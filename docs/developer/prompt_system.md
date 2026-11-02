@@ -115,6 +115,11 @@ A turn that carries an image before the encoder is ready is refused (409 `vision
   `sort_order` to 0. Extras are validated and capped (`MAX_ACTIVE_EXTRAS`,
   `MAX_TOTAL_INSTRUCTION_CHARS` in `user_data/domain/prompt_extra.rs`); one over the cap is
   skipped with a warning.
+- An extra with a `profile_id` is that member's own (`/api/v1/profiles/{id}/notes`, and the setup
+  interview's drafts). It is never in the system prompt: `profile_context_for` loads it only when
+  the turn is that member's, and the adapter renders it as `<member-notes>` in the turn's
+  `<system-context>`, once per conversation (`member_notes_block`). The household's active extras
+  and the speaker's share one cap.
 - `POST /skills` takes `name`, `content`, optional `description` (shown to the model every turn)
   and `icon`; `PUT /skills/{id}` patches any of those or `active`.
 

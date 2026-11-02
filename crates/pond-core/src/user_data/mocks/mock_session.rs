@@ -324,6 +324,14 @@ impl SessionStorage for InMemorySessionStorage {
             .unwrap_or((None, None)))
     }
 
+    /// The covered message id stands in for `rolling_summary_updated_at`: both move on a rewrite.
+    async fn get_rolling_summary_with_revision(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<String>, Option<String>), SessionStorageError> {
+        self.get_rolling_summary(session_id).await
+    }
+
     async fn set_rolling_summary(
         &self,
         session_id: &str,

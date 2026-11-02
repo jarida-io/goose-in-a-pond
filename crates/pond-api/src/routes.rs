@@ -19,6 +19,7 @@ use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
 use pond_core::mesh::domain::trust_scope::TrustScope;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::models::services::active_embedder::EmbedderState;
 use pond_core::models::services::context::context_governor::{
     ContextGovernor, ContextInputs, EngineWindow,
 };
@@ -503,6 +504,20 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(list_prompt_extras).post(upsert_prompt_extra),
         )
         .route("/agent/extras/{key}", delete(delete_prompt_extra))
+        // A member's own notes and setup interview, from that member's own devices.
+        .route("/profiles/{id}/notes", get(crate::member_notes::list_notes))
+        .route(
+            "/profiles/{id}/notes/{key}",
+            put(crate::member_notes::put_note).delete(crate::member_notes::delete_note),
+        )
+        .route(
+            "/profiles/{id}/interview",
+            get(crate::member_notes::interview_status).post(crate::member_notes::start_interview),
+        )
+        .route(
+            "/profiles/{id}/interview/approve",
+            post(crate::member_notes::approve_interview),
+        )
         // ── Turn-level telemetry ──────────────────────────────────────────────
         .route("/telemetry/turns", get(get_telemetry_turns))
         .route("/telemetry/summary", get(get_telemetry_summary))
@@ -1529,7 +1544,27 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({"status": "completed"})))
+    Ok(Json(json!({
+        "status": "completed",
+        "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
+    })))
+}
+
+/// The owner's setup interview, offered once setup completes: where it stands and how to start it.
+async fn owner_interview_offer(state: &Arc<AppState>, owner: Option<&str>) -> Value {
+    let Some(owner) = owner.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    let Some(service) = crate::member_notes::interview_service(state) else {
+        return Value::Null;
+    };
+    let current = service.get(owner).await.ok().flatten();
+    let view = crate::member_notes::interview_json(owner, current.as_ref());
+    json!({
+        "profile_id": owner,
+        "status": view["status"],
+        "start": format!("/api/v1/profiles/{owner}/interview"),
+    })
 }
 
 /// The device that claimed the pond paired before it had members, so it belonged to nobody; it
@@ -3080,6 +3115,15 @@ async fn drive_turn(
 
     use pond_core::shared::domain::agent::AgentRequest;
 
+    // The speaker's own setup interview runs in this session: its state, and only its tools.
+    let interview = interview_turn_for(state, &session_id, &turn_scope).await;
+    let tool_group_allowlist = match &interview {
+        Some(_) => Some(vec![
+            pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.to_string(),
+        ]),
+        None => req.tool_group_allowlist.clone(),
+    };
+
     let agent_req = AgentRequest {
         message: req.message.clone(),
         session_id: session_id.clone(),
@@ -3089,10 +3133,11 @@ async fn drive_turn(
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
         profile_context: profile_context_for(state, &turn_scope).await,
-        tool_group_allowlist: req.tool_group_allowlist.clone(),
+        tool_group_allowlist,
         warmup: false,
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
+        interview: interview.map(|turn| turn.context),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -4164,14 +4209,43 @@ async fn set_message_feedback_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether the caller may read this conversation: their own member's, or nobody's.
+/// The caller is resolved from their device alone; resolving from the session asked for would
+/// make every unattributed caller that session's member.
+async fn caller_may_read_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> bool {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let caller = read_only_caller_scope(state, principal, None).await;
+    match state.session_storage.get_session_identity(session_id).await {
+        Ok(identity) => identity.readable_by(&caller),
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read whose conversation this is");
+            false
+        }
+    }
+}
+
 /// Session messages: the newest `limit` (≤500) by default, or oldest-first from `offset`.
 async fn get_session_messages(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::models::domain::message::Role;
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, so an id can't be probed either.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     let limit: usize = params
         .get("limit")
@@ -4511,20 +4585,22 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Serves one attachment's raw bytes; `session_id` must own it, so ids can't cross sessions.
+/// Serves one attachment's raw bytes, if `session_id` owns it and the caller may read that session.
 /// Bearer-protected, so not usable as a bare `<img src>`; the desktop fetches it with its token.
 async fn get_session_attachment(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     use axum::response::IntoResponse;
 
-    let owns_it = state
-        .session_storage
-        .list_session_attachments(&session_id)
-        .await
-        .map(|atts| atts.iter().any(|a| a.id == attachment_id))
-        .unwrap_or(false);
+    let owns_it = caller_may_read_session(&state, principal.as_ref(), &session_id).await
+        && state
+            .session_storage
+            .list_session_attachments(&session_id)
+            .await
+            .map(|atts| atts.iter().any(|a| a.id == attachment_id))
+            .unwrap_or(false);
     if !owns_it {
         return Err((
             StatusCode::NOT_FOUND,
@@ -6305,6 +6381,9 @@ async fn update_settings(
         }
     }
 
+    // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
+    crate::apply_embedding_choice(&state, &merged).await;
+
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
     if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
@@ -7315,8 +7394,8 @@ async fn download_model(
     // Gigabytes for a model nothing here can run.
     refuse_unavailable_engine(&state, &m, "download")?;
 
-    // fastembed downloads embedding models itself on first use.
-    if cat == ModelCategory::Embedding {
+    // fastembed downloads its own models on first use; a GGUF embedder is a file like any other.
+    if cat == ModelCategory::Embedding && m.filename.is_none() {
         return Ok(Json(
             json!({"status": "ready", "name": name, "note": "Embedding model will download automatically on first use"}),
         ));
@@ -7706,7 +7785,10 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_embedding_model", name.clone())
                 .await;
-            // Leaves `embedding_provider` alone: the engine is a separate choice from the model.
+            // The model brings its own engine; `embedding_provider` stays the on/off switch.
+            if let Ok(settings) = settings_repo.get().await {
+                crate::apply_embedding_choice(&state, &settings).await;
+            }
         }
         _ => {}
     }
@@ -8739,6 +8821,20 @@ async fn delete_profile(
                 })),
             )
         })?;
+
+    // Explicit, since `PRAGMA foreign_keys` is per connection: the member's notes and interview.
+    if let Some(interviews) = crate::member_notes::interview_service(&state) {
+        interviews.forget_member(&id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!(
+                        "could not remove the member's notes, so the member was not deleted: {e}"
+                    )
+                })),
+            )
+        })?;
+    }
 
     // `primary_profile_id` is a KV row, not a foreign key, so clear it by hand before the delete.
     // Both failures abort: proceeding would leave it dangling.
@@ -12249,6 +12345,7 @@ async fn agent_chat_stream(
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -14581,6 +14678,7 @@ async fn upsert_prompt_extra(
         instruction: req.instruction,
         active: req.active,
         sort_order: req.sort_order,
+        profile_id: None,
     };
     if let Err(violation) = extra.validate() {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
@@ -14603,6 +14701,35 @@ async fn upsert_prompt_extra(
     };
     if let Err(violation) = check_active_set(&existing, &extra) {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+    }
+    // A member's turn reads the household's notes and theirs, so each such pair must still fit.
+    let members = match repo.list_all_members().await {
+        Ok(notes) => notes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut owners: Vec<&str> = members
+        .iter()
+        .filter_map(|n| n.profile_id.as_deref())
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        let mut turn: Vec<PromptExtra> = existing.clone();
+        turn.extend(
+            members
+                .iter()
+                .filter(|n| n.profile_id.as_deref() == Some(owner))
+                .cloned(),
+        );
+        if let Err(violation) = check_active_set(&turn, &extra) {
+            return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+        }
     }
     match repo.upsert(&extra).await {
         Ok(()) => {
@@ -14743,13 +14870,18 @@ fn default_source() -> String {
     "api".to_string()
 }
 
-/// The text's document vector, or `None` to leave the row for the index sweep; never fails a save.
+/// The text's document vector, or `None` to leave the row for the embedding slot; never fails a save.
 async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
-    let embedder = state.embedding_provider.as_ref()?;
-    match embedder.embed(text).await {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+    if !state.embedder.available() {
+        return None;
+    }
+    match state.embedder.embed(text).await {
         Ok(vector) => Some(vector),
         Err(e) => {
-            tracing::warn!("could not embed a memory; the index sweep will embed it later: {e:#}");
+            tracing::warn!(
+                "could not embed a memory; the embedding slot will embed it later: {e:#}"
+            );
             None
         }
     }
@@ -14923,7 +15055,7 @@ async fn extraction_status(
 // Both routes answer `lane: false` when this process has no lane, not an empty job list.
 
 /// `GET /api/v1/lane` — what every background job is doing and waiting for.
-/// Figures are up to one poll old (15 min for the index sweep), hence `observed_secs_ago`.
+/// Figures are as of each job's last tick; the embedding slot runs beside the lane.
 async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     let Some(lane) = state.lane.as_ref() else {
         return Json(json!({ "lane": false, "jobs": [] }));
@@ -14975,6 +15107,10 @@ async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response:
         "running": snapshot.running.map(|j| j.as_str()),
         "running_title": snapshot.running.map(|j| j.title()),
         "running_for_secs": snapshot.running_for_secs,
+        "embedding_slot": {
+            "running": snapshot.embedding_slot_running_for_secs.is_some(),
+            "running_for_secs": snapshot.embedding_slot_running_for_secs,
+        },
     }))
 }
 
@@ -19591,9 +19727,24 @@ async fn detect_location(
     }))
 }
 
+/// The embedder's lifecycle, so a switch reads as loading or failed rather than as lost vectors.
+fn embedder_status(state: &EmbedderState) -> Value {
+    json!({
+        "state": state.as_str(),
+        "model_id": state.model_id(),
+        "reason": match state {
+            EmbedderState::Failed { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        },
+    })
+}
+
 async fn context_index_health(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+
+    let embedder_state = state.embedder.state();
     let no_index = |reason: &str| {
         Json(json!({
             "indexed": false,
@@ -19602,6 +19753,7 @@ async fn context_index_health(
             "dims": Value::Null,
             "coverage": Value::Null,
             "corpora": [],
+            "embedder": embedder_status(&embedder_state),
         }))
     };
 
@@ -19609,10 +19761,12 @@ async fn context_index_health(
         return Ok(no_index(NO_VECTOR_INDEX));
     };
     // No embedder, no model to ask about; "all missing" would look like a wiped index instead.
-    let Some(embedder) = state.embedding_provider.as_ref() else {
+    if embedder_state == EmbedderState::Off {
         return Ok(no_index(NO_EMBEDDING_MODEL));
-    };
+    }
+    let embedder = &state.embedder;
 
+    // While a model loads, coverage is counted for it: the rows it will have to embed.
     let model_id = embedder.model_id();
     let health = index.health(&model_id).await.map_err(|e| {
         tracing::warn!(error = %e, "could not read personal-context index health");
@@ -19627,6 +19781,7 @@ async fn context_index_health(
 
     Ok(Json(json!({
         "indexed": true,
+        "embedder": embedder_status(&embedder_state),
         "model_id": model_id,
         "dims": embedder.dimensions(),
         "rows": rows,
@@ -19652,8 +19807,8 @@ async fn context_index_health(
     })))
 }
 
-/// `POST /api/v1/context/index/rebuild` -- empty the index so the maintenance sweep refills it.
-/// The sweep fills only absent vectors, so this repairs a changed embedder; nothing is lost.
+/// `POST /api/v1/context/index/rebuild` -- empty the index so the embedding slot refills it.
+/// Every row's source survives, so the slot re-embeds all of it; nothing is lost.
 async fn rebuild_context_index(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -19707,14 +19862,13 @@ async fn rebuild_context_index(
 
     tracing::info!(cleared, "personal-context index cleared for rebuild");
 
-    // Wake the idle-gated sweep (the user isn't idle). `notify_one` stores a permit, so a sweep
-    // mid-pass still runs a fresh pass afterwards.
+    // `notify_one` stores a permit, so a slot mid-pass still runs a fresh pass afterwards.
     let refilling = match state.index_reindex.as_ref() {
         Some(notify) => {
             notify.notify_one();
             true
         }
-        // No sweep to wake; the next process rebuilds from the emptied table.
+        // No slot to wake; the next process rebuilds from the emptied table.
         None => false,
     };
 
@@ -19753,7 +19907,46 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    Some(particulars_for(attributed, &profile.preferences))
+    let mut context = particulars_for(attributed, &profile.preferences);
+    // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
+    let notes_are_theirs = attributed
+        || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
+    if notes_are_theirs {
+        if let Some(repo) = &state.prompt_extra_repo {
+            match repo.list_for_profile(&profile_id).await {
+                Ok(notes) => context.member_notes = notes,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not read the speaker's own notes; this turn goes without them"
+                ),
+            }
+        }
+    }
+    Some(context)
+}
+
+/// The interview this turn runs, when the session is the speaker's own open interview.
+async fn interview_turn_for(
+    state: &Arc<AppState>,
+    session_id: &str,
+    scope: &ProfileScope,
+) -> Option<pond_core::user_data::services::profile_interview::InterviewTurn> {
+    let speaker = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
+        ProfileScope::Guest => return None,
+    };
+    let service = crate::member_notes::interview_service(state)?;
+    match service
+        .turn_for_session(session_id, &speaker, chrono::Utc::now())
+        .await
+    {
+        Ok(turn) => turn,
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read the session's interview");
+            None
+        }
+    }
 }
 
 /// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
@@ -19774,6 +19967,7 @@ fn particulars_for(
             .get("accessibility_atypical_speech")
             .map(|v| v == "true")
             .unwrap_or(false),
+        member_notes: Vec::new(),
     }
 }
 

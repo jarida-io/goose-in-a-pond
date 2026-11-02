@@ -56,7 +56,7 @@ serde_json = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_yaml = { workspace = true }
 # One statement, in `rebuild_context_index`: emptying the personal-context index
-# so the maintenance sweep refills it. The `VectorIndex` port cannot empty an
+# so the embedding slot refills it. The `VectorIndex` port cannot empty an
 # index whose source rows all still exist. Not a new coupling — `AppState.db` is
 # already a `pond_infra::db::Database`. A third caller means the port needs this.
 sqlx = { workspace = true }

@@ -721,6 +721,7 @@ mod tests {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                interview: None,
             })
             .await
             .unwrap();
@@ -745,6 +746,7 @@ mod tests {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                interview: None,
             })
             .await
             .unwrap();
@@ -827,6 +829,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
         let prompt = agent
             .build_system_prompt(&Settings::default(), &request)

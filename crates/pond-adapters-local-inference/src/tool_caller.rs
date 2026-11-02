@@ -8,6 +8,7 @@ use goose::providers::base::Provider as GooseProvider;
 use goose::providers::local_inference::LocalInferenceProvider;
 use goose_providers::model::ModelConfig;
 use pond_core::mcp::ports::tools::tool_caller::ToolCaller;
+use pond_core::models::domain::gpu_gate::gpu_gate;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,7 +71,8 @@ impl ToolCaller for ToolCallerEngine {
         println!("[tool_caller] └─────────────────────────────────────");
 
         let messages = vec![Message::user().with_text(user_query)];
-        let (response, _usage) = self
+        let lease = gpu_gate().lease().await;
+        let completed = self
             .provider
             .complete(
                 &self.model_config,
@@ -78,8 +80,10 @@ impl ToolCaller for ToolCallerEngine {
                 &messages,
                 &[], // No tools — declarations are in the system prompt
             )
-            .await
-            .map_err(|e| anyhow!("Tool-caller inference failed: {e}"))?;
+            .await;
+        lease.finished();
+        let (response, _usage) =
+            completed.map_err(|e| anyhow!("Tool-caller inference failed: {e}"))?;
 
         let response_text = response.as_concat_text();
         println!(

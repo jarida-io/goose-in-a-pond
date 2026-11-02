@@ -62,7 +62,7 @@ impl Recommendation {
     }
 }
 
-/// The same three on every machine; the Orin numbers are the household's logs.
+/// The same picks on every machine; the Orin numbers are the household's logs and P0's runs.
 pub const RECOMMENDED: &[Recommendation] = &[
     Recommendation {
         model_id: "gguf/gemma-4-E4B-it-qat-UD-Q4_K_XL",
@@ -99,6 +99,22 @@ pub const RECOMMENDED: &[Recommendation] = &[
             measured_on: "2026-10-05",
         }],
     },
+    Recommendation {
+        model_id: "embedding/embeddinggemma-2",
+        role: "embedding",
+        rank: Rank::Primary,
+        reason: "Finds facts in Swahili, Sheng or English, whichever language you ask in",
+        measured: &[Measured {
+            device: DeviceClass::Orin,
+            summary: "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right \
+                      Swahili or mixed-language fact in its top five 73% of the time, against \
+                      39% for the default",
+            first_reply_s: None,
+            tokens_per_second: None,
+            window_tokens: None,
+            measured_on: "2026-10-31",
+        }],
+    },
 ];
 
 pub fn recommendation_for(model_id: &str) -> Option<&'static Recommendation> {
@@ -109,19 +125,25 @@ pub fn recommendation_for(model_id: &str) -> Option<&'static Recommendation> {
 mod tests {
     use super::*;
     use crate::models::domain::curated;
+    use crate::models::domain::embedding_models::EMBEDDING_MODELS;
 
     #[test]
     fn every_recommendation_is_a_pick_with_a_rank_of_its_own() {
         let mut ranks = Vec::new();
         for r in RECOMMENDED {
+            let pick = match r.role {
+                "chat" => curated::CURATED.iter().any(|p| p.id() == r.model_id),
+                "embedding" => EMBEDDING_MODELS.iter().any(|m| m.id() == r.model_id),
+                other => panic!("{}: no picks for the {other} role", r.model_id),
+            };
+            assert!(pick, "{} is not one of GIAP's picks", r.model_id);
             assert!(
-                curated::CURATED.iter().any(|p| p.id() == r.model_id),
-                "{} is not one of GIAP's picks",
-                r.model_id
+                !ranks.contains(&(r.role, r.rank)),
+                "{:?} twice for {}",
+                r.rank,
+                r.role
             );
-            assert!(!ranks.contains(&r.rank), "{:?} twice", r.rank);
-            ranks.push(r.rank);
-            assert_eq!(r.role, "chat");
+            ranks.push((r.role, r.rank));
             assert!(!r.reason.is_empty() && !r.reason.ends_with('.'));
         }
         assert_eq!(
@@ -142,17 +164,28 @@ mod tests {
             );
             for m in r.measured {
                 assert_eq!(m.measured_on.len(), 10, "{}: a date", r.model_id);
-                assert!(
-                    m.first_reply_s.is_some()
-                        || m.tokens_per_second.is_some()
-                        || m.window_tokens.is_some()
-                );
+                assert!(!m.summary.is_empty() && !m.summary.ends_with('.'));
+                // The structured numbers are a chat model's; an embedder's live in its summary.
+                if r.role == "chat" {
+                    assert!(
+                        m.first_reply_s.is_some()
+                            || m.tokens_per_second.is_some()
+                            || m.window_tokens.is_some()
+                    );
+                }
             }
         }
         let e2b = recommendation_for("gguf/gemma-4-E2B-it-qat-UD-Q4_K_XL").unwrap();
         assert!(
             e2b.measured.is_empty(),
             "E2B QAT has not been measured on the Orin"
+        );
+        let eg2 = recommendation_for("embedding/embeddinggemma-2").unwrap();
+        assert_eq!((eg2.role, eg2.rank), ("embedding", Rank::Primary));
+        assert_eq!(
+            eg2.measured_on(DeviceClass::Orin).map(|m| m.measured_on),
+            Some("2026-10-31"),
+            "P0's run on the nano"
         );
         let e4b = recommendation_for("gguf/gemma-4-E4B-it-qat-UD-Q4_K_XL").unwrap();
         assert_eq!(

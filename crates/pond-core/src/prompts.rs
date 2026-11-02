@@ -18,6 +18,9 @@ pub struct ProfileContext {
     pub language: Option<String>,
     /// If true, Goose phrasing should be patient and forgiving of non-standard speech.
     pub atypical_speech: bool,
+    /// The speaker's own standing notes; set only when the turn is theirs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
 }
 
 // ── Runtime prompt state ──────────────────────────────────────────────────────

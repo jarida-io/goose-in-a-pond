@@ -341,9 +341,11 @@ function EntryRow({
             >
               <Switch
                 aria-label={entry.label}
-                isSelected={Boolean(value)}
+                isSelected={control.values ? value !== control.values.off : Boolean(value)}
                 isDisabled={inert}
-                onChange={(v: boolean) => onChange(entry.key, v)}
+                onChange={(v: boolean) =>
+                  onChange(entry.key, control.values ? (v ? control.values.on : control.values.off) : v)
+                }
               >
                 <Switch.Content>
                   <Switch.Control>

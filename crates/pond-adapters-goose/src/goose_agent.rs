@@ -343,6 +343,9 @@ struct SessionGroups {
     permitted: Vec<String>,
 }
 
+/// Each scorable tool group's description vector.
+type GroupVectors = Arc<Vec<(String, Vec<f32>)>>;
+
 /// Adapter: the `Agent` port on the Goose framework.
 pub struct GooseAdapter {
     agent: Arc<GooseAgent>,
@@ -418,8 +421,9 @@ pub struct GooseAdapter {
     /// Session id -> groups it may EVER hold; the enable hatch widens only within this.
     /// Not persisted: recomputed from scope on restore, as a stored boundary can go stale.
     session_permitted_groups: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
-    /// Group-description embeddings. No `Option` inside: a failed first try must not stick.
-    group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
+    /// Group-description vectors with the embedder generation that made them; a switched model
+    /// recomputes them, since its queries live in another space.
+    group_embeddings: tokio::sync::RwLock<Option<(u64, GroupVectors)>>,
     /// In-process picture support: the one state every vision path shares.
     pictures: Arc<crate::vision_encoder::PictureSupport>,
     /// Keeps transient tool results out of goose's store once their turn is over.
@@ -539,7 +543,7 @@ impl GooseAdapter {
             defaults_stripped: Mutex::new(HashSet::new()),
             session_tool_groups: tokio::sync::RwLock::new(HashMap::new()),
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
-            group_embeddings: tokio::sync::OnceCell::new(),
+            group_embeddings: tokio::sync::RwLock::new(None),
             pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
             transient_sweeps: crate::transient_history::TransientSweeps::default(),
         })
@@ -1901,7 +1905,7 @@ impl GooseAdapter {
         if scope.excludes_everything() {
             return Vec::new();
         }
-        if let Some(provider) = &self.embedding_provider {
+        if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
             match provider.embed_query(message).await {
                 Ok(query_vector) => {
@@ -1950,33 +1954,37 @@ impl GooseAdapter {
     }
 
     // ── Per-session tool selection ──────────────────────────────────────────
-    /// Group-description vectors, cached on first success; `None` means "don't narrow".
-    /// Failures aren't cached (the embedder may still be downloading), so a later session retries.
-    async fn group_description_embeddings(&self) -> Option<&Vec<(String, Vec<f32>)>> {
-        self.group_embeddings
-            .get_or_try_init(|| async {
-                let provider = self.embedding_provider.as_ref().ok_or(())?;
-                let available: Vec<String> = registered_extensions().to_vec();
-                let scorable =
-                    pond_core::mcp::services::tool_selection::scorable_groups(&available);
-                let mut out = Vec::with_capacity(scorable.len());
-                for (extension, description) in scorable {
-                    match provider.embed(description).await {
-                        Ok(v) => out.push((extension.to_string(), v)),
-                        // Unscored groups stay dormant until the escape hatch pulls them in.
-                        Err(e) => {
-                            tracing::warn!("tool selection: embedding '{extension}' failed: {e}")
-                        }
-                    }
-                }
-                // Empty is a failure: `Err` leaves the cell unset so a later session retries.
-                if out.is_empty() {
-                    return Err(());
-                }
-                Ok(out)
-            })
-            .await
-            .ok()
+    /// Group-description vectors for the current model, cached per embedder generation; `None`
+    /// means "don't narrow". Failures aren't cached (the model may still be loading).
+    async fn group_description_embeddings(&self) -> Option<(u64, GroupVectors)> {
+        // A model with no measured floor narrows nothing, so its embeds would be wasted.
+        let provider = self.embedding_provider.as_ref().filter(|p| {
+            p.available()
+                && pond_core::mcp::services::tool_selection::relevance_floor(p.as_ref()).is_some()
+        })?;
+        let generation = provider.generation();
+        if let Some((cached, vectors)) = self.group_embeddings.read().await.as_ref() {
+            if *cached == generation {
+                return Some((generation, vectors.clone()));
+            }
+        }
+        let available: Vec<String> = registered_extensions().to_vec();
+        let scorable = pond_core::mcp::services::tool_selection::scorable_groups(&available);
+        let mut out = Vec::with_capacity(scorable.len());
+        for (extension, description) in scorable {
+            match provider.embed(description).await {
+                Ok(v) => out.push((extension.to_string(), v)),
+                // Unscored groups stay dormant until the escape hatch pulls them in.
+                Err(e) => tracing::warn!("tool selection: embedding '{extension}' failed: {e}"),
+            }
+        }
+        // Empty is a failure, and a switch mid-way mixed two models: neither is cached.
+        if out.is_empty() || provider.generation() != generation {
+            return None;
+        }
+        let vectors: GroupVectors = Arc::new(out);
+        *self.group_embeddings.write().await = Some((generation, vectors.clone()));
+        Some((generation, vectors))
     }
 
     /// This session's tool groups, sticky: per-turn re-scoring would break KV prefix reuse.
@@ -2070,7 +2078,7 @@ impl GooseAdapter {
             self.group_description_embeddings().await,
             self.embedding_provider.as_ref(),
         ) {
-            (Some(group_vectors), Some(provider)) => {
+            (Some((generation, group_vectors)), Some(provider)) => {
                 let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
                 let mut failed = None;
                 for signal in &signals {
@@ -2088,6 +2096,8 @@ impl GooseAdapter {
                     }
                 }
                 match (per_signal.is_empty(), failed) {
+                    // The model changed under the scoring: its signals and groups are two spaces.
+                    _ if provider.generation() != generation => None,
                     // Every signal failed to embed: widen.
                     (true, Some(e)) => {
                         tracing::warn!("tool selection: embedding the opening message failed: {e}");
@@ -2101,19 +2111,29 @@ impl GooseAdapter {
             _ => None,
         };
 
-        let selection = sel::select_groups(
-            &available,
-            scores.as_deref(),
-            sel::DEFAULT_RELEVANCE_THRESHOLD,
-        );
+        let floor = self
+            .embedding_provider
+            .as_ref()
+            .and_then(|p| sel::relevance_floor(p.as_ref()));
+        let selection = sel::select_groups(&available, scores.as_deref(), floor);
 
+        if matches!(selection.basis, sel::SelectionBasis::Unmeasured) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_widened",
+                session_id = %giap_session_id,
+                reason = "floor_unmeasured",
+                groups = permitted.len(),
+                "tool selection keeps every group: the embedding model's floor is unmeasured"
+            );
+        }
         // Make a failed narrowing visible; otherwise it looks like mode = "relevant" worked.
         if matches!(selection.basis, sel::SelectionBasis::NoEmbedder) {
             tracing::warn!(
                 target: "giap::trace",
                 kind = "tool_selection_widened",
                 session_id = %giap_session_id,
-                reason = if self.embedding_provider.is_none() {
+                reason = if !self.embedding_provider.as_ref().is_some_and(|p| p.available()) {
                     "no_embedder"
                 } else {
                     "embed_failed"
@@ -2134,7 +2154,7 @@ impl GooseAdapter {
                     .collect();
                 tracing::debug!(
                     session_id = %giap_session_id,
-                    threshold = sel::DEFAULT_RELEVANCE_THRESHOLD,
+                    threshold = ?floor,
                     top_scores = %top.join(" "),
                     "tool selection: group scores"
                 );
@@ -2685,9 +2705,27 @@ impl GooseAdapter {
 
         // Outside prefix_hash by design; <extension-notes> sets it apart from core prompt sections.
         // Checked and escaped again here: rows saved before the write rules may break them.
-        if let Ok(extras) = extras_result {
-            shim_appendix.extend(render_extension_notes(&extras));
+        let household_extras = extras_result.unwrap_or_default();
+        shim_appendix.extend(render_extension_notes(&household_extras));
+        // Every turn of an interview's session is one, so its standing rules prefill once there.
+        if request.interview.is_some() {
+            shim_appendix
+                .push(pond_core::user_data::domain::profile_interview::INTERVIEW_RULES.to_string());
         }
+
+        // The speaker's own notes ride their turn once per conversation, never the shared prefix.
+        let member_notes_for_user_msg = match request.profile_context.as_ref() {
+            Some(profile) if !profile.member_notes.is_empty() => {
+                let earlier = self.earlier_user_texts(&goose_sid).await;
+                pond_core::user_data::domain::prompt_extra::member_notes_block(
+                    &household_extras,
+                    &profile.member_notes,
+                    &earlier,
+                )
+                .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
 
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
@@ -2763,7 +2801,10 @@ impl GooseAdapter {
                     fragments_available = memory_candidates.len(),
                     tokens_used,
                     token_budget,
-                    semantic = self.embedding_provider.is_some(),
+                    semantic = self
+                        .embedding_provider
+                        .as_ref()
+                        .is_some_and(|p| p.available()),
                     "Memory injection (budget from CompactionProfile ctx={})",
                     effective_ctx,
                 );
@@ -2936,7 +2977,8 @@ impl GooseAdapter {
         let mut dormant_groups_note = String::new();
         // Entitlement (all it could widen to; bounds delegation). `None` in "all" mode.
         let mut entitled_tools: Option<HashSet<String>> = None;
-        let allowed_tools = if settings.tool_selection_narrows() {
+        // An interview turn is narrowed to the interview's own group below, which no selection loads.
+        let allowed_tools = if settings.tool_selection_narrows() && request.interview.is_none() {
             let groups = self
                 .resolve_session_tool_groups(
                     &session_id,
@@ -3006,8 +3048,10 @@ impl GooseAdapter {
         ));
         // Standing too: the CURRENT CONTEXT line is news each turn, the rule for reading it is not.
         shim_appendix.push(pond_core::models::services::prompt_builder::TEMPORAL_RULE.to_string());
-        shim_appendix.push(
-            "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
+        // An interview turn holds none of these tools.
+        if request.interview.is_none() {
+            shim_appendix.push(
+                "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
              - Camera feed & face annotations (`giap-vision`, TEXT-FIRST): \
                1) Call `get_recent_camera_events` FIRST for who is in the room, recent activity, \
                or historical face sightings — it returns live face/motion/person detections as \
@@ -3028,8 +3072,9 @@ impl GooseAdapter {
                `update_schedule` / `schedule_action` (`delete` | `pause` | `resume` | `run_now`) \
                to inspect or control them. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
-                .to_string(),
-        );
+                    .to_string(),
+            );
+        }
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
@@ -3092,6 +3137,18 @@ impl GooseAdapter {
                 .into_iter()
                 .collect()
         });
+        // The interview's tools belong to its own turns; anywhere else they could reach notes.
+        let (allowed_tools, entitled_tools) = if request.interview.is_some() {
+            (allowed_tools, entitled_tools)
+        } else {
+            use pond_core::mcp::services::tool_selection::without_interview_tools;
+            (
+                without_interview_tools(allowed_tools.iter())
+                    .into_iter()
+                    .collect(),
+                entitled_tools.map(|t| without_interview_tools(t.iter()).into_iter().collect()),
+            )
+        };
 
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
@@ -3205,6 +3262,14 @@ impl GooseAdapter {
             }
             if !dynamic_suffix_for_user_msg.is_empty() {
                 msg.push_str(&dynamic_suffix_for_user_msg);
+                msg.push('\n');
+            }
+            if let Some(ref interview) = request.interview {
+                msg.push_str(interview);
+                msg.push('\n');
+            }
+            if !member_notes_for_user_msg.is_empty() {
+                msg.push_str(&member_notes_for_user_msg);
                 msg.push('\n');
             }
             if !memory_block_for_user_msg.is_empty() {
@@ -4123,6 +4188,7 @@ impl AgentPort for GooseAdapter {
             warmup: true,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let shape = if voice_mode {
@@ -8068,6 +8134,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

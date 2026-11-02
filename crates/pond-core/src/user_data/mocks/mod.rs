@@ -5,6 +5,7 @@ pub mod mock_device_registry;
 pub mod mock_matter_runtime;
 pub mod mock_memory;
 pub mod mock_profile;
+pub mod mock_profile_interview;
 pub mod mock_prompt_extra;
 pub mod mock_prompt_template;
 pub mod mock_push_token;

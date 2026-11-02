@@ -72,8 +72,11 @@ model chosen before the library went missing.
 assembles the catalogue from two sources, and one failing is skipped:
 
 - `StaticModelCatalogProvider`: the Whisper models (`ggml-*.bin` from `ggerganov/whisper.cpp`),
-  the Kokoro voices, the curated conversation picks, and the embedding rows (fastembed's
-  `all-MiniLM-L6-v2` and `bge-small-en-v1.5`, which fetch themselves).
+  the Kokoro voices, the curated conversation picks, and the embedding rows from
+  `pond_core::models::domain::embedding_models`: fastembed's `all-MiniLM-L6-v2` (the default)
+  and `bge-small-en-v1.5`, which fetch themselves, and the pinned GGUFs `nomic-embed-text-v1.5`,
+  `bge-base-en-v1.5` and `embeddinggemma-2` (EmbeddingGemma 2, the Memory role's recommended
+  pick), which download.
 - `OllamaCatalogProvider`: whatever a running Ollama server lists.
 
 Nothing is fetched from a remote registry; there is no registry URL setting.
@@ -217,8 +220,8 @@ What the pond fetches without a choice in the moment, and why each is safe to fe
 | The MTP drafter for a Gemma 4 E2B or E4B chat model (`mtp-gemma-4-E2B-it.gguf`, `mtp-gemma-4-E4B-it.gguf`, about 57 MB each, pinned by size and sha256 to the unsloth qat repositories) | On a budgeted device only, in the background, when the provider is built for that model or the model's file arrives | `pond_core::models::domain::drafter`, `crates/pond-adapters-goose/src/mtp_drafter.rs` |
 | Kokoro engine weights and voices, espeak-ng phoneme data | At `serve` and `chat --voice` start | `crates/pond-server/src/model_download.rs` |
 | Silero VAD, the ONNX Runtime library | When voice starts | `model_download::ensure_silero_model`, `ensure_onnx_runtime` in `main.rs` |
-| fastembed's embedding model | On first use by fastembed (`embedding_provider = "fastembed"`, the default) | fastembed itself |
-| The GGUF embedding model (`nomic-embed-text-v1.5` unless `active_embedding_model` names another, about 146 MB) | At `serve` start with `embedding_provider = "gguf"`, in the background | `EmbeddingModelSpec` in `crates/pond-inference/src/embedding.rs`, `main.rs` |
+| fastembed's embedding model | When the Memory-role model is a fastembed row (`all-MiniLM-L6-v2`, the default, or `bge-small-en-v1.5`) and the embedder loads it | fastembed itself |
+| A GGUF embedding model (`nomic-embed-text-v1.5`, `bge-base-en-v1.5`, or the 295 MB `embeddinggemma-2`, each pinned by size and sha256) | When the Memory-role model is a GGUF row whose file is missing: the embedder's factory asks `restore_model`, which fetches it through the tracker into `<data_dir>/models/embedding/`, so it shows on the Models page, and the embedder loads it once it arrives. It is also a catalogue row the household can download. EmbeddingGemma 2 loads on the GPU on a CUDA build when `device_budget::embedder_on_gpu` finds room, else on the CPU | `pond_core::models::domain::embedding_models`, `crates/pond-server/src/embedder_factory.rs` |
 | Face models | With the `face-onnx` feature, at `serve` start, in the background: the listeners never wait on them, and recognition switches on when they land ([face-recognition.md](../face-recognition.md#startup-never-waits-on-the-download)) | `model_download.rs`, `start_face_recognition` in `main.rs` |
 | The vision classifier (YOLOX-Nano, about 4 MB) | With the `vision-onnx` feature and no `vision_classifier_model` set, at `serve` start, before the listeners bind | `model_download.rs` |
 

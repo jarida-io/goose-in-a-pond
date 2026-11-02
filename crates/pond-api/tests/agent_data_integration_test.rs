@@ -166,7 +166,7 @@ async fn make_app_full(
         guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -466,7 +466,7 @@ async fn prompt_template_delete_system_returns_403() {
         guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -770,6 +770,7 @@ async fn prompt_extra_delete_with_a_malformed_key_is_refused_unless_a_legacy_row
         instruction: "legacy".into(),
         active: true,
         sort_order: 0,
+        profile_id: None,
     })
     .await
     .unwrap();
@@ -798,6 +799,7 @@ async fn hostile_rows_stored_in_the_database_cannot_close_the_note_wrapper() {
             instruction: instruction.into(),
             active: true,
             sort_order,
+            profile_id: None,
         })
         .await
         .unwrap();
@@ -1298,7 +1300,7 @@ async fn returns_501_when_repos_not_configured() {
         guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,

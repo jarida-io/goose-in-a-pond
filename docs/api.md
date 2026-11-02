@@ -318,6 +318,12 @@ The route summary's "Also" column names these.
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
 | DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
+| PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
+| DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
+| GET | /profiles/{id}/interview | token +onb | member | Where the member's setup interview stands |
+| POST | /profiles/{id}/interview | token +onb | member | Start the setup interview, or take it up again |
+| POST | /profiles/{id}/interview/approve | token +onb | member | Save the interview's drafted notes |
 | GET | /sessions/{session_id}/user | token +onb | | Who a session belongs to, and on what evidence |
 | PUT | /sessions/{session_id}/user | token +onb | policy | Identify the session as a member |
 | DELETE | /sessions/{session_id}/user | token +onb | | Release the binding |
@@ -750,7 +756,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed"}`; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
@@ -1000,9 +1006,44 @@ A profile is a household member: `Profile {id, display_name, avatar_emoji, prefe
 | `GET /profiles/{id}` | | the profile, or `404` |
 | `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
 
-Deleting a member removes their memories, face embeddings and Uber sign-in, and releases their
-sessions (the conversation stays, unattributed). Household-scoped memories are untouched. If the
-member was `primary_profile_id`, it is cleared first.
+Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
+interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
+memories are untouched. If the member was `primary_profile_id`, it is cleared first.
+
+### A member's notes and setup interview
+
+`member` routes answer only the member's own device: a token whose device is attributed to `{id}`,
+or, in a household of one member, a caller attributed to nobody. Anyone else gets `403`, and an
+unknown member `404`.
+
+A member's notes are prompt extras owned by that member: their turns carry them, in the turn's
+`<system-context>`, and nobody else's do. The household's notes and the speaker's share the limits
+of `/agent/extras`, so a write on either side that would take a member's turns past them is
+`400` with the same `code`.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /profiles/{id}/notes` | | `{notes: [{key, instruction, active, sort_order}], limits: {max_notes, max_total_chars, used_chars}}`; `used_chars` counts the household's active notes and the member's |
+| `PUT /profiles/{id}/notes/{key}` | `{instruction, active?, sort_order?}` | `{key, status: "ok"}`; `400` with `code` as for `/agent/extras` |
+| `DELETE /profiles/{id}/notes/{key}` | | `{key, status: "deleted"}` |
+| `GET /profiles/{id}/interview` | | The interview (below), or `{profile_id, status: "not_started"}` |
+| `POST /profiles/{id}/interview` | | The interview. A fresh one opens a chat session with the pond's first question already in it; an open or stopped one is taken up in its session, with a welcome back when no question is waiting; a finished one starts a new round in a new session |
+| `POST /profiles/{id}/interview/approve` | | `{saved: [key]}`; `409` with `code: "no_draft"` when no draft waits |
+
+The interview is `{profile_id, status, session_id, topics: [{id, label, status}], draft: [{key,
+topic, instruction}]}`. `status` is `in_progress`, `awaiting_approval`, `done` or `stopped`, and a
+topic's is `pending`, `answered` or `skipped`. The answers themselves are never returned, and are
+forgotten when the interview ends.
+
+The member answers in `POST /chat/stream` on `session_id`. While the interview is open and the
+member is the speaker, that turn carries the interview's state and is offered only the
+`giap-interview` tools: record an answer, skip a topic, stop, draft notes, save them. The answer or
+skip that settles the last topic drafts the notes in that turn, so `status` becomes
+`awaiting_approval` without the model asking. A save from
+the conversation is refused until the member has replied after the draft was shown; the approve
+route is the tap on their own phone. Notes from the interview use one key per topic (`me_address`,
+`me_identity`, `me_language`, `me_household`, `me_routine`, `me_food`, `me_access`, `me_style`,
+`me_avoid`, `me_other`), so a second interview replaces them and leaves other notes alone.
 
 Session identity records who a session belongs to and on what evidence. `identification_source`
 is `paired_device`, `explicit`, `face` or `unknown`, strongest first; a weaker source never takes

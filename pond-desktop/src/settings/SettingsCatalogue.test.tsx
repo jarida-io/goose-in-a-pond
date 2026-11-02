@@ -413,7 +413,49 @@ describe("SettingsCatalogue", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
     // Mirrors of `model_role_assignments`: catalogued, not offered.
     expect(screen.queryByLabelText("Chat model")).toBeNull();
-    expect(screen.queryByLabelText("Embedding model")).toBeNull();
+    expect(screen.queryByLabelText("Memory model")).toBeNull();
+  });
+
+  describe("search by meaning", () => {
+    async function openModels(over: Record<string, unknown>) {
+      await renderPage(over);
+      fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+      return screen.getByLabelText("Search memories by meaning") as HTMLInputElement;
+    }
+
+    it("is a switch, not a choice of engines, and says nothing false about the Orin", async () => {
+      const toggle = await openModels({ embedding_provider: "auto" });
+      expect(toggle.checked).toBe(true);
+      expect(screen.queryByRole("radiogroup", { name: /Embedding provider/ })).toBeNull();
+      const row = rowFor("Search memories by meaning");
+      expect(row.textContent).toContain("The model is chosen on the Models page.");
+      expect(row.textContent).not.toMatch(/Orin|initialise|FastEmbed|GGUF/);
+    });
+
+    // A pond that stored an engine name before the switch existed still searches by meaning.
+    it("reads the older engine names as on", async () => {
+      for (const stored of ["fastembed", "gguf", "auto"]) {
+        const toggle = await openModels({ embedding_provider: stored });
+        expect(toggle.checked, stored).toBe(true);
+        cleanup();
+      }
+      expect((await openModels({ embedding_provider: "none" })).checked).toBe(false);
+    });
+
+    it("stages \"none\" when switched off, and saves it as the pond reads it", async () => {
+      const toggle = await openModels({ embedding_provider: "fastembed" });
+      fireEvent.click(toggle);
+      expect(mockApi.updateSettings).not.toHaveBeenCalled();
+      fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "none" }));
+    });
+
+    it("stages \"auto\" when switched on, so the Memory model decides the engine", async () => {
+      const toggle = await openModels({ embedding_provider: "none" });
+      fireEvent.click(toggle);
+      fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
+    });
   });
 
   it("counts the inert settings per category in the rail", async () => {

@@ -253,7 +253,7 @@ con.execute(
     "ON CONFLICT(job) DO UPDATE SET last_run_at = excluded.last_run_at",
     ("titling", at.replace(microsecond=0).isoformat().replace("+00:00", "Z")),
 )
-# A memory with no vector; the restart pass asserts the boot backfill embeds it
+# A memory with no vector; the restart pass asserts the embedding slot embeds it
 # (live_checks.UNEMBEDDED_BEFORE_RESTART_ID).
 con.execute(
     "INSERT OR REPLACE INTO memory_fragments (id, content, embedding, source, tags, created_at, "

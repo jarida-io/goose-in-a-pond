@@ -682,8 +682,12 @@
 .srow__control { display: flex; align-items: center; justify-content: flex-end; flex-shrink: 0; }
 
 /* ─── Toggle ─── */
-.htoggle { width: 46px; height: 27px; border-radius: 999px; border: none; background: #D8D5E0; cursor: pointer; padding: 3px; transition: background .2s; display: flex; flex-shrink: 0; }
+/* Off is slate, not #D8D5E0 (1.45:1): 6.22:1 light and 4.80:1 dark on the card, the white knob 6.22:1 and 3.53:1. */
+/* justify-content: base.css centres every button's content, which put the knob mid-track when off. */
+.htoggle { width: 46px; height: 27px; border-radius: 999px; border: none; background: var(--color-text-tertiary); cursor: pointer; padding: 3px; transition: background .2s; display: flex; justify-content: flex-start; flex-shrink: 0; }
 .htoggle[data-on="true"] { background: var(--pp); }
+/* Purple on the dark panel is 2.97:1; 15% toward white makes it 3.90:1, the white knob 4.34:1. */
+:root[data-theme="dark"] .htoggle[data-on="true"] { background: color-mix(in srgb, var(--pp) 85%, white); }
 .htoggle__knob { width: 21px; height: 21px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform .2s; }
 .htoggle[data-on="true"] .htoggle__knob { transform: translateX(19px); }
 
@@ -703,12 +707,25 @@
    and its offset are spent on the model in use, or on the pick GIAP puts first, and on the one
    button the screen asks its question with; everything else is a hairline. Targets are 44px. */
 .hm-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.hm-tiles__cell { display: flex; min-width: 0; }
+.hm-tiles__cell > .hm-tile { flex: 1; }
+/* A tile is navigation to the card that changes its job, so it stays on a hairline and only tints. */
+button.hm-tile { position: relative; justify-content: flex-start; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+button.hm-tile:hover { background: var(--hub-bg); }
+.hm-tile__go { position: absolute; top: 12px; right: 12px; color: var(--mut); }
 .hm-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
 .hm-tile[data-empty="true"] { border-style: dashed; }
 .hm-tile__icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin-bottom: 4px; border-radius: 9px; background: var(--hub-bg); color: var(--mut); }
 .hm-tile__job { font-size: 12.5px; font-weight: 700; color: var(--mut); }
 .hm-tile__holder { max-width: 100%; font-size: 15px; font-weight: 800; color: var(--ink); overflow-wrap: anywhere; }
 .hm-tile[data-empty="true"] .hm-tile__holder { font-weight: 600; color: var(--mut); }
+.hm-tile__note { font-size: 12.5px; font-weight: 600; color: var(--mut); }
+.hm-tile__state { display: inline-flex; max-width: 100%; }
+.setcard > .mm-memory { padding: 4px 12px 12px; }
+/* The size is what a household spends, read from across a room on a panel that may be dim: body size in
+   --color-text, 18.06:1 light and 15.12:1 dark, where the dense classic page keeps it slate. */
+.setcard .mm-mem__cost { font-size: var(--text-base); color: var(--color-text); }
+.hm-embed:not(:empty) { padding: 4px 12px 12px; }
 .hm-picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; padding: 8px 8px 12px; }
 .hm-engine { padding: 4px 0; }
 .hm-engine + .hm-engine { border-top: 1px solid var(--line); }
@@ -736,6 +753,9 @@
 .hm-dim { opacity: 0.4; }
 .hm-skel { display: block; width: 110px; height: 12px; border-radius: 4px; background: var(--line); }
 .hm-skel--wide { width: 180px; margin-bottom: 6px; }
+.hm-skel--toggle { width: 46px; height: 27px; border-radius: 999px; }
+/* Said in place of a switch whose setting could not be read: --mut, 6.22:1 light and 4.80:1 dark. */
+.hm-ctl-note { max-width: 16ch; font-size: 12.5px; font-weight: 600; color: var(--mut); text-align: right; }
 .mrow__btn { border: 1px solid var(--line); background: var(--panel); color: var(--pp); font-family: inherit; font-size: 12.5px; font-weight: 700; padding: 7px 14px; border-radius: 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .mrow__btn:hover { background: var(--pp-50); }
 

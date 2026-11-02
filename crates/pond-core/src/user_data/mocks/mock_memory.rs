@@ -172,6 +172,16 @@ impl MemoryRepository for MockMemoryRepository {
         Ok(())
     }
 
+    async fn get_in_scope(&self, id: &str, scope: &ProfileScope) -> Result<Option<MemoryFragment>> {
+        Ok(self
+            .fragments
+            .read()
+            .await
+            .iter()
+            .find(|f| f.id == id && scope_matches(f, scope))
+            .cloned())
+    }
+
     async fn search_unembedded(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
         let fragments = self.fragments.read().await;
         Ok(fragments

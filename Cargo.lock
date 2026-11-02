@@ -9169,7 +9169,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llama-cpp-2"
 version = "0.1.156"
-source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=8ac8291a42c9641b23aeba48d80ecffc774f304e#8ac8291a42c9641b23aeba48d80ecffc774f304e"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c#d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -9182,7 +9182,7 @@ dependencies = [
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.156"
-source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=8ac8291a42c9641b23aeba48d80ecffc774f304e#8ac8291a42c9641b23aeba48d80ecffc774f304e"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c#d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
@@ -12594,9 +12594,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",

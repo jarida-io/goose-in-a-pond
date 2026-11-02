@@ -6,6 +6,8 @@ mod asset_root;
 mod audio_devices;
 mod composite_model_catalog_provider;
 mod conversation_extractor;
+mod embedder_factory;
+mod embedding_slot_runner;
 mod filesystem_model_storage;
 mod http_model_downloader;
 mod inference_lane_runner;
@@ -1104,12 +1106,6 @@ impl LlamafileManagerImpl {
     }
 }
 
-/// First index pass waits for boot to settle, so backfill never slows the first turn.
-const INDEX_MAINTENANCE_DELAY_SECS: u64 = 60;
-
-/// How often a pass is considered after that; the lane decides whether one runs.
-const INDEX_MAINTENANCE_POLL_SECS: u64 = 15 * 60;
-
 /// How often extraction considers a pass; the idle gate decides whether one runs.
 const MEMORY_EXTRACTION_POLL_SECS: u64 = 60;
 
@@ -1578,140 +1574,31 @@ async fn run_server(
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
-    // ── Embedding provider (gguf / fastembed / none) ─────────────────────────
-    // Before the memory/context repos (they need its model id) and the agent (semantic recall).
-    // "gguf" suits the Jetson (fastembed's ORT won't init there); it loads lazily on first embed.
+    // ── Embedder (the Memory-role model) ─────────────────────────────────────
+    // Chosen before the memory/context repos and the agent, which read its model as they work;
+    // loaded in the background once AppState exists, so a missing GGUF can be fetched.
+    let embedder = Arc::new(pond_core::models::services::active_embedder::ActiveEmbedder::off());
+    embedder
+        .choose(pond_core::models::domain::embedding_models::EmbedderChoice::resolve(&settings))
+        .await;
+    let embedder_factory = Arc::new(embedder_factory::ServerEmbedderFactory::new(
+        data_dir.join("models").join("embedding"),
+    ));
+    // Always wired: whether semantic search is on is the embedder's `available()`, which a
+    // settings save can change without a restart.
     let embedding_provider: Option<
         Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
-    > = {
-        use pond_core::models::ports::embedding::EmbeddingProvider as _;
-        match settings.embedding_provider.as_str() {
-            "none" => {
-                tracing::info!("embedding provider: disabled (embedding_provider = \"none\")");
-                None
-            }
-            #[cfg(feature = "local-inference")]
-            "gguf" => {
-                let embedding_dir = data_dir.join("models").join("embedding");
-                // Shared with fastembed: a stale name or typo means the gguf default, never None.
-                let spec =
-                    pond_inference::EmbeddingModelSpec::resolve(&settings.active_embedding_model)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(
-                                "'{}' is not a GGUF embedding model ({e}); using the default",
-                                settings.active_embedding_model
-                            );
-                            pond_inference::EmbeddingModelSpec::nomic_embed_text_v1_5()
-                        });
-                let dest = embedding_dir.join(&spec.filename);
-                if !dest.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&embedding_dir) {
-                        tracing::warn!("could not create embedding model dir: {e}");
-                    }
-                    tracing::info!(
-                        model_id = %spec.model_id,
-                        size_mb = spec.size_hint_mb,
-                        "fetching GGUF embedding model in the background (one-time, egress-gated)"
-                    );
-                    // Not awaited: ~146 MB would keep the port unbound; the provider loads lazily.
-                    // Egress-gated in `pond_hf_cache`; HF URLs bypass `download_file`'s own gate.
-                    let url = spec.download_url.clone();
-                    let size_hint = spec.size_hint_mb;
-                    let model_id = spec.model_id.clone();
-                    let dest_bg = dest.clone();
-                    tokio::spawn(async move {
-                        use pond_core::models::ports::model_downloader::ModelDownloader as _;
-                        let downloader = crate::http_model_downloader::HttpModelDownloader::new();
-                        match downloader.download(&url, &dest_bg, size_hint).await {
-                            Ok(()) => tracing::info!(
-                                model_id = %model_id,
-                                "GGUF embedding model downloaded; it loads on the next embed"
-                            ),
-                            Err(e) => tracing::warn!(
-                                model_id = %model_id,
-                                "GGUF embedding model download failed: {e:#} -- retrieval \
-                                 falls back to keyword until it succeeds"
-                            ),
-                        }
-                    });
-                }
-                let provider = pond_inference::GgufEmbeddingProvider::new(spec, &embedding_dir);
-                tracing::info!(
-                    model_id = provider.model_id(),
-                    dims = provider.dimensions(),
-                    "GGUF embedding provider ready (loads lazily on first embed)"
-                );
-                Some(Arc::new(provider)
-                    as Arc<
-                        dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync,
-                    >)
-            }
-            #[cfg(not(feature = "local-inference"))]
-            "gguf" => {
-                tracing::warn!(
-                    "embedding_provider = \"gguf\" needs the local-inference feature; \
-                     embeddings disabled"
-                );
-                None
-            }
-            _ => {
-                let emb_model = if settings.active_embedding_model.is_empty() {
-                    "all-MiniLM-L6-v2"
-                } else {
-                    &settings.active_embedding_model
-                };
-                let cache_dir = data_dir.join("models").join("embedding");
-                let emb_model_owned = emb_model.to_string();
-                let emb_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
-                            &emb_model_owned,
-                            Some(cache_dir),
-                        )
-                    }),
-                )
-                .await;
-                let init_result = match emb_result {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => Err(anyhow::anyhow!("embedding spawn_blocking failed: {e}")),
-                    Err(_) => Err(anyhow::anyhow!(
-                        "embedding provider init timed out after 30 s — ONNX Runtime may be \
-                         version-incompatible (need ORT 1.24.2)"
-                    )),
-                };
-                match init_result {
-                    Ok(provider) => {
-                        tracing::info!(
-                            model = provider.model_name(),
-                            dims = provider.dimensions(),
-                            "embedding provider ready"
-                        );
-                        Some(Arc::new(provider)
-                            as Arc<
-                                dyn pond_core::models::ports::embedding::EmbeddingProvider
-                                    + Send
-                                    + Sync,
-                            >)
-                    }
-                    Err(e) => {
-                        tracing::warn!("embedding provider failed to init: {e:#}");
-                        None
-                    }
-                }
-            }
-        }
-    };
+    > = Some(embedder.clone());
 
-    // Shared personal-context index; the model id below is `None` when embeddings are off.
+    // Shared personal-context index; writes are stamped with the embedder's model when it is ready.
     let vector_index: Arc<dyn pond_core::context::vector_index::VectorIndex> = Arc::new(
         pond_infra::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
     );
-    // A member's first turn must not queue behind the pond indexing itself.
-    let index_maintenance_cancel = tokio_util::sync::CancellationToken::new();
-    // Held here so the reindex route can trigger a refill; `Some` once the sweep spawns.
-    let mut index_reindex_handle: Option<Arc<tokio::sync::Notify>> = None;
-    let vector_model_id = embedding_provider.as_ref().map(|p| p.model_id());
+    // The embedding slot's bells: the Reindex route, and writers of rows that need a vector.
+    let embedding_reindex = Arc::new(tokio::sync::Notify::new());
+    let embedding_arrived = Arc::new(tokio::sync::Notify::new());
+    let vector_stamp: Option<Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>> =
+        Some(embedder.clone());
 
     // Chokepoint 1: this one construction redacts every memory write, whoever the writer.
     let memory_repo: Arc<
@@ -1721,7 +1608,7 @@ async fn run_server(
             // Inside the redactor, which drops a secret's vector: the index must mirror the store.
             Arc::new(
                 SqliteMemoryRepository::new(db.system.clone())
-                    .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+                    .with_vector_index(vector_index.clone(), vector_stamp.clone()),
             ),
             redactor.clone(),
         ),
@@ -2213,6 +2100,7 @@ async fn run_server(
         let sum_lane = inference_lane.clone();
         let idle_secs = settings.summary_idle_secs.max(30) as u64;
         let sum_wake = inference_lane.claim(LaneJob::SummaryRefresh);
+        let sum_arrived = embedding_arrived.clone();
 
         // Baselines for the "never on startup" guard; captured before the server binds.
         let started_at_instant = std::time::Instant::now();
@@ -2331,6 +2219,9 @@ async fn run_server(
                 // An attempt spends the interval budget whether or not it summarised anything.
                 // A guard, not a flag, so the `continue`s above release the slot too.
                 drop(slot);
+                if refreshed > 0 {
+                    sum_arrived.notify_one();
+                }
             }
         });
         tracing::info!(
@@ -2678,176 +2569,9 @@ async fn run_server(
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
     > = None;
 
-    // ── Embedding backfill ───────────────────────────────────────────────────
-    // `search_similar` skips unembedded rows; batched with pauses as it competes with inference.
-    if let Some(provider) = embedding_provider.clone() {
-        let backfill_repo = memory_repo.clone();
-        tokio::spawn(async move {
-            use pond_core::user_data::services::memory_relevance as relevance;
-            relevance::run_backfill(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-            // Then re-embed rows from another model: search excludes them and the backfill can't
-            // see them. Second, because a row with no vector at all is the worse miss.
-            relevance::run_dimension_repair(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-        });
-    }
-
-    // ── Personal-context index maintenance ───────────────────────────────────
-    // `index_reindex_handle` is set only inside this block, so it can't disagree with the sweep.
-    if let (Some(provider), Some(_)) = (embedding_provider.clone(), vector_model_id.clone()) {
-        use pond_core::user_data::services::inference_lane::LaneJob;
-
-        let index = vector_index.clone();
-        let storage = session_storage.clone();
-        // Backfill runs once at startup; this repairs rows left unembedded after it.
-        let sweep_memories = memory_repo.clone();
-        let cancel = index_maintenance_cancel.clone();
-        let sweep_lane = inference_lane.clone();
-        let reindex = inference_lane.claim(LaneJob::IndexMaintenance);
-        // The Reindex button is a person, so it rings the HAND bell.
-        index_reindex_handle = Some(reindex.hand_bell());
-        let sweep_activity = last_user_activity.clone();
-        let sweep_storage = session_storage.clone();
-
-        let started_at = std::time::Instant::now();
-        let started_at_utc = chrono::Utc::now();
-
-        tokio::spawn(async move {
-            use pond_core::context::index_maintenance::{plan_sweep, run_index_maintenance};
-            // Consolidation's idle threshold, so the two definitions of "idle" can't drift.
-            use pond_core::user_data::services::consolidation_schedule as sched;
-
-            let poll = std::time::Duration::from_secs(INDEX_MAINTENANCE_POLL_SECS);
-            let chore_idle = std::time::Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS);
-            // Whether a pass has COMPLETED since this process started.
-            let mut indexed_since_boot = false;
-
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(
-                    INDEX_MAINTENANCE_DELAY_SECS,
-                )) => {}
-            }
-
-            loop {
-                let woke = tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(poll) => crate::inference_lane_runner::Tick::Poll,
-                    rang = reindex.rang() => rang,
-                };
-                let asked = woke.waives();
-
-                let db_activity = newest_session_activity(sweep_storage.as_ref()).await;
-                let in_process_at = *sweep_activity.read().await;
-                let now = chrono::Utc::now();
-                let saw_activity_since_start = sched::saw_activity_since_start(
-                    started_at,
-                    in_process_at,
-                    started_at_utc,
-                    db_activity,
-                );
-                let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
-
-                // A requested pass skips the idle wait and the floor (a person is waiting on it);
-                // the lane's single slot still serialises jobs.
-                let (floor, idle_threshold) = if asked {
-                    (std::time::Duration::ZERO, std::time::Duration::ZERO)
-                } else {
-                    (poll, chore_idle)
-                };
-
-                let first_post_boot = !indexed_since_boot;
-                let tick = plan_sweep(asked, indexed_since_boot);
-
-                let Some(_slot) = sweep_lane
-                    .acquire(
-                        LaneJob::IndexMaintenance,
-                        // No toggle of its own: an unmaintained index silently goes stale.
-                        true,
-                        // `floor` and `idle_threshold` are zeroed above when `asked`; the
-                        // exemption comes from `plan_sweep`, not the lane's hand waiver.
-                        crate::inference_lane_runner::Cadence::new(
-                            floor,
-                            idle_threshold,
-                            tick.exempt_from_activity_gate,
-                        ),
-                        // A request or the first post-boot pass is exempt, or a quiet pond
-                        // would refuse forever.
-                        woke.waives(),
-                        saw_activity_since_start,
-                        idle_for,
-                    )
-                    .await
-                else {
-                    continue;
-                };
-
-                // Interruptible per pass; a child token, so cancelling it spares the sweep task.
-                let pass = cancel.child_token();
-                // Cancel only on activity newer than this pass's admission, not merely recent:
-                // otherwise the turn before a Reindex press kills the pass it asked for.
-                let baseline = *sweep_activity.read().await;
-                let watcher = tokio::spawn({
-                    let pass = pass.clone();
-                    let activity = sweep_activity.clone();
-                    async move {
-                        // In-process only: set at turn start, while the DB timestamp lags.
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            if *activity.read().await > baseline {
-                                pass.cancel();
-                                return;
-                            }
-                        }
-                    }
-                });
-
-                let report = run_index_maintenance(
-                    &index,
-                    storage.as_ref(),
-                    sweep_memories.as_ref(),
-                    provider.as_ref(),
-                    &pass,
-                    tick.budget,
-                )
-                .await;
-                watcher.abort();
-
-                // Only a completed pass spends the exemption: an interrupted one left the backlog.
-                if !pass.is_cancelled() {
-                    indexed_since_boot = true;
-                }
-
-                if asked || first_post_boot {
-                    tracing::info!(
-                        requested = asked,
-                        interrupted = pass.is_cancelled(),
-                        adopted = report.adopted,
-                        summaries = report.summaries_indexed,
-                        context = report.context_indexed,
-                        memories = report.memories_indexed,
-                        still_missing = report.still_missing,
-                        "personal-context index pass finished"
-                    );
-                }
-            }
-        });
-    }
-
     // ── Batch memory extraction ──────────────────────────────────────────────
-    // The only writer of extracted memories. Without an embedder there's no cosine dedup, so it
-    // reads nothing and says so via `blocked_on`.
+    // The only writer of extracted memories. Without a loaded embedder there's no cosine dedup,
+    // so it reads nothing and says so via `blocked_on`.
     let extraction_status = Arc::new(tokio::sync::RwLock::new(
         pond_core::user_data::services::memory_extraction::ExtractionEngineStatus {
             mode: pond_core::user_data::services::memory_extraction::ExtractionMode::parse(
@@ -2862,7 +2586,8 @@ async fn run_server(
     // once it exists further down.
     let (proposal_notice_tx, proposal_notice_rx) =
         tokio::sync::mpsc::channel::<pond_core::user_data::domain::proposal::Proposal>(64);
-    if let Some(provider) = embedding_provider.clone() {
+    {
+        use pond_core::models::ports::embedding::EmbeddingProvider as _;
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
         use pond_core::user_data::services::memory_extraction::{
@@ -2887,9 +2612,10 @@ async fn run_server(
         );
         let promotion_notices = proposal_notice_tx;
 
+        let extraction_embedder = embedder.clone();
         let service = Arc::new(
             BatchExtractionService::new()
-                .with_embedding_provider(provider)
+                .with_embedding_provider(embedder.clone())
                 .with_reminder_repository(reminder_repo),
         );
         let extraction_storage = session_storage.clone();
@@ -2978,6 +2704,10 @@ async fn run_server(
                     )
                     .await
                 else {
+                    // Otherwise an off or loading embedder looks like nothing left to extract.
+                    if !extraction_embedder.available() {
+                        status.write().await.blocked_on = Some("no_embedder".to_string());
+                    }
                     continue;
                 };
 
@@ -3111,17 +2841,9 @@ async fn run_server(
         });
         tracing::info!(
             "batch memory extraction active (mode={}) — reads one window per pass after {} min \
-             of household quiet",
+             of household quiet, once an embedding model is loaded",
             settings.memory_extraction_mode,
             settings.memory_extraction_idle_secs / 60,
-        );
-    } else {
-        // In the status too: otherwise a missing embedder looks like nothing left to extract.
-        extraction_status.write().await.blocked_on = Some("no_embedder".to_string());
-        tracing::info!(
-            "batch memory extraction inactive — no embedding provider, so nothing could be \
-             deduplicated and the pond would store a restatement of everything it already \
-             knows. NOTHING else extracts memories now, so this pond is not learning."
         );
     }
 
@@ -3393,6 +3115,7 @@ async fn run_server(
             security_policy.clone(),
         ),
     ));
+    init_interview_tools(&db.system);
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
@@ -4138,6 +3861,7 @@ async fn run_server(
     // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
     // `account_syncer` is hoisted so the "check now" route and the timer share one syncer.
     let mut account_syncer: Option<Arc<dyn pond_core::context::ports::AccountSync>> = None;
+    let slot_context: Arc<dyn pond_core::context::ports::ContextRepository>;
     {
         let context_repo: Arc<dyn pond_core::context::ports::ContextRepository> = Arc::new(
             pond_infra::sqlite_context::SqliteContextRepository::new(
@@ -4145,15 +3869,16 @@ async fn run_server(
                 redactor.clone(),
             )
             // Mirroring is safe: a ContextItem can only be constructed redacted.
-            .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+            .with_vector_index(vector_index.clone(), vector_stamp.clone()),
         );
+        slot_context = context_repo.clone();
         let pipeline = Arc::new(
             pond_core::context::ingest::IngestPipeline::new(context_repo.clone(), redactor.clone())
                 .with_embedder(embedding_provider.clone()),
         );
 
-        // Installed unconditionally: the toggle gates registration. No embedder, no unified
-        // retrieval: `recall` then answers nothing rather than degrading to context-only.
+        // Installed unconditionally: the toggle gates registration. With no model loaded,
+        // `recall` answers nothing rather than degrading to context-only.
         let unified_retrieval = embedding_provider.clone().map(|emb| {
             Arc::new(
                 pond_core::context::retrieval_service::PersonalContextRetrieval::new(
@@ -4461,11 +4186,10 @@ async fn run_server(
         guest_room_access,
         guest_device_access,
         memory_repo,
-        embedding_provider,
-        // Same handle the repos write through and the sweep repairs; never construct a second one.
+        embedder: embedder.clone(),
+        // Same handle the repos write through and the slot repairs; never construct a second one.
         vector_index: Some(vector_index.clone()),
-        // Some only if the sweep spawned, or the route would report `refilling: true` forever.
-        index_reindex: index_reindex_handle,
+        index_reindex: Some(embedding_reindex.clone()),
         lane: Some(inference_lane.clone()),
         account_sync: account_syncer.clone(),
         sensor_storage,
@@ -4726,10 +4450,17 @@ async fn run_server(
 
     // Load the model and prefill the static prompt prefix at boot, so turn 1 reuses it.
     let prewarm = pond_api::spawn_prefix_prewarm(state.clone(), false);
+    // TensorRT engines and a GPU embedder loading beside the language model's own GPU load risk
+    // an NvMap OOM, so both wait for the prewarm.
+    let (prewarm_done, prewarmed) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
+        let _ = prewarm_done.send(true);
+    });
     if let Some(plan) = onnx_gpu_plan {
+        let mut prewarmed = prewarmed.clone();
         tokio::spawn(async move {
-            // TensorRT engines loading beside the language model's own GPU load risk an NvMap OOM.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
+            let _ = prewarmed.wait_for(|done| *done).await;
             pond_onnx_accel::enable_gpu(plan);
         });
     }
@@ -4759,6 +4490,34 @@ async fn run_server(
                 tracing::info!("restore: started {n} download(s) for role-assigned models");
             }
         });
+    }
+
+    // Loads the embedder and keeps every vector current, in counter-phase. After AppState,
+    // through which the factory fetches a missing GGUF.
+    embedder_factory.attach(&state);
+    {
+        let warmup = state.warmup.clone();
+        tokio::spawn(embedding_slot_runner::run(
+            embedding_slot_runner::SlotDeps {
+                embedder: embedder.clone(),
+                factory: embedder_factory.clone(),
+                lane: inference_lane.clone(),
+                index: vector_index.clone(),
+                memories: state.memory_repo.clone(),
+                sessions: state.session_storage.clone(),
+                context: Some(slot_context),
+                activity: last_user_activity.clone(),
+                reindex: embedding_reindex,
+                arrived: embedding_arrived,
+                chat_model_warming: Box::new(move || {
+                    !*prewarmed.borrow()
+                        || matches!(
+                            warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
+                            pond_core::models::ports::agent::WarmupPhase::Warming
+                        )
+                }),
+            },
+        ));
     }
 
     // `wifi_station` was built earlier, alongside `data_wipe`, so this and the BLE setup
@@ -5327,6 +5086,7 @@ async fn run_chat(
             None,
         ),
     ));
+    init_interview_tools(&db.system);
 
     let settings_repo_chat = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_chat.get().await.unwrap_or_default();
@@ -10456,6 +10216,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             None,
         ),
     ));
+    init_interview_tools(&db.system);
     // Used only when chat_provider = "llamafile"; other providers route themselves.
     let llamafile_url = format!("http://127.0.0.1:{}", ports::llamafile_port());
 
@@ -10524,6 +10285,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                interview: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10601,6 +10363,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     warmup: false,
                     suggestion_context: None,
                     deep_research_task: None,
+                    interview: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -11188,6 +10951,23 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 
 // ── Unit tests ─────────────────────────────────────────────────────────────────
 
+/// The setup interview's tools act through this; every binary path that registers them needs it.
+fn init_interview_tools(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    pond_mcp_server::init_interview_deps(Arc::new(
+        pond_core::user_data::services::profile_interview::InterviewService::new(
+            Arc::new(
+                pond_infra::sqlite_profile_interview::SqliteProfileInterviewRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            Arc::new(
+                pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository::new(pool.clone()),
+            ),
+            Arc::new(SqliteSessionStorage::new(pool.clone())),
+            Arc::new(SqliteProfileRepository::new(pool.clone())),
+        ),
+    ));
+}
 #[cfg(test)]
 mod tests {
     /// A blocking thread that never finishes must not keep the process from exiting.

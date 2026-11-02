@@ -98,11 +98,13 @@ export function Slider({ min = 0, max = 100, value = 50, suffix = "", onChange }
 interface CardProps {
   title?: React.ReactNode;
   right?: React.ReactNode;
+  /** A card another control can take the person to; it then takes focus, so the keyboard lands there too. */
+  id?: string;
   children: React.ReactNode;
 }
-export function Card({ title, right, children }: CardProps) {
+export function Card({ title, right, id, children }: CardProps) {
   return (
-    <div className="setcard">
+    <div className="setcard" id={id} tabIndex={id ? -1 : undefined}>
       {(title != null || right != null) && (
         <div className="setcard__head">
           {title != null && <span className="setcard__title">{title}</span>}

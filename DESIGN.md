@@ -37,8 +37,14 @@ Known conflicts, already resolved:
   declared fallback. Inter is for the org's document templates, not for GIAP's UI.
 - **Scoring scale.** Jarida scores 0–5, Spotify 1–5. Both run higher-is-better. We use **Jarida's
   0–5** and borrow Spotify's language for what the low end means.
+- **Ground.** `@jarida/ink` and the designer PDF give the ground as Jarida White, `#FFF9F9`. The
+  product ships `#FAF3E1`, Jarida Warm White: `hub/state/themeStore.ts` strips ink's inline value
+  so the stylesheet's wins, and `ink-adoption.test.ts` exempts it as a brand choice. **`#FAF3E1`
+  wins.**
+- **Purple.** Jarida Purple, `#8C4BFF`, is the mark. The UI accent runs at `#7C3AED`. Both stay,
+  each in its own place: the mark in brand material (§8), the accent in the product (§2).
 
-When you find a fourth conflict, resolve it in favour of the shipped system, then fix whichever
+When you find another conflict, resolve it in favour of the shipped system, then fix whichever
 document was wrong in the same change. Do not leave the contradiction for the next person.
 
 ---
@@ -46,20 +52,36 @@ document was wrong in the same change. Do not leave the contradiction for the ne
 ## 2. The material
 
 Full token table in [`docs/design-system.md`](docs/design-system.md#design-tokens-stylesdesign-tokenscss).
-The six that carry the identity:
+The six that carry the identity, as they run with the default accent, Purple. Each ratio is
+measured on its own scheme's ground, `#FAF3E1` in light and `#131119` in dark:
 
-| Token | Hex | Contrast on `#FFF9F9` | Role |
+| Token | Light · dark | Contrast, light · dark | Role |
 |---|---|---|---|
-| `--color-bg` | `#FFF9F9` | — | Jarida White. The ground. Warm, not neutral |
-| `--color-text` | `#171616` | 17.35:1 | Jarida Charcoal. Body text |
-| `--color-accent` | `#8C4BFF` | **4.42:1** | Jarida Purple. Edges, rings, accents — **never body text** |
-| `--border-ink` | `#5D23C2` | 8.12:1 | The ink line, and the hard offset shadow |
-| `--color-text-secondary` | `#566178` | 5.97:1 | Slate. Meta, captions, provenance |
-| `--bg-brand-soft` | `#F4ECFF` | — | Quiet fill |
+| `--color-bg` | `#FAF3E1` · `#131119` | — | Jarida Warm White. The ground. Warm, not neutral |
+| `--color-text` | `#171616` · `#F3F1F8` | 16.32:1 · 16.71:1 | Jarida Charcoal. Body text |
+| `--color-accent` | `#7C3AED` · `#7C3AED` | 5.15:1 · **3.28:1** | The household's accent. Edges, rings, fills — **never body text** |
+| `--border-ink` | `#7C3AED` · `#7C3AED` | 5.15:1 · 3.28:1 | The ink line, and the hard offset shadow. Follows the accent |
+| `--color-text-secondary` | `#566178` · `rgba(243,241,248,0.55)` | 5.62:1 · 5.65:1 | Slate. Meta, captions, provenance |
+| `--bg-brand-soft` | `#F5F3FF` · `#241C33` | — | Quiet fill |
 
-**Jarida Purple is 4.42:1 on Jarida White.** That clears the 3:1 WCAG requires of a focus indicator
-or a UI boundary and misses the 4.5:1 it requires of body copy. So purple is an edge, a ring and an
-accent, and it is never a sentence. This is not a preference; it is the measurement.
+`design-tokens.css` alone does not give these values. `hub/state/themeStore.ts` writes
+`@jarida/ink`'s tokens inline on `<html>`, and inline beats the stylesheet, so the accent, text and
+fill above are ink's. It then removes ink's `--color-bg`, so the ground is the stylesheet's, and
+re-points `--border-ink` at the chosen accent. Measure what the page computes, not what a file says.
+
+**The accent is not a text colour.** The household picks it under Appearance → Accent. Purple, the
+default, is 5.15:1 on the light ground, enough for body copy, and 3.28:1 on the dark one, which is
+not. On the light ground Blue is 4.67:1, Magenta 4.15:1, Teal 3.38:1 and Coral 2.53:1. No accent
+on offer clears the 4.5:1 body copy needs in both schemes. So the accent is an edge, a ring and a
+fill, and it is never a sentence. As a line it needs the 3:1 WCAG asks of a focus indicator or a UI
+boundary, which Coral does not have on its own; that is why `--border-ink` and `--focus-ring` are
+derived from the accent rather than copied from it. This is not a preference; it is the measurement.
+
+**Two purples.** `#8C4BFF` is Jarida Purple, the mark: the logo and the brand material in §8. It
+measures 4.16:1 on the light ground. `#7C3AED` is the purple the product runs at. They differ on
+purpose, and `themeStore.ts` says why: collapsing them either dulls the logo or fails text contrast.
+The mark survives in the stylesheet as `--purple-500` and in a few fixed hues, such as the voice
+orb's listening state.
 
 Type is **Quicksand** (display, heading, body) with **Comfortaa** declared as its fallback, and
 **JetBrains Mono** for data — numbers, timestamps, file paths, measurements. Screen titles are set
@@ -209,6 +231,8 @@ From the Jarida heuristics — these apply to anything leaving the project:
   Minimum **24px** digital, **10mm** print.
 - Purple logo on light or neutral grounds; black where purple clashes. Never on a photograph
   without an overlay of at least 70% opacity behind it.
+- The purple here is the mark, `#8C4BFF`. The product's accent, `#7C3AED`, is a different value
+  (§2); don't take one for the other.
 - Never stretch, skew, rotate, recolour outside the palette, or add effects.
 - Credit **"Jarida Open Source Community"** unless waived; third-party adaptations comply with the
   **Jarida Fair License (JFL)** attribution clause.

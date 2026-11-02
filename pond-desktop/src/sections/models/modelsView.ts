@@ -192,7 +192,8 @@ const PLACEHOLDER_DESCRIPTIONS = ["(detected on disk)"];
 export function modelLabel(
   m: Pick<ModelEntry, "title" | "display_name" | "name" | "category" | "provider">,
 ): string {
-  const voice = (m.category ?? m.provider).startsWith("tts");
+  const kind = m.category ?? m.provider;
+  const voice = kind.startsWith("tts");
   const shown = (voice ? m.display_name : m.title)?.trim();
   if (shown && !PLACEHOLDER_DESCRIPTIONS.includes(shown)) return shown;
   const described = m.display_name?.trim();

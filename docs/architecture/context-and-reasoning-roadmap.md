@@ -181,8 +181,8 @@ batched startup backfill (A1); the injection path embeds the turn's message and 
 keeping a stopword-filtered keyword search as the fallback (A2, `GooseAdapter`'s memory selection in
 `goose_agent.rs`); ranking blends similarity, importance and a 14-day recency half-life (A3); and
 dedup adds a semantic pass at a 0.92 cosine floor (A4, `memory_extraction.rs`). The personal-context
-index (`crates/pond-core/src/context/`) later took over background embedding and backfill
-(`index_maintenance.rs`).
+index (`crates/pond-core/src/context/`) later took over background embedding and backfill, now the
+embedding slot (`embedding_slot.rs`).
 
 
 - A1 Embed at write: pass the embedding provider into the extraction

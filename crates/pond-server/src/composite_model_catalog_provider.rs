@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use pond_core::models::domain::curated::{self, CuratedModel};
+use pond_core::models::domain::embedding_models::{EmbeddingModel, EMBEDDING_MODELS};
 use pond_core::models::domain::model_record::{BinaryRecord, ModelCategory, ModelRecord};
 use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
 
@@ -248,81 +249,12 @@ fn curated_record(pick: &CuratedModel) -> ModelRecord {
 
 // ── Embedding ────────────────────────────────────────────────────────────────
 
+/// GGUF rows download their pinned file into `models/embedding`; fastembed rows name no file.
 fn embedding_models() -> Vec<ModelRecord> {
-    vec![
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "all-MiniLM-L6-v2"),
-            category: ModelCategory::Embedding,
-            name: "all-MiniLM-L6-v2".to_string(),
-            filename: None, // fastembed downloads automatically
-            description: "all-MiniLM-L6-v2 — fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.".to_string(),
-            size_mb: 23,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(50),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "bge-small-en-v1.5"),
-            category: ModelCategory::Embedding,
-            name: "bge-small-en-v1.5".to_string(),
-            filename: None,
-            description: "BGE Small EN v1.5 — high-quality English embedding model. 33 MB, 384 dimensions.".to_string(),
-            size_mb: 33,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(70),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "nomic-embed-text-v1.5"),
-            category: ModelCategory::Embedding,
-            name: "nomic-embed-text-v1.5".to_string(),
-            filename: None,
-            description: "Nomic Embed Text v1.5 — 768-dimension model with Matryoshka support (truncate to 256/384 dims). 274 MB.".to_string(),
-            size_mb: 274,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(350),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-    ]
+    EMBEDDING_MODELS
+        .iter()
+        .map(EmbeddingModel::record)
+        .collect()
 }
 
 // ── Ollama (local) ────────────────────────────────────────────────────────────
@@ -478,6 +410,28 @@ mod tests {
             assert_eq!(m.id, pin.id());
             assert_eq!(m.size_mb, pin.size_mb(), "{}", m.name);
             assert_eq!(m.category, pin.category());
+        }
+    }
+
+    #[test]
+    fn the_embedding_rows_are_the_table() {
+        let rows: Vec<ModelRecord> = static_models()
+            .into_iter()
+            .filter(|m| m.category == ModelCategory::Embedding)
+            .collect();
+        assert_eq!(rows.len(), EMBEDDING_MODELS.len());
+        for (row, model) in rows.iter().zip(EMBEDDING_MODELS) {
+            assert_eq!(row.id, model.id());
+            match model.gguf() {
+                Some(file) => {
+                    let url = row.url.as_deref().expect("a GGUF row downloads");
+                    let (repo, revision, name) =
+                        pond_hf_cache::parse_hf_url(url).expect("an HF URL");
+                    assert_eq!(curated::file_pin(&repo, &revision, &name), Some(file.pin()));
+                    assert_eq!(row.filename.as_deref(), Some(file.filename));
+                }
+                None => assert!(row.filename.is_none() && row.url.is_none(), "{}", row.name),
+            }
         }
     }
 

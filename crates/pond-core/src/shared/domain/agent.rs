@@ -55,6 +55,9 @@ pub struct AgentRequest {
     /// research, so the reply acknowledges it rather than answering the question itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_research_task: Option<DeepResearchTurn>,
+    /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interview: Option<String>,
 }
 
 /// A research task started for this turn, and where it waits when others are ahead of it.
@@ -512,6 +515,7 @@ mod agent_request_scope_tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         }
     }
 

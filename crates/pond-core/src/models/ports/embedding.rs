@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
+
+use crate::models::domain::embedding_models::{self, EmbeddingModel, SimilarityFloors};
 
 /// Text embedding; all vectors from one provider must share one dimensionality.
 #[async_trait]
@@ -13,6 +17,21 @@ pub trait EmbeddingProvider: Send + Sync {
         self.embed(text).await
     }
 
+    /// Embed several stored documents, one vector per text in order; callers pass at most
+    /// [`Self::max_batch`] texts.
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut vectors = Vec::with_capacity(texts.len());
+        for text in texts {
+            vectors.push(self.embed(text).await?);
+        }
+        Ok(vectors)
+    }
+
+    /// The most texts one [`Self::embed_batch`] call takes.
+    fn max_batch(&self) -> usize {
+        1
+    }
+
     /// The dimension of vectors returned by this provider (e.g. 384 for MiniLM).
     fn dimensions(&self) -> usize;
 
@@ -21,4 +40,25 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_id(&self) -> String {
         "unspecified".to_string()
     }
+
+    /// Cut-offs measured on this model's cosine scale; with `None`, no cosine cut-off is applied.
+    fn similarity_floors(&self) -> Option<SimilarityFloors> {
+        embedding_models::find_by_model_id(&self.model_id()).and_then(|m| m.floors)
+    }
+
+    /// Whether a model is loaded and embedding now; semantic search is on only while it is.
+    fn available(&self) -> bool {
+        true
+    }
+
+    /// Changes whenever the model behind this provider changes, so a cache of its vectors can tell.
+    fn generation(&self) -> u64 {
+        0
+    }
+}
+
+/// Builds the provider for one embedding model; the only place a model is loaded.
+#[async_trait]
+pub trait EmbedderFactory: Send + Sync {
+    async fn build(&self, model: &'static EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>>;
 }

@@ -32,28 +32,29 @@ pub trait MemoryRepository: Send + Sync {
     /// Delete a memory fragment by ID.
     async fn delete(&self, id: &str) -> Result<()>;
 
+    /// One fragment by ID, any lifecycle, only if `scope` reaches it: out of scope and missing
+    /// both read `None`. The default finds nothing, so an adapter without it refuses by-id acts.
+    async fn get_in_scope(
+        &self,
+        _id: &str,
+        _scope: &ProfileScope,
+    ) -> Result<Option<MemoryFragment>> {
+        Ok(None)
+    }
+
     /// Fragments owned by exactly this member; excludes the shared `IS NULL` rows, which
     /// survive the member and must not be reported as deleted.
     async fn count_for_profile(&self, _profile_id: &str) -> Result<u64> {
         Ok(0)
     }
 
-    /// Up to `limit` active fragments with no embedding, for the startup embedding backfill.
+    /// Up to `limit` active fragments with no embedding at all.
     async fn search_unembedded(&self, _limit: usize) -> Result<Vec<MemoryFragment>> {
         Ok(vec![])
     }
 
-    /// Up to `limit` active fragments whose vector isn't `expected_dims` wide (another model's).
-    /// Width stands in for a model id, which isn't persisted: GGUF is 768, fastembed 384.
-    async fn search_stale_dimension(
-        &self,
-        _expected_dims: usize,
-        _limit: usize,
-    ) -> Result<Vec<MemoryFragment>> {
-        Ok(vec![])
-    }
-
-    /// Attach (or replace) the embedding vector of an existing fragment.
+    /// Attach (or replace) the embedding vector of an existing fragment, and index it under the
+    /// model loaded now; the embedding slot holds a lease so that is the model that made it.
     async fn update_embedding(&self, _id: &str, _embedding: &[f32]) -> Result<()> {
         Ok(())
     }
@@ -78,7 +79,7 @@ pub trait MemoryRepository: Send + Sync {
 
     /// Replace a memory's text in place, keeping its identity (id, created_at, edges).
     /// The old vector would still score for the old words, so `embedding` (the new text's)
-    /// replaces it; `None` clears it for the sweep to re-embed.
+    /// replaces it; `None` clears it for the embedding slot to re-embed.
     async fn update_content(
         &self,
         _id: &str,

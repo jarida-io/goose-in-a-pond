@@ -82,22 +82,16 @@ impl MemoryRepository for RedactingMemoryRepository {
         self.inner.delete(id).await
     }
 
+    async fn get_in_scope(&self, id: &str, scope: &ProfileScope) -> Result<Option<MemoryFragment>> {
+        self.inner.get_in_scope(id, scope).await
+    }
+
     async fn count_for_profile(&self, profile_id: &str) -> Result<u64> {
         self.inner.count_for_profile(profile_id).await
     }
 
     async fn search_unembedded(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
         self.inner.search_unembedded(limit).await
-    }
-
-    async fn search_stale_dimension(
-        &self,
-        expected_dims: usize,
-        limit: usize,
-    ) -> Result<Vec<MemoryFragment>> {
-        self.inner
-            .search_stale_dimension(expected_dims, limit)
-            .await
     }
 
     async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
