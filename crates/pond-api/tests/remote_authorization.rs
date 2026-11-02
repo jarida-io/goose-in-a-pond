@@ -53,6 +53,7 @@ async fn make_app() -> Harness {
     let state = Arc::new(AppState {
         warmup: Default::default(),
         room_voice: None,
+        voice_match: None,
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),

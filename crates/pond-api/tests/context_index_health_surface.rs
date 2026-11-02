@@ -120,6 +120,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
     let state = Arc::new(AppState {
         warmup: Default::default(),
         room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

@@ -612,7 +612,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/faces/identify", post(identify_face_handler))
         .route("/faces/identify-burst", post(burst_identify_face_handler))
         .route("/faces/enroll-quality", post(enroll_quality_handler))
-        .route("/faces/profile/{profile_id}", get(list_face_enrollments))
+        .route(
+            "/faces/profile/{profile_id}",
+            get(list_face_enrollments).delete(delete_face_enrollments),
+        )
+        // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
+        .route("/voice/takes", post(crate::voice_match::post_take))
+        .route("/voice/prints", get(crate::voice_match::get_prints))
+        .route("/voice/prints/model", post(crate::voice_match::fetch_model))
+        .route(
+            "/voice/prints/{profile_id}",
+            delete(crate::voice_match::delete_prints),
+        )
         .route(
             "/faces/profile/{profile_id}/threshold",
             get(get_profile_threshold_handler)
@@ -6051,6 +6062,15 @@ async fn update_settings(
         }
     }
 
+    // What was learned of the old phrase is not the new one's: its pronunciations go now, and
+    // the CNN's enrolment results once the save lands. Another member's run never resets them.
+    let phrase_changed = pond_voice::text::normalize_transcript(&current.voice_wake_word)
+        != pond_voice::text::normalize_transcript(&merged.voice_wake_word);
+    if phrase_changed {
+        merged.voice_wake_word_transcriptions.clear();
+        write_keys.insert("voice_wake_word_transcriptions".to_string());
+    }
+
     state
         .settings_repo
         .update_fields(&merged, Some(&write_keys))
@@ -6065,6 +6085,10 @@ async fn update_settings(
     // Must follow the write (marks existing rows); exempts these keys from DEFAULT_ADOPTIONS.
     if let Err(e) = state.settings_repo.mark_user_set(&user_keys).await {
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
+    }
+
+    if phrase_changed {
+        crate::voice_match::wake_phrase_changed(&state).await;
     }
 
     // Privacy controls must apply now, not at the next restart.
@@ -18437,19 +18461,54 @@ async fn delete_user_biometrics(
     State(state): State<Arc<AppState>>,
     Path(profile_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let face = face_service(&state)?;
-    let deleted = face.delete_embeddings(&profile_id).await.map_err(|e| {
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    // Forget everything: the voice first, so a face store that is not ready cannot keep it.
+    let voice_deleted = crate::voice_match::forget_voice(&state, &profile_id)
+        .await
+        .map_err(internal)?;
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(internal)?;
+
+    Ok(Json(json!({
+        "profile_id":      profile_id,
+        "face_embeddings_deleted": faces_deleted,
+        "voice_prints_deleted": voice_deleted,
+    })))
+}
+
+/// A member's enrolled faces, through face recognition when it is up, else straight from its
+/// table, so forgetting never waits on a model.
+async fn delete_faces(state: &Arc<AppState>, profile_id: &str) -> anyhow::Result<u64> {
+    match face_service(state) {
+        Ok(face) => face.delete_embeddings(profile_id).await,
+        Err(_) => Ok(
+            sqlx::query("DELETE FROM face_embeddings WHERE profile_id = ?")
+                .bind(profile_id)
+                .execute(&state.db.system)
+                .await?
+                .rows_affected(),
+        ),
+    }
+}
+
+/// `DELETE /api/v1/faces/profile/{profile_id}`: their face only; a Voice Match stays.
+async fn delete_face_enrollments(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
     })?;
-
-    Ok(Json(json!({
-        "profile_id":      profile_id,
-        "face_embeddings_deleted": deleted,
-        // `voice_prints_deleted` joins this once voice prints are stored.
-    })))
+    Ok(Json(
+        json!({"profile_id": profile_id, "faces_deleted": faces_deleted}),
+    ))
 }
 
 // ── Proactive proposals ──────────────────────────────────────────────────────
@@ -18482,9 +18541,21 @@ async fn proposal_caller(
     session_id: &str,
     device: &ProvenDevice,
 ) -> Result<(ProfileScope, ProposalAudience), (StatusCode, Json<Value>)> {
-    let scope = resolve_turn_scope(state, session_id, device).await;
+    proposal_caller_with_source(state, session_id, device)
+        .await
+        .map(|(scope, audience, _)| (scope, audience))
+}
+
+/// [`proposal_caller`] with how the caller is known, which a decision must check.
+async fn proposal_caller_with_source(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> Result<(ProfileScope, ProposalAudience, IdentificationSource), (StatusCode, Json<Value>)> {
+    let resolved = resolve_turn_identity(state, session_id, device).await;
+    let (scope, source) = (resolved.scope, resolved.source);
     match ProposalAudience::from_scope(&scope) {
-        Ok(audience) => Ok((scope, audience)),
+        Ok(audience) => Ok((scope, audience, source)),
         // Never `Guest`: that means 2+ members, so a fallthrough would pick one by row order.
         Err(_) if matches!(scope, ProfileScope::Household) => {
             let members: Vec<String> = state
@@ -18503,7 +18574,7 @@ async fn proposal_caller(
                             "nobody identified this caller and this household has one member, \
                              so the proposal is theirs"
                         );
-                        Ok((ProfileScope::Owner(only.clone()), audience))
+                        Ok((ProfileScope::Owner(only.clone()), audience, source))
                     }
                     Err(e) => Err(proposal_caller_refusal(session_id, &e.to_string())),
                 },
@@ -18624,7 +18695,8 @@ async fn decide_proposal(
     // Device from the principal; a body `device_id` is a 400 (`deny_unknown_fields`).
     let device = proven_device(principal.as_ref());
     let Json(request) = body.map_err(|_| bad_body())?;
-    let (scope, _audience) = proposal_caller(&state, &request.session_id, &device).await?;
+    let (scope, _audience, source) =
+        proposal_caller_with_source(&state, &request.session_id, &device).await?;
 
     // Expired, decided, user-staged draft and absent all get the same 404 on purpose.
     let proposal = proposal_repo(&state)
@@ -18649,6 +18721,7 @@ async fn decide_proposal(
     // `PROPOSAL_SESSION_ID` is the sentinel session `SqliteProposalRepository::save` writes.
     if let Err(reason) = is_draft_decision_permitted(
         Some(&scope),
+        source,
         &request.session_id,
         Some(proposal.audience().profile_id()),
         PROPOSAL_SESSION_ID,
@@ -18694,6 +18767,15 @@ async fn resolve_turn_scope(
     session_id: &str,
     device: &ProvenDevice,
 ) -> ProfileScope {
+    resolve_turn_identity(state, session_id, device).await.scope
+}
+
+/// [`resolve_turn_scope`] with the evidence it rested on, for decisions a voice match may not make.
+async fn resolve_turn_identity(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> identity_resolution::ResolvedIdentity {
     // `rung` takes the `Result` so a failed read can't be flattened into "unattributed".
     let device_rung = match device.id() {
         None => DeviceRung::NoDevice,
@@ -18767,7 +18849,6 @@ async fn resolve_turn_scope(
         session: &identity,
         household_has_multiple_members,
     })
-    .scope
 }
 
 /// The device the *pond* proved; every turn-resolving handler must get its device here.
@@ -19466,6 +19547,9 @@ fn particulars_for(
     attributed: bool,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
+    if attributed {
+        return ProfileContext::of_member(prefs, Vec::new());
+    }
     ProfileContext {
         // Owner-scoped: stated only when the turn is attributed to this person.
         preferred_name: attributed

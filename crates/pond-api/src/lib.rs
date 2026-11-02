@@ -32,6 +32,7 @@ pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
 pub mod voice_agent;
+mod voice_match;
 pub mod voice_sample;
 pub mod web_search;
 
@@ -118,6 +119,8 @@ pub struct AppState {
     pub warmup: Arc<std::sync::RwLock<WarmupStatus>>,
     /// Serve's room voice loop, behind `/voice/room`; `None` where serve runs none.
     pub room_voice: Option<Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>>,
+    /// Voice Match's speaker model and enrolment takes; `None` where serve built none.
+    pub voice_match: Option<Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine>>,
     /// Hot-swappable when role assignments change; `None` inside the lock falls back to `agent`.
     pub llm_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
     /// Local llamafile base URL, kept so settings changes can rebuild the ModelRouter live.
