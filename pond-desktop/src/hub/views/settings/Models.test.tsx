@@ -9,6 +9,7 @@ vi.mock("../../../api/PondApiClient", () => ({
     listModels: vi.fn(),
     getActiveRoles: vi.fn(),
     getContextIndexHealth: vi.fn(),
+    getSettings: vi.fn(),
     updateSettings: vi.fn(),
     getMemoryStatus: vi.fn(),
     getDownloadProgress: vi.fn(),
@@ -67,6 +68,7 @@ beforeEach(() => {
   vi.mocked(api.activateModel).mockResolvedValue(undefined as never);
   vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({}));
   vi.mocked(api.updateSettings).mockResolvedValue({} as never);
+  vi.mocked(api.getSettings).mockResolvedValue({} as never);
   vi.mocked(api.downloadModel).mockResolvedValue({ status: "download_started", message: "Downloading Gemma 4 E4B (4.2 GB) and picture support (945 MB)" });
   vi.mocked(api.controlModelDownload).mockResolvedValue({ status: "ok" });
   setup();
@@ -420,12 +422,36 @@ describe("Hub Models: Memory", () => {
     setup({ models: ROWS(), roles: memoryRoles("", "fastembed") });
     renderHub();
     const memory = await card("Memory");
-    fireEvent.click(within(memory).getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }));
+    fireEvent.click(within(memory).getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" }));
     await waitFor(() => expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"));
     expect(
       await screen.findByText("Using EmbeddingGemma 2 for memory once it downloads (295 MB). Memory searches by keyword until then."),
     ).toBeTruthy();
     expect(api.downloadModel).not.toHaveBeenCalled();
+  });
+
+  it("rests Download and use, and says why, when the pond reaches nothing outside the house", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ network_mode: "offline" } as never);
+    setup({ models: ROWS(), roles: memoryRoles("", "fastembed") });
+    renderHub();
+    const memory = await card("Memory");
+    const press = await within(memory).findByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" });
+    await waitFor(() => expect((press as HTMLButtonElement).disabled).toBe(true));
+    expect(within(memory).getByText("Needs a connection to download")).toBeTruthy();
+  });
+
+  it("says a model chosen while search by meaning is off is used once it is on", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("", "none") });
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({ state: "off", model_id: null }, { indexed: false }));
+    renderHub();
+    const memory = await card("Memory");
+    fireEvent.click(within(memory).getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }));
+    await waitFor(() => expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"));
+    expect(
+      await screen.findByText(
+        "EmbeddingGemma 2 is set for memory. Once you turn on search by meaning, the pond downloads it (295 MB) and uses it.",
+      ),
+    ).toBeTruthy();
   });
 
   it("shows the download on its row with the bar and the controls", async () => {
@@ -453,10 +479,11 @@ describe("Hub Models: Memory", () => {
     vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({}, { matching: 40 }));
     renderHub();
     const memory = await card("Memory");
-    expect(await within(memory).findByText("Re-indexing: 40 of 95")).toBeTruthy();
+    expect(await within(memory).findByText("Reading memories again: 40 of 95 items")).toBeTruthy();
+    expect(within(memory).getByRole("progressbar", { name: "Items read again" })).toBeTruthy();
   });
 
-  it("says a failed load in plain words, with a way to try again", async () => {
+  it("says a failed load plainly, with the lighter model named, the pond's words behind Details, and a way to try again", async () => {
     setup({ models: ROWS(), roles: memoryRoles("embeddinggemma-2") });
     vi.mocked(api.getContextIndexHealth).mockResolvedValue(
       memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
@@ -464,9 +491,24 @@ describe("Hub Models: Memory", () => {
     renderHub();
     const memory = await card("Memory");
     const alert = await within(memory).findByRole("alert");
-    expect(alert.textContent).toContain("EmbeddingGemma 2 did not load");
+    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2");
+    expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
+    expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
+    expect(within(alert).getByText("loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory")).toBeTruthy();
     fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"));
+  });
+
+  it("does not call a chosen model that failed In use", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("embeddinggemma-2") });
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+      memoryHealth({ state: "failed", reason: "out of memory" }, { matching: 0 }),
+    );
+    renderHub();
+    const memory = await card("Memory");
+    expect(await within(memory).findByText("Chosen, not loaded")).toBeTruthy();
+    expect(within(memory).queryByText("In use")).toBeNull();
   });
 });
 

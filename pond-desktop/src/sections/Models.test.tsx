@@ -898,11 +898,34 @@ describe("Memory", () => {
     expect(api.activateModel).not.toHaveBeenCalled();
   });
 
+  it("says Download and use, with the size, on a press that starts a download, and plain Use where none is needed", async () => {
+    setup({ models: [e2b(HERE), miniLm(), nomicEmbed({ downloaded: true }), eg2()], roles: memoryRoles("", "fastembed") });
+    renderModels();
+    const memory = await memoryModels();
+    const press = within(memory).getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" });
+    expect(press.textContent).toBe("Download and use");
+    expect((press as HTMLButtonElement).disabled).toBe(false);
+    expect(within(memory).getByRole("button", { name: "Use Nomic Embed Text v1.5 for memory" }).textContent).toBe("Use");
+  });
+
+  it("rests Download and use, and says why, when the pond reaches nothing outside the house", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue({ network_mode: "offline" } as never);
+    setup({ models: [e2b(HERE), miniLm(), nomicEmbed({ downloaded: true }), eg2()], roles: memoryRoles("", "fastembed") });
+    renderModels();
+    const memory = await memoryModels();
+    const press = await within(memory).findByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" });
+    await waitFor(() => expect((press as HTMLButtonElement).disabled).toBe(true));
+    expect(within(memory).getByText("Needs a connection to download")).toBeTruthy();
+    expect(press.getAttribute("aria-describedby")).toBe(within(memory).getByText("Needs a connection to download").id);
+    // A model already here needs no connection, so it stays pressable.
+    expect((within(memory).getByRole("button", { name: "Use Nomic Embed Text v1.5 for memory" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("assigns the Memory role on Use, says a download comes first, and starts watching for it", async () => {
     setup({ models: MEMORY_ROWS(), roles: memoryRoles("", "fastembed") });
     renderModels();
     const memory = await memoryModels();
-    fireEvent.click(within(memory).getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }));
+    fireEvent.click(within(memory).getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" }));
     await waitFor(() =>
       expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"),
     );
@@ -993,11 +1016,11 @@ describe("Memory", () => {
       vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({}, { matching: 40 }));
       renderModels();
       const memory = await memoryModels();
-      expect(await within(memory).findByText("Re-indexing: 40 of 95")).toBeTruthy();
-      expect(within(memory).getByRole("progressbar", { name: "Memories re-indexed" }).getAttribute("aria-valuenow")).toBe("42");
+      expect(await within(memory).findByText("Reading memories again: 40 of 95 items")).toBeTruthy();
+      expect(within(memory).getByRole("progressbar", { name: "Items read again" }).getAttribute("aria-valuenow")).toBe("42");
     });
 
-    it("says a failed load in plain words and asks again by choosing the same model, never by clearing", async () => {
+    it("says a failed load plainly, names the lighter model, keeps the pond's words behind Details, and asks again without clearing", async () => {
       setup({ models: MEMORY_ROWS(), roles: memoryRoles("embeddinggemma-2") });
       vi.mocked(api.getContextIndexHealth).mockResolvedValue(
         memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
@@ -1005,12 +1028,48 @@ describe("Memory", () => {
       renderModels();
       const memory = await memoryModels();
       const alert = await within(memory).findByRole("alert");
-      expect(alert.textContent).toContain("EmbeddingGemma 2 did not load, so Memory is searching by keyword.");
-      expect(alert.textContent).toContain("out of memory");
+      expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+      expect(alert.textContent).toContain("Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.");
+      expect(alert.textContent).not.toContain("Gpu");
+      const details = within(alert).getByRole("button", { name: "Details" });
+      expect(details.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(details);
+      expect(details.getAttribute("aria-expanded")).toBe("true");
+      expect(within(alert).getByText("loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory")).toBeTruthy();
       fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
       await waitFor(() =>
         expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"),
       );
+    });
+
+    // The household chose it; the pond is the one that knows whether it runs.
+    it("does not call a chosen model that failed, or is still loading, in use", async () => {
+      setup({ models: MEMORY_ROWS(), roles: memoryRoles("embeddinggemma-2") });
+      vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+        memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
+      );
+      renderModels();
+      const memory = await memoryModels();
+      const row = (await within(memory).findByText("EmbeddingGemma 2", { selector: ".mm-mem__title" })).closest("li") as HTMLElement;
+      await waitFor(() => expect(within(row).getByText("Chosen, not loaded")).toBeTruthy());
+      expect(within(memory).queryByText("In use")).toBeNull();
+    });
+
+    it("says Loading, not In use, while the chosen model loads", async () => {
+      setup({ models: MEMORY_ROWS(), roles: memoryRoles("embeddinggemma-2") });
+      vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({ state: "loading" }, { matching: 0 }));
+      renderModels();
+      const memory = await memoryModels();
+      expect(await within(memory).findByText("Loading")).toBeTruthy();
+      expect(within(memory).queryByText("In use")).toBeNull();
+    });
+
+    it("says In use once the chosen model is ready", async () => {
+      setup({ models: MEMORY_ROWS(), roles: memoryRoles("embeddinggemma-2") });
+      renderModels();
+      const memory = await memoryModels();
+      const row = (await within(memory).findByText("EmbeddingGemma 2", { selector: ".mm-mem__title" })).closest("li") as HTMLElement;
+      await waitFor(() => expect(within(row).getByText("In use")).toBeTruthy());
     });
 
     it("says it is ready once everything is re-read, and asks nothing more of the pond", async () => {
@@ -1036,6 +1095,26 @@ describe("Memory", () => {
     fireEvent.click(within(memory).getByRole("button", { name: "Turn on" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
     expect(await screen.findByText(/Search by meaning is on/)).toBeTruthy();
+  });
+
+  // Nothing loads, fetches or reads again while it is off, so Use may only say the model is set.
+  it("says a model chosen while search by meaning is off is used once it is on, and promises no re-read", async () => {
+    setup({ models: MEMORY_ROWS(), roles: memoryRoles("", "none") });
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+      memoryHealth({ state: "off", model_id: null }, { indexed: false }),
+    );
+    renderModels();
+    const memory = await memoryModels();
+    // No download starts while it is off, so the press is a plain Use, with no size to spend.
+    fireEvent.click(within(memory).getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }));
+    await waitFor(() =>
+      expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"),
+    );
+    const said = await screen.findByText(/EmbeddingGemma 2 is set for memory/);
+    expect(said.textContent).toBe(
+      "EmbeddingGemma 2 is set for memory. Once you turn on search by meaning, the pond downloads it (295 MB) and uses it.",
+    );
+    expect(screen.queryByText(/reads memories again|Now using/)).toBeNull();
   });
 
   it("works on a pond that predates the embedder report", async () => {

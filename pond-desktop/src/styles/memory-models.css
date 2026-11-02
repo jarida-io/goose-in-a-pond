@@ -119,9 +119,20 @@
 
 .mm-mem__end {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
   margin-left: auto;
+}
+
+/* Why the button beside it is resting: secondary text on the card, 6.22:1 light and 5.45:1 dark. */
+.mm-mem__note {
+  max-width: 32ch;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+  text-align: right;
 }
 
 .mm-mem__xfer {
@@ -202,6 +213,37 @@
 
 .mm-embedder__retry {
   margin-left: auto;
+}
+
+/* The pond's own words stay one press away, with the retry on the same row. */
+.mm-embedder__actions {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* Secondary text on the status box's ground, 5.62:1 light and 5.65:1 dark. A text button, not a pill:
+   the box is chrome, so only the retry carries an edge. */
+.mm-embedder__more {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--tap-min);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.mm-embedder__more:hover {
+  color: var(--color-text);
+  text-decoration: underline;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -7,7 +7,7 @@ import { RefreshCw } from "lucide-react";
 import { api } from "../../api/PondApiClient";
 import type { ContextIndexHealth, MemoryFragment } from "../../api/types";
 import { EmbedderStatus } from "../../components/models/MemoryModels";
-import { embedderLine } from "../models/memoryEmbedder";
+import { embedderLine, embedderTitle } from "../models/memoryEmbedder";
 
 interface Props {
   memories: MemoryFragment[];
@@ -76,11 +76,11 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
     setNote(null);
     try {
       const r = await api.rebuildContextIndex();
-      // The route only clears; the deferred idle sweep refills, so don't claim "reindexed".
+      // The route only clears; the deferred idle sweep refills, so don't claim it is done.
       setNote(
         r.cleared === 0
-          ? "Nothing was indexed, so there was nothing to clear."
-          : `Cleared ${r.cleared} entries. The pond reads them again in the background; this page will fill back in.`,
+          ? "Nothing was indexed, so there was nothing to read again."
+          : "The pond is reading memories again in the background, and this page fills back in as it goes.",
       );
       onRebuilt?.();
     } catch (e) {
@@ -95,6 +95,8 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
   const line = embedderLine(health, { downloading });
   // The figures below already say "ready"; the line speaks only while something is moving or wrong.
   const spoken = line && line.kind !== "ready" ? line : null;
+  // A model that failed or is still loading has read nothing, so the sentence must not say it did.
+  const reading = !health?.embedder || health.embedder.state === "ready";
 
   const live = memories.filter((m) => !m.lifecycle || m.lifecycle === "active");
   const superseded = memories.filter((m) => m.superseded_by).length;
@@ -180,7 +182,7 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
             disabled={rebuilding}
           >
             <RefreshCw size={14} className={rebuilding ? "connections-spin" : undefined} />
-            <span>{rebuilding ? "Clearing" : "Read everything again"}</span>
+            <span>{rebuilding ? "Reading memories again" : "Read memories again"}</span>
           </button>
         </div>
         {note && <p className="lin__note">{note}</p>}
@@ -195,8 +197,9 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
         ) : (
           <>
             <p className="lin__vectorsIntro">
-              Read by <strong>{health.model_id}</strong> at {health.dims} dimensions. Anything
-              not indexed is still found by word, just less well.
+              {reading ? "Read by " : "Chosen: "}
+              <strong>{embedderTitle(health.model_id)}</strong>. Anything not indexed is still
+              found by word, just less well.
             </p>
             <ul className="lin__corpora">
               {health.corpora.map((corpus) => {

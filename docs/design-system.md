@@ -197,11 +197,13 @@ measured, its numbers. What the pond says while the choice takes hold is decided
 
 | Part | What it says |
 |---|---|
-| `<MemoryModels>` | One row per model: name, Recommended chip, reason, size or where its file is, and one Use. A download shows the same `<TransferView>`. `fold` keeps the recommendation and the model in use, the rest behind a button |
-| `<EmbedderStatus>` | One sentence: searching by keyword while the model loads or downloads, `Re-indexing: 40 of 95`, off, or a failed load in plain words with the pond's own reason in mono and a retry. Silent where the pond cannot say |
+| `<MemoryModels>` | One row per model: name, Recommended chip, reason, size or where its file is, and one button. A press that starts a download reads `Download and use` with the size in its accessible name, and rests as `Needs a connection to download` while `network_mode` is offline; otherwise it reads `Use`. The row of the model Memory is set to says `In use` only while the embedder runs it, else `Loading`, `Chosen, not loaded` or `Chosen, not downloaded`. A download shows the same `<TransferView>`. `fold` keeps the recommendation and the model in use, the rest behind a button |
+| `<EmbedderStatus>` | One sentence: searching by keyword while the model loads or downloads, `Reading memories again: 40 of 95 items` (items, because the total adds up memories, connected items and summaries), off, or a failed load in plain words with a retry; out of memory says so and names all-MiniLM-L6-v2 (23 MB) as the lighter choice. The pond's own reason waits behind `Details`. Silent where the pond cannot say |
 
 The status box wears a hairline, never the ink edge, and a settled model drops the box and keeps the
-sentence. Retrying a failed load chooses the same model again; it never clears the index.
+sentence. Retrying a failed load chooses the same model again; it never clears the index. Re-reading
+has one name in every surface: `Read memories again` for the action, `Reading memories again` for the
+status. While search by meaning is off nothing is fetched or read, so `Use` only sets the model.
 
 ---
 

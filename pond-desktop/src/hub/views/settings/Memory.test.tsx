@@ -28,13 +28,13 @@ function memoryHealth(embedder: Partial<EmbedderHealth>, over: Partial<ContextIn
 
 async function renderMemory(go: (route: string) => void = () => {}) {
   render(<MemoryDetail go={go} />);
-  await screen.findByText("Semantic search");
+  await screen.findByText("Search by meaning", { selector: ".setcard__title" });
   await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
 }
 
-/** The card the screen titles `Semantic search`. */
+/** The card the screen titles `Search by meaning`, as the classic setting is named. */
 function semanticCard(): HTMLElement {
-  return screen.getByText("Semantic search", { selector: ".setcard__title" }).closest(".setcard") as HTMLElement;
+  return screen.getByText("Search by meaning", { selector: ".setcard__title" }).closest(".setcard") as HTMLElement;
 }
 
 beforeEach(() => {
@@ -69,6 +69,27 @@ describe("Hub Memory: search by meaning", () => {
     expect(await within(semanticCard()).findByText("Using EmbeddingGemma 2.")).toBeTruthy();
   });
 
+  it("says a chosen model that did not load is not in use", async () => {
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+      memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    );
+    await renderMemory();
+    expect(await within(semanticCard()).findByText("EmbeddingGemma 2 is chosen but did not load.")).toBeTruthy();
+    expect(within(semanticCard()).queryByText(/^Using /)).toBeNull();
+  });
+
+  it("says a model still loading is not in use yet", async () => {
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({ state: "loading" }, { matching: 0 }));
+    await renderMemory();
+    expect(await within(semanticCard()).findByText("EmbeddingGemma 2 is loading.")).toBeTruthy();
+    expect(within(semanticCard()).queryByText(/^Using /)).toBeNull();
+  });
+
+  it("does not claim the Swahili example for whatever model is in use", async () => {
+    await renderMemory();
+    expect(semanticCard().textContent).not.toMatch(/Swahili/);
+  });
+
   it("reads the older engine names as on, so the switch shows what the pond does", async () => {
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "fastembed" } as never);
     await renderMemory();
@@ -100,7 +121,7 @@ describe("Hub Memory: search by meaning", () => {
     );
     fireEvent.click(within(semanticCard()).getByRole("button", { name: "Search by meaning" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
-    expect(await screen.findByText(/Search by meaning is on/)).toBeTruthy();
+    expect(await screen.findByText("Search by meaning is on. The pond reads memories again at the next quiet moment.")).toBeTruthy();
   });
 
   it("puts the switch back and says why when the pond refuses", async () => {
@@ -129,16 +150,20 @@ describe("Hub Memory: what the pond says while it switches", () => {
   it("counts the re-index", async () => {
     vi.mocked(api.getContextIndexHealth).mockResolvedValue(memoryHealth({}, { matching: 40 }));
     await renderMemory();
-    expect(await within(semanticCard()).findByText("Re-indexing: 40 of 95")).toBeTruthy();
+    expect(await within(semanticCard()).findByText("Reading memories again: 40 of 95 items")).toBeTruthy();
   });
 
-  it("says a failed load in plain words and asks again without clearing anything", async () => {
+  it("says a failed load plainly, keeps the pond's words behind Details, and asks again without clearing anything", async () => {
     vi.mocked(api.getContextIndexHealth).mockResolvedValue(
       memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
     );
     await renderMemory();
     const alert = await within(semanticCard()).findByRole("alert");
-    expect(alert.textContent).toContain("EmbeddingGemma 2 did not load");
+    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2");
+    expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
+    expect(within(alert).queryByText("loading x.gguf on the Gpu: out of memory")).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
+    expect(within(alert).getByText("loading x.gguf on the Gpu: out of memory")).toBeTruthy();
     fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(api.activateModel).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"));
   });

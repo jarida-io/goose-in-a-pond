@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
+import { contrastOf } from "./helpers/contrast";
 import { navigateTo } from "./helpers/nav";
 import { memoryHealth, memoryRows, mockModels, typicalModels, type ModelMocks } from "./helpers/model-mocks";
 
@@ -30,18 +31,27 @@ interface Seen {
   saved: unknown[];
 }
 
+/** The Memory model a roles reply names, or the built-in default when nobody chose. */
+const heldBy = (roles: Record<string, unknown>) =>
+  ((roles.embedding as { model?: string } | undefined)?.model || "all-MiniLM-L6-v2");
+
 /** Registered before navigating. `seen` records what the screen asks the pond to do. */
 async function setup(
   page: Page,
-  opts: { section: string; route?: string; scheme?: "Light" | "Dark"; size?: [number, number] } & ModelMocks,
+  opts: {
+    section: string; route?: string; scheme?: "Light" | "Dark"; size?: [number, number];
+    networkMode?: "open" | "allowlist" | "offline";
+  } & ModelMocks,
 ): Promise<Seen> {
   const seen: Seen = { activated: [], rebuilt: 0, saved: [] };
   await mockAllApiRoutes(page);
+  const roles = opts.roles ?? ROLES(DEFAULT_MEMORY);
   await mockModels(page, {
-    models: typicalModels({ embedding: memoryRows() }),
-    roles: ROLES(DEFAULT_MEMORY),
+    // The model in use is on this device, unless its file is the one coming down.
+    models: typicalModels({ embedding: memoryRows(opts.downloads?.length ? [] : [heldBy(roles)]) }),
     health: memoryHealth({ model_id: "all-MiniLM-L6-v2" }, { model_id: "all-MiniLM-L6-v2", dims: 384 }),
     ...opts,
+    roles,
   });
   await page.route("**/api/v1/models/embedding/*/activate", (route) => {
     seen.activated.push({ url: route.request().url(), body: route.request().postDataJSON() });
@@ -60,6 +70,7 @@ async function setup(
       json: {
         assistant_name: "Pond", user_name: "Jerry", chat_provider: "local",
         chat_model: "gemma-4-E2B-it-qat-UD-Q4_K_XL", embedding_provider: "fastembed",
+        ...(opts.networkMode ? { network_mode: opts.networkMode } : {}),
       },
     });
   });
@@ -108,8 +119,11 @@ test.describe("Memory, classic Models page", () => {
     await expect(rows.nth(0)).toContainText("Recommended");
     await expect(rows.nth(0)).toContainText("Finds facts in Swahili, Sheng or English, whichever language you ask in");
     await expect(rows.nth(0)).toContainText("295 MB to download");
+    // The press that spends 295 MB says so, with the size in its name.
     await expect(rows.nth(0).getByRole("button")).toHaveCount(1);
+    await expect(rows.nth(0).getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" })).toHaveText("Download and use");
     await expect(rows.filter({ hasText: "all-MiniLM-L6-v2" })).toContainText("In use");
+    await expect(rows.filter({ hasText: "all-MiniLM-L6-v2" })).not.toContainText("to download");
     // The Memory card names the model in a word or two, never its description.
     const card = page.locator(".mdl-role", { hasText: "Memory" });
     await expect(card.locator(".mdl-role__holder")).toHaveText("all-MiniLM-L6-v2");
@@ -126,7 +140,7 @@ test.describe("Memory, classic Models page", () => {
     );
     await page.route("**/api/v1/models/active-roles", (r) => r.fulfill({ json: ROLES(ON_EG2) }));
 
-    await memory.getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }).click();
+    await memory.getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
     expect(seen.activated[0].url).toContain("/models/embedding/embeddinggemma-2/activate");
@@ -142,42 +156,89 @@ test.describe("Memory, classic Models page", () => {
   });
 
   test("keeps MiniLM selectable once EmbeddingGemma 2 is in use", async ({ page }) => {
-    const seen = await setup(page, { section: "models", roles: ROLES(ON_EG2) });
+    const seen = await setup(page, {
+      section: "models", roles: ROLES(ON_EG2), health: memoryHealth({}, { matching: 95 }),
+    });
     const memory = await openClassicModels(page);
-    await expect(memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" })).toContainText("In use");
+    const inUse = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
+    await expect(inUse).toContainText("In use");
+    await expect(inUse).toContainText("On this device, 295 MB");
+    await expect(inUse).not.toContainText("to download");
     await memory.getByRole("button", { name: "Use all-MiniLM-L6-v2 for memory" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].url).toContain("/models/embedding/all-MiniLM-L6-v2/activate");
   });
 
-  test("says it searches by keyword while the model loads, and counts the re-index", async ({ page }) => {
+  test("says it searches by keyword while the model loads, and counts reading memories again", async ({ page }) => {
     await setup(page, {
       section: "models", roles: ROLES(ON_EG2),
       health: memoryHealth({ state: "loading" }, { matching: 0 }),
     });
     const memory = await openClassicModels(page);
     await expect(memory.getByText("Searching by keyword while EmbeddingGemma 2 loads")).toBeVisible();
+    // Loading is not in use, and the row says which.
+    const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
+    await expect(row).toContainText("Loading");
+    await expect(row).not.toContainText("In use");
 
     await page.unroute("**/api/v1/context/index/health");
     await page.route("**/api/v1/context/index/health", (r) => r.fulfill({ json: memoryHealth({}, { matching: 40 }) }));
     await page.reload();
-    await expect(page.getByRole("region", { name: "Memory models" }).getByText("Re-indexing: 40 of 95")).toBeVisible();
-    await expect(page.getByRole("progressbar", { name: "Memories re-indexed" })).toHaveAttribute("aria-valuenow", "42");
+    await expect(page.getByRole("region", { name: "Memory models" }).getByText("Reading memories again: 40 of 95 items")).toBeVisible();
+    await expect(page.getByRole("progressbar", { name: "Items read again" })).toHaveAttribute("aria-valuenow", "42");
+    await expect(page.getByRole("region", { name: "Memory models" }).getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" })).toContainText("In use");
   });
 
-  test("says a failed load in plain words, and Try again chooses the model again without clearing the index", async ({ page }) => {
+  test("says a failed load in plain words, names the lighter model, and Try again chooses the model again without clearing the index", async ({ page }) => {
     const seen = await setup(page, {
       section: "models", roles: ROLES(ON_EG2),
       health: memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
     });
     const memory = await openClassicModels(page);
     const alert = memory.getByRole("alert");
-    await expect(alert).toContainText("EmbeddingGemma 2 did not load, so Memory is searching by keyword.");
-    await expect(alert).toContainText("out of memory");
+    await expect(alert).toContainText("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    await expect(alert).toContainText("Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.");
+    // The pond's own words wait behind Details, and the row does not claim the model runs.
+    await expect(alert).not.toContainText("on the Gpu");
+    await alert.getByRole("button", { name: "Details" }).click();
+    await expect(alert).toContainText("loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory");
+    const row = memory.getByRole("listitem").filter({ hasText: "EmbeddingGemma 2" });
+    await expect(row).toContainText("Chosen, not loaded");
+    await expect(memory.getByText("In use")).toHaveCount(0);
     await alert.getByRole("button", { name: "Try again" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
     expect(seen.rebuilt).toBe(0);
+  });
+
+  test("rests Download and use, with the reason, when the pond reaches nothing outside the house", async ({ page }) => {
+    await setup(page, {
+      section: "models", networkMode: "offline",
+      models: typicalModels({ embedding: memoryRows(["all-MiniLM-L6-v2", "nomic-embed-text-v1.5"]) }),
+    });
+    const memory = await openClassicModels(page);
+    const press = memory.getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" });
+    await expect(press).toBeDisabled();
+    await expect(memory.getByText("Needs a connection to download")).toBeVisible();
+    await expect(press).toHaveAccessibleDescription("Needs a connection to download");
+    // A model whose file is here needs no connection.
+    await expect(memory.getByRole("button", { name: "Use Nomic Embed Text v1.5 for memory" })).toBeEnabled();
+  });
+
+  test("Use while search by meaning is off sets the model and promises no re-read", async ({ page }) => {
+    const seen = await setup(page, {
+      section: "models",
+      roles: ROLES({ model_id: null, model: "", provider: "none" }),
+      models: typicalModels({ embedding: memoryRows(["nomic-embed-text-v1.5"]) }),
+      health: { indexed: false, reason: "no embedding model is configured", model_id: null, dims: null, coverage: null, corpora: [], embedder: { state: "off", model_id: null, reason: null } },
+    });
+    const memory = await openClassicModels(page);
+    // Nothing is fetched while it is off, so no row offers a download.
+    await expect(memory.getByRole("button", { name: /Download and use/ })).toHaveCount(0);
+    await memory.getByRole("button", { name: "Use Nomic Embed Text v1.5 for memory" }).click();
+    await expect.poll(() => seen.activated.length).toBe(1);
+    await expect(page.getByText("Nomic Embed Text v1.5 is set for memory. The pond uses it once you turn on search by meaning.")).toBeVisible();
+    await expect(page.getByText(/reads memories again|Now using/)).toHaveCount(0);
   });
 
   test("says search by meaning is off, and turns it on with one press", async ({ page }) => {
@@ -213,6 +274,21 @@ test.describe("Memory, classic Context and Settings", () => {
     await expect(page.getByRole("status").filter({ hasText: "Searching by keyword while EmbeddingGemma 2 loads" })).toBeVisible();
   });
 
+  test("Lineage keeps one name for reading memories again, and names the model rather than its stamp", async ({ page }) => {
+    await setup(page, {
+      section: "context", roles: ROLES(ON_EG2),
+      health: memoryHealth({}, { matching: 40 }),
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: /Lineage/ }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Reading memories again: 40 of 95 items" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Read memories again" })).toBeVisible();
+    await expect(page.getByText("Read by EmbeddingGemma 2.")).toBeVisible();
+    await expect(page.getByText(/embeddinggemma-2-256|dimensions/)).toHaveCount(0);
+    // The bars count what the line counts: memories, then summaries, 40 + 0 of 45 + 50.
+    await expect(page.locator(".lin__corpusCount")).toHaveText(["40 of 45", "nothing here yet", "0 of 50"]);
+  });
+
   test("Settings offers search by meaning as a switch, not a choice of engines", async ({ page }) => {
     const seen = await setup(page, { section: "settings" });
     await page.goto("/");
@@ -240,6 +316,7 @@ test.describe("Memory, hub", () => {
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toContainText("EmbeddingGemma 2");
     await expect(rows.nth(0)).toContainText("295 MB to download");
+    await expect(rows.nth(0).getByRole("button")).toHaveText("Download and use");
     await expect(rows.nth(1)).toContainText("In use");
     await card.getByRole("button", { name: "Other Memory models (1)" }).click();
     await expect(rows).toHaveCount(3);
@@ -249,10 +326,26 @@ test.describe("Memory, hub", () => {
     }
   });
 
+  test("a failed load keeps every action touch sized, Details and Try again included", async ({ page }) => {
+    await setup(page, {
+      section: "hub", size: [800, 480], roles: ROLES(ON_EG2),
+      health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    });
+    const card = await openHubModels(page);
+    await expect(card.getByRole("alert")).toContainText("not enough free memory");
+    await expect(card.getByRole("listitem").first()).toContainText("Chosen, not loaded");
+    await card.getByRole("button", { name: "Details" }).click();
+    await expect(card.getByRole("alert")).toContainText("on the Gpu: out of memory");
+    for (const button of await card.getByRole("button").all()) {
+      const box = await button.boundingBox();
+      expect(box?.height ?? 0, await button.innerText()).toBeGreaterThanOrEqual(44);
+    }
+  });
+
   test("Use assigns the Memory role from the hub", async ({ page }) => {
     const seen = await setup(page, { section: "hub" });
     const card = await openHubModels(page);
-    await card.getByRole("button", { name: "Use EmbeddingGemma 2 for memory" }).click();
+    await card.getByRole("button", { name: "Download and use EmbeddingGemma 2 for memory, 295 MB" }).click();
     await expect.poll(() => seen.activated.length).toBe(1);
     expect(seen.activated[0].body).toEqual({ role: "embedding" });
   });
@@ -265,8 +358,12 @@ test.describe("Memory, hub", () => {
     await page.goto("/");
     await page.waitForSelector(".ghub", { timeout: 10_000 });
     await navigateTo(page, "Context");
-    const card = page.locator(".setcard", { has: page.locator(".setcard__title", { hasText: "Semantic search" }) });
+    const card = page.locator(".setcard", { has: page.locator(".setcard__title", { hasText: /^Search by meaning$/ }) });
     await expect(card.getByText("Searching by keyword while EmbeddingGemma 2 loads")).toBeVisible();
+    // Loading is not "Using": the Model line says what the embedder has done with the model.
+    await expect(card.getByText("EmbeddingGemma 2 is loading.")).toBeVisible();
+    await expect(card.getByText(/^Using /)).toHaveCount(0);
+    await expect(card.getByText(/Swahili/)).toHaveCount(0);
     await expect(card.getByRole("combobox")).toHaveCount(0);
 
     await card.getByRole("button", { name: "Search by meaning" }).click();
@@ -297,12 +394,48 @@ for (const scheme of ["Light", "Dark"] as const) {
       const memory = await openClassicModels(page);
       await expect(memory.getByRole("alert")).toBeVisible();
       await scan(page, "#mdl-memory", "classic Memory models, failed");
+      await memory.getByRole("button", { name: "Details" }).click();
+      await expect(memory.getByRole("alert")).toContainText("on the Gpu: out of memory");
+      await scan(page, "#mdl-memory", "classic Memory models, failed, with Details open");
 
       await page.unroute("**/api/v1/context/index/health");
       await page.route("**/api/v1/context/index/health", (r) => r.fulfill({ json: memoryHealth({}, { matching: 40 }) }));
       await page.reload();
-      await expect(page.getByText("Re-indexing: 40 of 95")).toBeVisible();
-      await scan(page, "#mdl-memory", "classic Memory models, re-indexing");
+      await expect(page.getByText("Reading memories again: 40 of 95 items")).toBeVisible();
+      await scan(page, "#mdl-memory", "classic Memory models, reading memories again");
+    });
+
+    // axe files text on a translucent colour as incomplete, so the new words are measured over what is behind them.
+    test("the state words and the Details toggle, measured", async ({ page }) => {
+      await setup(page, {
+        section: "models", scheme, roles: ROLES(ON_EG2),
+        health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+      });
+      const memory = await openClassicModels(page);
+      const alert = memory.getByRole("alert");
+      expect(await contrastOf(alert.getByRole("button", { name: "Details" })), "Details").toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(memory.getByText("Chosen, not loaded")), "Chosen, not loaded").toBeGreaterThanOrEqual(4.5);
+      await alert.getByRole("button", { name: "Details" }).click();
+      expect(await contrastOf(alert.getByText(/on the Gpu: out of memory/)), "the pond's reason").toBeGreaterThanOrEqual(4.5);
+
+      await page.unroute("**/api/v1/context/index/health");
+      await page.route("**/api/v1/context/index/health", (r) => r.fulfill({ json: memoryHealth({ state: "loading" }, { matching: 0 }) }));
+      await page.reload();
+      expect(await contrastOf(page.getByRole("region", { name: "Memory models" }).getByText("Loading", { exact: true })), "Loading").toBeGreaterThanOrEqual(4.5);
+    });
+
+    test("the offline note, measured", async ({ page }) => {
+      await setup(page, { section: "models", scheme, networkMode: "offline" });
+      const memory = await openClassicModels(page);
+      expect(await contrastOf(memory.getByText("Needs a connection to download").first())).toBeGreaterThanOrEqual(4.5);
+    });
+
+    test("the classic Memory models, with a download that needs a connection", async ({ page }) => {
+      await setup(page, { section: "models", scheme, networkMode: "offline" });
+      const memory = await openClassicModels(page);
+      // EmbeddingGemma 2 and Nomic both need a file, so both rest.
+      await expect(memory.getByText("Needs a connection to download")).toHaveCount(2);
+      await scan(page, "#mdl-memory", "classic Memory models, offline");
     });
 
     test("the hub Memory card and the Memory screen", async ({ page }) => {
@@ -315,10 +448,11 @@ for (const scheme of ["Light", "Dark"] as const) {
       await scan(page, ".ghub__main", "hub Memory card");
 
       await navigateTo(page, "Context");
-      await expect(page.getByText("Semantic search")).toBeVisible();
-      await expect(page.getByRole("alert").filter({ hasText: "did not load" })).toBeVisible();
+      await expect(page.locator(".setcard__title", { hasText: /^Search by meaning$/ })).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
+      await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
-      await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Semantic search");
+      await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");
     });
 
     test("the settings switch row", async ({ page }) => {

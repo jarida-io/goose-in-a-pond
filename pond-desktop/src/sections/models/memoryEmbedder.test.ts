@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ContextIndexHealth, EmbedderHealth } from "../../api/types";
 import {
-  embedderLine, embedderTitle, embedderWatching, holdsMemory, memoryChosenText, memoryCost,
-  memoryHolder, memoryIsOff, memoryModels, resolvedMemoryName,
+  embedderLine, embedderTitle, embedderWatching, holderBadge, holderText, holdsMemory, isOutOfMemory,
+  memoryChosenText, memoryCost, memoryHolder, memoryIsOff, memoryModels, memoryPress, NEEDS_CONNECTION,
+  resolvedMemoryName,
 } from "./memoryEmbedder";
 import { e4b, eg2, memoryRoles, miniLm, nomicEmbed, NO_ROLES } from "./fixtures";
 import { modelLabel } from "./modelsView";
@@ -69,9 +70,10 @@ describe("a model's name", () => {
     expect(modelLabel(miniLm())).toBe("all-MiniLM-L6-v2");
   });
 
-  it("reads EmbeddingGemma 2 for its 256-wide stamp", () => {
+  it("reads EmbeddingGemma 2 for its 256-wide stamp, and names the others as the catalogue does", () => {
     expect(embedderTitle("embeddinggemma-2-256")).toBe("EmbeddingGemma 2");
-    expect(embedderTitle("nomic-embed-text-v1.5")).toBe("nomic-embed-text-v1.5");
+    expect(embedderTitle("nomic-embed-text-v1.5")).toBe("Nomic Embed Text v1.5");
+    expect(embedderTitle("all-MiniLM-L6-v2")).toBe("all-MiniLM-L6-v2");
     expect(embedderTitle(null)).toBe("the Memory model");
   });
 });
@@ -96,9 +98,12 @@ describe("what the pond says while it switches", () => {
     expect(line?.text).toContain("Searching by keyword");
   });
 
-  it("counts the re-index from the rows reached against the rows there are", () => {
+  // The totals add up every store (memories, connected items, summaries), so they are counted as items.
+  it("counts reading again from the items reached against the items there are", () => {
     const line = embedderLine(health({}, { rows: 95, matching: 40, mismatched: 55, missing: 0, coverage: 40 / 95 }));
-    expect(line).toMatchObject({ kind: "reindexing", text: "Re-indexing: 40 of 95", progress: { done: 40, total: 95 } });
+    expect(line).toMatchObject({
+      kind: "reindexing", text: "Reading memories again: 40 of 95 items", progress: { done: 40, total: 95 },
+    });
   });
 
   it("calls a finished re-index ready", () => {
@@ -149,12 +154,39 @@ describe("what the pond says while it switches", () => {
     });
   });
 
-  it("explains a failed load in plain words, keeps the pond's own words, and offers another go", () => {
-    const line = embedderLine(health({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }));
-    expect(line).toMatchObject({ kind: "failed", retry: true, detail: "loading x.gguf on the Gpu: out of memory" });
+  it("explains a failed load in plain words, keeps the pond's own words for Details, and offers another go", () => {
+    const line = embedderLine(health({ state: "failed", reason: "loading x.gguf: bad magic number" }));
+    expect(line).toMatchObject({ kind: "failed", retry: true, detail: "loading x.gguf: bad magic number" });
     expect(line?.text).toBe(
       "EmbeddingGemma 2 did not load, so Memory is searching by keyword. Try again, or choose another Memory model.",
     );
+  });
+
+  it("says plainly that there is not enough memory, and names the lighter model, keeping the raw reason aside", () => {
+    const line = embedderLine(health({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }));
+    expect(line).toMatchObject({ kind: "failed", retry: true, detail: "loading x.gguf on the Gpu: out of memory" });
+    expect(line?.text).toBe(
+      "There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword. " +
+        "Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.",
+    );
+    expect(line?.text).not.toMatch(/Gpu|gguf|out of memory/);
+  });
+
+  it("does not send the lightest model to itself when it is the one that ran out of room", () => {
+    const line = embedderLine(
+      health({ state: "failed", model_id: "all-MiniLM-L6-v2", reason: "out of memory" }, { model_id: "all-MiniLM-L6-v2" }),
+    );
+    expect(line?.text).toBe(
+      "There is not enough free memory to load all-MiniLM-L6-v2, so Memory is searching by keyword. Try again later.",
+    );
+  });
+
+  it("recognises a load that ran out of room by the words engines use for it", () => {
+    expect(isOutOfMemory("loading x.gguf on the Gpu: out of memory")).toBe(true);
+    expect(isOutOfMemory("CUDA OOM while loading")).toBe(true);
+    expect(isOutOfMemory("failed to allocate 400 MiB")).toBe(true);
+    expect(isOutOfMemory("bad magic number")).toBe(false);
+    expect(isOutOfMemory(null)).toBe(false);
   });
 
   it("offers no retry where the build cannot run the model at all", () => {
@@ -191,15 +223,90 @@ describe("pressing Use", () => {
     );
   });
 
-  it("says a model already here is now in use, and that the pond reads again", () => {
+  it("says a model already here is now in use, and that the pond reads memories again", () => {
     expect(memoryCost(eg2({ downloaded: true }))).toBe("On this device, 295 MB");
     expect(memoryChosenText(eg2({ downloaded: true }))).toBe(
-      "Now using EmbeddingGemma 2 for memory. The pond reads your memories again at the next quiet moment.",
+      "Now using EmbeddingGemma 2 for memory. The pond reads memories again at the next quiet moment.",
     );
   });
 
   it("says a built-in model is fetched by the library, and is not a download here", () => {
     expect(memoryCost(miniLm())).toBe("23 MB, fetched the first time it is used");
     expect(memoryChosenText(miniLm())).toMatch(/^Now using all-MiniLM-L6-v2 for memory/);
+  });
+
+  // Nothing loads, downloads or reads again while the switch is off, so none of that may be promised.
+  it("says the model is set and used once search by meaning is on, without promising a read or a fetch", () => {
+    const here = memoryChosenText(eg2({ downloaded: true }), { off: true });
+    expect(here).toBe("EmbeddingGemma 2 is set for memory. The pond uses it once you turn on search by meaning.");
+    expect(here).not.toMatch(/reads|Now using|once it downloads/);
+    expect(memoryChosenText(eg2(), { off: true })).toBe(
+      "EmbeddingGemma 2 is set for memory. Once you turn on search by meaning, the pond downloads it (295 MB) and uses it.",
+    );
+  });
+});
+
+describe("the button on a Memory row", () => {
+  const on = { off: false, offline: false };
+
+  it("says Download and use only where the press starts a download", () => {
+    expect(memoryPress(eg2(), on)).toMatchObject({ label: "Download and use", download: true, size: "295 MB", blocked: null });
+    expect(memoryPress(eg2({ downloaded: true }), on)).toMatchObject({ label: "Use", download: false });
+    expect(memoryPress(miniLm(), on)).toMatchObject({ label: "Use", download: false });
+  });
+
+  it("stays a plain Use while search by meaning is off, because nothing is fetched then", () => {
+    expect(memoryPress(eg2(), { off: true, offline: false })).toMatchObject({ label: "Use", download: false, blocked: null });
+  });
+
+  it("rests, and says why, when the file is not here and the pond reaches nothing outside the house", () => {
+    expect(memoryPress(eg2(), { off: false, offline: true })).toMatchObject({ label: "Download and use", blocked: NEEDS_CONNECTION });
+    expect(NEEDS_CONNECTION).toBe("Needs a connection to download");
+  });
+
+  it("never rests a model that needs no download, offline or not", () => {
+    expect(memoryPress(eg2({ downloaded: true }), { off: false, offline: true }).blocked).toBeNull();
+    expect(memoryPress(miniLm(), { off: false, offline: true }).blocked).toBeNull();
+  });
+});
+
+describe("what the model's row and line may claim", () => {
+  const said = (embedder: Partial<EmbedderHealth>, opts: { downloading?: boolean } = {}, over: Partial<ContextIndexHealth> = {}) =>
+    embedderLine(health(embedder, over), opts);
+
+  it("says In use only once the model runs, reading again included", () => {
+    expect(holderBadge(said({}))).toEqual({ label: "In use", tone: "ok" });
+    expect(holderBadge(said({}, {}, { matching: 40 }))).toEqual({ label: "In use", tone: "ok" });
+    // The pond has nothing to say yet: the household's choice stands.
+    expect(holderBadge(null)).toEqual({ label: "In use", tone: "ok" });
+  });
+
+  it("says a chosen model that failed is chosen and not loaded", () => {
+    expect(holderBadge(said({ state: "failed", reason: "out of memory" }))).toEqual({
+      label: "Chosen, not loaded", tone: "stopped",
+    });
+    expect(holderBadge(said({ state: "failed", reason: "x.gguf is not on disk; the models pipeline is downloading it" }))).toEqual({
+      label: "Chosen, not downloaded", tone: "stopped",
+    });
+  });
+
+  it("says a model still on its way is not in use yet", () => {
+    expect(holderBadge(said({ state: "loading" }))).toEqual({ label: "Loading", tone: "busy" });
+    expect(holderBadge(said({ state: "chosen" }))).toEqual({ label: "Waiting to load", tone: "wait" });
+    expect(
+      holderBadge(said({ state: "failed", reason: "is not on disk; the models pipeline is downloading it" }, { downloading: true })),
+    ).toEqual({ label: "Downloading", tone: "busy" });
+  });
+
+  it("names the hub's Model line for what the embedder has done with it", () => {
+    expect(holderText(said({}), "embeddinggemma-2-256")).toBe("Using EmbeddingGemma 2.");
+    expect(holderText(said({ state: "failed", reason: "out of memory" }), "embeddinggemma-2-256")).toBe(
+      "EmbeddingGemma 2 is chosen but did not load.",
+    );
+    expect(holderText(said({ state: "loading" }), "embeddinggemma-2-256")).toBe("EmbeddingGemma 2 is loading.");
+    expect(holderText(said({ state: "chosen" }), "embeddinggemma-2-256")).toBe(
+      "EmbeddingGemma 2 is chosen and loads at a quiet moment.",
+    );
+    expect(holderText(null, null)).toBe("Chosen on the Models screen.");
   });
 });

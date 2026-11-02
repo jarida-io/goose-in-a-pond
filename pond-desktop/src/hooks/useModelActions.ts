@@ -6,7 +6,7 @@ import { api } from "../api/PondApiClient";
 import type { ModelEntry } from "../api/types";
 import type { UseModels } from "./useModels";
 import { controlResult, startedText, type ModelTransfer, type TransferAction } from "../sections/models/modelDownloads";
-import { memoryChosenText } from "../sections/models/memoryEmbedder";
+import { memoryChosenText, memoryIsOff } from "../sections/models/memoryEmbedder";
 import {
   ROLES, type RoleKey, fitsOnlyWithoutPictures, modelLabel, offersPictures,
 } from "../sections/models/modelsView";
@@ -30,13 +30,13 @@ const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export function useModelActions(
   data: Pick<
     UseModels,
-    "memory" | "reloadRoles" | "reloadMemory" | "reloadModels" | "reloadDownloads" | "watchDownloads"
+    "memory" | "roles" | "reloadRoles" | "reloadMemory" | "reloadModels" | "reloadDownloads" | "watchDownloads"
   >,
   say: (text: string, ok?: boolean) => void,
 ): ModelActions {
   const [busy, setBusy] = useState(false);
   const [choice, setChoice] = useState<Record<string, boolean>>({});
-  const { memory, reloadRoles, reloadMemory, reloadModels, reloadDownloads, watchDownloads } = data;
+  const { memory, roles, reloadRoles, reloadMemory, reloadModels, reloadDownloads, watchDownloads } = data;
 
   const attempt = useCallback(
     async (work: () => Promise<void>) => {
@@ -72,12 +72,13 @@ export function useModelActions(
           // The pond fetches a chosen file that is missing, so the page has to start watching for it.
           await reloadDownloads();
           watchDownloads();
-          say(memoryChosenText(m));
+          // Choosing a model never flips the switch, so the roles read before the press still say which way it is.
+          say(memoryChosenText(m, { off: memoryIsOff(roles) }));
           return;
         }
         say(`Now using ${modelLabel(m)} for ${ROLES.find((r) => r.key === role)?.label.toLowerCase()}.`);
       }),
-    [attempt, reloadRoles, reloadMemory, reloadDownloads, watchDownloads, say],
+    [attempt, roles, reloadRoles, reloadMemory, reloadDownloads, watchDownloads, say],
   );
 
   const download = useCallback(

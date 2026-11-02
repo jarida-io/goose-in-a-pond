@@ -321,6 +321,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
             retrying={job.retrying}
             busy={actions.busy}
             off={job.off}
+            offline={job.offline}
             onTurnOn={() => void job.turnOn()}
             onUse={(m) => void job.useModel(m)}
             onControl={(m, transfer, action) => void actions.control(m, transfer, action)}
