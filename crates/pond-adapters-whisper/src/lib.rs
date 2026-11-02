@@ -17,46 +17,6 @@ pub use in_process::WhisperRsInput;
 const QUIET_WHILE_LISTENING: std::time::Duration = std::time::Duration::from_secs(2);
 const QUIET_UNTIL_THE_TURN: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The longest the ping waits for other audio to pause before it plays anyway.
-const PING_WAITS_AT_MOST: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// Play a short two-tone wake-word confirmation ping (C6→E6, ~220ms), once other audio is paused.
-fn play_wake_ping(quiet: Option<Arc<pond_core::models::services::voice::quiet::Quiet>>) {
-    std::thread::spawn(move || {
-        let _quiet = quiet.as_ref().map(|quiet| {
-            let hold = quiet.hold();
-            quiet.until_quiet_blocking(PING_WAITS_AT_MOST);
-            hold
-        });
-        use rodio::Sink;
-        let Ok((_stream, handle, _)) = pond_audio_out::route::open_routed() else {
-            return;
-        };
-        let Ok(sink) = Sink::try_new(&handle) else {
-            return;
-        };
-        sink.set_volume(0.35);
-
-        let rate = 44100u32;
-        let tone = |freq: f32, ms: u64| -> Vec<f32> {
-            let n = (rate as u64 * ms / 1000) as usize;
-            (0..n)
-                .map(|i| {
-                    let t = i as f32 / rate as f32;
-                    let env = 1.0 - (i as f32 / n as f32); // fade-out
-                    (2.0 * std::f32::consts::PI * freq * t).sin() * env * 0.6
-                })
-                .collect()
-        };
-        // C6 (1047 Hz) then E6 (1319 Hz) — quick ascending chime
-        let mut samples = tone(1047.0, 100);
-        samples.extend(tone(1319.0, 120));
-        let buf = rodio::buffer::SamplesBuffer::new(1, rate, samples);
-        sink.append(buf);
-        sink.sleep_until_end();
-    });
-}
-
 // ── WhisperBackend trait ──────────────────────────────────────────────────────
 
 /// Synchronous transcription backend for the wake-word loop; always called in `spawn_blocking`.
@@ -479,16 +439,7 @@ impl WhisperKeywordDetector {
     /// a stored variant is reduced to the phrase as heard: older calibrations stored whole
     /// sentences, which fired only when that exact sentence was said again.
     pub fn with_transcriptions(mut self, variants: Vec<String>) -> Self {
-        let mut triggers = vec![self.wake_word.clone()];
-        let heard = variants
-            .iter()
-            .filter_map(|v| pond_voice::text::extract_wake_variant(v, &self.wake_word, None));
-        for t in heard.chain(builtin_fuzzy_variants(&self.wake_word)) {
-            if !triggers.contains(&t) {
-                triggers.push(t);
-            }
-        }
-        self.triggers = triggers;
+        self.triggers = pond_voice::text::wake_triggers(&self.wake_word, &variants);
         self
     }
 
@@ -501,30 +452,6 @@ impl WhisperKeywordDetector {
     /// The normalized variants this detector fires on; also what the transcriber strips.
     pub fn triggers(&self) -> &[String] {
         &self.triggers
-    }
-}
-
-/// Common whisper mishearings of short wake words (worst on tiny/base models).
-fn builtin_fuzzy_variants(primary_trigger: &str) -> Vec<String> {
-    match primary_trigger {
-        "goose" => vec![
-            "goose".to_string(),
-            "goos".to_string(),
-            "gooes".to_string(),
-            "gus".to_string(),
-            "gooch".to_string(),
-            "hey goose".to_string(),
-            "a goose".to_string(),
-            "the goose".to_string(),
-        ],
-        "hey goose" => vec![
-            "hey goose".to_string(),
-            "hey goos".to_string(),
-            "hey gus".to_string(),
-            "a goose".to_string(),
-            "hey gooch".to_string(),
-        ],
-        _ => vec![],
     }
 }
 
@@ -694,7 +621,7 @@ fn detection_loop(
                 }
             };
             keep_quiet(QUIET_WHILE_LISTENING);
-            play_wake_ping(quiet.clone());
+            pond_audio_out::play_wake_ping(quiet.clone());
 
             // Capture until `post_trigger_silence_ms` of silence or the `post_trigger_ms` ceiling.
             let poll_ms = 50u64;

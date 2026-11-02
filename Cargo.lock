@@ -11778,7 +11778,6 @@ dependencies = [
  "pond-audio-out",
  "pond-core",
  "pond-voice",
- "rodio",
  "serde",
  "tokio",
  "tracing",
