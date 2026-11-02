@@ -199,6 +199,17 @@ const SCAFFOLD_OPENS: &[&str] = &[
     "<answer-contract>",
     "<memories>",
     "<turn-context>",
+    "<identity>",
+    "<instructions>",
+    "<context-handling>",
+    "<tool-usage>",
+    "<tool-failure>",
+    "<memory-rules>",
+    "<output-quality>",
+    "<voice-mode>",
+    "<vision>",
+    "<conversation-summary>",
+    "<home-devices>",
 ];
 
 /// Every marker that can open a block; built once because `push` runs per token.
@@ -249,6 +260,17 @@ mod tests {
     }
 
     /// Replies a guest's voice turns began with on the nano (2026-11-02), verbatim.
+    /// Verbatim opening of a member's voice reply on the nano (2026-11-02, 3f3b6c5b).
+    #[test]
+    fn echoed_system_prompt_sections_are_dropped() {
+        let (out, f) = per_char(
+            "<context-handling>\nAnswer <user-message> only.\n</context-handling>\n<tool-usage>\n\
+             Only tools in your schema.\n</tool-usage>\nHerons hunt by standing still.",
+        );
+        assert_eq!(out.trim(), "Herons hunt by standing still.");
+        assert_eq!(f.scaffold_blocks(), 2);
+    }
+
     #[test]
     fn an_echoed_user_message_is_dropped_and_the_answer_kept() {
         let (out, f) = per_char(

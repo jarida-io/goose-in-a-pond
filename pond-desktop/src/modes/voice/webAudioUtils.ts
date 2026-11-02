@@ -487,7 +487,24 @@ export function splitText(text: string): SpeechUnit[] {
 // ── Markdown Stripping (for TTS) ─────────────────────────────────
 
 /** Port of `SCAFFOLD_TAGS` in `crates/pond-voice/src/text.rs`. */
-const SCAFFOLD_TAGS = ["system-context", "user-message", "answer-contract", "memories", "turn-context"];
+const SCAFFOLD_TAGS = [
+  "system-context",
+  "user-message",
+  "answer-contract",
+  "memories",
+  "turn-context",
+  "identity",
+  "instructions",
+  "context-handling",
+  "tool-usage",
+  "tool-failure",
+  "memory-rules",
+  "output-quality",
+  "voice-mode",
+  "vision",
+  "conversation-summary",
+  "home-devices",
+];
 
 /** Port of `strip_markup_for_speech` in `crates/pond-voice/src/text.rs`. */
 export function stripMarkupForSpeech(text: string): string {
