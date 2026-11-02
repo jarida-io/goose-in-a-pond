@@ -1268,13 +1268,13 @@ impl BatchExtractionService {
             let band = if lexical_dupe {
                 Band::Same
             } else {
-                match self.embed(&content).await {
-                    None => Band::Unscored,
-                    Some(vector) if !self.cosine_bands_apply() => {
+                match (self.embed(&content).await, self.cosine_bands(config)) {
+                    (None, _) => Band::Unscored,
+                    (Some(vector), None) => {
                         vector_for_row = Some(vector);
                         Band::Unscored
                     }
-                    Some(vector) => {
+                    (Some(vector), Some((reinforce, relate))) => {
                         let neighbours = repo
                             .search_similar(&vector, scope, BAND_NEIGHBOURS)
                             .await
@@ -1296,9 +1296,9 @@ impl BatchExtractionService {
                             None => Band::Unscored,
                             Some((id, sim)) => {
                                 matched = Some(id);
-                                if sim >= config.reinforce_threshold {
+                                if sim >= reinforce {
                                     Band::Same
-                                } else if sim >= config.relate_threshold {
+                                } else if sim >= relate {
                                     Band::Related
                                 } else {
                                     Band::Fresh
@@ -1434,12 +1434,14 @@ impl BatchExtractionService {
         }
     }
 
-    /// The relate and reinforce dials are cosines on MiniLM's scale; a model whose scale is
-    /// unmeasured dedups by the lexical check alone.
-    fn cosine_bands_apply(&self) -> bool {
-        self.embedding_provider
-            .as_ref()
-            .is_some_and(|p| p.similarity_floors().is_some())
+    /// `(reinforce, relate)` on the embedder's own scale. The dials are cosines on MiniLM's, so
+    /// another measured model brings its bands, and an unmeasured one dedups lexically alone.
+    fn cosine_bands(&self, config: &BatchExtractionConfig) -> Option<(f32, f32)> {
+        let floors = self.embedding_provider.as_ref()?.similarity_floors()?;
+        Some(floors.dedup.map_or(
+            (config.reinforce_threshold, config.relate_threshold),
+            |b| (b.reinforce, b.relate),
+        ))
     }
 
     /// Embed, recording health; `None` whether there is no embedder or it failed.
@@ -1506,7 +1508,7 @@ fn segment_label(segment: &MemorySegment) -> &'static str {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use crate::models::domain::embedding_models::{SimilarityFloors, ALL_MINILM_L6_V2};
+    use crate::models::domain::embedding_models::{DedupBands, SimilarityFloors, ALL_MINILM_L6_V2};
     use crate::models::domain::message::ChatMessage;
     use crate::user_data::domain::memory::MemoryTier;
     use crate::user_data::domain::session::SessionMessage;
@@ -2441,13 +2443,25 @@ mod batch_tests {
         assert_eq!(report.bands.total(), 2);
     }
 
-    /// MiniLM drops a candidate its cosine bands match; a model with no measured floors (EG2 for
-    /// now) drops only what the lexical check calls a repeat, and stores the rest with its vector.
+    /// MiniLM drops a candidate its dials match. A model with its own bands is judged on its own
+    /// scale, and one with no measured floors drops only what the lexical check calls a repeat.
     #[tokio::test]
-    async fn an_unmeasured_model_dedups_by_the_lexical_check_alone() {
+    async fn dedup_reads_the_bands_of_the_model_in_use() {
         let known = "Jerry waters the greenhouse before work.";
         let unrelated = "Jerry's sister Amara lives in Kisumu.";
-        for (floors, stored) in [(ALL_MINILM_L6_V2.floors, false), (None, true)] {
+        // Above every cosine, so a model on this scale calls even an identical vector fresh.
+        let own_scale = Some(SimilarityFloors {
+            tool_relevance: 0.5,
+            dedup: Some(DedupBands {
+                reinforce: 1.01,
+                relate: 1.01,
+            }),
+        });
+        for (floors, stored) in [
+            (ALL_MINILM_L6_V2.floors, None),
+            (own_scale, Some("fresh")),
+            (None, Some("unscored")),
+        ] {
             let storage = InMemorySessionStorage::new();
             seed(&storage, "sess-1", 4).await;
             let repo = MockMemoryRepository::new();
@@ -2489,13 +2503,17 @@ mod batch_tests {
                 .await
                 .unwrap();
             let kept = rows.iter().find(|f| f.content.contains("Amara"));
-            if stored {
+            if let Some(band) = stored {
                 assert_eq!(
                     report.bands.same, 1,
                     "only the lexical repeat: {:?}",
                     report.bands
                 );
-                assert_eq!(report.bands.unscored, 1, "bands: {:?}", report.bands);
+                let counted = match band {
+                    "fresh" => report.bands.fresh,
+                    _ => report.bands.unscored,
+                };
+                assert_eq!(counted, 1, "{band}: {:?}", report.bands);
                 let kept = kept.expect("the unrelated fact is stored");
                 assert!(kept.embedding.is_some(), "it is stored with its vector");
             } else {

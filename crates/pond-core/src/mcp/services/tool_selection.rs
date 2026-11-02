@@ -337,10 +337,11 @@ mod tests {
     const MINILM: Option<f32> = Some(0.28);
 
     #[test]
-    fn minilm_keeps_its_floor_and_eg2_has_none_yet() {
+    fn each_measured_model_keeps_its_own_floor() {
         use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
         assert_eq!(ALL_MINILM_L6_V2.floors.map(|f| f.tool_relevance), MINILM);
-        assert_eq!(EMBEDDINGGEMMA_2.floors, None);
+        // Its cosines sit higher: unneeded groups score 0.50-0.82, where MiniLM's sit near zero.
+        assert_eq!(EMBEDDINGGEMMA_2.floors.map(|f| f.tool_relevance), Some(0.71));
     }
 
     /// A cosine on an unmeasured scale rules nothing out, however low it is.
@@ -377,7 +378,8 @@ mod tests {
             }
         }
         assert_eq!(relevance_floor(&Named("all-MiniLM-L6-v2")), MINILM);
-        assert_eq!(relevance_floor(&Named("embeddinggemma-2-256")), None);
+        assert_eq!(relevance_floor(&Named("embeddinggemma-2-256")), Some(0.71));
+        assert_eq!(relevance_floor(&Named("nomic-embed-text-v1.5")), None);
         assert_eq!(relevance_floor(&Named("not-a-catalogue-model")), None);
     }
 
