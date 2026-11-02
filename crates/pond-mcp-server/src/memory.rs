@@ -1,6 +1,8 @@
 //! Memory MCP server: recall, save and forget memory fragments.
 
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment, MemoryTier,
 };
@@ -9,7 +11,7 @@ use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
+        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult, Meta,
         ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
@@ -54,12 +56,59 @@ pub struct ForgetMemoryParams {
     pub content: Option<String>,
 }
 
+/// Why a call touched no memory. Rendered as a successful result: small models retry errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// No live turn or helper stands behind the call, so nobody can be named.
+    Unresolved,
+    /// An unidentified speaker in a household of several.
+    Guest,
+}
+
+impl Refusal {
+    /// Model-facing text; each ends with what to do instead, or a small model retries verbatim.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Refusal::Unresolved => {
+                "Memory is not available in this conversation, so nothing was read, saved or \
+                 deleted. Answer from this conversation and say you could not use memory."
+            }
+            Refusal::Guest => {
+                "Memory is only available once this conversation is identified as a member of \
+                 the household, so nothing was read, saved or deleted. Answer from this \
+                 conversation instead."
+            }
+        }
+    }
+
+    fn trace(&self) -> &'static str {
+        match self {
+            Refusal::Unresolved => "unresolved",
+            Refusal::Guest => "guest",
+        }
+    }
+}
+
+fn refused(tool: &str, refusal: Refusal) -> CallToolResult {
+    tracing::info!(
+        target: "giap::trace",
+        kind = "memory_tool_refused",
+        tool,
+        reason = refusal.trace(),
+        "a memory tool call had no member to act for"
+    );
+    CallToolResult::success(vec![ContentBlock::text(refusal.message())])
+}
+
 // ── MCP server ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct MemoryMcpServer {
     memory_repo: Arc<dyn MemoryRepository + Send + Sync>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
+    /// Live turns by engine session; `None` reads the registry installed with the orchestrator.
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+    children: Arc<ChildSessionRegistry>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
@@ -78,6 +127,8 @@ impl MemoryMcpServer {
         Self {
             memory_repo,
             embedding_provider,
+            turns: None,
+            children: process_child_sessions(),
             tool_router: Self::tool_router(),
         }
     }
@@ -88,19 +139,85 @@ impl MemoryMcpServer {
     )]
     async fn recall_memories(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<RecallMemoriesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let limit = params.0.limit.unwrap_or(10) as usize;
+        self.run_recall(&ctx.meta, params.0).await
+    }
 
-        let filtered: Vec<_> = if let Some(ref query) = params.0.query {
+    #[tool(
+        description = "Save a memory. Pass supersedes=[ids] to replace and archive old memories."
+    )]
+    async fn save_memory(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        params: Parameters<SaveMemoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_save(&ctx.meta, params.0).await
+    }
+
+    #[tool(description = "Delete a specific memory by ID or by exact content match.")]
+    async fn forget_memory(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        params: Parameters<ForgetMemoryParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_forget(&ctx.meta, params.0).await
+    }
+}
+
+impl MemoryMcpServer {
+    /// Resolves callers from these registries instead of the process's own.
+    pub fn with_registries(
+        mut self,
+        turns: Arc<TurnAuthorityRegistry>,
+        children: Arc<ChildSessionRegistry>,
+    ) -> Self {
+        self.turns = Some(turns);
+        self.children = children;
+        self
+    }
+
+    /// Whose memories this call may reach: the live turn's scope, which its injected memories were
+    /// read at, else a helper's clamped one. Keyed by `_meta`, which the model cannot write.
+    fn scope_for(&self, meta: &Meta) -> Result<ProfileScope, Refusal> {
+        let session = crate::session_from_meta(meta).ok_or(Refusal::Unresolved)?;
+        // The adapter's registry, installed with the orchestrator's deps once the adapter exists.
+        let turns = self
+            .turns
+            .clone()
+            .or_else(|| crate::installed_orchestrator_deps().map(|deps| deps.authorities()));
+        let scope = turns
+            .and_then(|turns| turns.authority_for_engine_session(&session))
+            .map(|authority| authority.profile_scope().clone())
+            .or_else(|| self.children.scope_of(&session))
+            .ok_or(Refusal::Unresolved)?;
+        if scope.excludes_everything() {
+            return Err(Refusal::Guest);
+        }
+        Ok(scope)
+    }
+
+    /// The body of `recall_memories`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_recall(
+        &self,
+        meta: &Meta,
+        params: RecallMemoriesParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scope = match self.scope_for(meta) {
+            Ok(scope) => scope,
+            Err(refusal) => return Ok(refused("recall_memories", refusal)),
+        };
+        let limit = params.limit.unwrap_or(10) as usize;
+
+        let filtered: Vec<_> = if let Some(ref query) = params.query {
             if let Some(emb) = self.embedding_provider.as_ref().filter(|e| e.available()) {
                 // A query, not a document -- see EmbeddingProvider::embed_query.
                 match emb.embed_query(query).await {
                     Ok(query_vec) => {
                         match self
                             .memory_repo
-                            .search_similar(&query_vec, &ProfileScope::Household, limit)
+                            .search_similar(&query_vec, &scope, limit)
                             .await
                         {
                             Ok(results) if !results.is_empty() => {
@@ -114,7 +231,7 @@ impl MemoryMcpServer {
                                 tracing::debug!(
                                     "recall_memories: vector search empty, falling back to keyword"
                                 );
-                                keyword_search(&self.memory_repo, query, limit).await?
+                                keyword_search(&self.memory_repo, &scope, query, limit).await?
                             }
                         }
                     }
@@ -122,15 +239,15 @@ impl MemoryMcpServer {
                         tracing::warn!(
                             "recall_memories: embedding failed ({e}), falling back to keyword"
                         );
-                        keyword_search(&self.memory_repo, query, limit).await?
+                        keyword_search(&self.memory_repo, &scope, query, limit).await?
                     }
                 }
             } else {
-                keyword_search(&self.memory_repo, query, limit).await?
+                keyword_search(&self.memory_repo, &scope, query, limit).await?
             }
         } else {
             self.memory_repo
-                .search_recent(&ProfileScope::Household, limit)
+                .search_recent(&scope, limit)
                 .await
                 .map_err(|e| {
                     ErrorData::new(
@@ -207,20 +324,22 @@ impl MemoryMcpServer {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
-    #[tool(
-        description = "Save a memory. Pass supersedes=[ids] to replace and archive old memories."
-    )]
-    async fn save_memory(
+    /// The body of `save_memory`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_save(
         &self,
-        _ctx: RequestContext<RoleServer>,
-        params: Parameters<SaveMemoryParams>,
+        meta: &Meta,
+        params: SaveMemoryParams,
     ) -> Result<CallToolResult, ErrorData> {
+        let scope = match self.scope_for(meta) {
+            Ok(scope) => scope,
+            Err(refusal) => return Ok(refused("save_memory", refusal)),
+        };
         let id = uuid::Uuid::new_v4().to_string();
 
-        let supersedes = params.0.supersedes.clone();
+        let supersedes = params.supersedes.clone();
 
-        let content = if !params.0.content.is_empty() {
-            params.0.content.clone()
+        let content = if !params.content.is_empty() {
+            params.content.clone()
         } else {
             let user_msg = crate::last_user_message();
             if user_msg.is_empty() {
@@ -235,7 +354,6 @@ impl MemoryMcpServer {
             user_msg
         };
         let tag_list: Vec<String> = params
-            .0
             .tags
             .unwrap_or_default()
             .split(',')
@@ -244,20 +362,17 @@ impl MemoryMcpServer {
             .collect();
 
         let segment = params
-            .0
             .segment
             .as_deref()
             .and_then(parse_memory_segment)
             .unwrap_or_else(|| auto_classify_segment(&content));
 
         let importance = params
-            .0
             .importance
             .map(|i| i.clamp(0.0, 1.0))
             .unwrap_or_else(|| segment.default_importance());
 
         let tier = params
-            .0
             .tier
             .as_deref()
             .and_then(parse_memory_tier)
@@ -281,12 +396,13 @@ impl MemoryMcpServer {
             None
         };
 
-        let corrects = params.0.corrects.clone().filter(|s| !s.is_empty());
+        let corrects = params.corrects.clone().filter(|s| !s.is_empty());
 
         let new_id = id.clone();
         let fragment = MemoryFragment {
             id,
-            profile_id: None,
+            // A member's save is theirs; a household turn's stays shared, as extraction files it.
+            profile_id: scope.owner_id().map(str::to_string),
             session_id: None,
             content: content.clone(),
             embedding,
@@ -319,7 +435,10 @@ impl MemoryMcpServer {
 
         if let Some(ref superseded_ids) = supersedes {
             for old_id in superseded_ids {
-                let _ = self.memory_repo.mark_superseded(old_id, &new_id).await;
+                // Only a row this caller could recall may be archived, never another member's.
+                if let Ok(Some(_)) = self.memory_repo.get_in_scope(old_id, &scope).await {
+                    let _ = self.memory_repo.mark_superseded(old_id, &new_id).await;
+                }
             }
         }
 
@@ -340,13 +459,32 @@ impl MemoryMcpServer {
         )]))
     }
 
-    #[tool(description = "Delete a specific memory by ID or by exact content match.")]
-    async fn forget_memory(
+    /// The body of `forget_memory`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_forget(
         &self,
-        _ctx: RequestContext<RoleServer>,
-        params: Parameters<ForgetMemoryParams>,
+        meta: &Meta,
+        params: ForgetMemoryParams,
     ) -> Result<CallToolResult, ErrorData> {
-        if let Some(id) = &params.0.id {
+        let scope = match self.scope_for(meta) {
+            Ok(scope) => scope,
+            Err(refusal) => return Ok(refused("forget_memory", refusal)),
+        };
+        if let Some(id) = &params.id {
+            // Out of scope reads as missing, so another member's memory can't be deleted or probed.
+            let found = self
+                .memory_repo
+                .get_in_scope(id, &scope)
+                .await
+                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
+            if found.is_none() {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    crate::format::format_dead_end(
+                        "a memory with that id",
+                        "Nothing was deleted. Call recall_memories to find the memory's id \
+                         before trying to forget it again.",
+                    ),
+                )]));
+            }
             self.memory_repo.delete(id).await.map_err(|e| {
                 ErrorData::new(
                     ErrorCode::INTERNAL_ERROR,
@@ -363,10 +501,10 @@ impl MemoryMcpServer {
             ))]));
         }
 
-        if let Some(content) = &params.0.content {
+        if let Some(content) = &params.content {
             let memories = self
                 .memory_repo
-                .search_recent(&ProfileScope::Household, 100)
+                .search_recent(&scope, 100)
                 .await
                 .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
@@ -433,11 +571,12 @@ impl ServerHandler for MemoryMcpServer {
 /// Keyword-based memory search: fetch recent, then filter by substring match.
 async fn keyword_search(
     memory_repo: &Arc<dyn MemoryRepository + Send + Sync>,
+    scope: &ProfileScope,
     query: &str,
     limit: usize,
 ) -> Result<Vec<MemoryFragment>, ErrorData> {
     let fragments = memory_repo
-        .search_recent(&ProfileScope::Household, limit * 2) // fetch more to allow for filtering
+        .search_recent(scope, limit * 2) // fetch more to allow for filtering
         .await
         .map_err(|e| {
             ErrorData::new(
@@ -744,5 +883,310 @@ mod tests {
     #[test]
     fn server_constructs() {
         let _server = test_server();
+    }
+
+    // ── Whose memories a call reaches ───────────────────────────────────────
+
+    use pond_core::shared::domain::orchestration::DelegationAuthority;
+    use pond_core::shared::services::turn_authority::TurnAuthorityLease;
+    use pond_core::user_data::domain::profile::{EXEMPLAR_OWNER_ID, SECOND_EXEMPLAR_OWNER_ID};
+    use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
+
+    const AMINA: &str = EXEMPLAR_OWNER_ID;
+    const OTIENO: &str = SECOND_EXEMPLAR_OWNER_ID;
+
+    /// One memory per member and one shared row, every one embedded so semantic recall is live.
+    struct Pond {
+        repo: Arc<MockMemoryRepository>,
+        turns: Arc<TurnAuthorityRegistry>,
+        children: Arc<ChildSessionRegistry>,
+    }
+
+    impl Pond {
+        async fn new() -> Self {
+            let repo = Arc::new(MockMemoryRepository::new());
+            for (id, owner, content) in [
+                ("amina-1", Some(AMINA), "Amina is allergic to peanuts"),
+                ("otieno-1", Some(OTIENO), "Otieno is allergic to shellfish"),
+                ("shared-1", None, "The house is allergic to loud alarms"),
+            ] {
+                let mut fragment = MemoryFragment::from_chat(
+                    id.into(),
+                    owner.map(str::to_string),
+                    None,
+                    content.into(),
+                );
+                fragment.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+                repo.add(fragment).await.unwrap();
+            }
+            Self {
+                repo,
+                turns: Arc::new(TurnAuthorityRegistry::new()),
+                children: Arc::new(ChildSessionRegistry::new()),
+            }
+        }
+
+        fn server(&self, embedded: bool) -> MemoryMcpServer {
+            let embedder: Option<Arc<dyn EmbeddingProvider + Send + Sync>> = if embedded {
+                Some(Arc::new(StubEmbedding))
+            } else {
+                None
+            };
+            MemoryMcpServer::new(self.repo.clone(), embedder)
+                .with_registries(self.turns.clone(), self.children.clone())
+        }
+
+        /// A live turn; hold the lease, or the call is unresolved and every check passes vacuously.
+        fn turn(&self, engine: &str, scope: ProfileScope) -> TurnAuthorityLease {
+            self.turns.publish(
+                engine,
+                DelegationAuthority::for_turn(
+                    format!("giap-{engine}"),
+                    scope,
+                    ["giap-memory__recall_memories"],
+                ),
+                Default::default(),
+            )
+        }
+
+        async fn owner_of(&self, id: &str) -> Option<Option<String>> {
+            self.repo
+                .get_in_scope(id, &ProfileScope::Household)
+                .await
+                .unwrap()
+                .map(|f| f.profile_id)
+        }
+    }
+
+    fn meta_for(session: &str) -> Meta {
+        let mut m = Meta::new();
+        m.0.insert(
+            crate::session_meta::SESSION_ID_META_KEY.to_string(),
+            serde_json::Value::String(session.to_string()),
+        );
+        m
+    }
+
+    fn text(result: &CallToolResult) -> String {
+        format!("{:?}", result.content)
+    }
+
+    fn recall(query: Option<&str>) -> RecallMemoriesParams {
+        RecallMemoriesParams {
+            query: query.map(str::to_string),
+            limit: None,
+        }
+    }
+
+    fn save(content: &str) -> SaveMemoryParams {
+        SaveMemoryParams {
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_recalls_their_own_and_shared_memories_never_anothers() {
+        let pond = Pond::new().await;
+        let _turn = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let meta = meta_for("engine-amina");
+
+        // Recent, keyword and semantic recall each run their own query, so each is checked.
+        for (embedded, query) in [
+            (false, None),
+            (false, Some("allergic")),
+            (true, Some("allergic")),
+        ] {
+            let got = text(
+                &pond
+                    .server(embedded)
+                    .run_recall(&meta, recall(query))
+                    .await
+                    .unwrap(),
+            );
+            assert!(
+                got.contains("peanuts"),
+                "{query:?}: Amina lost her own memory: {got}"
+            );
+            assert!(
+                got.contains("loud alarms"),
+                "{query:?}: Amina lost the shared memory: {got}"
+            );
+            assert!(
+                !got.contains("shellfish"),
+                "{query:?}: Amina's turn read Otieno's memory: {got}"
+            );
+        }
+
+        // Vacuity control: a household turn reaches all three, so the miss above is the scope's.
+        let _household = pond.turn("engine-household", ProfileScope::Household);
+        let got = text(
+            &pond
+                .server(true)
+                .run_recall(&meta_for("engine-household"), recall(Some("allergic")))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            got.contains("shellfish") && got.contains("peanuts"),
+            "{got}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_helper_recalls_at_the_scope_it_was_bound_with() {
+        let pond = Pond::new().await;
+        let _child = pond.children.bind(
+            "engine-helper",
+            "giap-otieno-task",
+            ProfileScope::Owner(OTIENO.into()),
+        );
+        let got = text(
+            &pond
+                .server(false)
+                .run_recall(&meta_for("engine-helper"), recall(None))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            got.contains("shellfish") && got.contains("loud alarms"),
+            "{got}"
+        );
+        assert!(
+            !got.contains("peanuts"),
+            "Otieno's helper read Amina's memory: {got}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_with_no_member_behind_it_touches_nothing() {
+        let pond = Pond::new().await;
+        let _guest = pond.turn("engine-guest", ProfileScope::Guest);
+        let ended = pond.turn("engine-ended", ProfileScope::Owner(AMINA.into()));
+        drop(ended);
+        let server = pond.server(true);
+
+        for (meta, expected) in [
+            (Meta::new(), Refusal::Unresolved),
+            (meta_for("engine-unknown"), Refusal::Unresolved),
+            (meta_for("engine-ended"), Refusal::Unresolved),
+            (meta_for("engine-guest"), Refusal::Guest),
+        ] {
+            let got = text(
+                &server
+                    .run_recall(&meta, recall(Some("allergic")))
+                    .await
+                    .unwrap(),
+            );
+            assert!(got.contains(expected.message()), "{got}");
+            assert!(
+                !got.contains("allergic to"),
+                "a refused recall carried a memory: {got}"
+            );
+
+            let got = text(&server.run_save(&meta, save("I like jazz")).await.unwrap());
+            assert!(got.contains(expected.message()), "{got}");
+
+            let forget = ForgetMemoryParams {
+                id: Some("shared-1".into()),
+                content: None,
+            };
+            let got = text(&server.run_forget(&meta, forget).await.unwrap());
+            assert!(got.contains(expected.message()), "{got}");
+        }
+        assert_eq!(
+            pond.repo
+                .search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
+            3,
+            "a refused call saved or deleted a memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_members_save_is_theirs_and_a_household_save_stays_shared() {
+        let pond = Pond::new().await;
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let _household = pond.turn("engine-household", ProfileScope::Household);
+        let server = pond.server(false);
+
+        server
+            .run_save(&meta_for("engine-amina"), save("Amina prefers tea"))
+            .await
+            .unwrap();
+        server
+            .run_save(
+                &meta_for("engine-household"),
+                save("The wifi password is on the fridge"),
+            )
+            .await
+            .unwrap();
+
+        let saved = pond
+            .repo
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let owner = |content: &str| {
+            saved
+                .iter()
+                .find(|f| f.content.contains(content))
+                .unwrap_or_else(|| panic!("{content:?} was not saved"))
+                .profile_id
+                .clone()
+        };
+        assert_eq!(owner("prefers tea"), Some(AMINA.to_string()));
+        assert_eq!(owner("wifi password"), None);
+    }
+
+    #[tokio::test]
+    async fn a_member_cannot_forget_or_retire_anothers_memory_by_its_id() {
+        let pond = Pond::new().await;
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let server = pond.server(false);
+        let meta = meta_for("engine-amina");
+
+        let forget = |id: &str| ForgetMemoryParams {
+            id: Some(id.into()),
+            content: None,
+        };
+        server.run_forget(&meta, forget("otieno-1")).await.unwrap();
+        assert!(
+            pond.owner_of("otieno-1").await.is_some(),
+            "Amina deleted Otieno's memory"
+        );
+        let by_content = ForgetMemoryParams {
+            id: None,
+            content: Some("Otieno is allergic to shellfish".into()),
+        };
+        server.run_forget(&meta, by_content).await.unwrap();
+        assert!(
+            pond.owner_of("otieno-1").await.is_some(),
+            "Amina deleted it by its words"
+        );
+
+        let replacing = SaveMemoryParams {
+            supersedes: Some(vec!["otieno-1".into(), "amina-1".into()]),
+            ..save("Amina is allergic to peanuts and sesame")
+        };
+        server.run_save(&meta, replacing).await.unwrap();
+        let retired: Vec<String> = pond
+            .repo
+            .superseded()
+            .await
+            .into_iter()
+            .map(|(old, _)| old)
+            .collect();
+        assert_eq!(
+            retired,
+            vec!["amina-1".to_string()],
+            "only her own row may be retired"
+        );
+
+        // Control: her own memory goes, so the refusals above are the scope's.
+        server.run_forget(&meta, forget("amina-1")).await.unwrap();
+        assert!(pond.owner_of("amina-1").await.is_none());
     }
 }

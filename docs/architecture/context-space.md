@@ -123,12 +123,13 @@ decisions stand:
 
 **Defects that go with the old systems** (verified 2026-10-28, and the files are unchanged on
 `0309bf0d`):
-- the `giap-memory` tools search at `ProfileScope::Household`, the open PAI-1 gap;
-- MCP `save_memory` writes `profile_id: None`, making a member's own save household-visible;
+- the `giap-memory` tools searched at `ProfileScope::Household`, a PAI-1 gap;
+- MCP `save_memory` wrote `profile_id: None`, making a member's own save household-visible;
 - turn recall and `search_context` read the BLOBs on source rows, and only `recall` reads the index;
 - the `SuggestionGeneration` job has no cancel watcher.
 
-The first two are live privacy defects and are worth fixing before P3 (a task card offers it).
+The first two were live privacy defects and are fixed (2026-11-02): the tools read, save and forget
+at the live turn's scope, or a helper's clamped one (PAI-1 section 4d).
 
 **Tests that read source as text**, rewritten to guard the new chokepoint and never deleted
 without a replacement:
@@ -662,7 +663,8 @@ same release. Before any restart on the nano, check that no long task is running
 
 **What has to land first:**
 - `proven_profile_id` (PAI-2), before P4;
-- principal-scoped `get_session_messages` (PAI-1), before P3;
+- principal-scoped `get_session_messages` (PAI-1), before P3: landed 2026-11-02 with
+  `get_session_attachment`; `GET /sessions` still lists every conversation;
 - roles (#707) and `HOUSEHOLD_READ_TOOLS` (#717), before P3, because the audience rules and
   `search_context` build on them.
 

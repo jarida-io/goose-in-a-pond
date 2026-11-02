@@ -239,7 +239,11 @@ mod tests {
         let bindings = Arc::new(StepBindings::new());
         let children = Arc::new(ChildSessionRegistry::new());
         let lease = bindings.bind("sched-long-task-1", binding());
-        let child = children.bind("child-engine-1", "sched-long-task-1");
+        let child = children.bind(
+            "child-engine-1",
+            "sched-long-task-1",
+            ProfileScope::Household,
+        );
 
         assert_eq!(
             bindings.binding_for_helper("child-engine-1", &children),

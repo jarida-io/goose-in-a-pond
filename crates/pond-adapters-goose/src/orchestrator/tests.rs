@@ -153,6 +153,8 @@ struct FakeRunnerState {
     helper_during_run: Mutex<Vec<(bool, bool)>>,
     /// The parent the child's session resolved to during the run, as a tool server sees it.
     parent_during_run: Mutex<Vec<Option<String>>>,
+    /// The scope the child's session resolved to during the run, as a tool server sees it.
+    scope_during_run: Mutex<Vec<Option<ProfileScope>>>,
 }
 
 struct FakeRunner {
@@ -237,6 +239,14 @@ impl ChildRunner for FakeRunner {
             .push(
                 pond_core::shared::services::child_sessions::process_child_sessions()
                     .parent_of(&plan.child_session_id),
+            );
+        self.state
+            .scope_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(
+                pond_core::shared::services::child_sessions::process_child_sessions()
+                    .scope_of(&plan.child_session_id),
             );
         self.state
             .plans
@@ -514,6 +524,26 @@ async fn a_childs_engine_calls_are_helper_calls() {
             .parent_of(&child)
             .is_none(),
         "a finished child must stop resolving to {parent}"
+    );
+
+    // The child's own clamped scope, which `giap-memory` reads, and only while it runs.
+    let planned = state.plans.lock().unwrap_or_else(|e| e.into_inner())[0]
+        .profile_scope
+        .clone();
+    assert_eq!(planned, ProfileScope::Household, "the fixture's spec scope");
+    assert_eq!(
+        *state
+            .scope_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![Some(planned)],
+        "a running child must resolve to its plan's scope, or its memory tools refuse or widen"
+    );
+    assert!(
+        pond_core::shared::services::child_sessions::process_child_sessions()
+            .scope_of(&child)
+            .is_none(),
+        "a finished child must stop resolving to a scope"
     );
 }
 

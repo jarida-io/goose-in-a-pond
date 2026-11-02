@@ -717,7 +717,7 @@ mod child_scope {
 use self::child_scope::ChildScope;
 
 /// The child's groups: the role's within the parent's, minus [`groups_denied_to_subagents`].
-/// Also minus what the CHILD's scope denies, since `giap-memory` tools ignore scope.
+/// Also minus what the CHILD's scope denies: a guest child is offered no personal-data group.
 fn narrow_child_groups(
     requested: &BTreeSet<String>,
     parent: &BTreeSet<String>,
