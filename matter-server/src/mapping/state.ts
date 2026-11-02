@@ -219,3 +219,15 @@ function currentLabel(
   // ModeBase codes need not be list positions, so match by code rather than index.
   return setting.values.find(label => setting.valueFor(label) === current);
 }
+
+/** Sensor values travel as `reading` events, so a state change never repeats them. */
+const SENSOR_TYPES = new Set(SENSORS.map(sensor => sensor.sensorType));
+
+/** What changed in `state` since `last`, which it updates; a device seen first reports all of it. */
+export function stateChanges(last: Map<string, string>, state: DeviceState): StateValue[] {
+  const changed = state.values.filter(
+    v => !SENSOR_TYPES.has(v.name) && last.get(v.name) !== v.value,
+  );
+  for (const v of changed) last.set(v.name, v.value);
+  return changed;
+}
