@@ -4309,8 +4309,10 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: Some(pond_admin),
     });
+    state.device_events.clone().follow(event_bus.clone());
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
