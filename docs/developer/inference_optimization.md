@@ -76,7 +76,7 @@ the code is the knob.
 
 | Stamp | When | What it sets | Log line |
 |---|---|---|---|
-| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V, no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
+| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V with q8_0 when memory is tight (`KvCachePolicy::Q8WhenTight`), no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
 | `apply_platform_settings` | Every other build | `n_gpu_layers 99`, context sized by goose from free memory, `n_batch 512`, flash attention, template-derived tool mode and thinking | `Metal/platform settings applied to model ...`; on aarch64 Linux the same line begins `CPU-ONLY (built without the cuda feature)` |
 | `apply_litert_settings` | LiteRT-LM rows | The engine window and execution backend (`pond_core::models::domain::litert::engine_options`) | `Applied LiteRT-LM settings` |
 
@@ -120,6 +120,23 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   their window, and every partial resume goes through `SessionKv::window_resume`, which resumes in
   place, restores a window checkpoint, or refuses. On the Orin this took E4B's KV at 16K from 476 MiB
   to 152 MiB (q8_0) and decoded 8% faster at depth.
+- **KV cache type: f16 unless memory is tight.** The Jetson stamp asks for f16 K and V, which
+  decode 5-8% faster than q8_0 at depth on the Orin (llama-bench, E4B QAT, depth 8,192: 18.1
+  against 16.7 tok/s), with `kv_cache_policy: Q8WhenTight`. On unified memory the engine fits the
+  window to the memory free after the load (`MemoryFit` in `memory.rs`, `kind="context_sized"`),
+  and `choose_kv_cache` weighs both types there: when f16 would leave the window under
+  `KV_TIGHT_WINDOW` (8,192 tokens) and q8_0, about half the bytes per token, would leave a wider
+  one, the load takes q8_0 for K and V, and every context, snapshot key and failure estimate of the
+  model's turns uses it (`with_fitted_kv_type`). 8,192 is the narrowest rung that leaves a turn
+  about as much again as the ~3,300-token preamble; a narrower window fails a scheduled briefing,
+  which a slower decode only delays. Same window either way, f16 stays. Logged as
+  `kind="kv_cache_type_chosen"` with `preferred_n_ctx` (f16), `q8_n_ctx`, the type chosen and a
+  `reason` (`tight`, `roomy`, `requested_fits`, `q8_no_wider`, `no_candidate` without flash
+  attention). On 2026-11-02 E4B with its 945 MB encoder reserved had 1,037 MB free: f16 hit the
+  4,096 floor and q8_0 takes the 5,120 rung added for that case; on 2026-10-28, 1,419 MB free, f16
+  would get 6,144 and q8_0 gets 12,288. The fit charges every KV-owning layer the full window, so
+  it over-states a windowed cache (E4B f16 at 16K: 1,536 MiB charged, 286 MiB measured); the
+  type is chosen against that same bound.
 - **Stable-prefix snapshot on disk** (`prompt_snapshot.rs`). The longest token prefix every prompt
   for a model has shared (system prompt and tool schemas, never conversation) is saved under goose's
   data directory (`<data_dir>/engine/data/prompt-cache/`), keyed by model file, context size and

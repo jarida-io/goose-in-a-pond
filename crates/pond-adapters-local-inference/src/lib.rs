@@ -392,7 +392,7 @@ impl LocalInferenceLlmAdapter {
     /// past the budget `n_gpu_layers = 99` silently spills to CPU.
     fn apply_jetson_settings(model_id: &str) {
         use goose::providers::local_inference::local_model_registry::{
-            get_registry, ModelSettings, ToolCallingMode,
+            get_registry, KvCachePolicy, ModelSettings, ToolCallingMode,
         };
 
         // Same `device_window` the goose adapter asks about picture support, fed the resolved
@@ -460,6 +460,12 @@ impl LocalInferenceLlmAdapter {
             // 36.9/35.1/33.3.
             type_k: Some("f16".to_string()),
             type_v: Some("f16".to_string()),
+            // Unless memory is tight: goose fits the window to the memory free after the load,
+            // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
+            // (kind="kv_cache_type_chosen"). On 2026-11-02 E4B, its 945 MB encoder reserved, had
+            // 1,037 MB free: f16 hit the 4,096 floor, which a ~3,300-token preamble leaves almost
+            // no room in, and q8_0 buys 5,120. A 5-8% slower decode is the cheaper failure.
+            kv_cache_policy: KvCachePolicy::Q8WhenTight,
             // Prefill on the Orin (llama-bench, E4B/E2B QAT, depth 0 and 4,096): 256 is 1-6% faster
             // than 128 and 512 is slower than both. The compute buffer no longer scales with it:
             // the engine reserves logits for one output, not for every ubatch token.
@@ -920,7 +926,7 @@ mod tests {
     #[test]
     fn the_jetson_settings_block_still_type_checks_off_device() {
         use goose::providers::local_inference::local_model_registry::{
-            ModelSettings, ToolCallingMode,
+            KvCachePolicy, ModelSettings, ToolCallingMode,
         };
 
         let settings = ModelSettings {
@@ -931,6 +937,7 @@ mod tests {
             flash_attention: Some(true),
             type_k: Some("f16".to_string()),
             type_v: Some("f16".to_string()),
+            kv_cache_policy: KvCachePolicy::Q8WhenTight,
             n_ubatch: Some(256),
             use_mlock: false,
             tool_calling: ToolCallingMode::ForceNative,
@@ -939,9 +946,12 @@ mod tests {
         };
 
         assert_eq!(settings.n_ubatch, Some(256));
+        // f16 is the preferred type; goose trades it for q8_0 only when memory is tight.
         assert_eq!(settings.type_k.as_deref(), Some("f16"));
         assert_eq!(settings.type_v.as_deref(), Some("f16"));
-        // llama.cpp refuses a quantised V cache without flash attention.
+        assert_eq!(settings.kv_cache_policy, KvCachePolicy::Q8WhenTight);
+        // llama.cpp refuses a quantised V cache without flash attention, so without it the
+        // policy could never take q8_0.
         assert_eq!(settings.flash_attention, Some(true));
     }
 }
