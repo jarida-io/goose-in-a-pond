@@ -305,6 +305,47 @@ impl FinalReply {
         self.asked = true;
         true
     }
+
+    /// Whether a turn a guard stopped is followed by the final reply, claiming it if so.
+    ///
+    /// A guard ends a turn the model was still working on, often after it had gathered most of
+    /// what was asked: the Jetson's Daily Brief made thirteen calls, re-fetched the weather a
+    /// fourth time and was stopped with nothing written. The answer is asked for once, with tools
+    /// off, from what the turn already has. Only when the turn has no reply of its own and at
+    /// least one tool result to answer from; at most once a turn, shared with [`Self::due`].
+    fn due_after_stop(&mut self, replied: bool, gathered_results: bool) -> bool {
+        if self.asked || replied || !gathered_results {
+            return false;
+        }
+        self.asked = true;
+        true
+    }
+}
+
+/// The `reason` of a final reply asked because an attempt reasoned but wrote no reply.
+const REASONED_WITHOUT_REPLY: &str = "reasoned_without_reply";
+
+/// Why a guard ended a turn the model was still working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnStop {
+    /// One tool called with identical arguments more than [`MAX_IDENTICAL_TOOL_CALLS_PER_TURN`]
+    /// times.
+    IdenticalToolCall,
+    /// Goose's completeness check re-armed more than [`MAX_GOAL_RECHECKS_PER_TURN`] times.
+    GoalRecheck,
+    /// Goose's own cap on tool rounds (`max_turns`), the turn's tool-call budget.
+    TurnLimit,
+}
+
+impl TurnStop {
+    /// The `reason` field of `kind="turn_repetition_guard"` and `kind="final_reply_asked"`.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IdenticalToolCall => "identical_tool_call",
+            Self::GoalRecheck => "goal_recheck",
+            Self::TurnLimit => "turn_limit",
+        }
+    }
 }
 
 /// Shown once the re-engagement budget is spent, in place of silence.
@@ -3408,10 +3449,21 @@ impl GooseAdapter {
             let mut goal_rechecks: u32 = 0;
             let mut picture_failure_reported = false;
             let mut tool_call_counts: HashMap<(String, u64), usize> = HashMap::new();
-            let mut guard_tripped = false;
+            // Set when a guard ends the turn; the turn is never re-engaged after it, and gets at
+            // most the final reply, with tools off (`FinalReply::due_after_stop`).
+            let mut turn_stop: Option<TurnStop> = None;
+            // Goose's turn-cap notice, held until the turn knows whether the final reply answers
+            // in its place; streamed as before when it does not.
+            let mut held_turn_limit_notice: Option<String> = None;
+            // Tool results streamed this turn: what a stopped turn's final reply answers from.
+            let mut tool_results_gathered: usize = 0;
             // Set when a guard trips: goose's pull-based stream only flushes its history once
             // polled to the end, so keep draining after cancel, up to this bounded deadline.
             let mut drain_deadline: Option<tokio::time::Instant> = None;
+            // The token goose checks. A guard cancels it to stop the turn, so a final reply after
+            // the stop runs on a fresh one, cancelled like the first when the stream drops.
+            let mut engine_cancel = cancel_token.clone();
+            let mut _final_reply_cancel_guard: Option<tokio_util::sync::DropGuard> = None;
 
             tracing::info!(
                 target: "giap::trace",
@@ -3435,6 +3487,8 @@ impl GooseAdapter {
                 let mut final_reply = FinalReply::default();
                 // Set when the next attempt is the final reply rather than the question again.
                 let mut final_reply_next = false;
+                // Why the final reply was asked for: `REASONED_WITHOUT_REPLY` or a `TurnStop`.
+                let mut final_reply_reason = REASONED_WITHOUT_REPLY;
                 'attempts: loop {
                     let final_attempt = std::mem::take(&mut final_reply_next);
                     let attempt_text = if attempt == 0 {
@@ -3470,6 +3524,9 @@ impl GooseAdapter {
                     // off (its round would only be hidden), and reasoning is off for this call.
                     let mut reasoning_lifted = false;
                     let mut thinking_before_lift = None;
+                    // A stopped turn's final reply runs with no tools; its allow-set waits here.
+                    let tools_off = final_attempt && turn_stop.is_some();
+                    let mut tools_withheld: Option<HashSet<String>> = None;
                     let attempt_msg = if final_attempt {
                         agent_clone.set_session_goal(&turn_goose_sid, None).await;
                         if let Some((provider, _, off)) = &reasoning_off_engine {
@@ -3490,11 +3547,22 @@ impl GooseAdapter {
                                 ),
                             }
                         }
+                        if tools_off {
+                            // After a guard, the answer and nothing else: an empty allow-set has
+                            // the shim offer no tools, so the call that tripped it cannot recur.
+                            tools_withheld = guard_controls.allowed_tools_snapshot();
+                            guard_controls.set_allowed_tools(HashSet::new());
+                            // The guard cancelled the turn's token and left it draining.
+                            let fresh = CancellationToken::new();
+                            _final_reply_cancel_guard = Some(fresh.clone().drop_guard());
+                            engine_cancel = fresh;
+                            drain_deadline = None;
+                        }
                         Message::user().with_text(FINAL_REPLY_PROMPT)
                     } else {
                         attempt_msg
                     };
-                let mut goose_stream = match agent_clone.reply(attempt_msg, attempt_cfg, Some(cancel_token.clone())).await {
+                let mut goose_stream = match agent_clone.reply(attempt_msg, attempt_cfg, Some(engine_cancel.clone())).await {
                     Ok(s) => s,
                     Err(e) => {
                         yield Ok(AgentStreamEvent::Error { content: e.to_string() });
@@ -3596,11 +3664,12 @@ impl GooseAdapter {
                                                         repeats,
                                                         "the model called one tool with identical arguments {repeats} times in a turn; stopping it",
                                                     );
+                                                    let stop = TurnStop::IdenticalToolCall;
                                                     tracing::info!(
                                                         target: "giap::trace",
                                                         kind = "turn_repetition_guard",
                                                         session_id = %session_id,
-                                                        reason = "identical_tool_call",
+                                                        reason = stop.as_str(),
                                                         tool = %tool_name,
                                                         repeats,
                                                         goal_rechecks,
@@ -3608,13 +3677,13 @@ impl GooseAdapter {
                                                     // Disarm, or the NEXT turn starts armed with
                                                     // this question (we skip Goose's own clear).
                                                     agent_clone.set_session_goal(&turn_goose_sid, None).await;
-                                                    guard_tripped = true;
+                                                    turn_stop = Some(stop);
                                                     yield Ok(AgentStreamEvent::TurnLimitReached {
                                                         max_turns: MAX_IDENTICAL_TOOL_CALLS_PER_TURN as u32,
                                                     });
                                                     // Cancel, then drain: goose checks the token
                                                     // only when polled; the repeat never runs.
-                                                    cancel_token.cancel();
+                                                    engine_cancel.cancel();
                                                     drain_deadline = Some(
                                                         tokio::time::Instant::now() + GUARD_DRAIN_TIMEOUT,
                                                     );
@@ -3650,21 +3719,22 @@ impl GooseAdapter {
                                                     goal_rechecks,
                                                     "the completeness check re-armed {goal_rechecks} times in one turn; stopping it re-answering",
                                                 );
+                                                let stop = TurnStop::GoalRecheck;
                                                 tracing::info!(
                                                     target: "giap::trace",
                                                     kind = "turn_repetition_guard",
                                                     session_id = %session_id,
-                                                    reason = "goal_recheck",
+                                                    reason = stop.as_str(),
                                                     goal_rechecks,
                                                 );
                                                 agent_clone.set_session_goal(&turn_goose_sid, None).await;
-                                                guard_tripped = true;
+                                                turn_stop = Some(stop);
                                                 yield Ok(AgentStreamEvent::TurnLimitReached {
                                                     max_turns: MAX_GOAL_RECHECKS_PER_TURN,
                                                 });
                                                 // Drain, don't break: the shown answer is still
                                                 // unflushed in goose's `messages_to_add`.
-                                                cancel_token.cancel();
+                                                engine_cancel.cancel();
                                                 drain_deadline = Some(
                                                     tokio::time::Instant::now() + GUARD_DRAIN_TIMEOUT,
                                                 );
@@ -3738,6 +3808,7 @@ impl GooseAdapter {
                                                     "tool call failed",
                                                 );
                                             }
+                                            tool_results_gathered += 1;
                                             yield Ok(AgentStreamEvent::ToolResult {
                                                 id: tr.id.clone(),
                                                 tool: tool_name,
@@ -3781,26 +3852,39 @@ impl GooseAdapter {
                                         leaked_chars = raw_text.chars().count(),
                                         "model echoed internal scaffolding instead of answering",
                                     );
+                                } else if !raw_text.is_empty() && raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE {
+                                    // Goose's turn cap, streamed as text. Held, with the structured
+                                    // event that lets a client offer Continue, until the turn knows
+                                    // whether the final reply answers in the notice's place.
+                                    tracing::info!(
+                                        target: "giap::trace",
+                                        kind = "turn_limit_reached",
+                                        session_id = %session_id,
+                                        max_turns,
+                                    );
+                                    produced_visible = true;
+                                    turn_stop = Some(TurnStop::TurnLimit);
+                                    held_turn_limit_notice = Some(raw_text);
                                 } else if !raw_text.is_empty() {
-                                    // Goose streams its turn-cap notice as text; also re-emit it
-                                    // as a structured event so a client can offer Continue.
-                                    let hit_turn_limit = raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE;
                                     produced_visible = true;
                                     emitted_text = true;
                                     total_output_chars += raw_text.len();
                                     yield Ok(AgentStreamEvent::Text { content: raw_text });
-                                    if hit_turn_limit {
-                                        tracing::info!(
-                                            target: "giap::trace",
-                                            kind = "turn_limit_reached",
-                                            session_id = %session_id,
-                                            max_turns,
-                                        );
-                                        yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
-                                    }
                                 }
                             }
                             goose::agents::AgentEvent::HistoryReplaced(_) => {
+                                // Mid-turn, goose compacts only when the engine refuses a prompt
+                                // past its window; the results gathered so far live on only in
+                                // its summary, so the model may fetch them again.
+                                tracing::info!(
+                                    target: "giap::trace",
+                                    kind = "history_replaced",
+                                    session_id = %session_id,
+                                    after_inference = turn_stats.inference_count,
+                                    tool_results = tool_results_gathered,
+                                    "goose replaced this session's history, usually with a \
+                                     compaction summary",
+                                );
                                 yield Ok(AgentStreamEvent::Status { content: "Compacting context...".to_string() });
                             }
                             // Per inference: the last input is the context load; outputs sum.
@@ -3944,6 +4028,10 @@ impl GooseAdapter {
                             }
                         }
                     }
+                    // The turn's tools back once a stopped turn's final reply has run.
+                    if let Some(tools) = tools_withheld.take() {
+                        guard_controls.set_allowed_tools(tools);
+                    }
                     // An errored attempt is never retried: the user already has the error.
                     if stream_failed {
                         break 'attempts;
@@ -3996,10 +4084,6 @@ impl GooseAdapter {
                             }
                         }
                     }
-                    // A guard-stopped turn is never re-engaged (don't rely on `produced_visible`).
-                    if guard_tripped {
-                        break 'attempts;
-                    }
                     // Before the `produced_visible` break: a tool call sets it, and the attempt
                     // that called a tool and then only reasoned is the one this exists for.
                     let wrote_text = total_output_chars > chars_before;
@@ -4009,11 +4093,46 @@ impl GooseAdapter {
                             target: "giap::trace",
                             kind = "final_reply_result",
                             session_id = %session_id,
+                            reason = final_reply_reason,
                             wrote_text,
                             called_tools = produced_visible && !wrote_text,
                             reasoning_off = reasoning_lifted,
+                            tools_off,
                         );
-                    } else if !request.warmup && final_reply.due(wrote_text, reasoned) {
+                    }
+                    // A guard-stopped turn is never re-engaged (don't rely on `produced_visible`);
+                    // it gets at most the final reply, with tools off.
+                    if let Some(stop) = turn_stop {
+                        if !final_attempt
+                            && !request.warmup
+                            && final_reply.due_after_stop(total_output_chars > 0, tool_results_gathered > 0)
+                        {
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "final_reply_asked",
+                                session_id = %session_id,
+                                goose_sid = %turn_goose_sid,
+                                reason = stop.as_str(),
+                                tool_results = tool_results_gathered,
+                                reasoning_off = reasoning_off_engine.is_some(),
+                                tools_off = true,
+                                "a guard stopped the turn before it replied; asking once, with \
+                                 tools off, for the reply from what it gathered",
+                            );
+                            final_reply_reason = stop.as_str();
+                            final_reply_next = true;
+                            continue 'attempts;
+                        }
+                        if final_attempt && wrote_text && held_turn_limit_notice.take().is_some() {
+                            tracing::info!(
+                                session_id = %session_id,
+                                "the final reply answered in place of goose's turn-cap notice",
+                            );
+                            yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
+                        }
+                        break 'attempts;
+                    }
+                    if !final_attempt && !request.warmup && final_reply.due(wrote_text, reasoned) {
                         tracing::info!(
                             target: "giap::trace",
                             kind = "final_reply_asked",
@@ -4023,8 +4142,10 @@ impl GooseAdapter {
                             reasoning_tokens =
                                 turn_stats.reasoning_tokens.unwrap_or(0) - reasoning_before,
                             reasoning_off = reasoning_off_engine.is_some(),
+                            reason = REASONED_WITHOUT_REPLY,
                             "an attempt reasoned but wrote no reply; asking once for the reply",
                         );
+                        final_reply_reason = REASONED_WITHOUT_REPLY;
                         final_reply_next = true;
                         continue 'attempts;
                     }
@@ -4063,6 +4184,13 @@ impl GooseAdapter {
                         ),
                     });
                 }
+            // Goose's turn-cap notice, when no final reply answered in its place, streams as it
+            // always has: the text, then the event that lets a client offer Continue.
+            if let Some(notice) = held_turn_limit_notice.take() {
+                total_output_chars += notice.len();
+                yield Ok(AgentStreamEvent::Text { content: notice });
+                yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
+            }
             // `attempt` already counts attempts beyond the first (0 on an ordinary turn).
             turn_stats.reengagements = attempt as u32;
 
@@ -7765,13 +7893,128 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("the stream no longer contains `{needle}`"))
         };
-        let guard = position("if guard_tripped {");
+        let guard = position("if let Some(stop) = turn_stop {");
         let decided = position("final_reply.due(");
         let visible = position("if produced_visible {");
         assert!(
             guard < decided && decided < visible,
             "the final reply is decided at line {decided}; it belongs after the guard break \
              (line {guard}) and before the `produced_visible` break (line {visible})",
+        );
+    }
+
+    /// The Jetson's Daily Brief, 2026-10-28: thirteen tool calls gathered the weather, the
+    /// schedules and five searches, then a fourth identical weather call tripped the guard and the
+    /// run failed with no reply. A stopped turn with results and no reply is asked for its answer.
+    #[test]
+    fn a_turn_the_repetition_guard_stopped_is_asked_for_its_answer_once() {
+        let mut final_reply = FinalReply::default();
+        assert!(
+            final_reply.due_after_stop(false, true),
+            "a turn stopped after gathering results ends with no reply unless it is asked for one"
+        );
+        assert!(
+            !final_reply.due_after_stop(false, true),
+            "the final reply was asked for twice in one turn"
+        );
+        assert!(
+            !final_reply.due(false, true),
+            "the stopped turn's final reply and the reasoning one share one ask a turn"
+        );
+    }
+
+    #[test]
+    fn a_stopped_turn_that_replied_or_gathered_nothing_gets_no_final_reply() {
+        // It already answered: the guard only cut off more work.
+        assert!(!FinalReply::default().due_after_stop(true, true));
+        // Nothing gathered: there is nothing to answer from that the question did not have.
+        assert!(!FinalReply::default().due_after_stop(false, false));
+        // A reasoning final reply already asked this turn uses up the one ask.
+        let mut final_reply = FinalReply::default();
+        assert!(final_reply.due(false, true));
+        assert!(!final_reply.due_after_stop(false, true));
+    }
+
+    #[test]
+    fn every_turn_stop_logs_its_own_reason() {
+        let reasons = [
+            TurnStop::IdenticalToolCall,
+            TurnStop::GoalRecheck,
+            TurnStop::TurnLimit,
+        ]
+        .map(TurnStop::as_str);
+        assert_eq!(
+            reasons,
+            ["identical_tool_call", "goal_recheck", "turn_limit"]
+        );
+        assert!(!reasons.contains(&REASONED_WITHOUT_REPLY));
+    }
+
+    /// In the stop branch the final reply is decided before the turn ends; a `break` first and
+    /// a stopped turn could never be asked.
+    #[test]
+    fn a_stopped_turn_decides_its_final_reply_before_it_ends() {
+        let lines = stream_body_code();
+        let stop = lines
+            .iter()
+            .position(|l| l.contains("if let Some(stop) = turn_stop {"))
+            .expect("the stream no longer branches on `turn_stop`");
+        let after = &lines[stop..];
+        let asked = after
+            .iter()
+            .position(|l| l.contains("final_reply.due_after_stop("))
+            .expect("the stop branch no longer asks for the final reply");
+        let ended = after
+            .iter()
+            .position(|l| l.contains("break 'attempts;"))
+            .expect("the stop branch no longer ends the turn");
+        assert!(
+            asked < ended,
+            "the stop branch ends the turn before deciding the final reply"
+        );
+    }
+
+    /// The final reply after a guard offers no tools, so the call that tripped it cannot recur,
+    /// and runs on a fresh token, as the guard cancelled the turn's; the allow-set comes back
+    /// before the attempt's first exit.
+    #[test]
+    fn a_stopped_turns_final_reply_runs_without_tools_on_a_fresh_token() {
+        let lines = stream_body_code();
+        let position = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("the stream no longer contains `{needle}`"))
+        };
+        let final_branch = position("let attempt_msg = if final_attempt {");
+        let reply = position("agent_clone.reply(attempt_msg");
+        let window = lines[final_branch..reply].join("\n");
+        for needle in [
+            "if tools_off {",
+            "set_allowed_tools(HashSet::new())",
+            "engine_cancel = fresh;",
+            "drain_deadline = None;",
+        ] {
+            assert!(
+                window.contains(needle),
+                "the final reply no longer does `{needle}` before its call. Window:\n{window}"
+            );
+        }
+        assert!(
+            lines[reply].contains("Some(engine_cancel.clone())"),
+            "the engine call does not take the token a final reply can replace"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("cancel_token.cancel()")),
+            "a guard cancels the turn's own token, which a final reply cannot replace"
+        );
+        let engine_end = position("'engine: loop {");
+        let returned = position("guard_controls.set_allowed_tools(tools);");
+        let failed = position("if stream_failed {");
+        assert!(
+            engine_end < returned && returned < failed,
+            "the allow-set comes back at line {returned}; it belongs after the engine loop and \
+             before the attempt's first exit (line {failed})"
         );
     }
 

@@ -312,10 +312,7 @@ fn enforce_system(
     appendices: &[&Option<String>],
 ) -> Option<String> {
     let prefix = prefix.as_ref()?;
-    // Match OUR prompt ignoring trailing whitespace: goose appends after fewer newlines than the
-    // prefix ends with, so a plain `starts_with(prefix)` misses and ~28 KB leaks through.
-    let anchor = prefix.trim_end();
-    let giap_owned = !anchor.is_empty() && incoming.starts_with(anchor);
+    let giap_owned = is_giap_owned(incoming, prefix);
     let goose_default = incoming.contains(GOOSE_DEFAULT_MARKER);
     if !giap_owned && !goose_default {
         return None;
@@ -332,6 +329,35 @@ fn enforce_system(
     } else {
         Some(rebuilt)
     }
+}
+
+/// Whether `incoming` is GIAP's prompt, matched ignoring trailing whitespace: goose appends after
+/// fewer newlines than the prefix ends with, so a plain `starts_with(prefix)` misses and ~28 KB of
+/// goose's extras leak through.
+fn is_giap_owned(incoming: &str, prefix: &str) -> bool {
+    let anchor = prefix.trim_end();
+    !anchor.is_empty() && incoming.starts_with(anchor)
+}
+
+/// Whether a call left this turn's appendix undelivered; only the shim delivers it.
+///
+/// `rebuilt` is whether [`enforce_system`] rewrote the prompt. One it left alone because it was
+/// already GIAP's lost nothing. Neither did one of goose's auxiliary calls: a compaction's summary
+/// (`compact_messages`), a tool pair's summary and a tool-call label run in the session's scope with
+/// a system prompt of their own and offer no tools, and passing them through is right. Only the
+/// agent's own round offers tools, so a prompt there that is not GIAP's is the real loss (a `{{` in
+/// a name that minijinja mangled, for one).
+fn appendix_lost(
+    incoming: &str,
+    prefix: &Option<String>,
+    rebuilt: bool,
+    offers_tools: bool,
+) -> bool {
+    !rebuilt
+        && offers_tools
+        && !prefix
+            .as_deref()
+            .is_some_and(|prefix| is_giap_owned(incoming, prefix))
 }
 
 /// Providers whose format layer already re-hosts tool-result images; promoting would send twice.
@@ -704,15 +730,29 @@ impl Provider for GiapProviderShim {
             None => enforce_system(system, &prefix, &[&turn_apx, &ext_apx]),
         };
 
-        // Only the shim delivers GIAP's appendix, so a dropped one warns (e.g. a `{{` in a name
-        // that minijinja mangled).
-        if enforced_system.is_none() && turn_apx.is_some() && owned_system.is_none() {
-            tracing::warn!(
-                target: "giap::trace",
-                kind = "system_appendix_dropped",
-                "this turn's prompt extras and skills were not delivered: the system prompt \
-                 did not match GIAP's prefix, so the shim passed it through unchanged"
-            );
+        // Only the shim delivers GIAP's appendix, so a dropped one warns (`appendix_lost`).
+        if turn_apx.is_some() && owned_system.is_none() {
+            if appendix_lost(
+                system,
+                &prefix,
+                enforced_system.is_some(),
+                !tools.is_empty(),
+            ) {
+                tracing::warn!(
+                    target: "giap::trace",
+                    kind = "system_appendix_dropped",
+                    "this turn's prompt extras and skills were not delivered: the system prompt \
+                     did not match GIAP's prefix, so the shim passed it through unchanged"
+                );
+            } else if enforced_system.is_none() && tools.is_empty() {
+                tracing::debug!(
+                    target: "giap::trace",
+                    kind = "system_passthrough_auxiliary",
+                    compaction = goose_providers::request_context::replaces_history(),
+                    "goose's own auxiliary call (a compaction or tool summary) kept its system \
+                     prompt; it never carries the turn's appendix"
+                );
+            }
         }
         // Keep goose's `<turn-context>` (time, budget, `todo`/`tom` notes that survive compaction).
         // `strip_turn_context` remains the lever if its KV churn costs more than it returns.
@@ -1027,6 +1067,41 @@ mod tests {
     #[test]
     fn no_prefix_configured_means_pass_through() {
         assert_eq!(enforce_system("anything", &None, &[&None, &None]), None);
+    }
+
+    /// The Jetson's Daily Brief, 2026-10-28: three `system_appendix_dropped` warnings, each 0.2 s
+    /// after a round of 5,052 to 5,449 prompt tokens in a 6,144-token window, then a ~20 s pause
+    /// and a prompt 1,400 to 1,900 tokens smaller. Each was goose compacting the turn: its summary
+    /// call runs in the session's scope with goose's own prompt and no tools. Nothing was lost.
+    #[test]
+    fn a_compaction_summary_call_is_not_a_dropped_appendix() {
+        let compaction_prompt = "You are good at summarizing conversations.";
+        assert!(!appendix_lost(
+            compaction_prompt,
+            &some(PREFIX),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn the_agents_own_round_with_a_foreign_prompt_has_lost_the_appendix() {
+        let mangled = "<identity>\nYou are Goose, a home assistant (mangled).";
+        assert!(appendix_lost(mangled, &some(PREFIX), false, true));
+        // Before any turn set a prefix, nothing could deliver the appendix either.
+        assert!(appendix_lost(PREFIX, &None, false, true));
+    }
+
+    #[test]
+    fn a_prompt_that_was_rebuilt_or_already_giaps_lost_nothing() {
+        assert!(!appendix_lost(
+            "anything goose sent",
+            &some(PREFIX),
+            true,
+            true
+        ));
+        let already = format!("{PREFIX}\n\n<extension-notes>skills</extension-notes>");
+        assert!(!appendix_lost(&already, &some(PREFIX), false, true));
     }
 
     // ── Tool-result image promotion ──────────────────────────────────────

@@ -197,6 +197,17 @@ recoveries in the stream decide whether it gets an answer:
   and, on the `local` / `gguf` engines, reasoning is switched off, then restored. It is logged as
   `kind="final_reply_asked"` and `kind="final_reply_result"`. The user's Thinking setting is not
   changed.
+- When a guard stops the turn before it replied and after it gathered at least one tool result
+  (the repetition guard on an identical tool call, the completeness-check re-arm cap, or goose's
+  `max_turns` cap), the same final reply is asked once more, with tools off as well: for that call
+  the session's allow-set is emptied, so the provider shim offers no tools and the call that
+  tripped the guard cannot recur, then it is put back. It runs on a fresh cancellation token,
+  since the guard cancelled the turn's own. Both log lines carry `reason` (`identical_tool_call`,
+  `goal_recheck`, `turn_limit`, or `reasoned_without_reply` for the case above) and `tools_off`.
+  One final reply a turn, whichever asks first. Goose's turn-cap notice is held until then: a
+  final reply that writes text answers in its place, and otherwise the notice streams as before.
+  Seen on the Jetson on 2026-10-28, when a scheduled brief made thirteen calls, lost its early
+  results to three compactions, fetched the weather a fourth time and was stopped with no reply.
 
 A turn that still has no text fails the run with an error naming the tools it called, logged as
 `kind="turn_without_reply"`.
