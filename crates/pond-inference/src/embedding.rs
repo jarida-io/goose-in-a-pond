@@ -10,6 +10,7 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
+use pond_core::models::domain::gpu_gate::gpu_gate;
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -295,6 +296,7 @@ impl GgufEmbeddingProvider {
                 *guard = Some(load_sync(&spec, &model_path)?);
             }
             let loaded_ref = guard.as_ref().expect("just loaded");
+            let _gpu = gpu_gate().compute_blocking();
             embed_sync(loaded_ref, &spec, &owned, prefix)
         })
         .await

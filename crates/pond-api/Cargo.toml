@@ -52,6 +52,8 @@ image = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Already in the tree through goose; its HTML writer is not used, so the export escapes all markup itself.
+pulldown-cmark = { version = "0.13", default-features = false }
 serde_yaml = { workspace = true }
 # One statement, in `rebuild_context_index`: emptying the personal-context index
 # so the maintenance sweep refills it. The `VectorIndex` port cannot empty an

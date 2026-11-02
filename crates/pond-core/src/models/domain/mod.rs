@@ -7,6 +7,7 @@ pub mod device_profile;
 pub mod drafter;
 pub mod engine;
 pub mod gguf;
+pub mod gpu_gate;
 pub mod image_limits;
 pub mod litert;
 pub mod message;

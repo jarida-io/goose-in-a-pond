@@ -4,7 +4,9 @@ pub mod context;
 pub mod device;
 pub mod device_control;
 pub mod dispatcher;
+pub mod interview;
 pub mod knowledge;
+pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
 pub mod schedule;
@@ -16,6 +18,7 @@ pub mod toolkit;
 pub mod travel;
 pub mod vision;
 pub mod weather;
+pub mod web_page;
 pub mod web_search;
 pub mod wolfram;
 
@@ -39,6 +42,8 @@ pub use pond_core::shared::services::egress::{
 };
 
 pub fn set_last_user_message(msg: &str) {
+    // An address the person wrote is one `read_web_page` may fetch.
+    pond_core::mcp::services::page_addresses::global().note_words(msg);
     if let Ok(mut guard) = LAST_USER_MESSAGE.write() {
         *guard = msg.to_string();
     }
@@ -176,7 +181,13 @@ pub use weather::WeatherMcpServer;
 pub use audio::init_audio_control;
 pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
+pub use interview::{init_interview_deps, spawn_interview_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
+// Installed by pond-server once the Goose adapter exists, like the orchestrator's.
+pub use long_task::{
+    init_long_task_deps, installed_long_task_deps, spawn_task_work_server, spawn_tasks_server,
+    task_summary_for_notice, LongTaskDeps, TaskWorkMcpServer, TasksMcpServer,
+};
 pub use memory::{init_memory_deps, spawn_memory_server};
 // Installed by pond-server once the Goose adapter exists, not by `register_giap_extensions`.
 pub use orchestrator::{
@@ -189,9 +200,7 @@ pub use session_meta::{session_from_meta, SESSION_ID_META_KEY};
 pub use system::spawn_system_server;
 pub use toolkit::{init_toolkit_deps, spawn_toolkit_server};
 pub use travel::{init_travel_deps, spawn_travel_server, TRAVEL_EXTENSION};
-pub use vision::{
-    init_vision_deps, spawn_vision_server, vision_runtime_context, VisionMcpServer,
-};
+pub use vision::{init_vision_deps, spawn_vision_server, vision_runtime_context, VisionMcpServer};
 pub use weather::{init_weather_deps, spawn_weather_server, WEATHER_APP_URI};
 
 // ── MCP App resources ─────────────────────────────────────────────────────

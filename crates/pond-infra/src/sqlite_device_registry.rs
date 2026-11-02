@@ -234,11 +234,7 @@ mod tests {
     async fn make_registry() -> (SqliteDeviceRegistry, Pool<Sqlite>, tempfile::TempDir) {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
-        (
-            SqliteDeviceRegistry::new(db.system.clone()),
-            db.system,
-            tmp,
-        )
+        (SqliteDeviceRegistry::new(db.system.clone()), db.system, tmp)
     }
 
     /// A device's `room_id` is a foreign key, so tests that set one need a real row to point at.

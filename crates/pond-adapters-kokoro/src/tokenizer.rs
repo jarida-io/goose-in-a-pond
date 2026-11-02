@@ -552,7 +552,11 @@ mod tests {
 
         for case in weird_cases {
             let res = chunk(case, &vocab);
-            assert!(res.is_ok(), "failed to chunk weird case {case:?}: {:?}", res.err());
+            assert!(
+                res.is_ok(),
+                "failed to chunk weird case {case:?}: {:?}",
+                res.err()
+            );
         }
     }
 }

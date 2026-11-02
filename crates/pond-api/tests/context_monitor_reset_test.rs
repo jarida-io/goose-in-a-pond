@@ -182,6 +182,7 @@ async fn make_app() -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
     (
         build_router(state.clone(), std::path::PathBuf::from("pond-desktop/dist")),

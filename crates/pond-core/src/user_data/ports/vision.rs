@@ -3,7 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::user_data::domain::vision::{CapturedFrame, Detection, Frame};
+use crate::user_data::domain::vision::{CapturedFrame, DetectedObject, Detection, Frame};
 
 /// A stream of captured camera frames; `Send` only, as one pipeline task owns and polls it.
 #[async_trait]
@@ -21,4 +21,14 @@ pub trait FrameSource: Send {
 pub trait VisionClassifier: Send + Sync {
     /// Detections for `frame`, best first; empty means nothing was recognized.
     async fn classify(&self, frame: &Frame) -> Result<Vec<Detection>>;
+
+    /// Whether [`Self::detect`] says where objects are; without it the pipeline cannot follow people.
+    fn locates(&self) -> bool {
+        false
+    }
+
+    /// Every object in `frame` with its box, from a classifier that [`Self::locates`].
+    async fn detect(&self, _frame: &Frame) -> Result<Vec<DetectedObject>> {
+        Ok(Vec::new())
+    }
 }

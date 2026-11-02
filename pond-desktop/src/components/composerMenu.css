@@ -1,0 +1,221 @@
+/* Plus menu and research chip: chrome, so a hairline and the quiet fill, never the offset (DESIGN.md rule 3).
+   Light: secondary text 6.22:1 on --color-surface and 5.41:1 on --bg-brand-soft, text 15.6:1 on it; dark chip unmeasured. */
+
+.cmenu {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.cmenu__panel {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  min-width: 288px;
+  max-width: min(360px, calc(100vw - var(--space-8)));
+  padding: var(--space-1);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: fadeIn 0.12s ease;
+}
+
+.cmenu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: var(--tap-min);
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.cmenu--hub .cmenu__item {
+  font-size: var(--text-md);
+}
+
+.cmenu__item:hover:not([data-inert]),
+.cmenu__item:focus-visible {
+  background: var(--color-accent-subtle);
+}
+
+.cmenu__item[aria-disabled="true"] {
+  cursor: default;
+}
+
+/* Said in words, not by fading: opacity would take the text under 4.5:1. */
+.cmenu__item[aria-disabled="true"] .cmenu__label,
+.cmenu__item[aria-disabled="true"] .cmenu__icon {
+  color: var(--color-text-secondary);
+}
+
+.cmenu__icon {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+
+.cmenu__text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cmenu__label {
+  font-weight: var(--weight-semibold);
+}
+
+.cmenu__sub {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+}
+
+.cmenu__tick {
+  flex: none;
+}
+
+.rchip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  box-sizing: border-box;
+  padding: 0 var(--space-6) var(--space-2);
+}
+
+/* The classic composer sits in a centred column; the chip lines up with it. */
+.rchip-row--classic {
+  width: 100%;
+  max-width: var(--chat-measure, 60rem);
+  margin-inline: auto;
+}
+
+.rchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-brand-soft);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.rchip__x {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+/* The look stays 28px; the press reaches --tap-min on the block axis only, as touch.css does for chips. */
+.rchip__x::after {
+  content: "";
+  position: absolute;
+  inset: calc((var(--tap-min) - 28px) / -2) -2px;
+}
+
+.rchip__x:hover {
+  background: var(--color-hover);
+  color: var(--color-text);
+}
+
+/* Chrome, so a hairline: the chosen length is marked the way the context views mark theirs. */
+.rchip-len {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.rchip-len__opt {
+  position: relative;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+/* The look stays 32px; the press reaches --tap-min on the block axis only, as touch.css does. */
+.rchip-len__opt::after {
+  content: "";
+  position: absolute;
+  inset: calc((var(--tap-min) - 32px) / -2) 0;
+}
+
+.rchip-len__opt:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.rchip-len__opt[aria-pressed="true"] {
+  border-color: var(--border-ink);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+.rchip-len__opt:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.rchip__wait {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.rchip-row--hub {
+  padding-bottom: 0;
+}
+
+.rchip-row--hub .rchip {
+  min-height: 36px;
+  font-size: var(--text-base);
+}
+
+/* A panel read from across a room: each length clears the tap size on its own. */
+.rchip-row--hub .rchip-len__opt {
+  min-height: var(--tap-min);
+  font-size: var(--text-base);
+}
+
+@media (max-width: 900px) {
+  .rchip-row {
+    padding-inline: var(--space-4);
+  }
+}

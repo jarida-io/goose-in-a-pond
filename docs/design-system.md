@@ -276,3 +276,28 @@ A small set of utilities is defined in `base.css` and re-used across sections:
 | `.select-text` | enables text selection |
 | `.animate-fade-in` | fade + slide up entrance |
 | `.animate-spin` | continuous rotation |
+
+### State styling rules
+
+Four rules, each written after a control shipped unreadable or overlapping (2026-10-28):
+
+- **`::after` belongs to the touch layer.** `styles/touch.css` gives every dense control
+  (`.ext-tab-bar__tab`, `.ch-chip`, `.view-toggle__btn`, ...) an invisible 44px `::after` as its hit
+  area, and it loads last. Any other `::after` on the same element (a selected-tab underline, a
+  badge) inherits that box's height and position and paints over the label. Draw such marks with
+  `::before` or a `box-shadow`. `styles/touch.test.ts` fails the build on a new collision.
+- **An accent is not a text colour.** Accents are picked to read as fills and edges: as text, Coral
+  measures 2.53:1 on Jarida White and Purple 3.28:1 on the dark background. Selected and hovered
+  labels stay `--color-text`; the accent goes on the underline (`--border-ink`, floored at 3:1 by
+  `hub/state/themeStore.ts`) or a tint behind the label. Text on an accent fill uses
+  `--color-text-on-accent`, never a literal `#fff`.
+- **Disabled is drawn, not faded.** `base.css` fades every disabled button to 0.38 opacity, which
+  takes an icon-only control under 3:1 and makes it read as missing. Icon buttons that must stay
+  legible while disabled set `opacity: 1` and draw the state instead: a dashed edge and
+  `--color-text-secondary` for both edge and glyph (6.22:1 light, 5.43:1 dark on `--color-surface`).
+- **Chrome sits in flow, never in a reserved lane.** Home's arrange toolbar
+  (`hub/views/widgets/widget-frame.css`) used to be absolutely positioned into padding reserved by
+  card size. Width does not follow size: a medium card squeezed to about 300px wrapped the toolbar
+  to a second row and its remove button covered the card. Toolbars and controls that can wrap take
+  their room in flow, and a card is never allowed below its content height (no `min-height: 0` on a
+  card whose overflow stays visible). `tests/e2e/dashboard-arrange.spec.ts` measures it.

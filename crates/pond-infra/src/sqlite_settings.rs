@@ -390,6 +390,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         );
         // API keys live in `SecretRepository`; `searxng_url` is an endpoint, not a credential.
         upsert!("searxng_url", settings.searxng_url.as_deref().unwrap_or(""));
+        upsert!(
+            "web_search_local_results",
+            if settings.web_search_local_results {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Embedding
         upsert!("active_embedding_model", &settings.active_embedding_model);
         upsert!("embedding_provider", &settings.embedding_provider);
@@ -704,6 +712,26 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
+        upsert!(
+            "long_tasks_enabled",
+            if settings.long_tasks_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "agent_activations_enabled",
+            if settings.agent_activations_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "agent_prefill_retention_days",
+            settings.agent_prefill_retention_days.to_string()
+        );
         // Context ingest
         upsert!(
             "ext_context_enabled",
@@ -983,9 +1011,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.vision_event_types = v;
             }
         }
-        "picture_support_download_enabled" => {
-            s.picture_support_download_enabled = value == "true"
-        }
+        "picture_support_download_enabled" => s.picture_support_download_enabled = value == "true",
         // Matter
         // Legacy `matter_enabled` is ignored: its toggle is gone, so an old `false` would stick.
         "matter_enabled" => {}
@@ -1188,6 +1214,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 Some(value.to_string())
             };
         }
+        "web_search_local_results" => s.web_search_local_results = value == "true",
         // Extension toggles
         "ext_memory_enabled" => s.ext_memory_enabled = value == "true",
         "ext_schedule_enabled" => s.ext_schedule_enabled = value == "true",
@@ -1213,6 +1240,16 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "quiet_hours_end" => s.quiet_hours_end = value.to_string(),
         "unprompted_speech_categories" => s.unprompted_speech_categories = value.to_string(),
         "proactive_review_enabled" => s.proactive_review_enabled = value == "true",
+        "long_tasks_enabled" => s.long_tasks_enabled = value == "true",
+        "agent_activations_enabled" => s.agent_activations_enabled = value == "true",
+        // Below the floor is raised to it: a retention of zero would skip every agent at start.
+        "agent_prefill_retention_days" => {
+            if let Ok(v) = value.parse::<u32>() {
+                s.agent_prefill_retention_days = v.max(
+                    pond_core::shared::services::agent_prefill::MIN_AGENT_PREFILL_RETENTION_DAYS,
+                );
+            }
+        }
         // A corrupt row is not "true", so nothing is copied into the corpus.
         "context_ingest_enabled" => s.context_ingest_enabled = value == "true",
         // A corrupt row is not "true", so the pond keeps the codes to itself.

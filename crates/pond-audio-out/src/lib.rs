@@ -375,8 +375,10 @@ fn play(
     if needs_preroll {
         let sample_rate = decoder.sample_rate();
         let channels = decoder.channels();
-        let samples = (sample_rate as usize * channels as usize * HARDWARE_WAKE_PREROLL_MS as usize) / 1000;
-        let silence = rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0f32; samples]);
+        let samples =
+            (sample_rate as usize * channels as usize * HARDWARE_WAKE_PREROLL_MS as usize) / 1000;
+        let silence =
+            rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0f32; samples]);
         sink.append(silence);
     }
     sink.append(decoder);

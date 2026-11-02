@@ -92,9 +92,8 @@ impl GiapGooseExtensionManager {
         if let Some(cached) = self.session_id.read().await.clone() {
             match self.session_manager.get_session(&cached, false).await {
                 Ok(session) if session.name == EXTENSION_SESSION_NAME => return Ok(cached),
-                Ok(session) => tracing::warn!(
+                Ok(_) => tracing::warn!(
                     session_id = %cached,
-                    found_name = %session.name,
                     "the cached extension session id names a different session — re-resolving"
                 ),
                 Err(e) => tracing::warn!(

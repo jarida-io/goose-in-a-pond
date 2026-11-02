@@ -24,6 +24,14 @@ import type { ChatRunBridge } from "./chatRunStore";
 import { ApiError } from "../api/types";
 import type { ChatEvent } from "../api/types";
 import type { PreparedImage } from "../lib/imageAttach";
+import { OTHER_ID, STARTED_TEXT, TASK_ID } from "../longtasks/longTaskFixtures";
+import {
+  SEARCH_STUB,
+  SEARCH_TOOL,
+  assistantRow,
+  keptToolRow,
+  userRow,
+} from "../test-support/keptRows";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
@@ -953,5 +961,396 @@ describe("stopping on purpose", () => {
 
     await expect(abortRun()).resolves.toBeUndefined();
     expect(getChatRun().busy).toBe(false);
+  });
+});
+
+/** Brave's terms let the pond hold a search result only for the turn, so history keeps a stub. */
+describe("a web search result the pond does not keep", () => {
+  const TITLE = "Kenya Power outage schedule";
+  const SNIPPET = "Planned maintenance in Westlands from 9 am to 5 pm.";
+  const DOMAIN = "kenyapower.co.ke";
+
+  function searchTurn(transient: boolean): ChatEvent[] {
+    return [
+      { type: "tool_call", tool: SEARCH_TOOL, id: "call-1" } as ChatEvent,
+      {
+        type: "tool_result",
+        tool: SEARCH_TOOL,
+        id: "call-1",
+        content: `Web results for: power\n${SNIPPET}`,
+        ui: {
+          card_type: "search",
+          data: {
+            query: "when does the power come back",
+            results: [{ title: TITLE, url: `https://${DOMAIN}/outages`, domain: DOMAIN, snippet: SNIPPET }],
+          },
+        },
+        ...(transient ? { transient: true } : {}),
+      } as ChatEvent,
+      { type: "text", content: "Power should be back by 6 pm.", token: "Power should be back by 6 pm." } as ChatEvent,
+      { done: true, session_id: "sess-1", model_role: "chat" } as ChatEvent,
+    ];
+  }
+
+  function everythingStored(): string {
+    const dump = (s: Storage) => JSON.stringify(Object.fromEntries(Object.keys(s).map((k) => [k, s.getItem(k)])));
+    return dump(localStorage) + dump(sessionStorage);
+  }
+
+  it("shows the card for the turn, and writes none of it to web storage", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream(searchTurn(true)) as never);
+    sendTurn({ text: "when does the power come back?" });
+    await flush();
+
+    const card = getChatRun().messages[1].cards?.[0];
+    expect(card?.renderHint).toBe("search");
+    expect(JSON.stringify(card?.data)).toContain(TITLE);
+
+    const stored = everythingStored();
+    expect(stored).not.toContain(TITLE);
+    expect(stored).not.toContain(SNIPPET);
+    expect(stored).not.toContain(DOMAIN);
+  });
+
+  it("keeps a reattachable run's pointer free of the result, as it must be of any content", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: "q" });
+    await held.push({ type: "run_started", run_id: "run-1", session_id: "sess-1", epoch: "e", seq: 1 } as ChatEvent);
+    for (const ev of searchTurn(true).slice(0, 2)) await held.push(ev);
+
+    const pointer = JSON.parse(localStorage.getItem("giap-chat-run") ?? "{}");
+    expect(Object.keys(pointer).sort()).toEqual(["epoch", "lastSeq", "runId", "sessionId"]);
+    expect(everythingStored()).not.toContain(SNIPPET);
+    await held.end();
+  });
+
+  it("drops the card when the conversation is reopened, and shows one quiet line in its place", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream(searchTurn(true)) as never);
+    sendTurn({ text: "when does the power come back?" });
+    await flush();
+
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow(),
+      keptToolRow(),
+      assistantRow(),
+    ]);
+    await openSession("sess-1");
+
+    const [asked, answered] = getChatRun().messages;
+    expect(asked.role).toBe("user");
+    expect(answered.cards).toBeUndefined();
+    expect(answered.text).toBe("Power should be back by 6 pm.");
+    expect(answered.keptResults).toEqual([
+      { callId: "call-1", tool: SEARCH_TOOL, stub: SEARCH_STUB },
+    ]);
+    expect(JSON.stringify(getChatRun().messages)).not.toContain(SNIPPET);
+  });
+
+  it("gives each turn its own notes, and none to a turn that kept its results whole", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      keptToolRow({ id: "t1" }),
+      assistantRow({ id: "a1", content: "First answer." }),
+      userRow({ id: "u2", content: "and the weather?" }),
+      keptToolRow(
+        { id: "t2", tool_call_id: "call-2" },
+        { tool_call_id: "call-2", tool: "get_current_weather", transient: undefined, content: "24 degrees" },
+      ),
+      assistantRow({ id: "a2", content: "24 degrees." }),
+    ]);
+    await openSession("sess-1");
+
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.keptResults?.length ?? 0)).toEqual([1, 0]);
+  });
+
+  it("does not carry a note over to the next answer when its own turn showed nothing", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      keptToolRow({ id: "t1" }),
+      // A turn that called a tool and said nothing is not shown, so its note has no bubble to sit under.
+      assistantRow({ id: "a1", content: "" }),
+      userRow({ id: "u2", content: "thanks" }),
+      assistantRow({ id: "a2", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].keptResults).toBeUndefined();
+  });
+
+  it("reads the same stub from a history that marks the row itself", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow(),
+      keptToolRow({ content: SEARCH_STUB, transient: true }),
+      assistantRow(),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].keptResults?.[0].stub).toBe(SEARCH_STUB);
+  });
+});
+
+// A long task the prime starts is found in the tool's own text, live and in a stored row.
+describe("a long task the prime starts", () => {
+  const START_TOOL = "giap-tasks__task_start";
+
+  function startRow(id: string, text: string, tool = START_TOOL) {
+    return {
+      id: `tool-${id}`,
+      session_id: "sess-1",
+      role: "tool" as const,
+      created_at: "",
+      tool_call_id: `call-${id}`,
+      content: JSON.stringify({ tool_call_id: `call-${id}`, tool, content: text }),
+    };
+  }
+
+  const startedText = (id: string) => `Started task ${id}. It runs in the background.`;
+
+  it("is found in the result of a live turn, on the answer that follows", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: START_TOOL, id: "t1" },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "text", content: "Started." },
+      ]) as never,
+    );
+    sendTurn({ text: "plan a trip" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID]);
+    expect(getChatRun().messages[1].text).toBe("Started.");
+  });
+
+  it("is found once however many times the result is repeated, and again for a second task", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: START_TOOL, id: "t1" },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "tool_call", tool: START_TOOL, id: "t2" },
+        { type: "tool_result", tool: START_TOOL, id: "t2", content: startedText(OTHER_ID) },
+      ]) as never,
+    );
+    sendTurn({ text: "plan two trips" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID, OTHER_ID]);
+  });
+
+  it("is not found in the same words from another tool", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: "giap-notes__read_note", id: "t1" },
+        { type: "tool_result", tool: "giap-notes__read_note", id: "t1", content: STARTED_TEXT },
+      ]) as never,
+    );
+    sendTurn({ text: "read my note" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toBeUndefined();
+  });
+
+  it("is found in a stored tool row, and goes to the answer of its own turn", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT),
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+      userRow({ id: "u2", content: "thanks" }),
+      assistantRow({ id: "a2", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.longTaskIds)).toEqual([[TASK_ID], undefined]);
+  });
+
+  it("is found in a stored row whose content is the text itself", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      { ...startRow("1", ""), content: STARTED_TEXT },
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID]);
+  });
+
+  it("reaches the answer past an empty step of the same turn, but not into the next question's answer", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT),
+      assistantRow({ id: "a0", content: "" }),
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+      userRow({ id: "u2", content: "and another" }),
+      startRow("2", startedText(OTHER_ID)),
+      assistantRow({ id: "a2", content: "" }),
+      userRow({ id: "u3", content: "thanks" }),
+      assistantRow({ id: "a3", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.longTaskIds)).toEqual([[TASK_ID], undefined]);
+  });
+
+  it("is not found in a stored row of another tool", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT, "giap-notes__read_note"),
+      assistantRow({ id: "a1", content: "Here it is.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].longTaskIds).toBeUndefined();
+  });
+});
+
+// Deep research: the pond starts the task itself and streams the frames a model-made call would.
+describe("a deep research turn", () => {
+  const START_TOOL = "giap-tasks__task_start";
+  // The call id carries a uuid of its own, which is not the task's.
+  const CALL_ID = `deep-research-${OTHER_ID}`;
+  const QUESTION = "What changed in Kenya's tax rules this year?";
+  const POND_RESULT = `Started task ${TASK_ID}. It runs in the background and will report here when it is done.`;
+
+  function pondFrames(): ChatEvent[] {
+    return [
+      { type: "tool_call", tool: START_TOOL, id: CALL_ID, input: { goal: QUESTION } },
+      { type: "tool_result", tool: START_TOOL, id: CALL_ID, content: POND_RESULT },
+      { type: "text", content: "I have started the research. " },
+      { type: "text", content: "I will report here when it is done." },
+      { done: true, session_id: "sess-dr", type: "done" },
+    ];
+  }
+
+  it("asks the pond for research, and only when the turn is one", () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream([]) as never);
+    sendTurn({ text: QUESTION, deepResearch: true });
+    const call = vi.mocked(api.chatStream).mock.calls[0];
+    expect(call[0]).toBe(QUESTION);
+    expect(call[5]).toBe(true);
+    expect(call[6]).toBe(true);
+  });
+
+  it("leaves it off an ordinary turn", () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream([]) as never);
+    sendTurn({ text: "hello" });
+    expect(vi.mocked(api.chatStream).mock.calls[0][6]).toBeUndefined();
+  });
+
+  it("anchors the card to the pond's own task_start frames, and takes the task from the result, not the call id", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream(pondFrames()) as never);
+    sendTurn({ text: QUESTION, deepResearch: true });
+    await flush();
+
+    const [user, agent] = getChatRun().messages;
+    expect(user.text).toBe(QUESTION);
+    expect(agent.longTaskIds).toEqual([TASK_ID]);
+    expect(agent.text).toBe("I have started the research. I will report here when it is done.");
+    expect(agent.cards).toHaveLength(1);
+    expect(agent.cards?.[0]).toMatchObject({ tool: START_TOOL, callId: CALL_ID });
+    expect(agent.status).toBeUndefined();
+    expect(agent.streaming).toBe(false);
+    expect(getChatRun().completedTurns).toBe(1);
+  });
+
+  it("anchors the card while the turn is still streaming, before the reply has any words", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: QUESTION, deepResearch: true });
+    await held.push(pondFrames()[0]);
+    expect(getChatRun().messages[1].status).toBe("Getting that started…");
+    await held.push(pondFrames()[1]);
+
+    const agent = getChatRun().messages[1];
+    expect(agent.longTaskIds).toEqual([TASK_ID]);
+    expect(agent.streaming).toBe(true);
+    expect(agent.text).toBe("");
+    await held.end();
+  });
+
+  it("anchors it again when the conversation is reopened, from the stored tool row", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1", content: QUESTION }),
+      assistantRow({
+        id: "a0",
+        content: "",
+        tool_calls: [{ id: CALL_ID, name: START_TOOL, arguments: JSON.stringify({ goal: QUESTION }) }],
+      }),
+      {
+        id: "t1",
+        session_id: "sess-1",
+        role: "tool",
+        created_at: "",
+        tool_call_id: CALL_ID,
+        content: JSON.stringify({ tool_call_id: CALL_ID, tool: START_TOOL, content: POND_RESULT }),
+      },
+      assistantRow({ id: "a1", content: "I have started the research.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+
+    const { messages } = getChatRun();
+    expect(messages.map((m) => m.role)).toEqual(["user", "agent"]);
+    expect(messages[1].longTaskIds).toEqual([TASK_ID]);
+    expect(messages[1].text).toBe("I have started the research.");
+  });
+
+  it("is never queued behind a reply that is still streaming", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: "first" });
+    sendTurn({ text: QUESTION, deepResearch: true });
+
+    expect(getChatRun().queued).toEqual([]);
+    expect(api.chatStream).toHaveBeenCalledTimes(1);
+    await held.end();
+  });
+
+  describe("when the pond refuses it before saving anything", () => {
+    it.each([
+      [409, "deep_research_off", "Deep research is switched off on this pond."],
+      [403, "deep_research_unidentified", "The pond cannot tell who is asking."],
+    ] as const)("hands the question back on a %i, with the reason from the body", async (status, reason, message) => {
+      vi.mocked(api.chatStream).mockReturnValue(
+        rejectedStream(new ApiError(status, message, undefined, { error: message, reason })) as never,
+      );
+      sendTurn({ text: QUESTION, deepResearch: true });
+      await flush();
+
+      const run = getChatRun();
+      expect(run.messages).toEqual([]);
+      expect(run.busy).toBe(false);
+      expect(run.completedTurns).toBe(0);
+      expect(takeRefusedDraft()).toEqual({
+        text: QUESTION,
+        attachments: [],
+        message,
+        code: reason,
+        deepResearch: true,
+      });
+    });
+
+    it("prefers a code the body has to a reason", async () => {
+      vi.mocked(api.chatStream).mockReturnValue(
+        rejectedStream(new ApiError(409, "No model.", "no_model", { error: "No model.", code: "no_model", reason: "other" })) as never,
+      );
+      sendTurn({ text: QUESTION, deepResearch: true });
+      await flush();
+      expect(takeRefusedDraft()?.code).toBe("no_model");
+    });
+
+    it("says the turn was research even when it was refused for some other reason", async () => {
+      vi.mocked(api.chatStream).mockReturnValue(
+        rejectedStream(new ApiError(409, "No model.", "no_model")) as never,
+      );
+      sendTurn({ text: QUESTION, deepResearch: true });
+      await flush();
+      expect(takeRefusedDraft()).toMatchObject({ code: "no_model", deepResearch: true });
+    });
+
+    it("does not say so for an ordinary turn", async () => {
+      vi.mocked(api.chatStream).mockReturnValue(
+        rejectedStream(new ApiError(409, "No model.", "no_model")) as never,
+      );
+      sendTurn({ text: "hello" });
+      await flush();
+      expect("deepResearch" in (takeRefusedDraft() ?? {})).toBe(false);
+    });
   });
 });

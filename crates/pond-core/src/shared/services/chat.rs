@@ -36,6 +36,20 @@ fn bare_tool_name(tool: &str) -> String {
     }
 }
 
+/// The row history stores for a tool result that carries `keep`: its stub as `content`, marked
+/// `transient`, so neither the result's text nor its card is ever written. `None` keeps `row`.
+fn kept_tool_row(row: &serde_json::Value) -> Option<String> {
+    let keep = row.get("keep")?.as_str()?.trim();
+    if keep.is_empty() {
+        return None;
+    }
+    let mut kept = row.as_object()?.clone();
+    kept.remove("keep");
+    kept.insert("content".to_string(), serde_json::Value::from(keep));
+    kept.insert("transient".to_string(), serde_json::Value::Bool(true));
+    Some(serde_json::Value::Object(kept).to_string())
+}
+
 /// Control phrases live in `pond-voice` so the desktop shell (separate workspace) shares them.
 use pond_voice::control::{classify as classify_voice_command, VoiceCommand};
 
@@ -718,6 +732,8 @@ impl ChatService {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -833,6 +849,7 @@ impl ChatService {
 
     /// Persist the assistant side of a turn, after the agent stream drains.
     /// `tool_results` is one JSON string per call, in order; `usage` is `(prompt, completion)`.
+    /// A row carrying `keep` is stored as that stub, never its content (`kept_tool_row`).
     pub async fn persist_assistant_turn(
         &self,
         tool_results: Vec<String>,
@@ -871,6 +888,10 @@ impl ChatService {
             .collect();
 
         for (content, v) in tool_results.into_iter().zip(parsed.iter()) {
+            let content = match v {
+                Some(row) => kept_tool_row(row).unwrap_or(content),
+                None => content,
+            };
             let sm = SessionMessage::new(
                 Uuid::new_v4().to_string(),
                 self.session_id.clone(),
@@ -1091,6 +1112,8 @@ impl ChatService {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
@@ -2193,6 +2216,69 @@ mod tests {
             .persist_assistant_turn(vec![tool_result("noop")], "ok", Some((1, 1)), None)
             .await
             .expect("persistence must not fail without an event log");
+    }
+
+    #[tokio::test]
+    async fn a_transient_tool_result_is_stored_as_its_stub() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("sess-t".to_string()).await.unwrap();
+        let service = ChatService::new(
+            Arc::new(MockAgent::new()),
+            "sess-t".to_string(),
+            storage.clone(),
+        );
+        let stub = "Web search results are not kept after the turn. Sources: kws.go.ke.";
+        let searched = serde_json::json!({
+            "tool_call_id": "call-1",
+            "tool": "giap-knowledge__search_web",
+            "content": "Web results for: when does the park close\nNairobi National Park closes at 6:00 PM.",
+            "arguments": "{\"question\":\"when does the park close\"}",
+            "keep": stub,
+        })
+        .to_string();
+        service
+            .persist_assistant_turn(
+                vec![searched, tool_result("giap-weather__get_current_weather")],
+                "It closes at 6 pm.",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let messages = storage.get_messages("sess-t").await.unwrap();
+        let rows: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.message.role == crate::models::domain::message::Role::Tool)
+            .map(|m| serde_json::from_str(&m.message.content).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["content"], stub);
+        assert_eq!(rows[0]["transient"], true);
+        assert!(rows[0].get("keep").is_none(), "{}", rows[0]);
+        assert_eq!(rows[0]["tool_call_id"], "call-1");
+        assert_eq!(
+            rows[0]["arguments"],
+            "{\"question\":\"when does the park close\"}"
+        );
+        let stored: String = messages.iter().map(|m| m.message.content.clone()).collect();
+        assert!(!stored.contains("6:00 PM"), "{stored}");
+        assert_eq!(
+            rows[1]["content"], "ok",
+            "a result with no stub is kept whole"
+        );
+        assert!(rows[1].get("transient").is_none());
+    }
+
+    #[test]
+    fn a_row_without_a_usable_stub_is_kept_as_it_was() {
+        for row in [
+            serde_json::json!({"content": "x"}),
+            serde_json::json!({"content": "x", "keep": "  "}),
+            serde_json::json!({"content": "x", "keep": 3}),
+        ] {
+            assert_eq!(kept_tool_row(&row), None, "{row}");
+        }
     }
 
     // ── truncate_tool_result (NDJSON 2000-char cap) ──────────────────────

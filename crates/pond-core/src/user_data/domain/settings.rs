@@ -693,6 +693,11 @@ pub struct Settings {
     #[serde(default)]
     pub searxng_url: Option<String>,
 
+    /// Send the town from `weather_location_name` with each web search, so the results can
+    /// include nearby places. Off by default: it tells the search provider where the household is.
+    #[serde(default)]
+    pub web_search_local_results: bool,
+
     // ── Extension toggles ───────────────────────────────────────────────
     // Builtin MCP tool modules registered at startup.
     /// Enable the memory tools module (recall, save, forget).
@@ -754,6 +759,22 @@ pub struct Settings {
     /// Also needs [`Settings::ext_orchestrator_enabled`], which does not imply it.
     #[serde(default = "Settings::default_proactive_review_enabled")]
     pub proactive_review_enabled: bool,
+
+    /// May the pond work through the long tasks members start, a step at a time while it is quiet?
+    /// Also needs [`Settings::ext_orchestrator_enabled`]. Nothing runs until a member starts one.
+    #[serde(default = "Settings::default_long_tasks_enabled")]
+    pub long_tasks_enabled: bool,
+
+    /// May a household's agents start on their own schedules and events? Each run is a one-step
+    /// long task, so it also needs [`Settings::long_tasks_enabled`]. Nothing runs until a recipe
+    /// declares a schedule or an event.
+    #[serde(default = "Settings::default_agent_activations_enabled")]
+    pub agent_activations_enabled: bool,
+
+    /// Days an agent may go unused before the start-up pass stops compiling its prefill; at least
+    /// one. The shipped planner, worker and verifier are compiled whatever this says.
+    #[serde(default = "Settings::default_agent_prefill_retention_days")]
+    pub agent_prefill_retention_days: u32,
 
     /// May sensor and camera events become per-member context items the model is shown?
     /// Off stops ingest only; items already ingested stay recallable.
@@ -912,6 +933,7 @@ impl Default for Settings {
             tool_call_validation: Self::default_tool_call_validation(),
             tool_request_detection: Self::default_tool_request_detection(),
             searxng_url: None,
+            web_search_local_results: false,
             ext_memory_enabled: true,
             ext_schedule_enabled: true,
             ext_weather_enabled: true,
@@ -927,6 +949,9 @@ impl Default for Settings {
             quiet_hours_end: Self::default_quiet_hours_end(),
             unprompted_speech_categories: Self::default_unprompted_speech_categories(),
             proactive_review_enabled: false,
+            long_tasks_enabled: Self::default_long_tasks_enabled(),
+            agent_activations_enabled: Self::default_agent_activations_enabled(),
+            agent_prefill_retention_days: Self::default_agent_prefill_retention_days(),
             context_ingest_enabled: false,
             ext_context_enabled: false,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
@@ -1360,6 +1385,18 @@ impl Settings {
 
     fn default_proactive_review_enabled() -> bool {
         false
+    }
+
+    fn default_long_tasks_enabled() -> bool {
+        true
+    }
+
+    fn default_agent_activations_enabled() -> bool {
+        true
+    }
+
+    fn default_agent_prefill_retention_days() -> u32 {
+        crate::shared::services::agent_prefill::DEFAULT_AGENT_PREFILL_RETENTION_DAYS
     }
 
     fn default_context_ingest_enabled() -> bool {
@@ -2018,6 +2055,12 @@ mod tests {
             "memory_relate_threshold",
             // UI comes with a proposal-queue executor; until then a switch would overpromise.
             "memory_date_proposals_enabled",
+            // UI comes with the task panel; until then a switch would control nothing visible.
+            "long_tasks_enabled",
+            // UI comes with the agent builder; until then a switch would control nothing visible.
+            "agent_activations_enabled",
+            // UI comes with the builder's prefill line.
+            "agent_prefill_retention_days",
             // Engine state, not preferences: the rollout lever and a self-stamped epoch.
             "memory_extraction_mode",
             "memory_extraction_first_pass_at",
@@ -2153,6 +2196,9 @@ mod tests {
             "weather_longitude",
             // No UI row while its only reader, `search_web`, is unregistered; the value persists.
             "searxng_url",
+            // The local-places switch on the web search panel in both apps, under
+            // `GET /api/v1/web-search`'s `local_results`.
+            "web_search_local_results",
         ];
 
         let value = serde_json::to_value(Settings::default()).expect("serialize Settings");

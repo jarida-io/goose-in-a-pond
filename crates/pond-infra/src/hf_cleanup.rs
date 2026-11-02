@@ -1,6 +1,7 @@
-//! HF cache cleanup and disk usage for `/api/v1/models/{cleanup,disk-usage}`.
-//! Deletes only inside `hf_cache` and the `models/**` mirror: unreferenced, unprotected blobs,
-//! `.incomplete` files past `STALE_INCOMPLETE_AGE`, and snapshot dirs of only dead symlinks.
+//! HF cache cleanup and disk usage for `/api/v1/models/{cleanup,disk-usage}` and My Pond's
+//! download leftovers. Deletes only inside `hf_cache` and the `models/**` mirror: unreferenced,
+//! unprotected blobs, `.incomplete` files past `STALE_INCOMPLETE_AGE`, and snapshot dirs of only
+//! dead symlinks.
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -55,11 +56,51 @@ pub async fn run_cleanup(
     run_cleanup_with_threshold(data_dir, protected_names, STALE_INCOMPLETE_AGE).await
 }
 
+/// What [`run_cleanup`] would remove, removing nothing.
+pub async fn preview_cleanup(
+    data_dir: &Path,
+    protected_names: &HashSet<String>,
+) -> anyhow::Result<CleanupReport> {
+    sweep(data_dir, protected_names, STALE_INCOMPLETE_AGE, false).await
+}
+
+/// File names no sweep may delete: every model assigned to a role, by each name it is known by.
+pub async fn protected_model_names(
+    model_repo: &dyn pond_core::models::ports::model_repository::ModelRepository,
+) -> HashSet<String> {
+    let mut protected = HashSet::new();
+    if let Ok(assignments) = model_repo.list_assignments().await {
+        for a in &assignments {
+            if let Ok(Some(m)) = model_repo.get_by_id(&a.model_id).await {
+                if let Some(fname) = m.filename {
+                    protected.insert(fname);
+                }
+                // Legacy migrations left blobs named by bare model name.
+                protected.insert(m.name.clone());
+                if let Some(cfg) = m.config_filename {
+                    protected.insert(cfg);
+                }
+            }
+        }
+    }
+    protected
+}
+
 /// [`run_cleanup`] with a custom stale-`.incomplete` threshold (`ZERO` sweeps every one).
 pub async fn run_cleanup_with_threshold(
     data_dir: &Path,
     protected_names: &HashSet<String>,
     stale_threshold: Duration,
+) -> anyhow::Result<CleanupReport> {
+    sweep(data_dir, protected_names, stale_threshold, true).await
+}
+
+/// One pass over the cache; with `remove` false it only measures, for a preview.
+async fn sweep(
+    data_dir: &Path,
+    protected_names: &HashSet<String>,
+    stale_threshold: Duration,
+    remove: bool,
 ) -> anyhow::Result<CleanupReport> {
     let hub_dir = data_dir.join("hf_cache").join("hub");
     if fs::metadata(&hub_dir).await.is_err() {
@@ -109,9 +150,11 @@ pub async fn run_cleanup_with_threshold(
                 continue;
             }
             let bytes = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
-            if let Err(e) = fs::remove_file(&path).await {
-                tracing::warn!(path = %path.display(), error = %e, "cleanup: failed to remove blob");
-                continue;
+            if remove {
+                if let Err(e) = fs::remove_file(&path).await {
+                    tracing::warn!(path = %path.display(), error = %e, "cleanup: failed to remove blob");
+                    continue;
+                }
             }
             report.reclaimed_bytes += bytes;
             report.removed.push(RemovedBlob {
@@ -154,9 +197,11 @@ pub async fn run_cleanup_with_threshold(
                 continue;
             }
             let bytes = meta.len();
-            if let Err(e) = fs::remove_file(&path).await {
-                tracing::warn!(path = %path.display(), error = %e, "cleanup: stale incomplete remove failed");
-                continue;
+            if remove {
+                if let Err(e) = fs::remove_file(&path).await {
+                    tracing::warn!(path = %path.display(), error = %e, "cleanup: stale incomplete remove failed");
+                    continue;
+                }
             }
             report.reclaimed_bytes += bytes;
             report.removed.push(RemovedBlob {
@@ -184,6 +229,14 @@ pub async fn run_cleanup_with_threshold(
                 continue;
             }
             if is_fully_orphaned(&commit_path).await {
+                if !remove {
+                    report.removed.push(RemovedBlob {
+                        path: commit_path.display().to_string(),
+                        category: infer_category(&commit_path),
+                        bytes: 0,
+                    });
+                    continue;
+                }
                 if let Err(e) = fs::remove_dir_all(&commit_path).await {
                     tracing::warn!(path = %commit_path.display(), error = %e, "cleanup: snapshot dir remove failed");
                     continue;
@@ -482,6 +535,32 @@ mod tests {
         assert_eq!(report.reclaimed_bytes, 20);
         assert_eq!(report.removed.len(), 1);
         assert_eq!(report.removed[0].bytes, 20);
+    }
+
+    #[tokio::test]
+    async fn a_preview_measures_what_a_cleanup_would_free_and_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let orphan = make_blob(
+            tmp.path(),
+            "models--giap-local--orphan.gguf",
+            "deadbeef",
+            b"orphan blob contents",
+        );
+        let alive = make_blob(
+            tmp.path(),
+            "models--giap-local--alive.gguf",
+            "cafef00d",
+            b"alive",
+        );
+        link_flat(tmp.path(), "gguf/alive.gguf", &alive);
+
+        let preview = preview_cleanup(tmp.path(), &HashSet::new()).await.unwrap();
+        assert!(orphan.exists() && alive.exists());
+        let report = run_cleanup(tmp.path(), &HashSet::new()).await.unwrap();
+        assert_eq!(preview.reclaimed_bytes, 20);
+        assert_eq!(preview.reclaimed_bytes, report.reclaimed_bytes);
+        assert_eq!(preview.removed, report.removed);
+        assert!(!orphan.exists() && alive.exists());
     }
 
     #[tokio::test]

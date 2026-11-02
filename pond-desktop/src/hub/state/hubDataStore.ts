@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api } from "../../api/PondApiClient";
+import { isAgentYaml } from "../../agents/agentModel";
 import type {
   AgentRecipe,
   Device,
@@ -236,7 +237,8 @@ function recipeIdHash(name: string): number {
 
 /** Recipes as routine cards. Icon and colours are hash-picked, so stable across launches. */
 function routinesFromRecipes(recipes: AgentRecipe[]): RoutineDetail[] {
-  return recipes.map((r) => {
+  // An agent starts from a schedule, an event or a hand-off, so it is no one-tap routine.
+  return recipes.filter((r) => !isAgentYaml(r.yaml)).map((r) => {
     const template = ROUTINE_TEMPLATES[recipeIdHash(r.name) % ROUTINE_TEMPLATES.length];
     // The chips are the recipe's own description, split the way it was written.
     const desc = (r.description ?? "").trim();

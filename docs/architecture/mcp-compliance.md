@@ -60,7 +60,7 @@ sees it as `<extension>__<tool>`.
 | `giap-memory` | `memory.rs` | on | `recall_memories`, `save_memory`, `forget_memory` |
 | `giap-schedule` | `schedule.rs` | on (needs a scheduler) | `list_schedules`, `set_timer`, `create_schedule`, `schedule_action`, `world_clock` |
 | `giap-weather` | `weather.rs` | on | `get_current_weather`, `get_weather_forecast` |
-| `giap-knowledge` | `knowledge.rs`, `wolfram.rs`, `web_search.rs` | on | `get_wikipedia_article`, `compute_answer`, `search_web` |
+| `giap-knowledge` | `knowledge.rs`, `wolfram.rs`, `web_search.rs`, `web_page.rs` | on | `get_wikipedia_article`, `compute_answer`, `search_web`, `read_web_page` |
 | `giap-system` | `system.rs` | on | `get_current_time`, `get_system_info`, `send_notification` |
 | `giap-device` | `device.rs` | on (`ext_device_enabled`) | `list_registered_devices`, `set_audio_device`, `get_user_profile`, `list_skills`, `load_skill` |
 | `giap-device-control` | `device_control.rs` | with `giap-device` | `describe_device`, `get_device_state`, `set_device_state` |

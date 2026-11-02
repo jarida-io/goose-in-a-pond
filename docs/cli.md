@@ -50,6 +50,8 @@ interactive menu.
 | `onnxruntime build` | Jetson: build ONNX Runtime from source as onnxruntime.ai documents it, in the background (hours, logged to `~/.giap/onnxruntime/build.log`, resumable), install it under `<data_dir>/lib/onnxruntime-gpu/`, remove the 2.5 GB build tree (the wheel stays in `~/.giap/onnxruntime/dist/`), then build the TensorRT engines. Stops the pond while the build needs its memory and starts it again afterwards. With the install current for the device's CUDA and TensorRT, it only checks the engines |
 | `models pairings` | Regenerate the vision pairing table from Hugging Face |
 | `wifi-grant [remove\|status]` | Linux: install, remove or report the polkit grant that lets the pond's user join Wi-Fi from the BLE setup channel (uses sudo) |
+| `admin-card [show\|rotate]` | My Pond's admin card: make it as the pond's user, seal a recovery copy (the TPM on a Jetson, a root-only file without one, the Keychain on macOS) and, on a Jetson, let the pond's user switch power modes and restart (uses sudo). `show` prints the sealed card again; `rotate` replaces it and locks every phone. See [pond administrator](architecture/pond-administrator.md) |
+| `service-account [undo\|status]` | Linux: run the pond as its own locked system account, `agamemnon` (no password, shell `/usr/sbin/nologin`). Stops the pond, makes the account, moves the data directory to `/var/lib/goose-in-a-pond` (a link stays at the old path), writes a system unit with `User=agamemnon`, points the power rule and the Wi-Fi grant at it, and starts it (uses sudo). `undo` puts back the account, unit and data directory it came from; `status` is the doctor line. See [pond administrator](architecture/pond-administrator.md#the-service-account) |
 | `provision --host HOST --key FILE [...]` | Operator machine: save a pond's printed setup card and give it a device certificate over SSH. Must be the first argument; runs `scripts/provision-device.sh` |
 | `check [AREA...] [--all\|--e2e\|--full\|--base REF\|--dry-run]` | The checks CI runs, for the areas this branch changes against `main` (`rust`, `desktop`, `go`, `shell`, `matter`, `music`), or the named ones. Reads the Rust crate lists from `ci.yml`; refuses Rust early without access to the private llama.cpp fork. Must be the first argument; `scripts/lib/local-checks.sh` |
 
@@ -124,6 +126,7 @@ directory plus `goose-in-a-pond` (`~/Library/Application Support/goose-in-a-pond
 | [`calibrate`](#calibrate) | Calibrate the wake-word detector |
 | [`pairing`](#pairing) | Show or refresh the device pairing code |
 | [`setup-code`](#setup-code) | Show the printed setup code and its claim state |
+| [`admin-card`](#admin-card) | Make or replace the admin card that unlocks My Pond |
 | [`dashboard`](#dashboard) | Print a sign-in link for the web dashboard |
 
 `ble-helper` is hidden: the server runs it as its own child for the BLE setup channel on macOS.
@@ -341,13 +344,19 @@ See [wake-word-calibration.md](wake-word-calibration.md).
 ### pairing
 
 ```bash
-pond-server pairing [--refresh]
+pond-server pairing [--refresh] [--member <PROFILE_ID>]
 ```
 
 Asks the running server (`127.0.0.1:<.runtime_api_port>`, with the host credential) for the current
 pairing code, or for a new one when none is live or `--refresh` is given. Prints the six-digit code,
-its expiry, where the phone connects, the key it pins, and a QR code for Goose On The Go. Fails if
-the server is not running under this account.
+its expiry, whose the device that pairs with it becomes, where the phone connects, the key it pins,
+and a QR code for Goose On The Go. Fails if the server is not running under this account.
+
+Without `--member` the server decides whose the device becomes: a household of one binds it to that
+member, any other household binds it to nobody, and a device that belongs to nobody is a guest once
+there are two members. `--member <PROFILE_ID>` (an `id` from `GET /api/v1/profiles`) always issues a
+fresh code for that member. A phone that is already paired is linked to its member by pairing it
+again with such a code: the app keeps its install id, so the same device row takes the new owner.
 
 ### setup-code
 
@@ -366,6 +375,24 @@ with or without the server running.
 | `--card PATH\|-` | Also write a printable SVG card to `PATH` (mode 0600), or to stdout with `-` |
 | `--status` | Print only `unclaimed`, `claimed` or `missing`; never makes a code. Conflicts with the other flags |
 | `--rearm` | Accept the same card again; devices already paired keep working |
+
+### admin-card
+
+```bash
+pond-server admin-card [--json] [--rotate]
+pond-server admin-card --status
+```
+
+The password a member types into My Pond on their phone. It prints the password once and keeps
+only a PBKDF2 verifier in `<data_dir>/setup/admin.json`; a running server reads the new card on
+the next unlock. Use `bash scripts/giap.sh admin-card`, which also seals a recovery copy. Without
+`--rotate` it refuses to replace a card in force.
+
+| Flag | Description |
+|---|---|
+| `--json` | Print `{"password","card_id"}` instead of the card text |
+| `--rotate` | Replace the card in force; every phone unlocked with the old one locks |
+| `--status` | Print only `present` or `missing`; never makes a card. Conflicts with the other flags |
 
 ### dashboard
 

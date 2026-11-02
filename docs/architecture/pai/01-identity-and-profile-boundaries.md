@@ -714,6 +714,72 @@ not `navigator.language`) is already made by the locale step.
 
 ---
 
+## 4c. A device paired to nobody stays nobody's (2026-10-28)
+
+Found from a household on the Orin whose phone greeted "Good night, there" while the pond listed two
+people. P9 is intact; what was missing is every way into it after the pond has members.
+
+### What the pond held
+
+Read-only from `pond_system.db`, 2026-10-28:
+
+* Two `profiles` rows, created 2026-10-27 17:20 and 20:54.
+* The phone's `devices` row (paired 2026-10-20, a week before any member existed) with `profile_id`
+  NULL. The desktop's row, paired by loopback at 20:14 while there was exactly one member, carried
+  that member: the sole-member default worked the one time it could.
+* `settings.primary_profile_id` = the owner's **display name**, written 21:36 from the dashboard's
+  "Household profile" box, which was a free-text field over an id.
+* Every pairing code issued after 20:54 logged `attributed=false`.
+
+### Why nothing could fix it
+
+A device's member is written in exactly three places: the pairing code it consumed (P9), the
+setup-claim latch (sole member at claim time), and `attribute_claimant_to_owner` at onboarding
+completion. This pond was onboarded on 2026-09-17, its phone was not the claimant, and with two
+members a code issued with no body binds nobody. `POST /handshake/pairing-code` has always taken
+`{profile_id}`, but both of its callers, the dashboard's Pairing page and `pond-server pairing`, sent
+no body. So on any pond of two or more members, no shipped UI could attribute any device, and the
+log line telling the operator to let "Devices" bind it named a route that takes no member.
+
+The consequence, per turn on that phone: `resolve_turn_scope` gets `DeviceRung::Unattributed`, the
+session row carries no identity, and with two members `identity_resolution::resolve` answers
+`Guest`. A guest recalls nothing (`excludes_everything`), is not offered `giap-memory`,
+`giap-sensors`, `giap-vision`, `giap-context`, delegation or travel (`groups_denied_to_guests`),
+hears no unprompted speech, and cannot decide drafts or book rides. Its conversations are not
+attributed, so the batch extractor files nothing for anyone. Member-addressed delivery
+(`push_tokens_for_profile`) finds no device for the owner except the desktop.
+
+### What changed
+
+* `PUT /settings` refuses a `primary_profile_id` that is not a member's id (422 with `fields`), and
+  the dashboard renders it as a picker of members. A stored value that names nobody is shown as
+  "not a household member" rather than dropped.
+* The Pairing page asks "Who will use this device?" and issues the code for that member, or for
+  nobody explicitly (`{unattributed: true}`), and says whose a device pairing with the shown code
+  becomes. `pond-server pairing --member <PROFILE_ID>` does the same from a shell.
+* Pinned through the routes with no hand-set `profile_id`:
+  `a_phone_paired_before_any_member_existed_is_claimed_by_pairing_again_for_its_member` pairs a
+  phone before any member exists, creates two, shows the phone is nobody's and a bodyless code still
+  binds nobody, then pairs the same install id again with a member's code and reads the member back
+  from `GET /devices/self`.
+
+### Still open, and why it is a decision rather than a bug
+
+Linking an already-paired phone still means pairing it again. Three ways to remove that step, each a
+choice about who may assert identity, since `PairedDevice` outranks face and explicit:
+
+1. **Host-only re-attribution on Devices.** `PUT /devices/{id}` gains `profile_id`, accepted only with
+   the host credential on loopback, the same trust as issuing a member-bound code. Smallest change;
+   it moves an identity claim without the phone taking part.
+2. **Attribute pre-member devices when the first member is created**, as
+   `attribute_claimant_to_owner` does for the claimant. Fixes exactly this household, but on a pond
+   whose devices include a guest's or a shared tablet it makes them the first member's, the failure
+   section 4's "no backfill" refused.
+3. **"This is me" from the phone**, confirmed at the pond (a code read out or shown on the pond's
+   screen, as pairing is). Fits a second member's phone best and needs a new confirmation flow.
+
+---
+
 ## 5. Invariants
 
 1. Profile context stays in `<system-context>` on the user message. Never the system prefix.

@@ -366,7 +366,9 @@ fn disk_cache_speeds_up_model_load() {
     println!(
         "kokoro load: cached load took {:.2} ms (cache size: {} MB)",
         cached_load.as_secs_f64() * 1000.0,
-        cache_path.metadata().map(|m| m.len() / (1024 * 1024)).unwrap_or(0)
+        cache_path
+            .metadata()
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0)
     );
 }
-

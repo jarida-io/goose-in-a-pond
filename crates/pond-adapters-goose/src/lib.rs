@@ -15,6 +15,7 @@ pub mod provider_shim;
 pub mod registry_rows;
 pub mod shutdown;
 pub mod token_counter;
+mod transient_history;
 pub mod vision_encoder;
 
 pub use extension_manager::GiapGooseExtensionManager;

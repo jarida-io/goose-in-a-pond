@@ -100,6 +100,24 @@ standing cost of staying on 6.2.1, and it is the first half of the JetPack
 question — the other half being that NVIDIA's own fix for the same cap ships in
 6.2.2 / r36.5.
 
+`giap.sh doctor` names the state: `capped` is NVIDIA's signed module on an
+affected release, `local` a module built on the board. To build one on a board
+that cannot move to r36.5 yet, all on the device:
+
+1. Fetch the r36.4.4 `public_sources.tbz2` from NVIDIA (it predates the cap) and
+   extract the out-of-tree module sources.
+2. Build `nvmap.ko` from them against the running kernel's headers.
+3. Check its `vermagic` matches the running kernel and that the symbols `nvgpu`
+   imports from it (`nvmap_dma_alloc_attrs`, `nvmap_dma_free_attrs`) carry the
+   same CRCs as the stock module's. If either differs, stop.
+4. Copy the stock module aside, install the new one over
+   `/lib/modules/$(uname -r)/updates/drivers/video/tegra/nvmap/nvmap.ko`, run
+   `depmod -a`, hold the five packages above, and reboot.
+
+It reverts NVIDIA's hardening against CVE-2025-33182/33177, which keeps a large
+GPU allocation out of the kernel's OOM path (a local denial of service), so it
+is the board owner's call.
+
 ## What this does *not* change
 
 `LLM_BUDGET_MB` is a compile-time constant (`7620 − 1500 OS − 200 STT −

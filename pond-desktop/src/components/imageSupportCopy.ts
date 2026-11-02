@@ -1,5 +1,7 @@
 // What the chat shells say about picture support, shared so both shells and the strip agree.
 
+import { RESEARCH_REFUSED_CLAUSE } from "./deepResearchCopy";
+
 /** Copy for `not_declared`, which has no server prose; the pond's own refusal reads the same. */
 export const NOT_DECLARED_COPY =
   "This model cannot look at pictures. To send one, choose a model marked Pictures included on the Models page.";
@@ -19,6 +21,9 @@ export function refusalClientClause(code: string | undefined): string {
   }
   if (code === "vision_not_ready") {
     return " Your message and pictures are back in the box; send them when it is ready.";
+  }
+  if (code === "deep_research_off" || code === "deep_research_unidentified") {
+    return RESEARCH_REFUSED_CLAUSE;
   }
   if (code === "vision_unsupported") {
     return " Your message and pictures are back in the box. Remove the pictures to send just the text.";

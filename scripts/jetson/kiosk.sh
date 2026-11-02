@@ -53,6 +53,18 @@ set -uo pipefail
 # default_data_dir() in crates/pond-server/src/main.rs, as on Linux; mirrored by
 # pond-desktop/electron/main/dataDir.ts.
 DATA_DIR="${POND_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/goose-in-a-pond}"
+# A pond run by agamemnon keeps its data and its host credential to itself; this login reads the
+# credential through the sudo rule `giap.sh service-account` gave it.
+POND_UNIT="${POND_UNIT:-/etc/systemd/system/goose-in-a-pond.service}"
+POND_BY_AGAMEMNON=false
+if grep -qs '^User=agamemnon$' "$POND_UNIT"; then
+  POND_BY_AGAMEMNON=true
+  [ -n "${POND_DATA_DIR:-}" ] || DATA_DIR="$(sed -n 's/^Environment="\{0,1\}POND_DATA_DIR=\([^"]*\)"\{0,1\}$/\1/p' "$POND_UNIT" | head -1)"
+fi
+read_credential() {
+  if [ "$POND_BY_AGAMEMNON" = true ]; then sudo -n -u agamemnon cat "$DATA_DIR/.runtime_host_credential"
+  else cat "$DATA_DIR/.runtime_host_credential"; fi
+}
 WESTON_NV="/usr/lib/aarch64-linux-gnu/nvidia/weston-13.0"
 WESTON_STD="/usr/lib/aarch64-linux-gnu/weston"
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -309,7 +321,7 @@ firefox_target() {
 signed_in_page() {
   local port credential dir tmp page
   port="$(wait_for_server)" || return 1
-  credential="$(tr -d '[:space:]' < "$DATA_DIR/.runtime_host_credential")"
+  credential="$(read_credential 2>/dev/null | tr -d '[:space:]')"
   if ! [[ "$credential" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
     bad "$DATA_DIR/.runtime_host_credential does not hold a host credential" >&2
     return 1

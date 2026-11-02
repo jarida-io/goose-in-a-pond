@@ -1,0 +1,164 @@
+/* Text a result is written in; sizes follow the surrounding text so it reads the same in a bubble or a panel. */
+.md {
+  font-family: var(--font-body);
+  font-size: inherit;
+  line-height: var(--leading-base);
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md__p {
+  margin: 0 0 var(--space-2);
+}
+
+.md__h {
+  margin: var(--space-3) 0 var(--space-1);
+  font-family: var(--font-heading);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-snug);
+}
+
+.md__h1,
+.md__h2 {
+  font-size: var(--text-md);
+}
+
+.md__h3,
+.md__h4,
+.md__h5,
+.md__h6 {
+  font-size: var(--text-base);
+}
+
+.md__list {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-5);
+}
+
+.md__list li + li {
+  margin-top: var(--space-1);
+}
+
+.md__list .md__list {
+  margin: var(--space-1) 0 0;
+}
+
+.md__quote {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.md__code,
+.md__pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.md__code {
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--color-hover);
+}
+
+.md__pre {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-hover);
+}
+
+.md__hr {
+  margin: var(--space-3) 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.md a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.md del {
+  text-decoration: line-through;
+  color: var(--color-text-secondary);
+}
+
+/* A read-only box, outlined in secondary text (5.97:1 on the ground) because a control's edge needs 3:1; ticked is a filled box, never a hue. */
+.md__task {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-left: calc(var(--space-5) * -1);
+  list-style: none;
+}
+
+.md__box {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 0.25em;
+  box-sizing: border-box;
+  border: 1.5px solid var(--color-text-secondary);
+  border-radius: var(--radius-xs);
+  color: var(--color-bg);
+}
+
+.md__box[aria-checked="true"] {
+  border-color: var(--color-text);
+  background: var(--color-text);
+}
+
+.md__taskText {
+  min-width: 0;
+}
+
+.md__tablewrap {
+  margin: 0 0 var(--space-3);
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.md__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.md__cell {
+  min-width: 6rem;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-border);
+  overflow-wrap: break-word;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md__table thead .md__cell {
+  border-top: 0;
+  background: var(--color-hover);
+  font-weight: var(--weight-semibold);
+}
+
+.md__cell--center {
+  text-align: center;
+}
+
+.md__cell--right {
+  text-align: right;
+}

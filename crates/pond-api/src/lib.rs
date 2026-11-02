@@ -2,12 +2,13 @@
 
 pub mod audio_devices;
 mod camera;
-pub mod cleanup;
+pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
 pub mod download_failure;
 pub mod host_guard;
 pub(crate) mod image_normalize;
 pub mod insecure_dev;
+pub(crate) mod member_notes;
 pub mod middleware;
 pub mod model_acquisition;
 pub(crate) mod model_views;
@@ -16,7 +17,9 @@ pub mod musickit;
 pub mod network;
 pub mod oauth_callback;
 pub mod player;
+pub mod pond_admin;
 pub mod quiet_pass;
+mod report_export;
 pub mod rides;
 pub mod routes;
 pub mod runs;
@@ -307,6 +310,8 @@ pub struct AppState {
     pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
     /// The voice-sample route's limiter, shared by every caller; it speaks through `tts`.
     pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
+    /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
+    pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
 }
 
 impl AppState {
@@ -788,6 +793,8 @@ pub fn cors_layer() -> CorsLayer {
             header::CONTENT_TYPE,
             header::HeaderName::from_static(host_guard::CREDENTIAL_HEADER),
         ])
+        // A desktop on `app://giap` saves an export under the pond's own file name only if it can read it.
+        .expose_headers([header::CONTENT_DISPOSITION])
 }
 
 /// True for pairing endpoints (own rate budget); segment-matched so `/handshakes` is not one.

@@ -104,8 +104,12 @@ never overwrite them.
   the full key width, which over-states sliding-window layers under the windowed cache; the header
   does not say which layers slide. A window that fits is kept exactly. One that does not steps down
   16,384 / 12,288 / 8,192 / 6,144 / 4,096 and never below 4,096. The fit is fixed per load, so the
-  retained context and the preamble snapshot's key do not move with free memory turn to turn. A
-  prompt longer than a narrowed window is `ContextLengthExceeded`, which goose answers by compacting.
+  retained context and the preamble snapshot's key do not move with free memory turn to turn; a
+  drafter attached after the load measures it again. A prompt is admitted against the narrowed
+  window (`admit_prompt` in `inference_engine.rs`): a set limit (a pin or the request's
+  `context_limit`) admits a prompt past the engine's own memory estimate, but never past the fit,
+  and without one the estimate bounds it too. A prompt longer than the window is
+  `ContextLengthExceeded`, which goose answers by compacting.
 - **Any other machine**: goose sizes the context from free memory, capped by the model's own
   training length.
 - **LiteRT-LM**: fixed per engine, 8,192 tokens on the budgeted device and 16,384 elsewhere
@@ -216,8 +220,8 @@ error: null result from llama cpp."
 What the engine does now (`goose-local-inference/src/llamacpp/memory.rs`), on Linux with a GPU:
 
 - **Releases the model's files from the page cache** while llama.cpp loads them (its progress
-  callback, every 256 MiB), once the target and its drafter are loaded, and once a picture
-  add-on's encoder is. A released file's pages this process maps are paged out with
+  callback, every 256 MiB), once the target and its drafter are loaded (or the drafter attaches
+  later), and once a picture add-on's encoder is. A released file's pages this process maps are paged out with
   `madvise(MADV_PAGEOUT)` (Linux 5.4+; a no-op for file pages of a file the pond user neither owns
   nor can write), then the file is advised away with `posix_fadvise(POSIX_FADV_DONTNEED)`, which by
   itself skips mapped pages. Neither changes what the mapping reads: a CPU-side tensor row is read

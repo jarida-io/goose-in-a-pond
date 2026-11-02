@@ -227,6 +227,8 @@ export interface Settings {
 
   // API keys are not here: see listSecretKeys / setSecret / deleteSecret (values are write-only).
   searxng_url?: string | null;
+  /** Off by default. On, each web search sends the town from `weather_location_name` to Brave. */
+  web_search_local_results?: boolean;
 
   // Data retention
   retention_event_log_days?: number;
@@ -416,21 +418,30 @@ export interface Schedule {
   prompt: string;
   enabled: boolean;
   timezone?: string;
-  kind?: { type: "agent_prompt"; prompt: string } | { type: "webhook"; webhook_url: string };
+  kind?:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; webhook_url: string }
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
   last_run?: string;
   next_run?: string;
   created_at?: string;
+  /** Ask before running a fire time missed while the Pond was down. */
+  ask_if_missed?: boolean;
+  /** The missed fire time waiting for an answer. */
+  missed_run?: { due_at: string } | null;
 }
 
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */
@@ -438,7 +449,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;
@@ -893,6 +904,181 @@ export interface AgentRecipe {
   parameters?: RecipeParameter[];
   extensions?: RecipeExtensionSpec[];
   activities?: string[];
+  /** The member whose paired device first saved it; `null` when saved from no attributed device. */
+  owner_profile_id?: string | null;
+}
+
+/** One problem `POST /recipes/validate` found, at the path of its field (`giap_role.activations[2].event.on`). */
+export interface RecipeFieldError {
+  path: string;
+  message: string;
+}
+
+/** An activation as the validator reports it, tagged on `kind`. */
+export type ValidatedActivation =
+  | { kind: "delegated" }
+  | { kind: "task_step" }
+  | { kind: "schedule"; cron: string; brief: string; cooldown_secs: number }
+  | { kind: "event"; on: string; brief: string; cooldown_secs: number }
+  | { kind: "agent"; from: string[] };
+
+export interface ValidatedRole {
+  name: string;
+  tool_groups: string[];
+  activations: ValidatedActivation[];
+  hooks: { before: string[]; after: Array<string | { hand_to: string }> };
+  /** The role's own text, examples included; tool schemas are not counted. */
+  preamble_chars: number;
+}
+
+/** A shipped agent template the pond offers, shown only when this pond can run it. Nothing runs until it is turned on. */
+export interface AgentSuggestion {
+  /** The template's name; the key the enable and dismiss routes take. */
+  template: string;
+  title: string;
+  description: string;
+  /** Why it fits this pond, in the pond's words. */
+  why: string;
+  /** What it uses that this pond has, such as presence or a camera. */
+  needs: string[];
+  /** When it would run, such as "Every weekday at 7:00". */
+  activations_summary: string;
+}
+
+/** Where an agent's prefill (its saved start-up copy) stands; spellings are pond-core's `PrefillState`. */
+export type PrefillStatus = "ready" | "building" | "queued" | "idle" | "not_built" | "failed";
+
+export interface PrefillAgent {
+  /** The agent's recipe name; a built-in is `long-task-planner`, `-worker` or `-verifier`. */
+  agent: string;
+  kind: "default" | "member";
+  status: PrefillStatus;
+  compiled_at: string | null;
+  last_used_at: string | null;
+}
+
+/** What the compile pass is doing now; `current` is an agent or a prompt shape. */
+export interface PrefillBuild {
+  active: boolean;
+  current: string | null;
+  done: number;
+  total: number;
+}
+
+/** Answer of `GET /agents/prefills`. */
+export interface PrefillReport {
+  building: PrefillBuild;
+  /** Days unused before a copy is discarded and rebuilt on the agent's next run. */
+  retention_days: number;
+  agents: PrefillAgent[];
+}
+
+/** Where a long task is; spellings are pond-core's `LongTaskState`. */
+export type LongTaskState =
+  | "planning"
+  | "running"
+  | "awaiting_approval"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type LongTaskStepState = "pending" | "running" | "completed" | "failed" | "skipped" | "awaiting_approval";
+
+export interface LongTaskStep {
+  key: string;
+  /** The agent working the step: a recipe name, or `long-task-worker` and its kin. */
+  role: string;
+  state: LongTaskStepState;
+  attempts: number;
+  /** One line on how the step went, once it has. */
+  summary: string | null;
+  /** The pond's own reason, when the step failed. */
+  failure: string | null;
+}
+
+/** What a step made; the body comes from the artifact route, never with the task. */
+export interface LongTaskArtifact {
+  id: string;
+  task_id: string;
+  step_key: string | null;
+  kind: string;
+  title: string;
+  summary: string;
+  tokens: number;
+  created_at: string;
+}
+
+/** What a task is for; spellings are pond-core's `LongTaskKind`. */
+export type LongTaskKind = "general" | "research";
+
+/** A long task as the chat card shows it. */
+export interface LongTask {
+  id: string;
+  goal: string;
+  state: LongTaskState;
+  /** Absent from an older pond, which only has general tasks. */
+  kind?: LongTaskKind;
+  /** How long the answer is meant to be; absent from an older pond. `auto` until its planner decides. */
+  answer?: ResearchAnswer;
+  /** A finished short answer's whole text, shown on the card; `null` for anything else. */
+  answer_text?: string | null;
+  origin_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  steps: LongTaskStep[];
+  artifacts: LongTaskArtifact[];
+  result_artifact_id: string | null;
+  /** Where an open task waits; `null` once it has ended, and absent from an older pond. */
+  queue?: LongTaskQueuePlace | null;
+}
+
+/** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */
+export type LongTaskAhead = { id: string; goal: string; state: LongTaskState } | { another_member: true };
+
+/** One slot works the household's long tasks in the order they were asked for; 1 is the one under way. */
+export interface LongTaskQueuePlace {
+  position: number;
+  of: number;
+  ahead: LongTaskAhead[];
+}
+
+/** One web page a report cites. */
+export interface LongTaskSource {
+  title: string;
+  url: string;
+}
+
+/** A task's whole report, from `GET /long-tasks/{id}/report`; `markdown` joins the summary and every section. */
+export interface LongTaskReport {
+  id: string;
+  title: string;
+  state: LongTaskState;
+  kind: LongTaskKind;
+  markdown: string;
+  /** How many drafted sections the report was joined from. */
+  sections: number;
+  sources: LongTaskSource[];
+  /** How many dated events it holds; a calendar file is offered only above 0. */
+  calendar_events: number;
+}
+
+export type LongTaskExportFormat = "markdown" | "html" | "ics";
+
+export interface LongTaskArtifactBody {
+  id: string;
+  title: string;
+  kind: string;
+  summary: string;
+  body: string;
+}
+
+/** Answer of `POST /recipes/validate`: 200 whether or not the block is acceptable. */
+export interface RecipeValidation {
+  ok: boolean;
+  role: ValidatedRole | null;
+  errors: RecipeFieldError[];
 }
 
 // ── Chat / Streaming ──────────────────────────────────────────
@@ -912,7 +1098,22 @@ export interface ChatStreamRequest {
   images?: ImageAttachment[];
   /** Ask the server to keep this turn running if the connection drops. */
   resumable?: boolean;
+  /** The message is a research question: the pond starts deep research on it. */
+  deep_research?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide from the question. */
+  deep_research_answer?: ResearchAnswer;
 }
+
+/** How long a long task's answer should be: `auto` leaves it to the pond's reading of the ask. */
+export type ResearchAnswer = "auto" | "short" | "report";
+
+/**
+ * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the
+ * orchestrator off; `unidentified` means the pond cannot tell who is asking.
+ */
+export type DeepResearchAvailability =
+  | { available: true }
+  | { available: false; reason: "off" | "unidentified" };
 
 /** What the server is still driving for a session, from `GET .../active-run`. */
 export interface ActiveRun {
@@ -960,6 +1161,8 @@ export interface TurnStats {
   context_pct: number | null;
   model_load_ms: number | null;
   inference_count: number;
+  // Null when no MTP drafter ran; optional because servers built before it omit the key.
+  draft_accept_rate?: number | null;
 }
 
 /** Mid-stream frame when `should_compact` is true. Unlike `CompactionReport`, `turns_remaining`
@@ -1008,6 +1211,8 @@ export interface ChatEvent {
     card_type?: string;
     data?: Record<string, unknown>;
   };
+  /** On "tool_result": shown for this turn only; history keeps a stub, so the card is never stored. */
+  transient?: boolean;
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
   /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
@@ -1101,9 +1306,14 @@ export interface RecoveryRequest {
 export interface PairingCodeResponse {
   code: string | null;
   expires_at?: string;
+  /** The household member a device pairing with this code becomes; null binds it to nobody. */
+  profile_id?: string | null;
   /** Where a phone connects and which key it pins; sent only on this host-only route. */
   pairing: PairingMaterial;
 }
+
+/** Whose a device pairing with a new code becomes: a named member, or explicitly nobody. */
+export type PairingCodeBinding = { profile_id: string } | { unattributed: true };
 
 export interface PairingMaterial {
   hostname: string;
@@ -1180,6 +1390,8 @@ export interface SessionMessage {
   images?: SessionMessageImage[];
   /** Reasoning passages in order, if `persist_thinking` was on; absent (not `[]`) if unrecorded. */
   thinking?: string[];
+  /** On a role="tool" row whose result is not kept: `content` holds only a stub naming the sources. */
+  transient?: boolean;
   /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
 }
@@ -1428,6 +1640,8 @@ export interface WebSearchState {
   provider: "brave";
   configured: boolean;
   status: WebSearchStatus;
+  /** Absent from a pond older than local places. `town` is what a search would send. */
+  local_results?: { enabled: boolean; town: string | null };
 }
 
 /** `PUT /api/v1/web-search/key` when the key was stored. A key Brave refused is a 422 instead. */
@@ -1446,6 +1660,14 @@ export interface WebSearchHit {
   title: string;
   url: string;
   domain: string;
+  snippet: string;
+}
+
+/** One place of a `search` card's optional `places`, present only when local places answered. */
+export interface WebSearchPlace {
+  name: string;
+  /** May be empty. */
+  url: string;
   snippet: string;
 }
 

@@ -61,6 +61,15 @@ void i18n.use(initReactI18next).init({
     downloading: 'Face recognition is getting ready. The Pond is downloading its face models, which can take a while on a slow connection. It switches on by itself when they arrive; there is no need to restart anything.',
     downloadingProgress: '{{file}}: {{done}} of {{total}} MB',
     failed: 'Face recognition could not start on this Pond. {{detail}}',
+  }, weather: {
+    fetching: 'Fetching weather...',
+    nothing: 'The weather tool answered, but sent nothing this card can show.',
+    unknownCondition: 'Unknown',
+    humidity: '{{value}}%', wind: '{{value}} km/h',
+    forecast: 'Forecast', range: '{{from}} – {{to}}',
+    high: 'High {{value}}°', low: 'Low {{value}}°', rain: '{{value}}% chance of rain',
+    rainChance: '{{value}}%',
+    moreDays_one: '{{count}} more day', moreDays_other: '{{count}} more days',
   }, schedules: {
     date: 'Date', dateLabel: 'Run date',
     onceAt: 'Runs once on {{date}} at {{time}}',
@@ -70,6 +79,11 @@ void i18n.use(initReactI18next).init({
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',
     fingerprint: 'Public-key fingerprint', address: 'HTTPS address',
     manual: 'For manual pairing, enter this address, fingerprint, and pairing code on your phone while connected to the same LAN.',
+    owner: 'Who will use this device?',
+    ownerNobody: 'Nobody in particular (a guest or a shared screen)',
+    boundTo: 'A device that pairs with this code becomes {{name}}\'s, and the Pond knows it is {{name}} speaking. A phone that is already paired is linked by pairing it again with this code.',
+    boundToNobody: 'A device that pairs with this code belongs to nobody. The Pond cannot tell who is speaking on it, and once the household has more than one member it treats them as a guest: nothing is remembered for them and nothing addressed to a member reaches it.',
+    membersFailed: 'The household members could not be read, so this code can only be bound as the Pond decides. Reload this page to try again.',
   } } } },
 });
 export default i18n;

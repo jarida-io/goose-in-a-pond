@@ -321,6 +321,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     Pond {

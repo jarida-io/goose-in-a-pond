@@ -133,6 +133,8 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         }
     }
 

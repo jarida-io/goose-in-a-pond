@@ -1,4 +1,5 @@
 pub mod account_credentials;
+pub mod agent_suggestion;
 pub mod camera_storage;
 pub mod conversation_extractor;
 pub mod device_attribution;
@@ -18,6 +19,7 @@ pub mod memory_repository;
 pub mod onboarding;
 pub mod place_lookup;
 pub mod profile;
+pub mod profile_interview;
 pub mod prompt_extra;
 pub mod prompt_template;
 pub mod proposal;

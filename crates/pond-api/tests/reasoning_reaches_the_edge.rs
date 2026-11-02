@@ -69,6 +69,7 @@ struct StatsAgent {
     reasoning: Option<u32>,
     /// Attempts beyond the first; not an `Option`, since every turn here was observed.
     reengagements: u32,
+    draft_accept_rate: Option<f32>,
 }
 
 #[async_trait::async_trait]
@@ -89,6 +90,7 @@ impl Agent for StatsAgent {
         let model_role = request.model_role.clone();
         let reasoning = self.reasoning;
         let reengagements = self.reengagements;
+        let draft_accept_rate = self.draft_accept_rate;
         let stream = async_stream::stream! {
             yield Ok(AgentStreamEvent::Text { content: "Considered answer".to_string() });
             let mut stats = TurnStats {
@@ -102,6 +104,7 @@ impl Agent for StatsAgent {
                 context_limit_tokens: Some(3072),
                 inference_count: 1,
                 reengagements,
+                draft_accept_rate,
                 ..Default::default()
             };
             stats.finalize_rates();
@@ -231,6 +234,7 @@ async fn make_app(agent: Arc<dyn Agent>) -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     Harness {
@@ -298,6 +302,7 @@ async fn both_stream_routes_report_the_reasoning_count_beside_the_completion_cou
         let h = make_app(Arc::new(StatsAgent {
             reasoning: Some(240),
             reengagements: 0,
+            draft_accept_rate: None,
         }))
         .await;
         let frames = drive(&h.app, route, &format!("reasoning-{i}")).await;
@@ -335,6 +340,7 @@ async fn a_turn_nobody_counted_reads_as_null_and_not_as_zero() {
         let h = make_app(Arc::new(StatsAgent {
             reasoning: None,
             reengagements: 0,
+            draft_accept_rate: None,
         }))
         .await;
         let frames = drive(&h.app, route, &format!("uncounted-{i}")).await;
@@ -366,6 +372,7 @@ async fn both_stream_routes_report_what_the_empty_turn_recovery_cost() {
         let h = make_app(Arc::new(StatsAgent {
             reasoning: Some(240),
             reengagements: 2,
+            draft_accept_rate: None,
         }))
         .await;
         let frames = drive(&h.app, route, &format!("reengaged-{i}")).await;
@@ -385,6 +392,44 @@ async fn both_stream_routes_report_what_the_empty_turn_recovery_cost() {
     }
 }
 
+/// The drafter's acceptance is the only sign speculative decoding ran; no turn without it is `0`.
+#[tokio::test]
+async fn both_stream_routes_report_the_drafters_acceptance_or_null() {
+    for (i, route) in STREAM_ROUTES.iter().enumerate() {
+        let h = make_app(Arc::new(StatsAgent {
+            reasoning: Some(240),
+            reengagements: 0,
+            draft_accept_rate: Some(0.75),
+        }))
+        .await;
+        let frames = drive(&h.app, route, &format!("drafted-{i}")).await;
+        let stats = turn_stats_of(&frames, route);
+        assert_eq!(
+            stats["draft_accept_rate"], 0.75,
+            "{route} dropped the drafter's acceptance rate. Frame: {stats}"
+        );
+
+        let h = make_app(Arc::new(StatsAgent {
+            reasoning: Some(240),
+            reengagements: 0,
+            draft_accept_rate: None,
+        }))
+        .await;
+        let frames = drive(&h.app, route, &format!("undrafted-{i}")).await;
+        let stats = turn_stats_of(&frames, route);
+        let reported = stats
+            .as_object()
+            .and_then(|o| o.get("draft_accept_rate"))
+            .unwrap_or_else(|| {
+                panic!("{route}'s turn_stats frame has no `draft_accept_rate` key: {stats}")
+            });
+        assert!(
+            reported.is_null(),
+            "{route} reported a turn with no drafter as a rate. Frame: {stats}"
+        );
+    }
+}
+
 /// Zero is a measurement: omitting it would teach clients that missing means zero.
 #[tokio::test]
 async fn an_ordinary_turn_reports_zero_re_engagements_rather_than_nothing() {
@@ -392,6 +437,7 @@ async fn an_ordinary_turn_reports_zero_re_engagements_rather_than_nothing() {
         let h = make_app(Arc::new(StatsAgent {
             reasoning: Some(240),
             reengagements: 0,
+            draft_accept_rate: None,
         }))
         .await;
         let frames = drive(&h.app, route, &format!("ordinary-{i}")).await;
@@ -420,6 +466,7 @@ async fn the_stats_frame_arrives_before_the_stream_closes_on_both_routes() {
         let h = make_app(Arc::new(StatsAgent {
             reasoning: Some(240),
             reengagements: 0,
+            draft_accept_rate: None,
         }))
         .await;
         let frames = drive(&h.app, route, &format!("ordering-{i}")).await;
@@ -488,6 +535,7 @@ async fn the_usage_summary_totals_reasoning_and_says_how_many_turns_counted_one(
     let h = make_app(Arc::new(StatsAgent {
         reasoning: None,
         reengagements: 0,
+        draft_accept_rate: None,
     }))
     .await;
 
@@ -541,6 +589,7 @@ async fn a_pond_where_nothing_counted_reports_zero_turns_not_just_zero_tokens() 
     let h = make_app(Arc::new(StatsAgent {
         reasoning: None,
         reengagements: 0,
+        draft_accept_rate: None,
     }))
     .await;
     h.storage

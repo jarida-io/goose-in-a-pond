@@ -242,6 +242,7 @@ async fn make_app(installed: Arc<Installed>) -> (axum::Router, tempfile::TempDir
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        pond_admin: None,
     });
 
     (

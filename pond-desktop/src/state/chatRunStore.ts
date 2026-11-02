@@ -12,11 +12,14 @@ import type {
 } from "./reducer";
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
+import { keptResultOf, type KeptResult } from "./keptResults";
+import { startedTaskId, startedTaskIdOfRow } from "../longtasks/longTaskWords";
 import { ApiError } from "../api/types";
 import type {
   ChatEvent,
   ContextWarning,
   ImageAttachment,
+  ResearchAnswer,
   SessionMessage,
   TurnStats,
 } from "../api/types";
@@ -43,12 +46,16 @@ export interface Message {
   turnStats?: TurnStats;
   error?: boolean;
   historyToolNames?: string[];
+  /** Replayed history only: results the pond did not keep, which a reload shows as a line, not a card. */
+  keptResults?: KeptResult[];
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
   turnLimit?: number;
   /** From the turn's `context_warning` frame; renders the pressure line and "Compact now". */
   contextWarning?: ContextWarning;
   /** Folded from `subagent_progress` frames; unlike the other notes, rendered while streaming. */
   delegations?: SubagentRun[];
+  /** Long tasks this turn started (`task_start`), which the chat draws as live cards. */
+  longTaskIds?: string[];
   /** A live send's local preview URLs, or attachment URLs for replayed history. */
   images?: string[];
   /** session_messages.id; unset on a live turn until `done` backfills it, disabling its actions. */
@@ -69,6 +76,8 @@ function friendlyToolStatus(rawName: string): string {
     get_user_profile: "Looking up your profile…",
     list_skills: "Checking my skills…",
     search_web: "Searching the web…",
+    read_web_page: "Reading the page…",
+    task_start: "Getting that started…",
   };
   if (map[bare]) return map[bare];
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
@@ -88,8 +97,19 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
 } {
   const out: Message[] = [];
   const pending: HistoryImages[] = [];
+  // A turn's tool rows are stored just before its assistant row, so they wait for it.
+  let kept: KeptResult[] = [];
+  let started: string[] = [];
   for (const m of raw) {
-    if (m.role === "tool") continue;
+    if (m.role === "tool") {
+      const result = keptResultOf(m);
+      if (result) kept.push(result);
+      const task = startedTaskIdOfRow(m);
+      if (task && !started.includes(task)) started.push(task);
+      continue;
+    }
+    const keptResults = kept.length > 0 ? kept : undefined;
+    kept = [];
     if (m.role === "assistant") {
       const hasContent = m.content.trim().length > 0;
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
@@ -105,11 +125,15 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
         role: "agent",
         text: m.content,
         historyToolNames,
+        keptResults,
+        longTaskIds: started.length > 0 ? started : undefined,
         thinkingBlocks,
         backendId: m.id,
         liked: m.liked ?? null,
       });
+      started = [];
     } else {
+      started = [];
       out.push({
         id: ++_msgId,
         role: "user",
@@ -182,8 +206,13 @@ export interface RefusedDraft {
   attachments: PreparedImage[];
   /** The server's `error` sentence; a composer appends its own clause. */
   message: string;
-  /** The server's `code`, e.g. "vision_not_ready"; absent when the error had no structured body. */
+  /**
+   * The server's `code` (e.g. "vision_not_ready"), else the `reason` of a refusal that names one
+   * (deep research's); absent when the error had no structured body.
+   */
   code?: string;
+  /** The refused turn was a research question, so a composer can put its mode back. */
+  deepResearch?: boolean;
 }
 
 /** App state and dispatch from `AppContextProvider`; the module-scope driver has neither. */
@@ -364,6 +393,17 @@ export interface SendTurn {
    * and ignored if passed: a refused turn must hand back something the tray can re-render.
    */
   attachments?: PreparedImage[];
+  /** The text is a research question: the pond starts deep research on it. Never queued. */
+  deepResearch?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide. */
+  deepResearchAnswer?: ResearchAnswer;
+}
+
+/** `code` where the body has one, else its `reason`: deep research's refusals name theirs that way. */
+function refusalCode(e: ApiError): string | undefined {
+  if (e.code) return e.code;
+  const reason = (e.body as { reason?: unknown } | null | undefined)?.reason;
+  return typeof reason === "string" ? reason : undefined;
 }
 
 /** Takes and clears the refused draft, so a double effect or a second composer can't restore it twice. */
@@ -379,7 +419,8 @@ export function takeRefusedDraft(): RefusedDraft | null {
 /** Send, or queue while a reply streams. Attachments never queue: they belong to their turn. */
 export function sendTurn(turn: SendTurn): void {
   if (state.busy) {
-    if (!turn.text) return;
+    // The queue holds text only, so a research question queued would run as an ordinary message.
+    if (!turn.text || turn.deepResearch) return;
     state.queued = [...state.queued, turn.text];
     commit();
     return;
@@ -506,9 +547,14 @@ async function consume(
             ? { ...c, data: cardData, ...(renderHint ? { renderHint } : {}) }
             : c,
         );
+        const text = ev.content ?? (typeof cardData.result === "string" ? cardData.result : undefined);
+        const tool = evTool ?? last.cards.find((c) => c.callId === evId)?.tool;
+        const task = startedTaskId(text, tool);
+        const longTaskIds =
+          task && !last.longTaskIds?.includes(task) ? [...(last.longTaskIds ?? []), task] : last.longTaskIds;
         return [
           ...prev.slice(0, -1),
-          { ...last, cards: newCards, status: undefined },
+          { ...last, cards: newCards, longTaskIds, status: undefined },
         ];
       });
     } else if (ev.type === "review_status" && ev.content) {
@@ -681,6 +727,8 @@ async function runTurn(turn: SendTurn): Promise<void> {
         images,
         // Resumable: the run outlives this window, which the reattach path depends on.
         true,
+        turn.deepResearch ? true : undefined,
+        turn.deepResearch ? turn.deepResearchAnswer : undefined,
       ),
       ctx,
     );
@@ -695,7 +743,13 @@ async function runTurn(turn: SendTurn): Promise<void> {
       );
       // Handed back, not revoked: the composer's tray renders them again.
       for (const url of previewUrls) state.ownedPreviews.delete(url);
-      state.refusedDraft = { text, attachments, message: e.message, code: e.code };
+      state.refusedDraft = {
+        text,
+        attachments,
+        message: e.message,
+        code: refusalCode(e),
+        ...(turn.deepResearch ? { deepResearch: true } : {}),
+      };
     } else {
       // Also logged: with no surface mounted, the bubble isn't read until someone comes back.
       console.warn("Chat turn failed:", e);

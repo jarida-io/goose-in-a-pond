@@ -112,7 +112,7 @@ function applyToDOM(theme: ThemeChoice, accent: AccentName, density: DensityChoi
   // readable() is a no-op whenever the raw accent already clears the floor.
   const edgeColor = readable(ink.color.accent, ink.color.bg, "nonText");
   if (edgeColor !== ink.color.accent) {
-    // eslint-disable-next-line no-console -- a silent accent substitution is a hard debug later.
+    // A silent accent substitution is a hard debug later.
     console.warn(
       `[theme] ${accent} only clears ${ratio(ink.color.accent, ink.color.bg).toFixed(2)}:1 on ` +
         `--color-bg in ${resolved} mode; lightened --border-ink/--shadow-ink to ${edgeColor} for 3:1.`,

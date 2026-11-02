@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
 use pond_core::mcp::domain::web_search::{
-    WebSearchStatus, BRAVE_API_BASE, BRAVE_TIMEOUT, BRAVE_TOKEN_HEADER, BRAVE_WEB_SEARCH_PATH,
-    WEB_SEARCH_PROVIDER,
+    local_town, WebSearchStatus, BRAVE_API_BASE, BRAVE_TIMEOUT, BRAVE_TOKEN_HEADER,
+    BRAVE_WEB_SEARCH_PATH, WEB_SEARCH_PROVIDER,
 };
 use pond_core::mcp::services::web_search_status::{self, WebSearchStatusBoard};
 use pond_core::shared::services::egress;
@@ -70,7 +70,9 @@ fn no_store() -> Response {
     )
 }
 
-/// `GET /api/v1/web-search`: `{provider, configured, status}`.
+/// `GET /api/v1/web-search`: `{provider, configured, status, local_results: {enabled, town}}`.
+/// `town` is what a search would send with local places on, so an app can say so before the
+/// switch is turned; `null` when the pond has no place name.
 pub async fn status(
     State(state): State<Arc<AppState>>,
     layered: Option<Extension<WebSearchBackend>>,
@@ -90,10 +92,21 @@ pub async fn status(
         }
     };
     let status = backend.board.status_for(stored.as_deref());
+    let settings = match state.settings_repo.get().await {
+        Ok(settings) => settings,
+        Err(e) => {
+            tracing::warn!(error = %e, "web search: settings unreadable; reporting the defaults");
+            Default::default()
+        }
+    };
     Json(json!({
         "provider": WEB_SEARCH_PROVIDER,
         "configured": stored.is_some(),
         "status": status.as_str(),
+        "local_results": {
+            "enabled": settings.web_search_local_results,
+            "town": local_town(&settings.weather_location_name),
+        },
     }))
     .into_response()
 }

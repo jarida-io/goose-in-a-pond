@@ -85,6 +85,8 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
         tool_group_allowlist: None,
         warmup: false,
         suggestion_context: None,
+        deep_research_task: None,
+        interview: None,
     };
 
     let mut stream = adapter.chat_stream(request).await.unwrap();

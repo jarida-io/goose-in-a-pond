@@ -364,9 +364,13 @@ pub fn is_vision_allowlisted(dir: &str) -> bool {
     if let Ok(env_val) = std::env::var("POND_VISION_ALLOWLIST") {
         let val = env_val.trim();
         if val == "1" || val.eq_ignore_ascii_case("gemma") || val.eq_ignore_ascii_case("all") {
-            return GEMMA_VISION_ALLOWLIST.iter().any(|d| d.eq_ignore_ascii_case(dir));
+            return GEMMA_VISION_ALLOWLIST
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(dir));
         }
-        return val.split(',').any(|part| part.trim().eq_ignore_ascii_case(dir));
+        return val
+            .split(',')
+            .any(|part| part.trim().eq_ignore_ascii_case(dir));
     }
     false
 }

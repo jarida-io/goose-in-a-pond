@@ -215,6 +215,7 @@ impl ToolDispatcher for McpToolDispatcher {
             Err(e) => Ok(ToolCallResult {
                 content: e.to_string(),
                 success: false,
+                keep: None,
             }),
         }
     }
@@ -412,6 +413,10 @@ fn parse_tool_name(tool_name: &str) -> Result<(&str, &str)> {
 /// Extract text content from rmcp's CallToolResult.
 fn convert_rmcp_result(result: RmcpCallToolResult) -> ToolCallResult {
     let success = !result.is_error.unwrap_or(false);
+    let keep = result
+        .meta
+        .as_ref()
+        .and_then(|meta| pond_core::mcp::domain::transient_result::keep_from_meta(&meta.0));
     let content = result
         .content
         .into_iter()
@@ -419,7 +424,11 @@ fn convert_rmcp_result(result: RmcpCallToolResult) -> ToolCallResult {
         .collect::<Vec<_>>()
         .join("\n");
 
-    ToolCallResult { content, success }
+    ToolCallResult {
+        content,
+        success,
+        keep,
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

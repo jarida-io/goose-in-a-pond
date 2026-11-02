@@ -505,6 +505,7 @@ impl Agent for PondAgent {
                             tool: name.clone(),
                             content: result_text.clone(),
                             card: None,
+                            keep: None,
                         }))
                         .await;
 
@@ -718,6 +719,8 @@ mod tests {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
+                interview: None,
             })
             .await
             .unwrap();
@@ -741,6 +744,8 @@ mod tests {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
+                interview: None,
             })
             .await
             .unwrap();
@@ -822,6 +827,8 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
         let prompt = agent
             .build_system_prompt(&Settings::default(), &request)

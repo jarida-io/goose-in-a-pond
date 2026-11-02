@@ -4,7 +4,8 @@
 //! `OnceLock`. In pond-core because CI only runs pond-core's tests.
 
 use pond_core::mcp::domain::tool_group::{
-    ORCHESTRATOR_EXTENSION, TOOLKIT_EXTENSION, TOOL_GROUPS, TRAVEL_EXTENSION,
+    INTERVIEW_EXTENSION, ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TASK_WORK_EXTENSION,
+    TOOLKIT_EXTENSION, TOOL_GROUPS, TRAVEL_EXTENSION,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,9 @@ fn resolve_argument(arg: &str) -> String {
         "TOOLKIT_EXTENSION" => TOOLKIT_EXTENSION.to_string(),
         "ORCHESTRATOR_EXTENSION" => ORCHESTRATOR_EXTENSION.to_string(),
         "TRAVEL_EXTENSION" => TRAVEL_EXTENSION.to_string(),
+        "TASKS_EXTENSION" => TASKS_EXTENSION.to_string(),
+        "TASK_WORK_EXTENSION" => TASK_WORK_EXTENSION.to_string(),
+        "INTERVIEW_EXTENSION" => INTERVIEW_EXTENSION.to_string(),
         _ => panic!(
             "giap_registration.rs registers an extension under `{arg}`, which this test cannot \
              resolve to a name. Do NOT delete the call from the parser's view and do not make \
@@ -135,7 +139,7 @@ fn every_registered_extension_is_in_the_catalog_and_the_reverse() {
 /// Pinned here because `AGENTS.md` is untracked; update its sentence in the same change.
 #[test]
 fn the_extension_count_is_pinned() {
-    const CLAIMED: usize = 13;
+    const CLAIMED: usize = 16;
 
     // The registration count, which the test above ties to the catalog's.
     let registered = registered_extensions_from_source().len();
@@ -233,6 +237,21 @@ const DISPATCHER_EXCLUSIONS: &[(&str, &str)] = &[
     (
         "giap-vision",
         "needs the CameraStorage installed by pond-server's init_vision_deps",
+    ),
+    (
+        "giap-tasks",
+        "a task's owner and origin come from a live turn authority, which only a chat turn \
+         publishes",
+    ),
+    (
+        "giap-interview",
+        "every call acts for the member speaking in an engine session, which these routes do \
+         not carry, and a save needs that member's reply in their own interview",
+    ),
+    (
+        "giap-task-work",
+        "every call resolves to a step through the helper's engine session, which these \
+         routes do not carry",
     ),
 ];
 

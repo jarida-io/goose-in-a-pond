@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { api } from "../../../api/PondApiClient";
 import { powerStateOf } from "../../../sections/devicePower";
-import { timeSince } from "../../../sections/Devices";
+import { timeSince } from "../../../sections/timeSince";
 import type { DeviceData } from "../../data/mockHome";
 import { HubIco } from "../../primitives/HubIco";
 import { HP_PATHS } from "../../primitives/icons";

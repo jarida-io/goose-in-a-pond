@@ -36,7 +36,8 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
+    routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
+    SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
@@ -354,6 +355,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/run-now", post(run_schedule_now))
+        .route("/schedules/{id}/missed/run", post(run_missed_schedule))
+        .route("/schedules/{id}/missed/skip", post(skip_missed_schedule))
         .route("/schedules/{id}/runs", get(list_schedule_runs))
         .route("/schedules/events", get(schedule_events_sse))
         // ── Sensor rules ───────────────────────────────────────────────────
@@ -487,6 +490,20 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(list_prompt_extras).post(upsert_prompt_extra),
         )
         .route("/agent/extras/{key}", delete(delete_prompt_extra))
+        // A member's own notes and setup interview, from that member's own devices.
+        .route("/profiles/{id}/notes", get(crate::member_notes::list_notes))
+        .route(
+            "/profiles/{id}/notes/{key}",
+            put(crate::member_notes::put_note).delete(crate::member_notes::delete_note),
+        )
+        .route(
+            "/profiles/{id}/interview",
+            get(crate::member_notes::interview_status).post(crate::member_notes::start_interview),
+        )
+        .route(
+            "/profiles/{id}/interview/approve",
+            post(crate::member_notes::approve_interview),
+        )
         // ── Turn-level telemetry ──────────────────────────────────────────────
         .route("/telemetry/turns", get(get_telemetry_turns))
         .route("/telemetry/summary", get(get_telemetry_summary))
@@ -517,6 +534,57 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/skills/{id}", put(update_skill).delete(delete_skill))
         // ── Recipes ───────────────────────────────────────────────────────────
         .route("/recipes", get(list_recipes).post(create_recipe))
+        .route("/recipes/validate", post(validate_recipe))
+        .route("/agents/suggestions", get(agent_suggestions))
+        .route(
+            "/agents/suggestions/{template}/enable",
+            post(enable_agent_suggestion),
+        )
+        .route(
+            "/agents/suggestions/{template}/dismiss",
+            post(dismiss_agent_suggestion),
+        )
+        .route("/long-tasks", get(list_long_tasks))
+        .route("/long-tasks/deep-research", get(deep_research_availability))
+        .route("/long-tasks/queue", get(long_task_queue))
+        .route("/long-tasks/{id}", get(get_long_task))
+        .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route(
+            "/long-tasks/{id}/artifacts/{artifact_id}",
+            get(get_long_task_artifact),
+        )
+        .route("/long-tasks/{id}/report", get(get_long_task_report))
+        .route("/long-tasks/{id}/export", get(export_long_task))
+        // My Pond: a member's device, unlocked with the admin card (`pond_admin.rs`).
+        .route("/admin/status", get(crate::pond_admin::status))
+        .route("/admin/unlock", post(crate::pond_admin::unlock))
+        .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/overview", get(crate::pond_admin::overview))
+        .route(
+            "/admin/files",
+            get(crate::pond_admin::list_files).delete(crate::pond_admin::delete_file),
+        )
+        .route("/admin/caches", get(crate::pond_admin::caches))
+        .route(
+            "/admin/caches/{id}/clear",
+            post(crate::pond_admin::clear_cache),
+        )
+        .route("/admin/tasks", get(crate::pond_admin::tasks))
+        .route("/admin/tasks/{id}", delete(crate::pond_admin::delete_task))
+        .route(
+            "/admin/tasks/{id}/artifacts/{artifact_id}",
+            delete(crate::pond_admin::delete_artifact),
+        )
+        .route("/admin/health", get(crate::pond_admin::health))
+        .route("/admin/power", get(crate::pond_admin::power))
+        .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
+        .route("/admin/power/restart", post(crate::pond_admin::restart))
+        .route("/agents/prefills", get(agent_prefills))
+        .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
+        .route(
+            "/agents/{name}/prefill/rebuild",
+            post(rebuild_agent_prefill),
+        )
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -852,7 +920,8 @@ async fn emit_pairing_outcome(
     } else {
         tracing::warn!(
             kind = "pairing_rejected",
-            device = device_name.unwrap_or("unnamed"),
+            // A phone's name is often its owner's ("Amina's iPhone").
+            named = device_name.is_some(),
             reason = reason.unwrap_or("unspecified"),
             method,
             "pairing rejected"
@@ -1461,7 +1530,27 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({"status": "completed"})))
+    Ok(Json(json!({
+        "status": "completed",
+        "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
+    })))
+}
+
+/// The owner's setup interview, offered once setup completes: where it stands and how to start it.
+async fn owner_interview_offer(state: &Arc<AppState>, owner: Option<&str>) -> Value {
+    let Some(owner) = owner.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    let Some(service) = crate::member_notes::interview_service(state) else {
+        return Value::Null;
+    };
+    let current = service.get(owner).await.ok().flatten();
+    let view = crate::member_notes::interview_json(owner, current.as_ref());
+    json!({
+        "profile_id": owner,
+        "status": view["status"],
+        "start": format!("/api/v1/profiles/{owner}/interview"),
+    })
 }
 
 /// The device that claimed the pond paired before it had members, so it belonged to nobody; it
@@ -1476,7 +1565,8 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             device = device.unwrap_or("unknown"),
             error = %why,
             "onboarding completed, but the device that claimed this pond was not attributed \
-             to its owner; it stays unattributed until a pairing code or Devices binds it"
+             to its owner; it stays unattributed until it pairs again with a code issued for a \
+             member"
         );
     };
     let claimant = match claims.claimed_by().await {
@@ -1678,6 +1768,16 @@ struct ChatRequest {
     /// Grounding context when this turn was initiated from a suggestion card.
     #[serde(default)]
     suggestion_context: Option<pond_core::user_data::domain::suggestion::SuggestionContext>,
+    /// The member asked for deep research: the pond starts a research task on the message.
+    #[serde(default)]
+    deep_research: bool,
+    /// How long that research's answer should be: `short`, `report`, or `auto` (or absent) for
+    /// the planner to read from the ask. Anything else is read as `auto`.
+    #[serde(default)]
+    deep_research_answer: Option<String>,
+    /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
+    #[serde(skip)]
+    deep_research_for: Option<String>,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -2070,6 +2170,12 @@ async fn tts_synthesise(
 async fn chat_stream(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
@@ -2099,6 +2205,21 @@ async fn chat_stream(
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
     refuse_without_a_model(&state).await?;
     image_limit_response(&req.images)?;
+    req.deep_research_for = None;
+    if req.deep_research {
+        let member = long_task_caller(
+            &state,
+            principal.as_ref(),
+            peer,
+            insecure.is_some(),
+            tailnet.is_some(),
+        )
+        .await;
+        if let Some(refusal) = deep_research_refusal(&state, member.as_deref()).await {
+            return Err(refusal.response());
+        }
+        req.deep_research_for = member;
+    }
 
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
@@ -2440,6 +2561,10 @@ enum StreamStep {
 
 /// The one `tool_result` SSE frame shape; the MCP-UI renderer keys off the optional `ui`.
 fn tool_result_frame(tool: &str, id: &str, content: &str, ui_hint: Option<Value>) -> String {
+    tool_result_event(tool, id, content, ui_hint).to_string()
+}
+
+fn tool_result_event(tool: &str, id: &str, content: &str, ui_hint: Option<Value>) -> Value {
     let mut ev = json!({
         "type": "tool_result",
         "tool": tool,
@@ -2449,7 +2574,7 @@ fn tool_result_frame(tool: &str, id: &str, content: &str, ui_hint: Option<Value>
     if let Some(ui) = ui_hint {
         ev["ui"] = ui;
     }
-    ev.to_string()
+    ev
 }
 
 /// The one `turn_stats` SSE frame shape. `reasoning_tokens` is never deducted from
@@ -2473,6 +2598,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
         "inference_count": s.inference_count,
         // Runs caused by thinking without answering, which `inference_count` lumps with tool runs.
         "reengagements": s.reengagements,
+        // Null when no MTP drafter ran: the only per-turn sign that speculative decoding did.
+        "draft_accept_rate": s.draft_accept_rate,
     })
     .to_string()
 }
@@ -2549,24 +2676,32 @@ impl TurnAccumulator {
                 id,
                 content,
                 card,
+                keep,
             } => {
                 if let Some(start) = self.tool_call_start.take() {
                     self.last_tool_latency_ms = Some(start.elapsed().as_millis() as u64);
                 }
                 let (clean_content, ui_hint) = tool_result_parts(&content, card.as_deref());
-                self.tool_results.push(
-                    json!({
-                        "tool_call_id": id,
-                        "tool": tool,
-                        "content": clean_content,
-                        "arguments": self
-                            .tool_call_inputs
-                            .remove(&id)
-                            .unwrap_or_else(|| "{}".to_string()),
-                    })
-                    .to_string(),
-                );
-                StreamStep::Frame(tool_result_frame(&tool, &id, &clean_content, ui_hint))
+                let mut row = json!({
+                    "tool_call_id": id,
+                    "tool": tool,
+                    "content": clean_content,
+                    "arguments": self
+                        .tool_call_inputs
+                        .remove(&id)
+                        .unwrap_or_else(|| "{}".to_string()),
+                });
+                // ChatService stores the stub in place of the content (`persist_assistant_turn`).
+                if let Some(keep) = &keep {
+                    row["keep"] = json!(keep);
+                }
+                self.tool_results.push(row.to_string());
+                let mut frame = tool_result_event(&tool, &id, &clean_content, ui_hint);
+                // Shown during the turn; a client must not keep it, as history keeps only the stub.
+                if keep.is_some() {
+                    frame["transient"] = json!(true);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::Text { content } => {
                 let visible = self.thought.push(&content);
@@ -2836,7 +2971,41 @@ async fn drive_turn(
 
     let model_name_for_done = settings.chat_model.clone();
 
+    // ── Deep research ───────────────────────────────────────────────────
+    // Started by the pond rather than left to the model, and folded through `absorb` below as
+    // the prime's own `task_start` call is, so the chat card finds it live and in history.
+    let deep_research_task = match req.deep_research_for.as_deref() {
+        None => None,
+        Some(member) => match start_deep_research(
+            state,
+            member,
+            &req.message,
+            &session_id,
+            req.deep_research_answer.as_deref(),
+        )
+        .await
+        {
+            Ok(research) => Some(research),
+            Err(e) => {
+                let data =
+                    json!({"error": format!("Could not start deep research: {e}")}).to_string();
+                run.push(data, true);
+                run.finish(crate::runs::RunState::Failed);
+                return;
+            }
+        },
+    };
+
     use pond_core::shared::domain::agent::AgentRequest;
+
+    // The speaker's own setup interview runs in this session: its state, and only its tools.
+    let interview = interview_turn_for(state, &session_id, &turn_scope).await;
+    let tool_group_allowlist = match &interview {
+        Some(_) => Some(vec![
+            pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.to_string(),
+        ]),
+        None => req.tool_group_allowlist.clone(),
+    };
 
     let agent_req = AgentRequest {
         message: req.message.clone(),
@@ -2847,9 +3016,11 @@ async fn drive_turn(
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
         profile_context: profile_context_for(state, &turn_scope).await,
-        tool_group_allowlist: req.tool_group_allowlist.clone(),
+        tool_group_allowlist,
         warmup: false,
         suggestion_context: req.suggestion_context.clone(),
+        deep_research_task: deep_research_task.clone(),
+        interview: interview.map(|turn| turn.context),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -2857,6 +3028,16 @@ async fn drive_turn(
     } else {
         crate::thought_filter::ThoughtFilter::new()
     });
+    if let Some(research) = &deep_research_task {
+        for event in pond_core::shared::services::deep_research::opening_events(
+            &req.message,
+            &research.task_id,
+        ) {
+            if let StreamStep::Frame(data) = turn.absorb(event) {
+                run.push(data, false);
+            }
+        }
+    }
     let mut agent_stream = match state.agent.chat_stream(agent_req).await {
         Ok(s) => s,
         Err(e) => {
@@ -2967,7 +3148,10 @@ async fn drive_turn(
                                     }
                                 }
                             } else {
-                                tracing::warn!("Unrecognised tool-call envelope: {body}");
+                                tracing::warn!(
+                                    body_chars = body.chars().count(),
+                                    "Unrecognised tool-call envelope"
+                                );
                             }
                         }
                     }
@@ -4219,7 +4403,7 @@ async fn retitle_session(
                 kind = "session_retitled",
                 trigger = "manual_one",
                 session_id = %session_id,
-                title = %title,
+                title_chars = title.chars().count(),
             );
             json!({ "session_id": session_id, "outcome": "retitled", "title": title })
         }
@@ -5634,6 +5818,64 @@ fn geocode_target(
     (name_changed || coords_unset).then(|| name.to_string())
 }
 
+/// `primary_profile_id` must name a household member or be cleared (`null` or `""`).
+///
+/// It is a key-value row, not a foreign key, so nothing else stops a display name landing in it,
+/// and a dashboard once offered it as a free-text box: one household typed its owner's name, and
+/// every reader that looks the id up (the claimant's attribution at onboarding completion, the
+/// `Household` prompt particulars) then found nobody, without a word.
+async fn refuse_primary_profile_that_is_not_a_member(
+    state: &Arc<AppState>,
+    patch: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(id) = patch
+        .get("primary_profile_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    match state.profile_repo.get(id).await {
+        Ok(Some(member)) => {
+            tracing::info!(
+                kind = "primary_profile_set",
+                profile_id = %member.id,
+                "the household's primary member is set"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::warn!(
+                kind = "primary_profile_refused",
+                value = %id,
+                "refused a primary_profile_id that names no household member"
+            );
+            let message = "Choose a household member. This takes a member's id from \
+                           GET /api/v1/profiles, not a name.";
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("primary_profile_id: {message}"),
+                    "fields": [{ "field": "primary_profile_id", "message": message }],
+                })),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = "primary_profile_unverified",
+                error = %e,
+                "could not read the household members, so primary_profile_id was not saved"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Could not check that household member, so nothing was saved.",
+                })),
+            ))
+        }
+    }
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -5677,6 +5919,8 @@ async fn update_settings(
             })),
         ));
     }
+
+    refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -7023,23 +7267,10 @@ async fn cleanup_models(
     };
 
     // Never delete a blob whose basename matches an assigned model.
-    let mut protected: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(model_repo) = &state.model_repo {
-        if let Ok(assignments) = model_repo.list_assignments().await {
-            for a in &assignments {
-                if let Ok(Some(m)) = model_repo.get_by_id(&a.model_id).await {
-                    if let Some(fname) = m.filename {
-                        protected.insert(fname);
-                    }
-                    // Legacy migrations left blobs named by bare model name.
-                    protected.insert(m.name.clone());
-                    if let Some(cfg) = m.config_filename {
-                        protected.insert(cfg);
-                    }
-                }
-            }
-        }
-    }
+    let protected = match &state.model_repo {
+        Some(model_repo) => crate::cleanup::protected_model_names(model_repo.as_ref()).await,
+        None => std::collections::HashSet::new(),
+    };
 
     let report = crate::cleanup::run_cleanup(&data_dir, &protected)
         .await
@@ -8284,6 +8515,20 @@ async fn delete_profile(
                 })),
             )
         })?;
+
+    // Explicit, since `PRAGMA foreign_keys` is per connection: the member's notes and interview.
+    if let Some(interviews) = crate::member_notes::interview_service(&state) {
+        interviews.forget_member(&id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!(
+                        "could not remove the member's notes, so the member was not deleted: {e}"
+                    )
+                })),
+            )
+        })?;
+    }
 
     // `primary_profile_id` is a KV row, not a foreign key, so clear it by hand before the delete.
     // Both failures abort: proceeding would leave it dangling.
@@ -10293,6 +10538,9 @@ struct ApiCreateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring; ignored if `fire_at` is set.
     #[serde(default)]
     once: bool,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    ask_if_missed: bool,
 }
 
 /// `POST /api/v1/schedules` — create a new scheduled task.
@@ -10370,6 +10618,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10429,9 +10678,26 @@ async fn update_schedule(
         }
     };
 
-    let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+    // Refused here, not by the store, so a 404 still means only that there is no such task.
+    match &api_req.kind {
+        Some(TaskKind::SensorTrigger(spec)) => {
+            if let Some((status, body)) = rule_spec_rejection(spec) {
+                return (status, Json(body));
+            }
+        }
+        Some(TaskKind::Routine { actions }) => {
+            if let Some(why) = routine_rejection(actions) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": why})));
+            }
+        }
+        _ => {}
+    }
+    let kind = api_req
+        .kind
+        .or_else(|| api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p }));
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10453,12 +10719,15 @@ struct ApiUpdateScheduleRequest {
     cron: Option<String>,
     timezone: Option<String>,
     prompt: Option<String>,
+    /// Replaces the task's kind, such as a routine's actions; wins over `prompt`.
+    kind: Option<TaskKind>,
     /// Fire once at this instant instead of recurring.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Fire once at `cron`'s next occurrence instead of recurring.
     #[serde(default)]
     once: bool,
+    ask_if_missed: Option<bool>,
 }
 
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
@@ -10513,6 +10782,47 @@ async fn run_schedule_now(
     };
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+/// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
+async fn run_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+}
+
+/// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
+async fn skip_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+}
+
+/// The first answer settles a missed run; a later one is `409`, as is answering none.
+async fn answer_missed_schedule(
+    state: &AppState,
+    id: &str,
+    answer: MissedRunAnswer,
+) -> (StatusCode, Json<Value>) {
+    let Some(scheduler) = &state.scheduler else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "scheduler not configured"})),
+        );
+    };
+    match scheduler.answer_missed_run(id, answer).await {
+        Ok(()) => match answer {
+            MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+            MissedRunAnswer::Skip => (StatusCode::OK, Json(json!({"skipped": id}))),
+        },
+        Err(e) if e.downcast_ref::<NoMissedRun>().is_some() => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": e.to_string(), "code": "no_missed_run"})),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -10717,6 +11027,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -10789,6 +11100,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -11500,6 +11812,8 @@ async fn agent_chat_stream(
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
+            interview: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -11567,7 +11881,10 @@ async fn agent_chat_stream(
                                 }
                             }
                         } else {
-                            tracing::warn!("Unrecognised tool-call envelope: {body}");
+                            tracing::warn!(
+                                body_chars = body.chars().count(),
+                                "Unrecognised tool-call envelope"
+                            );
                         }
                     }
                 }
@@ -13829,6 +14146,7 @@ async fn upsert_prompt_extra(
         instruction: req.instruction,
         active: req.active,
         sort_order: req.sort_order,
+        profile_id: None,
     };
     if let Err(violation) = extra.validate() {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
@@ -13851,6 +14169,35 @@ async fn upsert_prompt_extra(
     };
     if let Err(violation) = check_active_set(&existing, &extra) {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+    }
+    // A member's turn reads the household's notes and theirs, so each such pair must still fit.
+    let members = match repo.list_all_members().await {
+        Ok(notes) => notes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut owners: Vec<&str> = members
+        .iter()
+        .filter_map(|n| n.profile_id.as_deref())
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        let mut turn: Vec<PromptExtra> = existing.clone();
+        turn.extend(
+            members
+                .iter()
+                .filter(|n| n.profile_id.as_deref() == Some(owner))
+                .cloned(),
+        );
+        if let Err(violation) = check_active_set(&turn, &extra) {
+            return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+        }
     }
     match repo.upsert(&extra).await {
         Ok(()) => {
@@ -15102,6 +15449,13 @@ struct CreateRecipeRequest {
 
 async fn create_recipe(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<CreateRecipeRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let repo = match &state.recipe_repo {
@@ -15124,6 +15478,8 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -15131,6 +15487,8 @@ async fn create_recipe(
         yaml: req.yaml,
         active: true,
         created_at: chrono::Utc::now().to_rfc3339(),
+        owner_profile_id,
+        template: None,
     };
     match repo.upsert(&recipe).await {
         Ok(()) => (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response(),
@@ -15140,6 +15498,1240 @@ async fn create_recipe(
         )
             .into_response(),
     }
+}
+
+/// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
+/// the plaintext development listener and not the tailnet, whose node also connects from here.
+fn on_this_host(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    insecure_dev: bool,
+    tailnet: bool,
+) -> bool {
+    !insecure_dev
+        && !tailnet
+        && peer.is_some_and(|axum::extract::ConnectInfo(p)| p.ip().is_loopback())
+}
+
+/// The member a request acts for when it saves an agent: its paired device's member, else, from
+/// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
+/// nobody too, never the primary member, who may be someone else.
+async fn acting_member(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    on_host: bool,
+) -> Option<String> {
+    let device = proven_device(principal);
+    if let Some(device_id) = device.id().map(str::to_owned) {
+        match device.rung(device_attribution(state).device_profile(&device_id).await) {
+            DeviceRung::Member(profile_id) => return Some(profile_id),
+            DeviceRung::Unavailable(why) => {
+                tracing::warn!(
+                    device = %device_id,
+                    error = %why,
+                    "could not read the device's member; acting for nobody"
+                );
+                return None;
+            }
+            DeviceRung::NoDevice | DeviceRung::Unattributed => {}
+        }
+    }
+    if !on_host {
+        return None;
+    }
+    match state.settings_repo.get().await {
+        Ok(settings) => settings
+            .primary_profile_id
+            .filter(|id| !id.trim().is_empty()),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the primary member; acting for nobody");
+            None
+        }
+    }
+}
+
+/// Same stand-in as [`proposal_repo`]: the ledger is a plain table beside the recipes.
+fn agent_suggestion_ledger(
+    state: &Arc<AppState>,
+) -> pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger {
+    pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger::new(state.db.system.clone())
+}
+
+/// What this pond can run for `member`, read from where each capability lives. A failed read
+/// counts as absent, so a card is hidden rather than offered for something that cannot run.
+async fn pond_capabilities(
+    state: &Arc<AppState>,
+    member: Option<&str>,
+) -> pond_core::shared::services::agent_templates::PondCapabilities {
+    use pond_core::shared::services::agent_templates::{camera_configured, PondCapabilities};
+
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let face_names_people = settings.vision_face_recognition_enabled
+        && camera_configured(&settings)
+        && state
+            .face_recognition
+            .as_ref()
+            .is_some_and(|slot| slot.current().is_ok());
+    let presence = match member {
+        Some(member) => {
+            face_names_people
+                || device_attribution(state)
+                    .devices_for_profile(member)
+                    .await
+                    .is_ok_and(|devices| !devices.is_empty())
+        }
+        None => false,
+    };
+    let sensor_types = state
+        .sensor_storage
+        .list_sensors()
+        .await
+        .map(|sensors| {
+            sensors
+                .into_iter()
+                .map(|(_, kind)| kind.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let web_search = settings.ext_knowledge_enabled
+        && match &state.secret_repo {
+            Some(repo) => repo
+                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|key| !key.trim().is_empty()),
+            None => false,
+        };
+    PondCapabilities {
+        presence,
+        identified_member: member.is_some(),
+        camera: camera_configured(&settings),
+        sensor_types,
+        weather: settings.ext_weather_enabled && state.weather_provider.is_some(),
+        web_search,
+    }
+}
+
+/// The caller of a long-task route, as a member's scope: a paired member's device, or the
+/// desktop on this host acting for the primary member. Nobody identified reaches no task.
+async fn long_task_caller(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: bool,
+    tailnet: bool,
+) -> Option<String> {
+    let on_host = on_this_host(peer.ok(), insecure, tailnet);
+    acting_member(state, principal, on_host).await
+}
+
+/// A member reaches their own tasks and the household's unowned ones, like their other data.
+fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::LongTask) -> bool {
+    pond_core::shared::services::long_task_queue::reaches(Some(member), task)
+}
+
+/// The conversation before a deep-research ask, as the task's brief; the ask itself is the goal.
+async fn deep_research_brief(
+    state: &Arc<AppState>,
+    session_id: &str,
+    question: &str,
+) -> Option<String> {
+    let mut rows = state
+        .session_storage
+        .get_recent_messages(session_id, 24)
+        .await
+        .ok()?;
+    if rows
+        .last()
+        .is_some_and(|row| row.message.content.trim() == question.trim())
+    {
+        rows.pop();
+    }
+    let earlier: Vec<(pond_core::models::domain::message::Role, &str)> = rows
+        .iter()
+        .map(|row| (row.message.role.clone(), row.message.content.as_str()))
+        .collect();
+    pond_core::shared::services::long_task_runner::conversation_brief(&earlier)
+}
+
+/// Every open task, in the order the runner takes them, read once for a request.
+async fn open_long_tasks(
+    repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
+) -> anyhow::Result<Vec<pond_core::shared::domain::long_task::LongTask>> {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    repo.list_tasks(LongTaskOwnerFilter::Everyone, false).await
+}
+
+/// Where one task waits, as `member` may see it; `null` once it is not in the line.
+fn long_task_queue_view(
+    open: &[pond_core::shared::domain::long_task::LongTask],
+    task_id: &str,
+    member: &str,
+) -> Value {
+    use pond_core::shared::services::long_task_queue::{place_of, run_order, Ahead};
+    let order = run_order(open);
+    let Some(place) = place_of(&order, task_id, Some(member)) else {
+        return Value::Null;
+    };
+    json!({
+        "position": place.position,
+        "of": place.of,
+        "ahead": place.ahead.iter().map(|ahead| match ahead {
+            Ahead::Reachable(task) => json!({
+                "id": task.id(),
+                "goal": task.goal(),
+                "state": task.state(),
+            }),
+            Ahead::AnotherMember => json!({"another_member": true}),
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
+    pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
+}
+
+/// Room for a short answer of 150 words with its links, and a margin for a model that ran over.
+const SHORT_ANSWER_VIEW_CHARS: usize = 4000;
+
+/// One task as the chat card shows it: its steps with their agents, and its artifacts without
+/// their bodies.
+async fn long_task_view(
+    repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
+    task: &pond_core::shared::domain::long_task::LongTask,
+    queue: Value,
+) -> anyhow::Result<Value> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
+        .map(|a| a.id.clone());
+    // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
+    let answer_text = match (&result, task.answer()) {
+        (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {
+            repo.get_artifact(task.id(), id).await?.map(|artifact| {
+                artifact
+                    .body()
+                    .chars()
+                    .take(SHORT_ANSWER_VIEW_CHARS)
+                    .collect::<String>()
+            })
+        }
+        _ => None,
+    };
+    Ok(json!({
+        "id": task.id(),
+        "goal": task.goal(),
+        "kind": task.kind(),
+        "answer": task.answer(),
+        "answer_text": answer_text,
+        "state": task.state(),
+        "origin_session_id": task.origin_session_id(),
+        "created_at": task.created_at(),
+        "updated_at": task.updated_at(),
+        "finished_at": task.finished_at(),
+        "steps": steps.iter().map(|step| json!({
+            "key": step.key().as_str(),
+            "role": step.role(),
+            "state": step.state(),
+            "attempts": step.attempts(),
+            "summary": step.summary(),
+            "failure": step.failure(),
+        })).collect::<Vec<_>>(),
+        "artifacts": artifacts,
+        "result_artifact_id": result,
+        "queue": queue,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskListQuery {
+    session_id: Option<String>,
+}
+
+/// Why deep research cannot start for this caller. It is a long task, so the household's long
+/// tasks must be on and a member must own it: the caller the long-task routes answer, so the chat
+/// card can read what it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepResearchRefusal {
+    Off,
+    Unidentified,
+}
+
+impl DeepResearchRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            DeepResearchRefusal::Off => "off",
+            DeepResearchRefusal::Unidentified => "unidentified",
+        }
+    }
+
+    fn response(self) -> (StatusCode, Json<Value>) {
+        let (status, error) = match self {
+            DeepResearchRefusal::Off => (
+                StatusCode::CONFLICT,
+                "Deep research is switched off on this pond.",
+            ),
+            DeepResearchRefusal::Unidentified => (
+                StatusCode::FORBIDDEN,
+                "Deep research needs to know who is asking, and this device is not linked to \
+                 anyone in the household.",
+            ),
+        };
+        // Both spellings: clients read refusals by `code`, and the composers' contract says `reason`.
+        let reason = format!("deep_research_{}", self.reason());
+        (
+            status,
+            Json(json!({"error": error, "code": reason, "reason": reason})),
+        )
+    }
+}
+
+async fn deep_research_refusal(
+    state: &Arc<AppState>,
+    member: Option<&str>,
+) -> Option<DeepResearchRefusal> {
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    if !(settings.ext_orchestrator_enabled && settings.long_tasks_enabled) {
+        return Some(DeepResearchRefusal::Off);
+    }
+    member
+        .is_none()
+        .then_some(DeepResearchRefusal::Unidentified)
+}
+
+/// `GET /api/v1/long-tasks/deep-research` -- whether this caller may start deep research now, so
+/// a composer offers it only where `chat_stream` would accept it.
+async fn deep_research_availability(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Json<Value> {
+    let member = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await;
+    match deep_research_refusal(&state, member.as_deref()).await {
+        None => Json(json!({"available": true})),
+        Some(refusal) => Json(json!({"available": false, "reason": refusal.reason()})),
+    }
+}
+
+/// A member's deep research, stored: a research task they own, reported back to this conversation.
+async fn start_deep_research(
+    state: &Arc<AppState>,
+    member: &str,
+    question: &str,
+    session_id: &str,
+    answer: Option<&str>,
+) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
+    use pond_core::shared::domain::long_task::AnswerShape;
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
+    use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+    let repo = long_task_repo(state);
+    let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
+    let task = pond_core::shared::services::deep_research::research_task(
+        member,
+        question,
+        session_id,
+        chrono::Utc::now(),
+    )?
+    .with_answer(answer);
+    // The helpers start in empty windows; what was said before the ask reaches them only here.
+    let brief = deep_research_brief(state, session_id, question)
+        .await
+        .map(|body| OpeningBrief {
+            summary: "What the conversation said before the ask",
+            body,
+        });
+    let task = open_task(&repo, task, brief).await?;
+    let open = repo
+        .list_tasks(LongTaskOwnerFilter::Everyone, false)
+        .await?;
+    let place = place_of(&run_order(&open), task.id(), Some(member));
+    tracing::info!(
+        target: "giap::trace",
+        kind = "long_task_started",
+        task_id = %task.id(),
+        origin_session_id = %session_id,
+        research = true,
+        answer = task.answer().as_str(),
+        position = place.as_ref().map(|p| p.position),
+        "a member asked for deep research"
+    );
+    Ok(pond_core::shared::domain::agent::DeepResearchTurn {
+        task_id: task.id().to_string(),
+        waiting: place.as_ref().and_then(waiting_line),
+        answer: task.answer(),
+    })
+}
+
+/// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
+/// conversation started.
+async fn list_long_tasks(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    Query(query): Query<LongTaskListQuery>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return Json(json!([])).into_response();
+    };
+    let repo = long_task_repo(&state);
+    let mut tasks = Vec::new();
+    for filter in [
+        LongTaskOwnerFilter::Member(&member),
+        LongTaskOwnerFilter::Unowned,
+    ] {
+        match repo.list_tasks(filter, true).await {
+            Ok(found) => tasks.extend(found),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    tasks.retain(|task| {
+        query
+            .session_id
+            .as_deref()
+            .is_none_or(|session| task.origin_session_id() == Some(session))
+    });
+    tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
+    let open = match open_long_tasks(&repo).await {
+        Ok(open) => open,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut views = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        let queue = long_task_queue_view(&open, task.id(), &member);
+        match long_task_view(&repo, task, queue).await {
+            Ok(view) => views.push(view),
+            Err(e) => {
+                tracing::warn!(task = %task.id(), error = %e, "a long task could not be read")
+            }
+        }
+    }
+    Json(json!(views)).into_response()
+}
+
+/// The task with `id` if the caller reaches it; a task they do not reach reads as unknown.
+async fn reachable_long_task(
+    state: &Arc<AppState>,
+    member: &str,
+    id: &str,
+) -> Result<pond_core::shared::domain::long_task::LongTask, Response<axum::body::Body>> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    match long_task_repo(state).get_task(id).await {
+        Ok(Some(task)) if long_task_reaches(member, &task) => Ok(task),
+        Ok(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such task"})),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+/// `GET /api/v1/long-tasks/queue` -- every open task in the order the pond will work on them. The
+/// caller's own and the household's carry their goal and progress, so a member can choose which to
+/// stop; another member's is only a place in the line.
+async fn long_task_queue(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::StepState;
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    use pond_core::shared::services::long_task_queue::run_order;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let repo = long_task_repo(&state);
+    let open = match open_long_tasks(&repo).await {
+        Ok(open) => open,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut line = Vec::new();
+    for (index, task) in run_order(&open).into_iter().enumerate() {
+        let position = index + 1;
+        if !long_task_reaches(&member, task) {
+            line.push(json!({"position": position, "another_member": true}));
+            continue;
+        }
+        let steps = repo.list_steps(task.id()).await.unwrap_or_default();
+        let done = steps
+            .iter()
+            .filter(|s| matches!(s.state(), StepState::Completed | StepState::Skipped))
+            .count();
+        line.push(json!({
+            "position": position,
+            "id": task.id(),
+            "goal": task.goal(),
+            "kind": task.kind(),
+            "answer": task.answer(),
+            "state": task.state(),
+            "origin_session_id": task.origin_session_id(),
+            "created_at": task.created_at(),
+            "steps_done": done,
+            "steps_total": steps.len(),
+        }));
+    }
+    Json(json!({"line": line})).into_response()
+}
+
+/// `GET /api/v1/long-tasks/{id}` -- one task, its steps and its artifacts.
+async fn get_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    let repo = long_task_repo(&state);
+    let queue = match open_long_tasks(&repo).await {
+        Ok(open) => long_task_queue_view(&open, task.id(), &member),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match long_task_view(&repo, &task, queue).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// A task's whole report: its summary and drafted sections joined in plan order, and the dated
+/// events its calendar artifacts hold.
+async fn long_task_report(
+    state: &Arc<AppState>,
+    task: &pond_core::shared::domain::long_task::LongTask,
+) -> anyhow::Result<(
+    String,
+    Vec<pond_core::shared::services::research_report::CalendarEvent>,
+    usize,
+)> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    use pond_core::shared::services::research_report as report;
+    let repo = long_task_repo(state);
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let parts = report::report_parts(&steps, &artifacts);
+    let summary = match &parts.result {
+        Some(id) => repo
+            .get_artifact(task.id(), id)
+            .await?
+            .map(|a| a.body().to_string()),
+        None => None,
+    };
+    let mut sections = Vec::with_capacity(parts.sections.len());
+    for id in &parts.sections {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            sections.push((artifact.title().to_string(), artifact.body().to_string()));
+        }
+    }
+    let mut events = Vec::new();
+    for id in &parts.calendars {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            events.extend(report::calendar_events(artifact.body()));
+        }
+    }
+    let markdown = report::assemble(task.goal(), summary.as_deref(), &sections);
+    // A small model often skips the calendar save; the itinerary's own times still hold.
+    if events.is_empty() {
+        events = report::itinerary_events(&markdown, task.created_at().date_naive());
+    }
+    let shown = if report::holds_its_sections(summary.as_deref().unwrap_or(""), &sections) {
+        0
+    } else {
+        sections.len()
+    };
+    Ok((markdown, events, shown))
+}
+
+/// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
+/// what it cites and whether it has dated events a calendar can take.
+async fn get_long_task_report(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    match long_task_report(&state, &task).await {
+        Ok((markdown, events, sections)) => Json(json!({
+            "id": task.id(),
+            "title": report::assembled_title(&markdown),
+            "state": task.state(),
+            "kind": task.kind(),
+            "markdown": markdown,
+            "sections": sections,
+            "sources": report::sources(&markdown)
+                .into_iter()
+                .map(|s| json!({"title": s.title, "url": s.url}))
+                .collect::<Vec<_>>(),
+            "calendar_events": events.len(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskExportQuery {
+    format: Option<String>,
+}
+
+/// `GET /api/v1/long-tasks/{id}/export?format=markdown|html|ics` -- the report as a file to
+/// keep: Markdown, a page that prints or saves as a PDF, or its dated events for a calendar.
+async fn export_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LongTaskExportQuery>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let format = query.format.as_deref().unwrap_or("markdown");
+    if !matches!(format, "markdown" | "html" | "ics") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "format is markdown, html or ics"})),
+        )
+            .into_response();
+    }
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    let (markdown, events, _) = match long_task_report(&state, &task).await {
+        Ok(found) => found,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let title = report::assembled_title(&markdown);
+    let stem = crate::report_export::file_stem(&title);
+    let now = chrono::Utc::now();
+    let (content_type, extension, body) = match format {
+        "html" => (
+            "text/html; charset=utf-8",
+            "html",
+            crate::report_export::html_document(
+                &title,
+                &markdown,
+                &now.format("%-d %B %Y").to_string(),
+            ),
+        ),
+        "ics" if events.is_empty() => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "this report has no dated events for a calendar"})),
+            )
+                .into_response()
+        }
+        "ics" => (
+            "text/calendar; charset=utf-8",
+            "ics",
+            report::to_ics(task.id(), &events, now),
+        ),
+        _ => ("text/markdown; charset=utf-8", "md", markdown),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{stem}.{extension}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/long-tasks/{id}/artifacts/{artifact_id}` -- an artifact's whole body, for
+/// "Read the result".
+async fn get_long_task_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((id, artifact_id)): Path<(String, String)>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    if let Err(response) = reachable_long_task(&state, &member, &id).await {
+        return response;
+    }
+    match long_task_repo(&state).get_artifact(&id, &artifact_id).await {
+        Ok(Some(artifact)) => Json(json!({
+            "id": artifact.id(),
+            "title": artifact.title(),
+            "kind": artifact.kind(),
+            "summary": artifact.summary(),
+            "body": artifact.body(),
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such artifact in this task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/long-tasks/{id}/cancel` -- stops a task; a step under way finishes first.
+async fn cancel_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::LongTaskState;
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    match long_task_repo(&state)
+        .set_task_state(&id, LongTaskState::Cancelled, chrono::Utc::now())
+        .await
+    {
+        Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// Every agent whose prefill the pond keeps: the shipped planner, worker and verifier, then each
+/// household recipe with a role, in the shape the compile pass builds them.
+async fn prefill_agents(
+    state: &Arc<AppState>,
+) -> Vec<pond_core::shared::domain::orchestration::AgentRole> {
+    use pond_core::shared::services::{long_task_roles as roles, long_task_runner};
+    let recipes = match &state.recipe_repo {
+        Some(repo) => repo.list().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut agents: Vec<_> = [roles::planner_role(), roles::verifier_role()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    agents.extend(long_task_runner::step_roles(&recipes));
+    agents
+}
+
+/// `GET /api/v1/agents/prefills` -- whether the pond is building caches now, and where each
+/// agent's prefill stands.
+async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    use pond_core::shared::services::prefill_progress::process_prefill_progress;
+
+    let progress = process_prefill_progress();
+    let build = progress.build();
+    let queued = progress.pending_rebuilds();
+    let failed = progress.failed();
+    let retention = state
+        .settings_repo
+        .get()
+        .await
+        .map(|s| s.agent_prefill_retention_days)
+        .unwrap_or(14);
+    let records =
+        pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(state.db.system.clone())
+            .get_all()
+            .await
+            .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let agents: Vec<Value> = prefill_agents(&state)
+        .await
+        .iter()
+        .map(|role| {
+            let name = role.name();
+            let is_default = is_default_agent(name);
+            let record = records.get(name);
+            let status = prefill_state(
+                role,
+                is_default,
+                record,
+                build.current.as_deref() == Some(name),
+                queued.includes(name),
+                failed.contains(name),
+                now,
+                retention,
+            );
+            json!({
+                "agent": name,
+                "kind": if is_default { "default" } else { "member" },
+                "status": status,
+                "compiled_at": record.and_then(|r| r.compiled_at),
+                "last_used_at": record.and_then(|r| r.last_used_at),
+            })
+        })
+        .collect();
+    Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
+/// rebuilds it at the next quiet moment.
+async fn rebuild_agent_prefill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl axum::response::IntoResponse {
+    if !prefill_agents(&state)
+        .await
+        .iter()
+        .any(|role| role.name() == name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no agent named {name}")})),
+        )
+            .into_response();
+    }
+    pond_core::shared::services::prefill_progress::process_prefill_progress()
+        .request_rebuild(Some(&name));
+    (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
+}
+
+/// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
+async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+    pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
+}
+
+/// `GET /api/v1/agents/suggestions` -- the shipped agents this pond can run for the caller, less
+/// those they declined or already have. Nobody identified is offered nothing.
+async fn agent_suggestions(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{enabled_templates, suggestions};
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return Json(json!([])).into_response();
+    };
+    // Unreadable, every card would come back, the declined ones included: show none instead.
+    let dismissed = match agent_suggestion_ledger(&state).dismissed(&member).await {
+        Ok(dismissed) => dismissed,
+        Err(e) => {
+            tracing::warn!(error = %e, "agent suggestions: the declined cards could not be read");
+            return Json(json!([])).into_response();
+        }
+    };
+    let enabled = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => enabled_templates(&recipes, &member),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent suggestions: recipes could not be read");
+                return Json(json!([])).into_response();
+            }
+        },
+        None => Default::default(),
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    Json(suggestions(&pond, &dismissed, &enabled)).into_response()
+}
+
+/// Serialises turning agents on, so two taps cannot both take the same free name: the recipe
+/// store's upsert would replace the first copy with the second.
+static ENABLING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/v1/agents/suggestions/{template}/enable` -- copies a shipped agent into the
+/// caller's recipes. Nothing runs that the template's activations do not declare.
+async fn enable_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{
+        copy_name, enabled_templates, template as find_template, template_copy,
+    };
+
+    let Some(shipped) = find_template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let Some(repo) = &state.recipe_repo else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"error": "Recipe repository not configured"})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can turn an agent on"})),
+        )
+            .into_response();
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    let missing = shipped.missing(&pond);
+    if !missing.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "this pond cannot run that agent yet",
+                "missing": missing,
+            })),
+        )
+            .into_response();
+    }
+
+    let _one_at_a_time = ENABLING.lock().await;
+    let recipes = match repo.list().await {
+        Ok(recipes) => recipes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    if enabled_templates(&recipes, &member).contains(shipped.id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "you already have this agent"})),
+        )
+            .into_response();
+    }
+    let taken = recipes.into_iter().map(|r| r.name).collect();
+    let recipe = template_copy(
+        shipped,
+        &member,
+        copy_name(shipped, &taken),
+        chrono::Utc::now(),
+    );
+    match repo.upsert(&recipe).await {
+        Ok(()) => {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "agent_enabled",
+                template = shipped.id,
+                recipe = %recipe.name,
+                member = %member,
+                "a member turned a shipped agent on"
+            );
+            (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/agents/suggestions/{template}/dismiss` -- hides a card from the caller for good.
+async fn dismiss_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let Some(shipped) = pond_core::shared::services::agent_templates::template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can dismiss a suggestion"})),
+        )
+            .into_response();
+    };
+    match agent_suggestion_ledger(&state)
+        .dismiss(shipped.id, &member, chrono::Utc::now())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ValidateRecipeRequest {
+    yaml: String,
+    /// The recipe's name, which is the agent's; a draft may not have one yet.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Name a draft agent is checked under before it has one.
+const DRAFT_AGENT_NAME: &str = "draft";
+
+/// `POST /api/v1/recipes/validate` -- every problem in an agent's `giap_role` block, each at the
+/// path of its field, so the builder or a small model can fix the right line. Always 200 for a
+/// readable body: a refused block is an answer, not a failed request.
+async fn validate_recipe(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ValidateRecipeRequest>, JsonRejection>,
+) -> impl axum::response::IntoResponse {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    // Unchecked rather than refused when the store is unreadable: the names are a convenience.
+    let known: Option<std::collections::BTreeSet<String>> = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => Some(recipes.into_iter().map(|r| r.name).collect()),
+            Err(e) => {
+                tracing::debug!(error = %e, "recipes/validate: could not list agents; names go unchecked");
+                None
+            }
+        },
+        None => None,
+    };
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(DRAFT_AGENT_NAME);
+    let checked = pond_core::shared::domain::role_block::validate_role_recipe(
+        name,
+        &req.yaml,
+        known.as_ref(),
+    );
+    Json(checked.report()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -15191,6 +16783,19 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
+        let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
+        if !widened.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "a copy of a shipped agent may narrow its tools, never widen them",
+                    "widened": widened,
+                })),
+            )
+                .into_response();
+        }
+    }
     let updated = AgentRecipe {
         id: existing.id,
         name: existing.name,
@@ -15198,6 +16803,8 @@ async fn update_recipe(
         yaml: req.yaml.unwrap_or(existing.yaml),
         active: req.active.unwrap_or(existing.active),
         created_at: existing.created_at,
+        owner_profile_id: existing.owner_profile_id,
+        template: existing.template,
     };
     match repo.upsert(&updated).await {
         Ok(()) => Json(recipe_view_json(&updated)).into_response(),
@@ -15384,6 +16991,9 @@ async fn run_recipe(
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
         suggestion_context: None,
+        deep_research: false,
+        deep_research_answer: None,
+        deep_research_for: None,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))
@@ -17668,7 +19278,46 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    Some(particulars_for(attributed, &profile.preferences))
+    let mut context = particulars_for(attributed, &profile.preferences);
+    // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
+    let notes_are_theirs = attributed
+        || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
+    if notes_are_theirs {
+        if let Some(repo) = &state.prompt_extra_repo {
+            match repo.list_for_profile(&profile_id).await {
+                Ok(notes) => context.member_notes = notes,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not read the speaker's own notes; this turn goes without them"
+                ),
+            }
+        }
+    }
+    Some(context)
+}
+
+/// The interview this turn runs, when the session is the speaker's own open interview.
+async fn interview_turn_for(
+    state: &Arc<AppState>,
+    session_id: &str,
+    scope: &ProfileScope,
+) -> Option<pond_core::user_data::services::profile_interview::InterviewTurn> {
+    let speaker = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
+        ProfileScope::Guest => return None,
+    };
+    let service = crate::member_notes::interview_service(state)?;
+    match service
+        .turn_for_session(session_id, &speaker, chrono::Utc::now())
+        .await
+    {
+        Ok(turn) => turn,
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read the session's interview");
+            None
+        }
+    }
 }
 
 /// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
@@ -17689,6 +19338,7 @@ fn particulars_for(
             .get("accessibility_atypical_speech")
             .map(|v| v == "true")
             .unwrap_or(false),
+        member_notes: Vec::new(),
     }
 }
 
@@ -18203,6 +19853,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),
@@ -19055,6 +20707,7 @@ mod tests {
             id: "call-1".to_string(),
             content: "24C and clear".to_string(),
             card: None,
+            keep: None,
         }));
         assert_eq!(
             result,
@@ -19105,6 +20758,7 @@ mod tests {
             id: "call-1".to_string(),
             content: "[[[mcp-ui:weather:{\"temp\":24}]]]\n24C and clear".to_string(),
             card: None,
+            keep: None,
         }));
 
         assert_eq!(
@@ -19137,6 +20791,7 @@ mod tests {
             id: "call-2".to_string(),
             content: "Web results for: q\nPassage.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
+            keep: None,
         }));
         assert_eq!(frame["content"], "Web results for: q\nPassage.");
         assert_eq!(
@@ -19145,6 +20800,31 @@ mod tests {
         );
         let persisted: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();
         assert_eq!(persisted["content"], "Web results for: q\nPassage.");
+        assert!(frame.get("transient").is_none(), "{frame}");
+    }
+
+    /// A transient result streams whole, marked for clients not to keep, and hands ChatService
+    /// the stub it stores instead.
+    #[test]
+    fn a_transient_result_streams_whole_and_hands_on_its_stub() {
+        let mut turn = accumulator();
+        let stub = "Web search results are not kept after the turn. Sources: kws.go.ke.";
+        let frame = frame_of(turn.absorb(AgentStreamEvent::ToolResult {
+            tool: "giap-knowledge__search_web".to_string(),
+            id: "call-3".to_string(),
+            content: "Web results for: q\nThe park closes at 6:00 PM.".to_string(),
+            card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
+            keep: Some(stub.to_string()),
+        }));
+        assert_eq!(
+            frame["content"],
+            "Web results for: q\nThe park closes at 6:00 PM."
+        );
+        assert_eq!(frame["transient"], true);
+        assert_eq!(frame["ui"]["card_type"], "search");
+        let row: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();
+        assert_eq!(row["keep"], stub);
+        assert_eq!(row["tool_call_id"], "call-3");
     }
 
     /// The handler's `ChatService` owns the `persist_thinking` gate; the translator never records.

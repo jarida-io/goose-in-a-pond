@@ -345,6 +345,19 @@ describe("hubDataStore", () => {
     expect(sunset?.time).toBe("On demand");
   });
 
+  it("leaves agents out of the routines: they start from a schedule, an event or a hand-off", async () => {
+    apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
+    apiMock.listDevices.mockResolvedValue([]);
+    apiMock.listSchedules.mockResolvedValue([]);
+    apiMock.listRecipes.mockResolvedValue([
+      { name: "Sunset Bath", description: "Run tub", yaml: "prompt: run the tub\n" },
+      { name: "morning-brief", description: "Briefs the house", yaml: "giap_role:\n  tool_groups: []\n  instructions: Brief the house.\n" },
+    ]);
+
+    await refreshHomeData();
+    expect(__getRoutinesForTests().map((r) => r.name)).toEqual(["Sunset Bath"]);
+  });
+
   // ── Now Playing ──────────────────────────────────────────────
   // Spotify dev-mode apps 403 every call for non-allowlisted accounts, even after OAuth;
   // that must never look like a paused player.

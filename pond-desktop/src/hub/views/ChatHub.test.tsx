@@ -8,6 +8,7 @@ import { api } from "../../api/PondApiClient";
 import { ApiError } from "../../api/types";
 import type { VisionStatus } from "../../api/types";
 import { __resetChatRunForTests, openSession } from "../../state/chatRunStore";
+import { assistantRow, keptToolRow, userRow } from "../../test-support/keptRows";
 import { ATTACH_BLOCKED_COPY, NOT_DECLARED_COPY } from "../../components/imageSupportCopy";
 import { prepareImage } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
@@ -227,13 +228,14 @@ describe("ChatHubView — picture support", () => {
 });
 
 /** With none chosen the pond refuses a turn and picks nothing, so the screen offers its suggestions. */
-describe("ChatHubView — the paperclip's reason", () => {
+describe("ChatHubView — Add pictures' reason", () => {
   it("names Pictures included when the model cannot look at pictures", async () => {
     vi.mocked(api.getVisionStatus).mockResolvedValue({
       model: "x", state: { kind: "not_declared" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<ChatHubView />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(NOT_DECLARED_COPY));
     expect(clip.getAttribute("title")).not.toMatch(/Reads pictures/);
   });
@@ -243,7 +245,8 @@ describe("ChatHubView — the paperclip's reason", () => {
       model: "x", state: { kind: "absent" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<ChatHubView />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(ATTACH_BLOCKED_COPY));
   });
 });
@@ -308,5 +311,27 @@ describe("ChatHubView — no conversation model", () => {
       expect((screen.getByLabelText("Message input") as HTMLInputElement).value).toBe("lights on");
     });
     await screen.findByText(/Your message is back in the box; send it once a model is chosen\./);
+  });
+});
+
+describe("ChatHubView, a result the pond did not keep", () => {
+  it("shows one quiet line under the answer, naming the sources", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([userRow(), keptToolRow(), assistantRow()] as never);
+    await openSession("sess-hub");
+    render(<ChatHubView />);
+
+    const note = await screen.findByText(
+      "Web search: results aren't kept after the turn. Sources: kenyapower.co.ke, nation.africa.",
+    );
+    expect(note.closest(".kept-note")).toBeTruthy();
+    expect(screen.getByText("Power should be back by 6 pm.")).toBeTruthy();
+  });
+
+  it("puts the line under the answer once, and nowhere under the question", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([userRow(), keptToolRow(), assistantRow()] as never);
+    await openSession("sess-hub");
+    render(<ChatHubView />);
+    await screen.findByText("Power should be back by 6 pm.");
+    expect(document.querySelectorAll(".kept-note")).toHaveLength(1);
   });
 });

@@ -39,6 +39,7 @@ bash scripts/giap.sh doctor   # health check; exits 1 on any FAIL
 | [Model capabilities](architecture/model_capabilities.md) | Thinking, vision and context detection |
 | [Token tracking](architecture/token_tracking.md) | Usage accounting per session |
 | [MCP compliance](architecture/mcp-compliance.md) | What of the MCP spec GIAP implements |
+| [Changes, 28 and 29 October 2026](architecture/changes-2026-10-28-29.md) | Long tasks, deep research, the queue, pace, the MTP drafter, My Pond and `agamemnon`, and their security controls |
 
 ## Personal Agentic Intelligence (PAI)
 
@@ -57,6 +58,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [PAI-7 Proactive intelligence](architecture/pai/07-proactive-intelligence.md) | |
 | [PAI-8 Personal context streaming](architecture/pai/08-personal-context-streaming.md) | |
 | [Personal-context index](architecture/personal-context-index.md) | The local vector index behind PAI-8 |
+| [Context space](architecture/context-space.md) | Designed: one item header over each kind's own table, one multimodal index and context agents (as recipes) in place of memories, summaries, the index and suggestions |
 | [Context and reasoning roadmap](architecture/context-and-reasoning-roadmap.md) | Phases A to F, with status |
 
 ## Models and inference

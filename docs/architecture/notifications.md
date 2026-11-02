@@ -6,7 +6,8 @@ How a notice from the Pond reaches a household member's phone. The routes themse
 A notification is `Notification {id, target, category, title, body, timestamp, data}`
 (`crates/pond-core/src/mcp/ports/notification.rs`). `category` is `alert`, `info` or
 `action_required`; `target` is a device id or `"broadcast"`; `data` is an optional JSON object
-that may carry an `open` route hint (written only through `OpenScreen`) or an `action` payload
+that may carry an `open` route hint (written only through `OpenScreen`; `ScheduleDetail` opens one
+schedule, as the missed-run question does) or an `action` payload
 (see [rides and maps](rides-and-maps.md)). Every producer goes through the `NotificationSender`
 port, implemented by `BroadcastNotificationSender` (`crates/pond-infra/src/broadcast_notification_sender.rs`),
 which caps the title at 200 characters and the body at 2000.

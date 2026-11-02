@@ -313,7 +313,10 @@ fn routine_recall(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         answered_by: GROUP_MEMORY,
         context: Some(SuggestionContext::PersonalMemory {
             source_memory_id: "routines".to_string(),
-            fact: format!("{} routine habits recorded in personal profile", s.routine_memories),
+            fact: format!(
+                "{} routine habits recorded in personal profile",
+                s.routine_memories
+            ),
         }),
     })
 }
@@ -339,7 +342,10 @@ fn memory_recall(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         answered_by: GROUP_MEMORY,
         context: Some(SuggestionContext::PersonalMemory {
             source_memory_id: "active_memories".to_string(),
-            fact: format!("{} active memories recorded in personal profile", s.active_memories),
+            fact: format!(
+                "{} active memories recorded in personal profile",
+                s.active_memories
+            ),
         }),
     })
 }

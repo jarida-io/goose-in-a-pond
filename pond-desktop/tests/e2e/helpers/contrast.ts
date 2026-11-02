@@ -18,7 +18,8 @@ function parse(css: string): Rgba {
 
 /**
  * WCAG contrast of an element's text over what is really behind it, with translucent
- * backgrounds composited down the ancestors. axe reports these as incomplete, not as failures.
+ * backgrounds composited down the ancestors and translucent text over the result. axe reports
+ * these as incomplete, not as failures.
  */
 export async function contrastOf(el: Locator): Promise<number> {
   const { color, backgrounds } = await el.evaluate((node) => {
@@ -34,6 +35,9 @@ export async function contrastOf(el: Locator): Promise<number> {
     const alpha = layer[3];
     behind = [0, 1, 2].map((i) => layer[i] * alpha + behind[i] * (1 - alpha));
   }
-  const [hi, lo] = [luminance(parse(color)), luminance(behind)].sort((a, b) => b - a);
+  // A translucent text colour is seen over what is behind it, so it is measured over it.
+  const [tr, tg, tb, ta] = parse(color);
+  const text = [tr, tg, tb].map((v, i) => v * ta + behind[i] * (1 - ta));
+  const [hi, lo] = [luminance(text), luminance(behind)].sort((a, b) => b - a);
   return (hi + 0.05) / (lo + 0.05);
 }

@@ -1,9 +1,17 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, Button, Input, Switch } from "@heroui/react";
-import { Plus, Trash2, BookOpen, Check, Pencil, Play, X } from "lucide-react";
+import { Plus, Trash2, BookOpen, Bot, Check, Pencil, Play, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm } from "../components/shared";
 import type { AgentRecipe, RecipeParameter } from "../api/types";
+import { AgentBuilder } from "../agents/AgentBuilder";
+import { AgentList } from "../agents/AgentList";
+import { AgentSuggestions } from "../agents/AgentSuggestions";
+import { BuiltInAgents, PrefillBar } from "../agents/BuiltInAgents";
+import { isAgentYaml } from "../agents/agentModel";
+import { clearOpenAgent, peekOpenAgent } from "../agents/openAgent";
+import { useAgentEnvironment } from "../agents/useAgentEnvironment";
+import { useRecipeList } from "../agents/useRecipeList";
 
 // ── Extension vocabulary ──────────────────────────────────────────────────
 // Names `recipe_extension_to_tool_group` (crates/pond-api/src/routes.rs) knows; others round-trip via YAML.
@@ -96,9 +104,14 @@ function slugify(s: string): string {
 
 export function Recipes() {
   const confirm = useConfirm();
-  const [recipes, setRecipes] = useState<AgentRecipe[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { recipes, loading, error: loadError, reload } = useRecipeList();
+  const env = useAgentEnvironment();
   const [error, setError] = useState<string | null>(null);
+  // `undefined` is the list; `null` is a new agent; a recipe is that agent being edited.
+  // Home can turn a suggestion on and hand the new copy here, to be opened in the builder.
+  const [agentBuilder, setAgentBuilder] = useState<AgentRecipe | null | undefined>(() => peekOpenAgent() ?? undefined);
+  const listHeading = useRef<HTMLHeadingElement>(null);
+  const builderWasOpen = useRef(false);
   const [showForm, setShowForm] = useState(false);
   const [editingRecipe, setEditingRecipe] = useState<AgentRecipe | null>(null);
   const [form, setForm] = useState<RecipeFormState>(EMPTY_FORM);
@@ -107,16 +120,17 @@ export function Recipes() {
   const [runValues, setRunValues] = useState<Record<string, string>>({});
   const [runError, setRunError] = useState<string | null>(null);
 
-  function load() {
-    setLoading(true);
-    api
-      .listRecipes()
-      .then((res) => setRecipes(Array.isArray(res) ? res : []))
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }
+  useEffect(() => {
+    clearOpenAgent();
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (builderWasOpen.current && agentBuilder === undefined) listHeading.current?.focus();
+    builderWasOpen.current = agentBuilder !== undefined;
+  }, [agentBuilder]);
+
+  const agents = recipes.filter((r) => isAgentYaml(r.yaml));
+  const others = recipes.filter((r) => !isAgentYaml(r.yaml));
 
   function resetForm() {
     setShowForm(false);
@@ -131,6 +145,10 @@ export function Recipes() {
   }
 
   function startEdit(r: AgentRecipe) {
+    if (isAgentYaml(r.yaml)) {
+      setAgentBuilder(r);
+      return;
+    }
     setEditingRecipe(r);
     setForm({
       name: r.name,
@@ -201,7 +219,7 @@ export function Recipes() {
         await api.createRecipe({ name, description: form.description.trim(), yaml });
       }
       resetForm();
-      load();
+      reload();
     } catch (e) {
       setError(String(e));
     }
@@ -210,8 +228,8 @@ export function Recipes() {
   async function toggleActive(r: AgentRecipe) {
     if (!r.id) return;
     try {
-      await api.updateRecipe(r.id, { active: !r.active });
-      load();
+      await api.updateRecipe(r.id, { active: r.active === false });
+      reload();
     } catch (e) {
       setError(String(e));
     }
@@ -219,10 +237,14 @@ export function Recipes() {
 
   async function remove(r: AgentRecipe) {
     if (!r.id) return;
-    if (!await confirm(`Delete recipe "${r.title || r.name}"? This cannot be undone.`, { title: "Delete Recipe", confirmLabel: "Delete", destructive: true })) return;
+    const agent = isAgentYaml(r.yaml);
+    const message = agent
+      ? `Delete agent "${r.title || r.name}"? Its schedules and events stop, and this cannot be undone.`
+      : `Delete recipe "${r.title || r.name}"? This cannot be undone.`;
+    if (!await confirm(message, { title: agent ? "Delete Agent" : "Delete Recipe", confirmLabel: "Delete", destructive: true })) return;
     try {
       await api.removeRecipe(r.id);
-      load();
+      reload();
     } catch (e) {
       setError(String(e));
     }
@@ -256,17 +278,44 @@ export function Recipes() {
     }
   }
 
+  if (agentBuilder !== undefined) {
+    return (
+      <div className="screen screen--recipes">
+        <AgentBuilder
+          variant="classic"
+          recipe={agentBuilder}
+          recipes={recipes}
+          env={env}
+          onBack={() => {
+            setAgentBuilder(undefined);
+            reload();
+          }}
+          onSaved={() => reload()}
+          onDeleted={() => {
+            setAgentBuilder(undefined);
+            reload();
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="screen screen--recipes">
       <PageHeader
         title="Recipes"
         action={
-          <Button
-            variant="secondary"
-            onPress={() => (showForm ? resetForm() : startCreate())}
-          >
-            {showForm ? null : <Plus size={14} />} {showForm ? "Cancel" : "Add Recipe"}
-          </Button>
+          <>
+            <Button variant="secondary" onPress={() => setAgentBuilder(null)}>
+              <Bot size={14} /> New agent
+            </Button>
+            <Button
+              variant="secondary"
+              onPress={() => (showForm ? resetForm() : startCreate())}
+            >
+              {showForm ? null : <Plus size={14} />} {showForm ? "Cancel" : "Add Recipe"}
+            </Button>
+          </>
         }
       />
 
@@ -415,76 +464,107 @@ export function Recipes() {
 
       {error && <p className="text-error text-error--sm">{error}</p>}
 
-      {loading ? (
-        <p className="muted-12">Loading...</p>
-      ) : recipes.length === 0 && !showForm ? (
-        <Card className="card">
-          <CardContent className="card-body--list">
-            <div className="empty-state">
-              <BookOpen size={20} />
-              <span>No recipes yet. Add one to teach Pond a repeatable routine.</span>
-            </div>
-          </CardContent>
-        </Card>
-      ) : recipes.length > 0 ? (
-        <div className="skills-grid">
-          {recipes.map((r) => (
-            <div key={r.id || r.name} className={`skill-card${r.active === false ? " skill-card--inactive" : ""}`}>
-              <div className="skill-card__top">
-                <span className="skill-card__icon">
-                  <BookOpen size={16} />
-                </span>
-                <Switch
-                  size="sm"
-                  isSelected={r.active !== false}
-                  onChange={() => toggleActive(r)}
-                  aria-label={`Enable ${r.title || r.name}`}
-                >
-                  <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                </Switch>
-              </div>
-              <h3 className="skill-card__title">{r.title || r.name}</h3>
-              <p className="skill-card__desc">
-                {r.description || <span className="muted">No description</span>}
-              </p>
-              {r.activities && r.activities.length > 0 && (
-                <div className="recipe-activities-editor__pills">
-                  {r.activities.slice(0, 3).map((a, i) => (
-                    <span key={i} className="recipe-activity-pill recipe-activity-pill--static">{a}</span>
-                  ))}
-                </div>
-              )}
-              <div className="skill-card__actions">
-                <button
-                  type="button"
-                  className="skill-card__action-btn"
-                  onClick={() => requestRun(r)}
-                  aria-label={`Run ${r.title || r.name}`}
-                  disabled={running === r.name}
-                >
-                  <Play size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="skill-card__action-btn"
-                  onClick={() => startEdit(r)}
-                  aria-label={`Edit ${r.title || r.name}`}
-                >
-                  <Pencil size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="skill-card__action-btn skill-card__action-btn--danger"
-                  onClick={() => remove(r)}
-                  aria-label={`Delete ${r.title || r.name}`}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-          ))}
+      <AgentSuggestions
+        variant="recipes"
+        onEnabled={(recipe) => {
+          reload();
+          setAgentBuilder(recipe);
+        }}
+      />
+
+      <AgentList
+        agents={agents}
+        loading={loading}
+        error={loadError}
+        onRetry={reload}
+        env={env}
+        variant="classic"
+        onNew={() => setAgentBuilder(null)}
+        onEdit={startEdit}
+        onDelete={remove}
+        onToggle={toggleActive}
+        headingRef={listHeading}
+        toolbar={<PrefillBar prefills={env.prefills} />}
+      />
+
+      <section className="ag-list" aria-labelledby="recipes-other-heading">
+        <div className="ag-list__head">
+          <h2 className="ag-list__title" id="recipes-other-heading">
+            Other recipes{!loading && others.length > 0 ? <span className="ag-list__count"> {others.length}</span> : null}
+          </h2>
+          <p className="ag-hint">Repeatable routines you run yourself. They have no schedule of their own.</p>
         </div>
-      ) : null}
+        {loading ? null : others.length === 0 ? (
+          <Card className="card">
+            <CardContent className="card-body--list">
+              <div className="empty-state">
+                <BookOpen size={20} />
+                <span>No other recipes yet. Add one to teach Pond a repeatable routine.</span>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="skills-grid">
+            {others.map((r) => (
+              <div key={r.id || r.name} className={`ink-edge ink-card skill-card${r.active === false ? " skill-card--inactive" : ""}`}>
+                <div className="skill-card__top">
+                  <span className="skill-card__icon">
+                    <BookOpen size={16} />
+                  </span>
+                  <Switch
+                    size="sm"
+                    isSelected={r.active !== false}
+                    onChange={() => toggleActive(r)}
+                    aria-label={`Enable ${r.title || r.name}`}
+                  >
+                    <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
+                  </Switch>
+                </div>
+                <h3 className="skill-card__title">{r.title || r.name}</h3>
+                <p className="skill-card__desc">
+                  {r.description || <span className="muted">No description</span>}
+                </p>
+                {r.activities && r.activities.length > 0 && (
+                  <div className="recipe-activities-editor__pills">
+                    {r.activities.slice(0, 3).map((a, i) => (
+                      <span key={i} className="recipe-activity-pill recipe-activity-pill--static">{a}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="skill-card__actions">
+                  <button
+                    type="button"
+                    className="skill-card__action-btn"
+                    onClick={() => requestRun(r)}
+                    aria-label={`Run ${r.title || r.name}`}
+                    disabled={running === r.name}
+                  >
+                    <Play size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="skill-card__action-btn"
+                    onClick={() => startEdit(r)}
+                    aria-label={`Edit ${r.title || r.name}`}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="skill-card__action-btn skill-card__action-btn--danger"
+                    onClick={() => remove(r)}
+                    aria-label={`Delete ${r.title || r.name}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <BuiltInAgents prefills={env.prefills} variant="classic" />
 
       {runTarget && (
         <div className="recipe-run-modal-backdrop" onClick={() => setRunTarget(null)}>

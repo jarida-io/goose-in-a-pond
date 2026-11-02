@@ -317,6 +317,20 @@ def section_deletion(jerry, liz):
                   ("bound", body and body.get("bound") is True)):
         return
 
+    # A display name is not a member's id: a household once stored one and matched nobody.
+    code, body = call("PUT", "/api/v1/settings", {"primary_profile_id": "Liz"})
+    expect(
+        "primary_profile_id refuses a name that is not a member's id",
+        code,
+        422,
+        body,
+        (
+            "names the field",
+            body is not None
+            and any(f.get("field") == "primary_profile_id" for f in body.get("fields", [])),
+        ),
+    )
+
     # Make Liz the primary member, so the dangling-reference fix is exercised.
     code, _ = call("PUT", "/api/v1/settings", {"primary_profile_id": liz})
     check("set Liz as primary member", code == 200)
@@ -593,6 +607,15 @@ def section_network_mode():
     )
 
 
+def web_search_is(body, configured, status):
+    """`GET /web-search`'s contract fields; `local_results` is checked on its own."""
+    return isinstance(body, dict) and {k: body.get(k) for k in ("provider", "configured", "status")} == {
+        "provider": "brave",
+        "configured": configured,
+        "status": status,
+    }
+
+
 def section_web_search():
     """search_web's settings routes on a real server: registered, reaching the secret store,
     and never answering with the key.
@@ -609,12 +632,28 @@ def section_web_search():
         code,
         200,
         body,
+        ("off", web_search_is(body, False, "not_configured")),
         (
-            "off",
-            body == {"provider": "brave", "configured": False, "status": "not_configured"},
+            "local places off by default",
+            isinstance(body, dict)
+            and isinstance(body.get("local_results"), dict)
+            and body["local_results"].get("enabled") is False
+            and "town" in body["local_results"],
         ),
     ):
         return
+
+    for enabled in (True, False):
+        code, body = call("PUT", "/api/v1/settings", {"web_search_local_results": enabled})
+        expect("web_search_local_results=%s is saved" % enabled, code, 200, body)
+        code, body = call("GET", "/api/v1/web-search")
+        expect(
+            "the status follows the local places switch (%s)" % enabled,
+            code,
+            200,
+            body,
+            ("enabled", isinstance(body, dict) and body.get("local_results", {}).get("enabled") is enabled),
+        )
 
     code, body = call("PUT", "/api/v1/web-search/key", {})
     expect("PUT /web-search/key without a key is refused", code, 400, body)
@@ -746,10 +785,7 @@ def section_web_search_after_restart():
         code,
         200,
         body,
-        (
-            "off",
-            body == {"provider": "brave", "configured": False, "status": "not_configured"},
-        ),
+        ("off", web_search_is(body, False, "not_configured")),
     )
 
 
