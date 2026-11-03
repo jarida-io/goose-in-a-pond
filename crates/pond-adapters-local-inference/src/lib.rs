@@ -444,6 +444,10 @@ impl LocalInferenceLlmAdapter {
         let has_vision = sizing.encoder_bytes > 0 || has_mmproj;
         let n_ubatch = if has_vision { 512 } else { 256 };
 
+        let kv_type = std::env::var("POND_KV_TYPE")
+            .ok()
+            .unwrap_or_else(|| "f16".to_string());
+
         let jetson_settings = ModelSettings {
             // Full offload: unified memory, one 8 GB pool for CPU and GPU.
             n_gpu_layers: Some(99),
@@ -455,14 +459,14 @@ impl LocalInferenceLlmAdapter {
             n_threads: Some(4),
             // Halves KV memory on Ampere, and llama.cpp requires it for a quantised `type_v`.
             flash_attention: Some(true),
-            // f16 KV. With the windowed cache only 4 of E4B's 24 KV layers grow with the context,
+            // f16 KV by default. With the windowed cache only 4 of E4B's 24 KV layers grow with the context,
             // so f16 costs 286 MiB at 16K against q8_0's 152 (and the full-size cache's 476), and
             // decodes faster at depth: quantised KV sends flash attention down a kernel that
             // re-reads K/V per query head. llama-bench on the Orin, E4B QAT, depth 0/4096/8192:
             // f16 19.5/18.4/18.1 tok/s, q8_0 18.7/17.4/16.7; E2B f16 38.1/38.1/37.0, q8_0
             // 36.9/35.1/33.3.
-            type_k: Some("f16".to_string()),
-            type_v: Some("f16".to_string()),
+            type_k: Some(kv_type.clone()),
+            type_v: Some(kv_type),
             // Unless memory is tight: goose fits the window to the memory free after the load,
             // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
             // (kind="kv_cache_type_chosen"): a ~3,300-token preamble needs about as much again
