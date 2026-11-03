@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/PondApiClient";
 import { friendlyToolName } from "../components/toolNames";
 import { filterThinking } from "../lib/thinkFilter";
+import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 
 export type TestStatus = "idle" | "running" | "done" | "failed" | "stopped";
 
 export interface TestRunState {
   status: TestStatus;
   text: string;
+  /** What the run wrote while it worked, moved out of `text` by each tool call's notes. */
+  steps: string[];
   /** Tools the run called, in order, named the way the chat names them. */
   tools: string[];
   error: string | null;
@@ -21,6 +24,7 @@ export interface TestRunState {
 const IDLE: TestRunState = {
   status: "idle",
   text: "",
+  steps: [],
   tools: [],
   error: null,
   seconds: null,
@@ -56,7 +60,7 @@ export function useTestRun(name: string) {
     const cancelled = () => stopped.current || !alive.current || generation.current !== mine;
     const started = Date.now();
     const tools: string[] = [];
-    let text = "";
+    let reply: StepsCarrier = { text: "" };
     let insideThought = false;
     let sessionId: string | null = null;
     setState({ ...IDLE, status: "running" });
@@ -67,11 +71,14 @@ export function useTestRun(name: string) {
         if (event.type === "text") {
           const [visible, inside] = filterThinking(event.content ?? event.token ?? "", insideThought);
           insideThought = inside;
-          text += visible;
+          const text = reply.text + visible;
+          reply = { ...reply, text };
           setState((s) => ({ ...s, text }));
         } else if (event.type === "tool_call" && event.tool) {
           tools.push(friendlyToolName(event.tool));
-          setState((s) => ({ ...s, tools: [...tools] }));
+          reply = foldToolCall(reply, event.working_notes);
+          const { text, steps = [] } = reply;
+          setState((s) => ({ ...s, text, steps, tools: [...tools] }));
         } else if (event.type === "error") {
           throw new Error(event.error ?? "The run ended with an error.");
         } else if (event.type === "done") {

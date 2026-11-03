@@ -10,6 +10,7 @@ import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
 import { GooseAvatar } from "./chat/GooseAvatar";
 import { TypingIndicator } from "./chat/TypingIndicator";
+import { StepsDisclosure } from "./chat/StepsDisclosure";
 import { ResultCard } from "./chat/ResultCard";
 import type { CardKind } from "./chat/ResultCard";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
@@ -58,6 +59,7 @@ interface Row {
   longTaskIds?: string[];
   images?: string[];
   keptResults?: KeptResult[];
+  steps?: string[];
 }
 
 // ── Constants ─────────────────────────────────────────────────
@@ -102,6 +104,7 @@ function toRow(m: Message): Row {
     longTaskIds: m.longTaskIds,
     images: m.images,
     keptResults: m.keptResults,
+    steps: m.steps,
   };
 }
 
@@ -399,6 +402,7 @@ export function ChatHubView() {
                 <SubagentTree runs={m.delegations} />
               )}
               {m.who === "goose" && <LongTaskCards ids={m.longTaskIds} longTasks={longTasks} variant="hub" />}
+              {m.who === "goose" && m.steps && m.steps.length > 0 && <StepsDisclosure steps={m.steps} />}
               <div className={`ch-bubble ch-bubble--${m.who}`}>
                 {m.images && m.images.length > 0 && (
                   <div className="ch-bubble__images">

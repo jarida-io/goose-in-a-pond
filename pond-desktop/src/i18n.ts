@@ -57,6 +57,8 @@ void i18n.use(initReactI18next).init({
       identity: 'About you', preference: 'Preference', correction: 'Correction', relationship: 'People',
       project: 'Project', routine: 'Habit', knowledge: 'Knowledge', context: 'Right now',
     },
+  }, chat: {
+    steps: 'Steps',
   }, faces: {
     downloading: 'Face recognition is getting ready. The Pond is downloading its face models, which can take a while on a slow connection. It switches on by itself when they arrive; there is no need to restart anything.',
     downloadingProgress: '{{file}}: {{done}} of {{total}} MB',
