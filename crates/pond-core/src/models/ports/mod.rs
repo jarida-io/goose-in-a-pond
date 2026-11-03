@@ -14,6 +14,7 @@ pub mod model_storage;
 pub mod provider;
 pub mod room_voice;
 pub mod speech_energy;
+pub mod speech_model;
 pub mod token_counter;
 pub mod tts_control;
 pub mod voice_input;

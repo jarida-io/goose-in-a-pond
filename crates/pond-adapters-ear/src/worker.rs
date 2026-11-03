@@ -56,6 +56,8 @@ pub(crate) struct Woke {
     pub pcm: Vec<f32>,
     pub speaker: Option<VoiceSpeaker>,
     pub transcript: Option<String>,
+    /// The segment cap ended the wake's segment with speech going on: the request runs past it.
+    pub cut: bool,
 }
 
 pub(crate) enum ListenFrom {
@@ -69,6 +71,7 @@ pub(crate) struct Segment {
     pub start: usize,
     pub end: usize,
     pub pcm: Vec<f32>,
+    pub cut: bool,
 }
 
 pub(crate) struct RefChunk {
@@ -93,6 +96,9 @@ pub(crate) enum Cmd {
     SegmentWake(Woke),
     /// The pond is about to say this.
     Spoken(String),
+    /// Hear no wake and start nothing until then; `None` ends a pause.
+    Pause(Option<Instant>),
+    Speaker(Box<pond_ear::ear::parts::SpeakerNet>),
     Household(Household),
     Shutdown,
 }
@@ -137,6 +143,8 @@ pub(crate) struct WorkerState {
     spoken: Spoken,
     /// When the turn under way began thinking; what it says is kept for the whole turn.
     turn_began: Option<Instant>,
+    /// Deaf to wakes and new requests until then, as while a member teaches it their voice.
+    paused_until: Option<Instant>,
 }
 
 impl WorkerState {
@@ -162,6 +170,7 @@ impl WorkerState {
             quiet_renewed: now,
             spoken: Spoken::default(),
             turn_began: None,
+            paused_until: None,
         }
     }
 }
@@ -254,7 +263,25 @@ impl Worker {
         }
     }
 
+    fn paused(&self) -> bool {
+        self.state
+            .paused_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
     fn event(&mut self, event: Event) {
+        // A paused ear still cancels echo and keeps its clock; it only hears nothing new.
+        if self.paused()
+            && matches!(
+                event,
+                Event::Wake { .. }
+                    | Event::Segment { .. }
+                    | Event::Utterance { .. }
+                    | Event::BargeIn { .. }
+            )
+        {
+            return;
+        }
         match event {
             Event::Wake { start, who, .. } => {
                 let speaker = speaker_named(self.hearing.household(), who);
@@ -281,7 +308,9 @@ impl Worker {
                 });
             }
             Event::Silence { .. } => self.heard(Heard::Silence),
-            Event::Segment { start, end, .. } => {
+            Event::Segment {
+                start, end, cut, ..
+            } => {
                 let mut pcm = Vec::new();
                 self.hearing.audio(start, end, &mut pcm);
                 if let Some(segments) = &self.segments {
@@ -290,6 +319,7 @@ impl Worker {
                         start,
                         end,
                         pcm: pcm.clone(),
+                        cut,
                     });
                 }
                 let speaker = self.speaker_of(start, end);
@@ -391,6 +421,7 @@ impl Worker {
                     pcm,
                     speaker,
                     transcript: None,
+                    cut: false,
                 });
             }
             return;
@@ -466,6 +497,9 @@ impl Worker {
                     _ => self.state.interrupts.push(reply),
                 }
             }
+            Cmd::SegmentWake(_) if self.paused() => {
+                tracing::debug!("ear: a wake while paused ignored");
+            }
             Cmd::SegmentWake(woke) => {
                 let now = Instant::now();
                 self.state.spoken.forget_old(now, self.state.turn_began);
@@ -488,6 +522,19 @@ impl Worker {
                 self.cue();
                 linger(QUIET_UNTIL_THE_TURN);
                 self.state.quiet_listening = false;
+                if woke.cut {
+                    // The rest of the request is still being said: endpoint it whole from the wake.
+                    self.state.stash = None;
+                    self.hearing.listen(woke.start);
+                    self.state.turn_start = woke.start;
+                    match self.state.host {
+                        WorkflowState::Thinking | WorkflowState::Speak => {
+                            self.interrupt(woke.start, InterruptReason::WakeWord)
+                        }
+                        _ => self.woke(woke),
+                    }
+                    return true;
+                }
                 match self.state.host {
                     WorkflowState::Thinking | WorkflowState::Speak => {
                         let start = woke.start;
@@ -512,6 +559,18 @@ impl Worker {
                 self.state.spoken.say(&text, now);
             }
             Cmd::Household(household) => self.hearing.set_household(household),
+            Cmd::Speaker(speaker) => self.hearing.set_speaker(*speaker),
+            Cmd::Pause(until) => {
+                self.state.paused_until = until;
+                if self.paused() {
+                    self.state.wake_turn = None;
+                    self.state.pending_woke = None;
+                    // A follow-up waiting now would take the next taught sentence for a request.
+                    if let Some(waiter) = self.state.listen.take() {
+                        let _ = waiter.send(Heard::Silence);
+                    }
+                }
+            }
             Cmd::Shutdown => return false,
         }
         true

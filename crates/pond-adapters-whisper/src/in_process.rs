@@ -254,8 +254,28 @@ impl WhisperRsInput {
     /// 16 kHz mono PCM through the accurate profile, the wake word left in. Blocking: call it
     /// from a blocking thread, where `blocking_read` is safe.
     pub fn transcribe_pcm(&self, samples: &[f32]) -> Result<String> {
+        self.transcribe_pcm_prompted(samples, None)
+    }
+
+    /// As [`Self::transcribe_pcm`], with `prompt` read by Whisper as the text before the audio.
+    pub fn transcribe_pcm_prompted(&self, samples: &[f32], prompt: Option<&str>) -> Result<String> {
+        self.transcribe_pcm_with(samples, TranscribeOpts::accurate(), prompt)
+    }
+
+    /// As [`Self::transcribe_pcm_prompted`], through `opts`.
+    pub fn transcribe_pcm_with(
+        &self,
+        samples: &[f32],
+        opts: TranscribeOpts,
+        prompt: Option<&str>,
+    ) -> Result<String> {
         let engine = self.engine.blocking_read().clone();
-        Self::transcribe_samples(&engine, samples.to_vec())
+        let text =
+            Self::transcribe_unless_abandoned(&engine, samples.to_vec(), opts, None, prompt)?;
+        Ok(match prompt {
+            Some(prompt) if is_prompt_echo(&text, prompt) => String::new(),
+            _ => text,
+        })
     }
 
     /// Transcribe 16 kHz mono PCM (artifacts stripped); empty → `Ok("")`, panic → `Err`.
@@ -272,7 +292,7 @@ impl WhisperRsInput {
         samples: Vec<f32>,
         opts: TranscribeOpts,
     ) -> Result<String> {
-        Self::transcribe_unless_abandoned(engine, samples, opts, None)
+        Self::transcribe_unless_abandoned(engine, samples, opts, None, None)
     }
 
     /// As [`Self::transcribe_samples_with`], giving up once `abandoned` is raised: before
@@ -282,6 +302,7 @@ impl WhisperRsInput {
         samples: Vec<f32>,
         opts: TranscribeOpts,
         abandoned: Option<&AtomicBool>,
+        prompt: Option<&str>,
     ) -> Result<String> {
         let is_abandoned = || abandoned.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if samples.is_empty() {
@@ -334,7 +355,18 @@ impl WhisperRsInput {
                 },
                 None => SamplingStrategy::Greedy { best_of: 1 },
             };
+            // Tokenised per call and borrowed: `set_initial_prompt` leaks its string every call.
+            let prompt_tokens = match prompt {
+                Some(text) => engine
+                    .context
+                    .tokenize(text, MAX_PROMPT_TOKENS)
+                    .context("whisper-rs: the prompt did not tokenize")?,
+                None => Vec::new(),
+            };
             let mut params = FullParams::new(strategy);
+            if !prompt_tokens.is_empty() {
+                params.set_tokens(&prompt_tokens);
+            }
             params.set_print_progress(false);
             params.set_print_special(false);
             params.set_print_realtime(false);
@@ -413,6 +445,25 @@ impl WhisperRsInput {
 }
 
 const ABANDONED: &str = "transcription abandoned";
+
+/// Over noise Whisper can say its prompt back, once or over and over, the last copy cut short;
+/// nobody says it that way.
+fn is_prompt_echo(text: &str, prompt: &str) -> bool {
+    let heard = pond_voice::text::normalize_transcript(text);
+    let prompt = pond_voice::text::normalize_transcript(prompt);
+    let (heard, prompt): (Vec<&str>, Vec<&str>) = (
+        heard.split_whitespace().collect(),
+        prompt.split_whitespace().collect(),
+    );
+    !prompt.is_empty()
+        && heard.len() >= prompt.len()
+        && heard
+            .iter()
+            .enumerate()
+            .all(|(i, w)| *w == prompt[i % prompt.len()])
+}
+/// Whisper keeps only the last half of its 448-token text context as the prompt.
+const MAX_PROMPT_TOKENS: usize = 224;
 
 /// whisper.cpp's abort hook, checked after the encoder and after each decode step.
 unsafe extern "C" fn abort_when_raised(flag: *mut std::ffi::c_void) -> bool {
@@ -512,6 +563,15 @@ impl TranscribeOpts {
             beam_size: Some(5),
             suppress_non_speech: true,
             temperature_step: 0.2,
+        }
+    }
+
+    /// A room segment's opening: the accurate decode without its retries, which over noise cost up
+    /// to five more decodes for a transcript that comes out empty anyway.
+    pub fn segment_scan() -> Self {
+        Self {
+            temperature_step: 0.0,
+            ..Self::accurate()
         }
     }
 
@@ -621,6 +681,7 @@ impl WhisperRsInput {
                                 resampled,
                                 TranscribeOpts::accurate(),
                                 Some(&abandoned),
+                                None,
                             )?;
                             // Strip here so speculative and confirmed transcripts stay byte-identical.
                             Ok(strip_wake_words(transcript, &wake_words))
@@ -734,6 +795,26 @@ mod tests {
             "the reuse gate compares these directly"
         );
         assert_eq!(speculative, "turn the kitchen lights on.");
+    }
+
+    #[test]
+    fn the_prompt_said_back_is_an_echo_and_a_request_that_starts_like_it_is_not() {
+        let prompt = "Hey goose. Jerry Anyumba.";
+        assert!(is_prompt_echo("Hey goose, Jerry Anyumba.", prompt));
+        assert!(is_prompt_echo(
+            "Hey goose. Jerry Anyumba. Hey goose. Jerry Anyumba. Hey goose.",
+            prompt
+        ));
+        assert!(
+            !is_prompt_echo("Hey goose. Jerry", prompt),
+            "shorter than one copy"
+        );
+        assert!(!is_prompt_echo(
+            "Hey goose, Jerry Anyumba is home, turn the lights on.",
+            prompt
+        ));
+        assert!(!is_prompt_echo("", prompt));
+        assert!(!is_prompt_echo("anything", ""));
     }
 
     #[test]
@@ -1067,6 +1148,7 @@ mod decode_profiles {
                     long,
                     TranscribeOpts::accurate(),
                     Some(&abandoned),
+                    None,
                 )
             }
         });

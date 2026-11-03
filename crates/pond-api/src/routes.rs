@@ -210,6 +210,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/voice/room/events", get(crate::room_voice::events))
         .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
+        .route("/voice/room/pause", post(crate::room_voice::pause))
+        .route("/voice/room/resume", post(crate::room_voice::resume))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
@@ -6185,6 +6187,10 @@ async fn update_settings(
     // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
     crate::apply_embedding_choice(&state, &merged).await;
 
+    if current.active_whisper_model != merged.active_whisper_model {
+        crate::speech_model::switch_soon(&merged.active_whisper_model);
+    }
+
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
     if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
@@ -7558,6 +7564,7 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_whisper_model", name.clone())
                 .await;
+            crate::speech_model::switch_soon(&name);
         }
         "tts" => {
             let _ = settings_repo

@@ -19,7 +19,8 @@ const EDGE_FRAME_SECS: f32 = 0.010;
 
 /// The span of `samples` holding speech, widened by `before` and `after` seconds; `None` when
 /// nothing is loud. A frame counts as speech within 40 dB of the loudest and above -50 dBFS, which
-/// finds Kokoro's ~0.3 s lead and ~0.5 s tail of near-silence on every forward pass.
+/// finds Kokoro's ~0.3 s lead and ~0.5 s tail of near-silence on every forward pass. A frame that
+/// is not finite counts as loud: a broken pass must be caught by its caller, not trimmed away.
 pub fn speech_bounds(
     samples: &[f32],
     sample_rate: u32,
@@ -28,13 +29,15 @@ pub fn speech_bounds(
 ) -> Option<std::ops::Range<usize>> {
     let frame = ((sample_rate as f32 * EDGE_FRAME_SECS) as usize).max(1);
     let levels: Vec<f32> = samples.chunks(frame).map(rms).collect();
-    let loudest = levels.iter().copied().fold(0.0_f32, f32::max);
-    if loudest <= 0.0 {
-        return None;
-    }
+    let loudest = levels
+        .iter()
+        .copied()
+        .filter(|l| l.is_finite())
+        .fold(0.0_f32, f32::max);
     let floor = (loudest * 0.01).max(10f32.powf(-50.0 / 20.0));
-    let first = levels.iter().position(|l| *l > floor)?;
-    let last = levels.iter().rposition(|l| *l > floor)?;
+    let loud = |l: &f32| !l.is_finite() || *l > floor;
+    let first = levels.iter().position(loud)?;
+    let last = levels.iter().rposition(loud)?;
     let pad = |secs: f32| (secs.max(0.0) * sample_rate as f32) as usize;
     let start = (first * frame).saturating_sub(pad(before));
     let end = ((last + 1) * frame + pad(after)).min(samples.len());
@@ -467,6 +470,20 @@ mod tests {
             speech_bounds(&hiss, 24_000, 0.03, 0.05).is_none(),
             "below -50 dBFS"
         );
+    }
+
+    #[test]
+    fn non_finite_samples_are_never_taken_for_silence() {
+        let sr = 24_000;
+        let mut x = vec![0.0f32; sr];
+        x[sr / 2] = f32::NAN;
+        let r = speech_bounds(&x, sr as u32, 0.0, 0.0).expect("a NaN is not silence");
+        assert!(r.contains(&(sr / 2)), "{r:?}");
+        let all_nan = vec![f32::NAN; sr];
+        assert_eq!(speech_bounds(&all_nan, sr as u32, 0.0, 0.0), Some(0..sr));
+        let mut inf = vec![0.0f32; 480];
+        inf[0] = f32::INFINITY;
+        assert!(speech_bounds(&inf, sr as u32, 0.0, 0.0).is_some());
     }
 
     #[test]

@@ -23,8 +23,13 @@ pub enum Event {
     /// A wake, then no command.
     Silence { t: f64 },
     /// A stretch of speech outside Listen ended, with segments on: `start..end` is for the host's
-    /// wake detector to read.
-    Segment { t: f64, start: usize, end: usize },
+    /// wake detector to read. `cut`: the segment cap ended it while the speech went on.
+    Segment {
+        t: f64,
+        start: usize,
+        end: usize,
+        cut: bool,
+    },
     /// While the reply plays, someone has spoken over it for the barge-in span, on the
     /// echo-cancelled signal. Whether that interrupts is the host's policy, not the ear's.
     BargeIn {
@@ -74,8 +79,8 @@ impl Event {
                 num(*t)
             ),
             Event::Silence { t } => format!("{{\"event\":\"silence\",\"t\":{}}}", num(*t)),
-            Event::Segment { t, start, end } => format!(
-                "{{\"event\":\"segment\",\"t\":{},\"start\":{start},\"end\":{end}}}",
+            Event::Segment { t, start, end, cut } => format!(
+                "{{\"event\":\"segment\",\"t\":{},\"start\":{start},\"end\":{end},\"cut\":{cut}}}",
                 num(*t)
             ),
             Event::BargeIn { t, start, end, who: w, score } => format!(
@@ -141,10 +146,11 @@ mod tests {
             Event::Segment {
                 t: 3.5,
                 start: 100,
-                end: 900
+                end: 900,
+                cut: false
             }
             .json(),
-            r#"{"event":"segment","t":3.5,"start":100,"end":900}"#
+            r#"{"event":"segment","t":3.5,"start":100,"end":900,"cut":false}"#
         );
         assert_eq!(
             Event::Speech {

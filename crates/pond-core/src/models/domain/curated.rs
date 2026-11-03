@@ -144,8 +144,8 @@ pub fn for_record(record: &ModelRecord) -> Option<&'static CuratedModel> {
     find(&record.category, &record.name)
 }
 
-/// The size and hash a Hugging Face file must have: a pick, a drafter, a paired picture add-on or
-/// a GGUF embedding model.
+/// The size and hash a Hugging Face file must have: a pick, a drafter, a paired picture add-on, a
+/// GGUF embedding model or a pinned Whisper.
 pub fn file_pin(repo: &str, revision: &str, filename: &str) -> Option<FilePin> {
     if let Some(pick) = pinned(repo, revision, filename) {
         return Some(FilePin {
@@ -163,6 +163,9 @@ pub fn file_pin(repo: &str, revision: &str, filename: &str) -> Option<FilePin> {
         });
     }
     if let Some(pin) = super::voice_match_model::pinned(repo, revision, filename) {
+        return Some(pin);
+    }
+    if let Some(pin) = super::whisper_models::pinned(repo, revision, filename) {
         return Some(pin);
     }
     super::vision_pairing::encoder_pinned(repo, revision, filename).map(|spec| FilePin {

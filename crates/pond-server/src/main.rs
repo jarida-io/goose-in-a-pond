@@ -23,6 +23,7 @@ mod ports;
 mod room_memory;
 mod room_voice;
 mod schedule_executors;
+mod speech_model;
 mod spoken_code;
 mod system_deps;
 mod three_stage_consolidator;
@@ -1301,6 +1302,10 @@ async fn run_server(
     )
     .await;
 
+    let whisper_catalog =
+        voice_models::whisper_catalog(&SqliteModelRepository::new(db.system.clone())).await;
+    // A chosen model still to fetch: another on disk stands in, and the switch fetches it later.
+    let mut fetch_after_start: Option<String> = None;
     let whisper_model_path: Option<std::path::PathBuf> = match voice_models.whisper.as_ref() {
         None => {
             if settings.active_whisper_model.is_empty() {
@@ -1317,24 +1322,38 @@ async fn run_server(
             }
             None
         }
+        Some(w) if w.path.exists() => Some(w.path.clone()),
         Some(w) => {
-            if !w.path.exists() {
-                println!("  📥 STT model not found — downloading...");
-                match w.download.as_ref() {
-                    Some(dl) => {
-                        if let Some(parent) = w.path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
+            match voice_models::standby_whisper(&w.path, &whisper_catalog, &data_dir.join("models"))
+            {
+                Some(standby) => {
+                    println!(
+                        "  STT: {} is not on disk yet; {} transcribes while it downloads",
+                        settings.active_whisper_model,
+                        standby.display()
+                    );
+                    fetch_after_start = Some(settings.active_whisper_model.clone());
+                    Some(standby)
+                }
+                // Nothing on disk to stand in, as on a first run: fetch it now.
+                None => {
+                    println!("  📥 STT model not found — downloading...");
+                    match w.download.as_ref() {
+                        Some(dl) => {
+                            if let Some(parent) = w.path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Err(e) =
+                                model_download::download_file(&dl.url, &w.path, dl.size_mb).await
+                            {
+                                println!("  ⚠  STT model download failed: {}", e);
+                            }
                         }
-                        if let Err(e) =
-                            model_download::download_file(&dl.url, &w.path, dl.size_mb).await
-                        {
-                            println!("  ⚠  STT model download failed: {}", e);
-                        }
+                        None => println!("  ⚠  STT model has no catalog download URL"),
                     }
-                    None => println!("  ⚠  STT model has no catalog download URL"),
+                    Some(w.path.clone())
                 }
             }
-            Some(w.path.clone())
         }
     };
 
@@ -1387,6 +1406,21 @@ async fn run_server(
     let download_tracker: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<String, pond_api::DownloadEntry>>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // The ASR role now takes effect at once: fetched if need be, swapped in once it loads.
+    if let Some(whisper) = &serve_whisper {
+        let switch = Arc::new(speech_model::ServeSpeechModel::new(
+            whisper.clone(),
+            &data_dir,
+            Arc::new(SqliteModelRepository::new(db.system.clone())),
+            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            download_tracker.clone(),
+        ));
+        pond_api::speech_model::install(switch.clone());
+        if let Some(model) = fetch_after_start.take() {
+            pond_api::speech_model::switch_soon(&model);
+        }
+    }
 
     // ── Kokoro: the TTS engine ──
     // Adopt the host's tier, then resolve a usable one, before fetching: an unusable tier must
@@ -5671,6 +5705,13 @@ async fn run_chat(
                 // Voice Match runs in serve's room; this terminal loop recognises nobody.
                 speaker: None,
                 cnn_hears_household: false,
+                whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
+                    voice_rig::household_prompt(
+                        wake_word.unwrap_or(settings.voice_wake_word.as_str()),
+                        Some(&SqliteProfileRepository::new(db.system.clone())),
+                    )
+                    .await,
+                ))),
             })
             .await,
         ),

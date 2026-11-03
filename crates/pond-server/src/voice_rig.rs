@@ -4,11 +4,11 @@
 //! builds it, and serve builds the same.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use pond_adapters_ear::{EarConfig, EarPart, EarRig, Transcriber, WakeMode};
 use pond_adapters_whisper::{
-    KeywordDetectorConfig, WhisperBackend, WhisperKeywordDetector, WhisperRsInput,
+    KeywordDetectorConfig, TranscribeOpts, WhisperBackend, WhisperKeywordDetector, WhisperRsInput,
 };
 use pond_audio::MicHandle;
 use pond_core::models::domain::wake_detector::{
@@ -23,6 +23,7 @@ use pond_core::models::services::voice::quiet;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_core::shared::services::chat::{ChatService, SpokenObserver, StateObserver};
 use pond_core::user_data::domain::settings::Settings;
+use pond_core::user_data::ports::profile::ProfileRepository;
 
 use crate::model_download;
 
@@ -43,6 +44,29 @@ pub struct ListeningOptions<'a> {
     pub speaker: Option<pond_adapters_ear::ModelFile>,
     /// The wake CNN heard every taught member's latest enrolment run.
     pub cnn_hears_household: bool,
+    /// What the ear's Whisper reads before each stretch of speech; its owner keeps it current.
+    pub whisper_prompt: Option<WhisperPrompt>,
+}
+
+/// The ear's Whisper prompt, shared with whoever rewrites it when the household changes.
+pub type WhisperPrompt = Arc<RwLock<Option<String>>>;
+
+/// The prompt for `wake_word` and every member's name, read now.
+pub async fn household_prompt(
+    wake_word: &str,
+    profiles: Option<&(dyn ProfileRepository + Send + Sync)>,
+) -> Option<String> {
+    let names = match profiles {
+        Some(repo) => match repo.list().await {
+            Ok(list) => list.into_iter().map(|p| p.display_name).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "room voice: no member names for Whisper");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    pond_core::models::domain::speech_prompt::room_prompt(wake_word, &names)
 }
 
 /// Which front end listens, and why, for status lines and the API.
@@ -144,11 +168,31 @@ impl Listening {
 
 /// Whisper through its accurate profile, for the ear: the state it already prepared at load, so
 /// the ear never builds Whisper's second, wake-word state.
-struct WhisperTranscriber(Arc<WhisperRsInput>);
+struct WhisperTranscriber {
+    whisper: Arc<WhisperRsInput>,
+    prompt: Option<WhisperPrompt>,
+}
+
+impl WhisperTranscriber {
+    fn run(&self, pcm: &[f32], opts: TranscribeOpts) -> anyhow::Result<String> {
+        let prompt = self
+            .prompt
+            .as_ref()
+            .and_then(|p| p.read().unwrap_or_else(|e| e.into_inner()).clone());
+        crate::room_memory::measured("whisper", || {
+            self.whisper
+                .transcribe_pcm_with(pcm, opts, prompt.as_deref())
+        })
+    }
+}
 
 impl Transcriber for WhisperTranscriber {
     fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<String> {
-        crate::room_memory::measured("whisper", || self.0.transcribe_pcm(pcm))
+        self.run(pcm, TranscribeOpts::accurate())
+    }
+
+    fn scan(&self, pcm: &[f32]) -> anyhow::Result<String> {
+        self.run(pcm, TranscribeOpts::segment_scan())
     }
 }
 
@@ -191,7 +235,10 @@ pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
     }));
     cfg.audio_level = opts.audio_level.clone();
     cfg.speaker = opts.speaker.take();
-    let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperTranscriber(opts.whisper.clone()));
+    let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperTranscriber {
+        whisper: opts.whisper.clone(),
+        prompt: opts.whisper_prompt.clone(),
+    });
     let mic = opts.mic.clone();
     // Loading converts Silero once and warms every ring: CPU work, off the runtime's workers.
     let started = tokio::task::spawn_blocking(move || {

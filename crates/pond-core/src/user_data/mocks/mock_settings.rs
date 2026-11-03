@@ -33,6 +33,9 @@ impl Default for MockSettingsRepository {
 /// Overlay stored string values onto a default Settings struct.
 fn build_settings(store: &HashMap<String, String>) -> Settings {
     let mut s = Settings::default();
+    if let Some(v) = store.get("active_whisper_model") {
+        s.active_whisper_model = v.clone();
+    }
     if let Some(v) = store.get("assistant_name") {
         s.assistant_name = v.clone();
     }
