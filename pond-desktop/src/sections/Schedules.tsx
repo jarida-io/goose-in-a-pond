@@ -89,8 +89,8 @@ function timeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
-/* ── Recipe / prompt presets ───────────────────────────────── */
-const RECIPE_PRESETS: Record<string, string> = {
+/* ── Example prompts (not recipes: a schedule runs its own prompt) ── */
+const PROMPT_EXAMPLES: Record<string, string> = {
   "Morning briefing":     "Give me a morning briefing: weather, calendar, and top news.",
   "Daily summary":        "Summarize today's key events and tasks.",
   "Sensor check":         "Check all sensor readings and report any anomalies.",
@@ -221,7 +221,7 @@ export function Schedules() {
   const [name, setName]               = useState("");
   const [prompt, setPrompt]           = useState("");
   const [timezone, setTimezone]       = useState("UTC");
-  const [recipeKey, setRecipeKey]     = useState("Custom");
+  const [exampleKey, setExampleKey]     = useState("Custom");
   const [submitting, setSubmitting]   = useState(false);
 
   // Human-friendly repeat picker state
@@ -322,7 +322,7 @@ export function Schedules() {
       setName("");
       setPrompt("");
       setTimezone("UTC");
-      setRecipeKey("Custom");
+      setExampleKey("Custom");
       setRepeat("daily");
       setSchedCfg(defaultConfig());
       setShowForm(false);
@@ -430,9 +430,9 @@ export function Schedules() {
     }
   }, [expandedRuns]);
 
-  function handleRecipeChange(key: string) {
-    setRecipeKey(key);
-    const preset = RECIPE_PRESETS[key];
+  function handleExampleChange(key: string) {
+    setExampleKey(key);
+    const preset = PROMPT_EXAMPLES[key];
     if (preset) setPrompt(preset);
   }
 
@@ -674,16 +674,16 @@ export function Schedules() {
             {/* Separator between timing and prompt */}
             <Separator />
 
-            {/* Recipe select */}
+            {/* Example prompt select */}
             <div className="sched-modal__field">
-              <label className="sched-modal__label">Recipe</label>
+              <label className="sched-modal__label">Start from an example</label>
               <select
                 className="sched-modal__select"
-                value={recipeKey}
-                onChange={(e) => handleRecipeChange(e.target.value)}
-                aria-label="Schedule recipe"
+                value={exampleKey}
+                onChange={(e) => handleExampleChange(e.target.value)}
+                aria-label="Example prompt"
               >
-                {Object.keys(RECIPE_PRESETS).map((k) => (
+                {Object.keys(PROMPT_EXAMPLES).map((k) => (
                   <option key={k} value={k}>
                     {k}
                   </option>
@@ -781,7 +781,7 @@ export function Schedules() {
       <div className="page-header">
         <div>
           <h1 className="page-header__title">Routines & Schedules</h1>
-          <p className="sched-header__sub">One-tap scenes and recurring automations.</p>
+          <p className="sched-header__sub">When things run. A scheduled prompt can use any tool that is switched on.</p>
         </div>
         <div className="page-header__action">
           <div className="view-toggle" role="group" aria-label="View mode">

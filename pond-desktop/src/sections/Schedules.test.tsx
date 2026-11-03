@@ -240,6 +240,16 @@ describe("Schedules section", () => {
     }
   });
 
+  it("says what a schedule is, and calls its sample prompts examples, not recipes", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([activeSchedule]);
+    renderSchedules();
+    await screen.findByText("Morning Briefing");
+    expect(screen.getByText(/A scheduled prompt can use any tool that is switched on/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /New Schedule/ }));
+    expect(screen.getByLabelText("Example prompt")).toBeTruthy();
+    expect(screen.queryByLabelText("Schedule recipe")).toBeNull();
+  });
+
   it("listSchedules is called on mount", async () => {
     vi.mocked(api.listSchedules).mockResolvedValue([]);
     renderSchedules();
