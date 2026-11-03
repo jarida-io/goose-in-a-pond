@@ -21,6 +21,7 @@ pub trait Hearing: Send {
     /// The household member whose voice spoke absolute samples `[start, end)`, if Voice Match
     /// recognises one.
     fn identify(&mut self, start: usize, end: usize) -> Option<String>;
+    fn set_speaker(&mut self, speaker: pond_ear::ear::parts::SpeakerNet);
 }
 
 impl Hearing for Ear {
@@ -66,5 +67,9 @@ impl Hearing for Ear {
 
     fn identify(&mut self, start: usize, end: usize) -> Option<String> {
         Ear::identify(self, start, end).0
+    }
+
+    fn set_speaker(&mut self, speaker: pond_ear::ear::parts::SpeakerNet) {
+        Ear::set_speaker(self, speaker);
     }
 }

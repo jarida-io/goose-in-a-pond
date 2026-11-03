@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::wake_detector::{WakeDetector, WakeDetectorReason};
-use crate::shared::domain::agent::WorkflowState;
+use crate::shared::domain::agent::{WorkflowEvent, WorkflowState};
 
 /// Why the room cannot listen even though it is switched on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub enum RoomState {
     Listen,
     Thinking,
     Speak,
+    /// Hears no wake word for a while, as while a member teaches it their voice.
+    Paused,
 }
 
 impl From<WorkflowState> for RoomState {
@@ -77,6 +79,53 @@ pub struct RoomStatus {
     pub interrupts: RoomInterrupts,
     pub last_heard: Option<LastHeard>,
     pub session_id: Option<String>,
+    /// RFC 3339, while `state` is `paused`.
+    #[serde(default)]
+    pub paused_until: Option<String>,
+}
+
+/// The longest pause `POST /voice/room/pause` takes.
+pub const MAX_ROOM_PAUSE_SECONDS: u64 = 300;
+/// How long the room stays deaf after an enrolment take, for phones that do not pause it.
+pub const PAUSE_AFTER_TAKE_SECONDS: u64 = 20;
+
+/// One line of `GET /voice/room/events`: the loop's own events, and the pause the loop never sees.
+#[derive(Debug, Clone)]
+pub enum RoomEvent {
+    Loop(WorkflowEvent),
+    /// RFC 3339.
+    Paused {
+        until: String,
+    },
+    /// The pause ended, early or on time; `state` is the room's own again.
+    Resumed {
+        state: RoomState,
+    },
+}
+
+#[derive(Serialize)]
+struct StateLine<'a> {
+    event: &'static str,
+    state: RoomState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paused_until: Option<&'a str>,
+}
+
+impl RoomEvent {
+    /// The same NDJSON line `chat --voice --json-events` prints; a pause is a `state` line too.
+    pub fn to_ndjson(&self) -> Option<String> {
+        let (state, paused_until) = match self {
+            Self::Loop(event) => return event.to_ndjson(),
+            Self::Paused { until } => (RoomState::Paused, Some(until.as_str())),
+            Self::Resumed { state } => (*state, None),
+        };
+        serde_json::to_string(&StateLine {
+            event: "state",
+            state,
+            paused_until,
+        })
+        .ok()
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +147,7 @@ mod tests {
             interrupts: RoomInterrupts::WakeOnly,
             last_heard: None,
             session_id: None,
+            paused_until: None,
         };
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
@@ -109,7 +159,8 @@ mod tests {
                 "wake": {"phrase": "hey goose", "detector": "whisper", "reason": "not_calibrated"},
                 "interrupts": "wake_only",
                 "last_heard": null,
-                "session_id": null
+                "session_id": null,
+                "paused_until": null
             })
         );
         assert_eq!(
@@ -127,6 +178,38 @@ mod tests {
         assert_eq!(
             serde_json::to_value(WakeDetector::HeyGoose).unwrap(),
             "hey_goose"
+        );
+    }
+
+    #[test]
+    fn a_pause_and_its_end_are_state_lines_and_the_loops_own_pass_through() {
+        assert_eq!(
+            RoomEvent::Paused {
+                until: "2026-11-03T06:54:45+00:00".into()
+            }
+            .to_ndjson()
+            .unwrap(),
+            r#"{"event":"state","state":"paused","paused_until":"2026-11-03T06:54:45+00:00"}"#
+        );
+        assert_eq!(
+            RoomEvent::Resumed {
+                state: RoomState::Wait
+            }
+            .to_ndjson()
+            .unwrap(),
+            r#"{"event":"state","state":"wait"}"#
+        );
+        assert_eq!(
+            RoomEvent::Loop(WorkflowEvent::StateChanged {
+                state: WorkflowState::Speak
+            })
+            .to_ndjson()
+            .unwrap(),
+            r#"{"event":"state","state":"speak"}"#
+        );
+        assert_eq!(
+            RoomEvent::Loop(WorkflowEvent::UserInput("hi".into())).to_ndjson(),
+            None
         );
     }
 }

@@ -307,8 +307,9 @@ that member's particulars and notes. That is all a voice match buys:
   never a session), so a voice session cannot approve a ride offer.
 - `claim_session_identity` never moves a session to another member, so a different voice's wake
   starts a session of its own, and so does an unrecognised voice after a member's turns.
-- A follow-up after a recognised wake must be the same voice; an unrecognised wake keeps the
-  follow-ups it had.
+- After a recognised wake, a follow-up in another enrolled member's voice is dropped; one Voice
+  Match does not recognise continues the conversation, and an unrecognised wake keeps every
+  follow-up.
 
 Without an enrolled member nothing changes: a voice session resolves to `Household` on a pond of
 one and `Guest` otherwise.

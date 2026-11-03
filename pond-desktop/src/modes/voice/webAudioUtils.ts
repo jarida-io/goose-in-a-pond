@@ -512,6 +512,8 @@ export function stripMarkupForSpeech(text: string): string {
   for (const tag of SCAFFOLD_TAGS) {
     out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
   }
+  // Models invent snake_case tags for tool syntax and turn records; no HTML tag has an underscore.
+  out = out.replace(/<([a-z][a-z0-9]*(?:_[a-z0-9]+)+)>[\s\S]*?<\/\1>/g, "");
   const attr = `\\s+[\\w.:-]+(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>/]+))?`;
   // A tool-like name may be cut off unclosed by a clause split; an HTML tag never counts so.
   out = out.replace(new RegExp(`</?[A-Za-z][\\w.:-]*__[\\w.:-]*(?:${attr})*(?:\\s*/?>|[\\s\\S]*$)`, "g"), "");

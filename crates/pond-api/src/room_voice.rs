@@ -11,6 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::Stream;
+use pond_core::models::domain::room_voice::RoomEvent;
 use pond_core::shared::domain::agent::WorkflowEvent;
 use serde::Deserialize;
 use serde_json::json;
@@ -98,13 +99,13 @@ pub async fn events(
 }
 
 fn event_stream(
-    mut events: tokio::sync::broadcast::Receiver<WorkflowEvent>,
+    mut events: tokio::sync::broadcast::Receiver<RoomEvent>,
     levels: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
         loop {
             match events.recv().await {
-                Ok(WorkflowEvent::AudioLevel { .. }) if !levels => {}
+                Ok(RoomEvent::Loop(WorkflowEvent::AudioLevel { .. })) if !levels => {}
                 Ok(event) => {
                     if let Some(line) = event.to_ndjson() {
                         yield Ok(Event::default().data(line));
@@ -124,6 +125,48 @@ pub async fn interrupt(State(state): State<Arc<AppState>>) -> Response {
     match &state.room_voice {
         Some(room) => {
             room.interrupt();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => no_room(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Pause {
+    seconds: u64,
+}
+
+/// `POST /api/v1/voice/room/pause {seconds}`: no wake word and no new turn for up to five
+/// minutes, as while a member teaches the pond their voice; never saved, and it resumes on its own.
+pub async fn pause(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<Pause>, JsonRejection>,
+) -> Response {
+    use pond_core::models::domain::room_voice::MAX_ROOM_PAUSE_SECONDS;
+    let Some(room) = state.room_voice.clone() else {
+        return no_room();
+    };
+    let seconds = match body {
+        Ok(Json(Pause { seconds })) if (1..=MAX_ROOM_PAUSE_SECONDS).contains(&seconds) => seconds,
+        _ => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("expected {{\"seconds\": 1 to {MAX_ROOM_PAUSE_SECONDS}}}"),
+                })),
+            )
+                .into_response()
+        }
+    };
+    room.pause(std::time::Duration::from_secs(seconds));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /api/v1/voice/room/resume`
+pub async fn resume(State(state): State<Arc<AppState>>) -> Response {
+    match &state.room_voice {
+        Some(room) => {
+            room.resume();
             StatusCode::NO_CONTENT.into_response()
         }
         None => no_room(),

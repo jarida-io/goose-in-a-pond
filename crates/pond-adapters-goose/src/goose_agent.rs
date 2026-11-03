@@ -482,6 +482,8 @@ pub struct GooseAdapter {
         Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     /// Where the household's edit of the Voice agent lives; `None` runs the shipped one.
     recipe_repo: Option<Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository>>,
+    /// The Voice agent's last thinking choice (`VoiceThinking as u8`), for the sync `capabilities`.
+    voice_thinking: std::sync::atomic::AtomicU8,
     /// Engine-reported prompt tokens per session (trimmer feedback); an Arc the stream can hold.
     last_prompt_tokens_arc: std::sync::OnceLock<Arc<Mutex<HashMap<String, u32>>>>,
     /// Tool set from the last `list_tools()`; cleared when extensions change.
@@ -612,6 +614,9 @@ impl GooseAdapter {
             prefix_cache: Mutex::new(PrefixCacheState::new(0, std::time::Instant::now())),
             giap_session_storage: None,
             recipe_repo: None,
+            voice_thinking: std::sync::atomic::AtomicU8::new(
+                pond_core::shared::services::voice_agent::VoiceThinking::Auto as u8,
+            ),
             last_prompt_tokens_arc: std::sync::OnceLock::new(),
             cached_tools: tokio::sync::RwLock::new(None),
             defaults_stripped: Mutex::new(HashSet::new()),
@@ -1426,16 +1431,13 @@ impl GooseAdapter {
 
     /// Whether this turn's prompt carries `<thinking>` (and `enable_thinking`). "auto" reads the
     /// model file, not the capability cache, which is stale on turn one and would move the prefix.
+    /// A spoken turn passes the Voice agent's mode (`VoiceThinking::mode`).
     fn thinking_section_applies(
         mode: &str,
         provider: &str,
         model: &str,
         data_dir: Option<&std::path::Path>,
-        voice: bool,
     ) -> bool {
-        if voice {
-            return false;
-        }
         match mode {
             "on" => true,
             "off" => false,
@@ -2689,14 +2691,24 @@ impl GooseAdapter {
             template_content
         };
 
-        // Voice disables thinking (it wastes TTS time and can leak as speech). Drives both the
-        // prompt's <thinking> section and the engine's `enable_thinking`, which must agree.
+        // A spoken turn thinks as the Voice agent chooses; its reasoning is never spoken or shown
+        // (`reasoning_frames_enabled`). Drives both the prompt's <thinking> section and the
+        // engine's `enable_thinking`, which must agree.
+        let thinking_mode = match is_voice {
+            true => voice_agent.thinking.mode(&settings.thinking_mode),
+            false => settings.thinking_mode.as_str(),
+        };
+        if is_voice {
+            self.voice_thinking.store(
+                voice_agent.thinking as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let thinking_enabled = Self::thinking_section_applies(
-            &settings.thinking_mode,
+            thinking_mode,
             &settings.chat_provider,
             &settings.chat_model,
             self.data_dir.as_deref(),
-            is_voice,
         );
 
         // One profile per turn, from what `apply_goose_env_knobs` cached, for every budget below.
@@ -4438,11 +4450,15 @@ impl AgentPort for GooseAdapter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        // Voice: thinking wastes TTS time; vision/audio inputs go unused.
+        // Voice: thinking only as the Voice agent last chose; vision/audio inputs go unused.
         // A voice turn's prompt never claims vision either: `vision_section_applies` takes the
         // turn's flag, which this one forces on.
         if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {
-            caps.thinking = false;
+            let off = pond_core::shared::services::voice_agent::VoiceThinking::Off as u8;
+            caps.thinking &= self
+                .voice_thinking
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != off;
             caps.vision = false;
             caps.audio_input = false;
         }
@@ -5448,24 +5464,21 @@ mod tests {
             "auto",
             "ollama",
             "gemma-4-E2B-it",
-            None,
-            false
+            None
         ));
         assert!(!GooseAdapter::thinking_section_applies(
             "auto",
             "ollama",
             "llama-3.2-3b",
-            None,
-            false
+            None
         ));
     }
 
     #[test]
     fn auto_thinking_gives_the_same_answer_twice() {
         for model in ["gemma-4-E2B-it", "llama-3.2-3b", "NVIDIA-Nemotron3-Nano-4B"] {
-            let first = GooseAdapter::thinking_section_applies("auto", "local", model, None, false);
-            let second =
-                GooseAdapter::thinking_section_applies("auto", "local", model, None, false);
+            let first = GooseAdapter::thinking_section_applies("auto", "local", model, None);
+            let second = GooseAdapter::thinking_section_applies("auto", "local", model, None);
             assert_eq!(first, second, "{model} answered differently on turn 2");
         }
     }
@@ -5511,31 +5524,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_thinking_modes_ignore_the_model_and_voice_always_wins() {
+    fn explicit_thinking_modes_ignore_the_model_and_voice_follows_its_agent() {
         assert!(GooseAdapter::thinking_section_applies(
             "on",
             "ollama",
             "llama-3.2-3b",
-            None,
-            false
+            None
         ));
         assert!(!GooseAdapter::thinking_section_applies(
             "off",
             "ollama",
             "gemma-4-E2B-it",
-            None,
-            false
+            None
         ));
-        for mode in ["on", "off", "auto"] {
-            assert!(
-                !GooseAdapter::thinking_section_applies(
-                    mode,
+        // A spoken turn passes the Voice agent's mode, which follows the household's on auto.
+        use pond_core::shared::services::voice_agent::VoiceThinking;
+        for (voice, household, thinks) in [
+            (VoiceThinking::Off, "on", false),
+            (VoiceThinking::On, "off", true),
+            (VoiceThinking::Auto, "off", false),
+            (VoiceThinking::Auto, "on", true),
+        ] {
+            assert_eq!(
+                GooseAdapter::thinking_section_applies(
+                    voice.mode(household),
                     "ollama",
                     "gemma-4-E2B-it",
                     None,
-                    true
                 ),
-                "voice mode must suppress <thinking> regardless of mode ({mode})"
+                thinks,
+                "{voice:?} over a household on {household}"
             );
         }
     }
