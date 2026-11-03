@@ -403,7 +403,10 @@ impl LocalInferenceLlmAdapter {
         });
         let sizing =
             pond_core::models::domain::device_budget::device_window(gguf.as_deref(), model_id);
-        let context_size = sizing.window;
+        let context_size = std::env::var("POND_CONTEXT_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(sizing.window);
         tracing::info!(
             model = model_id,
             model_mb = sizing.model_bytes / (1024 * 1024),
