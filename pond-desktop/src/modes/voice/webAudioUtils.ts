@@ -283,13 +283,9 @@ export function playPingTone(): void {
 // Port of `ReplySplitter` in `crates/pond-voice/src/text.rs`; keep the two in step.
 
 const ABBREV_WORD_RE = /^(?:dr|mr|mrs|ms|prof|st|jr|sr|vs|etc|approx|dept|govt|inc|ltd|corp|min|max|temp|est|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|e\.g|i\.e|u\.s|a\.m|p\.m)$/i;
-/** The first unit is cut here when no mark has come by `FIRST_UNIT_LOOKAHEAD_WORDS`. */
-export const FIRST_UNIT_MAX_WORDS = 6;
-export const FIRST_UNIT_LOOKAHEAD_WORDS = 10;
 /** A unit is cut before it passes this many estimated Kokoro tokens. */
 export const UNIT_TOKEN_BUDGET = 200;
 const MIN_CLAUSE_WORDS = 3;
-const CLAUSE_LOOKAHEAD_TOKENS = 40;
 const CLOSERS = `"')]\u201d\u2019`;
 const TERMINALS = ".?!\u2026";
 
@@ -342,7 +338,6 @@ function wsEnd(text: string, from: number): number {
 function nextCut(text: string, first: boolean, behind: boolean, settled: boolean): Cut | null {
   let words = 0;
   let inWord = false;
-  let sixthWordEnd: number | null = null;
   let lineStart = 0;
   let lastClause: number | null = null;
   let lastSpace: number | null = null;
@@ -353,16 +348,12 @@ function nextCut(text: string, first: boolean, behind: boolean, settled: boolean
       if (inWord) {
         inWord = false;
         words++;
-        if (words === FIRST_UNIT_MAX_WORDS) sixthWordEnd = i;
       }
       lastSpace = i;
     } else {
       inWord = true;
     }
 
-    if (first && words >= FIRST_UNIT_LOOKAHEAD_WORDS && sixthWordEnd !== null) {
-      return { end: sixthWordEnd, resume: sixthWordEnd, boundary: "word" };
-    }
     if (estimateTokens(text.slice(0, i)) > UNIT_TOKEN_BUDGET) {
       if (lastClause !== null) return { end: lastClause, resume: lastClause, boundary: "clause" };
       if (lastSpace === null) return null;

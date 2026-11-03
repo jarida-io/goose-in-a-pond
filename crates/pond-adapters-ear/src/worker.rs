@@ -2,7 +2,7 @@
 //! so every rule about wakes, turns and interrupts is decided here, in sample order.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pond_audio::{MicHandle, MicReader, MicState};
@@ -140,7 +140,7 @@ pub(crate) struct WorkerState {
     quiet_listening: bool,
     quiet_renewed: Instant,
     /// What the pond said lately, to tell its echo from a person.
-    spoken: Spoken,
+    spoken: Arc<Mutex<Spoken>>,
     /// When the turn under way began thinking; what it says is kept for the whole turn.
     turn_began: Option<Instant>,
     /// Deaf to wakes and new requests until then, as while a member teaches it their voice.
@@ -148,7 +148,7 @@ pub(crate) struct WorkerState {
 }
 
 impl WorkerState {
-    pub fn new() -> WorkerState {
+    pub fn new(spoken: Arc<Mutex<Spoken>>) -> WorkerState {
         let now = Instant::now();
         WorkerState {
             reference: Reference::new(),
@@ -168,7 +168,7 @@ impl WorkerState {
             dropped: 0,
             quiet_listening: false,
             quiet_renewed: now,
-            spoken: Spoken::default(),
+            spoken,
             turn_began: None,
             paused_until: None,
         }
@@ -322,17 +322,19 @@ impl Worker {
                         cut,
                     });
                 }
-                let speaker = self.speaker_of(start, end);
-                self.state.stash = Some((
-                    start,
-                    Heard::Utterance {
+                if self.state.host != WorkflowState::Speak {
+                    let speaker = self.speaker_of(start, end);
+                    self.state.stash = Some((
                         start,
-                        end,
-                        pcm,
-                        transcript: None,
-                        speaker,
-                    },
-                ));
+                        Heard::Utterance {
+                            start,
+                            end,
+                            pcm,
+                            transcript: None,
+                            speaker,
+                        },
+                    ));
+                }
             }
             Event::BargeIn {
                 start,
@@ -448,14 +450,21 @@ impl Worker {
         match cmd {
             Cmd::Loop(state) => self.follow(state),
             Cmd::Listen { from, reply } => {
+                const REVERB_MARGIN_SAMPLES: usize = 3_200;
+                let tap_floor = self
+                    .state
+                    .reference
+                    .cursor()
+                    .map(|c| c + REVERB_MARGIN_SAMPLES)
+                    .unwrap_or(0);
                 let start = match from {
-                    ListenFrom::Now => self.hearing.samples(),
-                    ListenFrom::At(sample) => sample,
-                    ListenFrom::Since(instant) => self.sample_of(instant),
+                    ListenFrom::Now => self.hearing.samples().max(tap_floor),
+                    ListenFrom::At(sample) => sample.max(tap_floor),
+                    ListenFrom::Since(instant) => self.sample_of(instant).max(tap_floor),
                 };
                 self.state.interrupted = false;
                 if let Some((began, _)) = &self.state.stash {
-                    if began + STASH_TOLERANCE >= start {
+                    if *began >= tap_floor && began + STASH_TOLERANCE >= start {
                         if let Some((_, heard)) = self.state.stash.take() {
                             let _ = reply.send(heard);
                         }
@@ -502,11 +511,15 @@ impl Worker {
             }
             Cmd::SegmentWake(woke) => {
                 let now = Instant::now();
-                self.state.spoken.forget_old(now, self.state.turn_began);
+                self.state
+                    .spoken
+                    .lock()
+                    .unwrap()
+                    .forget_old(now, self.state.turn_began);
                 let echo = woke
                     .transcript
                     .as_deref()
-                    .and_then(|heard| self.state.spoken.echo_of(heard));
+                    .and_then(|heard| self.state.spoken.lock().unwrap().echo_of(heard));
                 if let Some(share) = echo {
                     tracing::info!(
                         heard = woke.transcript.as_deref().unwrap_or_default(),
@@ -555,8 +568,9 @@ impl Worker {
             }
             Cmd::Spoken(text) => {
                 let now = Instant::now();
-                self.state.spoken.forget_old(now, self.state.turn_began);
-                self.state.spoken.say(&text, now);
+                let mut spoken = self.state.spoken.lock().unwrap();
+                spoken.forget_old(now, self.state.turn_began);
+                spoken.say(&text, now);
             }
             Cmd::Household(household) => self.hearing.set_household(household),
             Cmd::Speaker(speaker) => self.hearing.set_speaker(*speaker),

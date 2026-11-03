@@ -1296,8 +1296,20 @@ impl ChatService {
         let _turn = TurnEnds(self.voice_output.clone());
 
         // ── Working tone ──────────────────────────────────────────────────
-        // Plays from before inference until the first speakable sentence.
-        let mut tone = WorkingTone::start(self.voice_output.clone(), self.thinking_tone);
+        // Plays from before inference until speech audio begins playback.
+        let tone = Arc::new(std::sync::Mutex::new(WorkingTone::start(
+            self.voice_output.clone(),
+            self.thinking_tone,
+        )));
+        struct ToneStopper(Arc<std::sync::Mutex<WorkingTone>>);
+        impl Drop for ToneStopper {
+            fn drop(&mut self) {
+                if let Ok(mut tone) = self.0.lock() {
+                    tone.stop();
+                }
+            }
+        }
+        let _tone_stopper = ToneStopper(tone.clone());
 
         let mut stream = self.agent.chat_stream(request).await?;
         let mut turn_usage: Option<crate::models::ports::provider::UsageStats> = None;
@@ -1319,9 +1331,13 @@ impl ChatService {
         };
         let mut thought_filter = crate::models::services::thought_filter::ThoughtFilter::new();
         // Dropped with `speaking` on a barge-in, which stops synthesis and playback with it.
+        let tone_for_start = tone.clone();
         let mut pipeline = SpeechPipeline::start(
             self.voice_output.clone(),
             self.spoken_observer.clone(),
+            Some(Box::new(move || {
+                tone_for_start.lock().unwrap().stop();
+            })),
             None,
         );
 
@@ -1337,7 +1353,6 @@ impl ChatService {
                         Err(_) => {
                             // Stalled: say the sentences already whole rather than wait for more.
                             for unit in splitter.pause(pipeline.pace()) {
-                                tone.stop();
                                 if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                                     barge_in = self.watch_for_barge_in(tx);
                                 }
@@ -1431,7 +1446,6 @@ impl ChatService {
                 }
             }
                 for unit in units {
-                    tone.stop();
                     if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                         barge_in = self.watch_for_barge_in(tx);
                     }
@@ -1461,7 +1475,6 @@ impl ChatService {
             }
             units.extend(splitter.finish());
             for unit in units {
-                tone.stop();
                 if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                     barge_in = self.watch_for_barge_in(tx);
                 }
@@ -1471,7 +1484,7 @@ impl ChatService {
             pipeline.finish().await;
 
             // A turn that produced no speakable text still has to stop the tone.
-            tone.stop();
+            tone.lock().unwrap().stop();
 
             // Explicit drop: stop the barge-in watch now that TTS is done, after the tone.
             drop(barge_in.take());
@@ -1774,6 +1787,9 @@ impl ChatService {
         // Text captured by a wake-word interrupt; the next iteration skips listening for it.
         let mut pending_input: Option<String> = None;
 
+        // The assistant's last spoken reply; used to ignore its own echo if heard back.
+        let mut last_spoken: Option<String> = None;
+
         // Human-facing stdout; suppressed in `--json-events` mode, where stdout is NDJSON only.
         macro_rules! diag {
             ($($arg:tt)*) => {
@@ -1920,7 +1936,24 @@ impl ChatService {
                     first_turn = true;
                     continue;
                 }
-                Some(text) => text,
+                Some(text) => {
+                    if let Some(spoken) = &last_spoken {
+                        if pond_voice::text::is_echo_transcript(&text, spoken) {
+                            tracing::info!(
+                                input = %text,
+                                spoken = %spoken,
+                                "chat: input is an echo of the assistant's previous reply, ignored"
+                            );
+                            abort_speculative(speculative);
+                            if !first_turn {
+                                diag!("  nothing heard");
+                            }
+                            first_turn = true;
+                            continue;
+                        }
+                    }
+                    text
+                }
             };
 
             // ── Voice-loop control (dismissal / exit) — single source of truth ──
@@ -1931,6 +1964,7 @@ impl ChatService {
                     let farewell = "Until next time. Just say my name when you need me.";
                     diag!("  {}", farewell);
                     self.report_spoken(farewell);
+                    last_spoken = Some(farewell.to_string());
                     if let Err(e) = self.voice_output.speak(farewell).await {
                         tracing::warn!("TTS farewell failed: {}", e);
                     }
@@ -2072,6 +2106,9 @@ impl ChatService {
                     }
                 }
                 Raced::Turn(chat_result) => {
+                    if let Ok(Ok(outcome)) = &chat_result {
+                        last_spoken = Some(outcome.text.clone());
+                    }
                     if !self.finalize_confirmed_turn(chat_result, &input).await {
                         first_turn = true;
                     }

@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use tokio::time::Instant;
 
 use pond_voice::dsp::wav_duration_secs;
 use pond_voice::text::{estimate_tokens, pack_units, Pace, SpeechUnit};
@@ -68,9 +68,8 @@ impl Meter {
             .load(Ordering::Relaxed)
             .saturating_sub(self.now_ms());
         let queued = (self.ready_ms.load(Ordering::Relaxed) + playing) as f32 / 1000.0;
-        let owed = self.owed_tokens.load(Ordering::Relaxed) as f32 * spt;
         Pace {
-            slack_secs: queued - owed,
+            slack_secs: queued,
             synth_secs_per_token: spt,
         }
     }
@@ -100,10 +99,12 @@ pub struct SpeechPipeline {
 }
 
 impl SpeechPipeline {
+    /// `on_playback_start` runs when the first audio item begins playback.
     /// `on_playback_done` runs once the last unit has played, however the reply ends early.
     pub fn start(
         voice: Arc<dyn VoiceOutput>,
         on_spoken: Option<SpokenObserver>,
+        on_playback_start: Option<Box<dyn FnOnce() + Send>>,
         on_playback_done: Option<Box<dyn FnOnce() + Send>>,
     ) -> Self {
         let meter = Arc::new(Meter::new());
@@ -131,6 +132,8 @@ impl SpeechPipeline {
                 };
                 let after: usize = queue.iter().map(|u| estimate_tokens(&u.text)).sum();
                 let tokens = before - after;
+                let boundary = unit.boundary;
+                let chars = unit.text.chars().count();
                 if let Some(observer) = &on_spoken {
                     observer(&unit.text);
                 }
@@ -145,6 +148,19 @@ impl SpeechPipeline {
                     }
                     _ => AudioItem::Fallback(unit.text),
                 };
+                let audio_ms = match &item {
+                    AudioItem::Wav { millis, .. } => *millis,
+                    _ => 0,
+                };
+                tracing::info!(
+                    kind = "speech_unit",
+                    chars,
+                    tokens,
+                    boundary = ?boundary,
+                    synth_ms = started.elapsed().as_millis() as u64,
+                    audio_ms,
+                    "speech unit synthesised"
+                );
                 synth_meter.synthesised(tokens, started.elapsed().as_secs_f32());
                 if audio_tx.send(item).await.is_err() {
                     break;
@@ -154,7 +170,11 @@ impl SpeechPipeline {
 
         let play_meter = meter.clone();
         let playback = tokio::spawn(async move {
+            let mut on_playback_start = on_playback_start;
             while let Some(item) = audio_rx.recv().await {
+                if let Some(start) = on_playback_start.take() {
+                    start();
+                }
                 match item {
                     AudioItem::Wav { wav, millis } => {
                         sub(&play_meter.ready_ms, millis);
@@ -277,7 +297,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn units_play_in_order_with_their_boundaries() {
         let v = voice(10, 1);
-        let mut p = SpeechPipeline::start(v.clone(), None, None);
+        let mut p = SpeechPipeline::start(v.clone(), None, None, None);
         p.say(SpeechUnit::new("One.", Boundary::Paragraph)).await;
         p.say(SpeechUnit::new("Two.", Boundary::End)).await;
         p.finish().await;
@@ -288,9 +308,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn queued_audio_shows_as_slack_and_owed_synthesis_takes_it_away() {
+    async fn queued_audio_shows_as_slack() {
         let v = voice(100, 5_000);
-        let p = SpeechPipeline::start(v, None, None);
+        let p = SpeechPipeline::start(v, None, None, None);
         assert!(p.pace().slack_secs <= 0.0, "nothing is queued at the start");
         p.say(SpeechUnit::new(
             "The first sentence of the reply.",
@@ -303,18 +323,17 @@ mod tests {
             (4.5..=5.0).contains(&ahead),
             "five seconds of audio are playing: {ahead}"
         );
-        p.say(SpeechUnit::new("word ".repeat(40), Boundary::Sentence))
-            .await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
         assert!(
             p.pace().slack_secs < ahead,
-            "a unit still to synthesise is owed time"
+            "playing audio consumes slack over time"
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn units_waiting_behind_a_slow_synthesis_are_packed_when_there_is_time() {
         let v = voice(200, 20_000);
-        let p = SpeechPipeline::start(v.clone(), None, None);
+        let p = SpeechPipeline::start(v.clone(), None, None, None);
         p.say(SpeechUnit::new("First.", Boundary::Sentence)).await;
         tokio::time::sleep(Duration::from_millis(250)).await;
         // While the first plays for twenty seconds, three short sentences queue up.
@@ -340,7 +359,7 @@ mod tests {
             }
         }
         let v = Arc::new(Silent(Mutex::default()));
-        let mut p = SpeechPipeline::start(v.clone(), None, None);
+        let mut p = SpeechPipeline::start(v.clone(), None, None, None);
         p.say(SpeechUnit::new("Hello there.", Boundary::End)).await;
         p.finish().await;
         assert_eq!(*v.0.lock().unwrap(), ["Hello there."]);
@@ -356,11 +375,28 @@ mod tests {
             Some(Arc::new(move |t: &str| {
                 h.lock().unwrap().push(t.to_string())
             })),
+            None,
             Some(Box::new(move || d.store(true, Ordering::SeqCst))),
         );
         p.say(SpeechUnit::new("Only one.", Boundary::End)).await;
         p.finish().await;
         assert_eq!(*heard.lock().unwrap(), ["Only one."]);
         assert!(done.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playback_start_runs_when_the_first_unit_reaches_the_speaker() {
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s = started.clone();
+        let mut p = SpeechPipeline::start(
+            voice(10, 1),
+            None,
+            Some(Box::new(move || s.store(true, Ordering::SeqCst))),
+            None,
+        );
+        assert!(!started.load(Ordering::SeqCst));
+        p.say(SpeechUnit::new("First.", Boundary::Sentence)).await;
+        p.finish().await;
+        assert!(started.load(Ordering::SeqCst));
     }
 }
