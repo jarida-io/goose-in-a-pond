@@ -7,6 +7,7 @@ import { useAppState, useAppDispatch } from "../state/useAppContext";
 import type { Schedule, ScheduleRun, ChatEvent } from "../api/types";
 import { ApiError } from "../api/types";
 import { ScheduleCalendar } from "./ScheduleCalendar";
+import { ScheduleOrRecipe } from "./ScheduleOrRecipe";
 import { NewRoutineModal } from "./NewRoutineModal";
 import { useRoutines } from "../hub/state/hubDataStore";
 import { HubIco } from "../hub/primitives/HubIco";
@@ -828,6 +829,8 @@ export function Schedules() {
       {actionMsg   && <p className="sched-msg--ok">{actionMsg}</p>}
       {actionError && <p className="sched-msg--err">{actionError}</p>}
       {error       && <p className="sched-msg--err">{error}</p>}
+
+      <ScheduleOrRecipe />
 
       {/* ── Schedule content ────────────────────────────────── */}
       {loading ? (
