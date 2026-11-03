@@ -461,8 +461,8 @@ impl Ear {
         if let Some(s) = self.segmenter.as_mut() {
             if listening {
                 s.skip(end);
-            } else if let Some((start, end)) = s.step(&cfg, end, speaking) {
-                out.push(Event::Segment { t, start, end });
+            } else if let Some((start, end, cut)) = s.step(&cfg, end, speaking) {
+                out.push(Event::Segment { t, start, end, cut });
             }
         }
         match step.outcome {

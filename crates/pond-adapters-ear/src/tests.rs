@@ -212,7 +212,12 @@ fn utterance(start: usize, end: usize) -> Event {
 }
 
 fn segment(start: usize, end: usize) -> Event {
-    Event::Segment { t: 0.0, start, end }
+    Event::Segment {
+        t: 0.0,
+        start,
+        end,
+        cut: false,
+    }
 }
 
 fn barge(start: usize, end: usize, who: Option<&str>) -> Event {
@@ -417,6 +422,47 @@ async fn whisper_reads_each_segment_and_a_wake_in_one_hands_over_the_request() {
         "the segment's own transcript is the request"
     );
     assert!(ctl.listens().is_empty());
+}
+
+/// In a room that never pauses the cap cuts the segment mid-request: the wake is heard at the cut,
+/// and the request is endpointed whole from the wake rather than ending where the cut fell.
+#[tokio::test]
+async fn a_wake_in_a_cut_segment_hears_the_request_out() {
+    let says = Says::new(&[
+        "Hey goose, remind me tomorrow",
+        "Hey goose, remind me tomorrow to call the plumber about the sink.",
+    ]);
+    let (rig, ctl) = rig(WakeMode::Segments, says.clone()).await;
+    let waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    let start = at - 2 * S;
+    ctl.emit(Event::Segment {
+        t: 0.0,
+        start,
+        end: at,
+        cut: true,
+    });
+    let activation = bounded("the wake", waiting).await.unwrap().unwrap();
+    ctl.until("the ear to listen from the wake", |l, _| {
+        l.listens == [start]
+    })
+    .await;
+    rig.prime_with_captured(activation.captured_audio.unwrap());
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    ctl.emit(utterance(start, ctl.at()));
+    let heard = bounded("the request", listening).await.unwrap().unwrap();
+    assert_eq!(
+        heard.as_deref(),
+        Some("remind me tomorrow to call the plumber about the sink.")
+    );
+    assert_eq!(ctl.listens(), vec![start], "one listen, from the wake");
 }
 
 #[tokio::test]
@@ -657,6 +703,50 @@ async fn the_tap_reaches_the_ear_at_16_khz_ahead_of_the_microphone_it_overlaps()
     );
 }
 
+/// Names each call by how it was made, so a test can see which path read the audio.
+struct Paths(Mutex<Vec<&'static str>>);
+
+impl Transcriber for Paths {
+    fn transcribe(&self, _pcm: &[f32]) -> Result<String> {
+        self.0.lock().unwrap().push("transcribe");
+        Ok("hey goose tell me a story about a pond".into())
+    }
+
+    fn scan(&self, _pcm: &[f32]) -> Result<String> {
+        self.0.lock().unwrap().push("scan");
+        Ok("hey goose".into())
+    }
+}
+
+#[test]
+fn the_opening_is_scanned_and_only_a_long_wake_is_transcribed_in_full() {
+    let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
+    let paths = Paths(Mutex::default());
+    let short = Segment {
+        start: 0,
+        end: 3 * S,
+        pcm: vec![0.0; 3 * S],
+        cut: false,
+    };
+    let woke = wake_in(&paths, &triggers, short).unwrap().unwrap();
+    assert_eq!(woke.transcript.as_deref(), Some("hey goose"));
+    assert_eq!(*paths.0.lock().unwrap(), ["scan"]);
+
+    let paths = Paths(Mutex::default());
+    let long = Segment {
+        start: 0,
+        end: 20 * S,
+        pcm: vec![0.0; 20 * S],
+        cut: false,
+    };
+    let woke = wake_in(&paths, &triggers, long).unwrap().unwrap();
+    assert_eq!(
+        woke.transcript.as_deref(),
+        Some("hey goose tell me a story about a pond")
+    );
+    assert_eq!(*paths.0.lock().unwrap(), ["scan", "transcribe"]);
+}
+
 #[test]
 fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake() {
     let says = Says::new(&["some talk show"]);
@@ -664,6 +754,7 @@ fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake
         start: 0,
         end: 20 * S,
         pcm: vec![0.0; 20 * S],
+        cut: false,
     };
     let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
     assert!(wake_in(&*says, &triggers, long).unwrap().is_none());
@@ -674,6 +765,7 @@ fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake
         start: 0,
         end: 20 * S,
         pcm: vec![0.0; 20 * S],
+        cut: false,
     };
     let woke = wake_in(&*says, &triggers, long).unwrap().unwrap();
     assert_eq!(
