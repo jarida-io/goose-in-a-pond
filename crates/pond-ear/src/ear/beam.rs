@@ -651,6 +651,215 @@ pub fn beamform(left: &[f32], right: &[f32], weights: &Weights) -> Vec<f32> {
     out
 }
 
+/// An `n x n` Hermitian covariance per bin, for any number of microphones, row-major.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CovN {
+    pub n: usize,
+    pub m: Vec<C>,
+}
+
+impl CovN {
+    pub fn zero(n: usize) -> CovN {
+        CovN {
+            n,
+            m: vec![C::ZERO; n * n],
+        }
+    }
+
+    pub fn identity(n: usize) -> CovN {
+        let mut c = CovN::zero(n);
+        for i in 0..n {
+            c.m[i * n + i] = C::ONE;
+        }
+        c
+    }
+
+    fn trace(&self) -> f32 {
+        (0..self.n).map(|i| self.m[i * self.n + i].re).sum()
+    }
+
+    fn blend_outer(&mut self, x: &[C], a: f32) {
+        let n = self.n;
+        for i in 0..n {
+            for j in 0..n {
+                let o = x[i] * x[j].conj();
+                let e = &mut self.m[i * n + j];
+                *e = *e + (o - *e).scale(a);
+            }
+        }
+    }
+
+    pub fn loaded(&self, eps: f32) -> CovN {
+        let mut c = self.clone();
+        let d = eps * self.trace() / self.n as f32 + f32::MIN_POSITIVE;
+        for i in 0..self.n {
+            c.m[i * self.n + i].re += d;
+        }
+        c
+    }
+
+    pub fn mul_vec(&self, v: &[C]) -> Vec<C> {
+        (0..self.n)
+            .map(|i| (0..self.n).fold(C::ZERO, |acc, j| acc + self.m[i * self.n + j] * v[j]))
+            .collect()
+    }
+
+    /// `self^-1 b` by Gaussian elimination with partial pivoting; `None` when singular.
+    pub fn solve(&self, b: &[C]) -> Option<Vec<C>> {
+        let n = self.n;
+        let mut a = self.m.clone();
+        let mut x = b.to_vec();
+        for col in 0..n {
+            let piv = (col..n)
+                .max_by(|&p, &q| a[p * n + col].norm2().total_cmp(&a[q * n + col].norm2()))?;
+            if a[piv * n + col].norm2() <= f32::MIN_POSITIVE {
+                return None;
+            }
+            if piv != col {
+                for k in 0..n {
+                    a.swap(piv * n + k, col * n + k);
+                }
+                x.swap(piv, col);
+            }
+            let d = a[col * n + col];
+            for row in col + 1..n {
+                let f = a[row * n + col] / d;
+                for k in col..n {
+                    let v = a[col * n + k];
+                    a[row * n + k] = a[row * n + k] - f * v;
+                }
+                let v = x[col];
+                x[row] = x[row] - f * v;
+            }
+        }
+        for row in (0..n).rev() {
+            let mut acc = x[row];
+            for k in row + 1..n {
+                acc = acc - a[row * n + k] * x[k];
+            }
+            x[row] = acc / a[row * n + row];
+        }
+        x.iter()
+            .all(|c| c.re.is_finite() && c.im.is_finite())
+            .then_some(x)
+    }
+}
+
+/// Each frame's spectra over any number of equally long channels.
+pub fn for_each_frame_n(ch: &[&[f32]], mut f: impl FnMut(usize, &[Vec<C>])) {
+    let len = ch.iter().map(|c| c.len()).min().unwrap_or(0);
+    if len < FFT || ch.is_empty() {
+        return;
+    }
+    let mut stft: Vec<Stft> = ch.iter().map(|_| Stft::new()).collect();
+    let mut spec = vec![vec![C::ZERO; BINS]; ch.len()];
+    for (i, s) in (0..=len - FFT).step_by(HOP).enumerate() {
+        for ((st, sp), c) in stft.iter_mut().zip(spec.iter_mut()).zip(ch) {
+            st.analyse(&c[s..s + FFT], sp);
+        }
+        f(i, &spec);
+    }
+}
+
+/// A span's covariance over `ch`, over every frame or, with a noise covariance and `gate`, only
+/// the time-frequency bins standing `gate` above the noise's power.
+pub fn span_cov_n(ch: &[&[f32]], noise: Option<&[CovN]>, gate: f32) -> (Vec<CovN>, usize) {
+    let n = ch.len();
+    let mut cov = vec![CovN::zero(n); BINS];
+    let mut count = vec![0u32; BINS];
+    let mut frames = 0;
+    let mut x = vec![C::ZERO; n];
+    for_each_frame_n(ch, |_, spec| {
+        frames += 1;
+        for k in 0..BINS {
+            for (xi, s) in x.iter_mut().zip(spec) {
+                *xi = s[k];
+            }
+            if let Some(nc) = noise {
+                let p: f32 = x.iter().map(|c| c.norm2()).sum();
+                if p <= gate * nc[k].trace() {
+                    continue;
+                }
+            }
+            count[k] += 1;
+            cov[k].blend_outer(&x, 1.0 / count[k] as f32);
+        }
+    });
+    (cov, frames)
+}
+
+/// MVDR toward the target's relative transfer function (microphone 0 = 1), found per bin as the
+/// principal generalised eigenvector of the span against the noise. Any geometry works, devices
+/// a metre apart included, since nothing assumes a plane wave. A bin it cannot solve passes
+/// microphone 0.
+pub fn mvdr_rtf_n(span: &[CovN], noise: &[CovN], loading: f32) -> Vec<Vec<C>> {
+    span.iter()
+        .zip(noise)
+        .map(|(x, nc)| {
+            let n = x.n;
+            let pass0: Vec<C> = (0..n)
+                .map(|i| if i == 0 { C::ONE } else { C::ZERO })
+                .collect();
+            let nl = nc.loaded(loading);
+            let mut v = vec![C::ONE; n];
+            for _ in 0..24 {
+                let Some(next) = nl.solve(&x.mul_vec(&v)) else {
+                    return pass0;
+                };
+                let norm = next.iter().map(|c| c.norm2()).sum::<f32>().sqrt();
+                if !(norm.is_finite() && norm > 0.0) {
+                    return pass0;
+                }
+                v = next.iter().map(|c| c.scale(1.0 / norm)).collect();
+            }
+            let h = nl.mul_vec(&v);
+            if h[0].norm2() <= 1e-30 {
+                return pass0;
+            }
+            let d: Vec<C> = h.iter().map(|&c| c / h[0]).collect();
+            let Some(u) = nl.solve(&d) else {
+                return pass0;
+            };
+            let g = d
+                .iter()
+                .zip(&u)
+                .fold(C::ZERO, |acc, (a, b)| acc + a.conj() * *b);
+            if g.norm2() <= 0.0 || !g.re.is_finite() {
+                return pass0;
+            }
+            u.iter().map(|&c| c / g).collect()
+        })
+        .collect()
+}
+
+/// Channels through per-bin weights (`conj(w) . x`), same length and alignment as the input.
+pub fn beamform_n(ch: &[&[f32]], w: &[Vec<C>]) -> Vec<f32> {
+    let len = ch.iter().map(|c| c.len()).min().unwrap_or(0);
+    let pad = |c: &[f32]| {
+        let mut p = vec![0f32; LATENCY];
+        p.extend_from_slice(&c[..len]);
+        p.resize(LATENCY + len + FFT, 0.0);
+        p
+    };
+    let padded: Vec<Vec<f32>> = ch.iter().map(|c| pad(c)).collect();
+    let refs: Vec<&[f32]> = padded.iter().map(|p| p.as_slice()).collect();
+    let mut out = vec![0f32; LATENCY + len + 2 * FFT];
+    let mut synth = Stft::new();
+    let mut y = vec![C::ZERO; BINS];
+    for_each_frame_n(&refs, |i, spec| {
+        for (k, yk) in y.iter_mut().enumerate() {
+            *yk = spec
+                .iter()
+                .zip(&w[k])
+                .fold(C::ZERO, |acc, (s, wk)| acc + wk.conj() * s[k]);
+        }
+        synth.synthesise_add(&y, &mut out[i * HOP..i * HOP + FFT]);
+    });
+    out.drain(..LATENCY);
+    out.truncate(len);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +1069,49 @@ mod tests {
             .map(|k| (rtf[k][1] - ff[k][1]).norm2().sqrt())
             .fold(0f32, f32::max);
         assert!(worst < 0.1, "rtf off the free field by {worst}");
+    }
+
+    #[test]
+    fn three_microphones_null_an_interferer_whatever_their_spacing() {
+        let n = 32_768;
+        let target = delayed(&noise(n, 51), 0.0);
+        let jam = delayed_band(&noise(n, 52), 0.0, 300.0);
+        // Two capsules 6 cm apart, and a third device a metre away with its own gain.
+        let mics = |x: &[f32], d: [f32; 3], g: [f32; 3]| -> Vec<Vec<f32>> {
+            (0..3)
+                .map(|i| delayed(x, d[i]).iter().map(|v| v * g[i]).collect())
+                .collect()
+        };
+        let t = mics(&target, [0.0, 1.2, 37.5], [1.0, 1.0, 0.6]);
+        let j = mics(&jam, [0.0, -1.6, -20.0], [1.0, 1.0, 1.4]);
+        fn refs(v: &[Vec<f32>]) -> Vec<&[f32]> {
+            v.iter().map(|c| c.as_slice()).collect()
+        }
+        let mix: Vec<Vec<f32>> = (0..3)
+            .map(|i| t[i].iter().zip(&j[i]).map(|(a, b)| a + b).collect())
+            .collect();
+        let (nc, _) = span_cov_n(&refs(&j), None, 0.0);
+        let (x, _) = span_cov_n(&refs(&mix), None, 0.0);
+        let w = mvdr_rtf_n(&x, &nc, 1e-3);
+        let inner = 4_000..n - 4_000;
+        let t_out = beamform_n(&refs(&t), &w);
+        let j_out = beamform_n(&refs(&j), &w);
+        let err: Vec<f32> = t_out[inner.clone()]
+            .iter()
+            .zip(&t[0][inner.clone()])
+            .map(|(a, b)| a - b)
+            .collect();
+        let distortion = db(power(&err) / power(&t[0][inner.clone()]));
+        let jam_gain = db(power(&j_out[inner.clone()]) / power(&j[0][inner.clone()]));
+        assert!(distortion < -15.0, "target distorted: {distortion} dB");
+        assert!(jam_gain < -20.0, "interferer left at {jam_gain} dB");
+        let pass = beamform_n(&refs(&t), &vec![vec![C::ONE, C::ZERO, C::ZERO]; BINS]);
+        let err = t[0]
+            .iter()
+            .zip(&pass)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(err < 1e-4, "{err}");
     }
 
     #[test]
