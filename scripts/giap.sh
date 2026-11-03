@@ -780,21 +780,37 @@ doctor() {
   local sec_file key_file km
   sec_file="$D_DATA_DIR/secrets.json"
   key_file="${POND_SECRET_KEY_FILE:-$D_DATA_DIR/secrets/master.key}"
-  if [ ! -f "$sec_file" ]; then
+  local pond_u run_as=""
+  pond_u="$(connect_pond_user 2>/dev/null)" || pond_u=""
+  if [ -n "$pond_u" ] && [ "$pond_u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n -u "$pond_u" true 2>/dev/null; then
+      run_as="sudo -n -u $pond_u"
+    fi
+  fi
+  local sec_exists=false key_exists=false is_enc=false
+  if [ -n "$run_as" ]; then
+    $run_as test -f "$sec_file" 2>/dev/null && sec_exists=true
+    $run_as grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    $run_as test -f "$key_file" 2>/dev/null && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$($run_as stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$($run_as stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  else
+    [ -f "$sec_file" ] && sec_exists=true
+    grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    [ -f "$key_file" ] && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  fi
+  if [ "$sec_exists" = false ]; then
     info "no secret store yet (no API keys or connector tokens saved)"
-  elif ! grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null; then
+  elif [ "$is_enc" = false ]; then
     bad "secrets.json is PLAINTEXT — API keys and OAuth tokens are readable in the file"
     note "a server built after PAI-2 P4 encrypts it on the next start; this pond is on an older binary"
     DOC_FAIL=$((DOC_FAIL+1))
-  elif [ ! -f "$key_file" ]; then
+  elif [ "$key_exists" = false ]; then
     bad "secrets.json is encrypted but its key is MISSING at $key_file"
     note "every API key and connector token in it is unrecoverable — there is no passphrase"
     note "to start over: move $sec_file aside, restart, re-enter keys, re-authorise connectors"
     DOC_FAIL=$((DOC_FAIL+1))
   else
-    # GNU stat reads -f as a filesystem query and prints a block before failing, so pick by OS.
-    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"
-    else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
     km="${km:-?}"
     if [ "$km" = "600" ]; then
       ok "secret store encrypted; key present at $key_file (0600)"

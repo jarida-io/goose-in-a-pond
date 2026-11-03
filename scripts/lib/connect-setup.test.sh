@@ -7,8 +7,9 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/connect-setup-test.XXXXXX")" && pwd)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/connect-setup-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
 PASSED=0; FAILED=0

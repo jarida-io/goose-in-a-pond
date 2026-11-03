@@ -9,8 +9,10 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/node-setup-test.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/node-setup-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+SCRATCH="$(cd "$SCRATCH" && pwd)"
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"     # the real PATH, for tests that run giap.sh and so need git, sed and the rest
 PASSED=0; FAILED=0

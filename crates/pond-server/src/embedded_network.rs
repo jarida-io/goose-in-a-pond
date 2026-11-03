@@ -498,12 +498,18 @@ impl Runtime {
         })?;
         // SAFETY: geteuid has no preconditions and cannot fail.
         let euid = unsafe { libc::geteuid() };
+        let exe_uid = std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.uid());
         ensure!(
             metadata.is_file()
-                && (metadata.uid() == euid || metadata.uid() == 0)
+                && (metadata.uid() == euid
+                    || metadata.uid() == 0
+                    || Some(metadata.uid()) == exe_uid)
                 && metadata.mode() & 0o022 == 0,
-            "refusing the pondnet helper at {}: it must be a file owned by this account or root \
-             and writable by no one else",
+            "refusing the pondnet helper at {}: it must be a file owned by this account, root, \
+             or the executable's owner and writable by no one else",
             self.helper.display()
         );
         let mut command = Command::new(&self.helper);

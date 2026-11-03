@@ -149,6 +149,44 @@ agamemnon_need_acl() {
   return 1
 }
 
+# Internal symlinks and model registries may point to the previous directory path.
+# When the data directory is moved, retarget them to the new location.
+agamemnon_retarget_data() { # $1 = from_dir, $2 = to_dir, $3 = owner
+  local from="$1" to="$2" owner="${3:-}"
+  local dst link target new_target reg tmp
+  dst="$(agamemnon_p "$to")"
+  [ -d "$dst" ] || return 0
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    target="$(readlink "$link" 2>/dev/null || true)"
+    case "$target" in
+      "$from"/*)
+        new_target="$to/${target#"$from"/}"
+        if [ -n "$owner" ]; then
+          agamemnon_root ln -snf "$new_target" "$link" 2>/dev/null || true
+        else
+          ln -snf "$new_target" "$link" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done <<EOF
+$(agamemnon_root find "$dst" -type l 2>/dev/null)
+EOF
+
+  reg="$dst/engine/data/models/registry.json"
+  if agamemnon_root test -f "$reg" 2>/dev/null; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/giap-reg.XXXXXX")" || return 0
+    agamemnon_root cat "$reg" 2>/dev/null | sed "s|$from/|$to/|g" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    if [ -n "$owner" ]; then
+      agamemnon_root install -m 0644 -o "$owner" -g "$owner" "$tmp" "$reg" 2>/dev/null \
+        || { agamemnon_root cp "$tmp" "$reg" 2>/dev/null && agamemnon_root chown "$owner:$owner" "$reg" 2>/dev/null; } || true
+    else
+      mv "$tmp" "$reg" 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+  fi
+}
+
 # Moves the pond's data to agamemnon's directory and leaves a link where it was, so tools that look
 # in the old place still find it. A missing directory is created empty. Returns 1 with nothing
 # moved, 2 when it failed after the move.
@@ -177,6 +215,7 @@ agamemnon_take_data() { # $1 = where the data is now
     ln -s "$AGAMEMNON_DATA" "$src" 2>/dev/null || agamemnon_root ln -s "$AGAMEMNON_DATA" "$src" \
       || warn "could not leave a link at $from"
     ok "moved the pond's data to $AGAMEMNON_DATA (a link stays at $from)"
+    agamemnon_retarget_data "$from" "$AGAMEMNON_DATA" "$AGAMEMNON"
   fi
   agamemnon_root install -d -m 0750 -o "$AGAMEMNON" -g "$AGAMEMNON" "$dst" || return 2
   agamemnon_root chown -R "$AGAMEMNON:$AGAMEMNON" "$dst" || return 2
@@ -277,6 +316,7 @@ agamemnon_give_back() {
     agamemnon_root chown -R "$login:$gid" "$dst" || return 1
     agamemnon_root setfacl -R -b "$dst" || true
     ok "moved the pond's data back to $to"
+    agamemnon_retarget_data "$AGAMEMNON_DATA" "$to" "$login"
   fi
   [ -n "$home" ] && { agamemnon_root setfacl -x "u:$AGAMEMNON" "$(agamemnon_p "$home")" 2>/dev/null || true; }
   [ -n "$home" ] && [ -d "$(agamemnon_p "$giap_home")" ] && { agamemnon_root setfacl -R -x "u:$AGAMEMNON" "$(agamemnon_p "$giap_home")" 2>/dev/null || true; }
