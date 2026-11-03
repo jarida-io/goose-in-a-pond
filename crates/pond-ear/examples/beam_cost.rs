@@ -73,6 +73,23 @@ fn main() {
     }
     let per_segment = t.elapsed().as_nanos() / reps as u128;
 
+    let u = noise(n, 4);
+    let t = Instant::now();
+    for i in 0..reps {
+        let s = (i * RATE) % (n - m - RATE);
+        let pre = [&l[s..s + RATE], &r[s..s + RATE], &u[s..s + RATE]];
+        let seg = [
+            &l[s + RATE..s + RATE + m],
+            &r[s + RATE..s + RATE + m],
+            &u[s + RATE..s + RATE + m],
+        ];
+        let (nc, _) = beam::span_cov_n(&pre, None, 0.0);
+        let (x, _) = beam::span_cov_n(&seg, Some(&nc), 2.0);
+        let w = beam::mvdr_rtf_n(&x, &nc, 0.01);
+        black_box(beam::beamform_n(&seg, &w));
+    }
+    let per_segment3 = t.elapsed().as_nanos() / reps as u128;
+
     let mut aec = Aec::new(AecConfig::default());
     let mut y = Vec::with_capacity(n);
     let delay = RATE / 20;
@@ -108,6 +125,11 @@ fn main() {
         "  steer + MVDR-RTF beam of a {seg_s} s segment  {:6.2} ms  ({:.3} % of the segment's own audio)",
         per_segment as f64 / 1e6,
         pct(per_segment, seg_s)
+    );
+    println!(
+        "  steer + MVDR-RTF over 3 mics, {seg_s} s     {:6.2} ms  ({:.3} % of the segment's own audio)",
+        per_segment3 as f64 / 1e6,
+        pct(per_segment3, seg_s)
     );
     println!(
         "  echo canceller, far end playing           {:6.3} %  (x2 for one per microphone)",
