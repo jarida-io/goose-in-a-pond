@@ -95,6 +95,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/v1/voice/room"),
     ("GET", "/api/v1/voice/room/events"),
     ("POST", "/api/v1/voice/room/interrupt"),
+    ("POST", "/api/v1/voice/room/pause"),
+    ("POST", "/api/v1/voice/room/resume"),
 ];
 
 #[tokio::test]
@@ -186,6 +188,86 @@ async fn an_interrupt_reaches_the_room() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(room.interrupts(), 1);
+}
+
+/// While a member teaches the pond their voice, every sentence starts with the wake phrase.
+#[tokio::test]
+async fn a_pause_deafens_the_room_for_a_while_and_a_resume_ends_it() {
+    let room = Arc::new(MockRoomVoice::default());
+    let p = pond(Some(room.clone())).await;
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/pause",
+        Some(&p.token),
+        Some(json!({"seconds": 120})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = call(
+        &p.router,
+        Method::GET,
+        "/api/v1/voice/room",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], "paused", "{body}");
+    let until = chrono::DateTime::parse_from_rfc3339(body["paused_until"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let left = until - chrono::Utc::now();
+    assert!(left > chrono::Duration::seconds(100) && left <= chrono::Duration::seconds(120));
+
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/resume",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, body) = call(
+        &p.router,
+        Method::GET,
+        "/api/v1/voice/room",
+        Some(&p.token),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], "wait");
+    assert_eq!(body["paused_until"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_pause_is_one_to_three_hundred_seconds() {
+    let p = pond(Some(Arc::new(MockRoomVoice::default()))).await;
+    for body in [
+        json!({"seconds": 0}),
+        json!({"seconds": 301}),
+        json!({}),
+        json!({"seconds": "ten"}),
+    ] {
+        let (status, _) = call(
+            &p.router,
+            Method::POST,
+            "/api/v1/voice/room/pause",
+            Some(&p.token),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let (status, _) = call(
+        &p.router,
+        Method::POST,
+        "/api/v1/voice/room/pause",
+        Some(&p.token),
+        Some(json!({"seconds": 300})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -293,5 +375,30 @@ async fn the_event_stream_carries_the_loops_ndjson_and_levels_only_when_asked() 
     assert_eq!(
         next_data(&mut with_levels).await,
         r#"{"event":"wake","who":null}"#
+    );
+}
+
+/// The phone's room panel follows the stream, so a pause and its end reach it as state lines.
+#[tokio::test]
+async fn the_event_stream_carries_a_pause_and_its_end() {
+    let room = Arc::new(MockRoomVoice::default());
+    let p = pond(Some(room.clone())).await;
+    let mut sse = subscribe(&p, &room, "/api/v1/voice/room/events").await;
+    for (uri, body) in [
+        ("/api/v1/voice/room/pause", Some(json!({"seconds": 20}))),
+        ("/api/v1/voice/room/resume", None),
+    ] {
+        let (status, _) = call(&p.router, Method::POST, uri, Some(&p.token), body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let paused: Value = serde_json::from_str(&next_data(&mut sse).await).unwrap();
+    assert_eq!(
+        (&paused["event"], &paused["state"]),
+        (&json!("state"), &json!("paused"))
+    );
+    assert!(chrono::DateTime::parse_from_rfc3339(paused["paused_until"].as_str().unwrap()).is_ok());
+    assert_eq!(
+        next_data(&mut sse).await,
+        r#"{"event":"state","state":"wait"}"#
     );
 }

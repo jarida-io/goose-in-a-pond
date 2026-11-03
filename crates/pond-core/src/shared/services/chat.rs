@@ -3900,6 +3900,76 @@ mod tests {
         }
     }
 
+    /// A voice turn that reasons: reasoning frames, a think block in its text, then the answer.
+    struct ReasonsAloud;
+
+    #[async_trait::async_trait]
+    impl crate::models::ports::agent::Agent for ReasonsAloud {
+        async fn chat(
+            &self,
+            _request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<crate::models::ports::agent::AgentResponse> {
+            anyhow::bail!("voice uses chat_stream")
+        }
+
+        async fn chat_stream(
+            &self,
+            request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<crate::models::ports::agent::AgentStreamEvent>,
+            >,
+        > {
+            use crate::models::ports::agent::AgentStreamEvent as E;
+            use futures::StreamExt;
+            let (session_id, model_role) = (request.session_id, request.model_role);
+            let stream = async_stream::stream! {
+                yield Ok(E::Thinking { content: "SECRET plan: check the forecast first.".into() });
+                yield Ok(E::Text { content: "<think>SECRET weighing it".into() });
+                yield Ok(E::Text { content: " up</think>Tomorrow is sunny. ".into() });
+                yield Ok(E::Text { content: "Take a hat.".into() });
+                yield Ok(E::Done { session_id, model_role, usage: None, stats: None });
+            };
+            Ok(stream.boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_that_thinks_speaks_and_shows_none_of_its_reasoning() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("thinks".to_string()).await.unwrap();
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let output = Arc::new(CapturingSpeak::default());
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(ReasonsAloud), "thinks".into(), storage.clone())
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["weather tomorrow?"])))
+            .with_voice_output(output.clone())
+            .with_event_sink(collector.sink())
+            .with_spoken_observer({
+                let said = said.clone();
+                Arc::new(move |text: &str| said.lock().unwrap().push(text.to_string()))
+            });
+
+        run_bounded(&svc).await.unwrap();
+
+        let said = said.lock().unwrap().join(" ");
+        assert!(
+            said.contains("Tomorrow is sunny") && said.contains("Take a hat"),
+            "{said}"
+        );
+        assert!(!said.contains("SECRET"), "reasoning reached speech: {said}");
+        let spoken = output.spoken.lock().unwrap().join(" ");
+        assert!(!spoken.contains("SECRET"), "reasoning was played: {spoken}");
+        let shown = format!("{:?}", collector.events.lock().unwrap());
+        assert!(
+            !shown.contains("SECRET"),
+            "reasoning reached a screen: {shown}"
+        );
+        let kept = storage.get_messages("thinks").await.unwrap();
+        assert!(kept.iter().all(|m| !m.message.content.contains("SECRET")));
+    }
+
     /// One `listen()`: the onset it was primed with, and the state of things when it ran.
     struct Capture {
         onset: Option<Instant>,

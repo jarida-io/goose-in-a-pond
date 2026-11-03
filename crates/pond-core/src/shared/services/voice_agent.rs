@@ -43,6 +43,47 @@ pub struct VoiceAgent {
     pub tool_groups_off: BTreeSet<String>,
     /// In place of `voice_max_turns`; `None` keeps it.
     pub max_turns: Option<u32>,
+    /// Whether a spoken turn reasons before it answers.
+    pub thinking: VoiceThinking,
+}
+
+/// A spoken turn's reasoning: never spoken or shown, only waited through to the thinking tone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceThinking {
+    Off,
+    /// The household's `thinking_mode`, as a typed turn reads it.
+    #[default]
+    Auto,
+    On,
+}
+
+impl VoiceThinking {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VoiceThinking::Off => "off",
+            VoiceThinking::Auto => "auto",
+            VoiceThinking::On => "on",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<VoiceThinking> {
+        match raw {
+            "off" => Some(VoiceThinking::Off),
+            "auto" => Some(VoiceThinking::Auto),
+            "on" => Some(VoiceThinking::On),
+            _ => None,
+        }
+    }
+
+    /// The `thinking_mode` a spoken turn runs under, given the household's.
+    pub fn mode(self, household: &str) -> &str {
+        match self {
+            VoiceThinking::Off => "off",
+            VoiceThinking::Auto => household,
+            VoiceThinking::On => "on",
+        }
+    }
 }
 
 /// The groups a voice turn may have, with what a person calls them. The toolkit stays on, as it
@@ -92,6 +133,12 @@ struct VoiceBlock {
     tool_groups_off: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_auto")]
+    thinking: VoiceThinking,
+}
+
+fn is_auto(thinking: &VoiceThinking) -> bool {
+    *thinking == VoiceThinking::Auto
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +168,7 @@ impl VoiceAgent {
                 examples: self.examples.clone(),
                 tool_groups_off: self.tool_groups_off.clone(),
                 max_turns: self.max_turns,
+                thinking: self.thinking,
             },
         };
         serde_yaml::to_string(&recipe).unwrap_or_default()
@@ -135,6 +183,7 @@ impl VoiceAgent {
             examples: block.examples,
             tool_groups_off: block.tool_groups_off,
             max_turns: block.max_turns,
+            thinking: block.thinking,
         })
     }
 
@@ -161,9 +210,13 @@ impl VoiceAgent {
 
     /// The role its prefill is tracked under: the text and groups its preamble is built from.
     pub fn prefill_role(&self, shipped: &str) -> Option<AgentRole> {
-        let text = self
+        let mut text = self
             .voice_body(shipped)
             .unwrap_or_else(|| shipped.to_string());
+        // Thinking on renders `<|think|>` before the preamble: another shape, so another compile.
+        if self.thinking != VoiceThinking::Auto {
+            text.push_str(&format!("\n(thinking {})", self.thinking.as_str()));
+        }
         let groups = voice_tool_groups()
             .into_iter()
             .map(|(g, _)| g)
@@ -261,6 +314,9 @@ impl VoiceAgent {
             }
             next.max_turns = cap;
         }
+        if let Some(thinking) = patch.thinking {
+            next.thinking = thinking;
+        }
         if errors.is_empty() {
             Ok(next)
         } else {
@@ -278,6 +334,7 @@ pub struct VoicePatch {
     pub tool_groups_off: Option<Vec<String>>,
     /// `Some(None)` drops the cap.
     pub max_turns: Option<Option<u32>>,
+    pub thinking: Option<VoiceThinking>,
 }
 
 impl VoicePatch {
@@ -333,6 +390,12 @@ impl VoicePatch {
                     Some(n) => patch.max_turns = Some(Some(n)),
                     None => errors.push(error(key, "must be a whole number")),
                 },
+                ("thinking", Value::Null) => patch.thinking = Some(VoiceThinking::Auto),
+                ("thinking", Value::String(raw)) => match VoiceThinking::parse(raw) {
+                    Some(thinking) => patch.thinking = Some(thinking),
+                    None => errors.push(error(key, "must be \"off\", \"auto\" or \"on\"")),
+                },
+                ("thinking", _) => errors.push(error(key, "must be \"off\", \"auto\" or \"on\"")),
                 _ => errors.push(error(key, "is not a field of the Voice agent")),
             }
         }
@@ -485,6 +548,7 @@ mod tests {
             }],
             tool_groups_off: ["giap-vision".to_string()].into(),
             max_turns: Some(4),
+            thinking: VoiceThinking::Off,
         };
         let yaml = agent.to_recipe_yaml();
         assert_eq!(VoiceAgent::from_recipe_yaml(&yaml).unwrap(), agent);
@@ -517,6 +581,7 @@ mod tests {
                 "giap-nonsense".into(),
             ]),
             max_turns: Some(Some(MAX_ROLE_MAX_TURNS + 1)),
+            thinking: None,
         };
         let errors = VoiceAgent::default().patched(&patch).unwrap_err();
         let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
@@ -556,6 +621,71 @@ mod tests {
         assert_eq!(
             next.instructions, None,
             "blank text is the style's own again"
+        );
+    }
+
+    #[test]
+    fn a_voice_turn_that_thinks_differs_from_one_that_does_not_by_the_thinking_section_alone() {
+        for (style, template) in STYLES {
+            let render = |thinking: bool| {
+                let state = PromptState {
+                    thinking_enabled: thinking,
+                    ..voice_state()
+                };
+                build_prompt_partition(&Settings::default(), None, &state, template).static_prefix
+            };
+            let (off, on) = (render(false), render(true));
+            assert!(!off.contains("<thinking>"), "{style}");
+            assert!(
+                on.contains("<voice-mode>") && off.contains("<voice-mode>"),
+                "{style}"
+            );
+            let start = on
+                .find("<thinking>")
+                .unwrap_or_else(|| panic!("{style}: no thinking section in\n{on}"));
+            let start = on[..start].trim_end().len();
+            let end = on.find("</thinking>").unwrap() + "</thinking>".len();
+            let without = format!("{}{}", &on[..start], &on[end..]);
+            assert_eq!(
+                without, off,
+                "{style}: thinking changed more than its section"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_follows_the_household_until_the_household_chooses_for_voice() {
+        assert_eq!(VoiceThinking::default(), VoiceThinking::Auto);
+        assert_eq!(VoiceThinking::Auto.mode("off"), "off");
+        assert_eq!(VoiceThinking::Auto.mode("auto"), "auto");
+        assert_eq!(VoiceThinking::On.mode("off"), "on");
+        assert_eq!(VoiceThinking::Off.mode("on"), "off");
+
+        let on = VoiceAgent::default()
+            .patched(&VoicePatch::from_json(&serde_json::json!({"thinking": "on"})).unwrap())
+            .unwrap();
+        assert_eq!(on.thinking, VoiceThinking::On);
+        assert!(on.is_edited());
+        let read = VoiceAgent::from_recipe_yaml(&on.to_recipe_yaml()).unwrap();
+        assert_eq!(read, on);
+        assert!(
+            !VoiceAgent::default().to_recipe_yaml().contains("thinking"),
+            "an unedited row says nothing about thinking"
+        );
+        let back = on
+            .patched(&VoicePatch::from_json(&serde_json::json!({"thinking": null})).unwrap())
+            .unwrap();
+        assert_eq!(back, VoiceAgent::default());
+        let errors = VoicePatch::from_json(&serde_json::json!({"thinking": "maybe"})).unwrap_err();
+        assert_eq!(errors[0].path, "thinking");
+
+        let shipped = "Speak briefly.";
+        let auto = VoiceAgent::default().prefill_role(shipped).unwrap();
+        let thinking = on.prefill_role(shipped).unwrap();
+        assert_ne!(
+            crate::shared::services::agent_prefill::definition_hash(&auto),
+            crate::shared::services::agent_prefill::definition_hash(&thinking),
+            "a new thinking choice is a new shape to compile"
         );
     }
 

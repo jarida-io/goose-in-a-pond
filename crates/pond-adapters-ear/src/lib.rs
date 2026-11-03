@@ -264,6 +264,26 @@ impl EarRig {
         let _ = self.cmds.send(Cmd::Household(household));
     }
 
+    /// Hear no wake word and start no request until `until`; `None` resumes now.
+    pub fn pause_until(&self, until: Option<Instant>) {
+        let _ = self.cmds.send(Cmd::Pause(until));
+    }
+
+    /// Start recognising voices without a restart: the network is built and warmed here, on the
+    /// caller's thread, so the ear thread only swaps it in. Blocking.
+    pub fn load_speaker(&self, model: ModelFile) -> Result<()> {
+        let mut net = pond_ear::ear::parts::SpeakerNet::new(
+            model,
+            VOICE_MATCH_LABEL,
+            pond_ear::ear::machine::SPEAKER_MAX_SECONDS,
+        )
+        .context("loading the speaker model")?;
+        net.warm_up(pond_ear::Rung::fastest());
+        self.cmds
+            .send(Cmd::Speaker(Box::new(net)))
+            .map_err(|_| anyhow!("the ear has stopped"))
+    }
+
     fn command(&self, raw: &str) -> String {
         pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
     }
@@ -398,12 +418,24 @@ impl VoiceInput for EarRig {
                 return Ok(Some(String::new()));
             };
             let waker = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if follow_up && waker.is_some() && speaker != waker {
-                tracing::info!(
-                    heard = ?speaker,
-                    "ear: a follow-up in another voice than the wake's ignored"
-                );
-                return Ok(Some(String::new()));
+            // Only another enrolled member's voice ends it: a short follow-up is often too little
+            // for Voice Match to recognise even the waker.
+            if follow_up {
+                match (&waker, &speaker) {
+                    (Some(waker), Some(who)) if who != waker => {
+                        tracing::info!(
+                            who = %who,
+                            waker = %waker,
+                            "ear: a follow-up in another member's voice ignored"
+                        );
+                        return Ok(Some(String::new()));
+                    }
+                    (Some(waker), None) => tracing::debug!(
+                        waker = %waker,
+                        "ear: a follow-up Voice Match did not recognise continues the conversation"
+                    ),
+                    _ => {}
+                }
             }
             let raw = match transcript {
                 Some(t) => t,

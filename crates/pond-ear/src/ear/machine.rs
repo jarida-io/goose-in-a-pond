@@ -244,6 +244,12 @@ impl Ear {
         self.household = h;
     }
 
+    /// Voice Match's network, loaded and warmed elsewhere, so a running ear starts recognising
+    /// without a restart.
+    pub fn set_speaker(&mut self, speaker: SpeakerNet) {
+        self.speaker = Some(speaker);
+    }
+
     pub fn household(&self) -> &Household {
         &self.household
     }

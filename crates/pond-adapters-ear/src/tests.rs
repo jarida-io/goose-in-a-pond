@@ -32,6 +32,8 @@ impl Hearing for FakeEar {
         self.voice.lock().unwrap().clone()
     }
 
+    fn set_speaker(&mut self, _speaker: pond_ear::ear::parts::SpeakerNet) {}
+
     fn push_into(&mut self, mic: &[f32], out: &mut Vec<Event>) {
         self.audio.extend_from_slice(mic);
         self.pushed.fetch_add(mic.len(), Ordering::SeqCst);
@@ -505,12 +507,13 @@ fn enrolled(ids: &[&str]) -> Household {
     }
 }
 
-#[tokio::test]
-async fn a_recognised_wake_names_its_speaker_and_a_follow_up_must_be_their_voice() {
+/// A wake recognised as `waker` (or nobody), then one follow-up heard as `voice`: what the follow-up
+/// listen returns.
+async fn follow_up_after(waker: Option<&str>, voice: Option<&str>) -> (Option<String>, usize) {
     let says = Says::new(&["Goose, what's the weather?", "and tomorrow"]);
     let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
     rig.set_household(enrolled(&["amina", "zawadi"]));
-    *ctl.voice.lock().unwrap() = Some("amina".into());
+    *ctl.voice.lock().unwrap() = waker.map(str::to_string);
     let waiting = tokio::spawn({
         let rig = rig.clone();
         async move { rig.wait_for_activation_with_audio().await }
@@ -520,14 +523,14 @@ async fn a_recognised_wake_names_its_speaker_and_a_follow_up_must_be_their_voice
     let activation = bounded("the wake", waiting).await.unwrap().unwrap();
     assert_eq!(
         activation.speaker.map(|s| s.profile_id).as_deref(),
-        Some("amina")
+        waker,
+        "the wake names its speaker"
     );
     rig.prime_with_captured(activation.captured_audio.unwrap());
     let heard = bounded("the request", rig.listen()).await.unwrap();
     assert_eq!(heard.as_deref(), Some("what's the weather?"));
 
-    // Zawadi talking in the room is no follow-up to Amina's question.
-    *ctl.voice.lock().unwrap() = Some("zawadi".into());
+    *ctl.voice.lock().unwrap() = voice.map(str::to_string);
     let listening = tokio::spawn({
         let rig = rig.clone();
         async move { rig.listen().await }
@@ -535,23 +538,78 @@ async fn a_recognised_wake_names_its_speaker_and_a_follow_up_must_be_their_voice
     ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
         .await;
     ctl.emit(utterance(ctl.at() - S, ctl.at()));
-    let heard = bounded("Zawadi's words", listening).await.unwrap().unwrap();
-    assert_eq!(heard.as_deref(), Some(""), "another voice is no follow-up");
+    let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
+    (heard, says.calls())
+}
 
-    *ctl.voice.lock().unwrap() = Some("amina".into());
+/// While a member teaches the pond their voice, every sentence starts with the wake phrase.
+#[tokio::test]
+async fn a_paused_ear_hears_no_wake_and_ends_a_waiting_follow_up() {
+    let says = Says::new(&["Goose, what's the weather?"]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
     let listening = tokio::spawn({
         let rig = rig.clone();
         async move { rig.listen().await }
     });
-    ctl.until("the second follow-up listen", |l, _| l.listens.len() == 2)
+    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
         .await;
-    ctl.emit(utterance(ctl.at() - S, ctl.at()));
-    let heard = bounded("Amina's follow-up", listening)
+    rig.pause_until(Some(Instant::now() + Duration::from_secs(60)));
+    let heard = bounded("the paused follow-up", listening)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(heard.as_deref(), Some(""), "the waiting follow-up ended");
+
+    let mut waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut waiting)
+            .await
+            .is_err(),
+        "a paused ear woke"
+    );
+    assert_eq!(says.calls(), 0, "a paused ear transcribed a segment");
+
+    rig.pause_until(None);
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    bounded("the wake after the pause", waiting)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_wakers_own_voice_continues_the_conversation() {
+    let (heard, calls) = follow_up_after(Some("amina"), Some("amina")).await;
     assert_eq!(heard.as_deref(), Some("and tomorrow"));
-    assert_eq!(says.calls(), 2, "Zawadi's words were never transcribed");
+    assert_eq!(calls, 2);
+}
+
+/// A short follow-up is often too little for Voice Match to recognise even the waker.
+#[tokio::test]
+async fn a_follow_up_voice_match_does_not_recognise_continues_the_conversation() {
+    let (heard, calls) = follow_up_after(Some("amina"), None).await;
+    assert_eq!(heard.as_deref(), Some("and tomorrow"));
+    assert_eq!(calls, 2);
+}
+
+#[tokio::test]
+async fn another_members_voice_is_no_follow_up_and_is_never_transcribed() {
+    let (heard, calls) = follow_up_after(Some("amina"), Some("zawadi")).await;
+    assert_eq!(heard.as_deref(), Some(""));
+    assert_eq!(calls, 1, "Zawadi's words were never transcribed");
+}
+
+#[tokio::test]
+async fn a_wake_nobody_was_recognised_for_keeps_every_follow_up() {
+    let (heard, calls) = follow_up_after(None, Some("zawadi")).await;
+    assert_eq!(heard.as_deref(), Some("and tomorrow"));
+    assert_eq!(calls, 2);
 }
 
 #[tokio::test]

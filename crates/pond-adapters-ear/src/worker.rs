@@ -93,6 +93,9 @@ pub(crate) enum Cmd {
     SegmentWake(Woke),
     /// The pond is about to say this.
     Spoken(String),
+    /// Hear no wake and start nothing until then; `None` ends a pause.
+    Pause(Option<Instant>),
+    Speaker(Box<pond_ear::ear::parts::SpeakerNet>),
     Household(Household),
     Shutdown,
 }
@@ -137,6 +140,8 @@ pub(crate) struct WorkerState {
     spoken: Spoken,
     /// When the turn under way began thinking; what it says is kept for the whole turn.
     turn_began: Option<Instant>,
+    /// Deaf to wakes and new requests until then, as while a member teaches it their voice.
+    paused_until: Option<Instant>,
 }
 
 impl WorkerState {
@@ -162,6 +167,7 @@ impl WorkerState {
             quiet_renewed: now,
             spoken: Spoken::default(),
             turn_began: None,
+            paused_until: None,
         }
     }
 }
@@ -254,7 +260,25 @@ impl Worker {
         }
     }
 
+    fn paused(&self) -> bool {
+        self.state
+            .paused_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
     fn event(&mut self, event: Event) {
+        // A paused ear still cancels echo and keeps its clock; it only hears nothing new.
+        if self.paused()
+            && matches!(
+                event,
+                Event::Wake { .. }
+                    | Event::Segment { .. }
+                    | Event::Utterance { .. }
+                    | Event::BargeIn { .. }
+            )
+        {
+            return;
+        }
         match event {
             Event::Wake { start, who, .. } => {
                 let speaker = speaker_named(self.hearing.household(), who);
@@ -466,6 +490,9 @@ impl Worker {
                     _ => self.state.interrupts.push(reply),
                 }
             }
+            Cmd::SegmentWake(_) if self.paused() => {
+                tracing::debug!("ear: a wake while paused ignored");
+            }
             Cmd::SegmentWake(woke) => {
                 let now = Instant::now();
                 self.state.spoken.forget_old(now, self.state.turn_began);
@@ -512,6 +539,18 @@ impl Worker {
                 self.state.spoken.say(&text, now);
             }
             Cmd::Household(household) => self.hearing.set_household(household),
+            Cmd::Speaker(speaker) => self.hearing.set_speaker(*speaker),
+            Cmd::Pause(until) => {
+                self.state.paused_until = until;
+                if self.paused() {
+                    self.state.wake_turn = None;
+                    self.state.pending_woke = None;
+                    // A follow-up waiting now would take the next taught sentence for a request.
+                    if let Some(waiter) = self.state.listen.take() {
+                        let _ = waiter.send(Heard::Silence);
+                    }
+                }
+            }
             Cmd::Shutdown => return false,
         }
         true

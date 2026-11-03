@@ -210,6 +210,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/voice/room/events", get(crate::room_voice::events))
         .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
+        .route("/voice/room/pause", post(crate::room_voice::pause))
+        .route("/voice/room/resume", post(crate::room_voice::resume))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
