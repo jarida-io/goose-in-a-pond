@@ -2,6 +2,7 @@
 //! Match uses, every 80 ms. "hey goose" ships inside the crate; provenance in models/hey-goose.md.
 
 pub mod detector;
+pub mod personal;
 
 use crate::convert::ModelFile;
 use crate::engine::fbank::{self, NUM_BINS};

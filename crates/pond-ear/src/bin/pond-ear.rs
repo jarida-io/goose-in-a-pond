@@ -1,5 +1,6 @@
-//! `pond-ear measure|replay|convert`: what the ear costs in a fresh process, a recording run
-//! through it as if it were the microphone, and ONNX to `.vmw`. Usage is printed without arguments.
+//! `pond-ear measure|replay|convert|personal-cost`: what the ear costs in a fresh process, a
+//! recording run through it as if it were the microphone, ONNX to `.vmw`, and what matching a
+//! household's wake templates costs per segment. Usage is printed without arguments.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -11,6 +12,7 @@ const USAGE: &str = "\
 pond-ear measure [--wake PATH] [--vad PATH] [--speaker PATH] [--rung NAME] [--no-aec]
 pond-ear replay <in.wav> [--far PLAYED.wav] [--speak] [--wake PATH] [--vad PATH] [--speaker PATH] [--threshold T] [--rung NAME] [--chunk N] [--no-aec]
 pond-ear convert <in.onnx> <out.vmw>
+pond-ear personal-cost [--members N] [--templates N] [--frames N] [--runs N]
 --far plays a file sample-aligned with the microphone, --speak holds the ear in Speak.
 The wake model defaults to the embedded hey goose, Silero to the pond's own copy; Voice Match
 loads only with --speaker.";
@@ -178,12 +180,89 @@ fn convert(args: &[String]) -> ExitCode {
     }
 }
 
+/// Per-segment cost of the personal wake match: a household of seeded templates and the embedded
+/// references, timed on segments that miss (no reference needed) and that come near (all of them).
+fn personal_cost(args: &[String]) -> ExitCode {
+    use pond_ear::engine::fbank::NUM_BINS;
+    use pond_ear::wake::personal::{self, Member, PersonalWake, Query, Template, Thresholds};
+    let num = |key: &str, default: usize| {
+        arg(args, key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let (members, templates, frames, runs) = (
+        num("--members", 2),
+        num("--templates", 8),
+        num("--frames", 70),
+        num("--runs", 300),
+    );
+    let seed = std::cell::Cell::new(0x9e37_79b9_7f4a_7c15u64);
+    let noise = |n: usize| -> Vec<f32> {
+        (0..n * NUM_BINS)
+            .map(|_| {
+                let mut s = seed.get();
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                seed.set(s);
+                (s >> 40) as f32 / (1u64 << 24) as f32
+            })
+            .collect()
+    };
+    let household = |distance: f32| PersonalWake {
+        members: (0..members)
+            .map(|m| Member {
+                id: format!("m{m}"),
+                templates: (0..templates)
+                    .map(|_| Template::from_fbank(&noise(frames)))
+                    .collect(),
+                thresholds: Thresholds {
+                    distance,
+                    margin: 0.0,
+                },
+            })
+            .collect(),
+        references: personal::references(),
+    };
+    let timed = |wake: &PersonalWake| -> (f64, f64) {
+        let mut ms: Vec<f64> = (0..runs)
+            .map(|_| {
+                let q = Query::from_fbank(&noise(personal::QUERY_FRAMES));
+                let t = std::time::Instant::now();
+                std::hint::black_box(wake.judge(&q));
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        (ms[ms.len() / 2], ms[ms.len() * 95 / 100])
+    };
+    let miss = timed(&household(0.0));
+    let near = timed(&household(2.0));
+    let wake = household(0.0);
+    println!(
+        "personal wake: {members} members x {templates} templates of {frames} frames, {} references, \
+         {:.2} MB held",
+        wake.references.len(),
+        wake.bytes() as f64 / 1e6
+    );
+    println!(
+        "  a segment that misses: p50 {:.2} ms, p95 {:.2} ms",
+        miss.0, miss.1
+    );
+    println!(
+        "  a segment that comes near: p50 {:.2} ms, p95 {:.2} ms",
+        near.0, near.1
+    );
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("measure") => measure(&args),
         Some("replay") => replay(&args),
         Some("convert") => convert(&args),
+        Some("personal-cost") => personal_cost(&args),
         _ => fail(USAGE),
     }
 }
