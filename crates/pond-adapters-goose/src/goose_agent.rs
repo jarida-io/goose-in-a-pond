@@ -235,10 +235,12 @@ fn hidden_completeness_reply(messages: &[Message], goal: &str) -> Option<String>
 
 /// Drains one turn's stream into the reply a non-streaming caller (a schedule) receives.
 ///
-/// The reply is the turn's text and nothing else: reasoning is not an answer, and tool calls are
-/// recorded in `metadata["tool_calls"]`. A turn whose model wrote no text is an error that says
-/// so, naming the tools it did call, and is logged as `kind="turn_without_reply"` — a run that
-/// only fetched the weather must not read as the engine having failed. So is a turn that ended on
+/// The reply is the text written after the turn's last tool call and nothing else: reasoning is
+/// not an answer, text before a tool call is the model at work ("let me check the weather"), and
+/// tool calls are recorded in `metadata["tool_calls"]`. A turn whose model wrote no such text is
+/// an error that says so, naming the tools it did call, and is logged as
+/// `kind="turn_without_reply"` — a run that only fetched the weather must not read as the engine
+/// having failed, nor store its narration as the result. So is a turn that ended on
 /// [`EMPTY_TURN_EXHAUSTED_MESSAGE`]: the apology for no reply is not one, and a schedule must not
 /// speak it or record the run as done. A reply wrapped in `<answer>` tags comes without them.
 async fn collect_reply(
@@ -255,6 +257,17 @@ async fn collect_reply(
                 full_text.push_str(&content);
             }
             AgentStreamEvent::ToolCall { id, tool, .. } => {
+                let notes = std::mem::take(&mut full_text);
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        session_id = %session_id,
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call left out of the reply",
+                    );
+                }
                 tool_call_ids.push(id);
                 if !tool_names.contains(&tool) {
                     tool_names.push(tool);
@@ -6708,6 +6721,50 @@ mod tests {
         .expect("a turn with text is a reply");
         assert_eq!(reply.text, "Mainly clear, 23.6 C.");
         assert_eq!(reply.metadata["tool_calls"], "[\"call-1\"]");
+    }
+
+    /// A brief stored as "Let me check the weather.Let me look up the news.Good morning..." reads
+    /// as the model thinking aloud; the result is only what it wrote once the tools were done.
+    #[tokio::test]
+    async fn text_before_a_tool_call_is_not_part_of_the_reply() {
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![
+                AgentStreamEvent::Text {
+                    content: "Let me check the weather.".to_string(),
+                },
+                tool_call("call-1", "giap-weather__get_current_weather"),
+                AgentStreamEvent::Text {
+                    content: "Now the news.".to_string(),
+                },
+                tool_call("call-2", "giap-knowledge__web_search"),
+                AgentStreamEvent::Text {
+                    content: "Good morning. Mainly clear, 23.6 C.".to_string(),
+                },
+            ]),
+        )
+        .await
+        .expect("a turn that answered after its tools is a reply");
+        assert_eq!(reply.text, "Good morning. Mainly clear, 23.6 C.");
+        assert_eq!(reply.metadata["tool_calls"], "[\"call-1\",\"call-2\"]");
+    }
+
+    /// Narration followed by a tool call and then silence never answered: storing "Let me check
+    /// the weather." as the run's result would record a failed run as done.
+    #[tokio::test]
+    async fn a_turn_whose_only_text_came_before_its_tool_call_has_no_reply() {
+        let err = collect_reply(
+            "sched-test",
+            events(vec![
+                AgentStreamEvent::Text {
+                    content: "Let me check the weather.".to_string(),
+                },
+                tool_call("call-1", "giap-weather__get_current_weather"),
+            ]),
+        )
+        .await
+        .expect_err("working notes are not a reply");
+        assert!(err.to_string().contains("without writing a reply"), "{err}");
     }
 
     /// The old "Received empty response from Goose agent" read as an engine fault.
