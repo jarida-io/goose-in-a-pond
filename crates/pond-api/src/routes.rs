@@ -15503,6 +15503,7 @@ fn recipe_extension_to_tool_group(name: &str) -> Option<&'static str> {
         "device" | "developer" => Some("giap-device"),
         // Not `giap-matter`: that's the matter.js websocket protocol, not a tool group.
         "matter" | "home" => Some("giap-device-control"),
+        "vision" => Some("giap-vision"),
         _ => None,
     }
 }
@@ -21321,6 +21322,7 @@ mod tests {
             "developer",
             "matter",
             "home",
+            "vision",
         ];
 
         let mut mapped = 0usize;
