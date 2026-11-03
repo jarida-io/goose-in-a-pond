@@ -3,10 +3,11 @@ a beamformer can be checked offline before a room pass: the talkers from one pla
 from another, the two capsules SPACING apart.
 
 usage: sim_room.py DIR OUT_DIR [--spacing M] [--rt60 S] [--target AZ,DIST] [--babble AZ,DIST]
-  [--speaker AZ,DIST]
+  [--speaker AZ,DIST] [--usb DX,DY,DZ] [--usb-ppm PPM]
 reads DIR/programs/{quiet,echo}.wav, DIR/beds/*.wav and manifest.json (build_program.py --split);
 writes OUT_DIR/rec/S-{quiet,babble10,babble3,noise,echo}-cam.wav (stereo, 16 kHz) and
-rec/manifest.json. echo.wav plays from the pond's speaker.
+rec/manifest.json. echo.wav plays from the pond's speaker. A third microphone, a separate USB
+device DX,DY,DZ metres from the pair on a clock PPM fast, goes to rec/S-*-usb.wav (mono).
 Azimuths are degrees from broadside, positive toward the right capsule.
 """
 import json
@@ -106,6 +107,21 @@ def write(path, left, right):
         w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
 
 
+def own_clock(x, ppm, lead):
+    """`x` as a device whose clock runs PPM fast and whose recording started `lead` samples early."""
+    n = int(round(len(x) * (1 + ppm * 1e-6)))
+    y = np.fft.irfft(np.fft.rfft(x)[: n // 2 + 1], n) * n / len(x)
+    return np.concatenate([np.zeros(lead), y])
+
+
+def write_mono(path, x):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+
+
 def place(az_dist):
     az, dist = (float(v) for v in az_dist.split(","))
     a = np.radians(az)
@@ -121,7 +137,9 @@ def main():
     volume = ROOM.prod()
     surface = 2 * (ROOM[0] * ROOM[1] + ROOM[0] * ROOM[2] + ROOM[1] * ROOM[2])
     beta = np.sqrt(1 - min(0.161 * volume / (surface * rt60), 0.99))
-    mics = [ARRAY - np.array([spacing / 2, 0, 0]), ARRAY + np.array([spacing / 2, 0, 0])]
+    mics = [ARRAY - np.array([spacing / 2, 0, 0]), ARRAY + np.array([spacing / 2, 0, 0]),
+            ARRAY + np.array([float(v) for v in option("--usb", "0.9,0.25,-0.15").split(",")])]
+    ppm = float(option("--usb-ppm", 25.0))
     ht = [rir(target, m, beta) for m in mics]
     hb = [rir(babble, m, beta) for m in mics]
     rng = np.random.default_rng(5)
@@ -135,7 +153,7 @@ def main():
     for prog, snr in [("quiet", None), ("babble10", 10.0), ("babble3", 3.0), ("noise", 3.0)]:
         if prog == "noise":
             bed = read(root / "beds" / "noise.wav")
-            sig = [np.zeros(len(bed)), np.zeros(len(bed))]
+            sig = [np.zeros(len(bed)) for _ in range(3)]
         else:
             bed = read(root / "beds" / f"{prog}.wav") if snr is not None else np.zeros(len(quiet))
             sig = [x.copy() for x in talk]
@@ -145,10 +163,14 @@ def main():
             # The bed is placed at the stated ratio below the talkers' active level, at the left capsule.
             g = 10 ** ((-36.0 - snr - active_db(jam[0])) / 20)
             sig = [s + j * g for s, j in zip(sig, jam)]
+        if len(sig) == 2:
+            sig.append(np.zeros(n))
         amb = diffuse(n, spacing, rng)
         floor = 10 ** (-62 / 20) / np.std(amb[0])
+        amb = list(amb) + [rng.standard_normal(n) * np.std(amb[0])]
         sig = [s + a * floor + rng.standard_normal(n) * 10 ** (-80 / 20) for s, a in zip(sig, amb)]
         write(out / "rec" / f"S-{prog}-cam.wav", sig[0], sig[1])
+        write_mono(out / "rec" / f"S-{prog}-usb.wav", own_clock(sig[2], ppm, lead=int(0.137 * RATE)))
         print(f"{prog}: {n / RATE:.0f} s")
     echo = read(root / "programs" / "echo.wav")
     he = [rir(speaker, m, beta) for m in mics]
@@ -156,11 +178,13 @@ def main():
     g = 10 ** ((-30.0 - active_db(ec[0])) / 20)
     amb = diffuse(len(echo), spacing, rng)
     floor = 10 ** (-62 / 20) / np.std(amb[0])
-    write(out / "rec" / "S-echo-cam.wav", *[e * g + a * floor for e, a in zip(ec, amb)])
+    cam = [e * g + a * floor for e, a in zip(ec, amb)]
+    write(out / "rec" / "S-echo-cam.wav", cam[0], cam[1])
+    write_mono(out / "rec" / "S-echo-usb.wav", own_clock(ec[2] * g, ppm, lead=int(0.137 * RATE)))
     lag = lambda p: (np.linalg.norm(p - mics[0]) - np.linalg.norm(p - mics[1])) / C * RATE
     info = {"spacing_m": spacing, "rt60_s": rt60, "beta": float(beta), "target_tdoa": float(-lag(target)),
             "babble_tdoa": float(-lag(babble)),
-            "speaker_tdoa": float(-lag(speaker)), "clips": len(manifest["clips"])}
+            "speaker_tdoa": float(-lag(speaker)), "usb_ppm": ppm, "usb_lead_ms": 137.0, "clips": len(manifest["clips"])}
     (out / "rec" / "sim.json").write_text(json.dumps(info, indent=1))
     print(info)
 

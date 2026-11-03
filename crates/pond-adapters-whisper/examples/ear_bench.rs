@@ -7,6 +7,7 @@
 //!   [--prompt TEXT] [--gain-db DB] [--segment-max-ms MS] [--temp-step STEP]
 //!   [--beam mono|left|right|das|mvdr] [--steer ff|rtf] [--noise none|sil|pre] [--loading EPS]
 //!   [--pre-ms MS] [--max-lag SAMPLES] [--gate RATIO] [--min-strength S] [--hold] [--reseg]
+//!   [--with OTHER.wav]... [--select]
 //!   [--manifest manifest.json] --out results.jsonl RECORDING.wav
 //!
 //! A `--beam` other than mono reads a stereo recording. Each segment and clip window is then
@@ -14,6 +15,12 @@
 //! estimate) and beamformed before Whisper; `--hold` also feeds the ear the beam of the last wake,
 //! as a turn would hold it, and `--reseg` runs Silero again on each beamformed segment and scans
 //! each piece it finds.
+//!
+//! `--with` adds another device's recording, on its own clock: it is put on the main recording's
+//! clock by the two sync chirps (the offset a start-up sound test would give, and the drift), and
+//! the ear then hears the mean of every device. MVDR then runs over every microphone; `--select`
+//! instead picks, per segment, whichever of the main beam and the other devices stands clearest
+//! above the stretch before it.
 
 use std::io::Write;
 use std::ops::Range;
@@ -77,6 +84,7 @@ struct BeamArgs {
     min_strength: f32,
     hold: bool,
     reseg: bool,
+    select: bool,
 }
 
 struct Args {
@@ -91,6 +99,7 @@ struct Args {
     /// Whisper's retry temperature step for a segment's opening, in place of serve's 0.
     temp_step: Option<f32>,
     beam: BeamArgs,
+    with: Vec<PathBuf>,
     manifest: Option<PathBuf>,
     out: PathBuf,
     input: PathBuf,
@@ -103,6 +112,7 @@ fn args() -> Result<Args> {
     let (mut variants, mut prompt, mut gain_db) = (Vec::new(), None, 0.0f32);
     let mut segment_max_ms = None;
     let mut temp_step = None;
+    let mut with = Vec::new();
     let mut beam = BeamArgs {
         kind: Kind::Mono,
         steer: Steer::FreeField,
@@ -114,11 +124,13 @@ fn args() -> Result<Args> {
         min_strength: 0.0,
         hold: false,
         reseg: false,
+        select: false,
     };
     while let Some(k) = a.next() {
-        if k == "--hold" || k == "--reseg" {
+        if k == "--hold" || k == "--reseg" || k == "--select" {
             beam.hold |= k == "--hold";
             beam.reseg |= k == "--reseg";
+            beam.select |= k == "--select";
             continue;
         }
         let mut v = || a.next().ok_or_else(|| anyhow!("{k} needs a value"));
@@ -161,6 +173,7 @@ fn args() -> Result<Args> {
             "--max-lag" => beam.max_lag = v()?.parse()?,
             "--gate" => beam.gate = v()?.parse()?,
             "--min-strength" => beam.min_strength = v()?.parse()?,
+            "--with" => with.push(PathBuf::from(v()?)),
             "--manifest" => manifest = Some(PathBuf::from(v()?)),
             "--out" => out = Some(PathBuf::from(v()?)),
             _ if !k.starts_with("--") => input = Some(PathBuf::from(k)),
@@ -169,6 +182,9 @@ fn args() -> Result<Args> {
     }
     if (beam.hold || beam.reseg) && beam.kind == Kind::Mono {
         bail!("--hold and --reseg need a --beam");
+    }
+    if beam.hold && !with.is_empty() {
+        bail!("--hold holds the two-microphone beam only");
     }
     Ok(Args {
         model: model.context("--model")?,
@@ -180,6 +196,7 @@ fn args() -> Result<Args> {
         segment_max_ms,
         temp_step,
         beam,
+        with,
         manifest,
         out: out.context("--out")?,
         input: input.context("a recording")?,
@@ -245,9 +262,16 @@ impl log::Log for Stderr {
 /// The recording as the bench reads it: the mono mix the ear has always had, and the two
 /// channels when the beam needs them.
 struct Recording {
+    /// What the ear hears: the mean of every device.
     mono: Vec<f32>,
+    /// The main device's own mono mix.
+    main: Vec<f32>,
     left: Vec<f32>,
     right: Vec<f32>,
+    /// Other devices, each on the main recording's clock.
+    extra: Vec<Vec<f32>>,
+    names: Vec<String>,
+    align: Vec<Value>,
 }
 
 fn read_recording(bytes: &[u8], gain_db: f32, need_stereo: bool) -> Result<Recording> {
@@ -286,14 +310,128 @@ fn read_recording(bytes: &[u8], gain_db: f32, need_stereo: bool) -> Result<Recor
                 .collect(),
         ))
     };
-    Ok(Recording { mono, left, right })
+    Ok(Recording {
+        main: mono.clone(),
+        mono,
+        left,
+        right,
+        extra: Vec::new(),
+        names: Vec::new(),
+        align: Vec::new(),
+    })
+}
+
+/// The chirp's start in `x[from..to]` to a fraction of a sample (a parabola through the
+/// correlation either side of the best whole lag).
+fn chirp_at(x: &[f32], from: usize, to: usize) -> Option<(f64, f32)> {
+    let (lag, score) = find_chirp(x, from, to)?;
+    let c = chirp();
+    let ncc = |l: usize| -> f64 {
+        let w = &x[l..(l + c.len()).min(x.len())];
+        let dot: f64 = w.iter().zip(&c).map(|(a, b)| (*a * *b) as f64).sum();
+        let e: f64 = w.iter().map(|v| (*v as f64).powi(2)).sum();
+        dot / e.sqrt().max(1e-12)
+    };
+    if lag == 0 || lag + c.len() + 1 >= x.len() {
+        return Some((lag as f64, score));
+    }
+    let (a, b, cc) = (ncc(lag - 1), ncc(lag), ncc(lag + 1));
+    let den = a - 2.0 * b + cc;
+    let d = if den.abs() > 1e-12 {
+        0.5 * (a - cc) / den
+    } else {
+        0.0
+    };
+    Some((lag as f64 + d.clamp(-0.5, 0.5), score))
+}
+
+/// `x` at fractional position `t`: a 32-tap Hann-windowed sinc.
+fn interp(x: &[f32], t: f64) -> f32 {
+    const HALF: isize = 16;
+    let i = t.floor() as isize;
+    let f = t - i as f64;
+    let mut acc = 0f64;
+    for k in -HALF + 1..=HALF {
+        let j = i + k;
+        if j < 0 || j as usize >= x.len() {
+            continue;
+        }
+        let u = k as f64 - f;
+        let sinc = if u.abs() < 1e-9 {
+            1.0
+        } else {
+            (std::f64::consts::PI * u).sin() / (std::f64::consts::PI * u)
+        };
+        let w = 0.5 + 0.5 * (std::f64::consts::PI * u / HALF as f64).cos();
+        acc += x[j as usize] as f64 * sinc * w;
+    }
+    acc as f32
+}
+
+/// `other` put on `main`'s clock by the first and last sync chirps in each: the first is the
+/// start-up calibration's offset, the pair the drift between the two devices' clocks.
+fn align_to(main: &[f32], other: &[f32]) -> Result<(Vec<f32>, Value)> {
+    let edge = 15 * RATE;
+    let first = |x: &[f32]| chirp_at(x, 0, edge.min(x.len())).context("no first chirp");
+    let last =
+        |x: &[f32]| chirp_at(x, x.len().saturating_sub(edge), x.len()).context("no last chirp");
+    let ((m0, ms0), (m1, ms1)) = (first(main)?, last(main)?);
+    let ((o0, os0), (o1, os1)) = (first(other)?, last(other)?);
+    let scale = (m1 - m0) / (o1 - o0);
+    let out = (0..main.len())
+        .map(|n| interp(other, o0 + (n as f64 - m0) / scale))
+        .collect();
+    let info = json!({"offset_ms": (m0 - o0) / RATE as f64 * 1e3, "drift_ppm": (scale - 1.0) * 1e6,
+                      "span_s": (m1 - m0) / RATE as f64, "match": [ms0, ms1, os0, os1]});
+    Ok((out, info))
+}
+
+fn add_devices(rec: &mut Recording, with: &[PathBuf], gain_db: f32) -> Result<()> {
+    for path in with {
+        let bytes = std::fs::read(path).with_context(|| path.display().to_string())?;
+        let other = read_recording(&bytes, gain_db, false)?;
+        let (aligned, info) = align_to(&rec.main, &other.mono)?;
+        eprintln!("{}: {info}", path.display());
+        rec.extra.push(aligned);
+        rec.names.push(
+            path.file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into()),
+        );
+        rec.align.push(info);
+    }
+    if !rec.extra.is_empty() {
+        let devices = 1.0 + rec.extra.len() as f32;
+        rec.mono = (0..rec.main.len())
+            .map(|i| (rec.main[i] + rec.extra.iter().map(|x| x[i]).sum::<f32>()) / devices)
+            .collect();
+    }
+    Ok(())
+}
+
+/// Power in the speech band, 300 Hz to 4 kHz, per frame.
+fn band_power(x: &[f32]) -> f64 {
+    let hz = RATE as f64 / beam::FFT as f64;
+    let (lo, hi) = ((300.0 / hz) as usize, (4_000.0 / hz) as usize);
+    let (mut p, mut frames) = (0f64, 0usize);
+    beam::for_each_frame_n(&[x], |_, s| {
+        frames += 1;
+        p += s[0][lo..hi].iter().map(|c| c.norm2() as f64).sum::<f64>();
+    });
+    if frames == 0 {
+        0.0
+    } else {
+        p / frames as f64
+    }
 }
 
 /// What a span was steered to.
 struct Steered {
     weights: Weights,
+    /// Weights over every device's microphones, when there is more than the main pair.
+    multi: Option<Vec<Vec<C>>>,
     tdoa: Option<Tdoa>,
     noise_frames: usize,
+    picked: Option<String>,
 }
 
 fn identity_noise() -> Vec<Cov2> {
@@ -307,14 +445,41 @@ fn steer(b: &BeamArgs, rec: &Recording, span: Range<usize>, learned: &NoiseCov) 
     let (l, r) = (&rec.left[span.clone()], &rec.right[span.clone()]);
     let fixed = |w| Steered {
         weights: w,
+        multi: None,
         tdoa: None,
         noise_frames: 0,
+        picked: None,
     };
     match b.kind {
         Kind::Mono => return fixed(Weights::mean()),
         Kind::Left => return fixed(Weights::channel(0)),
         Kind::Right => return fixed(Weights::channel(1)),
         Kind::Das | Kind::Mvdr => {}
+    }
+    if b.kind == Kind::Mvdr && !rec.extra.is_empty() && !b.select {
+        let pre = b.pre_ms as usize * RATE / 1000;
+        let from = span.start.saturating_sub(pre);
+        let channels = |r: Range<usize>| -> Vec<&[f32]> {
+            let mut c = vec![&rec.left[r.clone()], &rec.right[r.clone()]];
+            c.extend(rec.extra.iter().map(|x| &x[r.clone()]));
+            c
+        };
+        let (nc, frames) = beam::span_cov_n(&channels(from..span.start), None, 0.0);
+        let nc = if frames as u64 >= beam::NOISE_MIN_FRAMES {
+            nc
+        } else {
+            vec![beam::CovN::identity(2 + rec.extra.len()); beam::BINS]
+        };
+        let gated =
+            (frames as u64 >= beam::NOISE_MIN_FRAMES && b.gate > 0.0).then_some(nc.as_slice());
+        let (x, _) = beam::span_cov_n(&channels(span.clone()), gated, b.gate);
+        return Steered {
+            weights: Weights::mean(),
+            multi: Some(beam::mvdr_rtf_n(&x, &nc, b.loading)),
+            tdoa: None,
+            noise_frames: frames,
+            picked: None,
+        };
     }
     let noise = match b.noise {
         NoiseFrom::Nothing => None,
@@ -324,8 +489,13 @@ fn steer(b: &BeamArgs, rec: &Recording, span: Range<usize>, learned: &NoiseCov) 
         NoiseFrom::Before => {
             let pre = b.pre_ms as usize * RATE / 1000;
             let from = span.start.saturating_sub(pre);
-            let (cov, frames) =
-                beam::span_cov(&rec.left[from..span.start], &rec.right[from..span.start]);
+            // Selection judges clarity on the second half, which the beam must not have fitted.
+            let to = if b.select {
+                span.start - (span.start - from) / 2
+            } else {
+                span.start
+            };
+            let (cov, frames) = beam::span_cov(&rec.left[from..to], &rec.right[from..to]);
             (frames as u64 >= beam::NOISE_MIN_FRAMES).then_some((cov, frames))
         }
     };
@@ -355,8 +525,10 @@ fn steer(b: &BeamArgs, rec: &Recording, span: Range<usize>, learned: &NoiseCov) 
     };
     Steered {
         weights,
+        multi: None,
         tdoa,
         noise_frames,
+        picked: None,
     }
 }
 
@@ -380,14 +552,52 @@ fn resegment(re: &mut Ear, pcm: &[f32]) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// `span` of the recording through `w`, with a frame of context before it.
-fn beamform_span(rec: &Recording, span: Range<usize>, w: &Weights) -> Vec<f32> {
+/// `span` of the recording through the steer, with a frame of context before it.
+fn beamform_span(rec: &Recording, span: Range<usize>, st: &Steered) -> Vec<f32> {
     let n = rec.left.len();
     let (s, e) = (span.start.min(n), span.end.min(n));
     let from = s.saturating_sub(BEAM_CONTEXT);
-    let mut y = beam::beamform(&rec.left[from..e], &rec.right[from..e], w);
+    let mut y = match &st.multi {
+        Some(w) => {
+            let mut c = vec![&rec.left[from..e], &rec.right[from..e]];
+            c.extend(rec.extra.iter().map(|x| &x[from..e]));
+            beam::beamform_n(&c, w)
+        }
+        None => beam::beamform(&rec.left[from..e], &rec.right[from..e], &st.weights),
+    };
     y.drain(..s - from);
     y
+}
+
+/// The span as Whisper will get it: the beam, or with `--select` whichever candidate (the main
+/// beam, or another device alone) stands clearest over the half second or so before the span.
+fn render(b: &BeamArgs, rec: &Recording, span: Range<usize>, st: &mut Steered) -> Vec<f32> {
+    if !b.select || rec.extra.is_empty() {
+        return beamform_span(rec, span, st);
+    }
+    let pre = (b.pre_ms as usize * RATE / 1000 / 2).min(span.start);
+    let wide = span.start - pre..span.end.min(rec.main.len());
+    let mut best = (
+        f64::MIN,
+        beamform_span(rec, wide.clone(), st),
+        "main".to_string(),
+    );
+    best.0 = clarity(&best.1, pre);
+    for (x, name) in rec.extra.iter().zip(&rec.names) {
+        let y = x[wide.clone()].to_vec();
+        let c = clarity(&y, pre);
+        if c > best.0 {
+            best = (c, y, name.clone());
+        }
+    }
+    st.picked = Some(best.2);
+    best.1.drain(..pre);
+    best.1
+}
+
+/// How far a span stands over the stretch before it (its first `pre` samples), in dB.
+fn clarity(x: &[f32], pre: usize) -> f64 {
+    10.0 * (band_power(&x[pre..]).max(1e-20) / band_power(&x[..pre]).max(1e-20)).log10()
 }
 
 /// The noise covariance learned as the stream goes: a frame is noise when every Silero chunk over
@@ -453,16 +663,18 @@ fn steer_json(s: &Steered) -> Value {
     let wng = s.weights.white_noise_power();
     let wng_db = 10.0 * (wng.iter().sum::<f32>() / wng.len() as f32 / 0.5).log10();
     json!({"lag": s.tdoa.map(|t| t.lag), "strength": s.tdoa.map(|t| t.strength),
-           "wng_db": wng_db, "noise_frames": s.noise_frames})
+           "wng_db": wng_db, "noise_frames": s.noise_frames, "picked": s.picked,
+           "mics": s.multi.as_ref().map(|w| w[0].len())})
 }
 
 fn main() -> Result<()> {
     let _ = log::set_logger(&Stderr).map(|()| log::set_max_level(log::LevelFilter::Info));
     let a = args()?;
     let b = a.beam;
-    let stereo = b.kind != Kind::Mono;
+    let stereo = b.kind != Kind::Mono || b.select;
     let bytes = std::fs::read(&a.input).with_context(|| a.input.display().to_string())?;
-    let rec = read_recording(&bytes, a.gain_db, stereo)?;
+    let mut rec = read_recording(&bytes, a.gain_db, stereo)?;
+    add_devices(&mut rec, &a.with, a.gain_db)?;
     let mic = &rec.mono;
     let silero = a.silero.as_path();
     let triggers = pond_voice::text::wake_triggers(&a.wake, &a.variants);
@@ -577,7 +789,8 @@ fn main() -> Result<()> {
                 );
                 steer_ns += t.elapsed().as_nanos() as u64;
                 let t = Instant::now();
-                let y = beamform_span(&rec, span, &st.weights);
+                let mut st = st;
+                let y = render(&b, &rec, span, &mut st);
                 segment_beam_ns += t.elapsed().as_nanos() as u64;
                 (y, Some(st))
             } else {
@@ -661,7 +874,8 @@ fn main() -> Result<()> {
                     span.clone(),
                     learner.as_ref().map_or(&NoiseCov::new(1), |l| &l.cov),
                 );
-                let y = beamform_span(&rec, span, &st.weights);
+                let mut st = st;
+                let y = render(&b, &rec, span, &mut st);
                 window_beam_ns += t.elapsed().as_nanos() as u64;
                 (y, Some(st))
             } else {
@@ -704,6 +918,7 @@ fn main() -> Result<()> {
                "load_ms": load_ms, "footprint_mb_before": mb(before),
                "footprint_mb_after_load": mb(after), "footprint_mb_end": mb(pond_adapters_ear::process_memory()),
                "triggers": triggers, "beam": beam_json,
+               "devices": rec.names, "align": rec.align,
                "parts": seg.parts().iter().map(|p| json!({"role": p.role, "name": p.name, "bytes": p.bytes.total(), "ns": p.ns})).collect::<Vec<_>>()})
     )?;
     out.flush()?;
