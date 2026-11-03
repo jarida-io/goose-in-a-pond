@@ -5671,6 +5671,13 @@ async fn run_chat(
                 // Voice Match runs in serve's room; this terminal loop recognises nobody.
                 speaker: None,
                 cnn_hears_household: false,
+                whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
+                    voice_rig::household_prompt(
+                        wake_word.unwrap_or(settings.voice_wake_word.as_str()),
+                        Some(&SqliteProfileRepository::new(db.system.clone())),
+                    )
+                    .await,
+                ))),
             })
             .await,
         ),

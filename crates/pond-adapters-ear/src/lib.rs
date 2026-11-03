@@ -38,6 +38,12 @@ use worker::{Cmd, Heard, ListenFrom, RefChunk, Segment, Woke, Worker, WorkerStat
 pub trait Transcriber: Send + Sync {
     /// 16 kHz mono f32 to text, Whisper's artifacts stripped and the wake phrase left in; blocking.
     fn transcribe(&self, pcm: &[f32]) -> Result<String>;
+
+    /// A segment's opening, read for the wake phrase: most segments are a room's other talk, so
+    /// this may be cheaper than `transcribe`.
+    fn scan(&self, pcm: &[f32]) -> Result<String> {
+        self.transcribe(pcm)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,7 +306,7 @@ pub(crate) fn wake_in(
         .pcm
         .len()
         .min(WAKE_SCAN_SECONDS * reference::RATE as usize);
-    let opening = transcriber.transcribe(&segment.pcm[..scan])?;
+    let opening = transcriber.scan(&segment.pcm[..scan])?;
     if !pond_voice::text::heard_wake(&opening, triggers) {
         tracing::debug!(heard = %opening, "ear: segment without the wake phrase");
         return Ok(None);

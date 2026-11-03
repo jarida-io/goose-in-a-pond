@@ -599,6 +599,48 @@ async fn the_tap_reaches_the_ear_at_16_khz_ahead_of_the_microphone_it_overlaps()
     );
 }
 
+/// Names each call by how it was made, so a test can see which path read the audio.
+struct Paths(Mutex<Vec<&'static str>>);
+
+impl Transcriber for Paths {
+    fn transcribe(&self, _pcm: &[f32]) -> Result<String> {
+        self.0.lock().unwrap().push("transcribe");
+        Ok("hey goose tell me a story about a pond".into())
+    }
+
+    fn scan(&self, _pcm: &[f32]) -> Result<String> {
+        self.0.lock().unwrap().push("scan");
+        Ok("hey goose".into())
+    }
+}
+
+#[test]
+fn the_opening_is_scanned_and_only_a_long_wake_is_transcribed_in_full() {
+    let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
+    let paths = Paths(Mutex::default());
+    let short = Segment {
+        start: 0,
+        end: 3 * S,
+        pcm: vec![0.0; 3 * S],
+    };
+    let woke = wake_in(&paths, &triggers, short).unwrap().unwrap();
+    assert_eq!(woke.transcript.as_deref(), Some("hey goose"));
+    assert_eq!(*paths.0.lock().unwrap(), ["scan"]);
+
+    let paths = Paths(Mutex::default());
+    let long = Segment {
+        start: 0,
+        end: 20 * S,
+        pcm: vec![0.0; 20 * S],
+    };
+    let woke = wake_in(&paths, &triggers, long).unwrap().unwrap();
+    assert_eq!(
+        woke.transcript.as_deref(),
+        Some("hey goose tell me a story about a pond")
+    );
+    assert_eq!(*paths.0.lock().unwrap(), ["scan", "transcribe"]);
+}
+
 #[test]
 fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake() {
     let says = Says::new(&["some talk show"]);

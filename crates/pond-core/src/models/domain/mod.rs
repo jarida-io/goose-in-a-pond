@@ -20,6 +20,7 @@ pub mod model_record; // re-exports ModelRecord, ModelCategory, ModelRoleAssignm
 pub mod model_role;
 pub mod recommended;
 pub mod room_voice;
+pub mod speech_prompt;
 pub mod taxonomy;
 pub mod vision_encoder;
 pub mod vision_pairing;

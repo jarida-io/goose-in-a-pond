@@ -104,6 +104,8 @@ struct Inner {
     memory_at_start: Mutex<Option<pond_adapters_ear::ProcessMemory>>,
     /// The running ear, so a new print reaches it without a restart.
     ear: Mutex<Option<Arc<pond_adapters_ear::EarRig>>>,
+    /// The ear's Whisper prompt: the wake phrase and the members' names, rewritten as they change.
+    prompt: voice_rig::WhisperPrompt,
 }
 
 pub struct RoomVoice {
@@ -141,6 +143,7 @@ impl RoomVoice {
             turn: Mutex::new(None),
             memory_at_start: Mutex::new(None),
             ear: Mutex::new(None),
+            prompt: Default::default(),
         });
         let task = tokio::spawn(supervise(inner.clone()));
         Arc::new(RoomVoice {
@@ -203,6 +206,7 @@ impl RoomVoiceControl for RoomVoice {
     fn household_changed(&self) {
         let inner = self.inner.clone();
         tokio::spawn(async move {
+            inner.refresh_prompt(None).await;
             let voices = household(&inner.deps).await;
             let ear = lock(&inner.ear).clone();
             let Some(ear) = ear else {
@@ -310,6 +314,31 @@ fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::Speake
 impl Inner {
     fn set_view(&self, change: impl FnOnce(&mut View)) {
         change(&mut lock(&self.view));
+    }
+
+    /// Rewrite the Whisper prompt from the settings (`settings`, else read now) and the profiles.
+    async fn refresh_prompt(
+        &self,
+        settings: Option<&pond_core::user_data::domain::settings::Settings>,
+    ) {
+        let read;
+        let settings = match settings {
+            Some(s) => s,
+            None => {
+                read = self.deps.settings.get().await.unwrap_or_default();
+                &read
+            }
+        };
+        let prompt =
+            voice_rig::household_prompt(&settings.voice_wake_word, self.deps.profiles.as_deref())
+                .await;
+        tracing::debug!(
+            words = prompt
+                .as_deref()
+                .map_or(0, |p| p.split_whitespace().count()),
+            "room voice: Whisper's prompt"
+        );
+        *self.prompt.write().unwrap_or_else(|e| e.into_inner()) = prompt;
     }
 
     /// What stands between the room and listening, if anything; holds the voice lock if not.
@@ -518,6 +547,7 @@ async fn run_once(
     };
     let recognises = speaker.is_some();
     let cnn_hears_household = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
+    inner.refresh_prompt(Some(settings)).await;
     let listening = voice_rig::build_listening(voice_rig::ListeningOptions {
         settings,
         data_dir: &inner.deps.data_dir,
@@ -528,6 +558,7 @@ async fn run_once(
         audio_level: Some(levels),
         speaker,
         cnn_hears_household,
+        whisper_prompt: Some(inner.prompt.clone()),
     })
     .await;
     let recognises = recognises && listening.ear.is_some();
@@ -730,6 +761,38 @@ mod tests {
             events.recv().await.unwrap(),
             WorkflowEvent::Wake { .. }
         ));
+        room.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn whisper_is_told_the_wake_phrase_and_every_members_name_as_they_change() {
+        use pond_core::user_data::domain::profile::CreateProfileRequest;
+        use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
+        let profiles = Arc::new(MockProfileRepository::new());
+        let mut d = deps(Arc::new(RunSupervisor::default()));
+        d.profiles = Some(profiles.clone());
+        let room = RoomVoice::start(d, false, wake());
+        let ana = CreateProfileRequest {
+            display_name: "Ana Wanjiru".into(),
+            avatar_emoji: "duck".into(),
+        };
+        profiles.create(ana).await.unwrap();
+        room.inner.refresh_prompt(None).await;
+        let prompt = room.inner.prompt.read().unwrap().clone().unwrap();
+        assert!(prompt.starts_with("Hey goose."), "{prompt}");
+        assert!(prompt.contains("Ana Wanjiru"), "{prompt}");
+
+        let otieno = CreateProfileRequest {
+            display_name: "Otieno".into(),
+            avatar_emoji: "duck".into(),
+        };
+        profiles.create(otieno).await.unwrap();
+        room.inner.refresh_prompt(None).await;
+        let prompt = room.inner.prompt.read().unwrap().clone().unwrap();
+        assert!(
+            prompt.contains("Otieno"),
+            "a new member reaches the prompt: {prompt}"
+        );
         room.shutdown().await;
     }
 
