@@ -6692,6 +6692,7 @@ dependencies = [
  "goose-sdk-types",
  "hf-hub 1.0.0",
  "include_dir",
+ "libc",
  "libloading 0.9.0",
  "llama-cpp-2",
  "llama-cpp-sys-2",
