@@ -3,7 +3,7 @@ import { Card, CardContent, Button, Input, Switch } from "@heroui/react";
 import { Plus, Trash2, BookOpen, Bot, Check, Pencil, Play, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm } from "../components/shared";
-import type { AgentRecipe, RecipeParameter } from "../api/types";
+import type { AgentRecipe, RecipeExtensionSpec, RecipeParameter } from "../api/types";
 import { AgentBuilder } from "../agents/AgentBuilder";
 import { AgentList } from "../agents/AgentList";
 import { AgentSuggestions } from "../agents/AgentSuggestions";
@@ -23,6 +23,11 @@ const EXTENSION_OPTIONS: Array<{ name: string; label: string }> = [
   { name: "matter", label: "Home / Matter" },
   { name: "vision", label: "Vision" },
 ];
+
+const toolsLabel = (exts?: RecipeExtensionSpec[]) =>
+  exts?.length
+    ? exts.map((e) => EXTENSION_OPTIONS.find((o) => o.name === e.name)?.label ?? e.name).join(", ")
+    : "Any that are switched on";
 
 const INPUT_TYPES: RecipeParameter["input_type"][] = ["string", "number", "boolean", "date", "select"];
 const REQUIREMENTS: RecipeParameter["requirement"][] = ["required", "optional"];
@@ -304,6 +309,7 @@ export function Recipes() {
     <div className="screen screen--recipes">
       <PageHeader
         title="Recipes"
+        subtitle="What runs, and which tools it may use. Run one yourself, or give an agent its own schedule."
         action={
           <>
             <Button variant="secondary" onPress={() => setAgentBuilder(null)}>
@@ -408,7 +414,7 @@ export function Recipes() {
                 </Button>
               </div>
 
-              <label className="ext-form-label">Extensions (tools this recipe may use)</label>
+              <label className="ext-form-label">Tools this recipe may use</label>
               <div className="recipe-extensions-picker">
                 {EXTENSION_OPTIONS.map((opt) => (
                   <label key={opt.name} className="recipe-extensions-picker__option">
@@ -421,7 +427,7 @@ export function Recipes() {
                   </label>
                 ))}
               </div>
-              <p className="muted-12">Leave all unchecked to allow the recipe's normal tool selection, unrestricted.</p>
+              <p className="muted-12">Tick none and it can use any tool that is switched on, like a schedule. Tick some and it gets only those.</p>
 
               <label htmlFor="recipe-activity-draft" className="ext-form-label">Activities (suggestion pills)</label>
               <div className="recipe-activities-editor">
@@ -524,6 +530,7 @@ export function Recipes() {
                 <p className="skill-card__desc">
                   {r.description || <span className="muted">No description</span>}
                 </p>
+                <p className="muted-12">Tools: {toolsLabel(r.extensions)}</p>
                 {r.activities && r.activities.length > 0 && (
                   <div className="recipe-activities-editor__pills">
                     {r.activities.slice(0, 3).map((a, i) => (

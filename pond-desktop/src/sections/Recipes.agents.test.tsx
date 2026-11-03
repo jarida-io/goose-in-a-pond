@@ -128,6 +128,22 @@ describe("the Recipes screen, split into agents and other recipes", () => {
     expect(within(others).queryByText("Greeter")).toBeNull();
   });
 
+  it("says on each plain recipe's card which tools it may use", async () => {
+    const pictures: AgentRecipe = {
+      ...DAILY,
+      id: "r3",
+      name: "doorbell_pictures",
+      title: "Doorbell pictures",
+      extensions: [{ type: "builtin", name: "weather" }, { type: "builtin", name: "vision" }],
+    };
+    vi.mocked(api.listRecipes).mockResolvedValue([DAILY, pictures]);
+    render(<Recipes />);
+    await screen.findByText("Doorbell pictures");
+    expect(screen.getByText(/What runs, and which tools it may use/)).toBeTruthy();
+    expect(screen.getByText("Tools: Weather, Vision")).toBeTruthy();
+    expect(screen.getByText("Tools: Any that are switched on")).toBeTruthy();
+  });
+
   it("says how an agent starts and what surrounds a run, in plain words", async () => {
     render(<Recipes />);
     const card = await screen.findByRole("article", { name: "Greeter" });
