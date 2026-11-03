@@ -24,7 +24,7 @@ mic 16 kHz -> echo canceller -> 32 s ring + 80-dim fbank every 10 ms -> wake CNN
 | `engine` | Kaldi fbank (f64 512-point FFT), libm-free `ln`/`exp`/`sqrt`/`erf`, conv kernels on three rungs (scalar f32, NEON f32, int8 `SDOT` in inline asm), the op-program executor over one caller-owned arena, Silero v5 by hand with the official 64-sample context, and a general f32 real FFT |
 | `convert` | our own ONNX protobuf reader (subgraphs included), converters for WeSpeaker ResNet, the wake CNN and Silero, the `.vmw` writer, SHA-256, `ModelFile` (validated weights in aligned memory) |
 | `wake` | window constants, the embedded "hey goose" model, `Detector` (the self-contained reference) |
-| `ear` | `Ear` (state machine), `Front`, the parts, `Endpointer`, `Aec`, events, OS memory readings |
+| `ear` | `Ear` (state machine), `Front`, the parts, `Endpointer`, `Aec`, `beam` (two microphones: GCC-PHAT, delay-and-sum, MVDR), events, OS memory readings |
 | `score` | Voice Match's decision, term for term the face matcher's: centroid + top-3, S-norm, margins, calibration, FAR/FRR/EER |
 | `dsp` | the pond's capture resampler, a streaming band-limited `Resampler` for the playback tap, the energy quality gate |
 | `wav`, `locations` | WAV in and out; where the pond keeps the ear's models |
@@ -155,7 +155,7 @@ word.
 
 ## Tests
 
-`cargo test -p pond-ear`: 42 unit tests, 2 echo-canceller tests, 5 parity tests and 6 replay
+`cargo test -p pond-ear`: 54 unit tests, 2 echo-canceller tests, 5 parity tests and 7 replay
 tests. The audio in all of them is synthetic, from formulas in `tests/common/mod.rs`. No
 recording of a person is in the repository.
 

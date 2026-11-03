@@ -10,6 +10,16 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
 
 /// 16-bit PCM or 32-bit float WAV, mixed down to mono, as `(rate, [-1, 1] samples)`.
 pub fn decode_wav(b: &[u8]) -> Result<(u32, Vec<f32>), String> {
+    let (rate, ch, frames) = decode_wav_channels(b)?;
+    let mono = frames
+        .chunks_exact(ch)
+        .map(|f| f.iter().sum::<f32>() / ch as f32)
+        .collect();
+    Ok((rate, mono))
+}
+
+/// `decode_wav` without the mix-down: `(rate, channels, interleaved samples)`.
+pub fn decode_wav_channels(b: &[u8]) -> Result<(u32, usize, Vec<f32>), String> {
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".into());
     }
@@ -41,11 +51,7 @@ pub fn decode_wav(b: &[u8]) -> Result<(u32, Vec<f32>), String> {
                     .collect(),
                 _ => return Err(format!("unsupported WAV format tag {tag}, {bits} bits")),
             };
-            let mono = frames
-                .chunks_exact(ch)
-                .map(|f| f.iter().sum::<f32>() / ch as f32)
-                .collect();
-            return Ok((rate, mono));
+            return Ok((rate, ch, frames));
         }
         i += 8 + len + (len & 1);
     }

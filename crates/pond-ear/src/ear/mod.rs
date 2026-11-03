@@ -2,6 +2,7 @@
 //! with every byte each part holds accounted for.
 
 pub mod aec;
+pub mod beam;
 pub mod endpoint;
 pub mod event;
 pub mod front;
