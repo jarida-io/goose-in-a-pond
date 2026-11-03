@@ -118,6 +118,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [Music player](architecture/music-player.md) | Apple Music and Spotify ([extension](../extensions/music/README.md)) |
 | [Rides and maps](architecture/rides-and-maps.md) | Uber on the household's own account |
 | [Calendar and mail](guides/connect-calendar-and-mail.html) | Connecting CalDAV and IMAP |
+| [Schedules and recipes](schedules-and-recipes.md) | What each is, how they differ, which tools each can use |
 
 ## Extending GIAP
 
