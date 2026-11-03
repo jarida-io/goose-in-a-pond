@@ -44,3 +44,9 @@ whisper-rs = { version = "0.16", default-features = false, features = ["log_back
 # No `wiremock`: it outlived the HTTP backend it was here to fake by two
 # releases, and nothing in `tests/` has started a mock server since.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# `examples/ear_bench.rs`: a recording through the room's front end, scored offline.
+pond-ear = { workspace = true }
+pond-adapters-ear = { path = "../pond-adapters-ear" }
+serde_json = { workspace = true }
+# whisper.cpp reports its buffers through `log`; the bench prints them.
+log = "0.4"
