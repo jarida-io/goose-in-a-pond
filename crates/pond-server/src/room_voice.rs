@@ -491,14 +491,17 @@ impl Inner {
                     }
                 }
             }
-            WorkflowEvent::Wake { who: Some(who) } => {
-                let heard = LastHeard {
-                    profile_id: who.profile_id.clone(),
-                    name: who.name.clone(),
-                    at: chrono::Utc::now().to_rfc3339(),
-                };
-                self.set_view(|v| v.last_heard = Some(heard));
-                self.prioritize_speaker_prompt(&who.name);
+            WorkflowEvent::Wake { who } => {
+                self.deps.runs.preempt();
+                if let Some(who) = who {
+                    let heard = LastHeard {
+                        profile_id: who.profile_id.clone(),
+                        name: who.name.clone(),
+                        at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    self.set_view(|v| v.last_heard = Some(heard));
+                    self.prioritize_speaker_prompt(&who.name);
+                }
             }
             WorkflowEvent::Exit { .. } => *lock(&self.turn) = None,
             // A different voice's wake moves the loop to a session of its own.

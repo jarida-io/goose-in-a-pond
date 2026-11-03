@@ -2051,7 +2051,7 @@ async fn run_server(
                     "idle after user activity — starting memory consolidation"
                 );
 
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = slot.cancellation_token();
                 *inact_cancel.write().await = Some(cancel.clone());
 
                 // Routes cancel directly; the DB poll lets an out-of-process voice turn abort.
@@ -2211,8 +2211,8 @@ async fn run_server(
                         tracing::debug!("summary refresh: stopping at {MAX_PER_PASS} this pass");
                         break;
                     }
-                    // Abort on activity: the serial engine must never make a user turn wait.
-                    let cancel = tokio_util::sync::CancellationToken::new();
+                    // Abort on activity or lane preemption: the serial engine must never make a user turn wait.
+                    let cancel = slot.cancellation_token();
                     let watcher_activity = sum_activity.clone();
                     let watcher_cancel = cancel.clone();
                     let baseline = idle_for;
@@ -2355,8 +2355,8 @@ async fn run_server(
                     }
                 };
 
-                // One token per pass: resumed activity ends the whole sweep.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // One token per pass: lane preemption or resumed activity ends the whole sweep.
+                let cancel = slot.cancellation_token();
 
                 let watcher_activity = title_activity.clone();
                 let watcher_storage = title_storage.clone();
@@ -2747,8 +2747,8 @@ async fn run_server(
                     continue;
                 };
 
-                // Checked before each window: activity costs at most one window's inference.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // Preempted immediately by the lane or on activity: activity costs at most one window's inference.
+                let cancel = slot.cancellation_token();
                 let watcher_cancel = cancel.clone();
                 let watcher_activity = extraction_activity.clone();
                 let baseline = in_process_at;
@@ -2769,15 +2769,22 @@ async fn run_server(
                     }
                 });
 
-                let report = service
-                    .run_pass(
+                let report = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::info!("batch-extraction: pass preempted by user activity");
+                        pond_core::user_data::services::memory_extraction::PassReport {
+                            blocked_on: Some("preempted".to_string()),
+                            ..Default::default()
+                        }
+                    }
+                    r = service.run_pass(
                         extraction_storage.as_ref(),
                         extraction_repo.as_ref(),
                         &extractor,
                         &config,
                         &cancel,
-                    )
-                    .await;
+                    ) => r,
+                };
                 watcher.abort();
 
                 status.write().await.record(config.mode, &report);
@@ -2898,6 +2905,39 @@ async fn run_server(
     // Created before the Matter runtime, which publishes sensor updates onto it.
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
+
+    // Vision presence tracker: holds background inference chores while a person is in view.
+    {
+        let last_person_seen = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let probe = last_person_seen.clone();
+        inference_lane.watch_presence(move || {
+            probe
+                .lock()
+                .ok()
+                .and_then(|t| *t)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90))
+        });
+
+        let mut events = event_bus.subscribe();
+        let lane = inference_lane.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use pond_core::shared::ports::event_bus::BusEvent;
+            while let Some(event) = events.next().await {
+                let is_person = match event {
+                    BusEvent::Camera(ref c) => c.event_type == "person",
+                    BusEvent::Presence(_) => true,
+                    _ => false,
+                };
+                if is_person {
+                    if let Ok(mut seen) = last_person_seen.lock() {
+                        *seen = Some(std::time::Instant::now());
+                    }
+                    lane.preempt();
+                }
+            }
+        });
+    }
 
     // `device_control` is a facade over Matter (when on and reachable) or the logging stub,
     // swapped at runtime behind one long-lived `Arc`.
@@ -3831,15 +3871,20 @@ async fn run_server(
                     .unwrap_or_default();
                 subjects.push(settings.user_name.clone());
 
-                let outcome = compose_suggestions(
-                    gen_memories.as_ref(),
-                    gen_queue.as_ref(),
-                    gen_provider.clone(),
-                    &subjects,
-                    MEMORY_SCAN,
-                    now,
-                )
-                .await;
+                let outcome = tokio::select! {
+                    _ = slot.cancelled() => {
+                        tracing::info!("[suggestions] pass preempted by user activity");
+                        continue;
+                    }
+                    res = compose_suggestions(
+                        gen_memories.as_ref(),
+                        gen_queue.as_ref(),
+                        gen_provider.clone(),
+                        &subjects,
+                        MEMORY_SCAN,
+                        now,
+                    ) => res,
+                };
 
                 // Logged even when nothing was composed: silent, a no-op looks like a bail.
                 match outcome {
@@ -4553,6 +4598,10 @@ async fn run_server(
             use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
             runs.turn_in_flight()
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
+        let lane = inference_lane.clone();
+        state.runs.set_preempt_hook(move || {
+            lane.preempt();
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -6602,6 +6651,16 @@ async fn run_quiet_compaction(
                     }
                     false
                 }
+                _ = slot.cancelled() => {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "quiet_compaction_preempted",
+                        session_id = %session_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "quiet compaction preempted by user activity"
+                    );
+                    true
+                }
                 // No cooldown: the conversation is still due, and a longer quiet tries again.
                 () = someone_back => {
                     tracing::info!(
@@ -6839,7 +6898,7 @@ async fn run_proactive_reviewer(
         );
 
         // The lease revokes on drop, so an ended review can no longer delegate.
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = slot.cancellation_token();
         let lease = authorities.publish(
             &session_id,
             review::review_authority(&audience, &session_id),
@@ -7308,7 +7367,7 @@ impl LongTaskHelpers {
                     target: "giap::trace",
                     kind = "long_task_reply_saved",
                     task_id = %task.id(),
-                    title = %draft.title(),
+                    title_chars = draft.title().chars().count(),
                     chars = draft.body().len(),
                     "a helper's work was in its reply; the runner saved it"
                 );

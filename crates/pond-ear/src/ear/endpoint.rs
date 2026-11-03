@@ -156,11 +156,7 @@ impl Endpointer {
         };
 
         let was = self.speaking;
-        self.speaking = if was {
-            p >= thresh_off
-        } else {
-            p >= thresh_on
-        };
+        self.speaking = if was { p >= thresh_off } else { p >= thresh_on };
         let mut step = Step {
             speech: (self.speaking != was).then_some(self.speaking),
             outcome: None,
