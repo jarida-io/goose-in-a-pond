@@ -1257,7 +1257,7 @@ action_build_server() {
   fi
   local cb; cb="$(cargo_bin)"
   local rust_flags="${RUSTFLAGS:-}"
-  if [ "$D_OS" = "linux" ] && { command -v lld >/dev/null 2>&1 || [ -x /usr/local/bin/lld ] || [ -x /usr/bin/lld ]; }; then
+  if [ "$D_OS" = "linux" ] && command -v ld.lld >/dev/null 2>&1; then
     rust_flags="${rust_flags:+$rust_flags }-C link-arg=-fuse-ld=lld"
   fi
   if [ "$D_IS_JETSON" = true ]; then

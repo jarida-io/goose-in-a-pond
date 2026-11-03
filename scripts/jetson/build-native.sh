@@ -77,7 +77,7 @@ if [ "$CUDA" = true ]; then
 fi
 
 RUST_FLAGS="${RUSTFLAGS:-}"
-if command -v lld >/dev/null 2>&1 || [ -x /usr/local/bin/lld ] || [ -x /usr/bin/lld ]; then
+if command -v ld.lld >/dev/null 2>&1; then
   RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C link-arg=-fuse-ld=lld"
 fi
 RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C codegen-units=8"
