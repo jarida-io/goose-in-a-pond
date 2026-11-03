@@ -6187,6 +6187,10 @@ async fn update_settings(
     // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
     crate::apply_embedding_choice(&state, &merged).await;
 
+    if current.active_whisper_model != merged.active_whisper_model {
+        crate::speech_model::switch_soon(&merged.active_whisper_model);
+    }
+
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
     if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
@@ -7560,6 +7564,7 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_whisper_model", name.clone())
                 .await;
+            crate::speech_model::switch_soon(&name);
         }
         "tts" => {
             let _ = settings_repo

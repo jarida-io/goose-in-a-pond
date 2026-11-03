@@ -24,6 +24,7 @@ pub mod rides;
 pub mod room_voice;
 pub mod routes;
 pub mod runs;
+pub mod speech_model;
 pub mod spoken_code;
 pub mod spotify_focus;
 #[cfg(feature = "test-support")]
