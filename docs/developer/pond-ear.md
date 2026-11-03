@@ -96,11 +96,14 @@ audio stays with the owners of the original videos. Whatever ships it must carry
 ## Segments for a host-side wake detector
 
 With `Config.segments` on, the wake CNN never runs. Outside Listen the ear instead reports each
-stretch of speech on the echo-cancelled signal as `Event::Segment { start, end }`, for the host to
-transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
-hysteresis, 800 ms of quiet, at most 30 s), reaches 200 ms back before Silero's onset and is
-dropped under 250 ms of voiced time. Listening cancels the segment in progress, since its audio
-belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
+stretch of speech on the echo-cancelled signal as `Event::Segment { start, end, cut }`, for the host
+to transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
+hysteresis, 800 ms of quiet), reaches 200 ms back before Silero's onset and is dropped under 250 ms
+of voiced time. It is cut at `Endpoint::segment_max_ms` (8 s) with `cut` set while the speech goes
+on: the host reads only a segment's opening, and a television or a room of talk otherwise ran a
+segment to 30 s and hid a wake past its opening. A wake in a cut segment listens from the wake's
+start, so the request is endpointed whole. Listening cancels the segment in progress, since its
+audio belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
 chunking and never while listening.
 
 ## Echo canceller
@@ -197,7 +200,7 @@ recording of a person is in the repository.
 | Step | Status | Where |
 |---|---|---|
 | **pond-adapters-ear** runs one `Ear` on its own thread with a permanent mic claim, read through `MicReader`. It serves `ChatService` as its `StreamingWakeWordDetector` (the activation is the endpointed request from `Ear::audio`, so nothing is recorded twice), its `VoiceInput` (`listen(start)`, then `Utterance` or `Silence`) and its `InterruptWatch`. The interrupt rule lives there: the wake word, or a `BargeIn` with an enrolled `who` | built | `crates/pond-adapters-ear/src/worker.rs` |
-| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (the accurate profile Whisper prepared at load) and matched against `wake_triggers`; a match is the wake and its transcript the request | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear` |
+| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (`Transcriber::scan`: the accurate profile without temperature retries) and matched against `wake_triggers`; a match is the wake and its transcript the request. Room Whisper reads the wake phrase and the members' names as its prompt (`speech_prompt::room_prompt`), and a transcript that is only that prompt said back counts as nothing | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear`, `WhisperTranscriber` in `crates/pond-server/src/voice_rig.rs` |
 | **pond-audio-out playback tap**: every played source copies what the mixer pulls to a process-wide tap; the ear resamples it to 16 kHz, stamps it with the mic's clock plus 10 ms, and passes it to `Ear::play` before the mic samples it overlaps | built | `crates/pond-audio-out/src/tap.rs`, `crates/pond-adapters-ear/src/reference.rs` |
 | **The host** moves the ear through `Think` and `Speak` and back to `Wait` from `ChatService`'s state observer, and calls `listen(start)` after an interrupt | built | `EarRig::state_hook`, `ChatService::with_state_observer` |
 | **Room voice in serve**, sharing serve's model, Whisper and Kokoro; the desktop attaches to it | built | `crates/pond-server/src/room_voice.rs`, `pond-desktop/electron/main/voice/roomClient.ts` |
