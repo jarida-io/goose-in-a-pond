@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { api } from "../../../api/PondApiClient";
+import { openStateLabel } from "../../../sections/clientPresence";
 import { powerStateOf } from "../../../sections/devicePower";
 import { timeSince } from "../../../sections/timeSince";
 import type { DeviceData } from "../../data/mockHome";
@@ -18,6 +19,7 @@ type PowerRead = boolean | undefined;
     which used to need its own fetch (HomeAlerts.tsx's) when this card only kept capabilities. */
 interface WireDevice {
   capabilities: string[];
+  device_type?: string;
   is_online: boolean;
   last_seen?: string;
 }
@@ -81,7 +83,12 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
         if (cancelled) return;
         const byId: Record<string, WireDevice> = {};
         for (const d of list) {
-          byId[d.id] = { capabilities: d.capabilities ?? [], is_online: d.is_online, last_seen: d.last_seen };
+          byId[d.id] = {
+            capabilities: d.capabilities ?? [],
+            device_type: d.device_type,
+            is_online: d.is_online,
+            last_seen: d.last_seen,
+          };
         }
         setWire({ status: "ready", byId });
       })
@@ -175,6 +182,8 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
   function connectivity(id: string): ReactElement | null {
     const info = connectivityOf(id);
     if (!info) return null;
+    const open = openStateLabel(info);
+    if (open !== null) return <span className="hcc__status">{open}</span>;
     return info.is_online ? (
       <span className="hcc__status" data-online="true">
         <span className="hcc__dot" aria-hidden="true" />

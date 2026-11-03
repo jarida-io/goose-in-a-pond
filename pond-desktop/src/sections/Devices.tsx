@@ -10,6 +10,7 @@ import {
 import { api } from "../api/PondApiClient";
 import { ApiError, type Device, type MatterStatus } from "../api/types";
 import { refreshHomeData } from "../hub/state/hubDataStore";
+import { openStateLabel } from "./clientPresence";
 import { powerStateOf } from "./devicePower";
 import { timeSince } from "./timeSince";
 
@@ -70,6 +71,18 @@ function iconClass(kind: string | undefined, isOnline: boolean): string {
 /** "now" while online (online means heard from recently); otherwise when it went quiet. */
 function lastSeen(device: Pick<Device, "is_online" | "last_seen">): string {
   return device.is_online ? "now" : timeSince(device.last_seen);
+}
+
+/** Whether the dashboard or app is open, in a neutral chip; online or offline for anything else. */
+function StatusChip({ device }: { device: Device }) {
+  const open = openStateLabel(device);
+  if (open !== null) return <span className="device-card__chip">{open}</span>;
+  return (
+    <span className={`device-card__chip device-card__chip--${device.is_online ? "online" : "offline"}`}>
+      <span className="device-card__dot" />
+      {device.is_online ? "online" : "offline"}
+    </span>
+  );
 }
 
 function canPower(d: Device): boolean {
@@ -372,10 +385,7 @@ export function Devices() {
 
               {/* Chips: status + type + last seen */}
               <div className="device-card__chips">
-                <span className={`device-card__chip device-card__chip--${d.is_online ? "online" : "offline"}`}>
-                  <span className="device-card__dot" />
-                  {d.is_online ? "online" : "offline"}
-                </span>
+                <StatusChip device={d} />
                 {d.device_type && (
                   <span className="device-card__chip">{d.device_type}</span>
                 )}
@@ -536,7 +546,7 @@ export function Devices() {
               <div className="sched-modal__field">
                 <label className="sched-modal__label">Status</label>
                 <div className="muted-12">
-                  {detail.is_online ? "online" : "offline"} · last seen {lastSeen(detail)}
+                  {openStateLabel(detail) ?? (detail.is_online ? "online" : "offline")} · last seen {lastSeen(detail)}
                 </div>
                 {/* Reachability, which is not the device's power. It lived on the
                     card labelled "Turn on"/"Turn off" and wrote nothing but

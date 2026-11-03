@@ -84,6 +84,8 @@ void i18n.use(initReactI18next).init({
     boundTo: 'A device that pairs with this code becomes {{name}}\'s, and the Pond knows it is {{name}} speaking. A phone that is already paired is linked by pairing it again with this code.',
     boundToNobody: 'A device that pairs with this code belongs to nobody. The Pond cannot tell who is speaking on it, and once the household has more than one member it treats them as a guest: nothing is remembered for them and nothing addressed to a member reaches it.',
     membersFailed: 'The household members could not be read, so this code can only be bound as the Pond decides. Reload this page to try again.',
+  }, devices: {
+    open: 'Open', notOpen: 'Not open',
   } } } },
 });
 export default i18n;
