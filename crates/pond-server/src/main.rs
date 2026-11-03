@@ -8329,7 +8329,7 @@ async fn run_calibrate(
     // Own mic owner: calibration never runs alongside the wake-word detector. The pinned mic,
     // so the variants are learned through the microphone voice will hear them on.
     let capture = match settings.audio_input_device.trim() {
-        "" => pond_audio::CpalCapture::new(),
+        "" | "auto" => pond_audio::CpalCapture::new(),
         pinned => pond_audio::CpalCapture::with_device(pinned),
     };
     let (mic_handle, _mic_owner_join) =

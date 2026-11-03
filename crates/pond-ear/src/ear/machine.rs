@@ -112,7 +112,7 @@ impl Config {
             speaker: None,
             rung: Rung::fastest(),
             ring_seconds: RING_SECONDS,
-            endpoint: Endpoint::default(),
+            endpoint: Endpoint::adaptive(),
             barge_in_ms: BARGE_IN_MS,
             aec: Some(AecConfig::default()),
             segments: false,

@@ -18,6 +18,16 @@ pub struct Endpoint {
     /// Longest segment for the host's wake detector, which reads only a segment's opening: speech
     /// that never pauses (a television, a room of talk) is cut this often.
     pub segment_max_ms: u32,
+    pub adaptive: bool,
+}
+
+impl Endpoint {
+    pub fn adaptive() -> Self {
+        Self {
+            adaptive: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Endpoint {
@@ -29,6 +39,7 @@ impl Default for Endpoint {
             command_timeout_ms: 5_000,
             max_ms: 30_000,
             segment_max_ms: SEGMENT_MAX_MS,
+            adaptive: false,
         }
     }
 }
@@ -70,6 +81,7 @@ pub struct Endpointer {
     pub cfg: Endpoint,
     speaking: bool,
     turn: Option<Turn>,
+    noise_floor: f32,
 }
 
 impl Endpointer {
@@ -78,12 +90,14 @@ impl Endpointer {
             cfg,
             speaking: false,
             turn: None,
+            noise_floor: 0.03,
         }
     }
 
     pub fn reset(&mut self) {
         self.speaking = false;
         self.turn = None;
+        self.noise_floor = 0.03;
     }
 
     pub fn speaking(&self) -> bool {
@@ -122,11 +136,30 @@ impl Endpointer {
 
     /// One Silero chunk ending at absolute sample `end` with speech probability `p`.
     pub fn vad(&mut self, end: usize, p: f32) -> Step {
+        let (thresh_on, thresh_off) = if self.cfg.adaptive {
+            if !self.speaking && p < 0.35 {
+                const ALPHA: f32 = 0.02;
+                self.noise_floor = self.noise_floor * (1.0 - ALPHA) + p * ALPHA;
+            }
+            let dynamic_on = (self.noise_floor + 0.25).clamp(0.28, self.cfg.on);
+            let dynamic_off = (dynamic_on - 0.12).clamp(0.18, self.cfg.off);
+            if self.turn.is_some() {
+                (
+                    (dynamic_on - 0.04).clamp(0.24, self.cfg.on),
+                    (dynamic_off - 0.04).clamp(0.16, self.cfg.off),
+                )
+            } else {
+                (dynamic_on, dynamic_off)
+            }
+        } else {
+            (self.cfg.on, self.cfg.off)
+        };
+
         let was = self.speaking;
         self.speaking = if was {
-            p >= self.cfg.off
+            p >= thresh_off
         } else {
-            p >= self.cfg.on
+            p >= thresh_on
         };
         let mut step = Step {
             speech: (self.speaking != was).then_some(self.speaking),
@@ -456,5 +489,18 @@ mod tests {
             panic!("{out:?}")
         };
         assert_eq!(*end, 15 * CHUNK + 480);
+    }
+
+    #[test]
+    fn adaptive_vad_tracks_ambient_noise_and_detects_quiet_far_field_speech() {
+        let mut e = Endpointer::new(Endpoint::adaptive());
+        let mut at = 0;
+        for _ in 0..30 {
+            at += CHUNK;
+            assert_eq!(e.vad(at, 0.02).speech, None);
+        }
+        at += CHUNK;
+        assert_eq!(e.vad(at, 0.32).speech, Some(true));
+        assert!(e.speaking());
     }
 }
