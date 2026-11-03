@@ -289,7 +289,6 @@ export const FIRST_UNIT_LOOKAHEAD_WORDS = 10;
 /** A unit is cut before it passes this many estimated Kokoro tokens. */
 export const UNIT_TOKEN_BUDGET = 200;
 const MIN_CLAUSE_WORDS = 3;
-const CLAUSE_LOOKAHEAD_TOKENS = 40;
 const CLOSERS = `"')]\u201d\u2019`;
 const TERMINALS = ".?!\u2026";
 
