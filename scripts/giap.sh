@@ -1256,13 +1256,24 @@ action_build_server() {
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
   local cb; cb="$(cargo_bin)"
+  local rust_flags="${RUSTFLAGS:-}"
+  if [ "$D_OS" = "linux" ] && { command -v lld >/dev/null 2>&1 || [ -x /usr/local/bin/lld ] || [ -x /usr/bin/lld ]; }; then
+    rust_flags="${rust_flags:+$rust_flags }-C link-arg=-fuse-ld=lld"
+  fi
+  if [ "$D_IS_JETSON" = true ]; then
+    rust_flags="${rust_flags:+$rust_flags }-C codegen-units=8"
+  fi
+  local sccache_env=""
+  if command -v sccache >/dev/null 2>&1; then
+    sccache_env="RUSTC_WRAPPER=sccache "
+  fi
   if [ -n "$feats" ]; then
     export CMAKE_CUDA_ARCHITECTURES=87
     export CUDA_COMPUTE_CAP=87
-    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
+    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH ${rust_flags:+RUSTFLAGS=\"$rust_flags\" }${sccache_env}SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
       $cb build -p pond-server --bin pond-server --features $feats --release"
   else
-    run_sh "SQLX_OFFLINE=true $cb build -p pond-server --bin pond-server --release"
+    run_sh "${rust_flags:+RUSTFLAGS=\"$rust_flags\" }${sccache_env}SQLX_OFFLINE=true $cb build -p pond-server --bin pond-server --release"
   fi
   local rc=$?
   # The remote-access helper is Go; a host without Go still gets a working pond, just without it.

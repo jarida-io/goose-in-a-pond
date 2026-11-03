@@ -76,7 +76,19 @@ if [ "$CUDA" = true ]; then
   SERVER_FEATURES="--features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
 fi
 
+RUST_FLAGS="${RUSTFLAGS:-}"
+if command -v lld >/dev/null 2>&1 || [ -x /usr/local/bin/lld ] || [ -x /usr/bin/lld ]; then
+  RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C link-arg=-fuse-ld=lld"
+fi
+RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C codegen-units=8"
+
+SCCACHE_ENV=""
+if command -v sccache >/dev/null 2>&1; then
+  SCCACHE_ENV="RUSTC_WRAPPER=sccache "
+fi
+
 PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+${RUST_FLAGS:+RUSTFLAGS="$RUST_FLAGS" }$SCCACHE_ENV \
 SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
 cargo build -p pond-server --bin pond-server $SERVER_FEATURES --release
 
