@@ -37,6 +37,7 @@ import {
 
 // Trigger MCP-UI card registrations
 import "../mcp-ui";
+import { MarkdownText } from "../components/MarkdownText";
 import {
   findCardRenderer,
   findCardByHint,
@@ -591,7 +592,9 @@ export function Canvas() {
                       {m.role === "assistant" && <GooseAvatar />}
                       <div className="ch-bubble-wrap">
                         <div className={`ch-bubble ${m.role === "user" ? "ch-bubble--user" : "ch-bubble--goose"}`}>
-                          {m.text || (streaming && i === thread.length - 1
+                          {m.role === "assistant" && m.text && !m.error
+                            ? <MarkdownText source={m.text} />
+                            : m.text || (streaming && i === thread.length - 1
                             ? <span className="stream-dots"><span /><span /><span /></span>
                             : "")}
                         </div>

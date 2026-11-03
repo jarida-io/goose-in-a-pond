@@ -53,6 +53,7 @@ import { useConversationModel } from "../hooks/useConversationModel";
 import { useDeepResearch } from "../hooks/useDeepResearch";
 import { ModelSwitcher } from "../components/ModelSwitcher";
 import { NoModelPicks } from "../components/models/NoModelPicks";
+import { MarkdownText } from "../components/MarkdownText";
 
 export function Chat() {
   const state    = useAppState();
@@ -817,7 +818,9 @@ export function Chat() {
                       </div>
                     </div>
                   ) : (
-                    msg.text || (msg.streaming
+                    msg.role === "agent" && msg.text && !msg.error
+                      ? <MarkdownText source={msg.text} />
+                      : msg.text || (msg.streaming
                       ? msg.status
                         ? <ThinkingPlaceholder status={msg.status} />
                         : <span className="stream-dots"><span /><span /><span /></span>
