@@ -62,11 +62,13 @@ async fn wake_detector_json(state: &AppState, phrase: &str) -> Value {
         .await
         .unwrap_or_default();
     let verdict = wake_verdict(&takes);
-    let (kind, reason) = household_wake_detector(&settings, verdict.cnn_hears_household);
+    let taught = !pond_core::user_data::services::voice_match::taught(&takes).is_empty();
+    let (kind, reason) = household_wake_detector(&settings, verdict.cnn_hears_household, taught);
     json!({
         "kind": match kind {
             WakeDetector::HeyGoose => "hey_goose",
             WakeDetector::Whisper => "whisper",
+            WakeDetector::Personal => "personal",
         },
         "heard": verdict.heard,
         "of": verdict.of,
@@ -214,8 +216,12 @@ pub(crate) async fn post_take(
             .map_err(failed)?;
     }
 
+    let triggers = pond_voice::text::wake_triggers(
+        &settings.voice_wake_word,
+        &settings.voice_wake_word_transcriptions,
+    );
     let heard = engine
-        .hear_take(pcm, take.voice_match)
+        .hear_take(pcm, take.voice_match, triggers)
         .await
         .map_err(|e| match e {
             TakeError::ModelNotReady => {
@@ -233,6 +239,11 @@ pub(crate) async fn post_take(
             phrase: phrase.clone(),
             cnn_heard: heard.cnn_heard,
             created_at: now,
+            // A member's template is their voice: kept only for a named member with Voice Match on.
+            template: voice_template(take.voice_match, take.profile_id.as_deref(), &heard)
+                .map(|t| t.phrase.clone()),
+            rest: voice_template(take.voice_match, take.profile_id.as_deref(), &heard)
+                .map(|t| t.rest.clone()),
         })
         .await
         .map_err(failed)?;
@@ -324,16 +335,33 @@ pub(crate) async fn get_prints(State(state): State<Arc<AppState>>) -> Result<Jso
     })))
 }
 
-/// `DELETE /api/v1/voice/prints/{profile_id}`: their voice only; their face and wake takes stay.
+fn voice_template<'a>(
+    voice_match: bool,
+    member: Option<&str>,
+    heard: &'a pond_core::models::ports::voice_match::HeardTake,
+) -> Option<&'a pond_core::models::ports::voice_match::TakeTemplate> {
+    (voice_match && member.is_some())
+        .then_some(heard.template.as_ref())
+        .flatten()
+}
+
+/// `DELETE /api/v1/voice/prints/{profile_id}`: their voice only, prints and wake templates; their
+/// face and what the CNN heard of their takes stay.
 pub(crate) async fn delete_prints(
     State(state): State<Arc<AppState>>,
     Path(profile_id): Path<String>,
 ) -> Result<StatusCode, Refusal> {
-    let deleted = voice_prints(&state)
-        .delete_prints(&profile_id)
+    let store = voice_prints(&state);
+    let deleted = store.delete_prints(&profile_id).await.map_err(failed)?;
+    let templates = store
+        .forget_wake_templates(&profile_id)
         .await
         .map_err(failed)?;
-    tracing::info!(deleted, "voice: a member's voice prints were forgotten");
+    tracing::info!(
+        deleted,
+        templates,
+        "voice: a member's voice prints were forgotten"
+    );
     household_changed(&state);
     Ok(StatusCode::NO_CONTENT)
 }

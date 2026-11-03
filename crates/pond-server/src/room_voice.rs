@@ -15,6 +15,7 @@ use pond_core::models::domain::audio_device::{AudioDeviceStatus, ChoiceBasis};
 use pond_core::models::domain::room_voice::{
     LastHeard, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
+use pond_core::models::domain::wake_detector::WakeDetector;
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::room_voice::RoomVoiceControl;
 use pond_core::models::ports::voice_output::VoiceOutput;
@@ -207,6 +208,25 @@ impl RoomVoiceControl for RoomVoice {
         let inner = self.inner.clone();
         tokio::spawn(async move {
             inner.refresh_prompt(None).await;
+            let settings = inner.deps.settings.get().await.unwrap_or_default();
+            let personal = personal_wake(&inner.deps, &settings.voice_wake_word).await;
+            let running = lock(&inner.ear).clone();
+            if let Some(ear) = running {
+                // The front end is Whisper's segments either way: only the templates change.
+                let (detector, reason) = voice_rig::expected_wake(
+                    &settings,
+                    cnn_hears_household(&inner.deps, &settings.voice_wake_word).await,
+                    personal.is_some(),
+                );
+                let segments = lock(&inner.view).wake.detector != WakeDetector::HeyGoose;
+                if segments && detector != WakeDetector::HeyGoose {
+                    ear.set_personal(personal);
+                    inner.set_view(|v| {
+                        v.wake.detector = detector;
+                        v.wake.reason = reason;
+                    });
+                }
+            }
             let voices = household(&inner.deps).await;
             let ear = lock(&inner.ear).clone();
             let Some(ear) = ear else {
@@ -271,6 +291,18 @@ async fn household(deps: &RoomDeps) -> pond_adapters_ear::Household {
 }
 
 /// Whether the wake CNN heard every taught member's latest run of the household's phrase.
+/// Whether any member taught enough takes for their own templates to listen.
+async fn taught(deps: &RoomDeps, phrase: &str) -> bool {
+    let Some(repo) = &deps.voice_prints else {
+        return false;
+    };
+    let phrase = pond_voice::text::normalize_transcript(phrase);
+    repo.wake_takes(&phrase)
+        .await
+        .map(|takes| !pond_core::user_data::services::voice_match::taught(&takes).is_empty())
+        .unwrap_or(false)
+}
+
 async fn cnn_hears_household(deps: &RoomDeps, phrase: &str) -> bool {
     let Some(repo) = &deps.voice_prints else {
         return false;
@@ -285,6 +317,26 @@ async fn cnn_hears_household(deps: &RoomDeps, phrase: &str) -> bool {
             false
         }
     }
+}
+
+/// The members' own wake templates for `phrase`, calibrated, with what building them cost.
+async fn personal_wake(deps: &RoomDeps, phrase: &str) -> Option<pond_adapters_ear::PersonalWake> {
+    let repo = deps.voice_prints.as_ref()?;
+    let phrase = pond_voice::text::normalize_transcript(phrase);
+    let takes = match repo.wake_takes(&phrase).await {
+        Ok(takes) => takes,
+        Err(e) => {
+            tracing::warn!(error = %e, "room voice: could not read the wake templates");
+            return None;
+        }
+    };
+    let before = crate::room_memory::now();
+    let wake = tokio::task::spawn_blocking(move || pond_adapters_ear::personal_wake(&takes))
+        .await
+        .ok()
+        .flatten()?;
+    crate::room_memory::log_personal(before, &wake);
+    Some(wake)
 }
 
 /// A recognised speaker's context for their turn, as the routes build it for a typed one.
@@ -423,7 +475,8 @@ async fn supervise(inner: Arc<Inner>) {
         tested &= on;
         let settings = inner.deps.settings.get().await.unwrap_or_default();
         let calibrated = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
-        let (detector, reason) = voice_rig::expected_wake(&settings, calibrated);
+        let taught = taught(&inner.deps, &settings.voice_wake_word).await;
+        let (detector, reason) = voice_rig::expected_wake(&settings, calibrated, taught);
         inner.set_view(|v| {
             v.wake = RoomWake {
                 phrase: settings.voice_wake_word.clone(),
@@ -547,6 +600,7 @@ async fn run_once(
     };
     let recognises = speaker.is_some();
     let cnn_hears_household = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
+    let personal = personal_wake(&inner.deps, &settings.voice_wake_word).await;
     inner.refresh_prompt(Some(settings)).await;
     let listening = voice_rig::build_listening(voice_rig::ListeningOptions {
         settings,
@@ -559,6 +613,7 @@ async fn run_once(
         speaker,
         cnn_hears_household,
         whisper_prompt: Some(inner.prompt.clone()),
+        personal,
     })
     .await;
     let recognises = recognises && listening.ear.is_some();

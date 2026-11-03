@@ -1,4 +1,5 @@
-//! Voice Match's prints and the wake CNN's enrolment results, in `pond_system.db`.
+//! Voice Match's prints, the wake CNN's enrolment results and members' wake templates, in
+//! `pond_system.db`.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -90,37 +91,54 @@ impl VoicePrintRepository for SqliteVoiceRecognition {
 
     async fn add_wake_take(&self, take: &WakeTake) -> Result<()> {
         sqlx::query(
-            "INSERT INTO voice_wake_takes (id, profile_id, phrase, cnn_heard, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO voice_wake_takes \
+             (id, profile_id, phrase, cnn_heard, created_at, template, template_rest) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&take.id)
         .bind(&take.profile_id)
         .bind(&take.phrase)
         .bind(take.cnn_heard as i64)
         .bind(stamp(take.created_at))
+        .bind(take.template.as_deref().map(pack))
+        .bind(take.rest.as_deref().map(pack))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
     async fn wake_takes(&self, phrase: &str) -> Result<Vec<WakeTake>> {
-        let rows: Vec<(String, Option<String>, String, i64, String)> = sqlx::query_as(
-            "SELECT id, profile_id, phrase, cnn_heard, created_at FROM voice_wake_takes \
-             WHERE phrase = ? ORDER BY created_at, rowid",
+        type Row = (
+            String,
+            Option<String>,
+            String,
+            i64,
+            String,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        );
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT id, profile_id, phrase, cnn_heard, created_at, template, template_rest \
+             FROM voice_wake_takes WHERE phrase = ? ORDER BY created_at, rowid",
         )
         .bind(phrase)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, profile_id, phrase, heard, created_at)| WakeTake {
-                id,
-                profile_id,
-                phrase,
-                cnn_heard: heard != 0,
-                created_at: parse_stamp(&created_at),
-            })
-            .collect())
+        rows.into_iter()
+            .map(
+                |(id, profile_id, phrase, heard, created_at, template, rest)| {
+                    Ok(WakeTake {
+                        id,
+                        profile_id,
+                        phrase,
+                        cnn_heard: heard != 0,
+                        created_at: parse_stamp(&created_at),
+                        template: template.as_deref().map(unpack).transpose()?,
+                        rest: rest.as_deref().map(unpack).transpose()?,
+                    })
+                },
+            )
+            .collect()
     }
 
     async fn clear_wake_takes(&self) -> Result<u64> {
@@ -138,6 +156,17 @@ impl VoicePrintRepository for SqliteVoiceRecognition {
                 .await?
                 .rows_affected(),
         )
+    }
+
+    async fn forget_wake_templates(&self, profile_id: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE voice_wake_takes SET template = NULL, template_rest = NULL \
+             WHERE profile_id = ? AND template IS NOT NULL",
+        )
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 }
 
@@ -185,9 +214,14 @@ mod tests {
                 phrase: "hey goose".into(),
                 cnn_heard: true,
                 created_at: Utc::now(),
+                template: Some(vec![0.5; 160]),
+                rest: Some(vec![-0.5; 80]),
             })
             .await
             .unwrap();
+        let take = &store.wake_takes("hey goose").await.unwrap()[0];
+        assert_eq!(take.template.as_deref(), Some(&[0.5f32; 160][..]));
+        assert_eq!(take.rest.as_deref(), Some(&[-0.5f32; 80][..]));
         sqlx::query("DELETE FROM profiles WHERE id = ?")
             .bind(&amina)
             .execute(&db.system)
@@ -211,6 +245,8 @@ mod tests {
                     phrase: phrase.into(),
                     cnn_heard: i == 0,
                     created_at: Utc::now(),
+                    template: (i != 1).then(|| vec![1.0; 80]),
+                    rest: None,
                 })
                 .await
                 .unwrap();
@@ -218,6 +254,10 @@ mod tests {
         let takes = store.wake_takes("hey goose").await.unwrap();
         assert_eq!(takes.len(), 2);
         assert!(takes[0].cnn_heard && takes[1].profile_id.is_none());
+        assert_eq!(store.forget_wake_templates(&amina).await.unwrap(), 2);
+        let takes = store.wake_takes("hey goose").await.unwrap();
+        assert!(takes.iter().all(|t| t.template.is_none()), "the voice goes");
+        assert!(takes[0].cnn_heard, "what the CNN heard stays");
         assert_eq!(store.delete_wake_takes(&amina).await.unwrap(), 2);
         assert_eq!(store.clear_wake_takes().await.unwrap(), 1);
     }

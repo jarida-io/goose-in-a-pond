@@ -72,6 +72,8 @@ pub(crate) struct Segment {
     pub end: usize,
     pub pcm: Vec<f32>,
     pub cut: bool,
+    /// Its opening's fbank frames, for the members' wake templates.
+    pub frames: Vec<f32>,
 }
 
 pub(crate) struct RefChunk {
@@ -290,12 +292,15 @@ impl Worker {
                 let mut pcm = Vec::new();
                 self.hearing.audio(start, end, &mut pcm);
                 if let Some(segments) = &self.segments {
+                    let mut frames = Vec::new();
+                    self.hearing.opening_frames(start, &mut frames);
                     // Full while one is still being transcribed: a backlog is not worth decoding.
                     let _ = segments.try_send(Segment {
                         start,
                         end,
                         pcm: pcm.clone(),
                         cut,
+                        frames,
                     });
                 }
                 let speaker = self.speaker_of(start, end);
@@ -606,13 +611,17 @@ pub(crate) async fn match_segments(
     cmds: Sender<Cmd>,
     transcriber: Arc<dyn crate::Transcriber>,
     triggers: Vec<String>,
+    personal: crate::SharedPersonal,
 ) {
     while let Some(segment) = segments.recv().await {
         let transcriber = transcriber.clone();
         let triggers = triggers.clone();
-        let matched =
-            tokio::task::spawn_blocking(move || crate::wake_in(&*transcriber, &triggers, segment))
-                .await;
+        let personal = personal.read().unwrap_or_else(|e| e.into_inner()).clone();
+        // Off the ear's thread: matching templates is the one costly step after Whisper.
+        let matched = tokio::task::spawn_blocking(move || {
+            crate::wake_in(&*transcriber, &triggers, personal.as_deref(), segment)
+        })
+        .await;
         match matched {
             Ok(Ok(Some(woke))) => {
                 if cmds.send(Cmd::SegmentWake(woke)).is_err() {

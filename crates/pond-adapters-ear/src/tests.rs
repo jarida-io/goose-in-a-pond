@@ -87,6 +87,10 @@ impl Hearing for FakeEar {
     fn household(&self) -> &Household {
         &self.household
     }
+
+    fn opening_frames(&self, _start: usize, out: &mut Vec<f32>) {
+        out.clear();
+    }
 }
 
 struct Ctl {
@@ -645,6 +649,102 @@ async fn the_tap_reaches_the_ear_at_16_khz_ahead_of_the_microphone_it_overlaps()
     );
 }
 
+/// Frames of a made-up phrase: `units` sounds, each held 10 frames.
+fn phrase_frames(units: &[usize]) -> Vec<f32> {
+    let mut out = Vec::new();
+    for &u in units {
+        for k in 0..10 {
+            for b in 0..80 {
+                out.push(((b as f32 * 0.2 * (u as f32 + 1.0)).sin() * 3.0) + 0.01 * k as f32);
+            }
+        }
+    }
+    out
+}
+
+fn taught(units: &[usize]) -> PersonalWake {
+    PersonalWake {
+        members: vec![pond_ear::wake::personal::Member {
+            id: "p-jerry".into(),
+            templates: vec![pond_ear::wake::personal::Template::from_fbank(
+                &phrase_frames(units),
+            )],
+            thresholds: Thresholds {
+                distance: 0.15,
+                margin: 0.0,
+            },
+        }],
+        references: Vec::new(),
+    }
+}
+
+/// Whisper heard "He goes" and no trigger, but the member's own template matched: the pond wakes,
+/// and the request is what came after the phrase.
+#[test]
+fn a_members_template_wakes_the_pond_when_whisper_misses_the_phrase() {
+    const HEY_GOOSE: &[usize] = &[1, 4, 2, 7, 3];
+    let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
+    let says = Says::new(&["He goes, what's the weather?", "what's the weather?"]);
+    let mut frames = phrase_frames(HEY_GOOSE);
+    frames.extend(phrase_frames(&[9, 8, 6, 5, 0]));
+    let segment = Segment {
+        start: 0,
+        end: 3 * S,
+        pcm: vec![0.0; 3 * S],
+        cut: false,
+        frames,
+    };
+    let woke = wake_in(&*says, &triggers, Some(&taught(HEY_GOOSE)), segment)
+        .unwrap()
+        .expect("the template woke it");
+    assert_eq!(woke.transcript.as_deref(), Some("what's the weather?"));
+    let heard = says.heard.lock().unwrap().clone();
+    assert_eq!(heard.len(), 2);
+    assert!(
+        heard[1] < heard[0],
+        "only the audio after the phrase was transcribed again"
+    );
+
+    let says = Says::new(&["He goes to school by bus."]);
+    let segment = Segment {
+        start: 0,
+        end: 3 * S,
+        pcm: vec![0.0; 3 * S],
+        cut: false,
+        frames: phrase_frames(&[1, 5, 2, 6, 0]),
+    };
+    assert!(
+        wake_in(&*says, &triggers, Some(&taught(HEY_GOOSE)), segment)
+            .unwrap()
+            .is_none(),
+        "another phrase in the same voice"
+    );
+}
+
+#[test]
+fn a_member_who_taught_three_takes_listens_with_calibrated_thresholds() {
+    use pond_core::user_data::domain::voice_print::WakeTake;
+    let take = |k: usize, template: bool| WakeTake {
+        id: format!("t{k}"),
+        profile_id: Some("p-jerry".into()),
+        phrase: "hey goose".into(),
+        cnn_heard: false,
+        created_at: Default::default(),
+        template: template.then(|| phrase_frames(&[1, 4, 2 + k % 2, 7, 3])),
+        rest: template.then(|| phrase_frames(&[9, 8, 6])),
+    };
+    assert!(personal_wake(&[take(0, true), take(1, true), take(2, false)]).is_none());
+    let wake = personal_wake(&[take(0, true), take(1, true), take(2, true)]).unwrap();
+    assert_eq!(wake.members.len(), 1);
+    let m = &wake.members[0];
+    assert_eq!((m.id.as_str(), m.templates.len()), ("p-jerry", 3));
+    assert!(m.thresholds.distance > 0.0 && m.thresholds.distance <= 0.5);
+    assert!(
+        !wake.references.is_empty(),
+        "the embedded references come along"
+    );
+}
+
 /// Names each call by how it was made, so a test can see which path read the audio.
 struct Paths(Mutex<Vec<&'static str>>);
 
@@ -669,8 +769,9 @@ fn the_opening_is_scanned_and_only_a_long_wake_is_transcribed_in_full() {
         end: 3 * S,
         pcm: vec![0.0; 3 * S],
         cut: false,
+        frames: Vec::new(),
     };
-    let woke = wake_in(&paths, &triggers, short).unwrap().unwrap();
+    let woke = wake_in(&paths, &triggers, None, short).unwrap().unwrap();
     assert_eq!(woke.transcript.as_deref(), Some("hey goose"));
     assert_eq!(*paths.0.lock().unwrap(), ["scan"]);
 
@@ -680,8 +781,9 @@ fn the_opening_is_scanned_and_only_a_long_wake_is_transcribed_in_full() {
         end: 20 * S,
         pcm: vec![0.0; 20 * S],
         cut: false,
+        frames: Vec::new(),
     };
-    let woke = wake_in(&paths, &triggers, long).unwrap().unwrap();
+    let woke = wake_in(&paths, &triggers, None, long).unwrap().unwrap();
     assert_eq!(
         woke.transcript.as_deref(),
         Some("hey goose tell me a story about a pond")
@@ -697,9 +799,10 @@ fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake
         end: 20 * S,
         pcm: vec![0.0; 20 * S],
         cut: false,
+        frames: Vec::new(),
     };
     let triggers = pond_voice::text::wake_triggers("hey goose", &[]);
-    assert!(wake_in(&*says, &triggers, long).unwrap().is_none());
+    assert!(wake_in(&*says, &triggers, None, long).unwrap().is_none());
     assert_eq!(*says.heard.lock().unwrap(), vec![WAKE_SCAN_SECONDS * S]);
 
     let says = Says::new(&["hey goose", "hey goose tell me a story about a pond"]);
@@ -708,8 +811,9 @@ fn a_long_segment_is_matched_on_its_opening_and_transcribed_whole_only_on_a_wake
         end: 20 * S,
         pcm: vec![0.0; 20 * S],
         cut: false,
+        frames: Vec::new(),
     };
-    let woke = wake_in(&*says, &triggers, long).unwrap().unwrap();
+    let woke = wake_in(&*says, &triggers, None, long).unwrap().unwrap();
     assert_eq!(
         woke.transcript.as_deref(),
         Some("hey goose tell me a story about a pond")

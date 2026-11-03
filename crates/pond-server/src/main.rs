@@ -4137,7 +4137,18 @@ async fn run_server(
         Arc::new(
             pond_infra::sqlite_voice_recognition::SqliteVoiceRecognition::new(db.system.clone()),
         );
-    let voice_match = voice_match::ServeVoiceMatch::new(&data_dir);
+    // Enrolment finds the phrase in a take by Whisper's word times, for the member's template.
+    let word_timer = serve_whisper.clone().map(|whisper| {
+        Arc::new(move |pcm: &[f32]| {
+            whisper.transcribe_words(pcm, None).map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| (w.text, w.start, w.end))
+                    .collect()
+            })
+        }) as voice_match::WordTimer
+    });
+    let voice_match = voice_match::ServeVoiceMatch::new(&data_dir, word_timer);
     {
         use pond_core::models::ports::voice_match::VoiceMatchEngine as _;
         voice_match.fetch_model();
@@ -4153,15 +4164,11 @@ async fn run_server(
             .await
             .unwrap_or_else(|_| settings.clone());
         let phrase = pond_voice::text::normalize_transcript(&current.voice_wake_word);
-        let calibrated = voice_prints
-            .wake_takes(&phrase)
-            .await
-            .map(|takes| {
-                pond_core::user_data::services::voice_match::wake_verdict(&takes)
-                    .cnn_hears_household
-            })
-            .unwrap_or(false);
-        let (detector, reason) = voice_rig::expected_wake(&current, calibrated);
+        let takes = voice_prints.wake_takes(&phrase).await.unwrap_or_default();
+        let calibrated =
+            pond_core::user_data::services::voice_match::wake_verdict(&takes).cnn_hears_household;
+        let taught = !pond_core::user_data::services::voice_match::taught(&takes).is_empty();
+        let (detector, reason) = voice_rig::expected_wake(&current, calibrated, taught);
         println!(
             "  Room voice: {}",
             if enabled {
@@ -5671,6 +5678,7 @@ async fn run_chat(
                 // Voice Match runs in serve's room; this terminal loop recognises nobody.
                 speaker: None,
                 cnn_hears_household: false,
+                personal: None,
                 whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
                     voice_rig::household_prompt(
                         wake_word.unwrap_or(settings.voice_wake_word.as_str()),

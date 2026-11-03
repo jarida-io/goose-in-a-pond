@@ -1,5 +1,5 @@
-//! Voice Match's stored evidence: one embedding per enrolment take, and whether the wake CNN heard
-//! each take. No audio is ever kept.
+//! Voice Match's stored evidence: one embedding per enrolment take, whether the wake CNN heard
+//! each take, and a member's wake template from it. No audio is ever kept, only features.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct VoicePrint {
 }
 
 /// Whether the "hey goose" CNN fired on one enrolment take of the household's phrase.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WakeTake {
     pub id: String,
     /// `None` for a take taught with Voice Match off and nobody named.
@@ -25,4 +25,10 @@ pub struct WakeTake {
     pub phrase: String,
     pub cnn_heard: bool,
     pub created_at: DateTime<Utc>,
+    /// The phrase's fbank frames in this take (`[frame][80]`): the member's own wake template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<Vec<f32>>,
+    /// The take's frames after the phrase: the member's other words, which their wake must beat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<Vec<f32>>,
 }

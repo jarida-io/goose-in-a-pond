@@ -67,4 +67,16 @@ impl VoicePrintRepository for InMemoryVoicePrints {
         takes.retain(|t| t.profile_id.as_deref() != Some(profile_id));
         Ok((before - takes.len()) as u64)
     }
+
+    async fn forget_wake_templates(&self, profile_id: &str) -> Result<u64> {
+        let mut n = 0;
+        for t in self.takes.lock().unwrap().iter_mut() {
+            if t.profile_id.as_deref() == Some(profile_id) && t.template.is_some() {
+                t.template = None;
+                t.rest = None;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
 }

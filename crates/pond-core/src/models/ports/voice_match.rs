@@ -35,6 +35,15 @@ pub struct HeardTake {
     pub cnn_heard: bool,
     /// The speaker model's embedding of the whole utterance, when one was asked for.
     pub embedding: Option<Vec<f32>>,
+    /// The phrase's fbank frames, and the frames after it, where the phrase was found in time.
+    pub template: Option<TakeTemplate>,
+}
+
+/// A take's wake template: features only, never audio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TakeTemplate {
+    pub phrase: Vec<f32>,
+    pub rest: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -55,6 +64,12 @@ pub trait VoiceMatchEngine: Send + Sync {
     /// Fetch the speaker model again (after a failure, or never started); returns at once.
     fn fetch_model(&self);
 
-    /// 16 kHz mono PCM of one take; `embed` asks for the speaker embedding too.
-    async fn hear_take(&self, pcm: Vec<f32>, embed: bool) -> Result<HeardTake, TakeError>;
+    /// 16 kHz mono PCM of one take; `embed` asks for the speaker embedding too, and `triggers`
+    /// (the phrase as it may be heard) for the wake template.
+    async fn hear_take(
+        &self,
+        pcm: Vec<f32>,
+        embed: bool,
+        triggers: Vec<String>,
+    ) -> Result<HeardTake, TakeError>;
 }

@@ -8,14 +8,19 @@ use async_trait::async_trait;
 use pond_adapters_ear::{ModelFile, TakeEar};
 use pond_core::models::domain::voice_match_model as model;
 use pond_core::models::ports::voice_match::{
-    HeardTake, TakeError, VoiceMatchEngine, VoiceModelState, VoiceModelStatus,
+    HeardTake, TakeError, TakeTemplate, VoiceMatchEngine, VoiceModelState, VoiceModelStatus,
 };
 
 use crate::model_download;
 
+/// Words heard in 16 kHz PCM and when, as (`text`, start, end) seconds; blocking.
+pub type WordTimer = Arc<dyn Fn(&[f32]) -> anyhow::Result<Vec<(String, f32, f32)>> + Send + Sync>;
+
 pub struct ServeVoiceMatch {
     data_dir: PathBuf,
     status: Arc<Mutex<VoiceModelStatus>>,
+    /// Where in a take the phrase was said, for its wake template; none without Whisper.
+    words: Option<WordTimer>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -23,13 +28,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl ServeVoiceMatch {
-    pub fn new(data_dir: &Path) -> Arc<ServeVoiceMatch> {
+    pub fn new(data_dir: &Path, words: Option<WordTimer>) -> Arc<ServeVoiceMatch> {
         let engine = Arc::new(ServeVoiceMatch {
             data_dir: data_dir.to_path_buf(),
             status: Arc::new(Mutex::new(VoiceModelStatus {
                 state: VoiceModelState::Missing,
                 progress: None,
             })),
+            words,
         });
         if engine.onnx_path().exists() {
             lock(&engine.status).state = VoiceModelState::Ready;
@@ -135,7 +141,12 @@ impl VoiceMatchEngine for ServeVoiceMatch {
         tokio::spawn(Self::fetch(self.status.clone(), dest));
     }
 
-    async fn hear_take(&self, pcm: Vec<f32>, embed: bool) -> Result<HeardTake, TakeError> {
+    async fn hear_take(
+        &self,
+        pcm: Vec<f32>,
+        embed: bool,
+        triggers: Vec<String>,
+    ) -> Result<HeardTake, TakeError> {
         let speaker = match embed {
             true => {
                 if self.model_status().state != VoiceModelState::Ready {
@@ -154,16 +165,35 @@ impl VoiceMatchEngine for ServeVoiceMatch {
         let silero = model_download::ensure_silero_model(&self.data_dir)
             .await
             .ok_or_else(|| TakeError::Failed("the speech detector is not installed".into()))?;
+        let words = self.words.clone().filter(|_| embed);
         tokio::task::spawn_blocking(move || {
+            // Only with Voice Match on: a template is the member's voice.
+            let span = words.and_then(|timer| match timer(&pcm) {
+                Ok(words) => {
+                    let timed: Vec<(&str, f32, f32)> =
+                        words.iter().map(|w| (w.0.as_str(), w.1, w.2)).collect();
+                    pond_voice::text::wake_span(&timed, &triggers)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = format!("{e:#}"),
+                        "enrol: no word times for the take"
+                    );
+                    None
+                }
+            });
             let vad = pond_adapters_ear::load_vad(&silero)?;
             let mut ear = TakeEar::new(vad, speaker)?;
-            ear.hear(&pcm, embed)
+            ear.hear(&pcm, embed, span)
         })
         .await
         .map_err(|e| TakeError::Failed(e.to_string()))?
         .map(|heard| HeardTake {
             cnn_heard: heard.cnn_heard,
             embedding: heard.embedding,
+            template: heard
+                .template
+                .map(|(phrase, rest)| TakeTemplate { phrase, rest }),
         })
         .map_err(|e| TakeError::Failed(format!("{e:#}")))
     }

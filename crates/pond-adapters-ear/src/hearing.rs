@@ -21,6 +21,8 @@ pub trait Hearing: Send {
     /// The household member whose voice spoke absolute samples `[start, end)`, if Voice Match
     /// recognises one.
     fn identify(&mut self, start: usize, end: usize) -> Option<String>;
+    /// The fbank frames from absolute sample `start` that a personal wake match reads.
+    fn opening_frames(&self, start: usize, out: &mut Vec<f32>);
 }
 
 impl Hearing for Ear {
@@ -66,5 +68,15 @@ impl Hearing for Ear {
 
     fn identify(&mut self, start: usize, end: usize) -> Option<String> {
         Ear::identify(self, start, end).0
+    }
+
+    fn opening_frames(&self, start: usize, out: &mut Vec<f32>) {
+        use pond_ear::engine::fbank::{NUM_BINS, SHIFT};
+        let reach = pond_ear::wake::personal::QUERY_FRAMES;
+        out.clear();
+        out.resize(reach * NUM_BINS, 0.0);
+        let first = start / SHIFT;
+        let n = self.front().frames(first, first + reach, out);
+        out.truncate(n * NUM_BINS);
     }
 }

@@ -55,6 +55,28 @@ pub fn describe_parts(ear_parts: &[EarPart]) -> String {
         .join(", ")
 }
 
+/// The members' wake templates and references as installed: what they hold, and what building
+/// them grew the process by.
+pub fn log_personal(before: Option<ProcessMemory>, wake: &pond_adapters_ear::PersonalWake) {
+    let after = now().unwrap_or_default();
+    let grew = before.map_or(0, |b| after.footprint.saturating_sub(b.footprint));
+    tracing::info!(
+        kind = "room_voice_memory",
+        part = "personal_wake",
+        held_mb = mb(wake.bytes() as u64),
+        grew_mb = mb(grew),
+        members = wake.members.len(),
+        templates = wake
+            .members
+            .iter()
+            .map(|m| m.templates.len())
+            .sum::<usize>(),
+        references = wake.references.len(),
+        footprint_mb = mb(after.footprint),
+        "room voice memory: members' wake templates"
+    );
+}
+
 /// Once the room is listening: the process before and after its front end, and what that holds.
 pub fn log_start(
     before: Option<ProcessMemory>,

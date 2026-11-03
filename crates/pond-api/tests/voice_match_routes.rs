@@ -53,13 +53,22 @@ impl VoiceMatchEngine for ScriptedEngine {
         *self.fetches.lock().unwrap() += 1;
     }
 
-    async fn hear_take(&self, _pcm: Vec<f32>, embed: bool) -> Result<HeardTake, TakeError> {
+    async fn hear_take(
+        &self,
+        _pcm: Vec<f32>,
+        embed: bool,
+        _triggers: Vec<String>,
+    ) -> Result<HeardTake, TakeError> {
         if embed && !*self.ready.lock().unwrap() {
             return Err(TakeError::ModelNotReady);
         }
         Ok(HeardTake {
             cnn_heard: self.cnn.lock().unwrap().pop_front().unwrap_or(true),
             embedding: embed.then(|| self.voice.clone()),
+            template: embed.then(|| pond_core::models::ports::voice_match::TakeTemplate {
+                phrase: vec![0.5; 160],
+                rest: vec![0.25; 80],
+            }),
         })
     }
 }
@@ -313,6 +322,46 @@ async fn the_model_is_fetched_again_on_request() {
     assert_eq!(body["model"]["state"], "missing");
     assert_eq!(body["members"][0]["takes"], 0);
     assert_eq!(body["members"][0]["consistency"], Value::Null);
+}
+
+/// Three takes with Voice Match on teach the member's own templates, which then listen beside
+/// Whisper; forgetting the voice forgets them, and a take with Voice Match off never keeps one.
+#[tokio::test]
+async fn a_members_takes_keep_their_wake_template_until_their_voice_is_forgotten() {
+    let pond = pond(true).await;
+    pond.engine.cnn.lock().unwrap().extend([false; 4]);
+    let mut last = Value::Null;
+    for _ in 0..3 {
+        let (status, body) = take(&pond, SAID, Some(&pond.amina), true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        last = body;
+    }
+    assert_eq!(last["wake_detector"]["kind"], "personal", "{last}");
+    assert_eq!(last["wake_detector"]["reason"], "taught");
+    let takes = pond.prints.wake_takes("hey goose").await.unwrap();
+    assert!(takes
+        .iter()
+        .all(|t| t.template.is_some() && t.rest.is_some()));
+
+    let (_, body) = take(&pond, SAID, Some(&pond.amina), false).await;
+    assert!(body["wake_detector"].is_object(), "{body}");
+    let takes = pond.prints.wake_takes("hey goose").await.unwrap();
+    assert!(
+        takes.last().unwrap().template.is_none(),
+        "Voice Match off keeps no template"
+    );
+
+    let uri = format!("/api/v1/voice/prints/{}", pond.amina);
+    assert_eq!(
+        call(&pond, Method::DELETE, &uri, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let takes = pond.prints.wake_takes("hey goose").await.unwrap();
+    assert_eq!(takes.len(), 4, "what the CNN heard stays");
+    assert!(
+        takes.iter().all(|t| t.template.is_none()),
+        "the voice's templates go"
+    );
 }
 
 #[tokio::test]

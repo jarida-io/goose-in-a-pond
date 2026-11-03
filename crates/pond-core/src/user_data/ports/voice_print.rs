@@ -25,4 +25,7 @@ pub trait VoicePrintRepository: Send + Sync {
 
     /// Forgets one member's wake takes, when everything about them is forgotten.
     async fn delete_wake_takes(&self, profile_id: &str) -> Result<u64>;
+
+    /// Forgets one member's wake templates with their voice, keeping what the CNN heard.
+    async fn forget_wake_templates(&self, profile_id: &str) -> Result<u64>;
 }

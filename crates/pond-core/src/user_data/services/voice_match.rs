@@ -65,6 +65,34 @@ pub struct WakeVerdict {
     pub missed: Vec<Option<String>>,
 }
 
+/// Takes with a template a member needs before their own templates listen: leave-one-out
+/// calibration has two to check each against, and one mistimed take cannot carry it.
+pub const TAUGHT_TAKES_NEEDED: usize = 3;
+/// A member's newest templates kept for matching; older takes only cost time on every segment.
+pub const TAUGHT_TAKES_KEPT: usize = 8;
+
+/// Each member's takes that kept a wake template, newest `TAUGHT_TAKES_KEPT`, for members with at
+/// least `TAUGHT_TAKES_NEEDED`; oldest first within a member.
+pub fn taught(takes: &[WakeTake]) -> Vec<(String, Vec<&WakeTake>)> {
+    let mut by_member: Vec<(String, Vec<&WakeTake>)> = Vec::new();
+    for take in takes.iter().filter(|t| t.template.is_some()) {
+        let Some(member) = take.profile_id.as_ref() else {
+            continue;
+        };
+        match by_member.iter_mut().find(|(m, _)| m == member) {
+            Some((_, list)) => list.push(take),
+            None => by_member.push((member.clone(), vec![take])),
+        }
+    }
+    by_member.retain(|(_, list)| list.len() >= TAUGHT_TAKES_NEEDED);
+    for (_, list) in by_member.iter_mut() {
+        list.sort_by_key(|t| t.created_at);
+        let drop = list.len().saturating_sub(TAUGHT_TAKES_KEPT);
+        list.drain(..drop);
+    }
+    by_member
+}
+
 pub fn wake_verdict(takes: &[WakeTake]) -> WakeVerdict {
     let runs = latest_runs(takes);
     let missed: Vec<Option<String>> = runs
@@ -150,6 +178,8 @@ mod tests {
             cnn_heard: heard,
             created_at: DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()
                 + Duration::minutes(minute),
+            template: None,
+            rest: None,
         }
     }
 
@@ -208,5 +238,27 @@ mod tests {
         assert_eq!(members[0].takes, 5);
         assert!(members[0].consistency.unwrap() > 0.99);
         assert_eq!(members[1].consistency, None);
+    }
+
+    #[test]
+    fn a_member_is_taught_from_three_templated_takes_and_keeps_the_newest() {
+        let with = |who: &str, minute: i64| WakeTake {
+            template: Some(vec![0.0; 80]),
+            ..take(Some(who), minute, false)
+        };
+        let mut takes: Vec<WakeTake> = (0..2).map(|i| with("amina", i)).collect();
+        takes.push(take(Some("amina"), 3, true));
+        takes.push(take(None, 4, true));
+        assert!(
+            taught(&takes).is_empty(),
+            "two templates, a bare take and a nameless one"
+        );
+        takes.extend((10..20).map(|i| with("amina", i)));
+        let taught = taught(&takes);
+        assert_eq!(taught.len(), 1);
+        let (who, kept) = &taught[0];
+        assert_eq!(who, "amina");
+        assert_eq!(kept.len(), TAUGHT_TAKES_KEPT);
+        assert_eq!(kept.last().unwrap().id, take(Some("amina"), 19, false).id);
     }
 }

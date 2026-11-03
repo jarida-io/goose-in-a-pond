@@ -13,6 +13,8 @@ pub enum WakeDetector {
     HeyGoose,
     /// Whisper on each speech segment the ear endpoints, never on a timer.
     Whisper,
+    /// Whisper on each segment, and each member's own templates of the phrase on its opening.
+    Personal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,22 +30,31 @@ pub enum WakeDetectorReason {
     CustomPhrase,
     /// The ear is not running (`vad_backend` is `rms`): Whisper listens on a timer.
     NoEar,
+    /// Members taught the phrase in their own voice: their templates listen beside Whisper.
+    Taught,
 }
 
-/// The detector for `setting` (`WAKE_DETECTORS`), the household's `phrase`, and whether the CNN
-/// heard the household's calibration takes. An unknown setting is read as `auto`.
+/// The detector for `setting` (`WAKE_DETECTORS`), the household's `phrase`, whether the CNN heard
+/// the household's calibration takes, and whether members `taught` the phrase in their own voice.
+/// An unknown setting is read as `auto`; `whisper` keeps the taught templates out.
 pub fn choose_wake_detector(
     setting: &str,
     phrase: &str,
     cnn_hears_household: bool,
+    taught: bool,
 ) -> (WakeDetector, WakeDetectorReason) {
+    let personal = taught && setting != "whisper";
     if pond_voice::text::normalize_transcript(phrase) != CNN_PHRASE {
-        return (WakeDetector::Whisper, WakeDetectorReason::CustomPhrase);
+        return match personal {
+            true => (WakeDetector::Personal, WakeDetectorReason::Taught),
+            false => (WakeDetector::Whisper, WakeDetectorReason::CustomPhrase),
+        };
     }
     match setting {
         "hey_goose" => (WakeDetector::HeyGoose, WakeDetectorReason::Chosen),
         "whisper" => (WakeDetector::Whisper, WakeDetectorReason::Chosen),
         _ if cnn_hears_household => (WakeDetector::HeyGoose, WakeDetectorReason::Calibrated),
+        _ if personal => (WakeDetector::Personal, WakeDetectorReason::Taught),
         _ => (WakeDetector::Whisper, WakeDetectorReason::NotCalibrated),
     }
 }
@@ -52,6 +63,7 @@ pub fn choose_wake_detector(
 pub fn household_wake_detector(
     settings: &crate::user_data::domain::settings::Settings,
     cnn_hears_household: bool,
+    taught: bool,
 ) -> (WakeDetector, WakeDetectorReason) {
     if settings.vad_backend.eq_ignore_ascii_case("rms") {
         return (WakeDetector::Whisper, WakeDetectorReason::NoEar);
@@ -60,6 +72,7 @@ pub fn household_wake_detector(
         &settings.voice_wake_detector,
         &settings.voice_wake_word,
         cnn_hears_household,
+        taught,
     )
 }
 
@@ -70,15 +83,15 @@ mod tests {
     #[test]
     fn auto_trusts_the_cnn_only_once_it_heard_the_household() {
         assert_eq!(
-            choose_wake_detector("auto", "hey goose", false),
+            choose_wake_detector("auto", "hey goose", false, false),
             (WakeDetector::Whisper, WakeDetectorReason::NotCalibrated)
         );
         assert_eq!(
-            choose_wake_detector("auto", "Hey, Goose!", true),
+            choose_wake_detector("auto", "Hey, Goose!", true, false),
             (WakeDetector::HeyGoose, WakeDetectorReason::Calibrated)
         );
         assert_eq!(
-            choose_wake_detector("something new", "hey goose", false).0,
+            choose_wake_detector("something new", "hey goose", false, false).0,
             WakeDetector::Whisper
         );
     }
@@ -86,19 +99,40 @@ mod tests {
     #[test]
     fn a_choice_holds_for_hey_goose_but_a_custom_phrase_always_gets_whisper() {
         assert_eq!(
-            choose_wake_detector("hey_goose", "hey goose", false),
+            choose_wake_detector("hey_goose", "hey goose", false, false),
             (WakeDetector::HeyGoose, WakeDetectorReason::Chosen)
         );
         assert_eq!(
-            choose_wake_detector("whisper", "hey goose", true),
+            choose_wake_detector("whisper", "hey goose", true, false),
             (WakeDetector::Whisper, WakeDetectorReason::Chosen)
         );
         for setting in ["auto", "hey_goose", "whisper"] {
             assert_eq!(
-                choose_wake_detector(setting, "goose", true),
+                choose_wake_detector(setting, "goose", true, false),
                 (WakeDetector::Whisper, WakeDetectorReason::CustomPhrase),
                 "{setting}"
             );
         }
+    }
+
+    #[test]
+    fn taught_templates_listen_beside_whisper_unless_whisper_was_chosen() {
+        assert_eq!(
+            choose_wake_detector("auto", "hey goose", false, true),
+            (WakeDetector::Personal, WakeDetectorReason::Taught)
+        );
+        assert_eq!(
+            choose_wake_detector("auto", "hey pond", false, true),
+            (WakeDetector::Personal, WakeDetectorReason::Taught),
+            "a phrase the CNN never learnt can still be taught"
+        );
+        assert_eq!(
+            choose_wake_detector("whisper", "hey goose", false, true),
+            (WakeDetector::Whisper, WakeDetectorReason::Chosen)
+        );
+        assert_eq!(
+            choose_wake_detector("auto", "hey goose", true, true),
+            (WakeDetector::HeyGoose, WakeDetectorReason::Calibrated)
+        );
     }
 }

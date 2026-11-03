@@ -44,6 +44,8 @@ pub struct ListeningOptions<'a> {
     pub speaker: Option<pond_adapters_ear::ModelFile>,
     /// The wake CNN heard every taught member's latest enrolment run.
     pub cnn_hears_household: bool,
+    /// Members' own wake templates, matched beside Whisper on each segment.
+    pub personal: Option<pond_adapters_ear::PersonalWake>,
     /// What the ear's Whisper reads before each stretch of speech; its owner keeps it current.
     pub whisper_prompt: Option<WhisperPrompt>,
 }
@@ -144,6 +146,7 @@ impl Listening {
                 let detector = match detector {
                     WakeDetector::HeyGoose => "the hey goose model",
                     WakeDetector::Whisper => "Whisper on speech segments",
+                    WakeDetector::Personal => "Whisper and members' own templates on segments",
                 };
                 let reason = match reason {
                     WakeDetectorReason::Chosen => "as set",
@@ -151,6 +154,7 @@ impl Listening {
                     WakeDetectorReason::NotCalibrated => "not calibrated",
                     WakeDetectorReason::CustomPhrase => "a custom phrase",
                     WakeDetectorReason::NoEar => "no ear",
+                    WakeDetectorReason::Taught => "members taught it",
                 };
                 format!("echo cancelled; wake word by {detector} ({reason})")
             }
@@ -200,8 +204,13 @@ impl Transcriber for WhisperTranscriber {
 pub fn expected_wake(
     settings: &Settings,
     cnn_hears_household: bool,
+    taught: bool,
 ) -> (WakeDetector, WakeDetectorReason) {
-    pond_core::models::domain::wake_detector::household_wake_detector(settings, cnn_hears_household)
+    pond_core::models::domain::wake_detector::household_wake_detector(
+        settings,
+        cnn_hears_household,
+        taught,
+    )
 }
 
 pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
@@ -221,11 +230,16 @@ pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
         &settings.voice_wake_detector,
         &wake_word,
         opts.cnn_hears_household,
+        opts.personal.is_some(),
     );
     let mode = match detector {
         WakeDetector::HeyGoose => WakeMode::HeyGoose,
-        WakeDetector::Whisper => WakeMode::Segments,
+        WakeDetector::Whisper | WakeDetector::Personal => WakeMode::Segments,
     };
+    let personal = opts
+        .personal
+        .take()
+        .filter(|_| detector == WakeDetector::Personal);
     let triggers =
         pond_voice::text::wake_triggers(&wake_word, &settings.voice_wake_word_transcriptions);
     let mut cfg = EarConfig::new(mode, triggers, format!("say \"{wake_word}\""));
@@ -260,6 +274,7 @@ pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
             return whisper_front(opts, wake_word, WhyNotTheEar::EarFailed).await;
         }
     };
+    ear.set_personal(personal);
     pond_audio_out::set_playback_tap(Some(ear.tap()));
     // Scheduled speech goes through the audio bus, not the loop.
     pond_audio_out::set_spoken_tap(Some(ear.spoken_hook()));

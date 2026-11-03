@@ -37,7 +37,31 @@ from five prints; `consistency` is the mean cosine between their prints.
 
 `voice_wake_detector = auto` uses the CNN only when the phrase is "hey goose" and the CNN heard at
 least 4 of 5 takes of every taught member's latest run; otherwise Whisper on the ear's speech
-segments. `reason` is one of `chosen`, `calibrated`, `not_calibrated`, `custom_phrase`, `no_ear`.
+segments, and once a member has three takes with a template, their own templates too (`personal`,
+reason `taught`; `whisper` keeps them out). `reason` is one of `chosen`, `calibrated`,
+`not_calibrated`, `custom_phrase`, `no_ear`, `taught`.
+
+### Personal templates
+
+A take with Voice Match on also keeps the member's wake template: Whisper's word times find the
+phrase in the take, and the ear's own fbank frames of it are stored on the take, with the frames
+after it (`voice_wake_takes.template`, `template_rest`). Features only, never audio. Forgetting the
+voice (`DELETE /voice/prints/{id}`) clears them; forgetting the takes or the member removes them.
+
+In the room each segment's opening is matched against every member's newest eight templates by
+subsequence DTW in a Sakoe-Chiba band (`pond_ear::wake::personal`). A match needs a distance under
+the member's threshold and a margin over the nearest of 36 embedded non-wake references ("he
+goes", "a goose", "hey guys" and others, rendered with Kokoro). Each threshold is calibrated by
+leave-one-out over the member's own takes, against their other words and the references. The rule
+is Whisper's triggers or a template (`ear: wake by template`). Every segment is logged as
+`kind="wake_shadow"` with Whisper's text, whether it matched the phrase strictly or by a learned
+variant, and the template's distance, margin and thresholds, so the strict rule (the phrase alone,
+or a template) can be judged on a household's own days before it is chosen.
+
+On the offline bench (4 Kokoro voices, 5 takes each) templates found 38 of 40 wakes in a quiet room
+with 1 false wake on 60 other sentences, half that under room reverb, and none in babble; the
+strict rule matched Whisper's recall everywhere with no false wakes. Templates earn their place
+only where Whisper hears a member's phrase as something else, which no synthetic voice shows.
 Changing `voice_wake_word` through `PUT /settings` clears the learned pronunciations and the CNN's
 results, because both belong to the phrase; a second member's run adds to them.
 

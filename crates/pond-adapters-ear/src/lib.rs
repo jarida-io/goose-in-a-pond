@@ -13,6 +13,7 @@ pub use hearing::Hearing;
 /// What the operating system says this process holds.
 pub use pond_ear::ear::mem::{now as process_memory, Mem as ProcessMemory};
 pub use pond_ear::score::{Policy, Print};
+pub use pond_ear::wake::personal::{PersonalWake, Thresholds};
 pub use pond_ear::{Household, ModelFile};
 
 use std::path::Path;
@@ -32,7 +33,11 @@ use pond_ear::ear::WakeConfig;
 use pond_ear::Ear;
 use tokio::sync::oneshot;
 
+use pond_ear::wake::personal::Query;
 use worker::{Cmd, Heard, ListenFrom, RefChunk, Segment, Woke, Worker, WorkerState};
+
+/// The household's wake templates as the matcher reads them; replaced whole when they change.
+pub(crate) type SharedPersonal = Arc<std::sync::RwLock<Option<Arc<PersonalWake>>>>;
 
 /// Speech-to-text for what the ear endpoints.
 pub trait Transcriber: Send + Sync {
@@ -116,6 +121,50 @@ pub fn load_speaker(onnx: &Path) -> Result<ModelFile> {
     ModelFile::read(&path).with_context(|| format!("loading {}", path.display()))
 }
 
+/// The household's taught wake templates from its enrolment takes, each member's thresholds
+/// calibrated on their own takes against their other words and the embedded references; `None`
+/// when nobody has taught enough takes.
+pub fn personal_wake(
+    takes: &[pond_core::user_data::domain::voice_print::WakeTake],
+) -> Option<PersonalWake> {
+    use pond_ear::wake::personal::{self, Member, Template};
+    let references = personal::references();
+    let members: Vec<Member> = pond_core::user_data::services::voice_match::taught(takes)
+        .into_iter()
+        .map(|(id, kept)| {
+            let mut own = Vec::new();
+            let mut taught = Vec::new();
+            for take in kept {
+                let phrase = take.template.as_deref().unwrap_or_default();
+                let rest = take.rest.as_deref().unwrap_or_default();
+                let opening: Vec<f32> = phrase.iter().chain(rest).copied().collect();
+                taught.push((Query::from_fbank(&opening), Template::from_fbank(phrase)));
+                if !rest.is_empty() {
+                    own.push(Query::from_fbank(rest));
+                }
+            }
+            own.extend(references.iter().map(|r| Query::from_fbank(r.normalised())));
+            let thresholds = personal::calibrate(&taught, &own, &references);
+            tracing::info!(
+                member = %id,
+                takes = taught.len(),
+                distance = thresholds.distance,
+                margin = thresholds.margin,
+                "ear: a member's wake templates calibrated"
+            );
+            Member {
+                id,
+                templates: taught.into_iter().map(|(_, t)| t).collect(),
+                thresholds,
+            }
+        })
+        .collect();
+    (!members.is_empty()).then_some(PersonalWake {
+        members,
+        references,
+    })
+}
+
 /// Silero as the ear loads it: converted once to `.vmw` beside the ONNX, since parsing ONNX in a
 /// long-lived process grows it by three times the model.
 pub fn load_vad(silero_onnx: &Path) -> Result<ModelFile> {
@@ -141,6 +190,7 @@ pub struct EarRig {
     parts: Mutex<Vec<EarPart>>,
     /// Who Voice Match heard wake the pond; a follow-up must be their voice too.
     waker: Mutex<Option<String>>,
+    personal: SharedPersonal,
 }
 
 impl EarRig {
@@ -191,6 +241,7 @@ impl EarRig {
     ) -> Result<Arc<EarRig>> {
         let (cmds, cmd_rx) = std::sync::mpsc::channel();
         let (refs, ref_rx) = std::sync::mpsc::channel();
+        let personal: SharedPersonal = Arc::default();
         let segments = match cfg.wake {
             WakeMode::Segments => {
                 let runtime = tokio::runtime::Handle::try_current()
@@ -201,6 +252,7 @@ impl EarRig {
                     cmds.clone(),
                     transcriber.clone(),
                     cfg.triggers.clone(),
+                    personal.clone(),
                 ));
                 Some(tx)
             }
@@ -231,6 +283,7 @@ impl EarRig {
             primed: Mutex::new(None),
             parts: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
+            personal,
         }))
     }
 
@@ -270,6 +323,12 @@ impl EarRig {
         let _ = self.cmds.send(Cmd::Household(household));
     }
 
+    /// The members' own wake templates, matched beside Whisper on each segment; `None` for none.
+    pub fn set_personal(&self, wake: Option<PersonalWake>) {
+        let wake = wake.filter(|w| !w.is_empty()).map(Arc::new);
+        *self.personal.write().unwrap_or_else(|e| e.into_inner()) = wake;
+    }
+
     fn command(&self, raw: &str) -> String {
         pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
     }
@@ -296,27 +355,70 @@ impl Drop for EarRig {
     }
 }
 
-/// The wake in `segment`, if its opening holds a trigger; the whole is transcribed only then.
+/// The wake in `segment`: Whisper hearing any trigger in its opening, or a member's own template
+/// matching it; the whole is transcribed only then. `triggers[0]` is the phrase itself.
 pub(crate) fn wake_in(
     transcriber: &dyn Transcriber,
     triggers: &[String],
+    personal: Option<&PersonalWake>,
     segment: Segment,
 ) -> Result<Option<Woke>> {
+    let verdict = personal
+        .filter(|p| !p.is_empty())
+        .map(|p| p.judge(&Query::from_fbank(&segment.frames)));
     let scan = segment
         .pcm
         .len()
         .min(WAKE_SCAN_SECONDS * reference::RATE as usize);
     let opening = transcriber.scan(&segment.pcm[..scan])?;
-    if !pond_voice::text::heard_wake(&opening, triggers) {
+    let by_whisper = pond_voice::text::heard_wake(&opening, triggers);
+    if let Some(v) = &verdict {
+        // Every segment, so a week of the room can be replayed against the strict rule offline.
+        let strict = pond_voice::text::heard_wake(&opening, &triggers[..triggers.len().min(1)]);
+        let t = v.thresholds.unwrap_or(Thresholds {
+            distance: f32::NAN,
+            margin: f32::NAN,
+        });
+        tracing::info!(
+            kind = "wake_shadow",
+            heard = %opening,
+            strict,
+            variant = by_whisper && !strict,
+            template = v.accepted.is_some(),
+            member = v.nearest.as_ref().map(|n| n.0.as_str()).unwrap_or(""),
+            distance = v.nearest.as_ref().map_or(f32::NAN, |n| n.1),
+            margin = v.margin,
+            threshold = t.distance,
+            margin_threshold = t.margin,
+            "ear: segment against the wake rules"
+        );
+    }
+    let by_template = verdict.as_ref().filter(|v| v.accepted.is_some());
+    let transcript = if by_whisper {
+        let whole = match scan < segment.pcm.len() {
+            true => transcriber.transcribe(&segment.pcm)?,
+            false => opening,
+        };
+        tracing::info!(heard = %whole, "ear: wake phrase in a segment");
+        whole
+    } else if let Some(v) = by_template {
+        tracing::info!(
+            member = v.accepted.as_deref().unwrap_or(""),
+            distance = v.nearest.as_ref().map_or(f32::NAN, |n| n.1),
+            margin = v.margin,
+            heard = %opening,
+            "ear: wake by template"
+        );
+        // Whisper heard the phrase as something else: the request is what follows the match.
+        let after = (v.end * pond_ear::engine::fbank::SHIFT).min(segment.pcm.len());
+        match segment.pcm.len() - after > reference::RATE as usize / 3 {
+            true => transcriber.transcribe(&segment.pcm[after..])?,
+            false => String::new(),
+        }
+    } else {
         tracing::debug!(heard = %opening, "ear: segment without the wake phrase");
         return Ok(None);
-    }
-    let transcript = if scan < segment.pcm.len() {
-        transcriber.transcribe(&segment.pcm)?
-    } else {
-        opening
     };
-    tracing::info!(heard = %transcript, "ear: wake phrase in a segment");
     Ok(Some(Woke {
         start: segment.start,
         end: segment.end,
