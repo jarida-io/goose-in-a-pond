@@ -2511,6 +2511,40 @@ pub fn wake_triggers(wake_word: &str, calibrated: &[String]) -> Vec<String> {
     triggers
 }
 
+/// Where in timed words (`text, start, end`) the wake phrase was said: the earliest run of words
+/// that is one of `triggers`, the longest such run when two start together.
+pub fn wake_span(words: &[(&str, f32, f32)], triggers: &[String]) -> Option<(f32, f32)> {
+    let heard: Vec<String> = words.iter().map(|w| normalize_transcript(w.0)).collect();
+    // A timed "word" can normalise to two ("Hey,goose") or to nothing ("—").
+    let flat: Vec<(usize, &str)> = heard
+        .iter()
+        .enumerate()
+        .flat_map(|(i, w)| w.split_whitespace().map(move |p| (i, p)))
+        .collect();
+    let mut best: Option<(usize, usize, usize)> = None;
+    for t in triggers {
+        let needle: Vec<&str> = t.split_whitespace().collect();
+        if needle.is_empty() || needle.len() > flat.len() {
+            continue;
+        }
+        let found = (0..=flat.len() - needle.len()).find(|&i| {
+            flat[i..i + needle.len()]
+                .iter()
+                .map(|f| f.1)
+                .eq(needle.iter().copied())
+        });
+        if let Some(i) = found {
+            let candidate = (i, needle.len(), flat[i + needle.len() - 1].0);
+            let better = best.is_none_or(|b| i < b.0 || (i == b.0 && needle.len() > b.1));
+            if better {
+                best = Some(candidate);
+            }
+        }
+    }
+    let (first, _, last_word) = best?;
+    Some((words[flat[first].0].1, words[last_word].2))
+}
+
 /// Whether `transcript` contains any of `triggers` as whole words, so "goose" never fires on
 /// "mongoose".
 pub fn heard_wake(transcript: &str, triggers: &[String]) -> bool {
@@ -2697,6 +2731,24 @@ pub fn extract_wake_variant(
 #[cfg(test)]
 mod wake_word_tests {
     use super::*;
+
+    #[test]
+    fn the_wake_span_is_the_earliest_trigger_in_the_timed_words() {
+        let triggers = wake_triggers("hey goose", &["he goes".to_string()]);
+        let words = [
+            ("Hey,", 0.32, 0.58),
+            ("goose,", 0.58, 1.04),
+            ("set", 1.2, 1.4),
+            ("a", 1.4, 1.5),
+            ("timer.", 1.5, 1.9),
+        ];
+        assert_eq!(wake_span(&words, &triggers), Some((0.32, 1.04)));
+        let heard_as = [("He", 0.2, 0.4), ("goes,", 0.4, 0.9), ("what", 1.0, 1.2)];
+        assert_eq!(wake_span(&heard_as, &triggers), Some((0.2, 0.9)));
+        let joined = [("Hey-goose", 0.1, 0.9), ("hi", 1.0, 1.1)];
+        assert_eq!(wake_span(&joined, &triggers), Some((0.1, 0.9)));
+        assert_eq!(wake_span(&[("timer", 0.0, 0.5)], &triggers), None);
+    }
 
     fn triggers(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| normalize_transcript(s)).collect()

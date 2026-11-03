@@ -262,6 +262,25 @@ impl WhisperRsInput {
         self.transcribe_pcm_with(samples, TranscribeOpts::accurate(), prompt)
     }
 
+    /// The words in 16 kHz mono PCM and when each was said, through the accurate profile.
+    pub fn transcribe_words(
+        &self,
+        samples: &[f32],
+        prompt: Option<&str>,
+    ) -> Result<Vec<HeardWord>> {
+        let engine = self.engine.blocking_read().clone();
+        let mut words = Vec::new();
+        Self::transcribe_unless_abandoned(
+            &engine,
+            samples.to_vec(),
+            TranscribeOpts::accurate(),
+            None,
+            prompt,
+            Some(&mut words),
+        )?;
+        Ok(words)
+    }
+
     /// As [`Self::transcribe_pcm_prompted`], through `opts`.
     pub fn transcribe_pcm_with(
         &self,
@@ -271,7 +290,7 @@ impl WhisperRsInput {
     ) -> Result<String> {
         let engine = self.engine.blocking_read().clone();
         let text =
-            Self::transcribe_unless_abandoned(&engine, samples.to_vec(), opts, None, prompt)?;
+            Self::transcribe_unless_abandoned(&engine, samples.to_vec(), opts, None, prompt, None)?;
         Ok(match prompt {
             Some(prompt) if is_prompt_echo(&text, prompt) => String::new(),
             _ => text,
@@ -292,7 +311,7 @@ impl WhisperRsInput {
         samples: Vec<f32>,
         opts: TranscribeOpts,
     ) -> Result<String> {
-        Self::transcribe_unless_abandoned(engine, samples, opts, None, None)
+        Self::transcribe_unless_abandoned(engine, samples, opts, None, None, None)
     }
 
     /// As [`Self::transcribe_samples_with`], giving up once `abandoned` is raised: before
@@ -303,6 +322,7 @@ impl WhisperRsInput {
         opts: TranscribeOpts,
         abandoned: Option<&AtomicBool>,
         prompt: Option<&str>,
+        mut words: Option<&mut Vec<HeardWord>>,
     ) -> Result<String> {
         let is_abandoned = || abandoned.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if samples.is_empty() {
@@ -379,6 +399,12 @@ impl WhisperRsInput {
             params.set_suppress_nst(opts.suppress_non_speech);
             params.set_temperature(0.0);
             params.set_temperature_inc(opts.temperature_step);
+            if words.is_some() {
+                // whisper.cpp's word timing: one word to a segment, timed from its tokens.
+                params.set_token_timestamps(true);
+                params.set_max_len(1);
+                params.set_split_on_word(true);
+            }
             params.set_n_threads(n_threads);
             if let Some(ctx_frames) = audio_ctx {
                 params.set_audio_ctx(ctx_frames);
@@ -407,6 +433,16 @@ impl WhisperRsInput {
                 if let Some(seg) = state.get_segment(i) {
                     if let Ok(text) = seg.to_str() {
                         out.push_str(text);
+                        if let Some(words) = words.as_deref_mut() {
+                            let word = text.trim();
+                            if !word.is_empty() {
+                                words.push(HeardWord {
+                                    text: word.to_string(),
+                                    start: seg.start_timestamp() as f32 / 100.0,
+                                    end: seg.end_timestamp() as f32 / 100.0,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -445,6 +481,14 @@ impl WhisperRsInput {
 }
 
 const ABANDONED: &str = "transcription abandoned";
+
+/// A word Whisper heard, and when, in seconds from the clip's start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeardWord {
+    pub text: String,
+    pub start: f32,
+    pub end: f32,
+}
 
 /// Over noise Whisper can say its prompt back, once or over and over, the last copy cut short;
 /// nobody says it that way.
@@ -681,6 +725,7 @@ impl WhisperRsInput {
                                 resampled,
                                 TranscribeOpts::accurate(),
                                 Some(&abandoned),
+                                None,
                                 None,
                             )?;
                             // Strip here so speculative and confirmed transcripts stay byte-identical.
@@ -1148,6 +1193,7 @@ mod decode_profiles {
                     long,
                     TranscribeOpts::accurate(),
                     Some(&abandoned),
+                    None,
                     None,
                 )
             }
