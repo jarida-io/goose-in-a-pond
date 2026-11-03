@@ -377,3 +377,28 @@ async fn the_event_stream_carries_the_loops_ndjson_and_levels_only_when_asked() 
         r#"{"event":"wake","who":null}"#
     );
 }
+
+/// The phone's room panel follows the stream, so a pause and its end reach it as state lines.
+#[tokio::test]
+async fn the_event_stream_carries_a_pause_and_its_end() {
+    let room = Arc::new(MockRoomVoice::default());
+    let p = pond(Some(room.clone())).await;
+    let mut sse = subscribe(&p, &room, "/api/v1/voice/room/events").await;
+    for (uri, body) in [
+        ("/api/v1/voice/room/pause", Some(json!({"seconds": 20}))),
+        ("/api/v1/voice/room/resume", None),
+    ] {
+        let (status, _) = call(&p.router, Method::POST, uri, Some(&p.token), body).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let paused: Value = serde_json::from_str(&next_data(&mut sse).await).unwrap();
+    assert_eq!(
+        (&paused["event"], &paused["state"]),
+        (&json!("state"), &json!("paused"))
+    );
+    assert!(chrono::DateTime::parse_from_rfc3339(paused["paused_until"].as_str().unwrap()).is_ok());
+    assert_eq!(
+        next_data(&mut sse).await,
+        r#"{"event":"state","state":"wait"}"#
+    );
+}

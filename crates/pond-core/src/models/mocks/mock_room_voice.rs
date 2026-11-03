@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::models::domain::room_voice::{
-    RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
+    RoomEvent, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
 use crate::models::domain::wake_detector::{WakeDetector, WakeDetectorReason};
 use crate::models::ports::room_voice::RoomVoiceControl;
@@ -15,7 +15,7 @@ use crate::shared::domain::agent::WorkflowEvent;
 
 pub struct MockRoomVoice {
     status: Mutex<RoomStatus>,
-    events: broadcast::Sender<WorkflowEvent>,
+    events: broadcast::Sender<RoomEvent>,
     interrupts: AtomicUsize,
 }
 
@@ -58,7 +58,7 @@ impl MockRoomVoice {
 
     /// Delivered to every subscriber; returns how many there were.
     pub fn send(&self, event: WorkflowEvent) -> usize {
-        self.events.send(event).unwrap_or(0)
+        self.events.send(RoomEvent::Loop(event)).unwrap_or(0)
     }
 
     pub fn subscribers(&self) -> usize {
@@ -94,7 +94,7 @@ impl RoomVoiceControl for MockRoomVoice {
         self.interrupts.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<RoomEvent> {
         self.events.subscribe()
     }
 
@@ -103,12 +103,16 @@ impl RoomVoiceControl for MockRoomVoice {
         let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
         s.state = RoomState::Paused;
         s.paused_until = Some(until.to_rfc3339());
+        let _ = self.events.send(RoomEvent::Paused {
+            until: until.to_rfc3339(),
+        });
     }
 
     fn resume(&self) {
         let mut s = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if s.state == RoomState::Paused {
             s.state = RoomState::Wait;
+            let _ = self.events.send(RoomEvent::Resumed { state: s.state });
         }
         s.paused_until = None;
     }

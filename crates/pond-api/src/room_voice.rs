@@ -11,6 +11,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::Stream;
+use pond_core::models::domain::room_voice::RoomEvent;
 use pond_core::shared::domain::agent::WorkflowEvent;
 use serde::Deserialize;
 use serde_json::json;
@@ -98,13 +99,13 @@ pub async fn events(
 }
 
 fn event_stream(
-    mut events: tokio::sync::broadcast::Receiver<WorkflowEvent>,
+    mut events: tokio::sync::broadcast::Receiver<RoomEvent>,
     levels: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
         loop {
             match events.recv().await {
-                Ok(WorkflowEvent::AudioLevel { .. }) if !levels => {}
+                Ok(RoomEvent::Loop(WorkflowEvent::AudioLevel { .. })) if !levels => {}
                 Ok(event) => {
                     if let Some(line) = event.to_ndjson() {
                         yield Ok(Event::default().data(line));
