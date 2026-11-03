@@ -323,6 +323,7 @@ pub(crate) fn wake_in(
         pcm: segment.pcm,
         speaker: None,
         transcript: Some(transcript),
+        cut: segment.cut,
     }))
 }
 
@@ -370,6 +371,8 @@ impl VoiceInput for EarRig {
         let follow_up = primed.is_none();
         let mut from = ListenFrom::Now;
         match primed {
+            // The ear is already endpointing the whole request from the wake's start.
+            Some(Primed::Woke(woke)) if woke.cut => from = ListenFrom::At(woke.start),
             Some(Primed::Woke(woke)) => {
                 let raw = match woke.transcript {
                     Some(t) => t,

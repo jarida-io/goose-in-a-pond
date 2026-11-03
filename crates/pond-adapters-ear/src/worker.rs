@@ -56,6 +56,8 @@ pub(crate) struct Woke {
     pub pcm: Vec<f32>,
     pub speaker: Option<VoiceSpeaker>,
     pub transcript: Option<String>,
+    /// The segment cap ended the wake's segment with speech going on: the request runs past it.
+    pub cut: bool,
 }
 
 pub(crate) enum ListenFrom {
@@ -69,6 +71,7 @@ pub(crate) struct Segment {
     pub start: usize,
     pub end: usize,
     pub pcm: Vec<f32>,
+    pub cut: bool,
 }
 
 pub(crate) struct RefChunk {
@@ -281,7 +284,9 @@ impl Worker {
                 });
             }
             Event::Silence { .. } => self.heard(Heard::Silence),
-            Event::Segment { start, end, .. } => {
+            Event::Segment {
+                start, end, cut, ..
+            } => {
                 let mut pcm = Vec::new();
                 self.hearing.audio(start, end, &mut pcm);
                 if let Some(segments) = &self.segments {
@@ -290,6 +295,7 @@ impl Worker {
                         start,
                         end,
                         pcm: pcm.clone(),
+                        cut,
                     });
                 }
                 let speaker = self.speaker_of(start, end);
@@ -391,6 +397,7 @@ impl Worker {
                     pcm,
                     speaker,
                     transcript: None,
+                    cut: false,
                 });
             }
             return;
@@ -488,6 +495,19 @@ impl Worker {
                 self.cue();
                 linger(QUIET_UNTIL_THE_TURN);
                 self.state.quiet_listening = false;
+                if woke.cut {
+                    // The rest of the request is still being said: endpoint it whole from the wake.
+                    self.state.stash = None;
+                    self.hearing.listen(woke.start);
+                    self.state.turn_start = woke.start;
+                    match self.state.host {
+                        WorkflowState::Thinking | WorkflowState::Speak => {
+                            self.interrupt(woke.start, InterruptReason::WakeWord)
+                        }
+                        _ => self.woke(woke),
+                    }
+                    return true;
+                }
                 match self.state.host {
                     WorkflowState::Thinking | WorkflowState::Speak => {
                         let start = woke.start;
