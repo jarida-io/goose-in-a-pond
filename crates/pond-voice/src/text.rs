@@ -516,6 +516,7 @@ pub fn strip_markup_for_speech(text: &str) -> String {
     for tag in SCAFFOLD_TAGS {
         s = drop_closed_blocks(&s, &format!("<{tag}>"), &format!("</{tag}>"));
     }
+    s = drop_snake_case_blocks(&s);
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -527,6 +528,36 @@ pub fn strip_markup_for_speech(text: &str) -> String {
         out.push(chars[i]);
         i += 1;
     }
+    out
+}
+
+/// Closed `<snake_case>` blocks with their bodies: models invent them for tool syntax and turn
+/// records, and no HTML or markdown tag has an underscore.
+fn drop_snake_case_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(i) = rest.find('<') {
+        let after = &rest[i + 1..];
+        if let Some(end) = after.find('>') {
+            let name = &after[..end];
+            let snake = name.contains('_')
+                && name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if snake {
+                let close = format!("</{name}>");
+                if let Some(len) = after[end + 1..].find(&close) {
+                    out.push_str(&rest[..i]);
+                    rest = &after[end + 1 + len + close.len()..];
+                    continue 'scan;
+                }
+            }
+        }
+        out.push_str(&rest[..=i]);
+        rest = after;
+    }
+    out.push_str(rest);
     out
 }
 
@@ -2105,6 +2136,26 @@ mod tests {
         );
         let echoed = "<user-message>\nWhat is a crocodile?\n</user-message>\nA large reptile.";
         assert_eq!(strip_markdown_for_speech(echoed), "A large reptile.");
+    }
+
+    #[test]
+    fn an_invented_snake_case_block_is_never_spoken() {
+        assert_eq!(
+            strip_markdown_for_speech(
+                "<search_web>What is the story of how the Great Rift Valley formed</search_web>"
+            ),
+            ""
+        );
+        assert_eq!(
+            strip_markdown_for_speech(
+                "<turn_plan>Search, then answer.</turn_plan> It formed slowly."
+            ),
+            "It formed slowly."
+        );
+        assert_eq!(
+            strip_markup_for_speech("Use snake_case names."),
+            "Use snake_case names."
+        );
     }
 
     #[test]
