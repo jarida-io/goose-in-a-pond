@@ -103,6 +103,7 @@ async fn an_engine_session_resolves_to_the_member_who_owns_the_giap_session() {
     assert_eq!(
         is_draft_decision_permitted(
             Some(&scope),
+            source,
             "20260805_9",
             Some(f.jerry.as_str()),
             "20260805_9"
@@ -113,6 +114,7 @@ async fn an_engine_session_resolves_to_the_member_who_owns_the_giap_session() {
     assert_eq!(
         is_draft_decision_permitted(
             Some(&scope),
+            source,
             "20260805_9",
             Some(f.liz.as_str()),
             "20260805_9"
@@ -140,7 +142,13 @@ async fn an_unmapped_or_blank_engine_session_refuses_rather_than_widens() {
             "engine session {engine:?} must be unresolvable, got {actor:?}"
         );
         assert_eq!(
-            is_draft_decision_permitted(None, engine, Some(f.liz.as_str()), "giap-sess-1"),
+            is_draft_decision_permitted(
+                None,
+                IdentificationSource::Unknown,
+                engine,
+                Some(f.liz.as_str()),
+                "giap-sess-1"
+            ),
             Err(REASON_UNRESOLVED_ACTOR)
         );
     }

@@ -6,14 +6,13 @@ speaking), and an echo canceller fed the exact audio the pond plays. The code is
 with std only and no crates. It is a port of the voice-match-lab engine, minus training, the lab
 website and Moonshine. Speech-to-text stays Whisper.
 
-It is not wired in yet. No crate depends on `pond-ear`; CI builds, lints and tests it with the
-fast crates. The voice loop's wake word is Whisper transcription matching
-([wake-word calibration](../wake-word-calibration.md)), its end-of-speech detector is
-`pond-adapters-silero` through ONNX Runtime, and it has no echo canceller. The plan for wiring the
-ear in is [at the end](#wiring-it-into-the-voice-child-plan).
+`crates/pond-adapters-ear` runs it behind the voice loop's ports, and `chat --voice` uses it
+wherever Silero is available and `vad_backend` is not `rms` (`build_listening` in
+`crates/pond-server/src/voice_rig.rs`). Room voice inside serve, and Voice Match enrolment, are
+not built yet. [The wiring](#wiring-it-into-the-voice-loop) is at the end.
 
 ```
-mic 16 kHz -> echo canceller -> 15 s ring + 80-dim fbank every 10 ms -> wake CNN (every 80 ms)
+mic 16 kHz -> echo canceller -> 32 s ring + 80-dim fbank every 10 ms -> wake CNN (every 80 ms)
      ^ play(at, pcm)                       |                         -> Silero (every 32 ms) -> endpoint rule
      the PCM being played                  +-------------------------> ResNet34 on a span   -> Voice Match
 ```
@@ -43,14 +42,17 @@ file holding only that rung's tensors would cost.
 | part | weights | arena | state | scalar / NEON f32 (rung file) | int8 SDOT (rung file) |
 |---|---|---|---|---|---|
 | echo canceller (160 ms tail, 500 ms delay search) | - | - | 0.54 MB | 0.54 MB | 0.54 MB |
-| front end (15 s ring + fbank stream) | - | - | 1.44 MB | 1.44 MB | 1.44 MB |
+| front end (32 s ring + fbank stream) | - | - | 3.07 MB | 3.07 MB | 3.07 MB |
 | wake CNN (hey goose) | 0.37 MB | 1.29 MB | 0.12 MB | 1.71 MB | 1.51 MB |
 | Silero v5 | 1.24 MB | 0.02 MB | 0.00 MB | 1.26 MB | 1.26 MB |
 | Voice Match (ResNet34-LM, 3 s span) | 31.87 MB | 8.79 MB | 0.10 MB | 35.41 MB | 19.50 MB |
 | **ear** (as loaded: 45.77 MB) | | | | **40.35 MB** | **24.25 MB** |
 | the OS: footprint grew by | | | | 45.50 MB (99%) | 46.43 MB (101%) |
 
-The ear without Voice Match holds 5.0 MB. CPU on a 30 s synthetic replay with 16 s of far end
+The front end row is computed, not measured: the ring grew from 15 s to 32 s, so that the
+endpointer's 30 s longest utterance still has its start in the ring when it ends; the rest of the
+table is the 2026-10-16 measurement, when the ring was 15 s and the ear held 1.63 MB less. The ear
+without Voice Match holds 6.6 MB. CPU on a 30 s synthetic replay with 16 s of far end
 was measured on a heavily loaded M4 (load average 26), so these figures are high. On the int8
 rung the wake CNN took 2.3% of one core, Silero 0.6%, the echo canceller 0.9% (about 1.7% while
 audio plays) and the front end 0.1%. On the scalar rung, the only one on x86, the wake CNN took
@@ -74,8 +76,8 @@ Recipe, evaluation and numbers are in
 
 ResNet34 and Silero are not embedded. The crate takes paths or bytes, and `locations` names where
 the pond keeps them: `models/silero/silero_vad.onnx`, which the voice child already downloads
-(`ensure_silero_model`), and `models/voice-match/resnet34_LM.onnx`, where the pond is to fetch it
-for Voice Match. Nothing fetches ResNet34 yet.
+(`ensure_silero_model`), and `models/voice-match/resnet34_LM.onnx`, which serve fetches by default
+for Voice Match (see [Voice Match](../voice-match.md)).
 
 ### Credit: the Voice Match model
 
@@ -90,6 +92,16 @@ audio stays with the owners of the original videos. Whatever ships it must carry
 > dataset", Interspeech 2017; J. S. Chung, A. Nagrani, A. Zisserman, "VoxCeleb2: Deep Speaker
 > Recognition", Interspeech 2018). Licensed under CC BY 4.0,
 > https://creativecommons.org/licenses/by/4.0/.
+
+## Segments for a host-side wake detector
+
+With `Config.segments` on, the wake CNN never runs. Outside Listen the ear instead reports each
+stretch of speech on the echo-cancelled signal as `Event::Segment { start, end }`, for the host to
+transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
+hysteresis, 800 ms of quiet, at most 30 s), reaches 200 ms back before Silero's onset and is
+dropped under 250 ms of voiced time. Listening cancels the segment in progress, since its audio
+belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
+chunking and never while listening.
 
 ## Echo canceller
 
@@ -180,14 +192,16 @@ recording of a person is in the repository.
 ...  "ops" (32-byte records), "w32" (f32 weights, biases, int8 scales and sums), optional "i8w"
 ```
 
-## Wiring it into the voice child (plan)
+## Wiring it into the voice loop
 
-None of this exists yet. The `Ear` methods it names (`push_into`, `audio`, `play`, `set_state`,
-`listen`, `embed`, `set_household`) do.
-
-| Step | Status | Evidence |
+| Step | Status | Where |
 |---|---|---|
-| **pond-adapters-ear**: runs an `Ear` on its own thread, reads the mic through `MicReader`, calls `push_into`, and maps `Event::Wake`, `Utterance`, `Silence` and `BargeIn` to `WakeWordActivation` (speaker, endpointed audio from `Ear::audio`), an interrupt watch and NDJSON. The interrupt rule (an enrolled voice for about 300 ms, or the wake word) lives there, not in the ear | not started | No such crate; not a workspace member |
-| **pond-audio-out playback tap**: played samples resampled with `dsp::Resampler::new(24_000, 16_000)`, stamped with the mic's clock, passed to `Ear::play(at, pcm)` before the matching mic samples arrive | not started | `crates/pond-audio-out` has no tap |
-| **The host** moves the ear to `Think` and `Speak` with `set_state`, back to `Wait` when the reply ends, and calls `listen(start)` for push-to-talk or after a barge-in | not started | `ChatService` drives `WhisperKeywordDetector` and `pond_voice::barge` instead |
-| **Models**: Silero as today; ResNet34 fetched to `models/voice-match/` and cached as `.vmw` with `ensure_vmw`; enrolment with `Ear::embed`; household prints set with `set_household`, `who` in events being the print's id | not started | Only Silero is fetched (`ensure_silero_model`); no Voice Match enrolment exists |
+| **pond-adapters-ear** runs one `Ear` on its own thread with a permanent mic claim, read through `MicReader`. It serves `ChatService` as its `StreamingWakeWordDetector` (the activation is the endpointed request from `Ear::audio`, so nothing is recorded twice), its `VoiceInput` (`listen(start)`, then `Utterance` or `Silence`) and its `InterruptWatch`. The interrupt rule lives there: the wake word, or a `BargeIn` with an enrolled `who` | built | `crates/pond-adapters-ear/src/worker.rs` |
+| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (the accurate profile Whisper prepared at load) and matched against `wake_triggers`; a match is the wake and its transcript the request | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear` |
+| **pond-audio-out playback tap**: every played source copies what the mixer pulls to a process-wide tap; the ear resamples it to 16 kHz, stamps it with the mic's clock plus 10 ms, and passes it to `Ear::play` before the mic samples it overlaps | built | `crates/pond-audio-out/src/tap.rs`, `crates/pond-adapters-ear/src/reference.rs` |
+| **The host** moves the ear through `Think` and `Speak` and back to `Wait` from `ChatService`'s state observer, and calls `listen(start)` after an interrupt | built | `EarRig::state_hook`, `ChatService::with_state_observer` |
+| **Room voice in serve**, sharing serve's model, Whisper and Kokoro; the desktop attaches to it | built | `crates/pond-server/src/room_voice.rs`, `pond-desktop/electron/main/voice/roomClient.ts` |
+| **Models**: Silero as `.vmw` through `ensure_vmw` (`load_vad`); ResNet34 fetched by default to `models/voice-match/` (pinned revision and SHA-256) and converted once (`load_speaker`) | built | `crates/pond-server/src/voice_match.rs`, `pond_core::models::domain::voice_match_model` |
+| **Enrolment**: one flow of five takes teaches the wake word and Voice Match (`POST /voice/takes`): Whisper records the phrase as heard, an ear of its own (`TakeEar`) scores the take with the CNN and embeds up to 12 s with `Ear::embed`; the audio is never kept | built | `crates/pond-adapters-ear/src/enrol.rs`, `crates/pond-api/src/voice_match.rs` |
+| **Recognition in the room**: the room's ear loads ResNet34 once someone has five prints, gets `set_household` at start and on every change, and names the waker on CNN wakes and Whisper segment wakes alike; a follow-up after a recognised wake must be the same voice | built | `crates/pond-server/src/room_voice.rs`, `EarRig::listen`, `Worker::speaker_of` |
+| **Echo**: a Whisper segment wake whose words are mostly, in order, what the pond said this turn or in the last 10 s is dropped (`ear: own echo ignored`) | built | `crates/pond-adapters-ear/src/echo.rs` |

@@ -220,6 +220,25 @@ impl WhisperRsInput {
         Ok(())
     }
 
+    /// The decode profiles that hold a kept state now, and how many states the loaded model has
+    /// made; `None` while the model is being swapped. A state in use counts as held.
+    pub fn held_states(&self) -> Option<(Vec<&'static str>, usize)> {
+        let engine = self.engine.try_read().ok()?.clone();
+        let held = |slot: &Mutex<Option<WhisperState>>| match slot.try_lock() {
+            Ok(state) => state.is_some(),
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(state)) => state.into_inner().is_some(),
+        };
+        let mut profiles = Vec::new();
+        if held(&engine.accurate) {
+            profiles.push("accurate");
+        }
+        if held(&engine.greedy) {
+            profiles.push("greedy");
+        }
+        Some((profiles, engine.created.load(Ordering::Relaxed)))
+    }
+
     pub async fn current_model_path(&self) -> PathBuf {
         self.model_path.read().await.clone()
     }
@@ -230,6 +249,13 @@ impl WhisperRsInput {
         let samples_16k = crate::resample_to_16k(&samples, rate);
         let engine = self.engine.blocking_read().clone();
         Self::transcribe_samples(&engine, samples_16k)
+    }
+
+    /// 16 kHz mono PCM through the accurate profile, the wake word left in. Blocking: call it
+    /// from a blocking thread, where `blocking_read` is safe.
+    pub fn transcribe_pcm(&self, samples: &[f32]) -> Result<String> {
+        let engine = self.engine.blocking_read().clone();
+        Self::transcribe_samples(&engine, samples.to_vec())
     }
 
     /// Transcribe 16 kHz mono PCM (artifacts stripped); empty → `Ok("")`, panic → `Err`.

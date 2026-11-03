@@ -209,6 +209,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
         .route("/transcribe", post(transcribe))
+        // Serve's room voice: its state, the switch, its events and its interrupt.
+        .route(
+            "/voice/room",
+            get(crate::room_voice::status).put(crate::room_voice::set_enabled),
+        )
+        .route("/voice/room/events", get(crate::room_voice::events))
+        .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
@@ -586,6 +593,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/power", get(crate::pond_admin::power))
         .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
         .route("/admin/power/restart", post(crate::pond_admin::restart))
+        .route(
+            "/agents/voice",
+            get(crate::voice_agent::get_voice_agent)
+                .put(crate::voice_agent::put_voice_agent)
+                .delete(crate::voice_agent::reset_voice_agent),
+        )
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -605,7 +618,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/faces/identify", post(identify_face_handler))
         .route("/faces/identify-burst", post(burst_identify_face_handler))
         .route("/faces/enroll-quality", post(enroll_quality_handler))
-        .route("/faces/profile/{profile_id}", get(list_face_enrollments))
+        .route(
+            "/faces/profile/{profile_id}",
+            get(list_face_enrollments).delete(delete_face_enrollments),
+        )
+        // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
+        .route("/voice/takes", post(crate::voice_match::post_take))
+        .route("/voice/prints", get(crate::voice_match::get_prints))
+        .route("/voice/prints/model", post(crate::voice_match::fetch_model))
+        .route(
+            "/voice/prints/{profile_id}",
+            delete(crate::voice_match::delete_prints),
+        )
         .route(
             "/faces/profile/{profile_id}/threshold",
             get(get_profile_threshold_handler)
@@ -665,9 +689,18 @@ fn file_response(path: &str, bytes: Vec<u8>) -> Response<axum::body::Body> {
         .into_response()
 }
 
+/// An `/api/` path no route serves. Never the dashboard: a client would read its `200` as a
+/// write that succeeded.
+pub async fn api_not_found() -> Response<axum::body::Body> {
+    (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+}
+
 /// Serves the embedded UI, else `static_dir` (dev); extensionless paths get `index.html`.
 pub async fn serve_web(uri: axum::http::Uri, static_dir: std::path::PathBuf) -> impl IntoResponse {
     let raw = uri.path().trim_start_matches('/');
+    if raw == "api" || raw.starts_with("api/") {
+        return api_not_found().await;
+    }
     let rel = if raw.is_empty() { "index.html" } else { raw };
 
     if embedded_ui_present() {
@@ -4099,14 +4132,43 @@ async fn set_message_feedback_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether the caller may read this conversation: their own member's, or nobody's.
+/// The caller is resolved from their device alone; resolving from the session asked for would
+/// make every unattributed caller that session's member.
+async fn caller_may_read_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> bool {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let caller = read_only_caller_scope(state, principal, None).await;
+    match state.session_storage.get_session_identity(session_id).await {
+        Ok(identity) => identity.readable_by(&caller),
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read whose conversation this is");
+            false
+        }
+    }
+}
+
 /// Session messages: the newest `limit` (≤500) by default, or oldest-first from `offset`.
 async fn get_session_messages(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::models::domain::message::Role;
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, so an id can't be probed either.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     let limit: usize = params
         .get("limit")
@@ -4446,20 +4508,22 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Serves one attachment's raw bytes; `session_id` must own it, so ids can't cross sessions.
+/// Serves one attachment's raw bytes, if `session_id` owns it and the caller may read that session.
 /// Bearer-protected, so not usable as a bare `<img src>`; the desktop fetches it with its token.
 async fn get_session_attachment(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     use axum::response::IntoResponse;
 
-    let owns_it = state
-        .session_storage
-        .list_session_attachments(&session_id)
-        .await
-        .map(|atts| atts.iter().any(|a| a.id == attachment_id))
-        .unwrap_or(false);
+    let owns_it = caller_may_read_session(&state, principal.as_ref(), &session_id).await
+        && state
+            .session_storage
+            .list_session_attachments(&session_id)
+            .await
+            .map(|atts| atts.iter().any(|a| a.id == attachment_id))
+            .unwrap_or(false);
     if !owns_it {
         return Err((
             StatusCode::NOT_FOUND,
@@ -6004,6 +6068,15 @@ async fn update_settings(
         }
     }
 
+    // What was learned of the old phrase is not the new one's: its pronunciations go now, and
+    // the CNN's enrolment results once the save lands. Another member's run never resets them.
+    let phrase_changed = pond_voice::text::normalize_transcript(&current.voice_wake_word)
+        != pond_voice::text::normalize_transcript(&merged.voice_wake_word);
+    if phrase_changed {
+        merged.voice_wake_word_transcriptions.clear();
+        write_keys.insert("voice_wake_word_transcriptions".to_string());
+    }
+
     state
         .settings_repo
         .update_fields(&merged, Some(&write_keys))
@@ -6020,8 +6093,17 @@ async fn update_settings(
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
     }
 
+    if phrase_changed {
+        crate::voice_match::wake_phrase_changed(&state).await;
+    }
+
     // Privacy controls must apply now, not at the next restart.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
+    if current.voice_room_enabled != merged.voice_room_enabled {
+        if let Some(room) = &state.room_voice {
+            room.set_enabled(merged.voice_room_enabled).await;
+        }
+    }
     let cameras = pond_adapters_vision::LiveCameraRegistry::global();
     cameras.sync_settings(&merged);
     cameras.notify_settings_changed();
@@ -15596,7 +15678,12 @@ async fn list_recipes(State(state): State<Arc<AppState>>) -> impl axum::response
     };
     match repo.list().await {
         Ok(recipes) => {
-            let views: Vec<Value> = recipes.iter().map(recipe_view_json).collect();
+            // The Voice agent's edit is no member's own agent; `/agents/voice` shows it.
+            let views: Vec<Value> = recipes
+                .iter()
+                .filter(|r| !crate::voice_agent::is_voice_row(r))
+                .map(recipe_view_json)
+                .collect();
             Json(json!(views)).into_response()
         }
         Err(e) => (
@@ -15646,6 +15733,13 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    if req.name.trim() == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "`voice` is the shipped Voice agent; edit it at /agents/voice"})),
+        )
+            .into_response();
+    }
     let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
     let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
@@ -15670,7 +15764,7 @@ async fn create_recipe(
 
 /// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
 /// the plaintext development listener and not the tailnet, whose node also connects from here.
-fn on_this_host(
+pub(crate) fn on_this_host(
     peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     insecure_dev: bool,
     tailnet: bool,
@@ -15683,7 +15777,7 @@ fn on_this_host(
 /// The member a request acts for when it saves an agent: its paired device's member, else, from
 /// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
 /// nobody too, never the primary member, who may be someone else.
-async fn acting_member(
+pub(crate) async fn acting_member(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     on_host: bool,
@@ -16581,6 +16675,7 @@ async fn prefill_agents(
         .into_iter()
         .filter_map(Result::ok)
         .collect();
+    agents.extend(crate::voice_agent::voice_prefill_role(state).await);
     agents.extend(long_task_runner::step_roles(&recipes));
     agents
 }
@@ -16589,7 +16684,6 @@ async fn prefill_agents(
 /// agent's prefill stands.
 async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
-    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
     use pond_core::shared::services::prefill_progress::process_prefill_progress;
 
     let progress = process_prefill_progress();
@@ -16612,29 +16706,50 @@ async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::respon
         .await
         .iter()
         .map(|role| {
-            let name = role.name();
-            let is_default = is_default_agent(name);
-            let record = records.get(name);
-            let status = prefill_state(
+            prefill_row(
                 role,
-                is_default,
-                record,
-                build.current.as_deref() == Some(name),
-                queued.includes(name),
-                failed.contains(name),
+                records.get(role.name()),
+                &build,
+                &queued,
+                &failed,
                 now,
                 retention,
-            );
-            json!({
-                "agent": name,
-                "kind": if is_default { "default" } else { "member" },
-                "status": status,
-                "compiled_at": record.and_then(|r| r.compiled_at),
-                "last_used_at": record.and_then(|r| r.last_used_at),
-            })
+            )
         })
         .collect();
     Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// One agent's row of `GET /agents/prefills`.
+pub(crate) fn prefill_row(
+    role: &pond_core::shared::domain::orchestration::AgentRole,
+    record: Option<&pond_core::shared::domain::agent_prefill::PrefillRecord>,
+    build: &pond_core::shared::services::prefill_progress::PrefillBuild,
+    queued: &pond_core::shared::services::prefill_progress::RebuildRequests,
+    failed: &std::collections::BTreeSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+    retention: u32,
+) -> Value {
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    let name = role.name();
+    let is_default = is_default_agent(name);
+    let status = prefill_state(
+        role,
+        is_default,
+        record,
+        build.current.as_deref() == Some(name),
+        queued.includes(name),
+        failed.contains(name),
+        now,
+        retention,
+    );
+    json!({
+        "agent": name,
+        "kind": if is_default { "default" } else { "member" },
+        "status": status,
+        "compiled_at": record.and_then(|r| r.compiled_at),
+        "last_used_at": record.and_then(|r| r.last_used_at),
+    })
 }
 
 /// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
@@ -16654,14 +16769,22 @@ async fn rebuild_agent_prefill(
         )
             .into_response();
     }
-    pond_core::shared::services::prefill_progress::process_prefill_progress()
-        .request_rebuild(Some(&name));
+    // Serve's prewarm compiles the Voice agent, not the long-task pass.
+    if name == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        crate::spawn_voice_prefill(state.clone());
+    } else {
+        pond_core::shared::services::prefill_progress::process_prefill_progress()
+            .request_rebuild(Some(&name));
+    }
     (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
 }
 
 /// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
-async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+async fn rebuild_all_prefills(
+    State(state): State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
     pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    crate::spawn_voice_prefill(state);
     (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
 }
 
@@ -16951,6 +17074,13 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if crate::voice_agent::is_voice_row(&existing) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "the Voice agent is edited at /agents/voice"})),
+        )
+            .into_response();
+    }
     if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
         let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
         if !widened.is_empty() {
@@ -17052,8 +17182,8 @@ async fn run_recipe(
     })?;
 
     let recipe = match repo.get_by_name(&name).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
+        Ok(Some(r)) if !crate::voice_agent::is_voice_row(&r) => r,
+        Ok(_) => {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("Recipe '{}' not found", name)})),
@@ -18483,19 +18613,54 @@ async fn delete_user_biometrics(
     State(state): State<Arc<AppState>>,
     Path(profile_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let face = face_service(&state)?;
-    let deleted = face.delete_embeddings(&profile_id).await.map_err(|e| {
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    // Forget everything: the voice first, so a face store that is not ready cannot keep it.
+    let voice_deleted = crate::voice_match::forget_voice(&state, &profile_id)
+        .await
+        .map_err(internal)?;
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(internal)?;
+
+    Ok(Json(json!({
+        "profile_id":      profile_id,
+        "face_embeddings_deleted": faces_deleted,
+        "voice_prints_deleted": voice_deleted,
+    })))
+}
+
+/// A member's enrolled faces, through face recognition when it is up, else straight from its
+/// table, so forgetting never waits on a model.
+async fn delete_faces(state: &Arc<AppState>, profile_id: &str) -> anyhow::Result<u64> {
+    match face_service(state) {
+        Ok(face) => face.delete_embeddings(profile_id).await,
+        Err(_) => Ok(
+            sqlx::query("DELETE FROM face_embeddings WHERE profile_id = ?")
+                .bind(profile_id)
+                .execute(&state.db.system)
+                .await?
+                .rows_affected(),
+        ),
+    }
+}
+
+/// `DELETE /api/v1/faces/profile/{profile_id}`: their face only; a Voice Match stays.
+async fn delete_face_enrollments(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
     })?;
-
-    Ok(Json(json!({
-        "profile_id":      profile_id,
-        "face_embeddings_deleted": deleted,
-        // `voice_prints_deleted` joins this once voice prints are stored.
-    })))
+    Ok(Json(
+        json!({"profile_id": profile_id, "faces_deleted": faces_deleted}),
+    ))
 }
 
 // ── Proactive proposals ──────────────────────────────────────────────────────
@@ -18528,9 +18693,21 @@ async fn proposal_caller(
     session_id: &str,
     device: &ProvenDevice,
 ) -> Result<(ProfileScope, ProposalAudience), (StatusCode, Json<Value>)> {
-    let scope = resolve_turn_scope(state, session_id, device).await;
+    proposal_caller_with_source(state, session_id, device)
+        .await
+        .map(|(scope, audience, _)| (scope, audience))
+}
+
+/// [`proposal_caller`] with how the caller is known, which a decision must check.
+async fn proposal_caller_with_source(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> Result<(ProfileScope, ProposalAudience, IdentificationSource), (StatusCode, Json<Value>)> {
+    let resolved = resolve_turn_identity(state, session_id, device).await;
+    let (scope, source) = (resolved.scope, resolved.source);
     match ProposalAudience::from_scope(&scope) {
-        Ok(audience) => Ok((scope, audience)),
+        Ok(audience) => Ok((scope, audience, source)),
         // Never `Guest`: that means 2+ members, so a fallthrough would pick one by row order.
         Err(_) if matches!(scope, ProfileScope::Household) => {
             let members: Vec<String> = state
@@ -18549,7 +18726,7 @@ async fn proposal_caller(
                             "nobody identified this caller and this household has one member, \
                              so the proposal is theirs"
                         );
-                        Ok((ProfileScope::Owner(only.clone()), audience))
+                        Ok((ProfileScope::Owner(only.clone()), audience, source))
                     }
                     Err(e) => Err(proposal_caller_refusal(session_id, &e.to_string())),
                 },
@@ -18670,7 +18847,8 @@ async fn decide_proposal(
     // Device from the principal; a body `device_id` is a 400 (`deny_unknown_fields`).
     let device = proven_device(principal.as_ref());
     let Json(request) = body.map_err(|_| bad_body())?;
-    let (scope, _audience) = proposal_caller(&state, &request.session_id, &device).await?;
+    let (scope, _audience, source) =
+        proposal_caller_with_source(&state, &request.session_id, &device).await?;
 
     // Expired, decided, user-staged draft and absent all get the same 404 on purpose.
     let proposal = proposal_repo(&state)
@@ -18695,6 +18873,7 @@ async fn decide_proposal(
     // `PROPOSAL_SESSION_ID` is the sentinel session `SqliteProposalRepository::save` writes.
     if let Err(reason) = is_draft_decision_permitted(
         Some(&scope),
+        source,
         &request.session_id,
         Some(proposal.audience().profile_id()),
         PROPOSAL_SESSION_ID,
@@ -18740,6 +18919,15 @@ async fn resolve_turn_scope(
     session_id: &str,
     device: &ProvenDevice,
 ) -> ProfileScope {
+    resolve_turn_identity(state, session_id, device).await.scope
+}
+
+/// [`resolve_turn_scope`] with the evidence it rested on, for decisions a voice match may not make.
+async fn resolve_turn_identity(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> identity_resolution::ResolvedIdentity {
     // `rung` takes the `Result` so a failed read can't be flattened into "unattributed".
     let device_rung = match device.id() {
         None => DeviceRung::NoDevice,
@@ -18813,7 +19001,6 @@ async fn resolve_turn_scope(
         session: &identity,
         household_has_multiple_members,
     })
-    .scope
 }
 
 /// The device the *pond* proved; every turn-resolving handler must get its device here.
@@ -19512,6 +19699,9 @@ fn particulars_for(
     attributed: bool,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
+    if attributed {
+        return ProfileContext::of_member(prefs, Vec::new());
+    }
     ProfileContext {
         // Owner-scoped: stated only when the turn is attributed to this person.
         preferred_name: attributed

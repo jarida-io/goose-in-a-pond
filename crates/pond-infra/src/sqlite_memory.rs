@@ -441,6 +441,19 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(count.max(0) as u64)
     }
 
+    async fn get_in_scope(&self, id: &str, scope: &ProfileScope) -> Result<Option<MemoryFragment>> {
+        if scope.excludes_everything() {
+            return Ok(None);
+        }
+        let (filter, bind) = scope_sql(scope);
+        let query = format!("SELECT {SELECT_ALL} FROM memory_fragments WHERE id = ? {filter}");
+        let mut q = sqlx::query_as::<_, FragmentRow>(&query).bind(id);
+        if let Some(pid) = bind {
+            q = q.bind(pid);
+        }
+        Ok(q.fetch_optional(&self.pool).await?.map(row_to_fragment))
+    }
+
     async fn delete(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM memory_fragments WHERE id = ?")
             .bind(id)
@@ -876,6 +889,30 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(repo.search_scoreable(&g).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_by_id_read_reaches_only_rows_in_scope() {
+        let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
+        let alice = ProfileScope::Owner("alice".into());
+        let found = |id: &'static str, scope: ProfileScope| {
+            let repo = &repo;
+            async move { repo.get_in_scope(id, &scope).await.unwrap().map(|f| f.id) }
+        };
+        assert_eq!(found("a", alice.clone()).await.as_deref(), Some("a"));
+        assert_eq!(found("s", alice.clone()).await.as_deref(), Some("s"));
+        assert_eq!(
+            found("b", alice).await,
+            None,
+            "alice must not reach bob's row by its id"
+        );
+        assert_eq!(
+            found("b", ProfileScope::Household).await.as_deref(),
+            Some("b"),
+            "the household reaches every row, so the miss above is the scope's"
+        );
+        assert_eq!(found("s", ProfileScope::Guest).await, None);
+        assert_eq!(found("missing", ProfileScope::Household).await, None);
     }
 
     #[tokio::test]
