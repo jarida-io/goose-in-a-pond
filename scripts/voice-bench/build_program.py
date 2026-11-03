@@ -1,8 +1,11 @@
 """Builds the bench's playback programs: every rendered clip, levelled, in a seeded order with gaps,
 between two sync chirps, optionally over a continuous babble bed at a fixed speech-to-babble ratio.
 
-usage: build_program.py DIR GAIN_DB
-writes DIR/programs/{quiet,babble10,babble3,noise}.wav and manifest.json
+usage: build_program.py DIR GAIN_DB [--voices a,b,...] [--gap S] [--noise-s S] [--split]
+writes DIR/programs/{quiet,babble10,babble3,noise}.wav and manifest.json; --split also writes the
+babble beds alone to DIR/beds/, for a second speaker to play while the first plays quiet.wav, plus
+programs/cal.wav and beds/cal.wav to set that speaker's level, and programs/echo.wav: a minute of
+reply-like speech between chirps, for the echo canceller
 """
 import json
 import random
@@ -11,7 +14,11 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import resample_poly
+
+try:
+    from scipy.signal import resample_poly
+except ImportError:  # the Mac's bench venv has numpy only
+    resample_poly = None
 
 RATE = 24_000
 SPEECH_DBFS = -23.0
@@ -46,6 +53,9 @@ def read_any(path):
 def to_rate(x, rate):
     if rate == RATE:
         return x
+    if resample_poly is None:
+        n = int(round(len(x) * RATE / rate))
+        return np.fft.irfft(np.fft.rfft(x)[: n // 2 + 1], n) * n / len(x)
     g = np.gcd(rate, RATE)
     return resample_poly(x, RATE // g, rate // g)
 
@@ -113,12 +123,20 @@ def write(path, x):
         w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
 
 
+def option(name, default):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
 def main():
     root = Path(sys.argv[1])
     gain = float(sys.argv[2])
+    voices = option("--voices", ",".join(VOICES)).split(",")
+    gap_s = float(option("--gap", GAP_S))
+    noise_s = int(option("--noise-s", 300))
+    split = "--split" in sys.argv
     speech = SPEECH_DBFS + gain
     sentences = dict(line.rstrip("\n").split("\t", 1) for line in open(root / "sentences.tsv"))
-    items = [(v, s) for v in VOICES for s in sentences]
+    items = [(v, s) for v in voices for s in sentences]
     random.Random(42).shuffle(items)
     pieces, clips = [np.zeros(RATE)], []
     pieces.append(chirp() * 10 ** (gain / 20))
@@ -129,8 +147,8 @@ def main():
         x = level(trim(to_rate(x, r)), speech)
         clips.append({"id": f"{voice}/{sid}", "voice": voice, "sentence": sid, "text": sentences[sid],
                       "start": t / RATE, "end": (t + len(x)) / RATE})
-        pieces += [x, np.zeros(int(GAP_S * RATE))]
-        t += len(x) + int(GAP_S * RATE)
+        pieces += [x, np.zeros(int(gap_s * RATE))]
+        t += len(x) + int(gap_s * RATE)
     pieces.append(chirp() * 10 ** (gain / 20))
     end_chirp = t / RATE
     pieces.append(np.zeros(RATE))
@@ -147,13 +165,35 @@ def main():
     ramp = int(0.5 * RATE)
     fade[a:a + ramp] = np.linspace(0, 1, ramp)
     fade[b - ramp:b] = np.linspace(1, 0, ramp)
+    beds = root / "beds"
+    if split:
+        beds.mkdir(exist_ok=True)
     for name, snr in [("babble10", 10.0), ("babble3", 3.0)]:
         write(out / f"{name}.wav", program + bed * fade * 10 ** (-snr / 20))
-    noise_s = 300
+        if split:
+            write(beds / f"{name}.wav", bed * fade * 10 ** (-snr / 20))
     noise = np.concatenate([np.zeros(RATE), chirp() * 10 ** (gain / 20), np.zeros(RATE),
                             level(babble_bed(root, noise_s, seed=11), speech) * 10 ** (-3.0 / 20),
                             np.zeros(RATE), chirp() * 10 ** (gain / 20), np.zeros(RATE)])
     write(out / "noise.wav", noise)
+    if split:
+        write(beds / "noise.wav", noise)
+        plain = [it for it in items if not it[1].startswith("w")]
+        sync = chirp() * 10 ** (gain / 20)
+        cal = [np.zeros(RATE), sync, np.zeros(RATE)]
+        for voice, sid in plain[:5]:
+            x, r = read_any(root / "tts" / voice / f"{sid}.wav")
+            cal += [level(trim(to_rate(x, r)), speech), np.zeros(int(0.8 * RATE))]
+        write(out / "cal.wav", np.concatenate(cal + [sync, np.zeros(RATE)]))
+        write(beds / "cal.wav", bed[a + ramp:a + ramp + 14 * RATE] * 10 ** (-3.0 / 20))
+        reply, n = [np.zeros(RATE), sync, np.zeros(RATE)], 0
+        for voice, sid in plain:
+            x, r = read_any(root / "tts" / voice / f"{sid}.wav")
+            reply += [level(trim(to_rate(x, r)), speech), np.zeros(int(0.25 * RATE))]
+            n += len(reply[-2]) + len(reply[-1])
+            if n > 60 * RATE:
+                break
+        write(out / "echo.wav", np.concatenate(reply + [sync, np.zeros(RATE)]))
     manifest = {"rate": RATE, "speech_dbfs": speech, "first_chirp": first_chirp, "end_chirp": end_chirp,
                 "clips": clips, "program_seconds": len(program) / RATE,
                 "noise": {"first_chirp": 1.0, "end_chirp": 2.0 + CHIRP_S + noise_s + 1.0,
