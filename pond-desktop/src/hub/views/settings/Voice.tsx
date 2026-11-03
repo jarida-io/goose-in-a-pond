@@ -33,6 +33,7 @@ interface SttOption {
 const STT_OPTIONS: SttOption[] = [
   { label: "Whisper base",          value: "ggml-base.bin"         },
   { label: "Whisper small",         value: "ggml-small.bin"        },
+  { label: "Whisper small, English (5-bit)", value: "ggml-small.en-q5_1.bin" },
   { label: "Whisper large-v3-turbo", value: "ggml-large-v3-turbo.bin" },
 ];
 

@@ -272,13 +272,13 @@ impl KokoroOutput {
             };
             let mut samples = Vec::new();
             for (k, chunk) in chunks.iter().enumerate() {
-                let style_row = style.style_for(chunk.tokens.len());
-                let audio = engine.synthesize(chunk, style_row, speed)?;
                 let end = match chunks.get(k + 1) {
                     Some(_) => Boundary::from_text_end(&chunk.phonemes),
                     None => after,
                 };
-                push_paced(&mut samples, &audio, end, speed);
+                push_checked(&mut samples, chunk, end, speed, |part| {
+                    engine.synthesize(part, style.style_for(part.tokens.len()), speed)
+                })?;
             }
             Ok(samples)
         })
@@ -578,6 +578,79 @@ mod tests {
         );
     }
 
+    fn chunk_of(phonemes: &str) -> tokenizer::Chunk {
+        tokenizer::Chunk {
+            text: "Goose, remind me to water the plants at six.".into(),
+            phonemes: phonemes.into(),
+            tokens: phonemes.chars().map(|c| c as i64).collect(),
+        }
+    }
+
+    const GOOSE: &str = "ɡˈuːs, ɹᵻmˈaɪnd mˌiː tə wˈɔːɾɚ ðə plˈænts æt sˈɪks.";
+
+    #[test]
+    fn a_pass_of_nan_or_silence_is_said_again_in_halves() {
+        for broken in [vec![f32::NAN; 24_000], vec![0.0; 24_000]] {
+            let whole = chunk_of(GOOSE);
+            let mut asked = Vec::new();
+            let mut out = Vec::new();
+            let pass = push_checked(&mut out, &whole, Boundary::Sentence, 1.0, |part| {
+                asked.push(part.phonemes.clone());
+                Ok(if part.tokens.len() == whole.tokens.len() {
+                    broken.clone()
+                } else {
+                    forward_pass(1.0)
+                })
+            })
+            .unwrap();
+            assert_eq!(pass, Pass::Rescued);
+            assert_eq!(asked.len(), 3, "{asked:?}");
+            assert_eq!(
+                asked[1], "ɡˈuːs, ɹᵻmˈaɪnd mˌiː tə",
+                "cut at the space nearest the middle"
+            );
+            assert!(out.iter().all(|v| v.is_finite()));
+            assert!(
+                secs(out.len()) > 2.0,
+                "both halves were said: {}",
+                secs(out.len())
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_that_fails_again_is_logged_as_lost_not_hidden() {
+        let mut out = Vec::new();
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+            Ok(vec![f32::NAN; 24_000])
+        })
+        .unwrap();
+        assert_eq!(pass, Pass::Lost);
+        assert!(out.iter().all(|v| *v == 0.0), "no NaN reaches the speaker");
+        let mut out = Vec::new();
+        let pass = push_checked(
+            &mut out,
+            &chunk_of("ˈoʊkˌeɪ."),
+            Boundary::End,
+            1.0,
+            |_| Ok(vec![0.0; 24_000]),
+        )
+        .unwrap();
+        assert_eq!(pass, Pass::Lost, "a one-word unit cannot be split");
+    }
+
+    #[test]
+    fn a_good_pass_is_said_once() {
+        let mut calls = 0;
+        let mut out = Vec::new();
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+            calls += 1;
+            Ok(forward_pass(1.0))
+        })
+        .unwrap();
+        assert_eq!((pass, calls), (Pass::Clean, 1));
+    }
+
     #[test]
     fn pauses_shrink_with_the_speed_like_the_models_own() {
         let mut slow = Vec::new();
@@ -751,6 +824,79 @@ fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
     }
     let pause = (end.pause_secs() / speed.max(MIN_SPEED) * SAMPLE_RATE as f32) as usize;
     out.resize(out.len() + pause, 0.0);
+}
+
+/// Why a forward pass's audio cannot be used. On the Orin's ONNX Runtime about one q4f16 pass in
+/// ten came back silent for a whole sentence, more often the longer the unit.
+fn unusable(audio: &[f32]) -> Option<&'static str> {
+    if audio.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite samples");
+    }
+    if speech_bounds(audio, SAMPLE_RATE, 0.0, 0.0).is_none() {
+        return Some("no speech");
+    }
+    None
+}
+
+/// How a chunk came out of [`push_checked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Clean,
+    /// The whole chunk failed and both halves were said instead.
+    Rescued,
+    /// Some of it could not be said; what was lost is logged.
+    Lost,
+}
+
+/// [`push_paced`] for one chunk, checking the model's audio first. A failed pass is retried once
+/// as two halves, each its own shorter pass: on the Orin a shorter unit failed far less often
+/// (2% of clauses against 10% of 100-200-token units) and a different style row rescued every
+/// failed unit it was tried on, and each half takes the row of its own length.
+fn push_checked(
+    out: &mut Vec<f32>,
+    chunk: &tokenizer::Chunk,
+    end: Boundary,
+    speed: f32,
+    mut synth: impl FnMut(&tokenizer::Chunk) -> Result<Vec<f32>>,
+) -> Result<Pass> {
+    let audio = synth(chunk)?;
+    let Some(why) = unusable(&audio) else {
+        push_paced(out, &audio, end, speed);
+        return Ok(Pass::Clean);
+    };
+    let Some((first, second)) = tokenizer::halves(chunk) else {
+        // Counts, not the words: the reply is the household's.
+        tracing::error!(
+            why,
+            tokens = chunk.tokens.len(),
+            "Kokoro gave no usable audio for a unit too short to split; it is not said"
+        );
+        push_paced(out, &[], end, speed);
+        return Ok(Pass::Lost);
+    };
+    tracing::warn!(
+        why,
+        tokens = chunk.tokens.len(),
+        "Kokoro gave no usable audio for a unit; saying it again in two halves"
+    );
+    let mut pass = Pass::Rescued;
+    let mid = Boundary::from_text_end(&first.phonemes);
+    for (part, part_end) in [(&first, mid), (&second, end)] {
+        let audio = synth(part)?;
+        match unusable(&audio) {
+            None => push_paced(out, &audio, part_end, speed),
+            Some(why) => {
+                tracing::error!(
+                    why,
+                    tokens = part.tokens.len(),
+                    "half of a Kokoro unit gave no usable audio again; that half is not said"
+                );
+                push_paced(out, &[], part_end, speed);
+                pass = Pass::Lost;
+            }
+        }
+    }
+    Ok(pass)
 }
 
 /// Phonemizing and synthesis take about real time; on a runtime worker they stall every task

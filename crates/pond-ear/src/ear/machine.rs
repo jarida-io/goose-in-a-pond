@@ -244,6 +244,12 @@ impl Ear {
         self.household = h;
     }
 
+    /// Voice Match's network, loaded and warmed elsewhere, so a running ear starts recognising
+    /// without a restart.
+    pub fn set_speaker(&mut self, speaker: SpeakerNet) {
+        self.speaker = Some(speaker);
+    }
+
     pub fn household(&self) -> &Household {
         &self.household
     }
@@ -455,8 +461,8 @@ impl Ear {
         if let Some(s) = self.segmenter.as_mut() {
             if listening {
                 s.skip(end);
-            } else if let Some((start, end)) = s.step(&cfg, end, speaking) {
-                out.push(Event::Segment { t, start, end });
+            } else if let Some((start, end, cut)) = s.step(&cfg, end, speaking) {
+                out.push(Event::Segment { t, start, end, cut });
             }
         }
         match step.outcome {

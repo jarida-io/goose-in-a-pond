@@ -13,7 +13,7 @@ use pond_api::runs::{RunSupervisor, TurnInFlight};
 use pond_audio::MicHandle;
 use pond_core::models::domain::audio_device::{AudioDeviceStatus, ChoiceBasis};
 use pond_core::models::domain::room_voice::{
-    LastHeard, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
+    LastHeard, RoomEvent, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::room_voice::RoomVoiceControl;
@@ -94,7 +94,7 @@ struct View {
 struct Inner {
     deps: RoomDeps,
     enabled: watch::Sender<bool>,
-    events: broadcast::Sender<WorkflowEvent>,
+    events: broadcast::Sender<RoomEvent>,
     view: Mutex<View>,
     /// The running loop's stop and interrupt; `None` between runs.
     control: Mutex<Option<VoiceControl>>,
@@ -104,6 +104,10 @@ struct Inner {
     memory_at_start: Mutex<Option<pond_adapters_ear::ProcessMemory>>,
     /// The running ear, so a new print reaches it without a restart.
     ear: Mutex<Option<Arc<pond_adapters_ear::EarRig>>>,
+    /// Deaf until then, as the ear and the status show it; never persisted.
+    paused: Mutex<Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)>>,
+    /// The ear's Whisper prompt: the wake phrase and the members' names, rewritten as they change.
+    prompt: voice_rig::WhisperPrompt,
 }
 
 pub struct RoomVoice {
@@ -141,6 +145,8 @@ impl RoomVoice {
             turn: Mutex::new(None),
             memory_at_start: Mutex::new(None),
             ear: Mutex::new(None),
+            paused: Mutex::new(None),
+            prompt: Default::default(),
         });
         let task = tokio::spawn(supervise(inner.clone()));
         Arc::new(RoomVoice {
@@ -162,12 +168,16 @@ impl RoomVoice {
 #[async_trait]
 impl RoomVoiceControl for RoomVoice {
     fn status(&self) -> RoomStatus {
+        let paused_until = self.inner.paused_until();
         let view = lock(&self.inner.view);
         RoomStatus {
             enabled: *self.inner.enabled.borrow(),
             available: view.available,
             unavailable_reason: view.unavailable_reason,
-            state: view.state,
+            state: match paused_until {
+                Some(_) => RoomState::Paused,
+                None => view.state,
+            },
             wake: view.wake.clone(),
             interrupts: if view.recognises {
                 RoomInterrupts::EnrolledOrWake
@@ -176,6 +186,7 @@ impl RoomVoiceControl for RoomVoice {
             },
             last_heard: view.last_heard.clone(),
             session_id: view.session_id.clone(),
+            paused_until: paused_until.map(|(_, at)| at.to_rfc3339()),
         }
     }
 
@@ -196,13 +207,14 @@ impl RoomVoiceControl for RoomVoice {
         }
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<WorkflowEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<RoomEvent> {
         self.inner.events.subscribe()
     }
 
     fn household_changed(&self) {
         let inner = self.inner.clone();
         tokio::spawn(async move {
+            inner.refresh_prompt(None).await;
             let voices = household(&inner.deps).await;
             let ear = lock(&inner.ear).clone();
             let Some(ear) = ear else {
@@ -210,19 +222,76 @@ impl RoomVoiceControl for RoomVoice {
             };
             let recognises = lock(&inner.view).recognises;
             if !voices.prints.is_empty() && !recognises {
-                // The running ear has no speaker model: the loop starts again with one.
-                tracing::info!(
-                    "room voice: someone enrolled; the ear starts again to recognise them"
-                );
-                if let Some(control) = lock(&inner.control).as_ref() {
-                    control.stop(StopReason::Requested);
+                // Loaded into the running ear: a restart here would cut a turn in flight.
+                let Some(engine) = inner.deps.voice_match.clone() else {
+                    return;
+                };
+                let loaded = tokio::task::spawn_blocking({
+                    let ear = ear.clone();
+                    move || match engine.speaker_model() {
+                        Some(model) => ear.load_speaker(model).map(|()| true),
+                        None => Ok(false),
+                    }
+                })
+                .await;
+                match loaded {
+                    Ok(Ok(true)) => tracing::info!(
+                        "room voice: someone enrolled; the running ear now recognises voices"
+                    ),
+                    Ok(Ok(false)) => return,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            error = format!("{e:#}"),
+                            "room voice: the speaker model did not load into the ear"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "room voice: loading the speaker model panicked");
+                        return;
+                    }
                 }
-                return;
             }
             let enrolled = voices.prints.len();
             ear.set_household(voices);
             inner.set_view(|v| v.recognises = enrolled > 0);
         });
+    }
+
+    fn pause(&self, span: Duration) {
+        let until = std::time::Instant::now() + span;
+        let at = chrono::Utc::now() + chrono::Duration::from_std(span).unwrap_or_default();
+        {
+            let mut paused = lock(&self.inner.paused);
+            if paused.is_some_and(|(held, _)| held >= until) {
+                return;
+            }
+            *paused = Some((until, at));
+            // Sent under the lock, so a resume racing it cannot be heard first.
+            let _ = self.inner.events.send(RoomEvent::Paused {
+                until: at.to_rfc3339(),
+            });
+        }
+        tracing::info!(
+            seconds = span.as_secs(),
+            "room voice: paused; it hears no wake word"
+        );
+        if let Some(ear) = lock(&self.inner.ear).as_ref() {
+            ear.pause_until(Some(until));
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let inner = Arc::downgrade(&self.inner);
+            runtime.spawn(async move {
+                tokio::time::sleep_until(until.into()).await;
+                if let Some(inner) = inner.upgrade() {
+                    inner.end_pause(Some(until));
+                }
+            });
+        }
+    }
+
+    fn resume(&self) {
+        self.inner.end_pause(None);
     }
 }
 
@@ -308,8 +377,56 @@ fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::Speake
 }
 
 impl Inner {
+    /// The pause in force, if it has not run out; only `end_pause` clears it, so its end is heard.
+    fn paused_until(&self) -> Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)> {
+        lock(&self.paused).filter(|(until, _)| std::time::Instant::now() < *until)
+    }
+
+    /// End the pause: now, or (`only`) when it is still the one that runs out then.
+    fn end_pause(&self, only: Option<std::time::Instant>) {
+        let state = lock(&self.view).state;
+        {
+            let mut paused = lock(&self.paused);
+            match (*paused, only) {
+                (None, _) => return,
+                (Some((until, _)), Some(only)) if until != only => return,
+                _ => *paused = None,
+            }
+            let _ = self.events.send(RoomEvent::Resumed { state });
+        }
+        tracing::info!("room voice: resumed");
+        if let Some(ear) = lock(&self.ear).as_ref() {
+            ear.pause_until(None);
+        }
+    }
+
     fn set_view(&self, change: impl FnOnce(&mut View)) {
         change(&mut lock(&self.view));
+    }
+
+    /// Rewrite the Whisper prompt from the settings (`settings`, else read now) and the profiles.
+    async fn refresh_prompt(
+        &self,
+        settings: Option<&pond_core::user_data::domain::settings::Settings>,
+    ) {
+        let read;
+        let settings = match settings {
+            Some(s) => s,
+            None => {
+                read = self.deps.settings.get().await.unwrap_or_default();
+                &read
+            }
+        };
+        let prompt =
+            voice_rig::household_prompt(&settings.voice_wake_word, self.deps.profiles.as_deref())
+                .await;
+        tracing::debug!(
+            words = prompt
+                .as_deref()
+                .map_or(0, |p| p.split_whitespace().count()),
+            "room voice: Whisper's prompt"
+        );
+        *self.prompt.write().unwrap_or_else(|e| e.into_inner()) = prompt;
     }
 
     /// What stands between the room and listening, if anything; holds the voice lock if not.
@@ -378,7 +495,7 @@ impl Inner {
             }
             _ => {}
         }
-        let _ = self.events.send(event.clone());
+        let _ = self.events.send(RoomEvent::Loop(event.clone()));
     }
 }
 
@@ -502,7 +619,7 @@ async fn run_once(
 
     let events = inner.events.clone();
     let levels = Arc::new(ThrottledAudioLevelSink::new(Box::new(move |rms: f32| {
-        let _ = events.send(WorkflowEvent::AudioLevel { rms });
+        let _ = events.send(RoomEvent::Loop(WorkflowEvent::AudioLevel { rms }));
     })));
     let memory_before = crate::room_memory::now();
     let voices = household(&inner.deps).await;
@@ -518,6 +635,7 @@ async fn run_once(
     };
     let recognises = speaker.is_some();
     let cnn_hears_household = cnn_hears_household(&inner.deps, &settings.voice_wake_word).await;
+    inner.refresh_prompt(Some(settings)).await;
     let listening = voice_rig::build_listening(voice_rig::ListeningOptions {
         settings,
         data_dir: &inner.deps.data_dir,
@@ -528,11 +646,16 @@ async fn run_once(
         audio_level: Some(levels),
         speaker,
         cnn_hears_household,
+        whisper_prompt: Some(inner.prompt.clone()),
     })
     .await;
     let recognises = recognises && listening.ear.is_some();
     if let Some(ear) = &listening.ear {
         ear.set_household(voices);
+        // A pause asked for while the room was starting still holds.
+        if let Some((until, _)) = inner.paused_until() {
+            ear.pause_until(Some(until));
+        }
     }
     *lock(&inner.ear) = listening.ear.clone();
     let (detector, reason) = listening.wake();
@@ -722,14 +845,96 @@ mod tests {
         );
         assert!(matches!(
             events.recv().await.unwrap(),
-            WorkflowEvent::StateChanged {
+            RoomEvent::Loop(WorkflowEvent::StateChanged {
                 state: WorkflowState::Listen
-            }
+            })
         ));
         assert!(matches!(
             events.recv().await.unwrap(),
-            WorkflowEvent::Wake { .. }
+            RoomEvent::Loop(WorkflowEvent::Wake { .. })
         ));
+        room.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_pause_shows_and_runs_out_and_a_longer_one_is_kept() {
+        let room = RoomVoice::start(deps(Arc::new(RunSupervisor::default())), false, wake());
+        let mut events = room.subscribe();
+        room.pause(Duration::from_secs(60));
+        room.pause(Duration::from_secs(5));
+        let status = room.status();
+        assert_eq!(status.state, RoomState::Paused);
+        let until = chrono::DateTime::parse_from_rfc3339(status.paused_until.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(
+            until - chrono::Utc::now() > chrono::Duration::seconds(50),
+            "the longer pause held"
+        );
+        room.resume();
+        room.resume();
+        assert_eq!(room.status().paused_until, None);
+        assert_ne!(room.status().state, RoomState::Paused);
+
+        room.pause(Duration::from_millis(30));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(
+            room.status().paused_until,
+            None,
+            "a pause runs out on its own"
+        );
+
+        let mut heard = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            heard.push(event.to_ndjson().unwrap());
+        }
+        let states: Vec<&str> = heard
+            .iter()
+            .map(|line| {
+                if line.contains(r#""state":"paused""#) {
+                    "paused"
+                } else {
+                    "resumed"
+                }
+            })
+            .collect();
+        assert_eq!(
+            states,
+            ["paused", "resumed", "paused", "resumed"],
+            "the kept pause, one resume of two, and a pause that ran out: {heard:?}"
+        );
+        room.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn whisper_is_told_the_wake_phrase_and_every_members_name_as_they_change() {
+        use pond_core::user_data::domain::profile::CreateProfileRequest;
+        use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
+        let profiles = Arc::new(MockProfileRepository::new());
+        let mut d = deps(Arc::new(RunSupervisor::default()));
+        d.profiles = Some(profiles.clone());
+        let room = RoomVoice::start(d, false, wake());
+        let ana = CreateProfileRequest {
+            display_name: "Ana Wanjiru".into(),
+            avatar_emoji: "duck".into(),
+        };
+        profiles.create(ana).await.unwrap();
+        room.inner.refresh_prompt(None).await;
+        let prompt = room.inner.prompt.read().unwrap().clone().unwrap();
+        assert!(prompt.starts_with("Hey goose."), "{prompt}");
+        assert!(prompt.contains("Ana Wanjiru"), "{prompt}");
+
+        let otieno = CreateProfileRequest {
+            display_name: "Otieno".into(),
+            avatar_emoji: "duck".into(),
+        };
+        profiles.create(otieno).await.unwrap();
+        room.inner.refresh_prompt(None).await;
+        let prompt = room.inner.prompt.read().unwrap().clone().unwrap();
+        assert!(
+            prompt.contains("Otieno"),
+            "a new member reaches the prompt: {prompt}"
+        );
         room.shutdown().await;
     }
 
