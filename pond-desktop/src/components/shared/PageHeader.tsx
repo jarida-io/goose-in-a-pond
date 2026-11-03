@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 
-export function PageHeader({ title, action }: { title: string; action?: ReactNode }) {
+export function PageHeader({ title, subtitle, action }: { title: string; subtitle?: string; action?: ReactNode }) {
+  const heading = <h1 className="page-header__title">{title}</h1>;
   return (
     <div className="page-header">
-      <h1 className="page-header__title">{title}</h1>
+      {subtitle ? <div>{heading}<p className="page-header__sub">{subtitle}</p></div> : heading}
       {action && <div className="page-header__action">{action}</div>}
     </div>
   );

@@ -2146,7 +2146,7 @@
 .sched-section__sub {
   font-size: var(--text-sm); color: var(--grey-500);
 }
-.sched-header__sub { font-size: 14px; font-weight: 600; color: var(--color-text-secondary); margin: 2px 0 0; }
+.sched-header__sub, .page-header__sub { font-size: 14px; font-weight: 600; color: var(--color-text-secondary); margin: 2px 0 0; }
 
 /* 3-column grid */
 .sched-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
