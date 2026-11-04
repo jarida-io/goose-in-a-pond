@@ -19,6 +19,7 @@
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
 #   bash scripts/giap.sh onnxruntime status  # Jetson: the GPU ONNX Runtime (vision and faces on TensorRT), verified
 #   bash scripts/giap.sh onnxruntime build   # Jetson: build it from source in the background (hours), install, build engines
+#   bash scripts/giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]  # inspect or switch KV cache quantization (POND_KV_TYPE)
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
@@ -167,6 +168,7 @@ D_ENGINE=""; D_ENGINE_FAILED=""; D_NVMAP=""
 D_LITERT_MAC=""; D_LITERT_MAC_TAG=""; D_LITERT_MAC_DIR=""; D_LITERT_LNX=""; D_LITERT_LNX_TAG=""; D_LITERT_LNX_DIR=""
 D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
 D_ORTGPU=""; D_ORTGPU_TAG=""; D_ORTGPU_DIR=""; D_ORTGPU_BUILD=""
+D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
 
 human_mb() { # $1 = MB
   local m="${1:-0}"
@@ -452,10 +454,63 @@ sqlite_setting() { # $1 = key
     "SELECT value FROM settings WHERE key='$1' LIMIT 1;" 2>/dev/null
 }
 
+pond_data_run() {
+  local pond_u
+  pond_u="$(connect_pond_user 2>/dev/null || true)"
+  if [ -n "$pond_u" ] && [ "$pond_u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n -u "$pond_u" true 2>/dev/null; then
+      sudo -n -u "$pond_u" "$@"
+      return $?
+    fi
+  fi
+  "$@"
+}
+
+detect_kv() {
+  D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
+  local kv_file="$D_DATA_DIR/kv.env" dropin="" v=""
+  if pond_data_run test -f "$kv_file" 2>/dev/null; then
+    v="$(pond_data_run sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$kv_file" 2>/dev/null | tail -1)"
+    [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$kv_file"; }
+  fi
+  if [ -z "$D_KV_CFG" ] && [ "$D_OS" = "linux" ]; then
+    if [ "$D_SVC_SCOPE" = "system" ]; then dropin="/etc/systemd/system/$SERVICE_NAME.d/override.conf"
+    elif [ "$D_SVC_SCOPE" = "user" ]; then dropin="$HOME/.config/systemd/user/$SERVICE_NAME.d/override.conf"; fi
+    if [ -n "$dropin" ] && [ -r "$dropin" ]; then
+      v="$(sed -n 's/^Environment="\{0,1\}POND_KV_TYPE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
+      [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$dropin"; }
+    fi
+  fi
+  if [ -z "$D_KV_CFG" ] && [ -f "$REPO_ROOT/.env.override" ]; then
+    v="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
+    [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$REPO_ROOT/.env.override"; }
+  fi
+  local reg="$D_DATA_DIR/engine/data/models/registry.json"
+  if pond_data_run test -f "$reg" 2>/dev/null; then
+    D_KV_REG="$(pond_data_run grep -E '"type_k"|"type_v"' "$reg" 2>/dev/null | head -2 \
+      | sed -n 's/.*"\(type_[kv]\)": *"\([^"]*\)".*/\2/p' | paste -sd',' - 2>/dev/null || true)"
+  fi
+  local lf; lf="$(log_file_today)"
+  if [ -f "$lf" ]; then
+    local last_ctx
+    last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    if [ -n "$last_ctx" ]; then
+      local kib nctx
+      kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+      nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+      [ -n "$kib" ] && D_KV_LOG="${kib} KiB/tok${nctx:+, n_ctx=$nctx}"
+    fi
+  fi
+  local eff="${D_KV_CFG:-default (q8_0,q8_0)}"
+  D_KV_SUMMARY="$eff"
+  [ -n "$D_KV_REG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · stamped $D_KV_REG"
+  [ -n "$D_KV_LOG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · $D_KV_LOG"
+}
+
 detect_all() {
   detect_host; detect_accel; detect_toolchain; detect_repo; detect_ui
   detect_binaries; detect_service; detect_runtime; detect_resources
-  detect_jetson_power; detect_capabilities; detect_engine; detect_nvmap; detect_litert; detect_onnxruntime
+  detect_jetson_power; detect_capabilities; detect_engine; detect_nvmap; detect_litert; detect_onnxruntime; detect_kv
 }
 
 # ── banner ───────────────────────────────────────────────────────────────────
@@ -489,6 +544,7 @@ banner() {
   printf '  %-9s %s process(es)%s · health %s · engine %s\n' "Runtime" "$D_PROCS" \
     "$( [ -n "$D_PORT" ] && echo " · port $D_PORT" )" "$D_HEALTH" \
     "$D_ENGINE$( [ -n "$D_ENGINE_FAILED" ] && echo ", last model load FAILED: $D_ENGINE_FAILED" )"
+  [ -n "$D_KV_SUMMARY" ] && printf '  %-9s %s\n' "KV cache" "$D_KV_SUMMARY"
   printf '  %-9s RAM %s%s · disk %s GiB free · target debug %s GiB / release %s GiB\n' "Resources" \
     "$(human_mb "${D_RAM_TOTAL:-0}")" \
     "$( [ -n "$D_RAM_AVAIL" ] && echo " ($(human_mb "$D_RAM_AVAIL") avail)" )" \
@@ -1406,6 +1462,213 @@ action_litert_menu() {
   return 0
 }
 
+# Normalize a single KV cache type token (bash 3.2 safe).
+kv_normalize_one() {
+  local t
+  t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  case "$t" in
+    q8|q8_0)       printf 'q8_0' ;;
+    q4|q4_0)       printf 'q4_0' ;;
+    q4_1)          printf 'q4_1' ;;
+    iq4|iq4_nl)    printf 'iq4_nl' ;;
+    q5|q5_0)       printf 'q5_0' ;;
+    q5_1)          printf 'q5_1' ;;
+    f16|fp16)      printf 'f16' ;;
+    bf16)          printf 'bf16' ;;
+    f32|fp32)      printf 'f32' ;;
+    *)             return 1 ;;
+  esac
+}
+
+# Normalize a KV cache spec ($1 = sub, $2 = optional second token) into KV_SPEC ("k,v" or "auto").
+kv_normalize_spec() {
+  KV_SPEC=""
+  local raw="${1:-}" arg2="${2:-}"
+  [ -n "$arg2" ] && raw="$raw,$arg2"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' ',' | tr -d ' ')"
+  case "$raw" in
+    auto|default|reset|none) KV_SPEC="auto"; return 0 ;;
+    q8_q4) raw="q8_0,q4_0" ;;
+    q8_q8) raw="q8_0,q8_0" ;;
+    q4_q4) raw="q4_0,q4_0" ;;
+  esac
+  local k_raw v_raw k v
+  case "$raw" in
+    *,*) k_raw="${raw%%,*}"; v_raw="${raw#*,}" ;;
+    *)   k_raw="$raw";       v_raw="$raw" ;;
+  esac
+  k="$(kv_normalize_one "$k_raw")" || {
+    bad "unknown KV cache type for K: '$k_raw' (expected q8_0, q4_0, f16, bf16, auto)"
+    return 2
+  }
+  v="$(kv_normalize_one "$v_raw")" || {
+    bad "unknown KV cache type for V: '$v_raw' (expected q8_0, q4_0, f16, bf16, auto)"
+    return 2
+  }
+  if [ "$D_IS_JETSON" = true ] || [ "$D_CUDA_STATE" = "usable" ]; then
+    case "$k,$v" in
+      q8_0,q8_0|q8_0,q4_0|q4_0,q4_0|f16,f16|bf16,bf16) ;;
+      *)
+        bad "CUDA FlashAttention on Jetson does not support K=$k, V=$v"
+        note "compiled GGML_CUDA_FA_QUANTS combinations: q8_0,q8_0 · q8_0,q4_0 · q4_0,q4_0 · f16,f16 · bf16,bf16"
+        return 2 ;;
+    esac
+  fi
+  KV_SPEC="$k,$v"
+  return 0
+}
+
+# Ensure systemd drop-in loads $D_DATA_DIR/kv.env and has no conflicting hardcoded POND_KV_TYPE.
+kv_ensure_systemd_dropin() {
+  [ "$D_OS" = "linux" ] || return 0
+  local dropin="" use_sudo=false
+  case "$D_SVC_SCOPE" in
+    system) dropin="/etc/systemd/system/$SERVICE_NAME.d/override.conf"; use_sudo=true ;;
+    user)   dropin="$HOME/.config/systemd/user/$SERVICE_NAME.d/override.conf" ;;
+    *)      return 0 ;;
+  esac
+  local env_file_line="EnvironmentFile=-$D_DATA_DIR/kv.env"
+  if [ -r "$dropin" ] \
+    && grep -Fqx "$env_file_line" "$dropin" 2>/dev/null \
+    && ! grep -Eq '^Environment="?POND_KV_TYPE=' "$dropin" 2>/dev/null; then
+    return 0
+  fi
+  info "wiring $dropin -> $env_file_line"
+  [ "$DRY_RUN" = true ] && return 0
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/giap-kv-dropin.XXXXXX")" || return 1
+  if [ -r "$dropin" ]; then
+    grep -Ev '^Environment="?POND_KV_TYPE=|^EnvironmentFile=.*kv\.env' "$dropin" > "$tmp" || true
+    grep -Fq '[Service]' "$tmp" 2>/dev/null || printf '[Service]\n' > "$tmp"
+  else
+    printf '[Service]\n' > "$tmp"
+  fi
+  printf '%s\n' "$env_file_line" >> "$tmp"
+  if [ "$use_sudo" = true ]; then
+    sudo mkdir -p "$(dirname "$dropin")" && sudo install -m 0644 "$tmp" "$dropin" && sudo systemctl daemon-reload
+  else
+    mkdir -p "$(dirname "$dropin")" && install -m 0644 "$tmp" "$dropin" && systemctl --user daemon-reload
+  fi
+  local rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# `giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]`: inspect or switch KV cache quantization.
+action_kv() {
+  local sub="${1:-status}" arg2="${2:-}"
+  if [ "$sub" = "status" ] && [ -z "$arg2" ]; then
+    detect_kv
+    head1 "KV cache quantization  (POND_KV_TYPE)"
+    local model provider
+    provider="$(sqlite_setting chat_provider || true)"
+    model="$(sqlite_setting chat_model || true)"
+    info "Active model:     ${model:-none}${provider:+ (provider: $provider)}"
+    if [ -n "$D_KV_CFG" ]; then
+      ok "Configured:       $D_KV_CFG  (from $D_KV_SRC)"
+    else
+      info "Configured:       default (q8_0,q8_0 — no override set)"
+    fi
+    [ -n "$D_KV_REG" ] && info "Registry stamp:   $D_KV_REG  ($D_DATA_DIR/engine/data/models/registry.json)"
+    local lf; lf="$(log_file_today)"
+    if [ -f "$lf" ]; then
+      local last_ctx
+      last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      if [ -n "$last_ctx" ]; then
+        local kib slmb nctx bud free_m
+        kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+        slmb="$(printf '%s' "$last_ctx" | sed -n 's/.*sliding_kv_mb=\([0-9]*\).*/\1/p')"
+        nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+        bud="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_budget_mb=\([0-9]*\).*/\1/p')"
+        free_m="$(printf '%s' "$last_ctx" | sed -n 's/.*free_mb=\([0-9]*\).*/\1/p')"
+        info "Last model load:  ${kib:-?} KiB/tok · sliding ${slmb:-?} MiB · n_ctx=${nctx:-?} · budget ${bud:-?} MiB (${free_m:-?} MiB free)"
+      fi
+    fi
+    say ""
+    info "Presets (CLI: bash scripts/giap.sh kv <preset>):"
+    note "q8     -> q8_0,q8_0   symmetric 8-bit KV (default; 8 KiB/tok on E4B, full tool/reasoning accuracy)"
+    note "q8,q4  -> q8_0,q4_0   asymmetric K=Q8_0, V=Q4_0 (6 KiB/tok on E4B; 8-bit keys, 4-bit values)"
+    note "q4     -> q4_0,q4_0   symmetric 4-bit KV (4 KiB/tok on E4B; lowest KV memory footprint)"
+    note "f16    -> f16,f16     unquantized FP16 KV (16 KiB/tok on E4B)"
+    note "bf16   -> bf16,bf16   unquantized BF16 KV (16 KiB/tok on E4B)"
+    note "auto   -> reset       remove override and use binary default (q8_0,q8_0)"
+    return 0
+  fi
+
+  kv_normalize_spec "$sub" "$arg2" || return $?
+  head1 "Set KV cache quantization -> $KV_SPEC"
+  local kv_file="$D_DATA_DIR/kv.env" env_ovr="$REPO_ROOT/.env.override"
+  if [ "$KV_SPEC" = "auto" ]; then
+    info "removing $kv_file (falling back to binary default q8_0,q8_0)"
+    if [ "$DRY_RUN" != true ]; then
+      pond_data_run rm -f "$kv_file" 2>/dev/null || rm -f "$kv_file" 2>/dev/null || true
+      if [ -f "$env_ovr" ]; then
+        local tmp_o
+        tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
+          grep -Ev '^POND_KV_TYPE=' "$env_ovr" > "$tmp_o" || true
+          mv "$tmp_o" "$env_ovr"
+        }
+      fi
+    fi
+  else
+    info "writing POND_KV_TYPE=$KV_SPEC to $kv_file"
+    if [ "$DRY_RUN" != true ]; then
+      local tmp_k
+      tmp_k="$(mktemp "${TMPDIR:-/tmp}/giap-kv.XXXXXX")" || return 1
+      printf 'POND_KV_TYPE=%s\n' "$KV_SPEC" > "$tmp_k"
+      chmod 0644 "$tmp_k" 2>/dev/null || true
+      pond_data_run mkdir -p "$D_DATA_DIR" 2>/dev/null || true
+      pond_data_run cp "$tmp_k" "$kv_file" || { rm -f "$tmp_k"; bad "could not write $kv_file"; return 1; }
+      rm -f "$tmp_k"
+      if [ -f "$env_ovr" ]; then
+        local tmp_o
+        tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
+          grep -Ev '^POND_KV_TYPE=' "$env_ovr" > "$tmp_o" || true
+          printf 'POND_KV_TYPE=%s\n' "$KV_SPEC" >> "$tmp_o"
+          mv "$tmp_o" "$env_ovr"
+        }
+      fi
+    fi
+  fi
+
+  kv_ensure_systemd_dropin || warn "could not update systemd drop-in; $kv_file was still written"
+  detect_kv
+  ok "configured KV cache quantization: ${D_KV_CFG:-default (q8_0,q8_0)}"
+
+  if [ "$D_SVC_ACTIVE" = "active" ]; then
+    if confirm "Restart $SERVICE_NAME now to apply KV cache quantization ($KV_SPEC)?"; then
+      svc_ctl restart || return 1
+      await_health || return 1
+      detect_all
+      action_kv status
+    else
+      note "restart later with: bash scripts/giap.sh kv $sub -y   (or menu 23)"
+    fi
+  else
+    note "the service is not running; the next start will use ${D_KV_CFG:-default (q8_0,q8_0)}"
+  fi
+  return 0
+}
+
+action_kv_menu() {
+  action_kv status
+  [ -t 0 ] || return 0
+  say ""
+  say "  1) q8_0,q8_0 (default)   2) q8_0,q4_0 (K=Q8, V=Q4)   3) q4_0,q4_0 (Q4)   4) f16,f16   5) bf16,bf16   a) auto   return) back"
+  local c=""; printf '  > '; read -r c
+  case "$c" in
+    1|q8)    action_kv q8_0,q8_0 ;;
+    2|q8,q4) action_kv q8_0,q4_0 ;;
+    3|q4)    action_kv q4_0,q4_0 ;;
+    4|f16)   action_kv f16,f16 ;;
+    5|bf16)  action_kv bf16,bf16 ;;
+    a|A|auto) action_kv auto ;;
+    "") ;;
+    *) action_kv "$c" ;;
+  esac
+  return 0
+}
+
 # ── service actions ──────────────────────────────────────────────────────────
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
@@ -1474,7 +1737,11 @@ action_serve_foreground() {
   local port="${D_PORT:-8080}"
   if [ -t 0 ]; then printf '  port [%s]: ' "$port"; local p=""; read -r p; [ -n "$p" ] && port="$p"; fi
   note "always pass --port explicitly: the real fallback is 4000..4009, not 80/8080/4000/5000"
-  run ./target/release/pond-server serve --port "$port"
+  if [ -n "$D_KV_CFG" ]; then
+    run env "POND_KV_TYPE=$D_KV_CFG" ./target/release/pond-server serve --port "$port"
+  else
+    run ./target/release/pond-server serve --port "$port"
+  fi
 }
 
 action_launch_gui() {
@@ -1787,6 +2054,7 @@ show_menu() {
   say "  13) Build both (UI then server)"
   say "  15) LiteRT-LM library — status and building (.litertlm models)"
   [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
+  say "  19) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
   say ""
   say "  ${C_B}Service & administration${C_RST}"
   say "  20) Install the service"
@@ -1831,6 +2099,7 @@ menu_loop() {
       16) action_wifi_grant; pause ;;
       17) action_update; pause ;;
       18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
+      19) action_kv_menu; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -1886,7 +2155,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$CMD" in
-  litert) ;;
+  litert|kv) ;;
   models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
@@ -1916,6 +2185,7 @@ case "$CMD" in
   gui)       action_launch_gui ;;
   litert)    action_litert "$CMD_SUB" "$CMD_ARG" ;;
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
+  kv)        action_kv "$CMD_SUB" "$CMD_ARG" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;

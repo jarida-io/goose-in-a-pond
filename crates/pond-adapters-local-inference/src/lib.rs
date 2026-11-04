@@ -290,6 +290,11 @@ impl LocalInferenceLlmAdapter {
             );
         }
 
+        let (type_k, type_v) = match Self::kv_override_from_env() {
+            Some((k, v)) => (Some(k), Some(v)),
+            None => (None, None),
+        };
+
         let settings = ModelSettings {
             // Full offload: unified memory needs no CPU/GPU split.
             n_gpu_layers: Some(99),
@@ -299,6 +304,8 @@ impl LocalInferenceLlmAdapter {
             n_batch: Some(512),
             // Flash attention reduces KV-cache memory by ~40%.
             flash_attention: Some(true),
+            type_k,
+            type_v,
             // Unified memory — mlock is unnecessary and can cause issues.
             use_mlock: false,
             // From the model's own chat template; see `tool_and_thinking_for`.
@@ -444,19 +451,9 @@ impl LocalInferenceLlmAdapter {
         let has_vision = sizing.encoder_bytes > 0 || has_mmproj;
         let n_ubatch = if has_vision { 512 } else { 256 };
 
-        let (type_k, type_v, kv_policy) = if let (Ok(k), Ok(v)) =
-            (std::env::var("POND_TYPE_K"), std::env::var("POND_TYPE_V"))
-        {
-            (k, v, KvCachePolicy::Fixed)
-        } else if let Ok(kv) = std::env::var("POND_KV_TYPE") {
-            if let Some((k, v)) = kv.split_once(',') {
-                (k.trim().to_string(), v.trim().to_string(), KvCachePolicy::Fixed)
-            } else {
-                (kv.clone(), kv, KvCachePolicy::Fixed)
-            }
-        } else {
-            ("q8_0".to_string(), "q8_0".to_string(), KvCachePolicy::Fixed)
-        };
+        let (type_k, type_v) = Self::kv_override_from_env()
+            .unwrap_or_else(|| ("q8_0".to_string(), "q8_0".to_string()));
+        let kv_policy = KvCachePolicy::Fixed;
 
         let jetson_settings = ModelSettings {
             // Full offload: unified memory, one 8 GB pool for CPU and GPU.
@@ -469,19 +466,8 @@ impl LocalInferenceLlmAdapter {
             n_threads: Some(4),
             // Halves KV memory on Ampere, and llama.cpp requires it for a quantised `type_v`.
             flash_attention: Some(true),
-            // f16 KV by default. With the windowed cache only 4 of E4B's 24 KV layers grow with the context,
-            // so f16 costs 286 MiB at 16K against q8_0's 152 (and the full-size cache's 476), and
-            // decodes faster at depth: quantised KV sends flash attention down a kernel that
-            // re-reads K/V per query head. llama-bench on the Orin, E4B QAT, depth 0/4096/8192:
-            // f16 19.5/18.4/18.1 tok/s, q8_0 18.7/17.4/16.7; E2B f16 38.1/38.1/37.0, q8_0
-            // 36.9/35.1/33.3.
-            type_k: Some(type_k),
-            type_v: Some(type_v),
-            // Unless memory is tight: goose fits the window to the memory free after the load,
-            // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
-            // (kind="kv_cache_type_chosen"): a ~3,300-token preamble needs about as much again
-            // for a turn, and a 5-8% slower decode is the cheaper failure. On 2026-11-02 E4B, its
-            // 945 MB encoder reserved, had 1,037 MB free, which holds 12,288 tokens in f16.
+            type_k: Some(type_k.clone()),
+            type_v: Some(type_v.clone()),
             kv_cache_policy: kv_policy,
             // Prefill on the Orin (llama-bench, E4B/E2B QAT, depth 0 and 4,096): 256 is 1-6% faster
             // than 128 and 512 is slower than both. The compute buffer no longer scales with it:
@@ -507,6 +493,8 @@ impl LocalInferenceLlmAdapter {
                 } else {
                     tracing::info!(
                         rows = ?applied,
+                        type_k = %type_k,
+                        type_v = %type_v,
                         "Applied Jetson Orin Nano CUDA settings"
                     );
                 }
@@ -518,6 +506,26 @@ impl LocalInferenceLlmAdapter {
                 );
             }
         }
+    }
+
+    fn kv_override_from_env() -> Option<(String, String)> {
+        if let (Ok(k), Ok(v)) = (std::env::var("POND_TYPE_K"), std::env::var("POND_TYPE_V")) {
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() && !v.is_empty() {
+                return Some((k.to_string(), v.to_string()));
+            }
+        }
+        if let Ok(kv) = std::env::var("POND_KV_TYPE") {
+            let kv = kv.trim();
+            if !kv.is_empty() && !kv.eq_ignore_ascii_case("auto") && !kv.eq_ignore_ascii_case("default") {
+                if let Some((k, v)) = kv.split_once(',') {
+                    return Some((k.trim().to_string(), v.trim().to_string()));
+                }
+                return Some((kv.to_string(), kv.to_string()));
+            }
+        }
+        None
     }
 
     /// Stamps `settings` on every row resolving to `model_id`'s GGUF: those ids share one slot.
