@@ -444,9 +444,19 @@ impl LocalInferenceLlmAdapter {
         let has_vision = sizing.encoder_bytes > 0 || has_mmproj;
         let n_ubatch = if has_vision { 512 } else { 256 };
 
-        let kv_type = std::env::var("POND_KV_TYPE")
-            .ok()
-            .unwrap_or_else(|| "f16".to_string());
+        let (type_k, type_v, kv_policy) = if let (Ok(k), Ok(v)) =
+            (std::env::var("POND_TYPE_K"), std::env::var("POND_TYPE_V"))
+        {
+            (k, v, KvCachePolicy::Fixed)
+        } else if let Ok(kv) = std::env::var("POND_KV_TYPE") {
+            if let Some((k, v)) = kv.split_once(',') {
+                (k.trim().to_string(), v.trim().to_string(), KvCachePolicy::Fixed)
+            } else {
+                (kv.clone(), kv, KvCachePolicy::Fixed)
+            }
+        } else {
+            ("f16".to_string(), "f16".to_string(), KvCachePolicy::Q8WhenTight)
+        };
 
         let jetson_settings = ModelSettings {
             // Full offload: unified memory, one 8 GB pool for CPU and GPU.
@@ -465,14 +475,14 @@ impl LocalInferenceLlmAdapter {
             // re-reads K/V per query head. llama-bench on the Orin, E4B QAT, depth 0/4096/8192:
             // f16 19.5/18.4/18.1 tok/s, q8_0 18.7/17.4/16.7; E2B f16 38.1/38.1/37.0, q8_0
             // 36.9/35.1/33.3.
-            type_k: Some(kv_type.clone()),
-            type_v: Some(kv_type),
+            type_k: Some(type_k),
+            type_v: Some(type_v),
             // Unless memory is tight: goose fits the window to the memory free after the load,
             // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
             // (kind="kv_cache_type_chosen"): a ~3,300-token preamble needs about as much again
             // for a turn, and a 5-8% slower decode is the cheaper failure. On 2026-11-02 E4B, its
             // 945 MB encoder reserved, had 1,037 MB free, which holds 12,288 tokens in f16.
-            kv_cache_policy: KvCachePolicy::Q8WhenTight,
+            kv_cache_policy: kv_policy,
             // Prefill on the Orin (llama-bench, E4B/E2B QAT, depth 0 and 4,096): 256 is 1-6% faster
             // than 128 and 512 is slower than both. The compute buffer no longer scales with it:
             // the engine reserves logits for one output, not for every ubatch token.
