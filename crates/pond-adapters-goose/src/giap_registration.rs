@@ -81,7 +81,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_weather_enabled {
-        pond_mcp_server::init_weather_deps(weather);
+        pond_mcp_server::init_weather_deps(weather, settings_repo.clone());
         register_builtin_extension("giap-weather", pond_mcp_server::spawn_weather_server);
         registered.push("giap-weather".into());
     }
