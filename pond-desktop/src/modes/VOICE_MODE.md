@@ -72,7 +72,7 @@ The orb flashes on `wait` -> `recording`, so a heard wake word is visible, not o
 `/api/v1/transcribe`, and matches the wake word and stored variants with `containsTrigger`
 (`modes/voice/wakePhrase.ts`, mirroring the server's whole-word matcher). After a reply it listens
 for a follow-up and returns to the wake word after 8 s without speech (`NO_SPEECH_TIMEOUT_MS`).
-Speech is split with `splitSpeechUnits` and each unit is fetched from `/api/v1/tts`
+Speech is split with `ReplySplitter` and each unit is fetched from `/api/v1/tts`
 (`modes/voice/webAudioUtils.ts`).
 
 Recording stops on its own after `voice_recording_duration_secs` (settings default 3 s; 30 s until

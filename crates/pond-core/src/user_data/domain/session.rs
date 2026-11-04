@@ -1,4 +1,5 @@
 use crate::models::domain::message::ChatMessage;
+use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -74,17 +75,21 @@ pub enum IdentificationSource {
     Explicit,
     /// Above-threshold face match, anti-spoof passed; the only source with a confidence.
     Face,
+    /// Voice Match on the wake phrase: personal context only, never an approval.
+    Voice,
     /// Nobody has been identified. The default, and never an error.
     Unknown,
 }
 
 impl IdentificationSource {
-    /// Stored form; must match the values in migration `0037_session_identification.sql`.
+    /// Stored form: the values in migration `0037_session_identification.sql`, and `voice` from
+    /// `0077_voice_prints.sql` (an applied migration's text is fixed by its checksum).
     pub fn as_str(&self) -> &'static str {
         match self {
             IdentificationSource::PairedDevice => "paired_device",
             IdentificationSource::Explicit => "explicit",
             IdentificationSource::Face => "face",
+            IdentificationSource::Voice => "voice",
             IdentificationSource::Unknown => "unknown",
         }
     }
@@ -95,6 +100,7 @@ impl IdentificationSource {
             "paired_device" => IdentificationSource::PairedDevice,
             "explicit" => IdentificationSource::Explicit,
             "face" => IdentificationSource::Face,
+            "voice" => IdentificationSource::Voice,
             _ => IdentificationSource::Unknown,
         }
     }
@@ -104,7 +110,8 @@ impl IdentificationSource {
         ("paired_device", 0),
         ("explicit", 1),
         ("face", 2),
-        ("unknown", 3),
+        ("voice", 3),
+        ("unknown", 4),
     ];
 
     /// Strength, lower is stronger. Only meaningful in comparison.
@@ -113,7 +120,8 @@ impl IdentificationSource {
             IdentificationSource::PairedDevice => 0,
             IdentificationSource::Explicit => 1,
             IdentificationSource::Face => 2,
-            IdentificationSource::Unknown => 3,
+            IdentificationSource::Voice => 3,
+            IdentificationSource::Unknown => 4,
         }
     }
 }
@@ -142,6 +150,16 @@ impl SessionIdentity {
     /// strength does, so a fresh face match can re-identify.
     pub fn supersedes(&self, existing: &SessionIdentity) -> bool {
         self.source.rank() <= existing.source.rank()
+    }
+
+    /// Whether a caller at `scope` may read this conversation: their own, or nobody's.
+    /// A named member narrows even without evidence, since a read must never widen on doubt.
+    pub fn readable_by(&self, scope: &ProfileScope) -> bool {
+        match (self.profile_id.as_deref(), scope) {
+            (_, ProfileScope::Household) | (None, _) => true,
+            (Some(owner), ProfileScope::Owner(caller)) => owner == caller,
+            (Some(_), ProfileScope::Guest) => false,
+        }
     }
 }
 
@@ -289,6 +307,37 @@ mod session_identity_tests {
     fn a_new_session_is_unattributed() {
         assert_eq!(Session::new("s1".to_string()).profile_id, None);
     }
+
+    #[test]
+    fn a_members_conversation_is_readable_by_them_and_the_household_only() {
+        use crate::user_data::domain::profile::{EXEMPLAR_OWNER_ID, SECOND_EXEMPLAR_OWNER_ID};
+        let theirs = identity(IdentificationSource::PairedDevice, EXEMPLAR_OWNER_ID);
+        assert!(theirs.readable_by(&ProfileScope::Owner(EXEMPLAR_OWNER_ID.into())));
+        assert!(theirs.readable_by(&ProfileScope::Household));
+        assert!(!theirs.readable_by(&ProfileScope::Owner(SECOND_EXEMPLAR_OWNER_ID.into())));
+        assert!(!theirs.readable_by(&ProfileScope::Guest));
+    }
+
+    #[test]
+    fn an_unattributed_conversation_stays_readable_by_every_caller() {
+        let nobody = SessionIdentity::unknown();
+        for scope in ProfileScope::every_shape() {
+            assert!(
+                nobody.readable_by(&scope),
+                "{scope:?} lost a shared conversation"
+            );
+        }
+    }
+
+    /// `resolve` ignores an id with no source; reading must not, or the member's words leak.
+    #[test]
+    fn a_member_named_without_evidence_still_narrows_the_read() {
+        use crate::user_data::domain::profile::{EXEMPLAR_OWNER_ID, SECOND_EXEMPLAR_OWNER_ID};
+        let unproven = identity(IdentificationSource::Unknown, EXEMPLAR_OWNER_ID);
+        assert!(!unproven.readable_by(&ProfileScope::Owner(SECOND_EXEMPLAR_OWNER_ID.into())));
+        assert!(!unproven.readable_by(&ProfileScope::Guest));
+        assert!(unproven.readable_by(&ProfileScope::Owner(EXEMPLAR_OWNER_ID.into())));
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +351,7 @@ mod ranked_table_tests {
             IdentificationSource::PairedDevice,
             IdentificationSource::Explicit,
             IdentificationSource::Face,
+            IdentificationSource::Voice,
             IdentificationSource::Unknown,
         ] {
             let entry = IdentificationSource::ALL_RANKED
@@ -317,7 +367,7 @@ mod ranked_table_tests {
         }
         assert_eq!(
             IdentificationSource::ALL_RANKED.len(),
-            4,
+            5,
             "a new source was added without a rank for the SQL comparison"
         );
     }

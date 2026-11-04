@@ -6,11 +6,12 @@ Prerequisites: none — this is the substrate everything else personal stands on
 
 Verified against code 2026-08-03.
 
-> Status (2026-10-23): P1-P10 are landed and the phase stamps below hold against the code.
-> Three gaps remain outside the phase list: `get_session_messages` and `get_session_attachment` take
-> no `Principal`; the `giap-memory` MCP tools search at `ProfileScope::Household`
-> (`pond-mcp-server/src/memory.rs`); and `language` is collected at onboarding but never written to
-> `profiles.preferences` (section 4b). Programme summary: [checklist section 0](./00-checklist.md).
+> Status (2026-11-02): P1-P10 are landed and the phase stamps below hold against the code. The
+> `giap-memory` tools and the two session read routes now follow the speaker (section 4d). Open
+> outside the phase list: `language` is collected at onboarding but never written to
+> `profiles.preferences` (section 4b); `GET /sessions` lists every conversation to any paired
+> client, and `POST /chat/stream` checks no ownership of the session it is given (section 4d).
+> Programme summary: [checklist section 0](./00-checklist.md).
 
 ---
 
@@ -250,10 +251,10 @@ failure mode.
 
 ### 3.5 Guest degradation
 
-An unidentified speaker gets: no personal memory injection, no personal-data tool groups
-(`giap-memory` reads are scoped to `Household`), no draft approval rights, and no ingested context
-items. It still gets weather, time, device control and knowledge tools — the assistant stays useful
-to a visitor without becoming a disclosure channel.
+An unidentified speaker gets: no personal memory injection, no personal-data tool groups (and a
+`giap-memory` call that reaches one anyway is refused), no draft approval rights, and no ingested
+context items. It still gets weather, time, device control and knowledge tools — the assistant
+stays useful to a visitor without becoming a disclosure channel.
 
 This is the behaviour that makes voice safe before speaker identification exists.
 
@@ -293,12 +294,25 @@ So P7 is narrower than written — drafts, schedules, and the per-category count
 is the part to keep: three of the four behaviours were decided years ago by migrations nobody
 remembered writing, and the fourth was decided by omission.
 
-### 3.8 Speaker identification is scoped out, and said so
+### 3.8 Speaker identification: Voice Match gives context, never authority (2026-11-02)
 
-Voice is a shared surface. Until `pond-adapters-speaker-embed` exists, a voice session resolves to
-`Household` (if a face is co-present and confident) or `Guest`. **This document does not claim
-per-person voice memory works.** The speaker-ID design in [data_pipeline.md, Biometric User Differentiation](../data_pipeline.md#biometric-user-differentiation) is the
-follow-on; PAI-1 makes it a drop-in by putting `identification_source` in place first.
+Voice is a shared surface. Voice Match ([voice-match.md](../../voice-match.md)) names the speaker
+of a room turn when their voice matches an enrolled member's prints: the session is marked
+`identification_source = 'voice'`, ranked below `face`, and the turn runs at `Owner` scope with
+that member's particulars and notes. That is all a voice match buys:
+
+- `is_draft_decision_permitted` refuses an actor known only by voice, so a proposal is never
+  decided on a voice match (`a_session_known_only_by_voice_never_decides_a_proposal`).
+- Rides are confirmed only from the member's paired phone (`rides::member` reads the device,
+  never a session), so a voice session cannot approve a ride offer.
+- `claim_session_identity` never moves a session to another member, so a different voice's wake
+  starts a session of its own, and so does an unrecognised voice after a member's turns.
+- After a recognised wake, a follow-up in another enrolled member's voice is dropped; one Voice
+  Match does not recognise continues the conversation, and an unrecognised wake keeps every
+  follow-up.
+
+Without an enrolled member nothing changes: a voice session resolves to `Household` on a pond of
+one and `Guest` otherwise.
 
 ---
 
@@ -780,6 +794,62 @@ choice about who may assert identity, since `PairedDevice` outranks face and exp
 
 ---
 
+## 4d. The memory tools and the session reads follow the speaker (2026-11-02)
+
+Three paths were still open after P10, each letting one member, or any paired client, read another
+member's data:
+
+* the `giap-memory` tools searched at `Household`, so on a pond of two one member's turn recalled
+  the other's memories; `save_memory` wrote `profile_id` NULL, so a member's own save became shared;
+  and `forget_memory` and `supersedes` acted on any id;
+* `GET /sessions/{id}/messages` and `GET /sessions/{id}/attachments/{attachment_id}` took no
+  `Principal`, so any paired client read any conversation, pictures included, by id.
+
+### How a tool call learns who is speaking
+
+Builtin MCP servers are process-wide, so the only per-call channel is the engine session id Goose
+stamps into `_meta`, which the model cannot write. Two registries are already keyed by it.
+`TurnAuthorityRegistry` holds the live turn's `DelegationAuthority`, whose scope is the turn's own:
+the one its injected memories were read at. `ChildSessionRegistry` holds a live helper's parent, and
+now also the helper's scope, which the orchestrator binds from the `TaskSpec`: the clamped child
+scope, not the parent's. The memory tools take the turn's scope, else the helper's; a call with
+neither behind it, or a guest's, is refused with text the model reads.
+
+`DraftAuthority`, which `giap-context` and the interview tools use, was not reused. It resolves
+again from the session row, without the device rung, so it disagrees with the turn wherever the
+turn's scope never reached that row: voice, schedules and the CLI declare `Household`, and a
+member's phone sending a turn into another member's session gets the row's member. The tools would
+have read less than the turn already injected, or the other member's memories.
+
+### What changed
+
+* Recall, recent, keyword and semantic alike, reads at the call's scope: an `Owner` sees their own
+  rows and the shared ones.
+* `save_memory` writes the member's id; a `Household` turn's save stays shared, as batch extraction
+  files it.
+* `forget_memory` and `supersedes` act only on a row the call could recall, through
+  `MemoryRepository::get_in_scope`, which goes through `scope_sql` like every other scoped read.
+  Out of scope reads as missing.
+* Both session routes resolve the caller from their device alone (`read_only_caller_scope` with no
+  session): resolving from the session asked for would make every unattributed caller that
+  session's member. `SessionIdentity::readable_by` serves a member's conversation to that member, or
+  to the household on a pond of one, and an unattributed conversation to anyone. A refusal is the
+  same 404 a missing conversation gets. A session row naming a member without evidence still
+  narrows the read.
+
+### Still open
+
+* `GET /sessions` lists every conversation's id, title and first answer to any paired client.
+  Opening another member's from that list now returns 404.
+* `POST /chat/stream` checks no ownership of the session it is given, so a member's phone naming
+  another member's session id continues that conversation, history included. Read from the code,
+  not reproduced.
+* The paths that call tools through `McpToolDispatcher` (the quarantined `pond-agent` and the
+  `mistralrs-agent` feature) carry no `_meta`, so their memory calls are refused. Neither is the
+  live path.
+
+---
+
 ## 5. Invariants
 
 1. Profile context stays in `<system-context>` on the user message. Never the system prefix.
@@ -851,6 +921,45 @@ rather than writing `devices.profile_id` directly, deliberately. `ProfileScope::
 a whole phase because every fixture that produced an owned row set the column by hand and no
 production path did: **a test whose fixture production cannot produce tests a system that does not
 exist.**
+
+### What the 2026-11-02 scoping ran (section 4d)
+
+On the Orin, with the branch deployed (E4B QAT), against the live pond, which then had two
+members of its own:
+
+* Two test members, each with a phone paired from a member-bound code, and a third phone paired to
+  nobody. Each member saved a code through `save_memory`, and each row carried that member's id.
+  Each member's turn then called `recall_memories`: it returned their own memory (read from
+  `memory_events`) and never the other's, in the events or the reply. A's conversation read back
+  for A's phone, and gave B's phone and the unattributed phone the same 404 as a missing
+  conversation. A conversation from the unattributed phone stayed readable by both members.
+* Asked to recall with every tool offered, E4B called `giap-context__recall` both times, so the
+  `recall_memories` turns ran with `tool_group_allowlist` set to `giap-memory`.
+* Every test session, memory, device, token and member was deleted; the memory count and the
+  settings were as found.
+* Tests on the Orin, release profile: `pond-core` (2,453 lib tests and its 14 integration
+  targets, the source readers included), `pond-infra` (575 and its 12), `pond-mcp-server` (342), and
+  `pond-api`'s `session_read_scope`, `reminder_surface`, `agent_suggestions_routes`,
+  `member_notes_routes` and `stream_handler_parity`. `pond-api`'s
+  `only_first_party_pages_may_send_requests` fails under `--release` by design (the Vite origin is
+  trusted in debug builds only) and passes in CI. CI ran the whole fast-crate suite,
+  `cargo check -p pond-server -p pond-adapters-goose --all-targets` and `scripts/live-test.sh`.
+  The orchestrator test that a running child resolves to its plan's scope is compiled there and
+  was not run: `pond-adapters-goose`'s tests build Goose.
+* `scripts/live-test.sh --no-build` on the deployed release binary: 192 and 35 checks, none
+  failed. A first run failed only the four memory-vector checks, because a fresh scratch pond on
+  the Orin was still downloading its models when they looked; the passing run seeded the scratch
+  directory with copies of the pond's embedding, Kokoro, vision and face models.
+
+New tests, and what each would have to be broken for:
+
+| Where | Asserts |
+|---|---|
+| `pond-mcp-server` `memory.rs` | recent, keyword and semantic recall each return a member's own and shared rows and never another member's, with a household control that reaches all three; a helper recalls at the scope it was bound with; no `_meta`, an unknown or ended turn, and a guest each refuse recall, save and forget alike, and nothing is written; a member's save carries their id and a household save stays shared; another member's row cannot be forgotten by id or by its words, or retired by `supersedes`, while the member's own can |
+| `sqlite_memory.rs` | `get_in_scope` reaches a member's own and shared rows, never another's, the household reaches all, a guest none |
+| `session.rs` domain | a member's conversation is readable by them and the household only; an unattributed one by every scope; a member named without evidence still narrows the read |
+| `child_sessions.rs`, orchestrator tests | a child resolves to its scope only while its lease lives, and a running child resolves to its plan's scope |
+| `pond-api` `session_read_scope.rs` | through the router with real tokens: a member reads their own and shared conversations and gets 404 for another's, identical to a missing one; a phone paired to nobody reads only unattributed ones; pictures follow their messages |
 
 ### The plan
 

@@ -83,7 +83,8 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 |---|---|
 | [Voice mode](developer/voice-mode.md) | The voice stack, crate by crate |
 | [Desktop voice child process](developer/voice-desktop-child-process.md) | `chat --voice --json-events` and the Electron side |
-| [pond-ear](developer/pond-ear.md) | Wake word, Voice Match, endpointing, echo cancellation; built and measured, not yet wired into the voice loop |
+| [pond-ear](developer/pond-ear.md) | Wake word, Voice Match, endpointing, echo cancellation; runs behind the voice loop through `pond-adapters-ear` |
+| [Voice Match](voice-match.md) | Who is speaking in the room: enrolment, the wake detector choice, and what a voice match may not do |
 | [Wake word calibration](wake-word-calibration.md) | Tuning the wake word |
 | [TTS text normalisation](tts-text-normalization.md) | What happens to text before Kokoro speaks it |
 | [Voice pipeline efficiency](voice-pipeline-efficiency.md) | Latency budget and what spends it |

@@ -11457,6 +11457,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pond-adapters-ear"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "pond-audio",
+ "pond-core",
+ "pond-ear",
+ "pond-voice",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pond-adapters-face-onnx"
 version = "0.1.0"
 dependencies = [
@@ -11774,12 +11788,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "log",
+ "pond-adapters-ear",
  "pond-audio",
  "pond-audio-out",
  "pond-core",
+ "pond-ear",
  "pond-voice",
- "rodio",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "whisper-rs",
@@ -12140,6 +12157,7 @@ dependencies = [
  "libc",
  "pond-adapters-audio-devices",
  "pond-adapters-caldav",
+ "pond-adapters-ear",
  "pond-adapters-face-onnx",
  "pond-adapters-goose",
  "pond-adapters-imap",
@@ -12594,9 +12612,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",

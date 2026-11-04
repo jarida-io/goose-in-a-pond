@@ -12,7 +12,7 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 
 fn pin(value: &str) -> Option<String> {
     let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
+    (!value.is_empty() && !value.eq_ignore_ascii_case("auto")).then(|| value.to_string())
 }
 
 pub fn prefs_of(settings: &Settings) -> AudioPrefs {

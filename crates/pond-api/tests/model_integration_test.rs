@@ -176,6 +176,8 @@ async fn pond_with_parts(
     mock_hs.add_valid_token("test-token".to_string()).await;
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -486,6 +488,58 @@ async fn activate_whisper_model_for_asr_role() {
 
     let assignment = repo.get_assignment("asr").await.unwrap();
     assert_eq!(assignment.unwrap().model_id, "whisper/base");
+}
+
+/// One switch for the whole binary: the route reaches it through a process-wide install.
+fn speech_switch() -> Arc<pond_core::models::mocks::mock_speech_model::MockSpeechModelSwitch> {
+    static SWITCH: std::sync::OnceLock<
+        Arc<pond_core::models::mocks::mock_speech_model::MockSpeechModelSwitch>,
+    > = std::sync::OnceLock::new();
+    SWITCH
+        .get_or_init(|| {
+            let switch = Arc::new(Default::default());
+            pond_api::speech_model::install(Arc::clone(&switch) as _);
+            switch
+        })
+        .clone()
+}
+
+async fn asked_for(
+    switch: &pond_core::models::mocks::mock_speech_model::MockSpeechModelSwitch,
+    model: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !switch.asked.lock().unwrap().iter().any(|m| m == model) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never asked for {model}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Choosing the speech model reaches the running one now, not at the next restart.
+#[tokio::test]
+async fn an_asr_choice_switches_the_running_speech_model() {
+    let switch = speech_switch();
+    let (app, repo, _tmp) = make_app().await;
+    repo.upsert(&whisper_record("small.en-q5_1")).await.unwrap();
+    let req = auth_req(
+        "POST",
+        "/api/v1/models/whisper/small.en-q5_1/activate",
+        Some(serde_json::json!({ "role": "asr" })),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    asked_for(&switch, "small.en-q5_1").await;
+
+    let (app, _repo, _settings, _tmp) = make_app_with_settings_repo().await;
+    let req = auth_req(
+        "PUT",
+        "/api/v1/settings",
+        Some(serde_json::json!({ "active_whisper_model": "base.en" })),
+    );
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    asked_for(&switch, "base.en").await;
 }
 
 // ── Kokoro voices, reached through the "tts" group key ────────────────────────

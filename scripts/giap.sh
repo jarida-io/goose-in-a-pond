@@ -783,21 +783,37 @@ doctor() {
   local sec_file key_file km
   sec_file="$D_DATA_DIR/secrets.json"
   key_file="${POND_SECRET_KEY_FILE:-$D_DATA_DIR/secrets/master.key}"
-  if [ ! -f "$sec_file" ]; then
+  local pond_u run_as=""
+  pond_u="$(connect_pond_user 2>/dev/null)" || pond_u=""
+  if [ -n "$pond_u" ] && [ "$pond_u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n -u "$pond_u" true 2>/dev/null; then
+      run_as="sudo -n -u $pond_u"
+    fi
+  fi
+  local sec_exists=false key_exists=false is_enc=false
+  if [ -n "$run_as" ]; then
+    $run_as test -f "$sec_file" 2>/dev/null && sec_exists=true
+    $run_as grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    $run_as test -f "$key_file" 2>/dev/null && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$($run_as stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$($run_as stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  else
+    [ -f "$sec_file" ] && sec_exists=true
+    grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    [ -f "$key_file" ] && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  fi
+  if [ "$sec_exists" = false ]; then
     info "no secret store yet (no API keys or connector tokens saved)"
-  elif ! grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null; then
+  elif [ "$is_enc" = false ]; then
     bad "secrets.json is PLAINTEXT — API keys and OAuth tokens are readable in the file"
     note "a server built after PAI-2 P4 encrypts it on the next start; this pond is on an older binary"
     DOC_FAIL=$((DOC_FAIL+1))
-  elif [ ! -f "$key_file" ]; then
+  elif [ "$key_exists" = false ]; then
     bad "secrets.json is encrypted but its key is MISSING at $key_file"
     note "every API key and connector token in it is unrecoverable — there is no passphrase"
     note "to start over: move $sec_file aside, restart, re-enter keys, re-authorise connectors"
     DOC_FAIL=$((DOC_FAIL+1))
   else
-    # GNU stat reads -f as a filesystem query and prints a block before failing, so pick by OS.
-    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"
-    else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
     km="${km:-?}"
     if [ "$km" = "600" ]; then
       ok "secret store encrypted; key present at $key_file (0600)"
@@ -1653,9 +1669,22 @@ action_deploy() {
 # My Pond's admin card, made as the account that runs the pond (docs/architecture/pond-administrator.md).
 action_admin_card() {
   head1 "Admin card (My Pond)"
-  local user
+  local user bin data
   user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
-  admin_card_run "${1:-}" "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$user"
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  data="$D_DATA_DIR"
+  if [ -z "${1:-}" ] && [ -t 0 ]; then
+    admin_card_doctor "$bin" "$data" "$user"
+    say ""
+    say "  s) Print sealed admin card    r) Rotate (generate new card)    return) back"
+    local c=""; printf '  > '; read -r c
+    case "$c" in
+      s|S) admin_card_run show "$bin" "$data" "$user" ;;
+      r|R) confirm "Generate a new admin card (invalidates the existing one)?" && admin_card_run rotate "$bin" "$data" "$user" ;;
+    esac
+    return 0
+  fi
+  admin_card_run "${1:-}" "$bin" "$data" "$user"
 }
 
 # `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
@@ -1750,39 +1779,42 @@ action_jetson_power() {
 # ── menu ─────────────────────────────────────────────────────────────────────
 show_menu() {
   head1 "Actions"
-  say "  ${C_B}Diagnose${C_RST}"
+  say "  ${C_B}Diagnose & repair${C_RST}"
   say "   1) Doctor — full health check (read-only)"
-  say "   3) Repair the goose submodule"
-  say "   4) Reclaim disk (target/debug only)"
-  say "   5) Stop stray pond-server / desktop app processes"
+  say "   3) Repair the goose submodule (align with pin)"
+  say "   4) Reclaim disk space (target/debug only)"
+  say "   5) Stop stray pond-server / desktop processes"
   say ""
-  say "  ${C_B}Install & build${C_RST}"
-  say "   9) Set up Node (find the right version, or download it)"
+  say "  ${C_B}Install & update${C_RST}"
   say "  10) Install GIAP on this host (first-time setup)"
-  say "  11) Build the web UI"
-  say "  12) Build pond-server (release, correct features for this host)"
-  say "  13) Build both (UI then server)"
-  say "  17) Update this pond (newest code, build, restart, grants, doctor)"
+  say "  17) Update this pond (pull, build, restart, doctor)"
   [ "$D_IS_JETSON" = false ] && say "  14) Deploy to the Jetson (from this dev machine)"
-  say "  15) LiteRT-LM library — status, and building it (for .litertlm models)"
-  [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime for the GPU — status, and building it (vision and faces on TensorRT)"
-  [ "$D_OS" = "linux" ] && say "  16) Let the pond join Wi-Fi from the BLE setup channel (polkit grant, sudo)"
-  [ "$D_OS" = "linux" ] && say "  19) Keep the clock right after a power cut: named time servers for timesyncd (sudo)"
   say ""
-  say "  ${C_B}Service${C_RST}"
+  say "  ${C_B}Build & runtimes${C_RST}"
+  say "   9) Set up Node (find the right version, or download it)"
+  say "  11) Build the web UI (pond-desktop/dist)"
+  say "  12) Build pond-server (release binary for this host)"
+  say "  13) Build both (UI then server)"
+  say "  15) LiteRT-LM library — status and building (.litertlm models)"
+  [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
+  say ""
+  say "  ${C_B}Service & administration${C_RST}"
   say "  20) Install the service"
-  say "  21) Start / 22) Stop / 23) Restart"
+  say "  21) Start  /  22) Stop  /  23) Restart"
   say "  24) Remove the service"
   say "  25) Run the server in the foreground"
-  [ "$D_OS" = "linux" ] && say "  26) Run the pond as its own locked account ($AGAMEMNON), or move it back"
+  [ "$D_OS" = "linux" ] && say "  26) Run as locked service account ($AGAMEMNON), or move back"
+  [ "$D_OS" = "linux" ] && say "  16) Wi-Fi BLE setup grant (NetworkManager polkit rule)"
+  [ "$D_OS" = "linux" ] && say "  19) Clock after a power cut — named time servers for timesyncd (sudo)"
+  say "  27) Admin card — view status, seal or rotate (My Pond)"
   say ""
-  say "  ${C_B}Desktop${C_RST}"
+  say "  ${C_B}Desktop client${C_RST}"
   say "  31) Build the desktop app (macOS only)"
   say "  32) Launch the GUI on this machine's display"
   say ""
-  say "  ${C_B}Observe${C_RST}"
-  say "  40) Logs"
-  say "  41) Live console: stats, charts and logs for this machine and the Jetson"
+  say "  ${C_B}Observe & monitor${C_RST}"
+  say "  40) Logs (tail live pond log)"
+  say "  41) Live console — stats, charts and logs"
   [ "$D_IS_JETSON" = true ] && say "  50) Jetson power, thermals and over-current"
   say ""
   say "   r) Re-run detection    d) Toggle dry-run (now: $DRY_RUN)    0) Quit"
@@ -1805,11 +1837,11 @@ menu_loop() {
       11) action_build_ui; pause ;;
       12) action_build_server; pause ;;
       13) action_build_ui && action_build_server; pause ;;
-      17) action_update; pause ;;
       14) action_deploy; pause ;;
       15) action_litert_menu; pause ;;
-      18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
       16) action_wifi_grant; pause ;;
+      17) action_update; pause ;;
+      18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
       19) action_time_sync; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
@@ -1818,6 +1850,7 @@ menu_loop() {
       24) action_service_remove; pause ;;
       25) action_serve_foreground; pause ;;
       26) if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then action_service_account undo; else action_service_account; fi; pause ;;
+      27) action_admin_card; pause ;;
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
@@ -1827,7 +1860,7 @@ menu_loop() {
       d|D) [ "$DRY_RUN" = true ] && DRY_RUN=false || DRY_RUN=true ;;
       0|q|Q) break ;;
       "") ;;
-      *) warn "unknown choice: $choice" ;;
+      *) warn "unknown choice: $choice"; sleep 1 ;;
     esac
   done
   say "bye."

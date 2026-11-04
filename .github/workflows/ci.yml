@@ -196,6 +196,7 @@ jobs:
             -p pond-audio-out \
             -p pond-adapters-audio-devices \
             -p pond-ear \
+            -p pond-adapters-ear \
             -p pond-core \
             -p pond-infra \
             -p pond-infra-scheduler \
@@ -226,6 +227,7 @@ jobs:
             -p pond-audio-out \
             -p pond-adapters-audio-devices \
             -p pond-ear \
+            -p pond-adapters-ear \
             -p pond-core \
             -p pond-infra \
             -p pond-infra-scheduler \

@@ -198,6 +198,57 @@ fn piper_download_of(
     })
 }
 
+/// The Whisper rows the database holds, and the bundled ones it does not yet: serve seeds the
+/// catalogue after it resolves its models, so a row new in this build is otherwise unknown.
+pub async fn whisper_catalog(repo: &dyn ModelRepository) -> Vec<ModelRecord> {
+    let mut rows = repo
+        .list_by_category(&ModelCategory::Whisper)
+        .await
+        .unwrap_or_default();
+    for bundled in crate::composite_model_catalog_provider::whisper_models() {
+        if !rows.iter().any(|m| m.id == bundled.id) {
+            rows.push(bundled);
+        }
+    }
+    rows
+}
+
+/// A Whisper already on disk to transcribe with while `wanted` is fetched: the largest no bigger
+/// than it, in its language first, so the stand-in never crowds the LLM more than the choice
+/// would; only when nothing that small is on disk, the smallest there is.
+pub fn standby_whisper(
+    wanted: &Path,
+    catalog: &[ModelRecord],
+    models_dir: &Path,
+) -> Option<PathBuf> {
+    let wanted_name = wanted.file_name()?.to_str()?;
+    let target = catalog
+        .iter()
+        .find(|m| m.filename.as_deref() == Some(wanted_name));
+    let (size, language) =
+        target.map_or((u64::MAX, None), |m| (m.size_mb, m.asr_language.as_deref()));
+    let on_disk: Vec<&ModelRecord> = catalog
+        .iter()
+        .filter(|m| {
+            m.filename
+                .as_deref()
+                .is_some_and(|f| f != wanted_name && models_dir.join(f).is_file())
+        })
+        .collect();
+    let fits = on_disk
+        .iter()
+        .filter(|m| m.size_mb <= size)
+        .max_by_key(|m| {
+            (
+                language.is_some() && m.asr_language.as_deref() == language,
+                m.size_mb,
+            )
+        });
+    fits.or_else(|| on_disk.iter().min_by_key(|m| m.size_mb))
+        .and_then(|m| m.filename.as_deref())
+        .map(|f| models_dir.join(f))
+}
+
 /// Resolve both voice models with one catalog fetch (whisper: `models/`, piper: `models/tts/`).
 pub async fn resolve_voice_models(
     settings: &Settings,
@@ -207,10 +258,7 @@ pub async fn resolve_voice_models(
     let models_dir = data_dir.join("models");
     let tts_dir = crate::model_download::tts_models_dir(data_dir);
 
-    let whisper_catalog = repo
-        .list_by_category(&ModelCategory::Whisper)
-        .await
-        .unwrap_or_default();
+    let whisper_catalog = whisper_catalog(repo).await;
     let piper_catalog = repo
         .list_by_category(&ModelCategory::TtsPiper)
         .await
@@ -300,6 +348,55 @@ mod tests {
             piper_rec("en-lessac-medium", "en_US-lessac-medium.onnx"),
             piper_rec("en-ryan-medium", "en_US-ryan-medium.onnx"),
         ]
+    }
+
+    fn sized(name: &str, filename: &str, size_mb: u64, language: &str) -> ModelRecord {
+        let mut r = whisper_rec(name, filename);
+        r.size_mb = size_mb;
+        r.asr_language = Some(language.to_string());
+        r
+    }
+
+    /// The household nano's `models/` the night it chose small.en q5_1.
+    fn nanos_catalog() -> Vec<ModelRecord> {
+        vec![
+            sized("tiny", "ggml-tiny.bin", 75, "multilingual"),
+            sized("base", "ggml-base.bin", 142, "multilingual"),
+            sized("base.en", "ggml-base.en.bin", 142, "en"),
+            sized("small.en", "ggml-small.en.bin", 466, "en"),
+            sized("small.en-q5_1", "ggml-small.en-q5_1.bin", 182, "en"),
+        ]
+    }
+
+    #[test]
+    fn a_model_still_to_fetch_is_stood_in_for_by_the_largest_on_disk_no_bigger_than_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "ggml-tiny.bin",
+            "ggml-base.bin",
+            "ggml-base.en.bin",
+            "ggml-small.en.bin",
+        ] {
+            std::fs::write(dir.path().join(f), b"w").unwrap();
+        }
+        let wanted = dir.path().join("ggml-small.en-q5_1.bin");
+        assert_eq!(
+            standby_whisper(&wanted, &nanos_catalog(), dir.path()),
+            Some(dir.path().join("ggml-base.en.bin")),
+            "same size class and language beats the bigger small.en already on disk"
+        );
+    }
+
+    #[test]
+    fn with_nothing_small_enough_on_disk_the_smallest_stands_in_and_with_nothing_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = dir.path().join("ggml-base.en.bin");
+        assert_eq!(standby_whisper(&wanted, &nanos_catalog(), dir.path()), None);
+        std::fs::write(dir.path().join("ggml-small.en.bin"), b"w").unwrap();
+        assert_eq!(
+            standby_whisper(&wanted, &nanos_catalog(), dir.path()),
+            Some(dir.path().join("ggml-small.en.bin"))
+        );
     }
 
     // ── shape 1: catalog name ────────────────────────────────────────────

@@ -12,6 +12,8 @@ members = [
     "crates/pond-adapters-audio-devices",
     # The ear: wake word, Voice Match, endpointing and echo cancellation. Std only, no crates.
     "crates/pond-ear",
+    # The ear on its own thread behind the voice ports, fed the mic and everything played.
+    "crates/pond-adapters-ear",
     "crates/pond-core",
     "crates/pond-api",
     "crates/pond-hf-cache",
@@ -247,6 +249,7 @@ pond-adapters-lightning = { path = "crates/pond-adapters-lightning" }
 pond-api               = { path = "crates/pond-api" }
 pond-hf-cache          = { path = "crates/pond-hf-cache" }
 pond-ear               = { path = "crates/pond-ear" }
+pond-adapters-ear      = { path = "crates/pond-adapters-ear" }
 pond-infra             = { path = "crates/pond-infra" }
 pond-net               = { path = "crates/pond-net" }
 pond-connect           = { path = "crates/pond-connect" }

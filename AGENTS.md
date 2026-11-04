@@ -147,9 +147,16 @@ renderer. It is packaged for macOS; the Jetson kiosk runs the same app unpackage
 
 ### Voice
 
+Serve runs room voice itself (`crates/pond-server/src/room_voice.rs`): the voice loop on the pond's
+own microphone and speaker, with serve's agent, Whisper and Kokoro, wherever the models are there, a
+microphone and speaker pair works and no `chat --voice` holds the voice lock (`GET /voice/room` says
+which). `voice_room_enabled` switches it.
+
 In the shell: `VoiceMode` → `useVoiceSession` (the only `voice-*` listener) → `start_voice_session`
-→ `VoiceChildProcess` (`electron/main/voice/`), which spawns `pond-server chat --voice --json-events`.
-The child owns the microphone and speaker. It writes NDJSON events (`warmup` lines may precede
+→ `VoiceChildProcess` (`electron/main/voice/`). Where `GET /voice/room` says `available`, it attaches:
+the room's SSE lines become the same `voice-*` events, and start, stop and interrupt become
+`PUT /voice/room` and `POST /voice/room/interrupt`, with the renderer's own token. Otherwise it spawns
+`pond-server chat --voice --json-events`, and the child owns the microphone and speaker. It writes NDJSON events (`warmup` lines may precede
 `ready`, then `state`, `transcript`, `token`, ...) and reads `{"cmd":"interrupt"}` and
 `{"cmd":"stop"}` on stdin. A second voice process exits with `already_running`, so a child you start
 by hand to diagnose the shell keeps the microphone, and the desktop's voice, until you kill it.
@@ -166,9 +173,14 @@ by hand to diagnose the shell keeps the microphone, and the desktop's voice, unt
   `/api/v1/chat/stream` and `/api/v1/tts`. A check that wrongly returns false drops the desktop onto
   that path and still appears to work.
 
-A turn: wake word (`WhisperKeywordDetector`, matched on Whisper's transcript) → capture with Silero
-end-of-speech (`pond-adapters-whisper`, `pond-adapters-silero`) → think → tokens split into clauses
-and spoken by Kokoro while the reply streams (`pond-adapters-kokoro`, `pond-audio-out`) → barge-in on
-microphone energy (`pond_voice::barge`) cuts the reply → a follow-up listen without the wake word.
-`pond-audio` is the single microphone owner. `pond-ear` (a wake-word CNN, echo cancellation, Voice
-Match) is built but nothing depends on it yet.
+A turn, where Silero is available (`crates/pond-server/src/voice_rig.rs` picks): the ear
+(`pond-adapters-ear` running `pond-ear` on its own thread, fed the mic and, through
+`pond_audio_out::tap`, everything played) hears the wake word, either its "hey goose" CNN or
+Whisper on each speech segment, and endpoints the request with Silero on echo-cancelled audio →
+Whisper transcribes it → think → tokens split into sentences (a short first clause, and clauses
+when synthesis falls behind) and spoken by Kokoro while the reply
+streams (`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
+interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word. With
+`vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,
+RMS gates, and barge-in on microphone energy (`pond_voice::barge`). `pond-audio` is the single
+microphone owner. Voice Match is built in `pond-ear` but nothing enrols anyone yet.

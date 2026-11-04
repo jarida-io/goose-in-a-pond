@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Brain, Ear, MessageSquare, RefreshCw, Volume2, type LucideIcon } from "lucide-react";
+import { Brain, ChevronRight, Ear, MessageSquare, RefreshCw, Volume2, type LucideIcon } from "lucide-react";
 import { DetailShell } from "./DetailShell";
 import { Card } from "./controls";
 import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
 import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView } from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
-import { MemoryModels } from "../../../components/models/MemoryModels";
+import { HolderBadge, MemoryModels } from "../../../components/models/MemoryModels";
+import { jobState } from "../../../sections/models/memoryEmbedder";
 import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
@@ -98,6 +99,23 @@ function HubRow({
       )}
     </div>
   );
+}
+
+/** The card that changes each job; listening and the voice share the Speech card. */
+const JOB_CARD: Record<RoleKey, string> = {
+  chat: "hm-card-conversation",
+  asr: "hm-card-speech",
+  tts: "hm-card-speech",
+  embedding: "hm-card-memory",
+};
+
+/** Takes the person to a card, gently unless they asked for no motion, and puts focus on it. */
+function openCard(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const calm = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView?.({ behavior: calm ? "auto" : "smooth", block: "start" });
+  el.focus({ preventScroll: true });
 }
 
 function SkeletonRow() {
@@ -205,24 +223,46 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           const name = isMemory ? job.holder?.name ?? null : roleHolder(roles, role.key);
           const engine = entry ? engineOf(entry) : null;
           const empty = emptyJobText(roles, role.key);
-          return (
-            <div key={role.key} className="hm-tile" role="listitem" data-empty={name || empty ? undefined : "true"}>
+          const state = isMemory && job.holder ? jobState(job.line, { checking: job.checking }) : null;
+          const shown = name ? (entry ? modelLabel(entry) : name) : empty ?? "Nothing chosen yet";
+          // Memory has a card only while the pond lists a model for it.
+          const card = isMemory && job.rows.length === 0 ? null : JOB_CARD[role.key];
+          const body = (
+            <>
               <span className="hm-tile__icon"><Icon size={18} aria-hidden="true" /></span>
+              {card && <ChevronRight size={16} className="hm-tile__go" aria-hidden="true" />}
               <span className="hm-tile__job">{role.label}</span>
-              <span className="hm-tile__holder">
-                {loading ? (
-                  <span className="hm-skel" />
-                ) : name ? (
-                  entry ? modelLabel(entry) : name
-                ) : (
-                  empty ?? "Nothing chosen yet"
-                )}
-              </span>
+              <span className="hm-tile__holder">{loading ? <span className="hm-skel" /> : shown}</span>
               {!loading && engine && (
                 <EngineMark engine={engine} label={engine.label} format={engine.file_format} />
               )}
+              {!loading && state && (
+                <span className="hm-tile__state"><HolderBadge badge={state} /></span>
+              )}
               {!loading && isMemory && job.holder?.builtIn && (
                 <span className="hm-tile__note">Built-in default</span>
+              )}
+            </>
+          );
+          const vacant = name || empty ? undefined : "true";
+          return (
+            <div key={role.key} className="hm-tiles__cell" role="listitem">
+              {card ? (
+                <button
+                  type="button"
+                  className="hm-tile"
+                  data-empty={vacant}
+                  onClick={() => openCard(card)}
+                  aria-label={[
+                    `${role.label}: ${loading ? "loading" : shown}`,
+                    !loading && state ? state.label : null,
+                    !loading && isMemory && job.holder?.builtIn ? "built-in default" : null,
+                  ].filter(Boolean).join(", ") + ". Change"}
+                >
+                  {body}
+                </button>
+              ) : (
+                <div className="hm-tile" data-empty={vacant}>{body}</div>
               )}
             </div>
           );
@@ -256,7 +296,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         </Card>
       )}
 
-      <Card title="Conversation">
+      <Card title="Conversation" id={JOB_CARD.chat}>
         {loading ? (
           <>
             <SkeletonRow />
@@ -280,7 +320,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         )}
       </Card>
 
-      <Card title="Speech">
+      <Card title="Speech" id={JOB_CARD.asr}>
         {loading ? (
           <SkeletonRow />
         ) : (
@@ -312,12 +352,13 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       </Card>
 
       {job.rows.length > 0 && (
-        <Card title="Memory">
+        <Card title="Memory" id={JOB_CARD.embedding}>
           <MemoryModels
             models={models}
             roles={roles}
             transferFor={transferFor}
             line={job.line}
+            checking={job.checking}
             retrying={job.retrying}
             busy={actions.busy}
             off={job.off}
