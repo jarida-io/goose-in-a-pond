@@ -142,7 +142,7 @@ which city. Never guess weather or shell out for it.")]
     }
 
     #[tool(description = "\
-Forecast. One day: day (0 today, 1 tomorrow, 2 the day after) or date. Else days 1-7 from \
+Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date. Else days 1-7 from \
 today, each labelled with its weekday (a week or a weekday name: 7). Highs/lows, rain chance, \
 UV, sun times. One call per place. Omit location for the configured home. Never guess data.")]
     async fn get_weather_forecast(
@@ -766,7 +766,7 @@ mod tests {
         );
         let description = tool.description.as_deref().unwrap_or_default();
         assert!(
-            description.contains("0 today, 1 tomorrow, 2 the day after"),
+            description.contains("0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa"),
             "{description}"
         );
     }
