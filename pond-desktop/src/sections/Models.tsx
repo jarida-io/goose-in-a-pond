@@ -10,7 +10,7 @@ import { ENGINE_GROUPS, engineOf, groupByEngine } from "../lib/modelProvider";
 import {
   ROLES, type RoleKey, roleHolder, emptyJobText, formatSize, formatBytes, budgetReading,
   downloadedOnly, rolesFor, modelLabel, groupBySection, isInUse, holderEntry, recommendedPicks,
-  raisedPick, askingPick, sortModels, carriesPictures, picturesOf, sectionOfRole, usesOf,
+  raisedPick, askingPick, sortModels, carriesPictures, picturesOf, sectionOfRole, usesOf, helpersOf,
 } from "./models/modelsView";
 import { isInFlight } from "./models/modelDownloads";
 import { HelperRow, ModelRow } from "./models/ModelRow";
@@ -196,10 +196,11 @@ export function Models() {
   const picks = useMemo(() => recommendedPicks(models), [models]);
   const pickIds = useMemo(() => new Set(picks.map((m) => m.id)), [picks]);
 
-  const groups = useMemo(
-    () => groupBySection(models, roles?.helpers ?? [], roles),
-    [models, roles],
-  );
+  const helpers = useMemo(() => roles?.helpers ?? [], [roles]);
+  const groups = useMemo(() => groupBySection(models, helpers, roles), [models, helpers, roles]);
+  // Memory has its own panel under Jobs, which says which model is in use and offers the rest, so
+  // the device list leaves its section out rather than list the memory model twice.
+  const deviceGroups = useMemo(() => groups.filter((g) => g.key !== "memory"), [groups]);
   const comingDown = useCallback((m: ModelEntry) => transferFor(m) !== null, [transferFor]);
 
   /** Rows to fetch: not here, not already a pick above, and with somewhere to fetch them from. */
@@ -281,7 +282,7 @@ export function Models() {
     const transfer = transferFor(m);
     return (
       <ModelRow key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)} roles={rolesFor(m)}
-        uses={usesOf(m, roles)}
+        uses={usesOf(m, roles)} helpers={helpersOf(m, helpers)}
         transfer={transfer} withPictures={withPictures(m)} busy={busy}
         onWithPictures={(next) => actions.setWithPictures(m, next)}
         onUse={(role) => void actions.useFor(m, role)} onDelete={() => void remove(m)}
@@ -324,6 +325,30 @@ export function Models() {
         <p className={flash.ok ? "mdl-flash" : "mdl-flash mdl-flash--bad"} role={flash.ok ? "status" : "alert"}>
           {flash.text}
         </p>
+      )}
+
+      {/* GIAP's picks come first: they are what a new pond starts from. The jobs follow, then what
+          is on this device. */}
+      {picks.length > 0 && (
+        <section className="mdl-band" id="mdl-recommended" aria-labelledby="mdl-recommended-title">
+          <h2 className="mdl-band__title" id="mdl-recommended-title">Recommended for this pond</h2>
+          <p className="mdl-band__sub">
+            GIAP's picks. Nothing is downloaded or switched on until you choose it.
+          </p>
+          <div className="mm-picks">
+            {picks.map((m) => {
+              const transfer = transferFor(m);
+              return (
+                <PickCard key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)}
+                  raised={raised?.id === m.id} asking={asking?.id === m.id}
+                  transfer={transfer} withPictures={withPictures(m)} busy={busy}
+                  onWithPictures={(next) => actions.setWithPictures(m, next)}
+                  onUse={() => void actions.useFor(m, "chat")} onDownload={() => void actions.download(m)}
+                  onControl={(action) => transfer && void actions.control(m, transfer, action)} />
+              );
+            })}
+          </div>
+        </section>
       )}
 
       <section className="mdl-band" aria-labelledby="mdl-jobs">
@@ -371,40 +396,19 @@ export function Models() {
         )}
       </section>
 
-      {picks.length > 0 && (
-        <section className="mdl-band" id="mdl-recommended" aria-labelledby="mdl-recommended-title">
-          <h2 className="mdl-band__title" id="mdl-recommended-title">Recommended for this pond</h2>
-          <p className="mdl-band__sub">
-            GIAP's picks. Nothing is downloaded or switched on until you choose it.
-          </p>
-          <div className="mm-picks">
-            {picks.map((m) => {
-              const transfer = transferFor(m);
-              return (
-                <PickCard key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)}
-                  raised={raised?.id === m.id} asking={asking?.id === m.id}
-                  transfer={transfer} withPictures={withPictures(m)} busy={busy}
-                  onWithPictures={(next) => actions.setWithPictures(m, next)}
-                  onUse={() => void actions.useFor(m, "chat")} onDownload={() => void actions.download(m)}
-                  onControl={(action) => transfer && void actions.control(m, transfer, action)} />
-              );
-            })}
-          </div>
-        </section>
-      )}
-
       <section className="mdl-band" id="mdl-device" aria-labelledby="mdl-device-title">
         <h2 className="mdl-band__title" id="mdl-device-title">On this device</h2>
         {error && <ErrorBanner error={error} onRetry={() => void data.reloadModels()} />}
         {loading && <p className="mdl-muted">Reading the catalogue…</p>}
-        {!loading && !error && groups.length === 0 && (
+        {!loading && !error && deviceGroups.length === 0 && (
           <p className="mdl-empty">Nothing downloaded yet. Pick one above, or add one below.</p>
         )}
         {/* Grouped under the section the pond lists each one in, in the Jobs band's own words, so
-            "Listening" means one thing on this page; every row says which jobs it is doing.
+            "Listening" means one thing on this page; every row says which jobs it is doing, and
+            what the models serving it (picture support, a drafter) add to it.
             Conversation then splits by the engine that runs it: the card is the group and the
             models are rows in it, because a card per model is a wall of purple. */}
-        {groups.map((g) => (
+        {deviceGroups.map((g) => (
           <section key={g.key} id={`mdl-section-${g.key}`} className="mdl-group" aria-label={g.label}>
             <header className="mdl-group__head">
               <h3 className="mdl-group__title">{g.label}</h3>
@@ -441,10 +445,7 @@ export function Models() {
             ) : (
               <div className="mdl-group__rows">
                 {g.models.map(row)}
-                {g.helpers.map((h) => (
-                  <HelperRow key={h.id} helper={h}
-                    serves={h.serves ? models.find((m) => m.id === h.serves) ?? null : null} />
-                ))}
+                {g.helpers.map((h) => <HelperRow key={h.id} helper={h} />)}
               </div>
             )}
           </section>

@@ -4,7 +4,9 @@ import { DetailShell } from "./DetailShell";
 import { Card } from "./controls";
 import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
-import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView, UseChips } from "../../../components/models/ModelMarks";
+import {
+  AddOnLine, EngineMark, FitCell, ServedMarks, SourceChip, TransferView, UseChips,
+} from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
 import { HolderBadge, MemoryModels } from "../../../components/models/MemoryModels";
 import { jobState } from "../../../sections/models/memoryEmbedder";
@@ -12,10 +14,11 @@ import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
   ROLES, type RoleKey, addOnOf, askingPick, budgetReading, emptyJobText, fitReading,
-  groupBySection, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel, raisedPick,
-  recommendedPicks, roleHolder, rolesFor, sortModels, sourceChip, unavailableNote, usesOf,
+  groupBySection, helpersOf, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel,
+  raisedPick, recommendedPicks, roleHolder, rolesFor, servedUses, sortModels, sourceChip,
+  unavailableNote, usesOf,
 } from "../../../sections/models/modelsView";
-import type { ModelEntry, ModelUse } from "../../../api/types";
+import type { HelperModel, ModelEntry, ModelUse } from "../../../api/types";
 
 const ROLE_ICON: Record<RoleKey, LucideIcon> = {
   chat: MessageSquare,
@@ -27,12 +30,14 @@ const ROLE_ICON: Record<RoleKey, LucideIcon> = {
 // ─── One installed model ─────────────────────────────────────
 
 function HubRow({
-  model, inUse, uses, raised, actions, memory, transfer,
+  model, inUse, uses, helpers, raised, actions, memory, transfer,
 }: {
   model: ModelEntry;
   inUse: boolean;
   /** The jobs this row is doing now, each shown as a chip. */
   uses: ModelUse[];
+  /** The models in use that serve this row, such as its drafter. */
+  helpers: HelperModel[];
   raised: boolean;
   actions: ReturnType<typeof useModelActions>;
   memory: ReturnType<typeof useModels>["memory"];
@@ -43,6 +48,7 @@ function HubRow({
   const chip = sourceChip(model);
   const facts = modelFacts(model);
   const addOn = addOnOf(model);
+  const served = servedUses(helpers, addOn);
   const measured = measuredOf(model.recommended);
   const fit = fitReading(model, memory, { inUse });
   const role = rolesFor(model)[0];
@@ -66,6 +72,7 @@ function HubRow({
             onAdd={addOn.kind === "add" ? () => void actions.addPictures(model) : undefined}
           />
         )}
+        <ServedMarks uses={served} />
       </div>
 
       {transfer ? (
@@ -189,6 +196,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       model={m}
       inUse={isInUse(m, roles)}
       uses={usesOf(m, roles)}
+      helpers={helpersOf(m, roles?.helpers ?? [])}
       raised={raisedInstalled?.id === m.id}
       actions={actions}
       memory={memory}
@@ -222,6 +230,34 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         <div className="hm-flash hm-flash--bad" role="alert">
           Could not reach the server: {error}
         </div>
+      )}
+
+      {/* GIAP's picks lead, as on the full Models page; the jobs follow. */}
+      {toGet.length > 0 && (
+        <Card title="Recommended for this pond">
+          <div className="hm-picks">
+            {toGet.map((m) => {
+              const transfer = transferFor(m);
+              return (
+                <PickCard
+                  key={m.id}
+                  model={m}
+                  memory={memory}
+                  inUse={false}
+                  raised={raisedCard?.id === m.id}
+                  asking={asking?.id === m.id}
+                  transfer={transfer}
+                  withPictures={actions.withPictures(m)}
+                  busy={actions.busy}
+                  onWithPictures={(next) => actions.setWithPictures(m, next)}
+                  onUse={() => void actions.useFor(m, "chat")}
+                  onDownload={() => void actions.download(m)}
+                  onControl={(action) => transfer && void actions.control(m, transfer, action)}
+                />
+              );
+            })}
+          </div>
+        </Card>
       )}
 
       <div className="hm-tiles" role="list" aria-label="Which model does each job">
@@ -277,33 +313,6 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           );
         })}
       </div>
-
-      {toGet.length > 0 && (
-        <Card title="Recommended for this pond">
-          <div className="hm-picks">
-            {toGet.map((m) => {
-              const transfer = transferFor(m);
-              return (
-                <PickCard
-                  key={m.id}
-                  model={m}
-                  memory={memory}
-                  inUse={false}
-                  raised={raisedCard?.id === m.id}
-                  asking={asking?.id === m.id}
-                  transfer={transfer}
-                  withPictures={actions.withPictures(m)}
-                  busy={actions.busy}
-                  onWithPictures={(next) => actions.setWithPictures(m, next)}
-                  onUse={() => void actions.useFor(m, "chat")}
-                  onDownload={() => void actions.download(m)}
-                  onControl={(action) => transfer && void actions.control(m, transfer, action)}
-                />
-              );
-            })}
-          </div>
-        </Card>
-      )}
 
       <Card title="Conversation" id={JOB_CARD.chat}>
         {loading ? (

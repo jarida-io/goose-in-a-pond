@@ -4,7 +4,7 @@ import {
   rolesFor, modelLabel, groupBySection, modelFacts, sourceChip, addOnOf,
   offersPictures, downloadSummary, recommendedPicks, measuredOf, raisedPick, askingPick,
   isInUse, holderEntry, sortModels, fitsOnlyWithoutPictures, fileFitsOnlyWithoutPictures, PICTURES_LEFT_OUT,
-  unavailableNote, usesOf, sectionOf, jobLabel,
+  unavailableNote, usesOf, sectionOf, jobLabel, helpersOf, servedUses, includedLabel, helperAbout,
 } from "./modelsView";
 import type { HelperModel, ModelActiveRoles, ModelEntry, ModelMemoryStatus } from "../../api/types";
 import {
@@ -501,18 +501,34 @@ describe("sections and the jobs each model is doing", () => {
     expect(groups[0].models.map((m) => m.name)).toEqual(["minilm", "bge-base"]);
   });
 
-  it("puts the models in use beside the rows under their own sections", () => {
-    const groups = groupBySection([
-      model({ name: "e4b", section: "conversation", roles: ["chat"] }),
-    ], [
-      helper(),
+  it("folds what serves a listed row into it, and lists the rest under their own sections", () => {
+    const e4bRow = model({ name: "e4b", section: "conversation", roles: ["chat"] });
+    const encoder = helper({ serves: e4bRow.id });
+    const drafter = helper({ id: "mtp", title: null, uses: ["drafter"], section: "other", serves: e4bRow.id });
+    const groups = groupBySection([e4bRow], [
+      encoder,
+      drafter,
       helper({ id: "camera_detector", title: "YOLOX-Nano", uses: ["camera"], serves: null }),
-      helper({ id: "mtp", title: null, uses: ["drafter"], section: "other" }),
-      helper({ id: "later", section: "reranking" as never }),
+      helper({ id: "gone#pictures", serves: "gguf/not-listed" }),
+      helper({ id: "later", section: "reranking" as never, serves: null }),
     ], null);
     expect(groups.map((g) => g.key)).toEqual(["conversation", "pictures", "other"]);
-    expect(groups[1].helpers.map((h) => h.id)).toEqual(["gguf/e4b#pictures", "camera_detector"]);
-    expect(groups[2].helpers.map((h) => h.id)).toEqual(["mtp", "later"]);
+    expect(groups[0].helpers).toEqual([]);
+    expect(groups[1].helpers.map((h) => h.id)).toEqual(["camera_detector", "gone#pictures"]);
+    expect(groups[2].helpers.map((h) => h.id)).toEqual(["later"]);
+    expect(helpersOf(e4bRow, [encoder, drafter])).toEqual([encoder, drafter]);
+  });
+
+  it("says on a row what its helpers add, and picture support only once", () => {
+    const drafter = helper({ id: "mtp", uses: ["drafter"], section: "other" });
+    const encoder = helper();
+    const included = { kind: "included", text: "Pictures included", bytes: 1 } as const;
+    const none = { kind: "none", text: "", bytes: null } as const;
+    expect(servedUses([encoder, drafter], included)).toEqual(["drafter"]);
+    expect(servedUses([encoder, drafter], none)).toEqual(["pictures", "drafter"]);
+    expect(includedLabel("drafter")).toBe("Faster answers");
+    expect(includedLabel("pictures")).toBe("Pictures included");
+    expect(helperAbout("faces")).toBe("Recognises the faces of the people your household has named.");
   });
 });
 

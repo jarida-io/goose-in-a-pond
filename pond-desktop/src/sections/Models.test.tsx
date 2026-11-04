@@ -97,11 +97,11 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the bands", () => {
-  it("opens on Jobs, what is recommended, what is here, and where to get more", async () => {
+  it("opens on what is recommended, then Jobs, what is here, and where to get more", async () => {
     renderModels();
     await screen.findByRole("heading", { name: "Recommended for this pond" });
     const bands = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
-    expect(bands).toEqual(["Jobs", "Recommended for this pond", "On this device", "Get more"]);
+    expect(bands).toEqual(["Recommended for this pond", "Jobs", "On this device", "Get more"]);
   });
 
   it("no longer has a band of its own for what is coming down", async () => {
@@ -268,14 +268,20 @@ describe("On this device", () => {
     expect(within(device).getByText("Llama-3.2-3B-Instruct-Q4_K_M")).toBeTruthy();
   });
 
-  it("says on every row which jobs it is doing, and lists what works beside the rows", async () => {
+  it("says on every row which jobs it is doing, and folds what serves a row into that row", async () => {
     const minilm = {
       id: "embedding/all-MiniLM-L6-v2", provider: "embedding", category: "embedding",
       name: "all-MiniLM-L6-v2", title: "all-MiniLM-L6-v2", is_active: false, downloaded: false,
       acquire: "external", roles: ["embedding"], section: "memory",
     } as ModelEntry;
     setup({
-      models: [e2b({ ...HERE, roles: ["chat", "tool"], section: "conversation" }), minilm],
+      models: [
+        e2b({
+          ...HERE, roles: ["chat", "tool"], section: "conversation",
+          companions: [{ kind: "pictures", label: "Gemma 4 E2B", size_bytes: 986_833_728, state: "installed" }],
+        }),
+        minilm,
+      ],
       roles: {
         ...rolesWith(null),
         helpers: [
@@ -287,24 +293,22 @@ describe("On this device", () => {
     });
     renderModels();
     const device = await band("On this device");
+    // Memory has its own panel under Jobs; the drafter and encoder are part of the Gemma row.
     const regions = within(device).getAllByRole("region").map((r) => r.getAttribute("aria-label"));
-    expect(regions).toEqual(["Conversation", "Memory", "Pictures", "Other"]);
+    expect(regions).toEqual(["Conversation", "Camera and faces"]);
 
     const conversation = within(device).getByRole("region", { name: "Conversation" });
     expect(within(conversation).getByText("Conversation", { selector: ".mm-chip--use" })).toBeTruthy();
     expect(within(conversation).getByText("Tool calls", { selector: ".mm-chip--use" })).toBeTruthy();
+    expect(within(conversation).getByText("Faster answers")).toBeTruthy();
+    expect(within(conversation).getByText("Pictures included")).toBeTruthy();
+    expect(within(device).queryByText("Gemma 4 E2B pictures")).toBeNull();
 
-    // The built-in memory model has no file, and is listed because it is doing a job.
-    const memoryBand = within(device).getByRole("region", { name: "Memory" });
-    expect(within(memoryBand).getByText("all-MiniLM-L6-v2", { selector: ".mdl-row__name" })).toBeTruthy();
-    expect(within(memoryBand).getByText("Memory", { selector: ".mm-chip--use" })).toBeTruthy();
-
-    const pictures = within(device).getByRole("region", { name: "Pictures" });
-    expect(within(pictures).getByText("YOLOX-Nano")).toBeTruthy();
-    expect(within(pictures).getByText("Works with Gemma 4 E2B")).toBeTruthy();
-    // A helper the pond has no name for is named by its job.
-    const other = within(device).getByRole("region", { name: "Other" });
-    expect(within(other).getByText("Faster answers", { selector: ".mdl-row__name" })).toBeTruthy();
+    // The camera's detector serves no row, so it stands alone, saying what it does, with nothing to press.
+    const camera = within(device).getByRole("region", { name: "Camera and faces" });
+    expect(within(camera).getByText("YOLOX-Nano")).toBeTruthy();
+    expect(within(camera).getByText("Spots people, animals and things in your cameras' pictures.")).toBeTruthy();
+    expect(within(camera).queryByRole("button")).toBeNull();
   });
 
   it("reads each row's picture support in the household's words", async () => {
@@ -919,8 +923,11 @@ describe("Memory", () => {
     const jobs = await band("Jobs");
     expect(within(jobs).getByRole("region", { name: "Memory models" })).toBeTruthy();
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
-      "Jobs", "Recommended for this pond", "On this device", "Get more",
+      "Recommended for this pond", "Jobs", "On this device", "Get more",
     ]);
+    // Memory is listed once, in its panel, not again as a section of the device list.
+    const device = await band("On this device");
+    expect(within(device).queryByRole("region", { name: "Memory" })).toBeNull();
   });
 
   it("recommends EmbeddingGemma 2 first, with what it buys and its size, and one action to use it", async () => {

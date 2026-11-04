@@ -458,6 +458,29 @@ export function jobLabel(use: ModelUse): string {
   return i18n.t(`models.use.${use}`);
 }
 
+/** What a model working beside a row adds to it, as the row reads: "Faster answers". */
+export function includedLabel(use: ModelUse): string {
+  return use === "pictures" || use === "drafter" ? i18n.t(`models.included.${use}`) : jobLabel(use);
+}
+
+/** What a model working beside the rows does, in a sentence. */
+export function helperAbout(use: ModelUse): string {
+  return i18n.t(`models.helperAbout.${use}`, { defaultValue: jobLabel(use) });
+}
+
+/** The models working beside `m` that the pond says serve it, such as its picture encoder or its
+ *  drafter. They are part of the model, not models of their own. */
+export function helpersOf(m: Pick<ModelEntry, "id">, helpers: HelperModel[]): HelperModel[] {
+  return helpers.filter((h) => h.serves === m.id);
+}
+
+/** The jobs `m`'s helpers add that its row does not already say. Picture support the row reads as
+ *  "Pictures included" from its own add-on is not said twice. */
+export function servedUses(helpers: HelperModel[], addOn: AddOn): ModelUse[] {
+  const uses = helpers.flatMap((h) => h.uses).filter((u) => USES.includes(u));
+  return [...new Set(uses)].filter((u) => !(u === "pictures" && addOn.kind === "included"));
+}
+
 const SECTION_OF_ROLE: Record<RoleKey, ModelSection> = {
   chat: "conversation",
   asr: "listening",
@@ -483,14 +506,15 @@ export interface SectionGroup {
   key: ModelSection;
   label: string;
   models: ModelEntry[];
-  /** Models in use beside the rows: picture support, a drafter, the camera's. */
+  /** Models in use that serve no listed row, such as the camera's detector. A helper that serves a
+   *  listed row (picture support, a drafter) goes with that row instead; see `helpersOf`. */
   helpers: HelperModel[];
 }
 
 /** What is on this device, by section in `MODEL_SECTIONS` order: every downloaded row, every row
  *  doing a job even when the pond fetched its weights itself (a built-in memory model has no
- *  file), and the models in use beside the rows. Rows doing a job come first. Empty sections are
- *  dropped. */
+ *  file), and the models in use that serve none of those rows. Rows doing a job come first. Empty
+ *  sections are dropped. */
 export function groupBySection(
   models: ModelEntry[],
   helpers: HelperModel[],
@@ -498,11 +522,13 @@ export function groupBySection(
 ): SectionGroup[] {
   const working = (m: ModelEntry) => (usesOf(m, roles).length > 0 ? 0 : 1);
   const shown = models.filter((m) => m.downloaded || working(m) === 0);
+  const listed = new Set(shown.map((m) => m.id));
+  const alone = helpers.filter((h) => !h.serves || !listed.has(h.serves));
   return MODEL_SECTIONS.map((key) => ({
     key,
     label: i18n.t(`models.section.${key}`),
     models: shown.filter((m) => sectionOf(m) === key).sort((a, b) => working(a) - working(b)),
-    helpers: helpers.filter((h) => (MODEL_SECTIONS.includes(h.section) ? h.section : "other") === key),
+    helpers: alone.filter((h) => (MODEL_SECTIONS.includes(h.section) ? h.section : "other") === key),
   })).filter((g) => g.models.length > 0 || g.helpers.length > 0);
 }
 
