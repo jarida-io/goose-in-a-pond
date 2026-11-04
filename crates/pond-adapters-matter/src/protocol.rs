@@ -231,6 +231,14 @@ pub struct StateResult {
     pub state: DeviceState,
 }
 
+/// The `state_patch` result: `state`'s own reading, typed instead of worded, for undo to replay
+/// a reversed command against.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StatePatchResult {
+    #[serde(default)]
+    pub patch: DeviceStatePatch,
+}
+
 /// The `commission` result.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommissionResult {
@@ -732,5 +740,21 @@ mod tests {
         assert_eq!(result.applied.on, Some(true));
         assert_eq!(result.applied.brightness, Some(40));
         assert_eq!(result.applied.position, None);
+    }
+
+    #[test]
+    fn the_state_patch_deserialises_straight_into_the_core_type() {
+        let result: StatePatchResult =
+            serde_json::from_value(json!({ "patch": { "locked": true, "valve": false } }))
+                .unwrap();
+        assert_eq!(result.patch.locked, Some(true));
+        assert_eq!(result.patch.valve, Some(false));
+        assert_eq!(result.patch.on, None);
+    }
+
+    #[test]
+    fn a_device_with_nothing_to_report_deserialises_to_an_empty_patch() {
+        let result: StatePatchResult = serde_json::from_value(json!({ "patch": {} })).unwrap();
+        assert_eq!(result.patch, DeviceStatePatch::default());
     }
 }

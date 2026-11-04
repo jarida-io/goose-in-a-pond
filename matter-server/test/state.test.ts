@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { planControl } from "../src/mapping/control.js";
 import { describeNode } from "../src/mapping/describe.js";
-import { stateOf } from "../src/mapping/state.js";
+import { stateOf, statePatchOf } from "../src/mapping/state.js";
 import {
   bareLockNode,
   coOnlyAlarmNode,
@@ -11,8 +11,10 @@ import {
   extendedColorLightNode,
   genericSwitchNode,
   laundryWasherNode,
+  levelValveNode,
   named,
   node,
+  plainValveNode,
   smokeCoAlarmNode,
   videoPlayerNode,
   tunableWhiteNode,
@@ -377,5 +379,62 @@ describe("device state", () => {
     expect(describeNode(roller).capabilities.map(c => c.verb)).toEqual(["position"]);
     expect(stateOf(roller).values.find(v => v.name === "tilt")).toBeUndefined();
     expect(() => planControl(roller, "matter-3", "tilt", 40)).not.toThrow();
+  });
+});
+
+describe("typed state -- what undo replays a reversed command against", () => {
+  it("reads power, lock and colour as typed values, not words", () => {
+    expect(statePatchOf(doorLockNode())).toEqual({ locked: true });
+    expect(statePatchOf(extendedColorLightNode())).toEqual({
+      on: true,
+      brightness: 100,
+      hue: 0,
+      saturation: 0,
+    });
+  });
+
+  it("reads a white bulb's colour temperature in kelvin, like stateOf does", () => {
+    // 370 mireds is 2703 K, matching `valueOf(tunableWhiteNode(), "color_temp")` above.
+    expect(statePatchOf(tunableWhiteNode()).color_temp).toBe(2703);
+  });
+
+  it("reads a television's volume, not its (absent) brightness", () => {
+    const patch = statePatchOf(videoPlayerNode());
+    expect(patch.volume).toBe(50);
+    expect(patch.brightness).toBeUndefined();
+  });
+
+  it("reads a valve's open/shut state and its level where it has one", () => {
+    expect(statePatchOf(levelValveNode())).toEqual({ valve: true, position: 40 });
+    // No level: nothing invented for position, same as `stateOf`.
+    expect(statePatchOf(plainValveNode())).toEqual({ valve: false });
+  });
+
+  it("reads a covering's lift and tilt together", () => {
+    const venetian = node(114, [
+      named("Blind"),
+      endpoint(1, {
+        windowCovering: {
+          currentPositionLiftPercent100ths: 0,
+          currentPositionTiltPercent100ths: 10000,
+        },
+      }),
+    ]);
+
+    expect(statePatchOf(venetian)).toEqual({ position: 100, tilt: 0 });
+  });
+
+  it("leaves out mode and operation -- a setting's name has nowhere typed to go", () => {
+    // The washer fixture has a mode ("Normal") and an operation ("stopped"); neither is a
+    // field `set_mode`/`set_operation` can be fed straight back into from this reading alone.
+    const patch = statePatchOf(laundryWasherNode());
+    expect(patch.mode).toBeUndefined();
+    expect(patch.operation).toBeUndefined();
+    expect(patch.on).toBe(false);
+  });
+
+  it("reports nothing for a device with no readable attributes", () => {
+    const bare = node(115, [named("Mystery"), endpoint(1, {})]);
+    expect(statePatchOf(bare)).toEqual({});
   });
 });

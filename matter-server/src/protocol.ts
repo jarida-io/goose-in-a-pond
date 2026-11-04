@@ -168,6 +168,7 @@ export type OpName =
   | "control"
   | "describe"
   | "state"
+  | "state_patch"
   | "ping";
 
 export interface Request {

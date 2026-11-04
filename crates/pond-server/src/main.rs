@@ -2982,6 +2982,12 @@ async fn run_server(
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
     );
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
+        db.system.clone(),
+    ));
+
     // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
     // (the log only records changes). Anywhere before serving is early enough.
     pond_mcp_server::init_sensor_deps(
@@ -3129,6 +3135,7 @@ async fn run_server(
             prompt_template_repo.clone(),
             prompt_extra_repo.clone(),
             device_control.clone(),
+            last_action.clone(),
             Some(session_storage.clone()),
             Some(model_repo.clone()),
             false, // voice_mode — server mode, not voice
@@ -5136,6 +5143,11 @@ async fn run_chat(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
+        db.system.clone(),
+    ));
 
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
@@ -5516,6 +5528,7 @@ async fn run_chat(
             template_repo,
             extras_repo,
             Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+            last_action,
             Some(trim_storage), // powers the trimmer's summary splice
             Some(chat_model_repo.clone()),
             voice_mode,
@@ -9485,6 +9498,7 @@ async fn build_goose_backend(
     device_control: Arc<
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
+    last_action: Arc<dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync>,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
@@ -9613,6 +9627,7 @@ async fn build_goose_backend(
         device_registry.clone(),
         skill_repo.clone(),
         device_control,
+        last_action,
         tool_caller.clone(),
     ) {
         Ok(ext_names) => {
@@ -10192,6 +10207,12 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let db = Database::init(&data_dir).await?;
     litert_runtime::ensure_library_dir(&data_dir);
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
+        db.system.clone(),
+    ));
+
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
@@ -10289,6 +10310,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10335,6 +10357,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10409,6 +10432,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,

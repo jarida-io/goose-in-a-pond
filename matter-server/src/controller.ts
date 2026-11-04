@@ -12,7 +12,7 @@ import { deviceClusters, nodeToDevice } from "./mapping/devices.js";
 import { observedFor, planControl, type Verb } from "./mapping/control.js";
 import { observedOperation, settingClusters } from "./mapping/settings.js";
 import { describeNode } from "./mapping/describe.js";
-import { stateOf } from "./mapping/state.js";
+import { stateOf, statePatchOf } from "./mapping/state.js";
 import { readingFor, sensorClusters } from "./mapping/sensors.js";
 import {
   applicationEndpoints,
@@ -344,6 +344,13 @@ export class Controller {
   state(deviceId: string): DeviceState {
     const [, slice] = this.#sliceFor(deviceId);
     return stateOf(slice);
+  }
+
+  /** The same snapshot as `state`, typed instead of worded -- what GIAP's "undo" replays a
+   * reversed command against. */
+  statePatch(deviceId: string): DeviceStatePatch {
+    const [, slice] = this.#sliceFor(deviceId);
+    return statePatchOf(slice);
   }
 
   /** Drive a device. Returns what the device state became. */

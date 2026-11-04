@@ -246,6 +246,11 @@ async function dispatch(controller: Controller, request: Request): Promise<unkno
       return { state: controller.state(deviceId) };
     }
 
+    case "state_patch": {
+      const deviceId = requireDeviceId(params.device_id);
+      return { patch: controller.statePatch(deviceId) };
+    }
+
     default:
       throw new OpError("bad_request", `'${String(request.op)}' is not an op`);
   }
