@@ -9170,6 +9170,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llama-cpp-2"
 version = "0.1.160"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=baff4015e2a2ce09812b12ca6016bc8cc3eecf37#baff4015e2a2ce09812b12ca6016bc8cc3eecf37"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -9182,6 +9183,7 @@ dependencies = [
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.160"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=baff4015e2a2ce09812b12ca6016bc8cc3eecf37#baff4015e2a2ce09812b12ca6016bc8cc3eecf37"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
