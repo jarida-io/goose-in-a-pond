@@ -23,12 +23,11 @@ const SCALE: f32 = 1.0 / 128.0;
 const DEFAULT_STRIDES: [u32; 3] = [8, 16, 32];
 const DEFAULT_NUM_ANCHORS: usize = 2;
 
-/// What the GPU warm-up feeds SCRFD: one frame at the export's input side.
 pub fn model_spec() -> ModelSpec {
     ModelSpec {
         name: crate::DETECTOR_NAME,
         input_shape: vec![1, 3, INPUT_SIDE as i64, INPUT_SIDE as i64],
-        gpu: true,
+        gpu: false,
     }
 }
 

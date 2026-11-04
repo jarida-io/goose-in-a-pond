@@ -23,12 +23,11 @@ const IOU_THRESH: f32 = 0.45;
 
 pub use pond_core::models::domain::acceleration::VISION_CLASSIFIER as MODEL_NAME;
 
-/// What the GPU warm-up feeds YOLOX: one letterboxed frame.
 pub fn model_spec() -> ModelSpec {
     ModelSpec {
         name: MODEL_NAME,
         input_shape: vec![1, 3, INPUT_SIZE as i64, INPUT_SIZE as i64],
-        gpu: true,
+        gpu: false,
     }
 }
 

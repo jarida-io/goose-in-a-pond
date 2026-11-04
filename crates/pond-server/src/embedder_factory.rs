@@ -54,8 +54,7 @@ impl ServerEmbedderFactory {
 
     #[cfg(feature = "local-inference")]
     async fn gguf(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
-        use pond_core::models::domain::device_budget::embedder_on_gpu;
-        use pond_inference::{EmbeddingModelSpec, Placement};
+        use pond_inference::EmbeddingModelSpec;
 
         let file = model
             .gguf()
@@ -68,29 +67,7 @@ impl ServerEmbedderFactory {
             ));
         }
         let spec = EmbeddingModelSpec::resolve(model.name)?;
-        let available = mem_available_mb();
-        if !embedder_on_gpu(
-            pond_adapters_local_inference::CUDA_ENABLED,
-            model.model_id,
-            available,
-        ) {
-            return self.warmed(spec, file.filename).await;
-        }
-        match self
-            .warmed(spec.clone().with_placement(Placement::Gpu), file.filename)
-            .await
-        {
-            Ok(provider) => Ok(provider),
-            // NvMap can refuse a load that MemAvailable said would fit; the CPU still serves.
-            Err(e) => {
-                tracing::warn!(
-                    model = model.name,
-                    available_mb = ?available,
-                    "the embedder did not load on the GPU, so it runs on the CPU: {e:#}"
-                );
-                self.warmed(spec, file.filename).await
-            }
-        }
+        self.warmed(spec, file.filename).await
     }
 
     /// The provider loads on its first embed; doing that here keeps the load out of a turn.
@@ -138,20 +115,6 @@ impl ServerEmbedderFactory {
             pond_api::model_acquisition::restore_model(state, &id).await;
         });
     }
-}
-
-/// `MemAvailable` in MB; `None` off Linux or when unreadable.
-#[cfg(feature = "local-inference")]
-fn mem_available_mb() -> Option<u64> {
-    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: u64 = info
-        .lines()
-        .find_map(|l| l.strip_prefix("MemAvailable:"))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    Some(kb / 1024)
 }
 
 #[async_trait]

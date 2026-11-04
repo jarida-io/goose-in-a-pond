@@ -22,6 +22,10 @@ const POLL: Duration = Duration::from_secs(60);
 /// How soon it looks again after the household held it off with work left; a choice.
 const RETRY: Duration = Duration::from_secs(5);
 
+/// Quiet period after a person's turn before the embedder is loaded on its own; a hand-asked
+/// reindex waives it.
+const IDLE_BEFORE_LOAD: Duration = Duration::from_secs(120);
+
 pub struct SlotDeps {
     pub embedder: Arc<ActiveEmbedder>,
     pub factory: Arc<dyn EmbedderFactory>,
@@ -64,38 +68,40 @@ enum Look {
 pub async fn run(deps: SlotDeps) {
     let mut slot = EmbeddingSlot::new();
     let mut load_owed = false;
+    let mut user_requested = false;
     let mut last = Look::Done;
-    tracing::info!("embedding slot active: loads the Memory-role model and re-embeds while idle");
+    tracing::info!(
+        "embedding slot active: loads the Memory-role model on demand while idle and unloads after"
+    );
     loop {
         let wait = if last == Look::HeldOff { RETRY } else { POLL };
         tokio::select! {
-            _ = deps.reindex.notified() => slot.retry_failed(),
+            _ = deps.reindex.notified() => {
+                slot.retry_failed();
+                user_requested = true;
+            }
             _ = deps.arrived.notified() => {}
             _ = deps.embedder.load_requested() => load_owed = true,
             _ = tokio::time::sleep(wait) => {}
         }
-        last = look(&deps, &mut slot, &mut load_owed).await;
+        last = look(&deps, &mut slot, &mut load_owed, &mut user_requested).await;
     }
 }
 
-async fn look(deps: &SlotDeps, slot: &mut EmbeddingSlot, load_owed: &mut bool) -> Look {
+async fn look(
+    deps: &SlotDeps,
+    slot: &mut EmbeddingSlot,
+    load_owed: &mut bool,
+    user_requested: &mut bool,
+) -> Look {
     loop {
-        if !deps.lane.embedding_may_run().await {
+        if !deps.lane.embedding_may_run().await || (deps.chat_model_warming)() {
+            deps.embedder.unload().await;
             return Look::HeldOff;
         }
-        if *load_owed || matches!(deps.embedder.state(), EmbedderState::Chosen { .. }) {
-            if (deps.chat_model_warming)() {
-                *load_owed = true;
-                return Look::HeldOff;
-            }
-            *load_owed = false;
-            let _shown = deps.lane.embedding_slot_running();
-            if !matches!(
-                deps.embedder.ensure_loaded(deps.factory.as_ref()).await,
-                EmbedderState::Ready { .. }
-            ) {
-                return Look::Done;
-            }
+        if !*user_requested && deps.activity.read().await.elapsed() < IDLE_BEFORE_LOAD {
+            deps.embedder.unload().await;
+            return Look::HeldOff;
         }
 
         let stores = SlotStores {
@@ -104,6 +110,25 @@ async fn look(deps: &SlotDeps, slot: &mut EmbeddingSlot, load_owed: &mut bool) -
             sessions: deps.sessions.as_ref(),
             context: deps.context.as_deref(),
         };
+        if !slot.has_pending_work(&stores, &deps.embedder).await {
+            *load_owed = false;
+            *user_requested = false;
+            deps.embedder.unload().await;
+            return Look::Done;
+        }
+
+        if *load_owed || matches!(deps.embedder.state(), EmbedderState::Chosen { .. }) {
+            *load_owed = false;
+            let _shown = deps.lane.embedding_slot_running();
+            if !matches!(
+                deps.embedder.ensure_loaded(deps.factory.as_ref()).await,
+                EmbedderState::Ready { .. }
+            ) {
+                *user_requested = false;
+                return Look::Done;
+            }
+        }
+
         let gate = Gate {
             lane: deps.lane.clone(),
             activity: deps.activity.clone(),
@@ -116,8 +141,15 @@ async fn look(deps: &SlotDeps, slot: &mut EmbeddingSlot, load_owed: &mut bool) -
         match report.end {
             // The new choice loads here, at once, while the device is still free.
             PassEnd::ModelChanged => *load_owed = true,
-            PassEnd::Yielded => return Look::HeldOff,
-            PassEnd::Drained | PassEnd::NotReady | PassEnd::StoreFailed => return Look::Done,
+            PassEnd::Yielded => {
+                deps.embedder.unload().await;
+                return Look::HeldOff;
+            }
+            PassEnd::Drained | PassEnd::NotReady | PassEnd::StoreFailed => {
+                *user_requested = false;
+                deps.embedder.unload().await;
+                return Look::Done;
+            }
         }
     }
 }

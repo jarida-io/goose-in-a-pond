@@ -1213,11 +1213,6 @@ async fn run_server(
     // After `set_network_mode` (it may download ~100 MB from github.com) and before any
     // ONNX-dependent init (face recognition, embeddings).
     ensure_onnx_runtime();
-    // Vision and face models start on the CPU and move to the GPU after the language model loads.
-    let onnx_gpu_plan = onnx_gpu::plan(&data_dir, ORT_VERSION, on_jetson());
-    if let Some(plan) = &onnx_gpu_plan {
-        tracing::info!(cache = %plan.cache_dir.display(), "onnx: GPU runtime with TensorRT in use");
-    }
     // Before any provider is built: goose reads it when it first loads a `.litertlm` model. What
     // it finds decides whether the catalogue offers LiteRT-LM models at all.
     let litert_library = litert_runtime::ensure_library_dir(&data_dir);
@@ -1480,12 +1475,14 @@ async fn run_server(
                         out.speed()
                     );
                     let arc = Arc::new(out);
-                    let prewarm_arc = arc.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = prewarm_arc.prewarm().await {
-                            tracing::debug!("Kokoro background prewarm deferred: {e}");
-                        }
-                    });
+                    if settings.voice_room_enabled {
+                        let prewarm_arc = arc.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = prewarm_arc.prewarm().await {
+                                tracing::debug!("Kokoro background prewarm deferred: {e}");
+                            }
+                        });
+                    }
                     Some(arc)
                 }
                 Err(e) => {
@@ -2649,6 +2646,8 @@ async fn run_server(
         let promotion_notices = proposal_notice_tx;
 
         let extraction_embedder = embedder.clone();
+        let extraction_factory = embedder_factory.clone();
+        let extraction_arrived = embedding_arrived.clone();
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
@@ -2732,7 +2731,9 @@ async fn run_server(
                         LaneJob::MemoryExtraction,
                         // Embedder health, never "every row has a vector": unembedded
                         // rows are routine, so that gate would latch shut for good.
-                        settings.memory_extraction_enabled && service.embedder_is_usable(),
+                        settings.memory_extraction_enabled
+                            && !extraction_embedder.model_id().is_empty()
+                            && service.health_is_usable(),
                         cadence,
                         tick.waives(),
                         saw_activity_since_start,
@@ -2740,12 +2741,21 @@ async fn run_server(
                     )
                     .await
                 else {
-                    // Otherwise an off or loading embedder looks like nothing left to extract.
-                    if !extraction_embedder.available() {
+                    if extraction_embedder.model_id().is_empty() || !service.health_is_usable() {
                         status.write().await.blocked_on = Some("no_embedder".to_string());
                     }
                     continue;
                 };
+
+                if !matches!(
+                    extraction_embedder
+                        .ensure_loaded(extraction_factory.as_ref())
+                        .await,
+                    pond_core::models::services::active_embedder::EmbedderState::Ready { .. }
+                ) {
+                    status.write().await.blocked_on = Some("no_embedder".to_string());
+                    continue;
+                }
 
                 // Preempted immediately by the lane or on activity: activity costs at most one window's inference.
                 let cancel = slot.cancellation_token();
@@ -2786,6 +2796,10 @@ async fn run_server(
                     ) => r,
                 };
                 watcher.abort();
+                extraction_embedder.unload().await;
+                if report.memories_written > 0 {
+                    extraction_arrived.notify_one();
+                }
 
                 status.write().await.record(config.mode, &report);
 
@@ -2919,7 +2933,6 @@ async fn run_server(
         });
 
         let mut events = event_bus.subscribe();
-        let lane = inference_lane.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
             use pond_core::shared::ports::event_bus::BusEvent;
@@ -2933,7 +2946,6 @@ async fn run_server(
                     if let Ok(mut seen) = last_person_seen.lock() {
                         *seen = Some(std::time::Instant::now());
                     }
-                    lane.preempt();
                 }
             }
         });
@@ -4583,13 +4595,6 @@ async fn run_server(
             let _ = prewarm_done.send(true);
         });
     }
-    if let Some(plan) = onnx_gpu_plan {
-        let mut prewarmed = prewarmed.clone();
-        tokio::spawn(async move {
-            let _ = prewarmed.wait_for(|done| *done).await;
-            pond_onnx_accel::enable_gpu(plan);
-        });
-    }
     // Every lane job: a turn in flight is not quiet, however long it has been answering.
     {
         let runs = state.runs.clone();
@@ -4600,8 +4605,13 @@ async fn run_server(
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
         });
         let lane = inference_lane.clone();
+        let preempt_embedder = embedder.clone();
         state.runs.set_preempt_hook(move || {
             lane.preempt();
+            let embedder = preempt_embedder.clone();
+            tokio::spawn(async move {
+                embedder.unload().await;
+            });
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -7016,7 +7026,7 @@ async fn run_long_task_runner(
     const POLL_SECS: u64 = 30;
     // Short, unlike the chores': a member asked for this work and is waiting for it. A step the
     // household then interrupts is rerun without spending a try, so a short wait costs little.
-    const QUIET_SECS: u64 = 10;
+    const QUIET_SECS: u64 = 2;
     // No spacing between runs: the loop asks again at once only after a run that did something,
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
@@ -7188,6 +7198,7 @@ async fn run_long_task_runner(
             )
             .await;
             compiled = Some(roles_print);
+            progressed = candidate.is_some();
             drop(slot);
             continue;
         }
