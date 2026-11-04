@@ -4,11 +4,13 @@
 /// Paired tags dropped with their contents; shared with `pond_api::thought_filter`'s SSE filter.
 pub const PAIRED_TAGS: &[(&str, &str)] = &[
     ("<|channel>thought", "<channel|>"),
+    ("<|channel|>thought", "<|channel|>"),
     ("<|tool_call>", "<tool_call|>"),
     ("<think>", "</think>"),
-    // Disjoint from `<think>` (the `>`), so order is free; without it voice speaks the reasoning.
     ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
+    ("<|thought>", "</thought>"),
+    ("<reasoning>", "</reasoning>"),
 ];
 
 /// The tags some models wrap a whole reply in; not markup anyone should hear or read.
@@ -23,6 +25,9 @@ pub const STANDALONE_SENTINELS: &[&str] = &[
     "</think>",
     "</thinking>",
     "</thought>",
+    "</reasoning>",
+    "<channel|>",
+    "<|channel|>",
     ANSWER_OPEN,
     ANSWER_CLOSE,
 ];
@@ -257,6 +262,10 @@ mod tests {
             ("<think>", "</think>"),
             ("<thinking>", "</thinking>"),
             ("<thought>", "</thought>"),
+            ("<|thought>", "</thought>"),
+            ("<|channel|>thought", "<|channel|>"),
+            ("<|channel>thought", "<channel|>"),
+            ("<reasoning>", "</reasoning>"),
         ] {
             let raw = format!("{open}step by step{close}The answer is 7.");
             assert_eq!(

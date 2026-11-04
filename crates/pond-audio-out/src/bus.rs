@@ -88,6 +88,7 @@ impl AudioBus {
 
         let mut full_text = String::new();
         let mut splitter = ReplySplitter::new();
+        let mut thought_filter = pond_core::models::services::thought_filter::ThoughtFilter::new();
 
         loop {
             let event = if splitter.pending().trim().is_empty() {
@@ -108,11 +109,24 @@ impl AudioBus {
             };
             let units = match event_result? {
                 AgentStreamEvent::Text { content } => {
-                    full_text.push_str(&content);
-                    splitter.push(&content, pipeline.pace())
+                    let visible = thought_filter.push(&content);
+                    if visible.is_empty() {
+                        Vec::new()
+                    } else {
+                        full_text.push_str(&visible);
+                        splitter.push(&visible, pipeline.pace())
+                    }
                 }
                 AgentStreamEvent::ToolCall { .. } => splitter.pause(pipeline.pace()),
-                AgentStreamEvent::Done { .. } => break,
+                AgentStreamEvent::Done { .. } => {
+                    let tail = thought_filter.flush();
+                    if !tail.is_empty() {
+                        full_text.push_str(&tail);
+                        splitter.push(&tail, pipeline.pace())
+                    } else {
+                        Vec::new()
+                    }
+                }
                 AgentStreamEvent::Error { content } => {
                     return Err(anyhow::anyhow!("agent stream error: {content}"));
                 }

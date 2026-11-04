@@ -455,7 +455,7 @@ impl LocalInferenceLlmAdapter {
                 (kv.clone(), kv, KvCachePolicy::Fixed)
             }
         } else {
-            ("f16".to_string(), "f16".to_string(), KvCachePolicy::Q8WhenTight)
+            ("q4_0".to_string(), "q4_0".to_string(), KvCachePolicy::Fixed)
         };
 
         let jetson_settings = ModelSettings {
