@@ -108,8 +108,8 @@ tree-sitter-rust = { version = "0.24", default-features = false }
 tree-sitter-swift = { version = "0.7", default-features = false }
 tree-sitter-typescript = { version = "0.23", default-features = false }
 # llama-cpp-2 has breaking changes in patch releases; goose pins it exactly.
-llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["sampler", "mtmd", "common"] }
-llama-cpp-sys-2 = { version = "=0.1.156", default-features = false }
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["sampler", "mtmd", "common"] }
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false }
 # temporal_rs 0.1 (transitive via PCTX) enables unstable icu features without
 # pinning; goose pins icu to a compatible exact version. Mirrored here.
 icu_calendar = { version = "=2.1.1", default-features = false }
