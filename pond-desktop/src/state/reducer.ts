@@ -80,6 +80,12 @@ export interface AppState {
   noticeFeedFailed: boolean;
   /** When set, Canvas should render a debrief card for this run. */
   debriefContext: DebriefContext | null;
+  /**
+   * A conversation a notification asked to open. The chat screen takes it once (clearing it) and
+   * opens it if the Pond has it; `sessionId` alone cannot ask this, since the chat opens on the
+   * wall even mid-conversation.
+   */
+  requestedConversation: string | null;
 }
 
 export type AppAction =
@@ -126,6 +132,8 @@ export type AppAction =
   | { type: "MARK_NOTICES_READ"; payload: string[] }
   | { type: "SET_NOTICE_FEED_FAILED"; payload: boolean }
   | { type: "SET_DEBRIEF_CONTEXT"; payload: DebriefContext | null }
+  | { type: "REQUEST_CONVERSATION"; payload: string }
+  | { type: "TAKE_CONVERSATION_REQUEST" }
   | { type: "CLEAR_DEBRIEF_CONTEXT" };
 
 let _transcriptIdCounter = 0;
@@ -176,6 +184,7 @@ export function buildInitialState(): AppState {
     householdNotices: [],
     noticeFeedFailed: false,
     debriefContext: null,
+    requestedConversation: null,
   };
 }
 
@@ -416,6 +425,14 @@ export function reducer(state: AppState, action: AppAction): AppState {
 
     case "CLEAR_DEBRIEF_CONTEXT":
       return { ...state, debriefContext: null };
+
+    case "REQUEST_CONVERSATION":
+      return { ...state, requestedConversation: action.payload };
+
+    case "TAKE_CONVERSATION_REQUEST":
+      return state.requestedConversation === null
+        ? state
+        : { ...state, requestedConversation: null };
 
     default:
       return state;

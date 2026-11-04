@@ -5,7 +5,7 @@ import { Bell, BellRing, Calendar, Info, Sparkles, TriangleAlert } from "lucide-
 import { useAppDispatch, useAppState } from "../../state/useAppContext";
 import { api } from "../../api/PondApiClient";
 import type { HouseholdNotice, ScheduleRunNotification } from "../../api/types";
-import { listedNotices, openSection } from "../../state/householdNotices";
+import { listedNotices, openSection, openSessionId } from "../../state/householdNotices";
 import {
   CATEGORY_COLOR,
   groupNotifications,
@@ -68,7 +68,11 @@ function buildNotificationFromNotice(notice: HouseholdNotice, t: TFunction): Not
     timestamp: notice.timestamp,
     read: notice.read,
   };
-  if (section) n.action = { label: t(`notifications.open.${section}`), route: section };
+  if (section) {
+    n.action = { label: t(`notifications.open.${section}`), route: section };
+    const sessionId = openSessionId(notice);
+    if (sessionId) n.action.sessionId = sessionId;
+  }
   return n;
 }
 
@@ -193,7 +197,9 @@ export function NotificationsView({ go }: NotificationsViewProps) {
         markNoticesRead([n.id]);
       }
     }
-    if (n.action) go?.(n.action.route, n.action.run);
+    if (!n.action) return;
+    if (n.action.sessionId) dispatch({ type: "REQUEST_CONVERSATION", payload: n.action.sessionId });
+    go?.(n.action.route, n.action.run);
   }
 
   const groups: NotificationGroup[] = groupNotifications(items);

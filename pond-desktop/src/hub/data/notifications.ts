@@ -22,6 +22,8 @@ export type NotificationAction = {
   route: string;
   /** Carried when route is "canvas" and the notification comes from a schedule run. */
   run?: ScheduleRunNotification;
+  /** Carried when route is "chat" and the notice names the conversation it is about. */
+  sessionId?: string;
 };
 
 export interface Notification {

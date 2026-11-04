@@ -9,6 +9,7 @@ import {
   listedNotices,
   mergeNotices,
   openSection,
+  openSessionId,
 } from "./householdNotices";
 import { reducer, buildInitialState } from "./reducer";
 
@@ -135,7 +136,31 @@ describe("openSection", () => {
   });
 });
 
+describe("openSessionId", () => {
+  it("reads the conversation a chat hint names", () => {
+    expect(openSessionId({ data: { open: "chat", session_id: "sess-1" } })).toBe("sess-1");
+  });
+
+  it("names none without a chat hint, an id, or with an id the Pond does not mint", () => {
+    expect(openSessionId({ data: null })).toBeNull();
+    expect(openSessionId({ data: { open: "chat" } })).toBeNull();
+    expect(openSessionId({ data: { open: "schedule", session_id: "sess-1" } })).toBeNull();
+    expect(openSessionId({ data: { open: "chat", session_id: "../x" } })).toBeNull();
+    expect(openSessionId({ data: { open: "chat", session_id: "" } })).toBeNull();
+    expect(openSessionId({ data: { open: "chat", session_id: 7 } })).toBeNull();
+    expect(openSessionId({ data: { open: "chat", session_id: "a".repeat(129) } })).toBeNull();
+  });
+});
+
 describe("reducer", () => {
+  it("holds a requested conversation until the chat takes it", () => {
+    let state = reducer(buildInitialState(), { type: "REQUEST_CONVERSATION", payload: "sess-1" });
+    expect(state.requestedConversation).toBe("sess-1");
+    state = reducer(state, { type: "TAKE_CONVERSATION_REQUEST" });
+    expect(state.requestedConversation).toBeNull();
+    expect(reducer(state, { type: "TAKE_CONVERSATION_REQUEST" })).toBe(state);
+  });
+
   it("merges notices by id and marks them read", () => {
     let state = buildInitialState();
     state = reducer(state, {

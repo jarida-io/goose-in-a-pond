@@ -94,3 +94,18 @@ export function openSection(notice: Pick<HouseholdNotice, "data">): GuiSection |
   const open = notice.data?.open;
   return typeof open === "string" ? (SECTION_FOR_OPEN[open] ?? null) : null;
 }
+
+/** The shape of an id the Pond mints: nothing that could be a path or a query. */
+const POND_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The conversation a `chat` hint names (`data.session_id`): the one a long task was started
+ * from, or a reminder was heard in. Null when the notice names none, opens another screen, or
+ * carries an id not of the shape the Pond mints; the action then opens the chat as before.
+ * "Route hints" in docs/architecture/notifications.md is the contract.
+ */
+export function openSessionId(notice: Pick<HouseholdNotice, "data">): string | null {
+  if (notice.data?.open !== "chat") return null;
+  const id = notice.data?.session_id;
+  return typeof id === "string" && POND_ID.test(id) ? id : null;
+}

@@ -176,6 +176,34 @@ describe("the Pond's household notices", () => {
     expect(markNotificationsRead).toHaveBeenCalledWith(["n9"]);
   });
 
+  it("asks for the conversation a task-done notice names, then opens chat", () => {
+    const go = vi.fn();
+    appState.householdNotices = [
+      notice({
+        id: "long-task-t1",
+        title: "Task done: How Embassies work?",
+        data: { open: "chat", long_task_id: "t1", session_id: "sess-embassies" },
+      }),
+    ];
+    render(<NotificationsView go={go} />);
+    fireEvent.click(screen.getByText("Open chat"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "REQUEST_CONVERSATION", payload: "sess-embassies" });
+    expect(go).toHaveBeenCalledWith("chat", undefined);
+  });
+
+  it("opens chat alone for a malformed conversation id", () => {
+    const go = vi.fn();
+    appState.householdNotices = [
+      notice({ id: "p", title: "A suggestion", data: { open: "chat", session_id: "../settings" } }),
+    ];
+    render(<NotificationsView go={go} />);
+    fireEvent.click(screen.getByText("Open chat"));
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "REQUEST_CONVERSATION" }),
+    );
+    expect(go).toHaveBeenCalledWith("chat", undefined);
+  });
+
   it("offers no action for a notice with no hint, or one it does not know", () => {
     appState.householdNotices = [
       notice({ id: "x", title: "A rule fired", data: null }),

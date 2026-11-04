@@ -112,7 +112,11 @@ every Pond without the loopback bypass) that reconnect with a growing pause (2 s
 4. Each notice is styled by its category (`info`, `alert`, `action_required`), and its `open` hint
    opens the dashboard's section: `schedule` the schedules, `devices`, `chat`, `models`,
    `extensions` their own, `remote_access` the Pairing page that holds remote access. An unknown
-   hint offers no action.
+   hint offers no action. A `chat` hint with a `session_id` (2026-11-04: a long task, an agent's
+   run, a suggestion from a reminder) opens that conversation: the chat screen asks the Pond for
+   it first, and stays on its wall when the Pond has no such conversation for this dashboard
+   (`openSessionId` in `pond-desktop/src/state/householdNotices.ts`, `requestedConversation` in
+   the reducer).
 5. "Mark all read", or opening one notice, marks it read at once and on the Pond with
    `POST /notifications/history/read`; a failure says so on the page. Schedule-run cards keep their
    in-memory read state. The bell counts unread runs plus unread listed notices.

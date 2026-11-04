@@ -55,6 +55,7 @@ const BASE: AppState = {
   householdNotices: [],
   noticeFeedFailed: false,
   debriefContext: null,
+  requestedConversation: null,
 };
 
 function msg(overrides?: Partial<TranscriptMessage>): TranscriptMessage {

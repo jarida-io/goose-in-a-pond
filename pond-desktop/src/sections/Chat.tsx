@@ -272,11 +272,12 @@ export function Chat() {
     api.listSessions()
       .then((list) => {
         setSessions(list);
-        setView(list.length > 0 ? "history" : "thread");
+        // Unless something opened a screen meanwhile, such as a notification's conversation.
+        setView((v) => v ?? (list.length > 0 ? "history" : "thread"));
       })
       .catch((err) => {
         console.warn("Could not list conversations (non-fatal):", err);
-        setView("thread");
+        setView((v) => v ?? "thread");
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.serverOnline]);
@@ -294,7 +295,7 @@ export function Chat() {
   }, [view, busy, run.completedTurns]);
 
   /** Open one conversation from the wall, growing it out of the card pressed. */
-  const openConversation = useCallback((id: string, origin: OpenOrigin) => {
+  const openConversation = useCallback((id: string, origin: OpenOrigin | null) => {
     setOpenOrigin(origin);
     setView("thread");
     acknowledgeCompletion();
@@ -304,6 +305,20 @@ export function Chat() {
     // Opening another conversation stops the current turn rather than let it answer unseen.
     void openSession(id, { stopCurrentRun: true });
   }, [dispatch, leaveResearch]);
+
+  // A conversation a notification asked for, taken once. It opens only if the Pond has it for this
+  // dashboard: one deleted since, or another member's (both read as missing), leaves the chat where
+  // it would have opened anyway.
+  const requested = state.requestedConversation;
+  useEffect(() => {
+    if (!requested || !state.serverOnline) return;
+    dispatch({ type: "TAKE_CONVERSATION_REQUEST" });
+    api.getSessionMessages(requested, 1)
+      .then(() => openConversation(requested, null))
+      .catch((err) => {
+        console.warn("[notifications] the conversation a notice named could not be opened; showing chat:", err);
+      });
+  }, [requested, state.serverOnline, dispatch, openConversation]);
 
   const beginTitleEdit = useCallback(() => {
     if (!getChatRun().sessionId) return;
