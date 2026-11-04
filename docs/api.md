@@ -971,6 +971,16 @@ of `ModelStatusEntry` (`crates/pond-api/src/lib.rs`): `id`, `category`, `name`, 
 `image_support_bytes`, `available` and `unavailable_reason` (for example `litert_library_missing`).
 All three `tts_*` categories are listed under `tts`.
 
+Each row also carries `roles`, the jobs it is doing now, and `section`, where both clients list it
+(`conversation`, `listening`, `speaking`, `memory`, `pictures`, `other`). Both come from
+`pond_core::models::domain::model_use`: settings decide who holds a job (`chat_provider` and
+`chat_model`, `tool_model`, `active_whisper_model`, `voice_tts_voice` then `active_tts_model`,
+and the embedder `EmbedderChoice` resolves), and `model_role_assignments` fills only a job whose
+setting is empty. A setting naming no row leaves the job unheld. `active` is still the
+assignment-table flag. A row doing a job is shown even when `downloaded` is false: a built-in
+memory model has no file of its own. Role names: `chat`, `tool`, `asr`, `tts`, `embedding`, and,
+for helpers, `pictures`, `drafter`, `camera`, `faces`.
+
 | Route | Request | Response |
 |---|---|---|
 | `GET /models/download/progress` | | `{downloads: [...]}`; finished entries are evicted after 5 minutes, paused ones stay |
@@ -984,7 +994,7 @@ All three `tts_*` categories are listed under `tts`.
 | `GET /models/capabilities` | | `ModelCapabilities {thinking, vision, audio_input, context_window_tokens, structured_output, tool_calling}`; see [architecture/model_capabilities.md](architecture/model_capabilities.md) |
 | `GET /models/vision-status` | | `{state, model, size_bytes, message}`; a pure read, polled |
 | `GET /models/memory-status` | | `{total_mb, available_for_llm_mb, budget_mb, loaded_model, reclaimable_mb}` |
-| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, router_name}` |
+| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, holders: {chat, tool, asr, tts, embedding}, helpers: [{id, title, uses, section, serves}], router_name}`. `holders` names the row holding each job, as the rows' `roles` do. `helpers` lists models in use that are no row of their own: the conversation model's picture encoder (once installed) and MTP drafter (on disk, on a budgeted device), the camera detector (once loaded) and face recognition (once ready) |
 | `POST /models/registry/refresh` | | `{status}`; the refresh runs in the background |
 | `POST /models/scan` | | `{found, entries}` |
 | `POST /models/cleanup` | | `{reclaimed_bytes, removed}` |

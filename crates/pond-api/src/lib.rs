@@ -621,6 +621,12 @@ pub struct ModelStatusEntry {
     /// Why `available` is false, e.g. `litert_library_missing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<pond_core::models::domain::engine::EngineUnavailable>,
+    /// The jobs this row is doing now, read from settings (`model_use::RoleHolders`). Empty for
+    /// a row that holds none; `active` stays the assignment-table flag it always was.
+    #[serde(default)]
+    pub roles: Vec<pond_core::models::domain::model_use::ModelUse>,
+    /// The section both clients list this row under.
+    pub section: pond_core::models::domain::model_use::ModelSection,
 }
 
 /// A row that says nothing about availability was listed by a pond that could run it.

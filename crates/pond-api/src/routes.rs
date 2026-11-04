@@ -6472,17 +6472,37 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
+///
+/// `holders` names the catalogue row doing each job as `model_use::RoleHolders` reads it from
+/// settings, the same truth `GET /models` puts on each row as `roles`. `helpers` lists the
+/// models in use that are no catalogue row of their own: the conversation model's picture
+/// encoder and drafter, the camera detector and face recognition.
 async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let assignments: std::collections::HashMap<String, String> = state
-        .model_repo
-        .as_ref()
-        .and_then(|r| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(r.list_assignments())
-            })
-            .ok()
-        })
-        .unwrap_or_default()
+    let (records, assignment_rows) = match state.model_repo.as_ref() {
+        Some(repo) => {
+            let records = repo.list_all().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_catalogue_unreadable",
+                    error = %e,
+                    "catalogue could not be read"
+                );
+                Vec::new()
+            });
+            let assignments = repo.list_assignments().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_assignments_unreadable",
+                    error = %e,
+                    "role assignments could not be read"
+                );
+                Vec::new()
+            });
+            (records, assignments)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let holders = crate::model_views::role_holders(&state, &records, &assignment_rows).await;
+    let helpers = crate::model_views::helper_models(&state, &holders).await;
+    let assignments: std::collections::HashMap<String, String> = assignment_rows
         .into_iter()
         .map(|a| (a.role, a.model_id))
         .collect();
@@ -6507,6 +6527,14 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
             "model": settings.active_embedding_model,
             "provider": settings.embedding_provider,
         },
+        "holders": {
+            "chat": holders.chat,
+            "tool": holders.tool,
+            "asr": holders.asr,
+            "tts": holders.tts,
+            "embedding": holders.embedding,
+        },
+        "helpers": helpers,
         "router_name": state.llm_provider.read().await
             .as_ref()
             .map(|p| p.model_name())
@@ -7018,6 +7046,7 @@ async fn list_models(
         )
     })?;
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
 
     let vision = crate::model_views::gguf_vision_batch(&state, &records).await;
     let fetching_pictures: std::collections::HashSet<String> = state
@@ -7039,7 +7068,7 @@ async fn list_models(
     let mut embedding = vec![];
 
     for m in &records {
-        let mut dto = record_to_dto(m, &assignments, state.engine_availability);
+        let mut dto = record_to_dto(m, &assignments, &holders, state.engine_availability);
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
@@ -7083,11 +7112,19 @@ async fn scan_models(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     let count = extras.len();
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    // Over the whole catalogue: a job's holder is found by name among every row.
+    let records = model_repo.list_all().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
     let entries: Vec<Value> = extras
         .iter()
         .map(|m| {
-            serde_json::to_value(record_to_dto(m, &assignments, state.engine_availability))
-                .unwrap_or_default()
+            serde_json::to_value(record_to_dto(
+                m,
+                &assignments,
+                &holders,
+                state.engine_availability,
+            ))
+            .unwrap_or_default()
         })
         .collect();
 
