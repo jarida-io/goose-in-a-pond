@@ -45,6 +45,7 @@ impl AudioBus {
         SpeechPipeline::start(
             self.voice.clone(),
             Some(Arc::new(|text: &str| crate::tap::report_spoken(text))),
+            None,
             Some(Box::new(move || voice.end_utterance())),
         )
     }

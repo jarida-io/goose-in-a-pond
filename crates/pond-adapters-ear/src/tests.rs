@@ -810,3 +810,58 @@ async fn the_real_ear_ends_a_quiet_follow_up_with_silence() {
     mic.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn a_hallucinated_filler_follow_up_is_ignored() {
+    let says = Says::new(&["Goose, what's the weather?", "Thank you."]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
+    let waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    let activation = bounded("the wake", waiting).await.unwrap().unwrap();
+    rig.prime_with_captured(activation.captured_audio.unwrap());
+    let heard = bounded("the request", rig.listen()).await.unwrap();
+    assert_eq!(heard.as_deref(), Some("what's the weather?"));
+
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
+        .await;
+    ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
+    assert_eq!(heard.as_deref(), Some(""));
+}
+
+#[tokio::test]
+async fn a_follow_up_that_echoes_the_ponds_reply_is_ignored() {
+    let says = Says::new(&["Goose, what's the weather?", "mostly sunny."]);
+    let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
+    let waiting = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.wait_for_activation_with_audio().await }
+    });
+    let at = ctl.at();
+    ctl.emit(segment(at - S, at));
+    let activation = bounded("the wake", waiting).await.unwrap().unwrap();
+    rig.prime_with_captured(activation.captured_audio.unwrap());
+    let heard = bounded("the request", rig.listen()).await.unwrap();
+    assert_eq!(heard.as_deref(), Some("what's the weather?"));
+
+    // The pond speaks its reply.
+    rig.spoken_hook()("The forecast in Nairobi today is mostly sunny.");
+
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
+        .await;
+    ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
+    assert_eq!(heard.as_deref(), Some(""));
+}

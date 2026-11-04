@@ -73,14 +73,13 @@ describe("ReplySplitter", () => {
     expect(texts(s.finish())).toEqual(["It is"]);
   });
 
-  it("waits up to ten words for a mark before the six-word cut", () => {
+  it("keeps the first unit whole when no clause mark precedes the sentence end", () => {
     const units = stream("The weather in Nairobi today is expected to be warm and mostly sunny all afternoon. Then");
     expect(texts(units)).toEqual([
-      "The weather in Nairobi today is",
-      "expected to be warm and mostly sunny all afternoon.",
+      "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon.",
       "Then",
     ]);
-    expect(units[0].boundary).toBe("word");
+    expect(units[0].boundary).toBe("sentence");
     expect(texts(stream("Here is a simple chapati recipe for about eight pieces. More."))).toEqual([
       "Here is a simple chapati recipe for about eight pieces.",
       "More.",

@@ -308,6 +308,14 @@ impl WhisperRsInput {
         if samples.is_empty() {
             return Ok(String::new());
         }
+        let mut samples = samples;
+        let peak = samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        if peak > 0.005 && peak < 0.25 {
+            let scale = (0.25 / peak).min(8.0);
+            for s in &mut samples {
+                *s *= scale;
+            }
+        }
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let sample_count = samples.len();
         let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(sample_count));
@@ -405,6 +413,14 @@ impl WhisperRsInput {
             let mut out = String::new();
             for i in 0..n_segments {
                 if let Some(seg) = state.get_segment(i) {
+                    if seg.no_speech_probability() > 0.6 {
+                        tracing::debug!(
+                            segment = i,
+                            no_speech_prob = seg.no_speech_probability(),
+                            "whisper: dropping segment with high no_speech_probability"
+                        );
+                        continue;
+                    }
                     if let Ok(text) = seg.to_str() {
                         out.push_str(text);
                     }
@@ -562,7 +578,7 @@ impl TranscribeOpts {
             fit_audio_ctx: false,
             beam_size: Some(5),
             suppress_non_speech: true,
-            temperature_step: 0.2,
+            temperature_step: 0.0,
         }
     }
 

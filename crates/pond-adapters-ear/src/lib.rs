@@ -8,6 +8,8 @@ mod hearing;
 mod reference;
 mod worker;
 
+use echo::Spoken;
+
 pub use enrol::{TakeEar, TakeHeard, ENROL_MAX_SECONDS};
 pub use hearing::Hearing;
 /// What the operating system says this process holds.
@@ -141,6 +143,7 @@ pub struct EarRig {
     parts: Mutex<Vec<EarPart>>,
     /// Who Voice Match heard wake the pond; a follow-up must be their voice too.
     waker: Mutex<Option<String>>,
+    spoken: Arc<Mutex<Spoken>>,
 }
 
 impl EarRig {
@@ -206,6 +209,7 @@ impl EarRig {
             }
             WakeMode::HeyGoose => None,
         };
+        let spoken = Arc::new(Mutex::new(Spoken::default()));
         let worker = Worker {
             hearing,
             mic,
@@ -215,7 +219,7 @@ impl EarRig {
             latency: (cfg.output_latency_ms as usize) * reference::RATE as usize / 1000,
             cue: cfg.cue,
             audio_level: cfg.audio_level,
-            state: WorkerState::new(),
+            state: WorkerState::new(spoken.clone()),
         };
         std::thread::Builder::new()
             .name("pond-ear".into())
@@ -231,6 +235,7 @@ impl EarRig {
             primed: Mutex::new(None),
             parts: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
+            spoken,
         }))
     }
 
@@ -260,8 +265,13 @@ impl EarRig {
     /// pond says, so its echo is not taken for a wake.
     pub fn spoken_hook(&self) -> SpokenObserver {
         let cmds = self.cmds.clone();
+        let spoken = self.spoken.clone();
         Arc::new(move |text: &str| {
             let _ = cmds.send(Cmd::Spoken(text.to_string()));
+            let now = Instant::now();
+            let mut s = spoken.lock().unwrap();
+            s.forget_old(now, None);
+            s.say(text, now);
         })
     }
 
@@ -450,7 +460,25 @@ impl VoiceInput for EarRig {
                 Some(t) => t,
                 None => self.transcribe(pcm).await?,
             };
-            let command = self.command(&raw);
+            let cleaned = pond_voice::text::strip_whisper_artifacts(&raw);
+            let command = self.command(&cleaned);
+            if follow_up && command.is_empty() {
+                tracing::info!(
+                    raw = %raw,
+                    "ear: follow-up contained only noise or filler hallucination, ignored"
+                );
+                return Ok(Some(String::new()));
+            }
+            let is_echo = self.spoken.lock().unwrap().echo_of(&cleaned).is_some()
+                || self.spoken.lock().unwrap().echo_of(&command).is_some();
+            if is_echo {
+                tracing::info!(
+                    raw = %raw,
+                    command = %command,
+                    "ear: transcript is an echo of the pond's own speech, ignored"
+                );
+                return Ok(Some(String::new()));
+            }
             if !command.is_empty() || !pond_voice::text::heard_wake(&raw, &self.triggers) {
                 return Ok(Some(command));
             }

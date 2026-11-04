@@ -30,6 +30,11 @@ impl Reference {
         }
     }
 
+    /// Where the last chunk's 16 kHz output ended, on the microphone's clock.
+    pub fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
     /// Resample one tapped chunk. `natural` is where its timing puts it on the microphone's clock
     /// and `floor` the first sample the ear has not heard yet, before which nothing can be
     /// cancelled any more. Returns the stamp and the 16 kHz samples, possibly none yet.
