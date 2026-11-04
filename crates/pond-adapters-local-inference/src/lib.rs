@@ -568,61 +568,8 @@ impl LocalInferenceLlmAdapter {
     }
 }
 
-/// Strip reasoning preambles: everything up to Gemma 4's last `<channel|>`, else `<thought>`
-/// or `<think>` blocks (Qwen3, DeepSeek-R1, QwQ).
 fn strip_thinking_tokens(text: &str) -> String {
-    const CHANNEL_CLOSE: &str = "<channel|>";
-    if let Some(pos) = text.rfind(CHANNEL_CLOSE) {
-        return text[pos + CHANNEL_CLOSE.len()..].trim().to_string();
-    }
-
-    if text.contains("<thought>") {
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        loop {
-            if let Some(start) = rest.find("<thought>") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</thought>") {
-                    rest = &rest[start + end + "</thought>".len()..];
-                } else {
-                    break; // unclosed — discard tail
-                }
-            } else {
-                out.push_str(rest);
-                break;
-            }
-        }
-        let trimmed = out.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-        return String::new();
-    }
-
-    if text.contains("<think>") {
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        loop {
-            if let Some(start) = rest.find("<think>") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</think>") {
-                    rest = &rest[start + end + "</think>".len()..];
-                } else {
-                    // Unclosed <think> — discard the rest
-                    break;
-                }
-            } else {
-                out.push_str(rest);
-                break;
-            }
-        }
-        let trimmed = out.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
-        }
-    }
-
-    text.to_string()
+    pond_core::models::services::thought_filter::strip_reasoning(text)
 }
 
 #[async_trait]

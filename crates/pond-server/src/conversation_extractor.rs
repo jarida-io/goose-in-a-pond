@@ -472,39 +472,9 @@ pub fn parse_window_response(
     Ok(extraction)
 }
 
-/// Strip `<think>…</think>` and `<|channel>…<channel|>` tokens.
+/// Strip reasoning blocks, orphaned preambles, and standalone sentinels.
 pub fn strip_thinking(text: &str) -> String {
-    let result = strip_blocks(text, "<think>", "</think>");
-    strip_blocks(&result, "<|channel>", "<channel|>")
-        .trim()
-        .to_string()
-}
-
-/// Remove every `open .. close` block, and any reasoning that lost its opening tag. Each pass
-/// removes the tag it found, so this always terminates; it runs holding the lane's only slot.
-fn strip_blocks(text: &str, open: &str, close: &str) -> String {
-    let mut s = text.to_string();
-
-    // A close before any open ends reasoning whose opening tag the chat template emitted.
-    while let Some(c) = s.find(close) {
-        if s.find(open).is_some_and(|o| o < c) {
-            break;
-        }
-        s.replace_range(..c + close.len(), "");
-    }
-
-    while let Some(start) = s.find(open) {
-        let body = start + open.len();
-        match s[body..].find(close) {
-            Some(rel) => s.replace_range(start..body + rel + close.len(), ""),
-            None => {
-                // Unclosed -- a reply cut off mid-thought. Strip to the end.
-                s.truncate(start);
-                break;
-            }
-        }
-    }
-    s
+    pond_core::models::services::thought_filter::strip_reasoning(text)
 }
 
 #[cfg(test)]

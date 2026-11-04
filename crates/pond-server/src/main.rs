@@ -6148,38 +6148,8 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
     }
 }
 
-/// Strips reasoning from model output: Gemma 4 channels, Qwen3/DeepSeek `<think>`, `<thought>`.
 fn strip_thinking_tags(raw: &str) -> String {
-    let mut text = raw.to_string();
-
-    // Gemma 4: everything after last <channel|>
-    if let Some(pos) = text.rfind("<channel|>") {
-        text = text[pos + "<channel|>".len()..].trim().to_string();
-    }
-
-    while let Some(start) = text.find("<think>") {
-        if let Some(end) = text[start..].find("</think>") {
-            let before = &text[..start];
-            let after = &text[start + end + "</think>".len()..];
-            text = format!("{}{}", before, after);
-        } else {
-            text = text[..start].to_string();
-            break;
-        }
-    }
-
-    while let Some(start) = text.find("<thought>") {
-        if let Some(end) = text[start..].find("</thought>") {
-            let before = &text[..start];
-            let after = &text[start + end + "</thought>".len()..];
-            text = format!("{}{}", before, after);
-        } else {
-            text = text[..start].to_string();
-            break;
-        }
-    }
-
-    text.trim().to_string()
+    pond_core::models::services::thought_filter::strip_reasoning(raw)
 }
 
 /// Parses the verdict JSON; unparseable output passes, since review must never block the user.

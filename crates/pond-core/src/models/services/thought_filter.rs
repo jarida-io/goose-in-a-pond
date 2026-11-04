@@ -4,12 +4,18 @@
 /// Paired tags dropped with their contents; shared with `pond_api::thought_filter`'s SSE filter.
 pub const PAIRED_TAGS: &[(&str, &str)] = &[
     ("<|channel>thought", "<channel|>"),
+    ("<|channel>thought", "<|channel|>"),
     ("<|channel|>thought", "<|channel|>"),
+    ("<|channel|>thought", "<channel|>"),
+    ("<|channel>", "<channel|>"),
+    ("<|channel|>", "<|channel|>"),
     ("<|tool_call>", "<tool_call|>"),
+    ("<tool_call>", "</tool_call>"),
     ("<think>", "</think>"),
     ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
     ("<|thought>", "</thought>"),
+    ("<|thought>", "<|thought|>"),
     ("<reasoning>", "</reasoning>"),
 ];
 
@@ -28,6 +34,8 @@ pub const STANDALONE_SENTINELS: &[&str] = &[
     "</reasoning>",
     "<channel|>",
     "<|channel|>",
+    "<tool_call|>",
+    "</tool_call>",
     ANSWER_OPEN,
     ANSWER_CLOSE,
 ];
@@ -44,6 +52,46 @@ pub fn unwrap_answer(text: &str) -> Option<&str> {
         .strip_prefix(ANSWER_OPEN)?
         .strip_suffix(ANSWER_CLOSE)?;
     (!inner.contains(ANSWER_OPEN) && !inner.contains(ANSWER_CLOSE)).then(|| inner.trim())
+}
+
+/// Strip reasoning blocks, orphaned preambles, and standalone sentinels from non-streaming text.
+pub fn strip_reasoning(text: &str) -> String {
+    let mut s = text.to_string();
+
+    for &(open, close) in PAIRED_TAGS {
+        s = strip_block(&s, open, close);
+    }
+
+    for sentinel in STANDALONE_SENTINELS {
+        if s.contains(sentinel) {
+            s = s.replace(sentinel, "");
+        }
+    }
+
+    s.trim().to_string()
+}
+
+fn strip_block(text: &str, open: &str, close: &str) -> String {
+    let mut s = text.to_string();
+
+    while let Some(c) = s.find(close) {
+        if s.find(open).is_some_and(|o| o < c) {
+            break;
+        }
+        s.replace_range(..c + close.len(), "");
+    }
+
+    while let Some(start) = s.find(open) {
+        let body = start + open.len();
+        match s[body..].find(close) {
+            Some(rel) => s.replace_range(start..body + rel + close.len(), ""),
+            None => {
+                s.truncate(start);
+                break;
+            }
+        }
+    }
+    s
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,5 +415,37 @@ mod tests {
         for sentinel in STANDALONE_SENTINELS {
             assert!(sentinel.is_ascii(), "non-ASCII sentinel: {sentinel}");
         }
+    }
+
+    #[test]
+    fn strip_reasoning_removes_paired_and_orphaned_blocks() {
+        assert_eq!(
+            strip_reasoning(r#"r1</think><think>r2</think>{"memories":[]}"#),
+            r#"{"memories":[]}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"a<channel|><|channel>b<channel|>{"x":1}"#),
+            r#"{"x":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"let me think</think>{"a":1}"#),
+            r#"{"a":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"<|channel|>thought reasoning<|channel|>Hello!"#),
+            "Hello!"
+        );
+        assert_eq!(
+            strip_reasoning(r#"reasoning preamble<|channel|>{"a":1}"#),
+            r#"{"a":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"<|tool_call>call:x{}<tool_call|>Done"#),
+            "Done"
+        );
+        assert_eq!(
+            strip_reasoning(r#"{"a":1}<think>cut off mid-"#),
+            r#"{"a":1}"#
+        );
     }
 }
