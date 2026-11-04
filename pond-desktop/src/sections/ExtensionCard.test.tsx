@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "../i18n";
 import type { Extension } from "../api/types";
 
@@ -52,5 +52,25 @@ describe("ExtensionCard status", () => {
     expect(container.querySelector(".ext-card__status-dot--error")).toBeTruthy();
     expect(screen.getByText("Extension failed to load")).toBeTruthy();
     expect(screen.queryByText("Running, no assistant tools here")).toBeNull();
+  });
+});
+
+describe("ExtensionCard redundancy", () => {
+  const brave: Extension = { ...music, name: "brave-search", status: "connected", status_reason: null };
+
+  it("marks an extension the built-in search makes redundant and offers its removal", () => {
+    const onDelete = vi.fn();
+    render(
+      <ExtensionCard ext={brave} onToggle={() => {}} onDelete={onDelete} redundant disabled={false} />,
+    );
+    expect(screen.getByText("Not needed")).toBeTruthy();
+    expect(screen.getByText(/already uses your Brave key/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove brave-search" }));
+    expect(onDelete).toHaveBeenCalledWith("brave-search");
+  });
+
+  it("says nothing about redundancy otherwise", () => {
+    card(brave);
+    expect(screen.queryByText("Not needed")).toBeNull();
   });
 });
