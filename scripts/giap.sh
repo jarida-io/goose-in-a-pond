@@ -3,7 +3,7 @@
 # giap.sh — one entry point for building, installing, running and repairing GIAP.
 #
 #   bash scripts/giap.sh              # interactive menu
-#   bash scripts/giap.sh install      # first-time install on this host
+#   bash scripts/giap.sh install      # first-time install on this host (alias: setup)
 #   bash scripts/giap.sh install -y   # ... without the confirmation prompts
 #   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
@@ -560,6 +560,16 @@ doctor() {
     note "and ~/.cargo/config.toml covers bare cargo. To fix it for good:"
     note "  sudo xcode-select --switch /Library/Developer/CommandLineTools"
     DOC_WARN=$((DOC_WARN+1))
+  fi
+
+  if [ "$D_OS" = "linux" ]; then
+    if command -v ld.lld >/dev/null 2>&1; then
+      ok "lld linker present"
+    else
+      warn "lld linker not installed (build linking is significantly slower with GNU ld)"
+      note "fix: sudo apt-get install -y lld"
+      DOC_WARN=$((DOC_WARN+1))
+    fi
   fi
 
   # 3. stray debug server binary.
@@ -1896,7 +1906,7 @@ case "$CMD" in
   "")        menu_loop ;;
   status)    banner ;;
   doctor)    banner; doctor; [ "$DOC_FAIL" -gt 0 ] && exit 1 || exit 0 ;;
-  install)   action_install ;;
+  install|setup) action_install ;;
   build)     action_build_ui; action_build_server ;;
   update)    action_update ;;
   build-ui)  action_build_ui ;;

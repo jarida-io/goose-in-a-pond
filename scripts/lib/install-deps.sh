@@ -45,7 +45,7 @@ _install_deps_linux() {
     log "Installing build dependencies via apt..."
     sudo apt-get update -qq 2>/dev/null || true
     if sudo apt-get install -y -qq \
-        build-essential pkg-config libssl-dev libasound2-dev libdbus-1-dev cmake 2>/dev/null; then
+        build-essential pkg-config libssl-dev libasound2-dev libdbus-1-dev cmake lld 2>/dev/null; then
       success "Linux dependencies installed (apt)"
       S_DEPS="ok"
     else
