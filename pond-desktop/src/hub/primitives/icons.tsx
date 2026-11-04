@@ -12,7 +12,10 @@ export const HP_PATHS = {
   thermo:      "M14 14.76V4.5a2.5 2.5 0 0 0-5 0v10.26a4.5 4.5 0 1 0 5 0z",
   cloudSun:    "M10 4a4 4 0 0 0-1.8 7.6M16 6a1 1 0 0 0-1 0M6 16a4 4 0 0 1 1-7.9 5 5 0 0 1 9.6-1A4 4 0 0 1 17 15H7a3 3 0 0 1-1-.2z",
   cloud:       "M17.5 19H9a7 7 0 1 1 6.7-9h.8a4.5 4.5 0 0 1 1 9z",
-  rain:        "M16 13a5 5 0 0 0 0-10 6 6 0 0 0-11.5 2A4.5 4.5 0 0 0 5 14M8 18l-1 3M12 18l-1 3M16 18l-1 3",
+  // Lucide's cloud-rain outline (as `cloud` above is Lucide's cloud), with the house's slanted
+  // drops. The hand-drawn cloud it replaces bulged to y -0.6 and x 0.2, past the 24-unit viewBox,
+  // so the SVG clipped its top and left on every rainy day; icons.test.ts holds the bounds.
+  rain:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 18l-1 3M12 18l-1 3M16 18l-1 3",
   music:       "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
   play:        "M6 4l14 8-14 8V4z",
   skipF:       "M5 4l10 8-10 8V4zM19 5v14",
