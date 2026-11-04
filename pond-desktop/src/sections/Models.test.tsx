@@ -25,7 +25,9 @@ vi.mock("../api/PondApiClient", () => ({
 
 import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
-import type { ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelEntry, ModelMemoryStatus } from "../api/types";
+import type {
+  ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelActiveRoles, ModelEntry, ModelMemoryStatus,
+} from "../api/types";
 import { ConfirmProvider } from "../components/shared";
 import { Models } from "./Models";
 import {
@@ -46,7 +48,7 @@ function renderModels() {
 
 function setup(opts: {
   models?: ModelEntry[];
-  roles?: ReturnType<typeof rolesWith>;
+  roles?: ModelActiveRoles;
   memory?: ModelMemoryStatus;
   downloads?: DownloadEntry[];
 } = {}) {
@@ -253,12 +255,56 @@ describe("On this device", () => {
   });
 
   it("never offers a helper as conversation, and never shows the scan's placeholder as a name", async () => {
-    setup({ models: [e2b(HERE), functionGemma(), foundOnDisk()] });
+    setup({ models: [e2b(HERE), functionGemma(HERE), foundOnDisk()] });
     renderModels();
     const device = await band("On this device");
-    expect(within(device).queryByText("FunctionGemma 270M")).toBeNull();
+    const conversation = within(device).getByRole("region", { name: "Conversation" });
+    expect(within(conversation).queryByText("FunctionGemma 270M")).toBeNull();
+    // It is on the device, so it is listed, under Other, with nothing to use it for.
+    const other = within(device).getByRole("region", { name: "Other" });
+    expect(within(other).getByText("FunctionGemma 270M")).toBeTruthy();
+    expect(within(other).queryByRole("button", { name: /^Use / })).toBeNull();
     expect(screen.queryByText("(detected on disk)")).toBeNull();
     expect(within(device).getByText("Llama-3.2-3B-Instruct-Q4_K_M")).toBeTruthy();
+  });
+
+  it("says on every row which jobs it is doing, and lists what works beside the rows", async () => {
+    const minilm = {
+      id: "embedding/all-MiniLM-L6-v2", provider: "embedding", category: "embedding",
+      name: "all-MiniLM-L6-v2", title: "all-MiniLM-L6-v2", is_active: false, downloaded: false,
+      acquire: "external", roles: ["embedding"], section: "memory",
+    } as ModelEntry;
+    setup({
+      models: [e2b({ ...HERE, roles: ["chat", "tool"], section: "conversation" }), minilm],
+      roles: {
+        ...rolesWith(null),
+        helpers: [
+          { id: "gguf/e2b#pictures", title: "Gemma 4 E2B pictures", uses: ["pictures"], section: "pictures", serves: e2b().id },
+          { id: "camera_detector", title: "YOLOX-Nano", uses: ["camera"], section: "pictures", serves: null },
+          { id: "mtp-gemma-4-E2B-it", title: null, uses: ["drafter"], section: "other", serves: e2b().id },
+        ],
+      },
+    });
+    renderModels();
+    const device = await band("On this device");
+    const regions = within(device).getAllByRole("region").map((r) => r.getAttribute("aria-label"));
+    expect(regions).toEqual(["Conversation", "Memory", "Pictures", "Other"]);
+
+    const conversation = within(device).getByRole("region", { name: "Conversation" });
+    expect(within(conversation).getByText("Conversation", { selector: ".mm-chip--use" })).toBeTruthy();
+    expect(within(conversation).getByText("Tool calls", { selector: ".mm-chip--use" })).toBeTruthy();
+
+    // The built-in memory model has no file, and is listed because it is doing a job.
+    const memoryBand = within(device).getByRole("region", { name: "Memory" });
+    expect(within(memoryBand).getByText("all-MiniLM-L6-v2", { selector: ".mdl-row__name" })).toBeTruthy();
+    expect(within(memoryBand).getByText("Memory", { selector: ".mm-chip--use" })).toBeTruthy();
+
+    const pictures = within(device).getByRole("region", { name: "Pictures" });
+    expect(within(pictures).getByText("YOLOX-Nano")).toBeTruthy();
+    expect(within(pictures).getByText("Works with Gemma 4 E2B")).toBeTruthy();
+    // A helper the pond has no name for is named by its job.
+    const other = within(device).getByRole("region", { name: "Other" });
+    expect(within(other).getByText("Faster answers", { selector: ".mdl-row__name" })).toBeTruthy();
   });
 
   it("reads each row's picture support in the household's words", async () => {

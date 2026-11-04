@@ -48,6 +48,15 @@ void i18n.use(initReactI18next).init({
       litert_library_missing: 'Needs the LiteRT-LM library, which this Pond does not have yet',
       other: 'This pond cannot run this model',
     },
+    section: {
+      conversation: 'Conversation', listening: 'Listening', speaking: 'Speaking', memory: 'Memory',
+      pictures: 'Pictures', other: 'Other',
+    },
+    use: {
+      chat: 'Conversation', tool: 'Tool calls', asr: 'Listening', tts: 'Speaking', embedding: 'Memory',
+      pictures: 'Pictures', drafter: 'Faster answers', camera: 'Camera', faces: 'Faces',
+    },
+    serves: 'Works with {{name}}',
   }, extensions: {
     noTools: 'Running, no assistant tools here',
     noToolsGeneric: 'This extension is running, but it gives the assistant nothing to use on this Pond.',

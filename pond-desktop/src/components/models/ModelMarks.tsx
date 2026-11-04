@@ -3,8 +3,8 @@ import {
   AlertTriangle, Check, Cpu, FileBox, Image, ImageOff, ImagePlus, Loader2, Microchip, Pause,
   Play, RotateCw, Server, X, type LucideIcon,
 } from "lucide-react";
-import type { ModelEngine } from "../../api/types";
-import { PICTURES_LEFT_OUT } from "../../sections/models/modelsView";
+import type { ModelEngine, ModelUse } from "../../api/types";
+import { PICTURES_LEFT_OUT, jobLabel } from "../../sections/models/modelsView";
 import type { AddOn, FitReading, SourceChip as Chip } from "../../sections/models/modelsView";
 import {
   pausedText, reconnectingText, type ModelTransfer, type TransferAction,
@@ -46,6 +46,18 @@ export function EngineMark({
 export function SourceChip({ chip }: { chip: Chip }) {
   return (
     <span className={chip === "Recommended" ? "mm-chip mm-chip--pick" : "mm-chip"}>{chip}</span>
+  );
+}
+
+/** A chip per job a model is doing, in the pond's order; nothing for a model doing none. */
+export function UseChips({ uses }: { uses: ModelUse[] }) {
+  if (uses.length === 0) return null;
+  return (
+    <span className="mm-uses">
+      {uses.map((use) => (
+        <span key={use} className="mm-chip mm-chip--use">{jobLabel(use)}</span>
+      ))}
+    </span>
   );
 }
 

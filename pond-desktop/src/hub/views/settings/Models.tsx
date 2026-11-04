@@ -4,18 +4,18 @@ import { DetailShell } from "./DetailShell";
 import { Card } from "./controls";
 import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
-import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView } from "../../../components/models/ModelMarks";
+import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView, UseChips } from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
 import { HolderBadge, MemoryModels } from "../../../components/models/MemoryModels";
 import { jobState } from "../../../sections/models/memoryEmbedder";
 import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
-  ROLES, type RoleKey, addOnOf, askingPick, budgetReading, downloadedOnly, emptyJobText, fitReading,
-  groupByJob, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel, raisedPick,
-  recommendedPicks, roleHolder, rolesFor, sortModels, sourceChip, unavailableNote,
+  ROLES, type RoleKey, addOnOf, askingPick, budgetReading, emptyJobText, fitReading,
+  groupBySection, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel, raisedPick,
+  recommendedPicks, roleHolder, rolesFor, sortModels, sourceChip, unavailableNote, usesOf,
 } from "../../../sections/models/modelsView";
-import type { ModelEntry } from "../../../api/types";
+import type { ModelEntry, ModelUse } from "../../../api/types";
 
 const ROLE_ICON: Record<RoleKey, LucideIcon> = {
   chat: MessageSquare,
@@ -27,10 +27,12 @@ const ROLE_ICON: Record<RoleKey, LucideIcon> = {
 // ─── One installed model ─────────────────────────────────────
 
 function HubRow({
-  model, inUse, raised, actions, memory, transfer,
+  model, inUse, uses, raised, actions, memory, transfer,
 }: {
   model: ModelEntry;
   inUse: boolean;
+  /** The jobs this row is doing now, each shown as a chip. */
+  uses: ModelUse[];
   raised: boolean;
   actions: ReturnType<typeof useModelActions>;
   memory: ReturnType<typeof useModels>["memory"];
@@ -51,6 +53,7 @@ function HubRow({
       <div className="hm-row__text">
         <span className="hm-row__name">
           <span className="hm-row__title">{title}</span>
+          <UseChips uses={uses} />
           {chip && <SourceChip chip={chip} />}
         </span>
         {facts.length > 0 && <span className="hm-row__facts">{facts.join(" · ")}</span>}
@@ -151,13 +154,18 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
   const actions = useModelActions(data, say);
   const job = useMemoryJob(data, actions, say);
 
-  const onDisk = useMemo(() => downloadedOnly(models), [models]);
-  const groups = useMemo(() => groupByJob(onDisk), [onDisk]);
+  const groups = useMemo(
+    () => groupBySection(models, roles?.helpers ?? [], roles),
+    [models, roles],
+  );
   const conversation = useMemo(
-    () => groups.find((g) => g.key === "chat")?.models ?? [],
+    () => groups.find((g) => g.key === "conversation")?.models ?? [],
     [groups],
   );
-  const listening = useMemo(() => groups.find((g) => g.key === "asr")?.models ?? [], [groups]);
+  const listening = useMemo(
+    () => groups.find((g) => g.key === "listening")?.models ?? [],
+    [groups],
+  );
   const picks = useMemo(() => recommendedPicks(models), [models]);
   // Picks already here are listed with the models on the device, which say why they are picks.
   const toGet = useMemo(() => picks.filter((m) => !m.downloaded), [picks]);
@@ -180,6 +188,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       key={m.id}
       model={m}
       inUse={isInUse(m, roles)}
+      uses={usesOf(m, roles)}
       raised={raisedInstalled?.id === m.id}
       actions={actions}
       memory={memory}

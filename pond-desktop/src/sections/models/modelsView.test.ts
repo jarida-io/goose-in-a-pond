@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   ROLES, roleHolder, formatSize, formatBytes, fitReading, budgetReading, downloadedOnly,
-  rolesFor, modelLabel, groupByJob, modelFacts, sourceChip, addOnOf,
+  rolesFor, modelLabel, groupBySection, modelFacts, sourceChip, addOnOf,
   offersPictures, downloadSummary, recommendedPicks, measuredOf, raisedPick, askingPick,
   isInUse, holderEntry, sortModels, fitsOnlyWithoutPictures, fileFitsOnlyWithoutPictures, PICTURES_LEFT_OUT,
-  unavailableNote,
+  unavailableNote, usesOf, sectionOf, jobLabel,
 } from "./modelsView";
-import type { ModelActiveRoles, ModelEntry, ModelMemoryStatus } from "../../api/types";
+import type { HelperModel, ModelActiveRoles, ModelEntry, ModelMemoryStatus } from "../../api/types";
 import {
   DESKTOP_MEMORY, E4B_ORIN, ORIN_MEMORY, e2b, e4b, foundOnDisk, functionGemma, litertE2b, litertE4b,
   llamafile, ollama, rolesWith, voice, whisper,
@@ -422,33 +422,98 @@ describe("sorting and grouping", () => {
     ]);
   });
 
-  it("gathers models under the job each one can do, in the Jobs band's order", () => {
-    const groups = groupByJob([
+  it("gathers a pond older than sections under the job each model can do, in the Jobs band's order", () => {
+    const groups = groupBySection([
       model({ name: "piper.onnx", provider: "piper" }),
       model({ name: "gemma.gguf", provider: "gguf" }),
       model({ name: "whisper.bin", provider: "whisper" }),
       model({ name: "nomic.gguf", provider: "gguf", recommended_role: "embedding" }),
       model({ name: "qwen.gguf", provider: "gguf" }),
-    ]);
+    ], [], null);
 
-    expect(groups.map((g) => g.key)).toEqual(["chat", "asr", "tts", "embedding"]);
+    expect(groups.map((g) => g.key)).toEqual(["conversation", "listening", "speaking", "memory"]);
     expect(groups.map((g) => g.label)).toEqual(["Conversation", "Listening", "Speaking", "Memory"]);
     expect(groups[0].models.map((m) => m.name)).toEqual(["gemma.gguf", "qwen.gguf"]);
     expect(groups[1].models.map((m) => m.name)).toEqual(["whisper.bin"]);
     expect(groups[3].models.map((m) => m.name)).toEqual(["nomic.gguf"]);
   });
 
-  it("keeps a helper out of Conversation", () => {
-    const groups = groupByJob([e2b({ downloaded: true }), functionGemma()]);
-    expect(groups.map((g) => g.key)).toEqual(["chat"]);
+  it("keeps a helper out of Conversation, under Other", () => {
+    const groups = groupBySection([e2b({ downloaded: true }), functionGemma()], [], null);
+    expect(groups.map((g) => g.key)).toEqual(["conversation", "other"]);
     expect(groups[0].models.map((m) => m.title)).toEqual(["Gemma 4 E2B"]);
   });
 
-  it("drops jobs nothing on this device can do", () => {
-    expect(groupByJob([model({ provider: "whisper" })]).map((g) => g.key)).toEqual(["asr"]);
-    expect(groupByJob([])).toEqual([]);
+  it("drops sections nothing on this device is in", () => {
+    expect(groupBySection([model({ provider: "whisper" })], [], null).map((g) => g.key)).toEqual(["listening"]);
+    expect(groupBySection([], [], null)).toEqual([]);
   });
 
+});
+
+describe("sections and the jobs each model is doing", () => {
+  const helper = (over: Partial<HelperModel> = {}): HelperModel => ({
+    id: "gguf/e4b#pictures", title: "Picture support", uses: ["pictures"], section: "pictures",
+    serves: "gguf/e4b", ...over,
+  });
+
+  it("reads a row's jobs from the pond, whatever the assignment flag says", () => {
+    expect(usesOf(model({ provider: "embedding", is_active: false, roles: ["embedding"] }), null))
+      .toEqual(["embedding"]);
+    expect(usesOf(model({ roles: ["chat", "tool"] }), null)).toEqual(["chat", "tool"]);
+    expect(usesOf(model({ roles: [] }), rolesWith({ provider: "local", model: "gemma-3-4b-it-q4.gguf" })))
+      .toEqual([]);
+  });
+
+  it("works a job out from the holders on a pond that does not say", () => {
+    const roles = rolesWith({ provider: "local", model: "gemma-3-4b-it-q4.gguf" });
+    expect(usesOf(model(), roles)).toEqual(["chat"]);
+    expect(usesOf(model({ name: "other.gguf" }), roles)).toEqual([]);
+  });
+
+  it("leaves off a job it has no words for", () => {
+    expect(usesOf(model({ roles: ["chat", "reranking" as never] }), null)).toEqual(["chat"]);
+  });
+
+  it("names every job in the household's words", () => {
+    expect(jobLabel("chat")).toBe("Conversation");
+    expect(jobLabel("embedding")).toBe("Memory");
+    expect(jobLabel("pictures")).toBe("Pictures");
+    expect(jobLabel("drafter")).toBe("Faster answers");
+    for (const use of ["tool", "asr", "tts", "camera", "faces"] as const) {
+      expect(jobLabel(use)).not.toMatch(/^models\./);
+    }
+  });
+
+  it("lists a row where the pond says, else under its job", () => {
+    expect(sectionOf(model({ section: "other" }))).toBe("other");
+    expect(sectionOf(model({ provider: "whisper" }))).toBe("listening");
+    expect(sectionOf(functionGemma())).toBe("other");
+  });
+
+  it("shows the memory model in use though the pond fetched it itself, first in its section", () => {
+    const groups = groupBySection([
+      model({ name: "bge-base", provider: "embedding", downloaded: true, section: "memory", roles: [] }),
+      model({ name: "minilm", provider: "embedding", downloaded: false, section: "memory", roles: ["embedding"] }),
+      model({ name: "bge-small", provider: "embedding", downloaded: false, section: "memory", roles: [] }),
+    ], [], null);
+    expect(groups.map((g) => g.key)).toEqual(["memory"]);
+    expect(groups[0].models.map((m) => m.name)).toEqual(["minilm", "bge-base"]);
+  });
+
+  it("puts the models in use beside the rows under their own sections", () => {
+    const groups = groupBySection([
+      model({ name: "e4b", section: "conversation", roles: ["chat"] }),
+    ], [
+      helper(),
+      helper({ id: "camera_detector", title: "YOLOX-Nano", uses: ["camera"], serves: null }),
+      helper({ id: "mtp", title: null, uses: ["drafter"], section: "other" }),
+      helper({ id: "later", section: "reranking" as never }),
+    ], null);
+    expect(groups.map((g) => g.key)).toEqual(["conversation", "pictures", "other"]);
+    expect(groups[1].helpers.map((h) => h.id)).toEqual(["gguf/e4b#pictures", "camera_detector"]);
+    expect(groups[2].helpers.map((h) => h.id)).toEqual(["mtp", "later"]);
+  });
 });
 
 describe("a model this pond cannot run", () => {

@@ -812,6 +812,32 @@ export interface ModelEntry {
   available?: boolean;
   /** Why `available` is false. */
   unavailable_reason?: ModelUnavailableReason;
+  /** The jobs the pond says this row is doing now, read from its settings. Absent on older ponds. */
+  roles?: ModelUse[];
+  /** The section the pond lists this row under. Absent on older ponds. */
+  section?: ModelSection;
+}
+
+/** A job a model on the pond is doing: the first five held by a catalogue row, the rest by a model
+ *  that works beside one (`pictures`, `drafter`) or by a camera model with no row. */
+export type ModelUse =
+  | "chat" | "tool" | "asr" | "tts" | "embedding" | "pictures" | "drafter" | "camera" | "faces";
+
+/** The sections the Models page lists, in this order. */
+export const MODEL_SECTIONS = [
+  "conversation", "listening", "speaking", "memory", "pictures", "other",
+] as const;
+export type ModelSection = (typeof MODEL_SECTIONS)[number];
+
+/** A model the pond has in use that is not a catalogue row: `helpers` of `GET /models/active-roles`. */
+export interface HelperModel {
+  id: string;
+  /** Null when the pond has no name for it but the job's. */
+  title: string | null;
+  uses: ModelUse[];
+  section: ModelSection;
+  /** The catalogue row it works for, as `{category}/{name}`. */
+  serves: string | null;
 }
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
@@ -1356,6 +1382,8 @@ export interface ModelActiveRoles {
   asr:        ModelRoleAssignment | null;
   tts:        ModelRoleAssignment | null;
   embedding:  ModelRoleAssignment | null;
+  /** Models in use beside the catalogue rows. Absent on older ponds. */
+  helpers?:   HelperModel[];
 }
 
 // ── Sessions ──────────────────────────────────────────────────

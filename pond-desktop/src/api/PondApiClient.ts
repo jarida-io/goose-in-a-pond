@@ -1440,6 +1440,8 @@ export class PondApiClient {
             recommended:
               (item.recommended as ModelEntry["recommended"] | null | undefined) ?? undefined,
             companions: (item.companions as ModelEntry["companions"] | undefined) ?? [],
+            roles: item.roles as ModelEntry["roles"],
+            section: item.section as ModelEntry["section"],
           });
         }
       }
