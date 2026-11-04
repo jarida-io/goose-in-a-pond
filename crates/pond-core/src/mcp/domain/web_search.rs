@@ -69,6 +69,41 @@ impl WebSearchStatus {
     }
 }
 
+/// Whether the built-in `search_web` can search, or what it is missing. The same condition a turn
+/// applies: the Knowledge extension that carries the tool is on (`ext_knowledge_enabled`), and a
+/// non-blank key is stored under [`super::tool_group::BRAVE_SEARCH_API_KEY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltInSearchState {
+    /// Both hold: every turn may offer `search_web`.
+    On,
+    /// Knowledge is on, but no Brave key is stored.
+    NeedsKey,
+    /// The Knowledge extension is turned off, so no turn offers `search_web` whatever the key.
+    KnowledgeOff,
+}
+
+impl BuiltInSearchState {
+    /// The state for the Knowledge switch and the stored key; a blank key counts as none.
+    pub fn of(knowledge_enabled: bool, stored_key: Option<&str>) -> Self {
+        if !knowledge_enabled {
+            Self::KnowledgeOff
+        } else if stored_key.is_some_and(|k| !k.trim().is_empty()) {
+            Self::On
+        } else {
+            Self::NeedsKey
+        }
+    }
+
+    /// The wire spelling the dashboard matches on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::NeedsKey => "needs_key",
+            Self::KnowledgeOff => "knowledge_off",
+        }
+    }
+}
+
 /// What search_web does with one LLM Context answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmContextOutcome {
@@ -130,6 +165,30 @@ pub fn local_search_town(local_results: bool, location_name: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn built_in_search_is_on_only_with_knowledge_on_and_a_key() {
+        assert_eq!(
+            BuiltInSearchState::of(true, Some("a-key")),
+            BuiltInSearchState::On
+        );
+        assert_eq!(
+            BuiltInSearchState::of(true, None),
+            BuiltInSearchState::NeedsKey
+        );
+        assert_eq!(
+            BuiltInSearchState::of(true, Some("   ")),
+            BuiltInSearchState::NeedsKey,
+            "a blank key is no key, as the turn gate reads it"
+        );
+        assert_eq!(
+            BuiltInSearchState::of(false, Some("a-key")),
+            BuiltInSearchState::KnowledgeOff
+        );
+        assert_eq!(BuiltInSearchState::On.as_str(), "on");
+        assert_eq!(BuiltInSearchState::NeedsKey.as_str(), "needs_key");
+        assert_eq!(BuiltInSearchState::KnowledgeOff.as_str(), "knowledge_off");
+    }
 
     #[test]
     fn the_wire_spellings_are_the_contracts() {

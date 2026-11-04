@@ -99,11 +99,36 @@ Catalogue entries (registry `version` 1; the parser reads only `extensions`):
 |---|---|---|
 | `filesystem` | `npx -y @modelcontextprotocol/server-filesystem /` | none |
 | `github` | `npx -y @modelcontextprotocol/server-github` | `GITHUB_PERSONAL_ACCESS_TOKEN` |
-| `brave-search` | `npx -y @modelcontextprotocol/server-brave-search` | `BRAVE_API_KEY` |
+| `brave-search` | `npx -y @modelcontextprotocol/server-brave-search` | `BRAVE_API_KEY` (not featured; `built_in: web_search`, see below) |
 | `memory` | `npx -y @modelcontextprotocol/server-memory` | none |
 | `puppeteer` | `npx -y @modelcontextprotocol/server-puppeteer` | none |
 | `slack` | `npx -y @modelcontextprotocol/server-slack` | `SLACK_BOT_TOKEN` |
 | `music` | `npx -y tsx extensions/music/src/server.ts` | `MUSIC_SERVICE`, `MUSIC_PLAYER`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_ACCESS_TOKEN`, `APPLE_MUSIC_TEAM_ID`, `APPLE_MUSIC_KEY_ID`, `APPLE_MUSIC_PRIVATE_KEY` |
+
+### Entries a built-in capability already covers
+
+An entry may name a capability the pond ships itself in `built_in`; today only `brave-search`
+does, with `web_search`. The built-in search is **on** exactly when a turn may offer
+`giap-knowledge__search_web`: `ext_knowledge_enabled` is true and the secret store holds a
+non-blank `BRAVE_SEARCH_API_KEY` (`BuiltInSearchState::of` in
+`crates/pond-core/src/mcp/domain/web_search.rs`, read by `pond_api::web_search::built_in_state`,
+which the agent-template capability check also uses).
+
+- `GET /api/v1/marketplace` adds `built_in_state` (`on`, `needs_key`, `knowledge_off`) to such an
+  entry.
+- `POST /api/v1/marketplace/brave-search/install` answers **409** with
+  `{"error": "Web search is built in and already uses your Brave key.", "reason": "built_in_web_search_on"}`
+  while the search is on, before any key is stored or anything started, and logs
+  `kind="extension_install_refused"` (`target: giap::trace`, same `reason`).
+  While the search is off the install goes ahead: an API client may still want the extension.
+- Both Extensions pages show the card as **Built in** with the state's one-line reason in place of
+  Install. With no key stored they steer to the built-in search: "Turn on web search" opens the
+  web search panel in place. With Knowledge off they name the Knowledge switch.
+- An extension installed before the search was on is never removed by the pond. Its installed card
+  says "Not needed" with the reason and a Remove action.
+
+Installing it would duplicate the built-in search: two more tool schemas in every prompt, which is
+prefill time on a Jetson, and a Node process, for nothing the built-in tool does not already do.
 
 ### The music extension
 
