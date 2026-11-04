@@ -348,11 +348,23 @@ Do not reason further — either call the tool you already decided on, or write 
 const TEXT_CALL_STEER: &str = "(Your previous attempt wrote a tool call as plain text, so it did \
 not run. Call the tool through the tool-call format, or write the answer directly.)";
 
-/// The final reply's request: the answer from what the turn already has, not the question again.
-/// Asked with reasoning off, so "do not reason" is the engine's setting as well as the words.
+/// The final reply's request after a guard stopped the turn: the answer from what the turn already
+/// has, with tools off. Asked with reasoning off, so "do not reason" is the engine's setting as well
+/// as the words. "Final" is said outright: asked to answer early, Gemma 4 E4B otherwise wrote a plan
+/// ("I am currently gathering that information") and the schedule stored it as the run's result.
 const FINAL_REPLY_PROMPT: &str = "(You have not replied yet. Write your reply to the request \
-above now, from what you already have, without reasoning first. If part of it could not be done, \
-or you have no tool for it, say so plainly instead of guessing.)";
+above now, from what you already have, without reasoning first. This reply is final: do not say \
+you are gathering or will do anything. Name any part you could not get, plainly, instead of \
+guessing.)";
+
+/// The final reply's request when an attempt reasoned but wrote nothing and no guard stopped it:
+/// tools are still on, so the model may fetch what the request still needs before answering. On
+/// the Jetson a Daily Brief stalled after one weather call; told to answer "from what you already
+/// have", it wrote a plan instead of fetching the rest.
+const FINAL_REPLY_CONTINUE_PROMPT: &str = "(You have not replied yet. If the request above still \
+needs information you have not fetched, call the tools for it now; then write the reply, without \
+reasoning first. This reply is final: do not say you are gathering or will do anything. Name any \
+part you could not get, plainly, instead of guessing.)";
 
 /// The one final reply a turn may ask for when an attempt reasoned but wrote no reply.
 ///
@@ -3692,7 +3704,11 @@ impl GooseAdapter {
                             engine_cancel = fresh;
                             drain_deadline = None;
                         }
-                        Message::user().with_text(FINAL_REPLY_PROMPT)
+                        Message::user().with_text(if tools_off {
+                            FINAL_REPLY_PROMPT
+                        } else {
+                            FINAL_REPLY_CONTINUE_PROMPT
+                        })
                     } else {
                         attempt_msg
                     };
@@ -8377,6 +8393,28 @@ mod tests {
             "the allow-set comes back at line {returned}; it belongs after the engine loop and \
              before the attempt's first exit (line {failed})"
         );
+    }
+
+    /// A stall with tools still on may fetch what is missing; only a guard-stopped turn answers
+    /// from what it has. Either way the reply is final, so it cannot claim work it is not doing:
+    /// the Jetson's Daily Brief stored "I am currently gathering that information" as its result.
+    #[test]
+    fn the_final_reply_asks_to_fetch_only_while_tools_are_on_and_never_promises_work() {
+        let lines = stream_body_code();
+        let window = lines.join("\n");
+        assert!(
+            window.contains("if tools_off {\n                            FINAL_REPLY_PROMPT")
+                && window
+                    .contains("} else {\n                            FINAL_REPLY_CONTINUE_PROMPT"),
+            "a final reply with tools on must get the prompt that lets it fetch, and one without \
+             tools the prompt that answers from what it has"
+        );
+        for prompt in [FINAL_REPLY_PROMPT, FINAL_REPLY_CONTINUE_PROMPT] {
+            assert!(prompt.contains("This reply is final"), "{prompt}");
+            assert!(prompt.contains("do not say you are gathering"), "{prompt}");
+        }
+        assert!(FINAL_REPLY_CONTINUE_PROMPT.contains("call the tools for it now"));
+        assert!(!FINAL_REPLY_PROMPT.contains("call the tools"));
     }
 
     /// Reasoning off must not outlive the final reply: lifted before the call, restored after the
