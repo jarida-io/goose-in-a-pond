@@ -43,7 +43,7 @@ the sentence so far plus 40 tokens would take (`Pace::can_wait_for`).
 | Numbers | `,` and `:` between digits do not split (`1,000`, `3:45`); `.` after a digit does not split when a digit follows or the buffer ends there (a decimal still streaming). A number of up to three digits starting a line, then `.`, is a list marker, not a sentence end |
 | Abbreviations | `.` after a known abbreviation (`Dr`, `Mr`, `etc`, `e.g`, `a.m`, month names and others in `is_abbrev_suffix`) or a single letter does not split |
 | Newlines | A blank line ends a unit after any words (`Paragraph`). A single newline ends one when its line or the next is a list item (`-`, `*`, `+`, bullet, `1.`, `1)`), and the unit gets a comma if it has no mark (`ListLine`). Any other single newline is a wrapped line |
-| First unit | Ends at its first clause mark after 3 words, or its sentence end. When neither has come by the tenth complete word (`FIRST_UNIT_LOOKAHEAD_WORDS`), it is cut after the sixth (`FIRST_UNIT_MAX_WORDS`) |
+| First unit | Ends at its first clause mark after 3 words, or its sentence end |
 | Budget | A unit is cut before it passes 200 estimated tokens (`UNIT_TOKEN_BUDGET`, about 1.1 per character): at its last clause mark, else its last space |
 
 `pack_units` joins units waiting behind a slow synthesis into one pass, within one paragraph and the

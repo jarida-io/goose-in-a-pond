@@ -429,6 +429,17 @@ impl Inner {
         *self.prompt.write().unwrap_or_else(|e| e.into_inner()) = prompt;
     }
 
+    fn prioritize_speaker_prompt(&self, speaker: &str) {
+        let mut prompt_guard = self.prompt.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = prompt_guard.as_ref() {
+            if let Some(reordered) =
+                pond_core::models::domain::speech_prompt::prioritize_name(current, speaker)
+            {
+                *prompt_guard = Some(reordered);
+            }
+        }
+    }
+
     /// What stands between the room and listening, if anything; holds the voice lock if not.
     async fn ready(&self, take_lock: bool) -> Result<Option<VoiceLock>, RoomUnavailable> {
         if self.deps.whisper.is_none() || self.deps.output.is_none() {
@@ -480,13 +491,17 @@ impl Inner {
                     }
                 }
             }
-            WorkflowEvent::Wake { who: Some(who) } => {
-                let heard = LastHeard {
-                    profile_id: who.profile_id.clone(),
-                    name: who.name.clone(),
-                    at: chrono::Utc::now().to_rfc3339(),
-                };
-                self.set_view(|v| v.last_heard = Some(heard));
+            WorkflowEvent::Wake { who } => {
+                self.deps.runs.preempt();
+                if let Some(who) = who {
+                    let heard = LastHeard {
+                        profile_id: who.profile_id.clone(),
+                        name: who.name.clone(),
+                        at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    self.set_view(|v| v.last_heard = Some(heard));
+                    self.prioritize_speaker_prompt(&who.name);
+                }
             }
             WorkflowEvent::Exit { .. } => *lock(&self.turn) = None,
             // A different voice's wake moves the loop to a session of its own.
@@ -935,6 +950,19 @@ mod tests {
             prompt.contains("Otieno"),
             "a new member reaches the prompt: {prompt}"
         );
+
+        room.inner.on_event(&WorkflowEvent::Wake {
+            who: Some(pond_core::shared::domain::agent::VoiceSpeaker {
+                profile_id: "otieno-id".into(),
+                name: "Otieno".into(),
+            }),
+        });
+        let prioritized = room.inner.prompt.read().unwrap().clone().unwrap();
+        assert_eq!(
+            prioritized, "Hey goose. Otieno, Ana Wanjiru.",
+            "the active speaker is prioritized in the prompt: {prioritized}"
+        );
+
         room.shutdown().await;
     }
 

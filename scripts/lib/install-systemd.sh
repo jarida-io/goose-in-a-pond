@@ -121,7 +121,7 @@ agamemnon_write_unit() { # $1 = path, then the unit text on stdin
 # A locked system account: no password, no shell, and the groups the pond's devices need.
 agamemnon_create() {
   local groups="" g
-  for g in video render audio i2c gpio; do
+  for g in video render audio i2c gpio dialout plugdev input spi; do
     getent group "$g" >/dev/null 2>&1 && groups="${groups:+$groups,}$g"
   done
   if getent passwd "$AGAMEMNON" >/dev/null 2>&1; then
@@ -147,6 +147,44 @@ agamemnon_need_acl() {
   fi
   warn "setfacl is missing and could not be installed; install the acl package, then run this again"
   return 1
+}
+
+# Internal symlinks and model registries may point to the previous directory path.
+# When the data directory is moved, retarget them to the new location.
+agamemnon_retarget_data() { # $1 = from_dir, $2 = to_dir, $3 = owner
+  local from="$1" to="$2" owner="${3:-}"
+  local dst link target new_target reg tmp
+  dst="$(agamemnon_p "$to")"
+  [ -d "$dst" ] || return 0
+  while IFS= read -r link; do
+    [ -n "$link" ] || continue
+    target="$(readlink "$link" 2>/dev/null || true)"
+    case "$target" in
+      "$from"/*)
+        new_target="$to/${target#"$from"/}"
+        if [ -n "$owner" ]; then
+          agamemnon_root ln -snf "$new_target" "$link" 2>/dev/null || true
+        else
+          ln -snf "$new_target" "$link" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done <<EOF
+$(agamemnon_root find "$dst" -type l 2>/dev/null)
+EOF
+
+  reg="$dst/engine/data/models/registry.json"
+  if agamemnon_root test -f "$reg" 2>/dev/null; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/giap-reg.XXXXXX")" || return 0
+    agamemnon_root cat "$reg" 2>/dev/null | sed "s|$from/|$to/|g" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    if [ -n "$owner" ]; then
+      agamemnon_root install -m 0644 -o "$owner" -g "$owner" "$tmp" "$reg" 2>/dev/null \
+        || { agamemnon_root cp "$tmp" "$reg" 2>/dev/null && agamemnon_root chown "$owner:$owner" "$reg" 2>/dev/null; } || true
+    else
+      mv "$tmp" "$reg" 2>/dev/null || true
+    fi
+    rm -f "$tmp"
+  fi
 }
 
 # Moves the pond's data to agamemnon's directory and leaves a link where it was, so tools that look
@@ -177,9 +215,11 @@ agamemnon_take_data() { # $1 = where the data is now
     ln -s "$AGAMEMNON_DATA" "$src" 2>/dev/null || agamemnon_root ln -s "$AGAMEMNON_DATA" "$src" \
       || warn "could not leave a link at $from"
     ok "moved the pond's data to $AGAMEMNON_DATA (a link stays at $from)"
+    agamemnon_retarget_data "$from" "$AGAMEMNON_DATA" "$AGAMEMNON"
   fi
   agamemnon_root install -d -m 0750 -o "$AGAMEMNON" -g "$AGAMEMNON" "$dst" || return 2
   agamemnon_root chown -R "$AGAMEMNON:$AGAMEMNON" "$dst" || return 2
+  agamemnon_root chmod -R u+rwX "$dst" 2>/dev/null || true
 }
 
 agamemnon_login_sudoers() { agamemnon_p "/etc/sudoers.d/goose-in-a-pond-login"; }
@@ -215,14 +255,26 @@ agamemnon_login_dropin() { # $1 = login
 # agamemnon_take_over <ExecStart> <checkout> <data dir now> <login>: everything but starting it.
 # Returns 1 with nothing moved, or 2 once the data has moved (undo: giap.sh service-account undo).
 agamemnon_take_over() {
-  local exec_start="$1" repo="$2" from="$3" login="$4" home bin uid
+  local exec_start="$1" repo="$2" from="$3" login="$4" home bin uid giap_home
   home="$(agamemnon_passwd_field "$login" 6)"
   bin="${exec_start%% *}"
+  giap_home="$home/.giap"
   [ -n "$home" ] || { warn "no home directory for $login"; return 1; }
   agamemnon_need_acl || return 1
   agamemnon_create || { warn "could not make the account $AGAMEMNON"; return 1; }
   # Homes are usually 0750; traverse alone reaches the checkout, and lists nothing.
   agamemnon_root setfacl -m "u:$AGAMEMNON:--x" "$(agamemnon_p "$home")" || return 1
+  if [ -d "$(agamemnon_p "$repo")" ]; then
+    agamemnon_root setfacl -R -n -m "u:$AGAMEMNON:rX" "$(agamemnon_p "$repo")" 2>/dev/null || true
+    agamemnon_root find "$(agamemnon_p "$repo")" -type d -exec setfacl -n -m "d:u:$AGAMEMNON:rX" {} + 2>/dev/null || true
+  fi
+  if [ ! -d "$(agamemnon_p "$giap_home")" ]; then
+    agamemnon_root install -d -m 0755 -o "$login" "$(agamemnon_p "$giap_home")" 2>/dev/null || true
+  fi
+  if [ -d "$(agamemnon_p "$giap_home")" ]; then
+    agamemnon_root setfacl -R -n -m "u:$AGAMEMNON:rX" "$(agamemnon_p "$giap_home")" 2>/dev/null || true
+    agamemnon_root find "$(agamemnon_p "$giap_home")" -type d -exec setfacl -n -m "d:u:$AGAMEMNON:rX" {} + 2>/dev/null || true
+  fi
   if ! agamemnon_as "$AGAMEMNON" test -x "$(agamemnon_p "$bin")"; then
     warn "$AGAMEMNON cannot run $bin; a directory on the way to it is closed to other users"
     note "open each one to it: sudo setfacl -m u:$AGAMEMNON:x <dir>"
@@ -238,6 +290,7 @@ agamemnon_take_over() {
   agamemnon_root loginctl enable-linger "$AGAMEMNON" \
     || warn "$AGAMEMNON's user manager does not linger, so it has no sound server and voice falls back to raw ALSA"
   uid="$(agamemnon_passwd_field "$AGAMEMNON" 3)"
+  [ -n "$uid" ] && agamemnon_root systemctl start "user@$uid.service" 2>/dev/null || true
   agamemnon_unit_text "$exec_start" "$repo" "$uid" "$home" | agamemnon_write_unit "$(agamemnon_unit_path)" || return 2
   agamemnon_root systemctl daemon-reload || return 2
   agamemnon_root systemctl enable "$AGAMEMNON_UNIT" >/dev/null 2>&1 || return 2
@@ -246,10 +299,11 @@ agamemnon_take_over() {
   return 0
 }
 
-# agamemnon_give_back <login> <data dir> : the reverse of take_over's data and grants, the unit stopped.
+# agamemnon_give_back <login> <data dir> [<repo>]: the reverse of take_over's data and grants, the unit stopped.
 agamemnon_give_back() {
-  local login="$1" to="$2" home gid src dst
+  local login="$1" to="$2" repo="${3:-}" home gid src dst giap_home uid
   home="$(agamemnon_passwd_field "$login" 6)"; gid="$(agamemnon_passwd_field "$login" 4)"
+  giap_home="$home/.giap"
   src="$(agamemnon_p "$AGAMEMNON_DATA")"; dst="$(agamemnon_p "$to")"
   if [ -L "$dst" ]; then rm -f "$dst" 2>/dev/null || agamemnon_root rm -f "$dst" || return 1; fi
   if [ -e "$dst" ]; then
@@ -262,8 +316,13 @@ agamemnon_give_back() {
     agamemnon_root chown -R "$login:$gid" "$dst" || return 1
     agamemnon_root setfacl -R -b "$dst" || true
     ok "moved the pond's data back to $to"
+    agamemnon_retarget_data "$AGAMEMNON_DATA" "$to" "$login"
   fi
   [ -n "$home" ] && { agamemnon_root setfacl -x "u:$AGAMEMNON" "$(agamemnon_p "$home")" 2>/dev/null || true; }
+  [ -n "$home" ] && [ -d "$(agamemnon_p "$giap_home")" ] && { agamemnon_root setfacl -R -x "u:$AGAMEMNON" "$(agamemnon_p "$giap_home")" 2>/dev/null || true; }
+  [ -n "$repo" ] && [ -d "$(agamemnon_p "$repo")" ] && { agamemnon_root setfacl -R -x "u:$AGAMEMNON" "$(agamemnon_p "$repo")" 2>/dev/null || true; }
+  uid="$(agamemnon_passwd_field "$AGAMEMNON" 3)"
+  [ -n "$uid" ] && agamemnon_root systemctl stop "user@$uid.service" 2>/dev/null || true
   agamemnon_root loginctl disable-linger "$AGAMEMNON" 2>/dev/null || true
   agamemnon_root rm -f "$(agamemnon_login_sudoers)"
   return 0
@@ -352,7 +411,7 @@ agamemnon_undo() {
   exec_start="$(sed -n 's/^ExecStart=//p' "$(agamemnon_unit_path)" 2>/dev/null | head -1)"
   agamemnon_root systemctl stop "$AGAMEMNON_UNIT" || true
   agamemnon_root systemctl disable "$AGAMEMNON_UNIT" >/dev/null 2>&1 || true
-  if ! agamemnon_give_back "$login" "$from"; then
+  if ! agamemnon_give_back "$login" "$from" "$repo"; then
     agamemnon_root systemctl enable --now "$AGAMEMNON_UNIT" >/dev/null 2>&1 || true
     return 1
   fi
@@ -403,7 +462,11 @@ agamemnon_wanted() {
   info "service and $AGAMEMNON_DATA, and may only switch power modes and restart. Your login keeps reading its data."
   echo -e "${BOLD:-}  ?  Run the pond as $AGAMEMNON? [Y/n]${NC:-}"
   printf '     '
-  read -r reply 2>/dev/null < /dev/tty || { reply=""; echo "(no terminal: yes)"; }
+  if [ -t 0 ]; then
+    read -r reply
+  else
+    reply=""; echo "(no terminal: yes)"
+  fi
   case "$reply" in [Nn]*) return 1 ;; esac
   return 0
 }
@@ -590,7 +653,8 @@ setup_systemd() {
     case "$rc" in
       0) S_ACCOUNT="$AGAMEMNON"; DATA_DIR="$AGAMEMNON_DATA"
          # The card made earlier in this install named the login; the power rule now names agamemnon.
-         admin_card_power_dropin "$AGAMEMNON" || true ;;
+         admin_card_power_dropin "$AGAMEMNON" || true
+         if [ "$(connect_grant_state "$login" 2>/dev/null)" = present ]; then connect_grant_install "$AGAMEMNON" || true; fi ;;
       1) warn "the pond runs as $login instead; move it later with: bash scripts/giap.sh service-account" ;;
       *) warn "the move to $AGAMEMNON stopped part way; put it back with: bash scripts/giap.sh service-account undo"
          # shellcheck disable=SC2034  # read by install.sh and print_summary in install-common.sh

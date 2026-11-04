@@ -49,6 +49,45 @@ pub fn room_prompt(wake_phrase: &str, names: &[String]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+/// Reorders an existing room prompt so `speaker` comes first among the names.
+pub fn prioritize_name(prompt: &str, speaker: &str) -> Option<String> {
+    let speaker = clean_name(speaker);
+    if speaker.is_empty() {
+        return Some(prompt.to_string());
+    }
+    let sentences: Vec<&str> = prompt
+        .split('.')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if sentences.is_empty() {
+        return None;
+    }
+    let (phrase, names_raw) = match sentences.len() {
+        1 if sentences[0].contains(',') => (None, Some(sentences[0])),
+        1 => (Some(sentences[0]), None),
+        _ => (Some(sentences[0]), Some(sentences[1])),
+    };
+    let mut names: Vec<String> = names_raw
+        .map(|s| {
+            s.split(',')
+                .map(|n| clean_name(n))
+                .filter(|n| !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.retain(|n| !n.eq_ignore_ascii_case(&speaker));
+    names.insert(0, speaker);
+    names.truncate(MAX_PROMPT_NAMES);
+
+    let mut parts = Vec::new();
+    if let Some(p) = phrase {
+        parts.push(format!("{}.", sentence_case(p)));
+    }
+    parts.push(format!("{}.", names.join(", ")));
+    Some(parts.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +136,22 @@ mod tests {
     fn a_prompt_never_holds_a_nul_byte() {
         let prompt = room_prompt("hey\0goose", &names(&["Ji\0m"])).unwrap();
         assert!(!prompt.contains('\0'));
+    }
+
+    #[test]
+    fn prioritizing_the_active_speaker_moves_them_first() {
+        let base = "Hey goose. Amina, Jerry Anyumba.";
+        assert_eq!(
+            prioritize_name(base, "Jerry Anyumba").as_deref(),
+            Some("Hey goose. Jerry Anyumba, Amina.")
+        );
+        assert_eq!(
+            prioritize_name("Hey goose.", "Jerry Anyumba").as_deref(),
+            Some("Hey goose. Jerry Anyumba.")
+        );
+        assert_eq!(
+            prioritize_name("Amina, Jerry.", "Jerry").as_deref(),
+            Some("Jerry, Amina.")
+        );
     }
 }
