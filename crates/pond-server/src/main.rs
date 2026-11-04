@@ -6986,11 +6986,7 @@ async fn run_proactive_reviewer(
             let report = sender
                 .send_to_profile(
                     audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(
-                        proposal.id(),
-                        proposal.summary(),
-                        proposal.rationale(),
-                    ),
+                    pond_server::system_notices::proposal_notification(proposal),
                 )
                 .await;
             tracing::info!(
@@ -7805,18 +7801,15 @@ async fn notify_long_task_owner(
     let report = sender
         .send_to_profile(
             owner,
-            pond_server::system_notices::long_task_notification(
-                task.id(),
-                task.goal(),
-                finished,
-                body,
-            ),
+            pond_server::system_notices::long_task_notification(task, finished, body),
         )
         .await;
     tracing::info!(
+        kind = "long_task_notice_sent",
         task = %task.id(),
         member = %owner,
         finished,
+        opens_conversation = task.origin_session_id().is_some(),
         queued = report.queued.len(),
         failed = report.failed.len(),
         "long task ended; its owner was told"
