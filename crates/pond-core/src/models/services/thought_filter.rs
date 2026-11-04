@@ -7,8 +7,6 @@ pub const PAIRED_TAGS: &[(&str, &str)] = &[
     ("<|channel>thought", "<|channel|>"),
     ("<|channel|>thought", "<|channel|>"),
     ("<|channel|>thought", "<channel|>"),
-    ("<|channel>", "<channel|>"),
-    ("<|channel|>", "<|channel|>"),
     ("<|tool_call>", "<tool_call|>"),
     ("<tool_call>", "</tool_call>"),
     ("<think>", "</think>"),
@@ -424,7 +422,7 @@ mod tests {
             r#"{"memories":[]}"#
         );
         assert_eq!(
-            strip_reasoning(r#"a<channel|><|channel>b<channel|>{"x":1}"#),
+            strip_reasoning(r#"a<channel|><|channel>thought b<channel|>{"x":1}"#),
             r#"{"x":1}"#
         );
         assert_eq!(
