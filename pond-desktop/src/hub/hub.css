@@ -1443,7 +1443,7 @@ body,
 
 /* Typewriter zone */
 .debrief-tw-zone { padding: 14px 16px; background: var(--hub-bg, #FAFAFA); border-bottom: 1px solid var(--line, #EBEBF0); }
-.debrief-tw { font-size: 13px; line-height: 1.6; color: var(--ink, #18181B); white-space: pre-wrap; word-break: break-word; margin: 0; font-family: inherit; }
+.debrief-tw { font-size: 13px; line-height: 1.6; color: var(--ink, #18181B); word-break: break-word; margin: 0; }
 .debrief-cursor { display: inline-block; width: 2px; height: 1em; background: var(--pp, #8C4BFF); margin-left: 1px; animation: blink .7s step-end infinite; }
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 

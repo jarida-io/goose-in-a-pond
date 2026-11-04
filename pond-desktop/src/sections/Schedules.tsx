@@ -14,6 +14,8 @@ import { HP_PATHS } from "../hub/primitives/icons";
 import { type RoutineId, ROUTINES } from "../hub/data/routines";
 import "../hub/views/routines.css";
 import { ZonePicker } from "../components/ZonePicker";
+import { MarkdownText } from "../components/MarkdownText";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 import i18n from "../i18n";
 import {
   type RepeatPattern,
@@ -973,7 +975,7 @@ export function Schedules() {
                             <span className="sched-run-row__duration">{(r.duration_ms / 1000).toFixed(1)}s</span>
                           )}
                           {(r.result || r.error) && (
-                            <span
+                            <div
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setExpandedRunId(expandedRunId === r.id ? null : r.id);
@@ -984,10 +986,12 @@ export function Schedules() {
                                 r.error && "sched-run-row__result--error",
                               ].filter(Boolean).join(" ")}
                             >
-                              {expandedRunId === r.id
-                                ? (r.result ?? r.error ?? "")
-                                : (r.result ?? r.error ?? "").slice(0, 120)}
-                            </span>
+                              {expandedRunId !== r.id
+                                ? markdownToPlainText(r.result ?? r.error ?? "").slice(0, 120)
+                                : r.result
+                                  ? <MarkdownText source={r.result} />
+                                  : r.error}
+                            </div>
                           )}
                         </div>
                       ))

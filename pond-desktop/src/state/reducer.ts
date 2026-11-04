@@ -7,6 +7,7 @@ import {
 import type { ScheduleRunNotification, DebriefContext } from "../api/types";
 import { defaultServerUrl } from "../api/PondApiClient";
 import { isDesktopShell } from "../shell";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 
 export type VoiceState =
   "idle" | "wait" | "recording" | "thinking" | "speaking" | "error";
@@ -345,7 +346,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
               status,
               result: result ?? r.result,
               error: error ?? r.error,
-              excerpt: (result ?? r.result ?? error ?? "").slice(0, 80),
+              excerpt: markdownToPlainText(result ?? r.result ?? error ?? "").slice(0, 80),
             }
           : r,
       );
