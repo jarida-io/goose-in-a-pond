@@ -3798,7 +3798,9 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
-/// List all sessions, ordered by most recently updated first.
+/// List the household's conversations, most recently updated first. Sessions the pond opened for
+/// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
+/// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -3810,7 +3812,25 @@ async fn list_sessions(
     })?;
 
     let mut session_list: Vec<Value> = Vec::with_capacity(sessions.len());
-    for s in &sessions {
+    // The scheduler opens a `sched-` session per run for the engine; it holds no conversation,
+    // so listing it showed every run as an empty "Untitled" chat. Its result is in the run log.
+    let machine = sessions
+        .iter()
+        .filter(|s| {
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        })
+        .count();
+    if machine > 0 {
+        tracing::debug!(
+            target: "giap::trace",
+            kind = "machine_sessions_unlisted",
+            count = machine,
+            "sessions the pond opened for its own work left out of the conversation list",
+        );
+    }
+    for s in sessions.iter().filter(|s| {
+        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+    }) {
         let message_count = state
             .session_storage
             .count_messages(&s.id)
