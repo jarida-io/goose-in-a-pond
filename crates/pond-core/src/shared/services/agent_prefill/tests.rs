@@ -203,6 +203,11 @@ fn a_pass_compiles_skips_and_forgets() {
     records.insert("busy".to_string(), record(&busy, Some(-90), Some(-2)));
     records.insert("idle".to_string(), record(&idle, Some(-90), Some(-60)));
     records.insert("deleted-agent".to_string(), record(&idle, Some(-1), None));
+    // Compiled by serve's own prewarm, never by this pass: its row must survive it.
+    records.insert(
+        crate::shared::services::voice_agent::VOICE_AGENT.to_string(),
+        record(&idle, Some(-1), None),
+    );
     let plan = plan_prefills(&roles, &records, t(0), 14);
     let compiled: Vec<&str> = plan.compile.iter().map(|r| r.name()).collect();
     assert_eq!(compiled, vec![worker.name(), "busy"]);

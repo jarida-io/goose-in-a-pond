@@ -20,13 +20,18 @@ mod model_download;
 mod node_path;
 mod onnx_gpu;
 mod ports;
+mod room_memory;
+mod room_voice;
 mod schedule_executors;
+mod speech_model;
 mod spoken_code;
 mod system_deps;
 mod three_stage_consolidator;
 mod tracing_setup;
 mod voice_lock;
+mod voice_match;
 mod voice_models;
+mod voice_rig;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -36,7 +41,7 @@ use pond_adapters_llamafile::LlamafileProvider;
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
 use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
-use pond_adapters_whisper::{WhisperKeywordDetector, WhisperRsInput};
+use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
@@ -1250,7 +1255,7 @@ async fn run_server(
         pond_core::models::domain::device_budget::allow_gemma_vision();
     }
 
-    // Serve never opens the mic (only `/transcribe`), but `WhisperRsInput::new` needs a handle.
+    // Room voice listens through it; with the room off, only `/transcribe` needs the handle.
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -1258,11 +1263,16 @@ async fn run_server(
         settings.mic_enabled,
     );
 
-    // Choose the speaker before Kokoro opens one. The mic is only tested on request, or by the
-    // voice session, which owns it.
-    {
+    // Choose the speaker before Kokoro opens one. With room voice on, serve owns the mic and
+    // tests it now; otherwise only on request, or by a voice session, which then owns it.
+    let serve_audio = {
+        let role = if settings.voice_room_enabled {
+            pond_adapters_audio_devices::Role::Room
+        } else {
+            pond_adapters_audio_devices::Role::Serve
+        };
         let supervisor = audio_devices::start(
-            pond_adapters_audio_devices::Role::Serve,
+            role,
             &data_dir,
             Some(mic_handle.clone()),
             Arc::new(SqliteSettingsRepository::new(db.system.clone())),
@@ -1273,12 +1283,13 @@ async fn run_server(
             None => println!("  ⚠  Speaker: still being tested; using the system default"),
         }
         let control = Arc::new(pond_adapters_audio_devices::PondAudioControl::new(
-            supervisor,
+            supervisor.clone(),
             data_dir.clone(),
         ));
         pond_api::audio_devices::install(control.clone());
         pond_mcp_server::init_audio_control(control);
-    }
+        supervisor
+    };
 
     // What did not start, told to the household once the notification pipeline exists.
     let mut startup_problems = pond_core::mcp::domain::system_notice::StartupProblems::default();
@@ -1291,6 +1302,10 @@ async fn run_server(
     )
     .await;
 
+    let whisper_catalog =
+        voice_models::whisper_catalog(&SqliteModelRepository::new(db.system.clone())).await;
+    // A chosen model still to fetch: another on disk stands in, and the switch fetches it later.
+    let mut fetch_after_start: Option<String> = None;
     let whisper_model_path: Option<std::path::PathBuf> = match voice_models.whisper.as_ref() {
         None => {
             if settings.active_whisper_model.is_empty() {
@@ -1307,24 +1322,38 @@ async fn run_server(
             }
             None
         }
+        Some(w) if w.path.exists() => Some(w.path.clone()),
         Some(w) => {
-            if !w.path.exists() {
-                println!("  📥 STT model not found — downloading...");
-                match w.download.as_ref() {
-                    Some(dl) => {
-                        if let Some(parent) = w.path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
+            match voice_models::standby_whisper(&w.path, &whisper_catalog, &data_dir.join("models"))
+            {
+                Some(standby) => {
+                    println!(
+                        "  STT: {} is not on disk yet; {} transcribes while it downloads",
+                        settings.active_whisper_model,
+                        standby.display()
+                    );
+                    fetch_after_start = Some(settings.active_whisper_model.clone());
+                    Some(standby)
+                }
+                // Nothing on disk to stand in, as on a first run: fetch it now.
+                None => {
+                    println!("  📥 STT model not found — downloading...");
+                    match w.download.as_ref() {
+                        Some(dl) => {
+                            if let Some(parent) = w.path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Err(e) =
+                                model_download::download_file(&dl.url, &w.path, dl.size_mb).await
+                            {
+                                println!("  ⚠  STT model download failed: {}", e);
+                            }
                         }
-                        if let Err(e) =
-                            model_download::download_file(&dl.url, &w.path, dl.size_mb).await
-                        {
-                            println!("  ⚠  STT model download failed: {}", e);
-                        }
+                        None => println!("  ⚠  STT model has no catalog download URL"),
                     }
-                    None => println!("  ⚠  STT model has no catalog download URL"),
+                    Some(w.path.clone())
                 }
             }
-            Some(w.path.clone())
         }
     };
 
@@ -1336,23 +1365,25 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
+    // One model for `/transcribe` and the room.
+    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
+        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                tracing::warn!(
+                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                );
+                startup_problems.speech_recognition =
+                    Some(format!("the speech model did not load ({e})"));
+                None
+            }
+        }
+    });
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
-        whisper_model_path.as_ref().and_then(|p| {
-            match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-                Ok(w) => {
-                    let w = Arc::new(w);
-                    Some(Arc::new(move |wav_bytes: Vec<u8>| {
-                        w.transcribe_wav_bytes(&wav_bytes)
-                    }) as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>)
-                }
-                Err(e) => {
-                    tracing::warn!("in-process whisper init failed, transcribe route will proxy to external: {e}");
-                    startup_problems.speech_recognition =
-                        Some(format!("the speech model did not load ({e})"));
-                    None
-                }
-            }
+        serve_whisper.clone().map(|w| {
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+                as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
     // Unconditional: Kokoro phonemizes through espeak-ng too.
@@ -1375,6 +1406,21 @@ async fn run_server(
     let download_tracker: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<String, pond_api::DownloadEntry>>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // The ASR role now takes effect at once: fetched if need be, swapped in once it loads.
+    if let Some(whisper) = &serve_whisper {
+        let switch = Arc::new(speech_model::ServeSpeechModel::new(
+            whisper.clone(),
+            &data_dir,
+            Arc::new(SqliteModelRepository::new(db.system.clone())),
+            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            download_tracker.clone(),
+        ));
+        pond_api::speech_model::install(switch.clone());
+        if let Some(model) = fetch_after_start.take() {
+            pond_api::speech_model::switch_soon(&model);
+        }
+    }
 
     // ── Kokoro: the TTS engine ──
     // Adopt the host's tier, then resolve a usable one, before fetching: an unusable tier must
@@ -2005,7 +2051,7 @@ async fn run_server(
                     "idle after user activity — starting memory consolidation"
                 );
 
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = slot.cancellation_token();
                 *inact_cancel.write().await = Some(cancel.clone());
 
                 // Routes cancel directly; the DB poll lets an out-of-process voice turn abort.
@@ -2165,8 +2211,8 @@ async fn run_server(
                         tracing::debug!("summary refresh: stopping at {MAX_PER_PASS} this pass");
                         break;
                     }
-                    // Abort on activity: the serial engine must never make a user turn wait.
-                    let cancel = tokio_util::sync::CancellationToken::new();
+                    // Abort on activity or lane preemption: the serial engine must never make a user turn wait.
+                    let cancel = slot.cancellation_token();
                     let watcher_activity = sum_activity.clone();
                     let watcher_cancel = cancel.clone();
                     let baseline = idle_for;
@@ -2309,8 +2355,8 @@ async fn run_server(
                     }
                 };
 
-                // One token per pass: resumed activity ends the whole sweep.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // One token per pass: lane preemption or resumed activity ends the whole sweep.
+                let cancel = slot.cancellation_token();
 
                 let watcher_activity = title_activity.clone();
                 let watcher_storage = title_storage.clone();
@@ -2701,8 +2747,8 @@ async fn run_server(
                     continue;
                 };
 
-                // Checked before each window: activity costs at most one window's inference.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // Preempted immediately by the lane or on activity: activity costs at most one window's inference.
+                let cancel = slot.cancellation_token();
                 let watcher_cancel = cancel.clone();
                 let watcher_activity = extraction_activity.clone();
                 let baseline = in_process_at;
@@ -2723,15 +2769,22 @@ async fn run_server(
                     }
                 });
 
-                let report = service
-                    .run_pass(
+                let report = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::info!("batch-extraction: pass preempted by user activity");
+                        pond_core::user_data::services::memory_extraction::PassReport {
+                            blocked_on: Some("preempted".to_string()),
+                            ..Default::default()
+                        }
+                    }
+                    r = service.run_pass(
                         extraction_storage.as_ref(),
                         extraction_repo.as_ref(),
                         &extractor,
                         &config,
                         &cancel,
-                    )
-                    .await;
+                    ) => r,
+                };
                 watcher.abort();
 
                 status.write().await.record(config.mode, &report);
@@ -2852,6 +2905,39 @@ async fn run_server(
     // Created before the Matter runtime, which publishes sensor updates onto it.
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
+
+    // Vision presence tracker: holds background inference chores while a person is in view.
+    {
+        let last_person_seen = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let probe = last_person_seen.clone();
+        inference_lane.watch_presence(move || {
+            probe
+                .lock()
+                .ok()
+                .and_then(|t| *t)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90))
+        });
+
+        let mut events = event_bus.subscribe();
+        let lane = inference_lane.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use pond_core::shared::ports::event_bus::BusEvent;
+            while let Some(event) = events.next().await {
+                let is_person = match event {
+                    BusEvent::Camera(ref c) => c.event_type == "person",
+                    BusEvent::Presence(_) => true,
+                    _ => false,
+                };
+                if is_person {
+                    if let Ok(mut seen) = last_person_seen.lock() {
+                        *seen = Some(std::time::Instant::now());
+                    }
+                    lane.preempt();
+                }
+            }
+        });
+    }
 
     // `device_control` is a facade over Matter (when on and reachable) or the logging stub,
     // swapped at runtime behind one long-lived `Arc`.
@@ -3785,15 +3871,20 @@ async fn run_server(
                     .unwrap_or_default();
                 subjects.push(settings.user_name.clone());
 
-                let outcome = compose_suggestions(
-                    gen_memories.as_ref(),
-                    gen_queue.as_ref(),
-                    gen_provider.clone(),
-                    &subjects,
-                    MEMORY_SCAN,
-                    now,
-                )
-                .await;
+                let outcome = tokio::select! {
+                    _ = slot.cancelled() => {
+                        tracing::info!("[suggestions] pass preempted by user activity");
+                        continue;
+                    }
+                    res = compose_suggestions(
+                        gen_memories.as_ref(),
+                        gen_queue.as_ref(),
+                        gen_provider.clone(),
+                        &subjects,
+                        MEMORY_SCAN,
+                        now,
+                    ) => res,
+                };
 
                 // Logged even when nothing was composed: silent, a no-op looks like a bail.
                 match outcome {
@@ -4118,7 +4209,79 @@ async fn run_server(
         ))
     };
 
+    // Shared with room voice, whose turns hold lane jobs back as a phone's do.
+    let runs = Arc::new(pond_api::runs::RunSupervisor::default());
+    // Voice Match: its speaker model is fetched by default, in the background.
+    let voice_prints: Arc<dyn pond_core::user_data::ports::voice_print::VoicePrintRepository> =
+        Arc::new(
+            pond_infra::sqlite_voice_recognition::SqliteVoiceRecognition::new(db.system.clone()),
+        );
+    let voice_match = voice_match::ServeVoiceMatch::new(&data_dir);
+    {
+        use pond_core::models::ports::voice_match::VoiceMatchEngine as _;
+        voice_match.fetch_model();
+    }
+    let room_voice = {
+        let enabled = settings_repo
+            .get()
+            .await
+            .map(|s| s.voice_room_enabled)
+            .unwrap_or(settings.voice_room_enabled);
+        let current = settings_repo
+            .get()
+            .await
+            .unwrap_or_else(|_| settings.clone());
+        let phrase = pond_voice::text::normalize_transcript(&current.voice_wake_word);
+        let calibrated = voice_prints
+            .wake_takes(&phrase)
+            .await
+            .map(|takes| {
+                pond_core::user_data::services::voice_match::wake_verdict(&takes)
+                    .cnn_hears_household
+            })
+            .unwrap_or(false);
+        let (detector, reason) = voice_rig::expected_wake(&current, calibrated);
+        println!(
+            "  Room voice: {}",
+            if enabled {
+                "on; it listens once a microphone and speaker pair works"
+            } else {
+                "off (voice_room_enabled)"
+            }
+        );
+        room_voice::RoomVoice::start(
+            room_voice::RoomDeps {
+                agent: agent.clone(),
+                storage: session_storage.clone(),
+                settings: settings_repo.clone(),
+                telemetry: telemetry.clone(),
+                data_dir: data_dir.clone(),
+                mic: mic_handle.clone(),
+                whisper: serve_whisper.clone(),
+                output: tts.clone(),
+                audio: Arc::new(serve_audio.clone()),
+                runs: runs.clone(),
+                voice_prints: Some(voice_prints.clone()),
+                voice_match: Some(voice_match.clone()),
+                profiles: Some(profile_repo.clone()),
+                prompt_extras: Some(prompt_extra_repo.clone()),
+            },
+            enabled,
+            pond_core::models::domain::room_voice::RoomWake {
+                phrase: current.voice_wake_word.clone(),
+                detector,
+                reason,
+            },
+        )
+    };
+
+    let voice_match_engine: Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine> =
+        voice_match.clone();
     let state = Arc::new(AppState {
+        room_voice: Some(
+            room_voice.clone() as Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>
+        ),
+        voice_match: Some(voice_match_engine),
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
         suggestion_queue: Arc::new(
@@ -4187,7 +4350,7 @@ async fn run_server(
         event_log: Some(event_log.clone()),
         push_token_repo: Some(push_token_repo.clone()),
         face_recognition,
-        runs: Arc::new(pond_api::runs::RunSupervisor::default()),
+        runs: runs.clone(),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         // Own, larger pool so long-lived phone streams never starve interactive chat SSE.
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -4408,10 +4571,18 @@ async fn run_server(
     // TensorRT engines and a GPU embedder loading beside the language model's own GPU load risk
     // an NvMap OOM, so both wait for the prewarm.
     let (prewarm_done, prewarmed) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
-        let _ = prewarm_done.send(true);
-    });
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            // The typed shape first, then the Voice agent's: a spoken turn renders its own preamble.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                let _ = prewarm.await;
+                pond_api::compile_voice_prefill(state).await;
+            })
+            .await;
+            let _ = prewarm_done.send(true);
+        });
+    }
     if let Some(plan) = onnx_gpu_plan {
         let mut prewarmed = prewarmed.clone();
         tokio::spawn(async move {
@@ -4427,6 +4598,10 @@ async fn run_server(
             use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
             runs.turn_in_flight()
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
+        let lane = inference_lane.clone();
+        state.runs.set_preempt_hook(move || {
+            lane.preempt();
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -4719,6 +4894,9 @@ async fn run_server(
         matter.shutdown().await;
     }
 
+    // Before the model goes: a room turn must not start while it is released.
+    room_voice.shutdown().await;
+
     // While logging still runs, so the release is on record. `async_main` repeats it for the
     // other entry points; a second call finds nothing loaded.
     pond_adapters_goose::release_local_models(std::time::Duration::from_secs(20)).await;
@@ -4858,59 +5036,6 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
         let _ = stdout.write_all(line.as_bytes());
         let _ = stdout.write_all(b"\n");
         let _ = stdout.flush();
-    }
-}
-
-/// Returns the Silero VAD, or `None` (energy gate) on any failure: a worse VAD, never a deaf pond.
-/// Diagnostics use stderr: `out!` is a no-op under `--json-events`, the desktop's only mode.
-async fn build_speech_detector(
-    vad_backend: &str,
-    data_dir: &std::path::Path,
-) -> Option<Box<dyn pond_voice::dsp::SpeechDetector + Send>> {
-    if vad_backend.eq_ignore_ascii_case("rms") {
-        // The escape hatch, for a board whose ONNX Runtime is broken.
-        return None;
-    }
-    if !vad_backend.eq_ignore_ascii_case("silero") {
-        // A hand-edited DB can land here: `apply_key` skips the API's `VAD_BACKENDS` validation.
-        eprintln!("  Listen   unknown vad_backend \"{vad_backend}\" — using the energy gate.");
-        return None;
-    }
-
-    // Fetched before `ready`, unlike Kokoro: it's 2 MB and `chat --voice` must work with no server.
-    let path = model_download::ensure_silero_model(data_dir).await?;
-
-    // Bounded: with no dylib, ort's `load-dynamic` init hangs forever instead of failing.
-    const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-    let loading = tokio::time::timeout(
-        LOAD_TIMEOUT,
-        tokio::task::spawn_blocking(move || pond_adapters_silero::SileroDetector::new(&path)),
-    )
-    .await;
-
-    match loading {
-        Ok(Ok(Ok(detector))) => {
-            tracing::info!("silero VAD active");
-            Some(Box::new(detector) as Box<dyn pond_voice::dsp::SpeechDetector + Send>)
-        }
-        Ok(Ok(Err(e))) => {
-            eprintln!("  Listen   silero VAD failed to load: {e}");
-            eprintln!("           Using the energy gate.");
-            None
-        }
-        Ok(Err(e)) => {
-            eprintln!("  Listen   silero VAD load panicked: {e}");
-            None
-        }
-        Err(_) => {
-            eprintln!(
-                "  Listen   silero VAD load timed out after {}s — the ONNX Runtime is \
-                 probably missing or version-incompatible.",
-                LOAD_TIMEOUT.as_secs()
-            );
-            eprintln!("           Using the energy gate.");
-            None
-        }
     }
 }
 
@@ -5615,18 +5740,38 @@ async fn run_chat(
         None
     };
 
-    // Set on the shared backend, so both voice input and the wake-word detector use it.
-    if let Some(backend) = &whisper_backend {
-        if let Some(detector) = build_speech_detector(&settings.vad_backend, &data_dir).await {
-            backend.set_speech_detector(detector);
-        }
-    }
+    // The ear where Silero is available, the Whisper detector and energy gates otherwise.
+    let listening = match &whisper_backend {
+        Some(backend) => Some(
+            voice_rig::build_listening(voice_rig::ListeningOptions {
+                settings: &settings,
+                data_dir: &data_dir,
+                mic: &mic_handle,
+                whisper: backend.clone(),
+                wake_word,
+                no_wake_word,
+                audio_level: audio_level_sink.clone(),
+                // Voice Match runs in serve's room; this terminal loop recognises nobody.
+                speaker: None,
+                cnn_hears_household: false,
+                whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
+                    voice_rig::household_prompt(
+                        wake_word.unwrap_or(settings.voice_wake_word.as_str()),
+                        Some(&SqliteProfileRepository::new(db.system.clone())),
+                    )
+                    .await,
+                ))),
+            })
+            .await,
+        ),
+        None => None,
+    };
 
     // Under --json-events stdin is the shell's command channel; typed turns share it.
     let control = json_events.then(VoiceControl::new);
     let mut typed_lines = None;
-    let voice: Arc<dyn VoiceInput> = match &whisper_backend {
-        Some(backend) => {
+    match &listening {
+        Some(listening) => {
             out!(
                 "  Listen   {}",
                 voice_models
@@ -5636,20 +5781,22 @@ async fn run_chat(
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "whisper".to_string())
             );
-            backend.clone() as Arc<dyn VoiceInput>
+            chat_service = listening.apply(chat_service);
         }
         None => {
             out!("  Listen   typed input (no speech model)");
-            if control.is_some() {
+            let voice: Arc<dyn VoiceInput> = if control.is_some() {
                 let (tx, typed) = TypedLineInput::channel();
                 typed_lines = Some(tx);
                 Arc::new(typed)
             } else {
                 Arc::new(StdinInput::new())
-            }
+            };
+            chat_service = chat_service
+                .with_voice_input(voice)
+                .with_wake_word_detector(Arc::new(InstantActivation));
         }
-    };
-    chat_service = chat_service.with_voice_input(voice);
+    }
     if let Some(control) = &control {
         chat_service = chat_service.with_control(control.clone());
         let control = control.clone();
@@ -5660,53 +5807,19 @@ async fn run_chat(
             .spawn(move || pump_stdin(std::io::stdin().lock(), &control, typed_lines))?;
     }
 
-    // ── Wire wake word detector ──
-    if no_wake_word || whisper_backend.is_none() {
-        chat_service = chat_service.with_wake_word_detector(Arc::new(InstantActivation));
-    } else {
-        let backend = whisper_backend.clone().expect("checked above");
-        let trigger = wake_word.unwrap_or(settings.voice_wake_word.as_str());
-        let transcriptions = settings.voice_wake_word_transcriptions.clone();
-
-        if transcriptions.is_empty() {
-            out!("  Wake     \"{}\"", trigger);
+    if let Some(listening) = listening.as_ref().filter(|_| !no_wake_word) {
+        if listening.calibrated == 0 {
+            out!("  Wake     \"{}\"", listening.wake_word);
         } else {
             out!(
                 "  Wake     \"{}\" ({} calibrated variants)",
-                trigger,
-                transcriptions.len()
+                listening.wake_word,
+                listening.calibrated
             );
         }
-        use pond_adapters_whisper::{KeywordDetectorConfig, WhisperBackend};
-        let kws_config = KeywordDetectorConfig {
-            energy_threshold: settings.voice_kws_energy_threshold,
-            post_trigger_silence_ms: settings.voice_kws_post_trigger_silence_ms,
-            cooldown_ms: settings.voice_kws_cooldown_ms,
-            ..KeywordDetectorConfig::default()
-        };
-
-        let mut detector_builder = WhisperKeywordDetector::new(
-            backend.clone() as Arc<dyn WhisperBackend>,
-            trigger,
-            mic_handle.clone(),
-        )
-        .with_transcriptions(transcriptions)
-        .with_config(kws_config);
-        if let Some(sink) = &audio_level_sink {
-            detector_builder = detector_builder.with_audio_level_sink(sink.clone());
-        }
-        let detector = Arc::new(detector_builder);
-        // The command clip contains the wake word; strip exactly the triggers the detector used.
-        backend.set_wake_words(detector.triggers());
-        chat_service = chat_service.with_wake_word_detector(detector);
-    };
-
-    // ── Wire barge-in energy ──
-    // Required for barge-in: the default `NoEnergy` is inert. Only with speech input, because
-    // it opens the mic while the reply plays and hands what it hears to the next capture.
-    if whisper_backend.is_some() {
-        chat_service =
-            chat_service.with_speech_energy(Arc::new(pond_audio::MicEnergy::new(&mic_handle)));
+    }
+    if let Some(listening) = &listening {
+        out!("  Ear      {}", listening.describe());
     }
 
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake
@@ -6538,6 +6651,16 @@ async fn run_quiet_compaction(
                     }
                     false
                 }
+                _ = slot.cancelled() => {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "quiet_compaction_preempted",
+                        session_id = %session_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "quiet compaction preempted by user activity"
+                    );
+                    true
+                }
                 // No cooldown: the conversation is still due, and a longer quiet tries again.
                 () = someone_back => {
                     tracing::info!(
@@ -6775,7 +6898,7 @@ async fn run_proactive_reviewer(
         );
 
         // The lease revokes on drop, so an ended review can no longer delegate.
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = slot.cancellation_token();
         let lease = authorities.publish(
             &session_id,
             review::review_authority(&audience, &session_id),
@@ -7244,7 +7367,7 @@ impl LongTaskHelpers {
                     target: "giap::trace",
                     kind = "long_task_reply_saved",
                     task_id = %task.id(),
-                    title = %draft.title(),
+                    title_chars = draft.title().chars().count(),
                     chars = draft.body().len(),
                     "a helper's work was in its reply; the runner saved it"
                 );
@@ -8265,7 +8388,7 @@ async fn run_calibrate(
     // Own mic owner: calibration never runs alongside the wake-word detector. The pinned mic,
     // so the variants are learned through the microphone voice will hear them on.
     let capture = match settings.audio_input_device.trim() {
-        "" => pond_audio::CpalCapture::new(),
+        "" | "auto" => pond_audio::CpalCapture::new(),
         pinned => pond_audio::CpalCapture::with_device(pinned),
     };
     let (mic_handle, _mic_owner_join) =
@@ -9531,6 +9654,8 @@ async fn build_goose_backend(
             };
             // Read per turn, so mesh_rebuild filling it later needs no adapter rebuild.
             let adapter = adapter.with_mesh_provider(mesh_provider);
+            // A spoken turn reads the household's Voice agent edit from it.
+            let adapter = adapter.with_recipe_repo(recipe_repo.clone());
             if voice_mode {
                 adapter.set_voice_mode(true);
             }

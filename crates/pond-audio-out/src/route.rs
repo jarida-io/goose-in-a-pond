@@ -261,8 +261,9 @@ pub fn play_samples_exactly(
             .map_err(|e| anyhow!("audio output device unavailable: {e}"))?,
     };
     let sink = rodio::Sink::try_new(&handle).map_err(|e| anyhow!("no sink: {e}"))?;
-    sink.set_volume(volume);
-    sink.append(rodio::buffer::SamplesBuffer::new(1, rate, samples));
+    use rodio::Source;
+    let samples = rodio::buffer::SamplesBuffer::new(1, rate, samples).amplify(volume);
+    sink.append(crate::tap::tapped(samples));
     sink.sleep_until_end();
     Ok(())
 }

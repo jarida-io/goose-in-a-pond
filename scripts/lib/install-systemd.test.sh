@@ -8,8 +8,9 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/install-systemd-test.XXXXXX")" && pwd)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/install-systemd-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
 PASSED=0; FAILED=0
@@ -142,11 +143,11 @@ test_the_account_is_locked_with_no_shell_and_only_the_groups_this_host_has() {
 test_an_existing_account_only_gains_groups() {
   world
   printf 'agamemnon:x:998:998::/var/lib/goose-in-a-pond:/usr/sbin/nologin\n' >> "$W/etc/passwd"
-  printf 'i2c:x:116:\ngpio:x:999:\n' >> "$W/etc/group"
+  printf 'i2c:x:116:\ngpio:x:999:\ndialout:x:20:\nplugdev:x:46:\ninput:x:107:\nspi:x:997:\n' >> "$W/etc/group"
   agamemnon_create >/dev/null || return 1
   local c; c="$(calls)"
   lacks "$c" "useradd"
-  contains "$c" "usermod -a -G video,render,audio,i2c,gpio agamemnon"
+  contains "$c" "usermod -a -G video,render,audio,i2c,gpio,dialout,plugdev,input,spi agamemnon"
 }
 
 test_a_new_install_moves_the_data_and_leaves_a_link() {
@@ -162,9 +163,14 @@ test_a_new_install_moves_the_data_and_leaves_a_link() {
   local c; c="$(calls)"
   contains "$c" "chown -R agamemnon:agamemnon $R/var/lib/goose-in-a-pond"
   contains "$c" "setfacl -m u:agamemnon:--x $R/home/nano"
+  contains "$c" "setfacl -R -n -m u:agamemnon:rX $R/home/nano/goose-in-a-pond"
+  contains "$c" "setfacl -n -m d:u:agamemnon:rX $R/home/nano/goose-in-a-pond"
+  contains "$c" "setfacl -R -n -m u:agamemnon:rX $R/home/nano/.giap"
+  contains "$c" "setfacl -n -m d:u:agamemnon:rX $R/home/nano/.giap"
   contains "$c" "setfacl -R -n -m u:nano:rX $R/var/lib/goose-in-a-pond"
   contains "$c" "setfacl -n -m d:u:nano:rX $R/var/lib/goose-in-a-pond"
   contains "$c" "loginctl enable-linger agamemnon"
+  contains "$c" "systemctl start user@998.service"
   contains "$c" "systemctl daemon-reload"
   contains "$c" "systemctl enable goose-in-a-pond.service"
   contains "$(cat "$R/etc/systemd/system/goose-in-a-pond.service")" "User=agamemnon"
@@ -250,6 +256,9 @@ test_a_user_unit_pond_moves_and_undo_puts_back_every_piece() {
   contains "$c" "chown -R nano:1000 $R$OLD_DATA"
   contains "$c" "setfacl -R -b $R$OLD_DATA"
   contains "$c" "setfacl -x u:agamemnon $R/home/nano"
+  contains "$c" "setfacl -R -x u:agamemnon $R/home/nano/.giap"
+  contains "$c" "setfacl -R -x u:agamemnon $R/home/nano/goose-in-a-pond"
+  contains "$c" "systemctl stop user@998.service"
   contains "$c" "loginctl disable-linger agamemnon"
   eq "$(connect_grant_state nano)" present
 }
@@ -371,6 +380,24 @@ test_a_login_rule_visudo_refuses_is_never_installed() {
   contains "$out" "did not pass visudo"
   contains "$out" "needs sudo's password"
   [ ! -e "$R/etc/sudoers.d/goose-in-a-pond-login" ] || { echo "a refused rule was installed"; return 1; }
+}
+
+test_symlinks_and_registry_retargeted_on_move_and_undo() {
+  world
+  user_unit
+  mkdir -p "$R$OLD_DATA/models/gguf" "$R$OLD_DATA/engine/data/models"
+  touch "$R$OLD_DATA/models/gguf/gemma.gguf"
+  ln -s "$OLD_DATA/models/gguf/gemma.gguf" "$R$OLD_DATA/models/active.gguf"
+  printf '{"path": "%s/models/gguf/gemma.gguf"}\n' "$OLD_DATA" > "$R$OLD_DATA/engine/data/models/registry.json"
+
+  agamemnon_move user "$U" "$OLD_DATA" nano /home/nano/goose-in-a-pond >/dev/null || return 1
+  local new_data="$R$AGAMEMNON_DATA"
+  eq "$(readlink "$new_data/models/active.gguf")" "$AGAMEMNON_DATA/models/gguf/gemma.gguf"
+  contains "$(cat "$new_data/engine/data/models/registry.json")" "$AGAMEMNON_DATA/models/gguf/gemma.gguf"
+
+  agamemnon_undo nano /home/nano/goose-in-a-pond >/dev/null || return 1
+  eq "$(readlink "$R$OLD_DATA/models/active.gguf")" "$OLD_DATA/models/gguf/gemma.gguf"
+  contains "$(cat "$R$OLD_DATA/engine/data/models/registry.json")" "$OLD_DATA/models/gguf/gemma.gguf"
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do

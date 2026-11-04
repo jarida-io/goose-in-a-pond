@@ -223,7 +223,9 @@ impl AudioChoice {
         pinned: Option<&str>,
         plugged_in_first: bool,
     ) -> Self {
-        let pinned = pinned.map(str::trim).filter(|p| !p.is_empty());
+        let pinned = pinned
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("auto"));
         let ordered: Vec<ProbedDevice> = probe_order(&devices, pinned, plugged_in_first)
             .into_iter()
             .map(|d| ProbedDevice::new(d.clone(), ProbeOutcome::Untested))
@@ -395,6 +397,57 @@ pub struct AudioDeviceStatus {
     pub sound_server: Option<SoundServerDefaults>,
 }
 
+impl AudioDeviceStatus {
+    /// A microphone and speaker shown to work together: a pair the sound test heard, or, where
+    /// no sound test ran, a speaker that took audio and a microphone that heard the room.
+    pub fn pair_works(&self) -> bool {
+        if self.input.heard_with.is_some() && self.output.heard_with.is_some() {
+            return true;
+        }
+        let chosen = |c: &AudioChoice| {
+            c.device.is_some()
+                && !matches!(
+                    c.basis,
+                    ChoiceBasis::NoDevice
+                        | ChoiceBasis::MicOff
+                        | ChoiceBasis::NotTested
+                        | ChoiceBasis::BestEffort
+                )
+        };
+        !self.output.unheard
+            && chosen(&self.input)
+            && chosen(&self.output)
+            && self.input.outcome.proven()
+            && self.output.outcome.works()
+    }
+}
+
+fn capability_priority(d: &AudioDevice) -> u8 {
+    let lower = format!("{} {}", d.label, d.id).to_ascii_lowercase();
+    if lower.contains("array")
+        || lower.contains("respeaker")
+        || lower.contains("c920")
+        || lower.contains("c922")
+        || lower.contains("c930")
+        || lower.contains("brio")
+        || lower.contains("conference")
+        || lower.contains("jabra")
+        || lower.contains("anker")
+        || lower.contains("poly")
+        || lower.contains("yeti")
+        || lower.contains("quadcast")
+        || lower.contains("shure")
+        || lower.contains("rode")
+        || lower.contains("webcam")
+    {
+        0
+    } else if lower.contains("pnp") || lower.contains("generic") || lower.contains("dongle") {
+        2
+    } else {
+        1
+    }
+}
+
 /// The order to try devices in: the pin, then the system default, then the rest best-first.
 /// With `plugged_in_first`, plugged-in devices go ahead of the default: on a board the sound
 /// server picks its default by priority, while the household plugged the USB card in on purpose.
@@ -404,9 +457,12 @@ pub fn probe_order<'a>(
     pinned: Option<&str>,
     plugged_in_first: bool,
 ) -> Vec<&'a AudioDevice> {
+    let clean_pin = pinned
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("auto"));
     let mut order: Vec<(usize, &AudioDevice)> = devices.iter().enumerate().collect();
     order.sort_by_key(|(i, d)| {
-        let tier = if Some(d.id.as_str()) == pinned {
+        let tier = if clean_pin == Some(d.id.as_str()) {
             0
         } else if plugged_in_first && d.plugged_in && d.kind != DeviceKind::Virtual {
             1 + d.kind.rank()
@@ -415,14 +471,17 @@ pub fn probe_order<'a>(
         } else {
             6 + d.kind.rank()
         };
-        (tier, *i)
+        (tier, capability_priority(d), *i)
     });
     order.into_iter().map(|(_, d)| d).collect()
 }
 
 /// Whether trying further devices can change the choice: a working pin, or any proven device.
 pub fn settles(device: &AudioDevice, outcome: &ProbeOutcome, pinned: Option<&str>) -> bool {
-    if Some(device.id.as_str()) == pinned {
+    let clean_pin = pinned
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("auto"));
+    if clean_pin == Some(device.id.as_str()) {
         return outcome.works();
     }
     outcome.proven()
@@ -437,7 +496,9 @@ pub fn choose(
     pinned: Option<&str>,
     plugged_in_first: bool,
 ) -> AudioChoice {
-    let pinned = pinned.map(str::trim).filter(|p| !p.is_empty());
+    let pinned = pinned
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("auto"));
     let plain: Vec<AudioDevice> = devices.iter().map(|p| p.device.clone()).collect();
     let ordered: Vec<&ProbedDevice> = probe_order(&plain, pinned, plugged_in_first)
         .into_iter()
@@ -539,6 +600,62 @@ mod tests {
     }
     fn probed(id: &str, is_default: bool, outcome: ProbeOutcome) -> ProbedDevice {
         ProbedDevice::new(dev(id, is_default, DeviceKind::Hardware), outcome)
+    }
+
+    fn status(input: AudioChoice, output: AudioChoice) -> AudioDeviceStatus {
+        AudioDeviceStatus {
+            input,
+            output,
+            updated_at_ms: 0,
+            source: "serve".into(),
+            pid: 1,
+            raised: Vec::new(),
+            sound_server: None,
+        }
+    }
+
+    #[test]
+    fn a_room_needs_a_pair_that_works_together() {
+        let mic = choose(IN, vec![probed("USB mic", true, hearing())], None, false);
+        let speaker = choose(
+            OUT,
+            vec![probed("USB speaker", true, ProbeOutcome::Accepting)],
+            None,
+            false,
+        );
+        assert!(
+            status(mic.clone(), speaker.clone()).pair_works(),
+            "no sound test ran: two devices that each work"
+        );
+
+        let mut unheard = speaker.clone();
+        unheard.unheard = true;
+        assert!(
+            !status(mic.clone(), unheard).pair_works(),
+            "the sound test ran and nothing heard the speaker"
+        );
+
+        let silent = choose(
+            IN,
+            vec![probed("USB mic", true, ProbeOutcome::Silent)],
+            None,
+            false,
+        );
+        assert!(!status(silent, speaker.clone()).pair_works());
+
+        let untested = AudioChoice::not_tested(
+            IN,
+            vec![dev("USB mic", true, DeviceKind::Hardware)],
+            None,
+            false,
+        );
+        assert!(!status(untested, speaker.clone()).pair_works());
+        assert!(!status(AudioChoice::mic_off(None), speaker.clone()).pair_works());
+
+        let (mut heard_in, mut heard_out) = (mic, speaker);
+        heard_in.heard_with = Some("USB speaker".into());
+        heard_out.heard_with = Some("USB mic".into());
+        assert!(status(heard_in, heard_out).pair_works());
     }
 
     #[test]
@@ -977,5 +1094,54 @@ mod tests {
             Some("sysdefault:CARD=Device"),
             "a sound server route that stalled mid-session falls back to the card itself"
         );
+    }
+
+    #[test]
+    fn an_array_or_webcam_mic_beats_a_generic_dongle_when_unpinned() {
+        let mut dongle = usb("sysdefault:CARD=Device");
+        dongle.label = "USB PnP Audio Device".into();
+        let mut webcam = usb("sysdefault:CARD=U0x46d0x892");
+        webcam.label = "HD Pro Webcam C920".into();
+
+        let devices = vec![
+            ProbedDevice::new(dongle, hearing()),
+            ProbedDevice::new(webcam, hearing()),
+        ];
+        let c = choose(IN, devices, None, true);
+        assert_eq!(c.device_id(), Some("sysdefault:CARD=U0x46d0x892"));
+        assert_eq!(c.basis, ChoiceBasis::PluggedIn);
+    }
+
+    #[test]
+    fn a_pinned_generic_dongle_still_beats_an_unpinned_array() {
+        let mut dongle = usb("sysdefault:CARD=Device");
+        dongle.label = "USB PnP Audio Device".into();
+        let mut webcam = usb("sysdefault:CARD=U0x46d0x892");
+        webcam.label = "HD Pro Webcam C920".into();
+
+        let devices = vec![
+            ProbedDevice::new(dongle, hearing()),
+            ProbedDevice::new(webcam, hearing()),
+        ];
+        let c = choose(IN, devices, Some("sysdefault:CARD=Device"), true);
+        assert_eq!(c.device_id(), Some("sysdefault:CARD=Device"));
+        assert_eq!(c.basis, ChoiceBasis::Pinned);
+    }
+
+    #[test]
+    fn auto_pin_string_means_automatic() {
+        let mut dongle = usb("sysdefault:CARD=Device");
+        dongle.label = "USB PnP Audio Device".into();
+        let mut webcam = usb("sysdefault:CARD=U0x46d0x892");
+        webcam.label = "HD Pro Webcam C920".into();
+
+        let devices = vec![
+            ProbedDevice::new(dongle, hearing()),
+            ProbedDevice::new(webcam, hearing()),
+        ];
+        let c = choose(IN, devices, Some("auto"), true);
+        assert_eq!(c.device_id(), Some("sysdefault:CARD=U0x46d0x892"));
+        assert_eq!(c.basis, ChoiceBasis::PluggedIn);
+        assert_eq!(c.pinned, None);
     }
 }

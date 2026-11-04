@@ -78,6 +78,12 @@ pub(crate) fn resolve_ffmpeg_bin() -> std::ffi::OsString {
             return p.into_os_string();
         }
     }
+    if let Ok(data_dir) = std::env::var("POND_DATA_DIR") {
+        let data_bin = std::path::PathBuf::from(data_dir).join("bin/ffmpeg");
+        if data_bin.exists() {
+            return data_bin.into_os_string();
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         let local_bin = std::path::PathBuf::from(home).join(".local/bin/ffmpeg");
         if local_bin.exists() {
