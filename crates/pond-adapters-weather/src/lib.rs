@@ -100,6 +100,18 @@ impl ForecastData {
     /// Compact context block for the LLM. Each day is labelled with its weekday, so a question
     /// that names one ("on Saturday") is answered by reading a label, not by counting dates.
     pub fn as_context_block(&self) -> String {
+        self.block(None)
+    }
+
+    /// [`as_context_block`](Self::as_context_block), with today, tomorrow and the day after also
+    /// tagged by name, in English and Swahili, counted from `today` (the household's date). A
+    /// small model asked for "kesho kutwa" reads the tag on the matching line rather than having to
+    /// know which date that is.
+    pub fn as_context_block_from(&self, today: chrono::NaiveDate) -> String {
+        self.block(Some(today))
+    }
+
+    fn block(&self, today: Option<chrono::NaiveDate>) -> String {
         let mut out = format!(
             "[{}-Day Forecast — {}]\n",
             self.days.len(),
@@ -107,8 +119,18 @@ impl ForecastData {
         );
         for d in &self.days {
             // An unparseable date still prints, unlabelled: the figures are what matter.
-            let weekday = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")
-                .map(|day| format!("{} ", day.format("%A")))
+            let date = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").ok();
+            let relative = match (date, today) {
+                (Some(day), Some(today)) => match (day - today).num_days() {
+                    0 => " (today/leo)",
+                    1 => " (tomorrow/kesho)",
+                    2 => " (the day after tomorrow/kesho kutwa)",
+                    _ => "",
+                },
+                _ => "",
+            };
+            let weekday = date
+                .map(|day| format!("{}{relative} ", day.format("%A")))
                 .unwrap_or_default();
             out.push_str(&format!(
                 "{}{}: {} | {:.0}\u{00B0}C/{:.0}\u{00B0}C | Rain: {:.1}mm ({}%) | \

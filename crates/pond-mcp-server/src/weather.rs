@@ -281,7 +281,7 @@ impl WeatherMcpServer {
         let hint = format!("[[[mcp-ui:weather:{}]]]\n", ui_data);
         CallToolResult::success(vec![ContentBlock::text(format!(
             "{hint}{header}{}",
-            data.as_context_block()
+            data.as_context_block_from(today)
         ))])
     }
 
@@ -663,7 +663,10 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("Thursday 2026-11-05:"), "{text}");
+        assert!(
+            text.contains("Thursday (the day after tomorrow/kesho kutwa) 2026-11-05:"),
+            "{text}"
+        );
         assert!(!text.contains("2026-11-04"), "only the day asked: {text}");
     }
 
@@ -693,7 +696,10 @@ mod tests {
                 .forecast_result(&params, at("2026-11-03T09:00:00Z"))
                 .await,
         );
-        assert!(text.contains("Thursday 2026-11-05:"), "{text}");
+        assert!(
+            text.contains("Thursday (the day after tomorrow/kesho kutwa) 2026-11-05:"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -744,6 +750,35 @@ mod tests {
         );
         assert!(!text.contains("Forecast for "), "{text}");
         assert!(text.contains("Saturday 2026-11-07:") && text.contains("Monday 2026-11-09:"));
+    }
+
+    /// Asked "kesho kutwa", Gemma 4 E4B fetched the week rather than `day: 2`; the matching line
+    /// must still say which one it is, so the answer reads a tag instead of counting dates.
+    #[tokio::test]
+    async fn a_span_tags_today_tomorrow_and_the_day_after() {
+        let server = server_on("Europe/Moscow", "2026-11-03").await;
+        let params = ForecastParams {
+            days: Some(7),
+            ..Default::default()
+        };
+        let text = text_of(
+            &server
+                .forecast_result(&params, at("2026-11-03T09:00:00Z"))
+                .await,
+        );
+        assert!(text.contains("Tuesday (today/leo) 2026-11-03:"), "{text}");
+        assert!(
+            text.contains("Wednesday (tomorrow/kesho) 2026-11-04:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Thursday (the day after tomorrow/kesho kutwa) 2026-11-05:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Friday 2026-11-06:"),
+            "only the first three are tagged: {text}"
+        );
     }
 
     #[test]
