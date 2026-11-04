@@ -20,6 +20,7 @@
 #   bash scripts/giap.sh onnxruntime status  # Jetson: the GPU ONNX Runtime (vision and faces on TensorRT), verified
 #   bash scripts/giap.sh onnxruntime build   # Jetson: build it from source in the background (hours), install, build engines
 #   bash scripts/giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]  # inspect or switch KV cache quantization (POND_KV_TYPE)
+#   bash scripts/giap.sh ctx [status|8k|16k|24k|32k|48k|64k|auto|N] # inspect or configure context window n_ctx (POND_CONTEXT_SIZE)
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
@@ -169,6 +170,7 @@ D_LITERT_MAC=""; D_LITERT_MAC_TAG=""; D_LITERT_MAC_DIR=""; D_LITERT_LNX=""; D_LI
 D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
 D_ORTGPU=""; D_ORTGPU_TAG=""; D_ORTGPU_DIR=""; D_ORTGPU_BUILD=""
 D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
+D_CTX_CFG=""; D_CTX_SRC=""
 
 human_mb() { # $1 = MB
   local m="${1:-0}"
@@ -468,22 +470,37 @@ pond_data_run() {
 
 detect_kv() {
   D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
-  local kv_file="$D_DATA_DIR/kv.env" dropin="" v=""
+  D_CTX_CFG=""; D_CTX_SRC=""
+  local kv_file="$D_DATA_DIR/kv.env" dropin="" v="" c=""
   if pond_data_run test -f "$kv_file" 2>/dev/null; then
     v="$(pond_data_run sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$kv_file" 2>/dev/null | tail -1)"
     [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$kv_file"; }
+    c="$(pond_data_run sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$kv_file" 2>/dev/null | tail -1)"
+    [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$kv_file"; }
   fi
-  if [ -z "$D_KV_CFG" ] && [ "$D_OS" = "linux" ]; then
+  if [ "$D_OS" = "linux" ]; then
     if [ "$D_SVC_SCOPE" = "system" ]; then dropin="/etc/systemd/system/$SERVICE_NAME.d/override.conf"
     elif [ "$D_SVC_SCOPE" = "user" ]; then dropin="$HOME/.config/systemd/user/$SERVICE_NAME.d/override.conf"; fi
     if [ -n "$dropin" ] && [ -r "$dropin" ]; then
-      v="$(sed -n 's/^Environment="\{0,1\}POND_KV_TYPE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
-      [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$dropin"; }
+      if [ -z "$D_KV_CFG" ]; then
+        v="$(sed -n 's/^Environment="\{0,1\}POND_KV_TYPE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
+        [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$dropin"; }
+      fi
+      if [ -z "$D_CTX_CFG" ]; then
+        c="$(sed -n 's/^Environment="\{0,1\}POND_CONTEXT_SIZE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
+        [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$dropin"; }
+      fi
     fi
   fi
-  if [ -z "$D_KV_CFG" ] && [ -f "$REPO_ROOT/.env.override" ]; then
-    v="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
-    [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$REPO_ROOT/.env.override"; }
+  if [ -f "$REPO_ROOT/.env.override" ]; then
+    if [ -z "$D_KV_CFG" ]; then
+      v="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
+      [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$REPO_ROOT/.env.override"; }
+    fi
+    if [ -z "$D_CTX_CFG" ]; then
+      c="$(sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
+      [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$REPO_ROOT/.env.override"; }
+    fi
   fi
   local reg="$D_DATA_DIR/engine/data/models/registry.json"
   if pond_data_run test -f "$reg" 2>/dev/null; then
@@ -503,6 +520,7 @@ detect_kv() {
   fi
   local eff="${D_KV_CFG:-default (q8_0,q8_0)}"
   D_KV_SUMMARY="$eff"
+  [ -n "$D_CTX_CFG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · target n_ctx=$D_CTX_CFG"
   [ -n "$D_KV_REG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · stamped $D_KV_REG"
   [ -n "$D_KV_LOG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · $D_KV_LOG"
 }
@@ -1530,7 +1548,7 @@ kv_ensure_systemd_dropin() {
   local env_file_line="EnvironmentFile=-$D_DATA_DIR/kv.env"
   if [ -r "$dropin" ] \
     && grep -Fqx "$env_file_line" "$dropin" 2>/dev/null \
-    && ! grep -Eq '^Environment="?POND_KV_TYPE=' "$dropin" 2>/dev/null; then
+    && ! grep -Eq '^Environment="?(POND_KV_TYPE|POND_CONTEXT_SIZE)=' "$dropin" 2>/dev/null; then
     return 0
   fi
   info "wiring $dropin -> $env_file_line"
@@ -1538,7 +1556,7 @@ kv_ensure_systemd_dropin() {
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/giap-kv-dropin.XXXXXX")" || return 1
   if [ -r "$dropin" ]; then
-    grep -Ev '^Environment="?POND_KV_TYPE=|^EnvironmentFile=.*kv\.env' "$dropin" > "$tmp" || true
+    grep -Ev '^Environment="?(POND_KV_TYPE|POND_CONTEXT_SIZE)=|^EnvironmentFile=.*kv\.env' "$dropin" > "$tmp" || true
     grep -Fq '[Service]' "$tmp" 2>/dev/null || printf '[Service]\n' > "$tmp"
   else
     printf '[Service]\n' > "$tmp"
@@ -1552,6 +1570,36 @@ kv_ensure_systemd_dropin() {
   local rc=$?
   rm -f "$tmp"
   return $rc
+}
+
+# Set or remove a key ($1) in $D_DATA_DIR/kv.env and .env.override, preserving other keys.
+kv_env_set() {
+  local key="$1" val="${2:-}"
+  local kv_file="$D_DATA_DIR/kv.env" env_ovr="$REPO_ROOT/.env.override"
+  [ "$DRY_RUN" = true ] && return 0
+  local tmp_k
+  tmp_k="$(mktemp "${TMPDIR:-/tmp}/giap-kv.XXXXXX")" || return 1
+  if pond_data_run test -f "$kv_file" 2>/dev/null; then
+    pond_data_run grep -Ev "^${key}=" "$kv_file" > "$tmp_k" 2>/dev/null || true
+  fi
+  [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$tmp_k"
+  if [ -s "$tmp_k" ]; then
+    chmod 0644 "$tmp_k" 2>/dev/null || true
+    pond_data_run mkdir -p "$D_DATA_DIR" 2>/dev/null || true
+    pond_data_run cp "$tmp_k" "$kv_file" || { rm -f "$tmp_k"; bad "could not write $kv_file"; return 1; }
+  else
+    pond_data_run rm -f "$kv_file" 2>/dev/null || rm -f "$kv_file" 2>/dev/null || true
+  fi
+  rm -f "$tmp_k"
+  if [ -f "$env_ovr" ]; then
+    local tmp_o
+    tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
+      grep -Ev "^${key}=" "$env_ovr" > "$tmp_o" || true
+      [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$tmp_o"
+      mv "$tmp_o" "$env_ovr"
+    }
+  fi
+  return 0
 }
 
 # `giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]`: inspect or switch KV cache quantization.
@@ -1597,38 +1645,13 @@ action_kv() {
 
   kv_normalize_spec "$sub" "$arg2" || return $?
   head1 "Set KV cache quantization -> $KV_SPEC"
-  local kv_file="$D_DATA_DIR/kv.env" env_ovr="$REPO_ROOT/.env.override"
+  local kv_file="$D_DATA_DIR/kv.env"
   if [ "$KV_SPEC" = "auto" ]; then
-    info "removing $kv_file (falling back to binary default q8_0,q8_0)"
-    if [ "$DRY_RUN" != true ]; then
-      pond_data_run rm -f "$kv_file" 2>/dev/null || rm -f "$kv_file" 2>/dev/null || true
-      if [ -f "$env_ovr" ]; then
-        local tmp_o
-        tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
-          grep -Ev '^POND_KV_TYPE=' "$env_ovr" > "$tmp_o" || true
-          mv "$tmp_o" "$env_ovr"
-        }
-      fi
-    fi
+    info "removing POND_KV_TYPE from $kv_file (falling back to binary default q8_0,q8_0)"
+    kv_env_set POND_KV_TYPE "" || return 1
   else
     info "writing POND_KV_TYPE=$KV_SPEC to $kv_file"
-    if [ "$DRY_RUN" != true ]; then
-      local tmp_k
-      tmp_k="$(mktemp "${TMPDIR:-/tmp}/giap-kv.XXXXXX")" || return 1
-      printf 'POND_KV_TYPE=%s\n' "$KV_SPEC" > "$tmp_k"
-      chmod 0644 "$tmp_k" 2>/dev/null || true
-      pond_data_run mkdir -p "$D_DATA_DIR" 2>/dev/null || true
-      pond_data_run cp "$tmp_k" "$kv_file" || { rm -f "$tmp_k"; bad "could not write $kv_file"; return 1; }
-      rm -f "$tmp_k"
-      if [ -f "$env_ovr" ]; then
-        local tmp_o
-        tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
-          grep -Ev '^POND_KV_TYPE=' "$env_ovr" > "$tmp_o" || true
-          printf 'POND_KV_TYPE=%s\n' "$KV_SPEC" >> "$tmp_o"
-          mv "$tmp_o" "$env_ovr"
-        }
-      fi
-    fi
+    kv_env_set POND_KV_TYPE "$KV_SPEC" || return 1
   fi
 
   kv_ensure_systemd_dropin || warn "could not update systemd drop-in; $kv_file was still written"
@@ -1665,6 +1688,152 @@ action_kv_menu() {
     a|A|auto) action_kv auto ;;
     "") ;;
     *) action_kv "$c" ;;
+  esac
+  return 0
+}
+
+# Normalize a context size token ($1) into CTX_SPEC (integer tokens or "auto").
+ctx_normalize_spec() {
+  CTX_SPEC=""
+  local raw
+  raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d ' ,_')"
+  case "$raw" in
+    auto|default|reset|none) CTX_SPEC="auto"; return 0 ;;
+    4k)   CTX_SPEC=4096; return 0 ;;
+    6k)   CTX_SPEC=6144; return 0 ;;
+    8k)   CTX_SPEC=8192; return 0 ;;
+    12k)  CTX_SPEC=12288; return 0 ;;
+    16k)  CTX_SPEC=16384; return 0 ;;
+    24k)  CTX_SPEC=24576; return 0 ;;
+    32k)  CTX_SPEC=32768; return 0 ;;
+    48k)  CTX_SPEC=49152; return 0 ;;
+    64k)  CTX_SPEC=65536; return 0 ;;
+    96k)  CTX_SPEC=98304; return 0 ;;
+    100k) CTX_SPEC=102400; return 0 ;;
+    128k) CTX_SPEC=131072; return 0 ;;
+    *[0-9]k)
+      local base="${raw%k}"
+      case "$base" in *[!0-9]*) ;; *) CTX_SPEC=$((base * 1024)); return 0 ;; esac ;;
+  esac
+  case "$raw" in
+    ''|*[!0-9]*)
+      bad "unknown context size: '$1' (expected 8k, 16k, 24k, 32k, 48k, 64k, auto, or a token count >= 2048)"
+      return 2 ;;
+  esac
+  if [ "$raw" -lt 2048 ] || [ "$raw" -gt 262144 ]; then
+    bad "context size $raw is out of range (2048..262144)"
+    return 2
+  fi
+  CTX_SPEC="$raw"
+  return 0
+}
+
+# `giap.sh ctx [status|8k|16k|24k|32k|48k|64k|auto|N]`: inspect or configure n_ctx (POND_CONTEXT_SIZE).
+action_ctx() {
+  local sub="${1:-status}"
+  if [ "$sub" = "status" ]; then
+    detect_kv
+    head1 "Context window n_ctx  (POND_CONTEXT_SIZE)"
+    local model provider
+    provider="$(sqlite_setting chat_provider || true)"
+    model="$(sqlite_setting chat_model || true)"
+    info "Active model:     ${model:-none}${provider:+ (provider: $provider)}"
+    if [ -n "$D_CTX_CFG" ]; then
+      ok "Configured:       $D_CTX_CFG tokens  (from $D_CTX_SRC)"
+    else
+      info "Configured:       auto (device_window sizer — 16384 default on Orin Nano)"
+    fi
+    local lf; lf="$(log_file_today)"
+    local kib=8 slmb=21 nctx="" req="" rsn="" bud="" free_m="" used=""
+    if [ -f "$lf" ]; then
+      local last_ctx last_inf
+      last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      last_inf="$(grep -aE 'kind="(inference|turn_end)"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      if [ -n "$last_ctx" ]; then
+        kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+        slmb="$(printf '%s' "$last_ctx" | sed -n 's/.*sliding_kv_mb=\([0-9]*\).*/\1/p')"
+        nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+        req="$(printf '%s' "$last_ctx" | sed -n 's/.*requested=\([0-9]*\).*/\1/p')"
+        rsn="$(printf '%s' "$last_ctx" | sed -n 's/.*reason="\([^"]*\)".*/\1/p')"
+        bud="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_budget_mb=\([0-9]*\).*/\1/p')"
+        free_m="$(printf '%s' "$last_ctx" | sed -n 's/.*free_mb=\([0-9]*\).*/\1/p')"
+        local alloc_mb=$(( ${slmb:-0} + (${nctx:-0} * ${kib:-0} + 512) / 1024 ))
+        info "Last model load:  n_ctx=$nctx (requested=$req, reason=$rsn) · KV alloc ${alloc_mb} MiB / budget ${bud:-?} MiB (${free_m:-?} MiB free)"
+      fi
+      if [ -n "$last_inf" ]; then
+        local pt ct
+        pt="$(printf '%s' "$last_inf" | sed -n 's/.*prompt_tokens=\([0-9]*\).*/\1/p')"
+        ct="$(printf '%s' "$last_inf" | sed -n 's/.*completion_tokens=\([0-9]*\).*/\1/p')"
+        [ -n "$ct" ] || ct="$(printf '%s' "$last_inf" | sed -n 's/.*output_tokens=\([0-9]*\).*/\1/p')"
+        used=$(( ${pt:-0} + ${ct:-0} ))
+        if [ "${nctx:-0}" -gt 0 ] && [ "$used" -gt 0 ]; then
+          local pct=$(( (100 * used + nctx / 2) / nctx ))
+          local used_mb=$(( ${slmb:-0} + (used * ${kib:-0} + 512) / 1024 ))
+          info "Current fill:     $used / $nctx tokens (${pct}%) · active KV ~${used_mb} MiB"
+        fi
+      fi
+    fi
+    say ""
+    info "Estimated KV cache RAM at ${kib:-8} KiB/tok + ${slmb:-21} MiB sliding (${D_KV_CFG:-q8_0,q8_0}):"
+    local r r_tok r_mb fit_note
+    for r in "8k:8192" "16k:16384" "24k:24576" "32k:32768" "48k:49152" "64k:65536"; do
+      r_tok="${r#*:}"; r_mb=$(( ${slmb:-21} + (r_tok * ${kib:-8} + 512) / 1024 ))
+      fit_note=""
+      if [ -n "$bud" ]; then
+        [ "$r_mb" -le "$bud" ] && fit_note=" (fits ${bud} MiB budget)" || fit_note=" (exceeds ${bud} MiB budget; engine steps down if tight)"
+      fi
+      note "$(printf '%-4s -> %6s tok   ~%3s MiB KV%s' "${r%%:*}" "$r_tok" "$r_mb" "$fit_note")"
+    done
+    note "auto -> reset        remove override and use device_window sizer"
+    return 0
+  fi
+
+  ctx_normalize_spec "$sub" || return $?
+  head1 "Set context window n_ctx -> $CTX_SPEC"
+  local kv_file="$D_DATA_DIR/kv.env"
+  if [ "$CTX_SPEC" = "auto" ]; then
+    info "removing POND_CONTEXT_SIZE from $kv_file (using device_window sizer)"
+    kv_env_set POND_CONTEXT_SIZE "" || return 1
+  else
+    info "writing POND_CONTEXT_SIZE=$CTX_SPEC to $kv_file"
+    kv_env_set POND_CONTEXT_SIZE "$CTX_SPEC" || return 1
+  fi
+
+  kv_ensure_systemd_dropin || warn "could not update systemd drop-in; $kv_file was still written"
+  detect_kv
+  ok "configured context window: ${D_CTX_CFG:-auto (device_window sizer)}"
+
+  if [ "$D_SVC_ACTIVE" = "active" ]; then
+    if confirm "Restart $SERVICE_NAME now to apply n_ctx ($CTX_SPEC)?"; then
+      svc_ctl restart || return 1
+      await_health || return 1
+      detect_all
+      action_ctx status
+    else
+      note "restart later with: bash scripts/giap.sh ctx $sub -y   (or menu 23)"
+    fi
+  else
+    note "the service is not running; the next start will use ${D_CTX_CFG:-auto}"
+  fi
+  return 0
+}
+
+action_ctx_menu() {
+  action_ctx status
+  [ -t 0 ] || return 0
+  say ""
+  say "  1) 8k (8192)   2) 16k (16384)   3) 24k (24576)   4) 32k (32768)   5) 48k (49152)   6) 64k (65536)   a) auto   return) back"
+  local c=""; printf '  > '; read -r c
+  case "$c" in
+    1) action_ctx 8k ;;
+    2) action_ctx 16k ;;
+    3) action_ctx 24k ;;
+    4) action_ctx 32k ;;
+    5) action_ctx 48k ;;
+    6) action_ctx 64k ;;
+    a|A|auto) action_ctx auto ;;
+    "") ;;
+    *) action_ctx "$c" ;;
   esac
   return 0
 }
@@ -1737,8 +1906,12 @@ action_serve_foreground() {
   local port="${D_PORT:-8080}"
   if [ -t 0 ]; then printf '  port [%s]: ' "$port"; local p=""; read -r p; [ -n "$p" ] && port="$p"; fi
   note "always pass --port explicitly: the real fallback is 4000..4009, not 80/8080/4000/5000"
-  if [ -n "$D_KV_CFG" ]; then
-    run env "POND_KV_TYPE=$D_KV_CFG" ./target/release/pond-server serve --port "$port"
+  local fg_env=""
+  [ -n "$D_KV_CFG" ]  && fg_env="${fg_env:+$fg_env }POND_KV_TYPE=$D_KV_CFG"
+  [ -n "$D_CTX_CFG" ] && fg_env="${fg_env:+$fg_env }POND_CONTEXT_SIZE=$D_CTX_CFG"
+  if [ -n "$fg_env" ]; then
+    # shellcheck disable=SC2086
+    run env $fg_env ./target/release/pond-server serve --port "$port"
   else
     run ./target/release/pond-server serve --port "$port"
   fi
@@ -2055,6 +2228,7 @@ show_menu() {
   say "  15) LiteRT-LM library — status and building (.litertlm models)"
   [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
   say "  19) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
+  say "  28) Context window (n_ctx) — status and sizing (8k, 16k, 32k, 48k, 64k, auto)"
   say ""
   say "  ${C_B}Service & administration${C_RST}"
   say "  20) Install the service"
@@ -2100,6 +2274,7 @@ menu_loop() {
       17) action_update; pause ;;
       18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
       19) action_kv_menu; pause ;;
+      28) action_ctx_menu; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -2156,7 +2331,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert|kv) ;;
-  models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  ctx|context|n_ctx|models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -2186,6 +2361,7 @@ case "$CMD" in
   litert)    action_litert "$CMD_SUB" "$CMD_ARG" ;;
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
   kv)        action_kv "$CMD_SUB" "$CMD_ARG" ;;
+  ctx|context|n_ctx) action_ctx "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;

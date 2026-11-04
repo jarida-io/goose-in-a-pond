@@ -294,12 +294,15 @@ impl LocalInferenceLlmAdapter {
             Some((k, v)) => (Some(k), Some(v)),
             None => (None, None),
         };
+        let context_size = std::env::var("POND_CONTEXT_SIZE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
 
         let settings = ModelSettings {
             // Full offload: unified memory needs no CPU/GPU split.
             n_gpu_layers: Some(99),
-            // Goose's `estimate_max_context_for_memory()` sizes it from free RAM.
-            context_size: None,
+            // Goose's `estimate_max_context_for_memory()` sizes it from free RAM unless overridden.
+            context_size,
             // Batch 512 is optimal for Metal prefill throughput.
             n_batch: Some(512),
             // Flash attention reduces KV-cache memory by ~40%.

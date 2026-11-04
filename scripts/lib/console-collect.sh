@@ -139,6 +139,51 @@ _cc_pond() {
   echo "mtp_logged=$POND_MTP_LOGGED"; echo "mtp_failed=$POND_MTP_FAILED"
   pond_kv_state "$log"
   echo "kv_saved=$POND_KV_SAVED"; echo "kv_loaded=$POND_KV_LOADED"; echo "kv_not_written=$POND_KV_NOT_WRITTEN"
+  local kv_t="" ctx_cfg=""
+  if [ -r "$d/kv.env" ]; then
+    kv_t="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$d/kv.env" 2>/dev/null | tail -1)"
+    ctx_cfg="$(sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$d/kv.env" 2>/dev/null | tail -1)"
+  fi
+  [ -n "$kv_t" ] && echo "kv_type=$kv_t"
+  [ -n "$ctx_cfg" ] && echo "ctx_configured=$ctx_cfg"
+  if [ -f "$log" ]; then
+    local ctx_line last_inf
+    ctx_line="$(grep -a 'kind="context_sized"' "$log" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    last_inf="$(grep -aE 'kind="(inference|turn_end)"' "$log" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    awk -v cl="$ctx_line" -v il="$last_inf" -v cfg="$ctx_cfg" '
+      function f(s, k,   r) {
+        if (match(s, " " k "=\"[^\"]+\"")) return substr(s, RSTART + length(k) + 3, RLENGTH - length(k) - 4)
+        if (match(s, " " k "=[^ ]+")) return substr(s, RSTART + length(k) + 2, RLENGTH - length(k) - 2)
+        return ""
+      }
+      BEGIN {
+        nctx = f(cl, "n_ctx") + 0
+        req  = f(cl, "requested") + 0
+        rsn  = f(cl, "reason")
+        kib  = f(cl, "kv_kib_per_token") + 0
+        slmb = f(cl, "sliding_kv_mb") + 0
+        swa  = f(cl, "n_swa") + 0; if (swa <= 0) swa = 512
+        bud  = f(cl, "kv_budget_mb") + 0
+        lim  = f(il, "context_limit_tokens") + 0
+        if (nctx <= 0) nctx = (lim > 0 ? lim : cfg + 0)
+        pt   = f(il, "prompt_tokens") + 0
+        ct   = f(il, "completion_tokens") + 0
+        if (ct <= 0) ct = f(il, "output_tokens") + 0
+        used = pt + ct
+        if (nctx > 0) printf "ctx_max=%d\n", nctx
+        if (req > 0)  printf "ctx_req=%d\n", req
+        if (rsn != "") printf "ctx_reason=%s\n", rsn
+        printf "ctx_used=%d\n", used
+        if (nctx > 0) printf "ctx_pct=%d\n", int(100 * used / nctx + 0.5)
+        if (kib > 0) {
+          alloc_mb = int(slmb + (nctx * kib) / 1024 + 0.5)
+          swa_frac = (used >= swa ? 1.0 : (used > 0 ? used / swa : 0.0))
+          used_mb  = (used > 0 ? int(slmb * swa_frac + (used * kib) / 1024 + 0.5) : 0)
+          printf "kv_kib_tok=%d\nkv_sliding_mb=%d\nkv_alloc_mb=%d\nkv_used_mb=%d\n", kib, slmb, alloc_mb, used_mb
+        }
+        if (bud > 0) printf "kv_budget_mb=%d\n", bud
+      }'
+  fi
   # The last turns as `turn=<time> <ttft ms> <decode tok/s> <prompt> <completion> <draft rate>`.
   [ -f "$log" ] && grep -a 'kind="turn_end"' "$log" 2>/dev/null | tail -60 | awk '
     function f(k,   m) { if (match($0, " " k "=[^ ]+")) return substr($0, RSTART + length(k) + 2, RLENGTH - length(k) - 2); return "-" }

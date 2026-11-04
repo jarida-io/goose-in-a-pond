@@ -344,6 +344,18 @@ cs_dash_top() {
   printf ' RAM  %s %3s%%  %s  %s / %s GiB  swap %s / %s GiB\n' "$(cs_hbar "$mem" 20)" "$mem" \
     "$(cs_spark "$n" 100 "$(awk '{ print $4 }' "$hist" 2>/dev/null)")" \
     "$(cs_gib "$memu")" "$(cs_gib "$memt")" "$(cs_gib "$(cs_get swap_used_kb)")" "$(cs_gib "$(cs_get swap_total_kb)")"
+  if [ -n "$(cs_get ctx_max)" ]; then
+    local cmax cused cpct cspark kv_info="" kvt
+    cmax="$(cs_get ctx_max)"; cused="$(cs_get ctx_used)"; cpct="$(cs_get ctx_pct)"
+    cspark="$(awk '{ print ($4 != "-" && $5 != "-" ? $4 + $5 : ($4 != "-" ? $4 : "-")) }' "$turns" 2>/dev/null | tr '\n' ' ')"
+    kvt="$(cs_get kv_type)"; [ -n "$kvt" ] || kvt="q8_0,q8_0"
+    if [ -n "$(cs_get kv_alloc_mb)" ]; then
+      kv_info="  KV $(cs_get kv_used_mb) / $(cs_get kv_alloc_mb) MiB (${kvt} ${CS_DOT} $(cs_get kv_kib_tok) KiB/tok$( [ -n "$(cs_get kv_budget_mb)" ] && printf ' %s budget %s MiB' "$CS_DOT" "$(cs_get kv_budget_mb)"))"
+    fi
+    printf ' CTX  %s %3s%%  %s  %s / %s tok%s\n' \
+      "$(cs_hbar "${cpct:-0}" 20)" "${cpct:-0}" "$(cs_spark "$n" "$cmax" "${cspark:--}")" \
+      "${cused:-0}" "$cmax" "$kv_info"
+  fi
   tmp="$(for k in cpu gpu tj; do v="$(cs_get "temp_$k")"; [ -n "$v" ] && printf '%s %s.%sC  ' "$k" "$((v / 10))" "$((v % 10))"; done)"
   pwr="$(cs_get power_VDD_IN)"
   if [ -n "$tmp" ] || [ -n "$pwr" ]; then
