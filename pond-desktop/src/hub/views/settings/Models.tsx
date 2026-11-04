@@ -232,34 +232,6 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         </div>
       )}
 
-      {/* GIAP's picks lead, as on the full Models page; the jobs follow. */}
-      {toGet.length > 0 && (
-        <Card title="Recommended for this pond">
-          <div className="hm-picks">
-            {toGet.map((m) => {
-              const transfer = transferFor(m);
-              return (
-                <PickCard
-                  key={m.id}
-                  model={m}
-                  memory={memory}
-                  inUse={false}
-                  raised={raisedCard?.id === m.id}
-                  asking={asking?.id === m.id}
-                  transfer={transfer}
-                  withPictures={actions.withPictures(m)}
-                  busy={actions.busy}
-                  onWithPictures={(next) => actions.setWithPictures(m, next)}
-                  onUse={() => void actions.useFor(m, "chat")}
-                  onDownload={() => void actions.download(m)}
-                  onControl={(action) => transfer && void actions.control(m, transfer, action)}
-                />
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
       <div className="hm-tiles" role="list" aria-label="Which model does each job">
         {ROLES.map((role) => {
           const Icon = ROLE_ICON[role.key];
@@ -313,6 +285,34 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           );
         })}
       </div>
+
+      {/* After the jobs, GIAP's picks, as on the full Models page. */}
+      {toGet.length > 0 && (
+        <Card title="Recommended for this pond">
+          <div className="hm-picks">
+            {toGet.map((m) => {
+              const transfer = transferFor(m);
+              return (
+                <PickCard
+                  key={m.id}
+                  model={m}
+                  memory={memory}
+                  inUse={false}
+                  raised={raisedCard?.id === m.id}
+                  asking={asking?.id === m.id}
+                  transfer={transfer}
+                  withPictures={actions.withPictures(m)}
+                  busy={actions.busy}
+                  onWithPictures={(next) => actions.setWithPictures(m, next)}
+                  onUse={() => void actions.useFor(m, "chat")}
+                  onDownload={() => void actions.download(m)}
+                  onControl={(action) => transfer && void actions.control(m, transfer, action)}
+                />
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       <Card title="Conversation" id={JOB_CARD.chat}>
         {loading ? (

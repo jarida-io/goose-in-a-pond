@@ -97,11 +97,11 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the bands", () => {
-  it("opens on what is recommended, then Jobs, what is here, and where to get more", async () => {
+  it("opens on the Jobs, then what is recommended, what is here, and where to get more", async () => {
     renderModels();
     await screen.findByRole("heading", { name: "Recommended for this pond" });
     const bands = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
-    expect(bands).toEqual(["Recommended for this pond", "Jobs", "On this device", "Get more"]);
+    expect(bands).toEqual(["Jobs", "Recommended for this pond", "On this device", "Get more"]);
   });
 
   it("no longer has a band of its own for what is coming down", async () => {
@@ -923,7 +923,7 @@ describe("Memory", () => {
     const jobs = await band("Jobs");
     expect(within(jobs).getByRole("region", { name: "Memory models" })).toBeTruthy();
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
-      "Recommended for this pond", "Jobs", "On this device", "Get more",
+      "Jobs", "Recommended for this pond", "On this device", "Get more",
     ]);
     // Memory is listed once, in its panel, not again as a section of the device list.
     const device = await band("On this device");

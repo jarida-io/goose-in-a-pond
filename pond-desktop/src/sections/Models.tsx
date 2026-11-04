@@ -327,30 +327,6 @@ export function Models() {
         </p>
       )}
 
-      {/* GIAP's picks come first: they are what a new pond starts from. The jobs follow, then what
-          is on this device. */}
-      {picks.length > 0 && (
-        <section className="mdl-band" id="mdl-recommended" aria-labelledby="mdl-recommended-title">
-          <h2 className="mdl-band__title" id="mdl-recommended-title">Recommended for this pond</h2>
-          <p className="mdl-band__sub">
-            GIAP's picks. Nothing is downloaded or switched on until you choose it.
-          </p>
-          <div className="mm-picks">
-            {picks.map((m) => {
-              const transfer = transferFor(m);
-              return (
-                <PickCard key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)}
-                  raised={raised?.id === m.id} asking={asking?.id === m.id}
-                  transfer={transfer} withPictures={withPictures(m)} busy={busy}
-                  onWithPictures={(next) => actions.setWithPictures(m, next)}
-                  onUse={() => void actions.useFor(m, "chat")} onDownload={() => void actions.download(m)}
-                  onControl={(action) => transfer && void actions.control(m, transfer, action)} />
-              );
-            })}
-          </div>
-        </section>
-      )}
-
       <section className="mdl-band" aria-labelledby="mdl-jobs">
         <h2 className="mdl-band__title" id="mdl-jobs">Jobs</h2>
         <p className="mdl-band__sub">Which model does what. This is the only part most ponds ever change.</p>
@@ -395,6 +371,30 @@ export function Models() {
           </section>
         )}
       </section>
+
+      {/* After the jobs, GIAP's picks: what a pond changes most is which model does what, then what
+          to fetch next. What is on this device follows. */}
+      {picks.length > 0 && (
+        <section className="mdl-band" id="mdl-recommended" aria-labelledby="mdl-recommended-title">
+          <h2 className="mdl-band__title" id="mdl-recommended-title">Recommended for this pond</h2>
+          <p className="mdl-band__sub">
+            GIAP's picks. Nothing is downloaded or switched on until you choose it.
+          </p>
+          <div className="mm-picks">
+            {picks.map((m) => {
+              const transfer = transferFor(m);
+              return (
+                <PickCard key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)}
+                  raised={raised?.id === m.id} asking={asking?.id === m.id}
+                  transfer={transfer} withPictures={withPictures(m)} busy={busy}
+                  onWithPictures={(next) => actions.setWithPictures(m, next)}
+                  onUse={() => void actions.useFor(m, "chat")} onDownload={() => void actions.download(m)}
+                  onControl={(action) => transfer && void actions.control(m, transfer, action)} />
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       <section className="mdl-band" id="mdl-device" aria-labelledby="mdl-device-title">
         <h2 className="mdl-band__title" id="mdl-device-title">On this device</h2>
