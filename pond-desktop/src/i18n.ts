@@ -48,6 +48,21 @@ void i18n.use(initReactI18next).init({
       litert_library_missing: 'Needs the LiteRT-LM library, which this Pond does not have yet',
       other: 'This pond cannot run this model',
     },
+    section: {
+      conversation: 'Conversation', listening: 'Listening', speaking: 'Speaking', memory: 'Memory',
+      pictures: 'Camera and faces', other: 'Other',
+    },
+    use: {
+      chat: 'Conversation', tool: 'Tool calls', asr: 'Listening', tts: 'Speaking', embedding: 'Memory',
+      pictures: 'Pictures', drafter: 'Faster answers', camera: 'Camera', faces: 'Faces',
+    },
+    included: { pictures: 'Pictures included', drafter: 'Faster answers' },
+    helperAbout: {
+      pictures: 'Lets the conversation model read the pictures you send it.',
+      drafter: 'A small model that guesses ahead, so the conversation model answers faster.',
+      camera: "Spots people, animals and things in your cameras' pictures.",
+      faces: 'Recognises the faces of the people your household has named.',
+    },
   }, extensions: {
     noTools: 'Running, no assistant tools here',
     noToolsGeneric: 'This extension is running, but it gives the assistant nothing to use on this Pond.',

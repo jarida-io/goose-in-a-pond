@@ -25,7 +25,9 @@ vi.mock("../api/PondApiClient", () => ({
 
 import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
-import type { ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelEntry, ModelMemoryStatus } from "../api/types";
+import type {
+  ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelActiveRoles, ModelEntry, ModelMemoryStatus,
+} from "../api/types";
 import { ConfirmProvider } from "../components/shared";
 import { Models } from "./Models";
 import {
@@ -46,7 +48,7 @@ function renderModels() {
 
 function setup(opts: {
   models?: ModelEntry[];
-  roles?: ReturnType<typeof rolesWith>;
+  roles?: ModelActiveRoles;
   memory?: ModelMemoryStatus;
   downloads?: DownloadEntry[];
 } = {}) {
@@ -95,7 +97,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the bands", () => {
-  it("opens on Jobs, what is recommended, what is here, and where to get more", async () => {
+  it("opens on the Jobs, then what is recommended, what is here, and where to get more", async () => {
     renderModels();
     await screen.findByRole("heading", { name: "Recommended for this pond" });
     const bands = screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
@@ -253,12 +255,60 @@ describe("On this device", () => {
   });
 
   it("never offers a helper as conversation, and never shows the scan's placeholder as a name", async () => {
-    setup({ models: [e2b(HERE), functionGemma(), foundOnDisk()] });
+    setup({ models: [e2b(HERE), functionGemma(HERE), foundOnDisk()] });
     renderModels();
     const device = await band("On this device");
-    expect(within(device).queryByText("FunctionGemma 270M")).toBeNull();
+    const conversation = within(device).getByRole("region", { name: "Conversation" });
+    expect(within(conversation).queryByText("FunctionGemma 270M")).toBeNull();
+    // It is on the device, so it is listed, under Other, with nothing to use it for.
+    const other = within(device).getByRole("region", { name: "Other" });
+    expect(within(other).getByText("FunctionGemma 270M")).toBeTruthy();
+    expect(within(other).queryByRole("button", { name: /^Use / })).toBeNull();
     expect(screen.queryByText("(detected on disk)")).toBeNull();
     expect(within(device).getByText("Llama-3.2-3B-Instruct-Q4_K_M")).toBeTruthy();
+  });
+
+  it("says on every row which jobs it is doing, and folds what serves a row into that row", async () => {
+    const minilm = {
+      id: "embedding/all-MiniLM-L6-v2", provider: "embedding", category: "embedding",
+      name: "all-MiniLM-L6-v2", title: "all-MiniLM-L6-v2", is_active: false, downloaded: false,
+      acquire: "external", roles: ["embedding"], section: "memory",
+    } as ModelEntry;
+    setup({
+      models: [
+        e2b({
+          ...HERE, roles: ["chat", "tool"], section: "conversation",
+          companions: [{ kind: "pictures", label: "Gemma 4 E2B", size_bytes: 986_833_728, state: "installed" }],
+        }),
+        minilm,
+      ],
+      roles: {
+        ...rolesWith(null),
+        helpers: [
+          { id: "gguf/e2b#pictures", title: "Gemma 4 E2B pictures", uses: ["pictures"], section: "pictures", serves: e2b().id },
+          { id: "camera_detector", title: "YOLOX-Nano", uses: ["camera"], section: "pictures", serves: null },
+          { id: "mtp-gemma-4-E2B-it", title: null, uses: ["drafter"], section: "other", serves: e2b().id },
+        ],
+      },
+    });
+    renderModels();
+    const device = await band("On this device");
+    // Memory has its own panel under Jobs; the drafter and encoder are part of the Gemma row.
+    const regions = within(device).getAllByRole("region").map((r) => r.getAttribute("aria-label"));
+    expect(regions).toEqual(["Conversation", "Camera and faces"]);
+
+    const conversation = within(device).getByRole("region", { name: "Conversation" });
+    expect(within(conversation).getByText("Conversation", { selector: ".mm-chip--use" })).toBeTruthy();
+    expect(within(conversation).getByText("Tool calls", { selector: ".mm-chip--use" })).toBeTruthy();
+    expect(within(conversation).getByText("Faster answers")).toBeTruthy();
+    expect(within(conversation).getByText("Pictures included")).toBeTruthy();
+    expect(within(device).queryByText("Gemma 4 E2B pictures")).toBeNull();
+
+    // The camera's detector serves no row, so it stands alone, saying what it does, with nothing to press.
+    const camera = within(device).getByRole("region", { name: "Camera and faces" });
+    expect(within(camera).getByText("YOLOX-Nano")).toBeTruthy();
+    expect(within(camera).getByText("Spots people, animals and things in your cameras' pictures.")).toBeTruthy();
+    expect(within(camera).queryByRole("button")).toBeNull();
   });
 
   it("reads each row's picture support in the household's words", async () => {
@@ -875,6 +925,9 @@ describe("Memory", () => {
     expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual([
       "Jobs", "Recommended for this pond", "On this device", "Get more",
     ]);
+    // Memory is listed once, in its panel, not again as a section of the device list.
+    const device = await band("On this device");
+    expect(within(device).queryByRole("region", { name: "Memory" })).toBeNull();
   });
 
   it("recommends EmbeddingGemma 2 first, with what it buys and its size, and one action to use it", async () => {

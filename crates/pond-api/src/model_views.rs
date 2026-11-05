@@ -4,9 +4,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pond_core::models::domain::curated;
+use pond_core::models::domain::drafter::{drafter_for, drafter_path};
 use pond_core::models::domain::engine::{Engine, EngineAvailability};
 use pond_core::models::domain::model_layout;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord, ModelRoleAssignment};
+use pond_core::models::domain::model_use::{HelperModel, ModelSection, ModelUse, RoleHolders};
 use pond_core::models::domain::recommended::{self, DeviceClass};
 use pond_core::models::domain::taxonomy::{self, Acquisition, ModelKind, Provenance};
 use pond_core::models::domain::vision_encoder::{encoder_for_model, EncoderSpec, EncoderState};
@@ -15,16 +17,21 @@ use pond_core::models::ports::agent::Agent;
 
 use crate::{AppState, CompanionDto, MeasuredDto, ModelStatusEntry, RecommendedDto};
 
-/// `m` as the catalogue shows it; `engines` decides whether this pond can run it.
+/// `m` as the catalogue shows it; `engines` decides whether this pond can run it, `holders`
+/// which jobs it is doing.
 pub(crate) fn record_to_dto(
     m: &ModelRecord,
     assignments: &[ModelRoleAssignment],
+    holders: &RoleHolders,
     engines: EngineAvailability,
 ) -> ModelStatusEntry {
     let active = assignments.iter().any(|a| a.model_id == m.id);
     let pick = curated::for_record(m);
     let unavailable = engines.unavailable_for(&m.category);
+    let roles = holders.uses_of(&m.id);
     ModelStatusEntry {
+        section: ModelSection::of(m, &roles),
+        roles,
         category: m.category.as_str().to_string(),
         name: m.name.clone(),
         description: m.description.clone(),
@@ -235,10 +242,242 @@ pub(crate) async fn reclaimable_mb(
     )
 }
 
+/// Who holds each job among `records`, read from this pond's settings. Unreadable settings
+/// hold nothing, said once in the log rather than guessed from the assignment table.
+pub(crate) async fn role_holders(
+    state: &AppState,
+    records: &[ModelRecord],
+    assignments: &[ModelRoleAssignment],
+) -> RoleHolders {
+    match state.settings_repo.get().await {
+        Ok(settings) => RoleHolders::resolve(records, assignments, &settings),
+        Err(e) => {
+            tracing::warn!(
+                kind = "model_roles_settings_unreadable",
+                error = %e,
+                "settings could not be read, so no model is shown doing a job"
+            );
+            RoleHolders::default()
+        }
+    }
+}
+
+/// What the pond knows, right now, about the models that work beside the catalogue rows.
+#[derive(Debug, Default)]
+pub(crate) struct HelperFacts {
+    /// The conversation row's id, with the label of its picture encoder when that is installed.
+    pub pictures: Option<(String, String)>,
+    /// The conversation row's id, with the id of a drafter on disk that the engine attaches.
+    pub drafter: Option<(String, &'static str)>,
+    /// The camera detector's name, when one is loaded.
+    pub camera: Option<String>,
+    /// Face recognition's models are loaded.
+    pub faces: bool,
+}
+
+/// The helpers `facts` describe, in section order.
+pub(crate) fn helpers_from(facts: HelperFacts) -> Vec<HelperModel> {
+    let mut out = Vec::new();
+    if let Some((chat, label)) = facts.pictures {
+        out.push(HelperModel::new(
+            format!("{chat}#pictures"),
+            Some(label),
+            ModelUse::Pictures,
+            Some(chat),
+        ));
+    }
+    if let Some(name) = facts.camera {
+        out.push(HelperModel::new(
+            "camera_detector",
+            Some(name),
+            ModelUse::Camera,
+            None,
+        ));
+    }
+    if facts.faces {
+        out.push(HelperModel::new(
+            "face_recognition",
+            None,
+            ModelUse::Faces,
+            None,
+        ));
+    }
+    if let Some((chat, drafter)) = facts.drafter {
+        out.push(HelperModel::new(
+            drafter,
+            None,
+            ModelUse::Drafter,
+            Some(chat),
+        ));
+    }
+    out
+}
+
+/// The camera detector's name: the bundled YOLOX-Nano unless settings point at another file.
+fn camera_detector_name(configured: &str) -> String {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return "YOLOX-Nano".to_string();
+    }
+    std::path::Path::new(configured)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(configured)
+        .to_string()
+}
+
+/// The models in use beside the catalogue rows, for `holders`' conversation model: its picture
+/// encoder and drafter, the camera detector and face recognition. Each is listed only when it
+/// is loaded or on disk where the engine picks it up.
+pub(crate) async fn helper_models(state: &AppState, holders: &RoleHolders) -> Vec<HelperModel> {
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let mut facts = HelperFacts::default();
+
+    // The conversation row is a llama.cpp file only when the row id says `gguf/`.
+    let chat = holders
+        .chat
+        .as_deref()
+        .and_then(|id| id.strip_prefix("gguf/").map(|name| (id, name)));
+    if let Some((id, name)) = chat {
+        if let Some(EncoderState::Ready { .. }) = state.agent.vision_state("local", name) {
+            let label = chat_model_encoder(state, name)
+                .await
+                .map(|spec| spec.label.to_string())
+                .unwrap_or_else(|| name.to_string());
+            facts.pictures = Some((id.to_string(), label));
+        }
+        // The engine attaches a drafter on budgeted devices only (goose_agent.rs).
+        if pond_core::models::domain::device_budget::budgeted_device() {
+            if let (Some(spec), Some(dd)) = (drafter_for(name), state.data_dir.as_ref()) {
+                if drafter_path(dd, &spec).exists() {
+                    facts.drafter = Some((id.to_string(), spec.id));
+                }
+            }
+        }
+    }
+
+    if pond_adapters_vision::LiveCameraRegistry::global()
+        .status()
+        .classifier_available
+    {
+        facts.camera = Some(camera_detector_name(&settings.vision_classifier_model));
+    }
+    facts.faces = state
+        .face_recognition
+        .as_ref()
+        .is_some_and(|slot| slot.current().is_ok());
+
+    let helpers = helpers_from(facts);
+    tracing::debug!(
+        kind = "model_helpers_listed",
+        count = helpers.len(),
+        ids = ?helpers.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        "helper models in use"
+    );
+    helpers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pond_core::models::domain::recommended::Rank;
+
+    #[test]
+    fn nothing_known_lists_no_helper() {
+        assert!(helpers_from(HelperFacts::default()).is_empty());
+    }
+
+    #[test]
+    fn each_helper_is_listed_under_its_job_and_names_the_row_it_serves() {
+        let helpers = helpers_from(HelperFacts {
+            pictures: Some(("gguf/gemma-4-E4B-it".into(), "Picture support".into())),
+            drafter: Some(("gguf/gemma-4-E4B-it".into(), "mtp-gemma-4-E4B-it")),
+            camera: Some("YOLOX-Nano".into()),
+            faces: true,
+        });
+        let listed: Vec<_> = helpers
+            .iter()
+            .map(|h| {
+                (
+                    h.id.as_str(),
+                    h.uses.as_slice(),
+                    h.section,
+                    h.serves.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "gguf/gemma-4-E4B-it#pictures",
+                    &[ModelUse::Pictures][..],
+                    ModelSection::Pictures,
+                    Some("gguf/gemma-4-E4B-it")
+                ),
+                (
+                    "camera_detector",
+                    &[ModelUse::Camera][..],
+                    ModelSection::Pictures,
+                    None
+                ),
+                (
+                    "face_recognition",
+                    &[ModelUse::Faces][..],
+                    ModelSection::Pictures,
+                    None
+                ),
+                (
+                    "mtp-gemma-4-E4B-it",
+                    &[ModelUse::Drafter][..],
+                    ModelSection::Other,
+                    Some("gguf/gemma-4-E4B-it")
+                ),
+            ]
+        );
+        assert_eq!(helpers[0].title.as_deref(), Some("Picture support"));
+    }
+
+    #[test]
+    fn the_camera_detector_is_named_by_its_file() {
+        assert_eq!(camera_detector_name(""), "YOLOX-Nano");
+        assert_eq!(camera_detector_name("  "), "YOLOX-Nano");
+        assert_eq!(camera_detector_name("custom/yolox_s.onnx"), "yolox_s");
+    }
+
+    #[test]
+    fn a_row_carries_the_jobs_it_holds_and_its_section() {
+        let row = pond_core::models::domain::embedding_models::ALL_MINILM_L6_V2.record();
+        let holders = RoleHolders {
+            embedding: Some(row.id.clone()),
+            ..RoleHolders::default()
+        };
+        let dto = record_to_dto(
+            &row,
+            &[],
+            &holders,
+            EngineAvailability {
+                litert_library: true,
+            },
+        );
+        assert_eq!(dto.roles, [ModelUse::Embedding]);
+        assert_eq!(dto.section, ModelSection::Memory);
+        assert!(!dto.active, "`active` still reads the assignment table");
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["roles"], serde_json::json!(["embedding"]));
+        assert_eq!(json["section"], "memory");
+
+        let idle = record_to_dto(
+            &row,
+            &[],
+            &RoleHolders::default(),
+            EngineAvailability {
+                litert_library: true,
+            },
+        );
+        assert!(idle.roles.is_empty());
+        assert_eq!(idle.section, ModelSection::Memory);
+    }
 
     #[test]
     fn a_desktop_reads_the_reason_and_no_orin_number() {

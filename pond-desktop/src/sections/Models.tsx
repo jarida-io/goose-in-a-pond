@@ -9,11 +9,11 @@ import { EngineMark } from "../components/models/ModelMarks";
 import { ENGINE_GROUPS, engineOf, groupByEngine } from "../lib/modelProvider";
 import {
   ROLES, type RoleKey, roleHolder, emptyJobText, formatSize, formatBytes, budgetReading,
-  downloadedOnly, rolesFor, modelLabel, groupByJob, isInUse, holderEntry, recommendedPicks,
-  raisedPick, askingPick, sortModels, carriesPictures, picturesOf,
+  downloadedOnly, rolesFor, modelLabel, groupBySection, isInUse, holderEntry, recommendedPicks,
+  raisedPick, askingPick, sortModels, carriesPictures, picturesOf, sectionOfRole, usesOf, helpersOf,
 } from "./models/modelsView";
 import { isInFlight } from "./models/modelDownloads";
-import { ModelRow } from "./models/ModelRow";
+import { HelperRow, ModelRow } from "./models/ModelRow";
 import { HolderBadge, MemoryModels } from "../components/models/MemoryModels";
 import { jobState } from "./models/memoryEmbedder";
 import { useMemoryJob } from "../hooks/useMemoryJob";
@@ -196,7 +196,11 @@ export function Models() {
   const picks = useMemo(() => recommendedPicks(models), [models]);
   const pickIds = useMemo(() => new Set(picks.map((m) => m.id)), [picks]);
 
-  const groups = useMemo(() => groupByJob(onDisk), [onDisk]);
+  const helpers = useMemo(() => roles?.helpers ?? [], [roles]);
+  const groups = useMemo(() => groupBySection(models, helpers, roles), [models, helpers, roles]);
+  // Memory has its own panel under Jobs, which says which model is in use and offers the rest, so
+  // the device list leaves its section out rather than list the memory model twice.
+  const deviceGroups = useMemo(() => groups.filter((g) => g.key !== "memory"), [groups]);
   const comingDown = useCallback((m: ModelEntry) => transferFor(m) !== null, [transferFor]);
 
   /** Rows to fetch: not here, not already a pick above, and with somewhere to fetch them from. */
@@ -268,7 +272,7 @@ export function Models() {
 
   function change(role: RoleKey) {
     const label = ROLES.find((r) => r.key === role)?.label.toLowerCase();
-    if (!jumpTo(role === "embedding" ? "mdl-memory" : `mdl-job-${role}`)) {
+    if (!jumpTo(role === "embedding" ? "mdl-memory" : `mdl-section-${sectionOfRole(role)}`)) {
       jumpTo(role === "chat" ? "mdl-recommended" : "mdl-get");
     }
     say(role === "tts" ? "Pick a voice under Speaking." : `Press Use on the model you want for ${label}.`);
@@ -278,6 +282,7 @@ export function Models() {
     const transfer = transferFor(m);
     return (
       <ModelRow key={m.id} model={m} memory={memory} inUse={isInUse(m, roles)} roles={rolesFor(m)}
+        uses={usesOf(m, roles)} helpers={helpersOf(m, helpers)}
         transfer={transfer} withPictures={withPictures(m)} busy={busy}
         onWithPictures={(next) => actions.setWithPictures(m, next)}
         onUse={(role) => void actions.useFor(m, role)} onDelete={() => void remove(m)}
@@ -336,7 +341,7 @@ export function Models() {
               role.key === "chat" ||
               role.key === "tts" ||
               (role.key === "embedding" && job.rows.length > 0) ||
-              groups.some((g) => g.key === role.key) ||
+              groups.some((g) => g.key === sectionOfRole(role.key)) ||
               (role.key === "asr" && getMoreListening.length > 0);
             return (
               <RoleCard key={role.key} role={role}
@@ -367,6 +372,8 @@ export function Models() {
         )}
       </section>
 
+      {/* After the jobs, GIAP's picks: what a pond changes most is which model does what, then what
+          to fetch next. What is on this device follows. */}
       {picks.length > 0 && (
         <section className="mdl-band" id="mdl-recommended" aria-labelledby="mdl-recommended-title">
           <h2 className="mdl-band__title" id="mdl-recommended-title">Recommended for this pond</h2>
@@ -393,25 +400,26 @@ export function Models() {
         <h2 className="mdl-band__title" id="mdl-device-title">On this device</h2>
         {error && <ErrorBanner error={error} onRetry={() => void data.reloadModels()} />}
         {loading && <p className="mdl-muted">Reading the catalogue…</p>}
-        {!loading && !error && onDisk.length === 0 && (
+        {!loading && !error && deviceGroups.length === 0 && (
           <p className="mdl-empty">Nothing downloaded yet. Pick one above, or add one below.</p>
         )}
-        {/* Grouped under the job each one can do, in the Jobs band's own words, so "Listening" means
-            one thing on this page. Conversation then splits by the engine that runs it: the card
-            is the group and the models are rows in it, because a card per model is a wall of
-            purple. */}
-        {groups.map((g) => (
-          <section key={g.key} id={`mdl-job-${g.key}`} className="mdl-group" aria-label={g.label}>
+        {/* Grouped under the section the pond lists each one in, in the Jobs band's own words, so
+            "Listening" means one thing on this page; every row says which jobs it is doing, and
+            what the models serving it (picture support, a drafter) add to it.
+            Conversation then splits by the engine that runs it: the card is the group and the
+            models are rows in it, because a card per model is a wall of purple. */}
+        {deviceGroups.map((g) => (
+          <section key={g.key} id={`mdl-section-${g.key}`} className="mdl-group" aria-label={g.label}>
             <header className="mdl-group__head">
               <h3 className="mdl-group__title">{g.label}</h3>
               <span className="mdl-group__count">
-                {g.key === "tts"
+                {g.key === "speaking"
                   ? // The picker lists every voice, so count installed out of all.
                     `${installedVoices.size} of ${allVoices.length} voices installed`
-                  : `${g.models.length} ${g.models.length === 1 ? "model" : "models"}`}
+                  : `${g.models.length + g.helpers.length} ${g.models.length + g.helpers.length === 1 ? "model" : "models"}`}
               </span>
             </header>
-            {g.key === "tts" ? (
+            {g.key === "speaking" ? (
               <VoicePicker
                 voices={allVoices.length ? allVoices : g.models.map((m) => m.name)}
                 installed={installedVoices}
@@ -427,7 +435,7 @@ export function Models() {
                 onQualityChange={(v) => void chooseQuality(v)}
                 availableMb={memory?.available_for_llm_mb ?? null}
               />
-            ) : g.key === "chat" ? (
+            ) : g.key === "conversation" ? (
               groupByEngine(sortModels(g.models)).map((section) => (
                 <div key={section.key} className="mdl-engine-section">
                   <EngineHead group={section} />
@@ -435,7 +443,10 @@ export function Models() {
                 </div>
               ))
             ) : (
-              <div className="mdl-group__rows">{g.models.map(row)}</div>
+              <div className="mdl-group__rows">
+                {g.models.map(row)}
+                {g.helpers.map((h) => <HelperRow key={h.id} helper={h} />)}
+              </div>
             )}
           </section>
         ))}
