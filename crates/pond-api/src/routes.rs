@@ -2645,7 +2645,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
 struct TurnAccumulator {
     /// Strips (and captures) Harmony thought channels and `<think>` blocks from visible text.
     thought: crate::thought_filter::ThoughtFilter,
-    /// The assistant's visible answer, as persisted.
+    /// The assistant's visible answer, as persisted: the text written after the turn's last tool
+    /// call. Text before a tool call is working notes and leaves it (see `absorb`).
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
@@ -2703,10 +2704,25 @@ impl TurnAccumulator {
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "{}".to_string()),
                 );
-                StreamStep::Frame(
-                    json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
-                        .to_string(),
-                )
+                let mut frame = json!({"type": "tool_call", "tool": tool, "id": id, "input": input});
+                // Text written before a tool call is the model at work ("let me check the
+                // weather"), not the answer: it leaves `full_text`, and the frame tells the client
+                // to move that trailing text out of the answer into the turn's steps. What the
+                // filter still holds back was never shown and belongs to the notes too: it must
+                // not surface at the head of the answer when the turn ends.
+                let notes = std::mem::take(&mut self.full_text);
+                let _unshown = self.thought.flush();
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call moved out of the answer",
+                    );
+                    frame["working_notes"] = json!(notes);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::ToolResult {
                 tool,
@@ -21018,6 +21034,51 @@ mod tests {
             turn.ttft,
             Some(first),
             "TTFT is the FIRST token; re-stamping it reports the last one instead"
+        );
+    }
+
+    /// "Let me check the weather" is the model at work: the answer is what follows the last call.
+    #[test]
+    fn text_before_a_tool_call_leaves_the_answer_as_working_notes() {
+        let mut turn = accumulator();
+        let narration = frame_of(turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        }));
+        let shown = narration["content"]
+            .as_str()
+            .expect("content is a string")
+            .to_string();
+
+        let call = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_weather".to_string(),
+            id: "call-1".to_string(),
+            input: None,
+        }));
+        assert_eq!(
+            call["working_notes"], shown,
+            "the client strips exactly what it was shown, so the notes must be that text"
+        );
+        assert!(turn.full_text.is_empty(), "notes are not the answer");
+
+        let second = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_forecast".to_string(),
+            id: "call-2".to_string(),
+            input: None,
+        }));
+        assert!(
+            second.get("working_notes").is_none(),
+            "a call with no text before it carries no notes, not an empty string"
+        );
+
+        turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        });
+        let tail = turn.thought.flush();
+        assert_eq!(
+            format!("{}{tail}", turn.full_text),
+            SENTENCE,
+            "the answer is the text after the last call, whole: none of the held-back \
+             narration may lead it"
         );
     }
 

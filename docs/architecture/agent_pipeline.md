@@ -119,3 +119,12 @@ parameters the main model passed. With no tool model, handlers use the main mode
 | `reattached`, `replay_gap`, `run_evicted` | Detached runs | Reattach bookkeeping |
 | (no type) `done: true` | End of turn | `session_id`, `model_name`, `usage`, `interrupted` |
 | (no type) `error` | Any stage | Error message; ends the stream |
+
+**Working notes.** Text the model writes before a tool call is the model at work, not the answer.
+`TurnAccumulator::absorb` (`pond-api/src/routes.rs`) takes it out of `full_text` when the call
+arrives and sends it on the `tool_call` frame as `working_notes`. Clients show it as a collapsed
+"steps" line and keep only the text after the last call as the answer. `collect_reply`
+(`goose_agent.rs`) applies the same rule to schedules and `POST /chat`. A turn whose only text came
+before a tool call therefore has no reply, and fails as one. Notes are logged at debug as
+`kind="working_notes"` and are never persisted. Voice is the exception: it speaks sentences as
+they finish, so narration before a tool is heard, and the voice transcript keeps it.

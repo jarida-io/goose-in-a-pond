@@ -1253,6 +1253,8 @@ export interface ChatEvent {
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
   result?: unknown;         // for "tool_call" events
+  /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
+  working_notes?: string;
   error?: string;           // for "error" events
   /** Optional MCP-APP UI rendering hint from backend */
   ui?: {

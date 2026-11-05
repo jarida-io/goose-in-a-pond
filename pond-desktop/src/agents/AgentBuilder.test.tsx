@@ -620,6 +620,23 @@ describe("a test run", () => {
     expect(log.textContent).not.toContain("private");
   });
 
+  it("keeps what the run wrote while it worked out of its output, behind Steps", async () => {
+    stream([
+      { type: "text", content: "Let me check the weather. " },
+      { type: "tool_call", tool: "giap-weather__get_current_weather", working_notes: "Let me check the weather. " },
+      { type: "text", content: "Sunny." },
+      { type: "done" },
+    ]);
+    setup({ recipe: greeter() });
+    fireEvent.click(screen.getByRole("button", { name: "Run test" }));
+    const log = await screen.findByRole("log", { name: "Test run output" });
+    await waitFor(() => expect(log.textContent).toContain("Sunny."));
+    expect(log.textContent).not.toContain("Let me check the weather.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Steps" }));
+    expect(log.textContent).toContain("Let me check the weather.");
+  });
+
   it("says when the run ends with an error", async () => {
     stream([{ type: "text", content: "Starting" }, { type: "error", error: "the model is not loaded" }]);
     setup({ recipe: greeter() });

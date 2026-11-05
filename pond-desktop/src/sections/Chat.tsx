@@ -22,6 +22,7 @@ import { KeptResultNote } from "../components/KeptResultNote";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
+import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
 import { AttachmentTray } from "../components/AttachmentTray";
 import { ComposerMenu } from "../components/ComposerMenu";
 import { ResearchModeChip } from "../components/ResearchModeChip";
@@ -754,6 +755,9 @@ export function Chat() {
                       </span>
                     ))}
                   </div>
+                )}
+                {msg.role === "agent" && msg.steps && msg.steps.length > 0 && (
+                  <StepsDisclosure steps={msg.steps} />
                 )}
                 {msg.role === "agent" && msg.keptResults?.map((kept, i) => (
                   <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
