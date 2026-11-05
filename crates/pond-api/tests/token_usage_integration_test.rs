@@ -346,3 +346,43 @@ async fn api_list_sessions_includes_tokens() {
     assert_eq!(sessions[0]["total_completion_tokens"].as_u64(), Some(150));
     assert_eq!(sessions[0]["model_name"].as_str(), Some("model-x"));
 }
+
+/// A schedule run opens a `sched-` session for the engine and writes no conversation into it;
+/// listed, every run showed up as an empty "Untitled" chat. Its tokens still count as usage.
+#[tokio::test]
+async fn api_list_sessions_leaves_out_schedule_runs() {
+    let (app, storage, _tmp) = make_app().await;
+
+    storage.create_session("chat-1".into()).await.unwrap();
+    storage
+        .create_session("sched-daily-brief-1793755403".into())
+        .await
+        .unwrap();
+    storage
+        .increment_usage("sched-daily-brief-1793755403", 900, 400, Some("gemma"))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(auth_get("/api/v1/sessions"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = json_body(resp).await;
+    let ids: Vec<&str> = json["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["chat-1"], "a schedule run is not a conversation");
+
+    let resp = app
+        .oneshot(auth_get("/api/v1/usage/summary"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = json_body(resp).await;
+    assert_eq!(json["total_prompt_tokens"].as_u64(), Some(900));
+}
