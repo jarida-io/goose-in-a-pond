@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -70,7 +71,11 @@ type Backend interface {
 	EnsureUser(context.Context, string) (string, error)
 	Register(context.Context, string, string) (Registered, error)
 	Delete(context.Context, string) error
+	// Policy writes the complete policy document built from the rules and attributes.
 	Policy(context.Context, []Rule, []NodeAttr) error
+	// CurrentPolicy reads the policy document the coordinator holds, so that an
+	// unchanged policy is never written again.
+	CurrentPolicy(context.Context) ([]byte, error)
 }
 
 // Rule permits only approved phone addresses to reach their own Pond HTTPS port.
@@ -113,6 +118,10 @@ type Service struct {
 	households    *sources
 	// degraded is set while the coordinator cannot be reconciled; requests still run.
 	degraded atomic.Bool
+	// applied is the decoded policy document this service last wrote to the coordinator
+	// or found already there, and nil while that is unknown: before the first policy
+	// evaluation and after a write whose outcome is unknown. Guarded by Store.mu.
+	applied any
 }
 
 // New reconciles the durable allowlist before accepting enrollment requests. A coordinator
@@ -143,18 +152,26 @@ func (s *Service) degrade(err error) {
 	}
 }
 
-func (s *Service) policy(ctx context.Context) (err error) {
+// policy brings the coordinator's policy into line with the store and a fresh inventory.
+func (s *Service) policy(ctx context.Context) error {
+	_, err := s.enforcePolicy(ctx)
+	return err
+}
+
+// enforcePolicy is policy, also returning the inventory the policy was computed from,
+// so that Reconcile can work from the same read rather than make another.
+func (s *Service) enforcePolicy(ctx context.Context) (inventory []Registered, err error) {
 	defer func() {
 		if err != nil {
 			s.degrade(err)
 		}
 	}()
 	if s.Store.failure != nil {
-		return s.Store.failure
+		return nil, s.Store.failure
 	}
-	inventory, err := s.Backend.Inventory(ctx)
+	inventory, err = s.Backend.Inventory(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Indexed once, so matching runs under the store lock in devices plus nodes rather
 	// than their product. The first node with a given ID wins, as a scan would find it.
@@ -202,13 +219,87 @@ func (s *Service) policy(ctx context.Context) (err error) {
 		slices.Sort(cachers)
 		attrs = append(attrs, NodeAttr{Target: cachers, Attr: []string{cacheNetworkMaps}})
 	}
-	if err := s.Backend.Policy(ctx, rules, attrs); err != nil {
-		return err
+	if err := s.applyPolicy(ctx, rules, attrs); err != nil {
+		return nil, err
 	}
 	if s.degraded.Swap(false) {
 		slog.Info("enrollment service recovered: the coordinator policy is reconciled")
 	}
+	return inventory, nil
+}
+
+// applyPolicy writes the policy only when the coordinator's differs from it.
+//
+// Every write makes the coordinator re-evaluate the policy for every node and can push
+// a new network map to every connected phone, so an unchanged policy is not written
+// again. The two are compared decoded, so the coordinator's whitespace or key order is
+// never a difference. Reading still runs every evaluation, so a policy changed on the
+// coordinator by anything else is put back. A read that fails falls back to writing:
+// an allowlist enforced twice costs a reload, one left unenforced is an exposure.
+func (s *Service) applyPolicy(ctx context.Context, rules []Rule, attrs []NodeAttr) error {
+	document, err := policyDocument(rules, attrs)
+	if err != nil {
+		return err
+	}
+	var computed any
+	if err := json.Unmarshal(document, &computed); err != nil {
+		return err
+	}
+	current, readErr := s.coordinatorPolicy(ctx)
+	if readErr == nil && reflect.DeepEqual(current, computed) {
+		s.applied = computed
+		slog.Debug("coordinator policy unchanged; not written", "kind", "policy_unchanged")
+		return nil
+	}
+	computedRules, computedAttrs, _ := policyShape(computed)
+	switch {
+	case readErr != nil:
+		slog.Warn("coordinator policy could not be read; writing it", "kind", "policy_read_failed", "error", readErr)
+	case s.applied == nil:
+		slog.Info("coordinator policy differs from the computed one, and what this service last wrote is not known; writing it", "kind", "policy_unverified", "rules", computedRules, "node_attrs", computedAttrs)
+	case !reflect.DeepEqual(current, s.applied):
+		// Nothing but this service should write the policy, so this is an operator or a
+		// fault on the coordinator. Only counts are logged, never addresses.
+		currentRules, currentAttrs, currentFields := policyShape(current)
+		_, _, computedFields := policyShape(computed)
+		slog.Warn("coordinator policy drifted from what this service last wrote; restoring it", "kind", "policy_drift",
+			"store_changed", !reflect.DeepEqual(computed, s.applied),
+			"coordinator_rules", currentRules, "coordinator_node_attrs", currentAttrs, "coordinator_fields", currentFields,
+			"computed_rules", computedRules, "computed_node_attrs", computedAttrs, "computed_fields", computedFields)
+	default:
+		slog.Info("coordinator policy updated: the store changed", "kind", "policy_store_changed", "rules", computedRules, "node_attrs", computedAttrs)
+	}
+	if err := s.Backend.Policy(ctx, rules, attrs); err != nil {
+		// The write may still have landed, so what the coordinator holds is unknown.
+		s.applied = nil
+		slog.Warn("coordinator policy write failed", "kind", "policy_write_failed", "error", err)
+		return err
+	}
+	s.applied = computed
+	slog.Info("coordinator policy written", "kind", "policy_written", "rules", computedRules, "node_attrs", computedAttrs)
 	return nil
+}
+
+// coordinatorPolicy reads and decodes the coordinator's policy document.
+func (s *Service) coordinatorPolicy(ctx context.Context) (any, error) {
+	document, err := s.Backend.CurrentPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var current any
+	if err := json.Unmarshal(document, &current); err != nil {
+		return nil, errors.New("the coordinator policy is not a JSON document")
+	}
+	return current, nil
+}
+
+// policyShape summarises a decoded policy document for a log line: its rule count,
+// node attribute count and top-level field count. It never reveals an address.
+func policyShape(document any) (rules, attrs, fields int) {
+	top, _ := document.(map[string]any)
+	acls, _ := top["acls"].([]any)
+	nodeAttrs, _ := top["nodeAttrs"].([]any)
+	return len(acls), len(nodeAttrs), len(top)
 }
 func strict(data []byte, value any) error {
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -499,6 +590,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Reconcile recovers a lost registration response by its approved machine key,
 // and retries revocations. It never repeats an ambiguous registration write. A
 // failure leaves the service degraded until a later reconciliation succeeds.
+//
+// The policy is enforced first, so a revoked identity is excluded before anything else
+// happens, and again at the end only when this pass changed one of its inputs: a device
+// record or the coordinator's nodes. Retired records are not an input to the policy.
 func (s *Service) Reconcile(ctx context.Context) (err error) {
 	s.Store.mu.Lock()
 	defer s.Store.mu.Unlock()
@@ -507,13 +602,11 @@ func (s *Service) Reconcile(ctx context.Context) (err error) {
 			s.degrade(err)
 		}
 	}()
-	if err := s.policy(ctx); err != nil {
-		return err
-	}
-	inventory, err := s.Backend.Inventory(ctx)
+	inventory, err := s.enforcePolicy(ctx)
 	if err != nil {
 		return err
 	}
+	changed := false
 	// Indexed once by machine key, so pairing devices with nodes under the store lock
 	// is linear rather than devices times nodes. Each list keeps inventory order.
 	byMachine := map[string][]Registered{}
@@ -538,6 +631,7 @@ func (s *Service) Reconcile(ctx context.Context) (err error) {
 						continue
 					}
 					devices[id] = active
+					changed = true
 					if err = s.Store.save(); err != nil {
 						return err
 					}
@@ -551,7 +645,9 @@ func (s *Service) Reconcile(ctx context.Context) (err error) {
 			if device.Status != "revoking" && !tombstone {
 				continue
 			}
-			if err := s.deleteOwnedFrom(ctx, device, s.Store.value.Households[household].UserID, owned(device)); err != nil {
+			deleted, err := s.deleteOwnedFrom(ctx, device, s.Store.value.Households[household].UserID, owned(device))
+			changed = changed || deleted
+			if err != nil {
 				return err
 			}
 			if tombstone {
@@ -559,6 +655,7 @@ func (s *Service) Reconcile(ctx context.Context) (err error) {
 			}
 			device = Device{Role: device.Role, Status: "revoked", MachineKey: device.MachineKey, Revision: device.Revision}
 			devices[id] = device
+			changed = true
 			if err := s.Store.save(); err != nil {
 				return err
 			}
@@ -566,13 +663,18 @@ func (s *Service) Reconcile(ctx context.Context) (err error) {
 	}
 	for household, retired := range s.Store.value.Retired {
 		for _, device := range retired {
-			if err := s.deleteOwnedFrom(ctx, device, s.Store.value.Households[household].UserID, owned(device)); err != nil {
+			deleted, err := s.deleteOwnedFrom(ctx, device, s.Store.value.Households[household].UserID, owned(device))
+			changed = changed || deleted
+			if err != nil {
 				return err
 			}
 		}
 	}
 	if err := s.expireRetired(inventory); err != nil {
 		return err
+	}
+	if !changed {
+		return nil
 	}
 	return s.policy(ctx)
 }
@@ -657,12 +759,14 @@ func (s *Service) deleteOwned(ctx context.Context, device Device, user string) e
 	if err != nil {
 		return err
 	}
-	return s.deleteOwnedFrom(ctx, device, user, nodes)
+	_, err = s.deleteOwnedFrom(ctx, device, user, nodes)
+	return err
 }
 
 // Revoked machine identities remain tombstoned so a late Headscale registration
-// can be removed even if the first revocation preceded its completion.
-func (s *Service) deleteOwnedFrom(ctx context.Context, device Device, user string, nodes []Registered) error {
+// can be removed even if the first revocation preceded its completion. It reports
+// whether it deleted any node, including when a later deletion then fails.
+func (s *Service) deleteOwnedFrom(ctx context.Context, device Device, user string, nodes []Registered) (deleted bool, err error) {
 	for _, node := range nodes {
 		matched := device.NodeID != "" && node.ID == device.NodeID && node.Key == device.Key
 		if device.NodeID == "" && device.MachineKey != "" {
@@ -676,9 +780,10 @@ func (s *Service) deleteOwnedFrom(ctx context.Context, device Device, user strin
 			continue
 		}
 		if err := s.Backend.Delete(ctx, node.ID); err != nil {
-			return err
+			return deleted, err
 		}
+		deleted = true
 		slog.Info("coordinator node deleted", "node", node.ID)
 	}
-	return nil
+	return deleted, nil
 }

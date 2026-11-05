@@ -22,16 +22,20 @@ import (
 )
 
 type fakeBackend struct {
-	users        map[string]string
-	created      int
-	nodes        []Registered
-	calls        int
-	deleted      int
-	rules        []Rule
-	attrs        []NodeAttr
-	fail         bool
-	lostResponse bool
-	rejected     bool
+	users   map[string]string
+	created int
+	nodes   []Registered
+	calls   int
+	deleted int
+	rules   []Rule
+	attrs   []NodeAttr
+	// policyWrites counts Policy calls; policyReadErr, when set, fails CurrentPolicy.
+	policyWrites   int
+	inventoryReads int
+	policyReadErr  error
+	fail           bool
+	lostResponse   bool
+	rejected       bool
 	// mutate, when set, alters each node the coordinator registers before it is stored.
 	mutate func(*Registered)
 }
@@ -54,7 +58,10 @@ func (f *fakeBackend) Register(_ context.Context, user, auth string) (Registered
 	}
 	return n, nil
 }
-func (f *fakeBackend) Inventory(context.Context) ([]Registered, error) { return f.nodes, nil }
+func (f *fakeBackend) Inventory(context.Context) ([]Registered, error) {
+	f.inventoryReads++
+	return f.nodes, nil
+}
 func (f *fakeBackend) EnsureUser(_ context.Context, name string) (string, error) {
 	if f.fail {
 		return "", errors.New("offline")
@@ -82,8 +89,17 @@ func (f *fakeBackend) Delete(_ context.Context, id string) error {
 	return nil
 }
 func (f *fakeBackend) Policy(_ context.Context, r []Rule, a []NodeAttr) error {
+	f.policyWrites++
 	f.rules, f.attrs = r, a
 	return nil
+}
+
+// CurrentPolicy reads back the document Policy last stored, as Headscale does.
+func (f *fakeBackend) CurrentPolicy(context.Context) ([]byte, error) {
+	if f.policyReadErr != nil {
+		return nil, f.policyReadErr
+	}
+	return policyDocument(f.rules, f.attrs)
 }
 func fixture(t *testing.T) (*Service, ed25519.PrivateKey, *fakeBackend) {
 	t.Helper()
