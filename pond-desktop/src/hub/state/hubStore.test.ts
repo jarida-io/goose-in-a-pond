@@ -43,6 +43,17 @@ describe("hubStore.controlDevice", () => {
     expect(hubGetDevice("door-test").locked).toBe(true); // reverted
   });
 
+  it("reverts the optimistic patch when the device refuses the command", async () => {
+    invokeTool.mockResolvedValueOnce({ tool: "x", success: true, content: "ok" });
+    await controlDevice("plug-test", { on: true });
+
+    invokeTool.mockResolvedValueOnce({ tool: "x", success: false, content: "Couldn't set power on 'plug-test'" });
+    const ok = await controlDevice("plug-test", { on: false });
+
+    expect(ok).toBe(false);
+    expect(hubGetDevice("plug-test").on).toBe(true);
+  });
+
   it("maps a thermostat target to target_temp", async () => {
     invokeTool.mockResolvedValue({ tool: "x", success: true, content: "ok" });
     await controlDevice("thermo-test", { target: 72 });

@@ -165,6 +165,16 @@ function readReport(answer: unknown, id: string): LongTaskReport | null {
   };
 }
 
+/** A refusal body's text and code: its sentence where it has one beside the code (the onboarding
+ *  guard's `{error: "onboarding_required", message}`), else its `error`. */
+function refusalOf(body: unknown, fallback: string): { msg: string; code?: string } {
+  const b = (body ?? {}) as { error?: unknown; message?: unknown; code?: unknown };
+  const error = typeof b.error === "string" ? b.error : undefined;
+  const message = typeof b.message === "string" ? b.message : undefined;
+  const code = typeof b.code === "string" ? b.code : undefined;
+  return { msg: message ?? error ?? fallback, code: code ?? (message !== undefined ? error : undefined) };
+}
+
 export class PondApiClient {
   /** Mutable: the shell can correct this when the sidecar binds a fallback port. */
   private base: string;
@@ -423,9 +433,7 @@ export class PondApiClient {
         let body: unknown;
         try {
           body = await res.json();
-          const b = body as { error?: string; code?: string };
-          msg = b.error ?? msg;
-          code = b.code;
+          ({ msg, code } = refusalOf(body, msg));
         } catch {
           /* ignore */
         }
@@ -572,7 +580,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -1999,9 +2007,7 @@ export class PondApiClient {
       let body: unknown;
       try {
         body = await res.json();
-        const b = body as { error?: string; code?: string };
-        msg = b.error ?? msg;
-        code = b.code;
+        ({ msg, code } = refusalOf(body, msg));
       } catch {
         /* ignore */
       }
@@ -2462,7 +2468,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -2492,7 +2498,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }

@@ -594,6 +594,22 @@ describe("ApiError", () => {
     await expect(client().health()).rejects.toMatchObject({ status: 502 });
   });
 
+  it("shows a refusal's sentence, not its code, and keeps the code to branch on", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: "onboarding_required", message: "Complete onboarding before using this feature" }),
+        { status: 403, statusText: "Forbidden", headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    try {
+      await client().getPrompt("missing");
+      expect.fail("should have thrown");
+    } catch (e) {
+      expect((e as ApiError).message).toBe("Complete onboarding before using this feature");
+      expect((e as ApiError).code).toBe("onboarding_required");
+    }
+  });
+
   it("captures a structured {error, code} body's code, for a caller to branch on", async () => {
     fetchMock.mockResolvedValueOnce(errJson(409, "Picture support is not ready yet.", "vision_not_ready"));
     try {
