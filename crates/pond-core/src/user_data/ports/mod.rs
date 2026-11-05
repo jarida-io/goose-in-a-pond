@@ -11,6 +11,7 @@ pub mod draft;
 pub mod face_detector;
 pub mod face_embedding_extractor;
 pub mod face_recognition;
+pub mod guest_room_access;
 pub mod lane_control;
 pub mod lane_run_log;
 pub mod matter_runtime;
