@@ -552,7 +552,7 @@ impl DeviceControlMcpServer {
                     requested.on = Some(on);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set power on '{device_id}': {e}"
                     )))
                 }
@@ -566,7 +566,7 @@ impl DeviceControlMcpServer {
                     requested.brightness = Some(pct);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set brightness on '{device_id}': {e}"
                     )))
                 }
@@ -579,7 +579,7 @@ impl DeviceControlMcpServer {
                     requested.target_temp = Some(t);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set temperature on '{device_id}': {e}"
                     )))
                 }
@@ -591,7 +591,11 @@ impl DeviceControlMcpServer {
                     applied.push(format!("locked={locked}"));
                     requested.locked = Some(locked);
                 }
-                Err(e) => return Ok(guidance(format!("Couldn't (un)lock '{device_id}': {e}"))),
+                Err(e) => {
+                    return Ok(device_failed(format!(
+                        "Couldn't (un)lock '{device_id}': {e}"
+                    )))
+                }
             }
         }
         if let Some(open) = p.valve {
@@ -602,7 +606,9 @@ impl DeviceControlMcpServer {
                 }
                 Err(e) => {
                     let asked = if open { "open" } else { "close" };
-                    return Ok(guidance(format!("Couldn't {asked} '{device_id}': {e}")));
+                    return Ok(device_failed(format!(
+                        "Couldn't {asked} '{device_id}': {e}"
+                    )));
                 }
             }
         }
@@ -617,7 +623,7 @@ impl DeviceControlMcpServer {
                     requested.saturation = Some(sat);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set colour on '{device_id}': {e}"
                     )))
                 }
@@ -631,7 +637,7 @@ impl DeviceControlMcpServer {
                     requested.volume = Some(pct);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set volume on '{device_id}': {e}"
                     )))
                 }
@@ -645,7 +651,7 @@ impl DeviceControlMcpServer {
                     requested.color_temp = Some(kelvin);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set colour temperature on '{device_id}': {e}"
                     )))
                 }
@@ -659,7 +665,7 @@ impl DeviceControlMcpServer {
                     requested.fan_speed = Some(pct);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set fan speed on '{device_id}': {e}"
                     )))
                 }
@@ -672,7 +678,7 @@ impl DeviceControlMcpServer {
                     requested.fan_mode = Some(mode.to_string());
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set fan mode on '{device_id}': {e}"
                     )))
                 }
@@ -702,7 +708,7 @@ impl DeviceControlMcpServer {
                     }
                 },
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set {setting} on '{device_id}': {e}"
                     )))
                 }
@@ -719,7 +725,11 @@ impl DeviceControlMcpServer {
                         OperationNote::Missed(text) => notes.push(text),
                     }
                 }
-                Err(e) => return Ok(guidance(format!("Couldn't {operation} '{device_id}': {e}"))),
+                Err(e) => {
+                    return Ok(device_failed(format!(
+                        "Couldn't {operation} '{device_id}': {e}"
+                    )))
+                }
             }
         }
         if let Some(open) = p.tilt {
@@ -729,7 +739,7 @@ impl DeviceControlMcpServer {
                     applied.push(format!("tilt={pct}% open"));
                     requested.tilt = Some(pct);
                 }
-                Err(e) => return Ok(guidance(format!("Couldn't tilt '{device_id}': {e}"))),
+                Err(e) => return Ok(device_failed(format!("Couldn't tilt '{device_id}': {e}"))),
             }
         }
 
@@ -741,7 +751,7 @@ impl DeviceControlMcpServer {
                     requested.position = Some(pct);
                 }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set position on '{device_id}': {e}"
                     )))
                 }
@@ -965,6 +975,12 @@ impl DeviceControlMcpServer {
 /// Error-as-guidance: the LLM reads this and adapts (per the MCP server standard).
 fn guidance(msg: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(msg)])
+}
+
+/// A command the device refused or never got: no other tool can fix it (the MCP server standard's
+/// error case), and `/tools/invoke` keeps no reply for it, so a resent tap tries the device again.
+fn device_failed(msg: String) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(msg)])
 }
 
 // ── Natural device resolution (pure, unit-tested) ────────────────────────────

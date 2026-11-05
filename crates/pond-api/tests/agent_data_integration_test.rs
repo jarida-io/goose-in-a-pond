@@ -1455,12 +1455,13 @@ async fn invoke_tool_400_when_tool_missing() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// Counts its runs, waits a little in each so resends can overlap, and fails the first run
-/// when asked to.
+/// Counts its runs, waits a little in each so resends can overlap, and fails (an error) or
+/// refuses (`success: false`, as a device that did not answer reports) the first run when asked to.
 #[derive(Default)]
 struct CountingDispatcher {
     runs: std::sync::atomic::AtomicUsize,
     fail_first: bool,
+    refuse_first: bool,
 }
 
 #[async_trait::async_trait]
@@ -1473,10 +1474,11 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for CountingD
         let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         anyhow::ensure!(!(self.fail_first && run == 0), "the lamp did not answer");
+        let refused = self.refuse_first && run == 0;
         Ok(
             pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
                 content: format!("run {run} of {tool_name}"),
-                success: true,
+                success: !refused,
                 keep: None,
             },
         )
@@ -1573,6 +1575,21 @@ async fn a_failed_tap_is_not_kept_so_its_resend_runs() {
     let resent = app.oneshot(tap(Some("tap-1"), true)).await.unwrap();
     assert_eq!(resent.status(), StatusCode::OK);
     assert_eq!(body_json(resent).await["idempotency_key"], "tap-1");
+    assert_eq!(runs(&dispatcher), 2);
+}
+
+#[tokio::test]
+async fn a_tap_the_device_refused_is_not_kept_so_its_resend_runs() {
+    let dispatcher = Arc::new(CountingDispatcher {
+        refuse_first: true,
+        ..Default::default()
+    });
+    let (app, _tmp) = make_app_with_dispatcher(Some(dispatcher.clone())).await;
+    let refused = app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::OK);
+    assert_eq!(body_json(refused).await["success"], false);
+    let resent = app.oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(body_json(resent).await["success"], true);
     assert_eq!(runs(&dispatcher), 2);
 }
 
