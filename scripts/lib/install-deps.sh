@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/lib/install-deps.sh — System dependency installation
 #
-# Provides: install_system_deps(), ensure_llvm()
+# Provides: install_system_deps(), ensure_llvm(), ensure_swap_size()
 # Sourced by install.sh — not meant to be run directly.
 
 # ── System dependencies ──────────────────────────────────────────────────────
@@ -79,6 +79,59 @@ _install_deps_linux() {
   # LLVM tools are needed for production and Jetson builds
   if [ "$MODE" = "production" ] || [ "$MODE" = "jetson" ]; then
     _ensure_llvm
+  fi
+
+  ensure_swap_size 6144
+}
+
+# ── Swap memory configuration ───────────────────────────────────────────────
+ensure_swap_size() {
+  local target_mb="${1:-6144}"
+  [ "${OS:-$(uname -s | tr '[:upper:]' '[:lower:]')}" = "linux" ] || return 0
+  command -v swapon &>/dev/null || return 0
+
+  local total_kb=0 total_mb=0 zram_kb=0 zram_mb=0
+  if [ -r /proc/meminfo ]; then
+    total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    total_mb=$(( total_kb / 1024 ))
+  fi
+
+  if [ "$total_mb" -ge 5500 ] && [ "$total_mb" -le 6600 ]; then
+    log "Swap memory is ${total_mb} MB (~6 GB) -- OK"
+    return 0
+  fi
+
+  if [ -r /proc/swaps ]; then
+    zram_kb="$(awk '$1 ~ /^\/dev\/zram/ {sum += $3} END {print sum+0}' /proc/swaps 2>/dev/null || echo 0)"
+    zram_mb=$(( zram_kb / 1024 ))
+  fi
+
+  local needed_mb=$(( target_mb - zram_mb ))
+  [ "$needed_mb" -ge 1024 ] || needed_mb=1024
+
+  log "Configuring swap to ~${target_mb} MB (ZRAM: ${zram_mb} MB, /swapfile: ${needed_mb} MB)..."
+
+  if grep -qs '^/swapfile ' /proc/swaps 2>/dev/null; then
+    sudo swapoff /swapfile 2>/dev/null || true
+  fi
+
+  if sudo dd if=/dev/zero of=/swapfile bs=1M count="$needed_mb" status=none 2>/dev/null; then
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile >/dev/null 2>&1
+    if sudo swapon /swapfile 2>/dev/null; then
+      sudo sh -c 'grep -qs "^/swapfile " /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab'
+      local new_total_mb=0
+      if [ -r /proc/meminfo ]; then
+        new_total_mb="$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+      fi
+      success "Swap configured: ${new_total_mb} MB total (/swapfile ${needed_mb} MB + ZRAM ${zram_mb} MB)"
+    else
+      warn "swapon /swapfile failed"
+      return 1
+    fi
+  else
+    warn "Failed to create /swapfile (check disk space and sudo permissions)"
+    return 1
   fi
 }
 

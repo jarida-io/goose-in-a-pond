@@ -109,6 +109,10 @@ t_keys_move_between_views_and_hosts() {
   cs_handle k && cs_handle k && eq "$CS_LV_BACK" 2 || return 1
   cs_handle G && eq "$CS_LV_BACK" 0 || return 1
   cs_handle ESC && eq "$CS_VIEW" dash || return 1
+  cs_handle m && eq "$CS_VIEW" mem || return 1
+  cs_handle m && eq "$CS_VIEW" dash || return 1
+  cs_handle m && eq "$CS_VIEW" mem || return 1
+  cs_handle ESC && eq "$CS_VIEW" dash || return 1
   cs_handle $'\t' && eq "$CS_SEL" 1 || return 1
   cs_handle 1 && eq "$CS_SEL" 0 || return 1
   cs_handle 9 && eq "$CS_SEL" 0 || return 1
@@ -189,6 +193,35 @@ t_a_system_unit_names_the_data_directory() {
   eq "$(unset POND_DATA_DIR; CC_SYSTEM_UNIT="$W/unit" console_data_dir)" "/var/lib/goose-in-a-pond" || return 1
   eq "$(POND_DATA_DIR=/elsewhere CC_SYSTEM_UNIT="$W/unit" console_data_dir)" "/elsewhere" || return 1
   eq "$(unset POND_DATA_DIR XDG_DATA_HOME; CC_SYSTEM_UNIT="$W/none" console_data_dir)" "$HOME/.local/share/goose-in-a-pond"
+}
+
+t_memview_shows_breakdown_and_swap() {
+  world
+  printf 'host=nano\nboard=Jetson Orin Nano\nmem_total_kb=8000000\nmem_used_kb=6000000\nmem_avail_kb=2000000\nmem_cached_kb=1000000\nswap_total_kb=6000000\nswap_used_kb=1000000\nswap_zram_total_kb=4000000\nswap_zram_used_kb=1000000\nswap_file_total_kb=2000000\nswap_file_used_kb=0\nmodel_mb=4020\nchat_model=gemma-4-E4B-it\nkv_alloc_mb=581\npond_rss_kb=800000\nrss_matter_kb=20000\n' > "$W/state/h0/full"
+  cs_load 0
+  out="$(cs_memview 80 30)"
+  contains "$out" "LLM Model Weights" || return 1
+  contains "$out" "4020 MiB" || return 1
+  contains "$out" "KV Cache Buffer" || return 1
+  contains "$out" "581 MiB" || return 1
+  contains "$out" "Pond Server RSS" || return 1
+  contains "$out" "Companion Services" || return 1
+  contains "$out" "matter" || return 1
+  contains "$out" "ZRAM Pool" || return 1
+  contains "$out" "Swapfile" || return 1
+  contains "$out" "Total Swap"
+}
+
+t_dashboard_shows_ram_holds() {
+  world
+  printf 'host=nano\nboard=Jetson Orin Nano\nmem_total_kb=8000000\nmem_used_kb=6000000\nmem_avail_kb=2000000\nmem_cached_kb=1000000\nmodel_mb=4020\nkv_alloc_mb=581\npond_rss_kb=800000\n' > "$W/state/h0/full"
+  cs_load 0
+  out="$(cs_dash_top 80)"
+  contains "$out" "holds" || return 1
+  contains "$out" "model 3.9G" || return 1
+  contains "$out" "KV 581M" || return 1
+  contains "$out" "pond 781M" || return 1
+  contains "$out" "(m detail)"
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^t_'); do t "${fn#t_}" "$fn"; done

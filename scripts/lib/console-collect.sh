@@ -45,7 +45,14 @@ _cc_mac() {
   vm_stat 2>/dev/null | awk -v total="${total:-0}" '
     /page size of/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) ps = $i }
     /^Pages active/ { a = $NF } /^Pages wired down/ { w = $NF } /occupied by compressor/ { c = $NF }
-    END { printf "mem_total_kb=%d\nmem_used_kb=%d\n", total / 1024, (a + w + c) * ps / 1024 }'
+    /^Pages free/ { f = $NF } /^Pages speculative/ { spec = $NF } /^Pages inactive/ { inact = $NF }
+    END {
+      used_kb = (a + w + c) * ps / 1024
+      free_kb = (f + inact) * ps / 1024
+      cached_kb = (spec + inact) * ps / 1024
+      printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_free_kb=%d\nmem_avail_kb=%d\nmem_cached_kb=%d\n",
+        total / 1024, used_kb, free_kb, free_kb, cached_kb
+    }'
   sysctl -n vm.swapusage 2>/dev/null | awk '{
     for (i = 1; i <= NF; i++) { if ($i == "total") t = $(i + 2); if ($i == "used") u = $(i + 2) }
     printf "swap_total_kb=%d\nswap_used_kb=%d\n", t * 1024, u * 1024 }'
@@ -70,8 +77,21 @@ _cc_linux() {
   fi
   awk '/^cpu/ { tot = 0; for (i = 2; i <= NF; i++) tot += $i
     k = ($1 == "cpu") ? "cpu_raw" : "core_raw_" substr($1, 4); printf "%s=%d %d\n", k, tot, $5 + $6 }' /proc/stat
-  awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } /^SwapTotal:/ { st = $2 } /^SwapFree:/ { sf = $2 }
-    END { printf "mem_total_kb=%d\nmem_used_kb=%d\nswap_total_kb=%d\nswap_used_kb=%d\n", t, t - a, st, st - sf }' /proc/meminfo
+  awk '/^MemTotal:/ { t = $2 } /^MemFree:/ { f = $2 } /^MemAvailable:/ { a = $2 }
+       /^Buffers:/ { b = $2 } /^Cached:/ { c = $2 } /^Slab:/ { sl = $2 }
+       /^SwapTotal:/ { st = $2 } /^SwapFree:/ { sf = $2 }
+    END {
+      if (a == 0) a = f + b + c
+      printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_free_kb=%d\nmem_avail_kb=%d\nmem_cached_kb=%d\nmem_slab_kb=%d\nswap_total_kb=%d\nswap_used_kb=%d\n",
+        t, t - a, f, a, c + b, sl, st, st - sf }' /proc/meminfo
+  if [ -r /proc/swaps ]; then
+    awk 'NR > 1 {
+      if ($1 ~ /^\/dev\/zram/) { zt += $3; zu += $4 }
+      else { ft += $3; fu += $4 }
+    } END {
+      printf "swap_zram_total_kb=%d\nswap_zram_used_kb=%d\nswap_file_total_kb=%d\nswap_file_used_kb=%d\n", zt, zu, ft, fu
+    }' /proc/swaps
+  fi
   awk '{ printf "uptime_s=%d\n", $1 }' /proc/uptime
   for f in /sys/devices/platform/bus@0/*.gpu/load /sys/devices/platform/*.gpu/load /sys/devices/platform/gpu.0/load; do
     [ -r "$f" ] && { echo "gpu_pct=$(( $(cat "$f" 2>/dev/null || echo 0) / 10 ))"; break; }
@@ -129,9 +149,35 @@ _cc_pond() {
   log="$(pond_log_today "$d")"
   echo "log_path=$log"
   [ "$full" = 1 ] || return 0
+  local cur_model=""
   if command -v sqlite3 >/dev/null 2>&1 && [ -f "$d/pond_system.db" ]; then
     sqlite3 "$d/pond_system.db" "SELECT key || '=' || value FROM settings WHERE key IN ('chat_model','chat_provider','thinking_mode');" 2>/dev/null
+    cur_model="$(sqlite3 "$d/pond_system.db" "SELECT value FROM settings WHERE key = 'chat_model';" 2>/dev/null)"
   fi
+  ps -eo rss,args 2>/dev/null | awk '
+    /matter-server/ && !/awk/ { mat += $1 }
+    /pondnet/ && !/awk/ { pnet += $1 }
+    /music\/src\/server/ && !/awk/ { mus += $1 }
+    /(pond-desktop|electron)/ && !/awk/ { dsk += $1 }
+    /gst-launch/ && !/awk/ { cam += $1 }
+    END {
+      if (mat > 0) printf "rss_matter_kb=%d\n", mat
+      if (pnet > 0) printf "rss_pondnet_kb=%d\n", pnet
+      if (mus > 0) printf "rss_music_kb=%d\n", mus
+      if (dsk > 0) printf "rss_desktop_kb=%d\n", dsk
+      if (cam > 0) printf "rss_camera_kb=%d\n", cam
+    }'
+  local model_mb=""
+  if [ -f "$log" ]; then
+    model_mb="$(grep -aE 'model_mb=[0-9]+' "$log" 2>/dev/null | tail -1 | sed -n 's/.*model_mb=\([0-9]*\).*/\1/p' | tr -d '\000\r\n')"
+  fi
+  if [ -z "$model_mb" ] && [ -n "$cur_model" ]; then
+    local mf="$d/models/gguf/${cur_model}.gguf"
+    if [ -r "$mf" ]; then
+      model_mb="$(ls -lLn "$mf" 2>/dev/null | awk '{print int($5 / 1048576)}')"
+    fi
+  fi
+  [ -n "$model_mb" ] && [ "$model_mb" -gt 0 ] && echo "model_mb=$model_mb"
   pond_engine_state "$log" "$os"
   echo "engine=$POND_ENGINE"; echo "engine_failed=$POND_ENGINE_FAILED"
   pond_mtp_state "$log"

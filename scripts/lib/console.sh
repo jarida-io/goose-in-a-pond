@@ -14,9 +14,11 @@ CS_LOADED=""
 cs_glyphs() {
   case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
     *UTF-8*|*utf-8*|*UTF8*|*utf8*)
-      CS_BLOCKS="▁ ▂ ▃ ▄ ▅ ▆ ▇ █"; CS_FULL="▓"; CS_EMPTY="░"; CS_RULE="─"; CS_DOT="·" ;;
+      CS_BLOCKS="▁ ▂ ▃ ▄ ▅ ▆ ▇ █"; CS_FULL="▓"; CS_EMPTY="░"; CS_RULE="─"; CS_DOT="·"
+      CS_GLYPH_MOD="█"; CS_GLYPH_KV="▓"; CS_GLYPH_POND="▒"; CS_GLYPH_CACHE="░"; CS_GLYPH_AVAIL="·" ;;
     *)
-      CS_BLOCKS=". : - = + * # @"; CS_FULL="#"; CS_EMPTY="."; CS_RULE="-"; CS_DOT="|" ;;
+      CS_BLOCKS=". : - = + * # @"; CS_FULL="#"; CS_EMPTY="."; CS_RULE="-"; CS_DOT="|"
+      CS_GLYPH_MOD="#"; CS_GLYPH_KV="="; CS_GLYPH_POND="+"; CS_GLYPH_CACHE="-"; CS_GLYPH_AVAIL="." ;;
   esac
   CS_REV=$'\033[7m'; CS_BOLD=$'\033[1m'; CS_DIM=$'\033[2m'; CS_OFF=$'\033[0m'
   if [ -n "${NO_COLOR:-}" ]; then CS_RED=""; CS_YLW=""
@@ -190,6 +192,7 @@ cs_get() { local n="S_$1"; printf '%s' "${!n:-}"; }
 
 cs_count() { printf '%s\n' "$1" | wc -w | tr -d ' '; }
 cs_gib() { awk -v k="${1:-0}" 'BEGIN { printf "%.1f", k / 1048576 }'; }
+cs_mb_fmt() { awk -v m="${1:-0}" 'BEGIN { if (m >= 1024) printf "%.1fG", m / 1024; else printf "%dM", m }'; }
 cs_uptime() { awk -v s="${1:-0}" 'BEGIN { d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
   if (d > 0) printf "%dd %dh", d, h; else printf "%dh %dm", h, m }'; }
 cs_rule() { awk -v r="$CS_RULE" -v w="$1" 'BEGIN { for (i = 0; i < w; i++) printf "%s", r }'; }
@@ -344,6 +347,22 @@ cs_dash_top() {
   printf ' RAM  %s %3s%%  %s  %s / %s GiB  swap %s / %s GiB\n' "$(cs_hbar "$mem" 20)" "$mem" \
     "$(cs_spark "$n" 100 "$(awk '{ print $4 }' "$hist" 2>/dev/null)")" \
     "$(cs_gib "$memu")" "$(cs_gib "$memt")" "$(cs_gib "$(cs_get swap_used_kb)")" "$(cs_gib "$(cs_get swap_total_kb)")"
+  local mod_mb kv_mb prss_kb mat_kb pnet_kb mus_kb dsk_kb cam_kb cache_kb avail_kb svcs_kb hp=""
+  mod_mb="$(cs_get model_mb)"; kv_mb="$(cs_get kv_alloc_mb)"; prss_kb="$(cs_get pond_rss_kb)"
+  mat_kb="$(cs_get rss_matter_kb)"; pnet_kb="$(cs_get rss_pondnet_kb)"; mus_kb="$(cs_get rss_music_kb)"
+  dsk_kb="$(cs_get rss_desktop_kb)"; cam_kb="$(cs_get rss_camera_kb)"
+  cache_kb="$(cs_get mem_cached_kb)"; avail_kb="$(cs_get mem_avail_kb)"
+  svcs_kb=$(( ${mat_kb:-0} + ${pnet_kb:-0} + ${mus_kb:-0} + ${dsk_kb:-0} + ${cam_kb:-0} ))
+  local hp=""
+  [ -n "$mod_mb" ] && [ "$mod_mb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }model $(cs_mb_fmt "$mod_mb")"
+  [ -n "$kv_mb" ] && [ "$kv_mb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }KV ${kv_mb}M"
+  [ -n "$prss_kb" ] && [ "$prss_kb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }pond $((prss_kb / 1024))M"
+  [ "$svcs_kb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }services $((svcs_kb / 1024))M"
+  [ -n "$cache_kb" ] && [ "$cache_kb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }cache $((cache_kb / 1024))M"
+  [ -n "$avail_kb" ] && [ "$avail_kb" -gt 0 ] && hp="${hp:+$hp $CS_DOT }avail $((avail_kb / 1024))M"
+  if [ -n "$hp" ]; then
+    printf '      %sholds%s %s  %s(m detail)%s\n' "$CS_DIM" "$CS_OFF" "$hp" "$CS_DIM" "$CS_OFF"
+  fi
   if [ -n "$(cs_get ctx_max)" ]; then
     local cmax cused cpct cspark kv_info="" kvt
     cmax="$(cs_get ctx_max)"; cused="$(cs_get ctx_used)"; cpct="$(cs_get ctx_pct)"
@@ -397,6 +416,160 @@ cs_logview() {
   [ "$total" -gt 0 ] || printf ' %snothing matches%s\n' "$CS_DIM" "$CS_OFF"
 }
 
+cs_memview() {
+  local cols="$1" rows="$2"
+  local memt_kb memu_kb mema_kb cache_kb swt_kb swu_kb zt_kb zu_kb ft_kb fu_kb
+  local mod_mb kv_mb prss_kb pid mat_kb pnet_kb mus_kb dsk_kb cam_kb
+  local cmodel kvt cmax os host board
+  memt_kb="$(cs_get mem_total_kb)"; memu_kb="$(cs_get mem_used_kb)"
+  mema_kb="$(cs_get mem_avail_kb)"; cache_kb="$(cs_get mem_cached_kb)"
+  swt_kb="$(cs_get swap_total_kb)"; swu_kb="$(cs_get swap_used_kb)"
+  zt_kb="$(cs_get swap_zram_total_kb)"; zu_kb="$(cs_get swap_zram_used_kb)"
+  ft_kb="$(cs_get swap_file_total_kb)"; fu_kb="$(cs_get swap_file_used_kb)"
+  mod_mb="$(cs_get model_mb)"; kv_mb="$(cs_get kv_alloc_mb)"
+  prss_kb="$(cs_get pond_rss_kb)"; pid="$(cs_get pond_pid)"
+  mat_kb="$(cs_get rss_matter_kb)"; pnet_kb="$(cs_get rss_pondnet_kb)"
+  mus_kb="$(cs_get rss_music_kb)"; dsk_kb="$(cs_get rss_desktop_kb)"; cam_kb="$(cs_get rss_camera_kb)"
+  cmodel="$(cs_get chat_model)"; kvt="$(cs_get kv_type)"; cmax="$(cs_get ctx_max)"
+  os="$(cs_get os)"; host="$(cs_get host)"; board="$(cs_get board)"
+
+  local tot_mb=$(( ${memt_kb:-0} / 1024 ))
+  local usd_mb=$(( ${memu_kb:-0} / 1024 ))
+  local avl_mb=$(( ${mema_kb:-0} / 1024 ))
+  local cch_mb=$(( ${cache_kb:-0} / 1024 ))
+  local prs_mb=$(( ${prss_kb:-0} / 1024 ))
+  local mmb="${mod_mb:-0}"
+  local kmb="${kv_mb:-0}"
+  local mat_mb=$(( ${mat_kb:-0} / 1024 ))
+  local pnet_mb=$(( ${pnet_kb:-0} / 1024 ))
+  local mus_mb=$(( ${mus_kb:-0} / 1024 ))
+  local dsk_mb=$(( ${dsk_kb:-0} / 1024 ))
+  local cam_mb=$(( ${cam_kb:-0} / 1024 ))
+  local svc_mb=$(( mat_mb + pnet_mb + mus_mb + dsk_mb + cam_mb ))
+
+  [ -n "$cmodel" ] || cmodel="no model loaded"
+  [ -n "$kvt" ] || kvt="q8_0,q8_0"
+
+  local ram_pct=0
+  [ "$tot_mb" -gt 0 ] && ram_pct=$(( usd_mb * 100 / tot_mb ))
+  cs_titlebar "$cols" "${CS_DOT} memory breakdown"
+  printf ' %s%s%s %s %s  %s  RAM %s / %s GiB (%d%%)  %s  Swap %s / %s GiB\n\n' \
+    "$CS_BOLD" "$host" "$CS_OFF" "$CS_DOT" "${board:-$os}" "$CS_DOT" \
+    "$(cs_gib "$memu_kb")" "$(cs_gib "$memt_kb")" \
+    "$ram_pct" "$CS_DOT" \
+    "$(cs_gib "$swu_kb")" "$(cs_gib "$swt_kb")"
+
+  local bw=$(( cols - 6 ))
+  [ "$bw" -gt 64 ] && bw=64
+  [ "$bw" -lt 20 ] && bw=20
+
+  local bar_parts
+  bar_parts="$(awk -v tot="$tot_mb" -v w="$bw" \
+                  -v m="$mmb" -v kv="$kmb" -v p="$prs_mb" \
+                  -v s="$svc_mb" -v c="$cch_mb" -v a="$avl_mb" \
+                  -v gm="$CS_GLYPH_MOD" -v gkv="$CS_GLYPH_KV" -v gp="$CS_GLYPH_POND" \
+                  -v gc="$CS_GLYPH_CACHE" -v ga="$CS_GLYPH_AVAIL" '
+    BEGIN {
+      if (tot <= 0) tot = 1
+      wm  = int(w * m / tot + 0.5)
+      wkv = int(w * kv / tot + 0.5)
+      wp  = int(w * p / tot + 0.5)
+      ws  = int(w * s / tot + 0.5)
+      wc  = int(w * c / tot + 0.5)
+      wa  = int(w * a / tot + 0.5)
+      rem = w - (wm + wkv + wp + ws + wc)
+      if (rem < 0) rem = 0
+      if (wa > rem) wa = rem
+      out = ""
+      for (i = 0; i < wm; i++) out = out gm
+      for (i = 0; i < wkv; i++) out = out gkv
+      for (i = 0; i < wp; i++) out = out gp
+      for (i = 0; i < ws; i++) out = out gp
+      for (i = 0; i < wc; i++) out = out gc
+      for (i = 0; i < wa; i++) out = out ga
+      while (length(out) < w) out = out ga
+      print out
+    }')"
+
+  printf '  [%s]\n' "$bar_parts"
+  printf '  %s%s%s Model  %s%s%s KV  %s%s%s Pond/Svcs  %s%s%s Cache  %s%s%s Avail\n\n' \
+    "$CS_BOLD" "$CS_GLYPH_MOD" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_KV" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_POND" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_CACHE" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_AVAIL" "$CS_OFF"
+
+  printf '  %-22s %10s   %6s   %s\n' "COMPONENT" "RESIDENT" "SHARE" "ROLE & DETAILS"
+  printf '  %s\n' "$(cs_rule $(( cols - 4 > 72 ? 72 : cols - 4 )))"
+
+  if [ "$mmb" -gt 0 ]; then
+    printf '  %-22s %7d MiB   %5.1f%%   %s (unified VRAM)\n' \
+      "LLM Model Weights" "$mmb" \
+      "$(awk -v m="$mmb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')" \
+      "$cmodel"
+  fi
+  if [ "$kmb" -gt 0 ]; then
+    printf '  %-22s %7d MiB   %5.1f%%   %s (%s tok, %s)\n' \
+      "KV Cache Buffer" "$kmb" \
+      "$(awk -v m="$kmb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')" \
+      "Context KV window" "${cmax:-cfg}" "$kvt"
+  fi
+  if [ "$prs_mb" -gt 0 ]; then
+    printf '  %-22s %7d MiB   %5.1f%%   PID %s (engine, SQLite, audio)\n' \
+      "Pond Server RSS" "$prs_mb" \
+      "$(awk -v m="$prs_mb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')" \
+      "${pid:-active}"
+  fi
+  if [ "$svc_mb" -gt 0 ]; then
+    local svc_names=""
+    [ "$mat_mb" -gt 0 ] && svc_names="${svc_names:+$svc_names, }matter ($mat_mb M)"
+    [ "$pnet_mb" -gt 0 ] && svc_names="${svc_names:+$svc_names, }pondnet ($pnet_mb M)"
+    [ "$cam_mb" -gt 0 ] && svc_names="${svc_names:+$svc_names, }camera ($cam_mb M)"
+    [ "$mus_mb" -gt 0 ] && svc_names="${svc_names:+$svc_names, }music ($mus_mb M)"
+    [ "$dsk_mb" -gt 0 ] && svc_names="${svc_names:+$svc_names, }desktop ($dsk_mb M)"
+    printf '  %-22s %7d MiB   %5.1f%%   %s\n' \
+      "Companion Services" "$svc_mb" \
+      "$(awk -v m="$svc_mb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')" \
+      "$svc_names"
+  fi
+  if [ "$cch_mb" -gt 0 ]; then
+    printf '  %-22s %7d MiB   %5.1f%%   Reclaimable page/buffer cache\n' \
+      "Page Cache & Buffers" "$cch_mb" \
+      "$(awk -v m="$cch_mb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')"
+  fi
+  if [ "$avl_mb" -gt 0 ]; then
+    printf '  %-22s %7d MiB   %5.1f%%   Headroom before swapping\n' \
+      "Free & Available Pool" "$avl_mb" \
+      "$(awk -v m="$avl_mb" -v t="$tot_mb" 'BEGIN { printf "%.1f", (t>0? 100*m/t : 0) }')"
+  fi
+  printf '  %s\n' "$(cs_rule $(( cols - 4 > 72 ? 72 : cols - 4 )))"
+  printf '  %-22s %7d MiB   %5.1f%%\n\n' "Total Physical RAM" "$tot_mb" "100.0"
+
+  local swt_mb=$(( ${swt_kb:-0} / 1024 ))
+  local swu_mb=$(( ${swu_kb:-0} / 1024 ))
+  if [ "$swt_mb" -gt 0 ]; then
+    local zt_mb=$(( ${zt_kb:-0} / 1024 ))
+    local zu_mb=$(( ${zu_kb:-0} / 1024 ))
+    local ft_mb=$(( ${ft_kb:-0} / 1024 ))
+    local fu_mb=$(( ${fu_kb:-0} / 1024 ))
+    printf '  %-22s %10s   %10s   %s\n' "SWAP PARTITION" "ALLOCATED" "USED" "TYPE & STORAGE"
+    printf '  %s\n' "$(cs_rule $(( cols - 4 > 72 ? 72 : cols - 4 )))"
+    if [ "$zt_mb" -gt 0 ]; then
+      printf '  %-22s %7d MiB   %7d MiB   RAM compressed (/dev/zram)\n' \
+        "ZRAM Pool" "$zt_mb" "$zu_mb"
+    fi
+    if [ "$ft_mb" -gt 0 ]; then
+      printf '  %-22s %7d MiB   %7d MiB   Disk swap (/swapfile)\n' \
+        "Swapfile" "$ft_mb" "$fu_mb"
+    fi
+    printf '  %s\n' "$(cs_rule $(( cols - 4 > 72 ? 72 : cols - 4 )))"
+    local swap_pct=0
+    [ "$swt_mb" -gt 0 ] && swap_pct=$(( swu_mb * 100 / swt_mb ))
+    printf '  %-22s %7d MiB   %7d MiB   (%d%% utilized)\n' \
+      "Total Swap" "$swt_mb" "$swu_mb" "$swap_pct"
+  fi
+}
+
 cs_help() {
   cs_titlebar "$1" "${CS_DOT} keys"
   cat <<EOF
@@ -407,7 +580,11 @@ cs_help() {
    L            the whole log in less    ?          these keys
 
  Dashboard
+   m            live RAM breakdown view
    l            open the log view
+
+ Memory view
+   m, esc       return to dashboard
 
  Log view
    up, k / down, j     one line          PgUp, b / PgDn, space   one page
@@ -427,7 +604,8 @@ EOF
 cs_footer() {
   local keys
   if [ "$CS_VIEW" = logs ]; then keys=" esc back  arrows/j/k scroll  PgUp/PgDn page  g/G ends  f follow  a w t u filter  / search  L less  q quit"
-  else keys=" q quit  tab host  l logs  L less  d doctor  r restart pond  ? keys"; fi
+  elif [ "$CS_VIEW" = mem ]; then keys=" esc/m dashboard  r restart pond  d doctor  L less  q quit"
+  else keys=" q quit  tab host  m memory  l logs  L less  d doctor  r restart pond  ? keys"; fi
   if [ -n "$CS_MSG" ] && [ "$(date +%s)" -le "$CS_MSG_UNTIL" ]; then keys=" $CS_MSG"; fi
   printf '%s%s%s' "$CS_REV" "$(cs_pad "$keys" "$1")" "$CS_OFF"
 }
@@ -443,6 +621,7 @@ cs_frame() {
   else
     case "$CS_VIEW" in
       logs) body="$(cs_logview "$cols" "$rows")" ;;
+      mem)  body="$(cs_memview "$cols" "$rows")" ;;
       help) body="$(cs_help "$cols")" ;;
       *)    body="$(cs_dashboard "$cols" "$rows")" ;;
     esac
@@ -533,6 +712,8 @@ cs_handle() {
     *:r) cs_restart ;;
     *:L) cs_less ;;
     dash:l) CS_VIEW=logs; CS_LV_BACK=0 ;;
+    dash:m|dash:M) CS_VIEW=mem ;;
+    mem:m|mem:M|mem:ESC) CS_VIEW=dash ;;
     logs:ESC) CS_VIEW=dash ;;
     logs:ESC'[A'|logs:k) CS_LV_BACK=$((CS_LV_BACK + 1)) ;;
     logs:ESC'[B'|logs:j) [ "$CS_LV_BACK" -gt 0 ] && CS_LV_BACK=$((CS_LV_BACK - 1)) ;;

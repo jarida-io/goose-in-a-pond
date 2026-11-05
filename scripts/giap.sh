@@ -21,6 +21,7 @@
 #   bash scripts/giap.sh onnxruntime build   # Jetson: build it from source in the background (hours), install, build engines
 #   bash scripts/giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]  # inspect or switch KV cache quantization (POND_KV_TYPE)
 #   bash scripts/giap.sh ctx [status|8k|16k|24k|32k|48k|64k|auto|N] # inspect or configure context window n_ctx (POND_CONTEXT_SIZE)
+#   bash scripts/giap.sh swap [status|setup|N]       # Linux: inspect or configure total swap to ~6 GB target
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
@@ -843,13 +844,13 @@ doctor() {
 
   # 12. remotes (deploy safety)
   if [ "$D_OS" = "macos" ]; then
-    local r missing=""
+    local r unpushed=""
     for r in origin jarida-io; do
       git remote 2>/dev/null | grep -qx "$r" || continue
-      git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || missing="$missing $r"
+      git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || unpushed="$unpushed $r"
     done
-    if [ -n "$missing" ]; then
-      warn "HEAD is not on:$missing — the Jetson pulls from origin, so a deploy would build stale code"
+    if [ -n "$unpushed" ]; then
+      warn "HEAD is not on:$unpushed — the Jetson pulls from origin, so a deploy would build stale code"
       DOC_WARN=$((DOC_WARN+1))
     else
       ok "HEAD is present on the deploy remotes"
@@ -966,6 +967,9 @@ doctor() {
 
   # 19. KV snapshots: what a cold turn after a restart can reuse. Information only.
   doctor_kv
+
+  # 20. Swap memory configuration: verify Linux swap is around the ~6 GB target.
+  doctor_swap
 
   printf '\n  %sVerdict: %s FAIL · %s WARN · %s UNKNOWN%s\n' \
     "$C_B" "$DOC_FAIL" "$DOC_WARN" "$DOC_UNK" "$C_RST"
@@ -1136,6 +1140,31 @@ doctor_kv() {
   [ -z "$POND_KV_REASON" ] || note "most often not written because: $POND_KV_REASON"
   if [ "$POND_KV_SAVED" -gt 0 ] && [ "$POND_KV_LOADED" -eq 0 ]; then
     note "none loaded yet: one pays off on the first turn after a restart that keeps the same model and prompt"
+  fi
+  return 0
+}
+
+doctor_swap() {
+  [ "$D_OS" = "linux" ] || return 0
+  local total_kb=0 total_mb=0 zram_mb=0 file_mb=0
+  if [ -r /proc/meminfo ]; then
+    total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    total_mb=$(( total_kb / 1024 ))
+  fi
+  if [ -r /proc/swaps ]; then
+    zram_mb="$(awk '$1 ~ /^\/dev\/zram/ {sum += $3} END {print int(sum/1024)}' /proc/swaps 2>/dev/null || echo 0)"
+    file_mb="$(awk '$1 !~ /^\/dev\/zram/ && NR>1 {sum += $3} END {print int(sum/1024)}' /proc/swaps 2>/dev/null || echo 0)"
+  fi
+  if [ "$total_mb" -ge 5500 ] && [ "$total_mb" -le 6600 ]; then
+    ok "swap: ${total_mb} MB (~6 GB total: ZRAM ${zram_mb} MB + file ${file_mb} MB)"
+  elif [ "$total_mb" -eq 0 ]; then
+    warn "swap: 0 MB (no swap configured; runs out of memory under load; run: bash scripts/giap.sh swap setup)"
+    DOC_WARN=$((DOC_WARN+1))
+  elif [ "$total_mb" -lt 5000 ]; then
+    warn "swap: ${total_mb} MB (less than recommended ~6 GB; risk of build or inference OOM; run: bash scripts/giap.sh swap setup)"
+    DOC_WARN=$((DOC_WARN+1))
+  else
+    note "swap: ${total_mb} MB (larger than recommended ~6 GB: ZRAM ${zram_mb} MB + file ${file_mb} MB)"
   fi
   return 0
 }
@@ -1838,6 +1867,38 @@ action_ctx_menu() {
   return 0
 }
 
+action_swap() { # $1 = "" | status | setup | <size_mb>
+  head1 "Swap memory configuration"
+  if [ "$D_OS" != "linux" ]; then
+    note "Swap memory is managed dynamically by macOS; nothing to configure."
+    return 0
+  fi
+  local sub="${1:-status}"
+  case "$sub" in
+    setup)
+      local target="${2:-6144}"
+      source "$REPO_ROOT/scripts/lib/install-deps.sh"
+      ensure_swap_size "$target"
+      ;;
+    status)
+      doctor_swap
+      if [ -r /proc/swaps ]; then
+        say ""
+        info "Active swap partitions (/proc/swaps):"
+        cat /proc/swaps | sed 's/^/  /'
+      fi
+      ;;
+    *)
+      if [[ "$sub" =~ ^[0-9]+$ ]]; then
+        source "$REPO_ROOT/scripts/lib/install-deps.sh"
+        ensure_swap_size "$sub"
+      else
+        warn "unknown swap command: $sub (expected status, setup, or size in MB)"
+      fi
+      ;;
+  esac
+}
+
 # ── service actions ──────────────────────────────────────────────────────────
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
@@ -2080,13 +2141,13 @@ action_deploy() {
     bad "you are ON the Jetson — deploy runs from the dev machine. Use menu 12 to build here."
     return 1
   fi
-  local missing="" r
+  local unpushed="" r
   for r in origin jarida-io; do
     git remote 2>/dev/null | grep -qx "$r" || continue
-    git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || missing="$missing $r"
+    git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || unpushed="$unpushed $r"
   done
-  if [ -n "$missing" ]; then
-    bad "HEAD is not on:$missing"
+  if [ -n "$unpushed" ]; then
+    bad "HEAD is not on:$unpushed"
     note "the Jetson resets to origin/<branch>; deploying now builds stale code and reports success"
     confirm "Deploy anyway?" || return 1
   fi
@@ -2229,6 +2290,7 @@ show_menu() {
   [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
   say "  19) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
   say "  28) Context window (n_ctx) — status and sizing (8k, 16k, 32k, 48k, 64k, auto)"
+  [ "$D_OS" = "linux" ] && say "  29) Swap memory — status and setup (~6 GB target)"
   say ""
   say "  ${C_B}Service & administration${C_RST}"
   say "  20) Install the service"
@@ -2275,6 +2337,7 @@ menu_loop() {
       18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
       19) action_kv_menu; pause ;;
       28) action_ctx_menu; pause ;;
+      29) [ "$D_OS" = "linux" ] && action_swap status; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -2330,7 +2393,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$CMD" in
-  litert|kv) ;;
+  litert|kv|swap) ;;
   ctx|context|n_ctx|models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
@@ -2366,5 +2429,6 @@ case "$CMD" in
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
+  swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac
