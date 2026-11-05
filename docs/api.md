@@ -218,7 +218,7 @@ The route summary's "Also" column names these.
 | GET | /onboard/status | open | | Onboarding progress |
 | POST | /onboard | wizard | | Start onboarding, or report where it is |
 | POST | /onboard/step/{name} | wizard | | Record reaching a step |
-| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device |
+| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device and gives it its My Pond key |
 | POST | /onboard/reset | reset | cred if tokenless | Back to `Welcome`; reopens the wizard routes |
 
 ### Connections and setup card
@@ -765,7 +765,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; plus `admin_key`, the phone's own [My Pond key](architecture/pond-administrator.md#each-phones-own-key), when the caller is the device that claimed the pond and this call is the one that completed setup; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
