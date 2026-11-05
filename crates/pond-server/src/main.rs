@@ -7871,24 +7871,55 @@ async fn run_consolidation_pipeline(
         }
     };
 
-    // Oldest-first: duplicates cluster in time, so a contiguous window catches both halves.
-    let selection = consolidation::select_batch(memories, batch_size);
+    // Oldest-first within each owner: duplicates cluster in time, so a contiguous window catches
+    // both halves, and no batch holds two members' memories.
+    let batches = consolidation::select_owner_batches(memories, batch_size);
+    let largest = batches.iter().map(|s| s.batch.len()).max().unwrap_or(0);
+    let runnable: Vec<_> = batches.into_iter().filter(|s| !s.below_minimum()).collect();
 
-    if selection.below_minimum() {
+    if runnable.is_empty() {
         tracing::debug!(
-            "consolidation: skipped — only {} eligible memories (need >= {})",
-            selection.batch.len(),
+            "consolidation: skipped — at most {largest} eligible memories for one owner (need >= {})",
             MIN_MEMORIES_TO_CONSOLIDATE
         );
         let _ = broadcast_tx.send(ConsolidationEvent::Error {
             message: format!(
                 "Need at least {} memories to consolidate, found {}",
-                MIN_MEMORIES_TO_CONSOLIDATE,
-                selection.batch.len()
+                MIN_MEMORIES_TO_CONSOLIDATE, largest
             ),
         });
         return;
     }
+
+    for selection in runnable {
+        if cancel.is_cancelled() {
+            return;
+        }
+        consolidate_one_batch(
+            repo.as_ref(),
+            provider.clone(),
+            &broadcast_tx,
+            cancel.clone(),
+            mode,
+            selection,
+        )
+        .await;
+    }
+}
+
+/// One owner's batch through the consolidator, then `apply_actions` and an audit row.
+async fn consolidate_one_batch(
+    repo: &(dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync),
+    provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    broadcast_tx: &tokio::sync::broadcast::Sender<
+        pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
+    >,
+    cancel: tokio_util::sync::CancellationToken,
+    mode: &str,
+    selection: pond_core::user_data::services::memory_consolidation::BatchSelection,
+) {
+    use pond_core::user_data::ports::memory_consolidator::ConsolidationEvent;
+    use pond_core::user_data::services::memory_consolidation as consolidation;
 
     if selection.deferred > 0 {
         tracing::info!(
@@ -7933,18 +7964,17 @@ async fn run_consolidation_pipeline(
                 .map(|e| e.proposal.action.clone())
                 .collect();
 
-            let outcome =
-                match consolidation::apply_actions(repo.as_ref(), &selection.batch, accepted).await
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::warn!("consolidation: applying actions failed: {e}");
-                        let _ = broadcast_tx.send(ConsolidationEvent::Error {
-                            message: e.to_string(),
-                        });
-                        return;
-                    }
-                };
+            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("consolidation: applying actions failed: {e}");
+                    let _ = broadcast_tx.send(ConsolidationEvent::Error {
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            };
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
