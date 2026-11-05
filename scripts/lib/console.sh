@@ -193,6 +193,7 @@ cs_get() { local n="S_$1"; printf '%s' "${!n:-}"; }
 cs_count() { printf '%s\n' "$1" | wc -w | tr -d ' '; }
 cs_gib() { awk -v k="${1:-0}" 'BEGIN { printf "%.1f", k / 1048576 }'; }
 cs_mb_fmt() { awk -v m="${1:-0}" 'BEGIN { if (m >= 1024) printf "%.1fG", m / 1024; else printf "%dM", m }'; }
+cs_tok_fmt() { awk -v t="${1:-0}" 'BEGIN { if (t >= 1000000) printf "%.1fM", t / 1000000; else if (t >= 1000) printf "%.1fk", t / 1000; else printf "%d", t }'; }
 cs_uptime() { awk -v s="${1:-0}" 'BEGIN { d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
   if (d > 0) printf "%dd %dh", d, h; else printf "%dh %dm", h, m }'; }
 cs_rule() { awk -v r="$CS_RULE" -v w="$1" 'BEGIN { for (i = 0; i < w; i++) printf "%s", r }'; }
@@ -374,6 +375,30 @@ cs_dash_top() {
     printf ' CTX  %s %3s%%  %s  %s / %s tok%s\n' \
       "$(cs_hbar "${cpct:-0}" 20)" "${cpct:-0}" "$(cs_spark "$n" "$cmax" "${cspark:--}")" \
       "${cused:-0}" "$cmax" "$kv_info"
+    local t_sys t_tools t_mem t_msgs t_free chp="" mcp_c mems_c s_chars
+    t_sys=1100
+    mcp_c="$(cs_get ctx_mcp_cnt)"; [ -n "$mcp_c" ] || mcp_c=1
+    mems_c="$(cs_get ctx_memories_cnt)"; [ -n "$mems_c" ] || mems_c=0
+    s_chars="$(cs_get ctx_session_chars)"; [ -n "$s_chars" ] || s_chars=0
+    t_tools=$(( 3040 + mcp_c * 350 ))
+    t_mem=$(( mems_c > 0 ? 650 : 0 ))
+    if [ "${cused:-0}" -gt $(( t_sys + t_tools + t_mem )) ]; then
+      t_msgs=$(( cused - t_sys - t_tools - t_mem ))
+    elif [ "${cused:-0}" -gt 0 ]; then
+      t_msgs=$(( s_chars / 4 ))
+    else
+      t_msgs=0
+    fi
+    t_free=$(( cmax - cused ))
+    [ "$t_free" -lt 0 ] && t_free=0
+    [ "$t_msgs" -gt 0 ] && chp="${chp:+$chp $CS_DOT }messages $(cs_tok_fmt "$t_msgs")"
+    [ "$t_tools" -gt 0 ] && chp="${chp:+$chp $CS_DOT }tools $(cs_tok_fmt "$t_tools")"
+    [ "$t_sys" -gt 0 ] && chp="${chp:+$chp $CS_DOT }sys $(cs_tok_fmt "$t_sys")"
+    [ "$t_mem" -gt 0 ] && chp="${chp:+$chp $CS_DOT }memories $(cs_tok_fmt "$t_mem")"
+    [ "$t_free" -gt 0 ] && chp="${chp:+$chp $CS_DOT }free $(cs_tok_fmt "$t_free")"
+    if [ -n "$chp" ]; then
+      printf '      %sholds%s %s  %s(c detail)%s\n' "$CS_DIM" "$CS_OFF" "$chp" "$CS_DIM" "$CS_OFF"
+    fi
   fi
   tmp="$(for k in cpu gpu tj; do v="$(cs_get "temp_$k")"; [ -n "$v" ] && printf '%s %s.%sC  ' "$k" "$((v / 10))" "$((v % 10))"; done)"
   pwr="$(cs_get power_VDD_IN)"
@@ -570,6 +595,148 @@ cs_memview() {
   fi
 }
 
+cs_ctxview() {
+  local cols="$1" rows="$2"
+  local cmax cused cpct kvt kv_alloc kv_used kib slmb
+  local s_id s_msgs s_chars mems_cnt skills_cnt mcp_cnt
+  local host board os model
+  local t_sys t_tools t_mem t_msgs t_free t_compact bw bar_parts compact_thresh
+
+  cmax="$(cs_get ctx_max)"; [ -n "$cmax" ] && [ "$cmax" -gt 0 ] || cmax=65536
+  cused="$(cs_get ctx_used)"; [ -n "$cused" ] || cused=0
+  cpct="$(cs_get ctx_pct)"; [ -n "$cpct" ] || cpct=$(( cmax > 0 ? (cused * 100 / cmax) : 0 ))
+  kvt="$(cs_get kv_type)"; [ -n "$kvt" ] || kvt="q8_0,q8_0"
+  kv_alloc="$(cs_get kv_alloc_mb)"; kv_used="$(cs_get kv_used_mb)"
+  kib="$(cs_get kv_kib_tok)"; [ -n "$kib" ] || kib=4
+  slmb="$(cs_get kv_sliding_mb)"; [ -n "$slmb" ] || slmb=11
+
+  s_id="$(cs_get ctx_session_id)"
+  s_msgs="$(cs_get ctx_session_msgs)"; [ -n "$s_msgs" ] || s_msgs=0
+  s_chars="$(cs_get ctx_session_chars)"; [ -n "$s_chars" ] || s_chars=0
+  mems_cnt="$(cs_get ctx_memories_cnt)"; [ -n "$mems_cnt" ] || mems_cnt=0
+  skills_cnt="$(cs_get ctx_skills_cnt)"; [ -n "$skills_cnt" ] || skills_cnt=0
+  mcp_cnt="$(cs_get ctx_mcp_cnt)"; [ -n "$mcp_cnt" ] || mcp_cnt=1
+
+  host="$(cs_get host)"; board="$(cs_get board)"; os="$(cs_get os)"
+  model="$(cs_get chat_model)"; [ -n "$model" ] || model="no model loaded"
+
+  t_sys=1100
+  t_tools=$(( 3040 + mcp_cnt * 350 ))
+  if [ "$mems_cnt" -gt 0 ]; then
+    t_mem=$(( 250 + mems_cnt * 10 ))
+    [ "$t_mem" -gt 800 ] && t_mem=800
+  else
+    t_mem=0
+  fi
+
+  if [ "$cused" -gt $(( t_sys + t_tools + t_mem )) ]; then
+    t_msgs=$(( cused - t_sys - t_tools - t_mem ))
+  elif [ "$cused" -gt 0 ]; then
+    t_msgs=$(( s_chars / 4 ))
+  else
+    t_msgs=0
+  fi
+
+  t_free=$(( cmax - cused ))
+  [ "$t_free" -lt 0 ] && t_free=0
+
+  compact_thresh=$(( cmax * 8 / 10 ))
+  t_compact=$(( compact_thresh - cused ))
+  [ "$t_compact" -lt 0 ] && t_compact=0
+
+  cs_titlebar "$cols" "${CS_DOT} context breakdown"
+  printf ' %s%s%s %s %s  %s  %d%% used  %s  %s / %s tok  %s  KV %s / %s MiB (%s)\n\n' \
+    "$CS_BOLD" "$host" "$CS_OFF" "$CS_DOT" "${board:-$os}" "$CS_DOT" \
+    "$cpct" "$CS_DOT" "$(cs_tok_fmt "$cused")" "$(cs_tok_fmt "$cmax")" "$CS_DOT" \
+    "${kv_used:-0}" "${kv_alloc:-0}" "$kvt"
+
+  bw=$(( cols - 6 ))
+  [ "$bw" -gt 64 ] && bw=64
+  [ "$bw" -lt 20 ] && bw=20
+
+  bar_parts="$(awk -v tot="$cmax" -v w="$bw" \
+                  -v m="$t_msgs" -v tl="$t_tools" -v s="$t_sys" \
+                  -v mem="$t_mem" -v f="$t_free" \
+                  -v gm="$CS_GLYPH_MOD" -v gt="$CS_GLYPH_KV" -v gs="$CS_GLYPH_POND" \
+                  -v gmem="$CS_GLYPH_CACHE" -v gf="$CS_GLYPH_AVAIL" '
+    BEGIN {
+      if (tot <= 0) tot = 1
+      wm   = int(w * m / tot + 0.5)
+      wtl  = int(w * tl / tot + 0.5)
+      ws   = int(w * s / tot + 0.5)
+      wmem = int(w * mem / tot + 0.5)
+      rem = w - (wm + wtl + ws + wmem)
+      if (rem < 0) rem = 0
+      wf = rem
+      out = ""
+      for (i = 0; i < wm; i++) out = out gm
+      for (i = 0; i < wtl; i++) out = out gt
+      for (i = 0; i < ws; i++) out = out gs
+      for (i = 0; i < wmem; i++) out = out gmem
+      for (i = 0; i < wf; i++) out = out gf
+      while (length(out) < w) out = out gf
+      print out
+    }')"
+
+  printf '  [%s]\n' "$bar_parts"
+  printf '  %s%s%s Messages  %s%s%s MCP Tools  %s%s%s System Prompt  %s%s%s Memories  %s%s%s Free Space\n\n' \
+    "$CS_BOLD" "$CS_GLYPH_MOD" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_KV" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_POND" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_CACHE" "$CS_OFF" \
+    "$CS_BOLD" "$CS_GLYPH_AVAIL" "$CS_OFF"
+
+  printf '  %-24s %10s   %7s   %7s   %s\n' "COMPONENT" "TOKENS" "% USED" "% WINDOW" "ROLE & DETAILS"
+  printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
+
+  if [ "$t_msgs" -gt 0 ]; then
+    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d msgs in active session\n' \
+      "Messages (Chat History)" "$(cs_tok_fmt "$t_msgs")" \
+      "$(awk -v p="$t_msgs" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+      "$(awk -v p="$t_msgs" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+      "$s_msgs"
+  fi
+  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d MCP extensions registered\n' \
+    "MCP Tool Declarations" "$(cs_tok_fmt "$t_tools")" \
+    "$(awk -v p="$t_tools" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+    "$(awk -v p="$t_tools" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+    "$(( 8 + mcp_cnt ))"
+  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Persona & rules (KV prefix cached)\n' \
+    "System Prompt" "$(cs_tok_fmt "$t_sys")" \
+    "$(awk -v p="$t_sys" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+    "$(awk -v p="$t_sys" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')"
+  if [ "$t_mem" -gt 0 ]; then
+    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   <system-context> (%d active)\n' \
+      "Memory Files & Context" "$(cs_tok_fmt "$t_mem")" \
+      "$(awk -v p="$t_mem" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+      "$(awk -v p="$t_mem" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+      "$mems_cnt"
+  fi
+  printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
+  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Active KV: ~%d MiB\n' \
+    "Context Used" "$(cs_tok_fmt "$cused")" "100.0" \
+    "$(awk -v u="$cused" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*u/t : 0) }')" \
+    "${kv_used:-0}"
+  printf '  %-24s %7s tok        -    %6.1f%%   80%% target (%s until auto-compact)\n' \
+    "Autocompact Buffer" "$(cs_tok_fmt "$t_compact")" \
+    "$(awk -v b="$t_compact" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*b/t : 0) }')" \
+    "$(cs_tok_fmt "$t_compact")"
+  printf '  %-24s %7s tok        -    %6.1f%%   Unallocated headroom\n' \
+    "Free Space" "$(cs_tok_fmt "$t_free")" \
+    "$(awk -v f="$t_free" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*f/t : 0) }')"
+  printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
+  printf '  %-24s %7s tok        -   100.0%%   n_ctx (%s · %s KiB/tok)\n\n' \
+    "Total Context Window" "$(cs_tok_fmt "$cmax")" "$kvt" "$kib"
+
+  printf '  > MCP tools:        %d registered extensions (toolkit, vision, memory, weather, knowledge...)\n' "$(( 8 + mcp_cnt ))"
+  printf '  > Memory fragments: %d active fragments in vector/system database\n' "$mems_cnt"
+  printf '  > Custom skills:    %d active user skills\n' "$skills_cnt"
+  if [ -n "$s_id" ]; then
+    printf '  > Active session:   %s (%d messages, %d chars)\n' "$s_id" "$s_msgs" "$s_chars"
+  fi
+  printf '  > Compaction status: %s until auto-compact (hybrid compaction active)\n' "$(cs_tok_fmt "$t_compact")"
+}
+
 cs_help() {
   cs_titlebar "$1" "${CS_DOT} keys"
   cat <<EOF
@@ -581,10 +748,14 @@ cs_help() {
 
  Dashboard
    m            live RAM breakdown view
+   c            live context breakdown view
    l            open the log view
 
  Memory view
    m, esc       return to dashboard
+
+ Context view
+   c, esc       return to dashboard
 
  Log view
    up, k / down, j     one line          PgUp, b / PgDn, space   one page
@@ -605,7 +776,8 @@ cs_footer() {
   local keys
   if [ "$CS_VIEW" = logs ]; then keys=" esc back  arrows/j/k scroll  PgUp/PgDn page  g/G ends  f follow  a w t u filter  / search  L less  q quit"
   elif [ "$CS_VIEW" = mem ]; then keys=" esc/m dashboard  r restart pond  d doctor  L less  q quit"
-  else keys=" q quit  tab host  m memory  l logs  L less  d doctor  r restart pond  ? keys"; fi
+  elif [ "$CS_VIEW" = ctx ]; then keys=" esc/c dashboard  r restart pond  d doctor  L less  q quit"
+  else keys=" q quit  tab host  m memory  c context  l logs  L less  d doctor  r restart pond  ? keys"; fi
   if [ -n "$CS_MSG" ] && [ "$(date +%s)" -le "$CS_MSG_UNTIL" ]; then keys=" $CS_MSG"; fi
   printf '%s%s%s' "$CS_REV" "$(cs_pad "$keys" "$1")" "$CS_OFF"
 }
@@ -622,6 +794,7 @@ cs_frame() {
     case "$CS_VIEW" in
       logs) body="$(cs_logview "$cols" "$rows")" ;;
       mem)  body="$(cs_memview "$cols" "$rows")" ;;
+      ctx)  body="$(cs_ctxview "$cols" "$rows")" ;;
       help) body="$(cs_help "$cols")" ;;
       *)    body="$(cs_dashboard "$cols" "$rows")" ;;
     esac
@@ -713,7 +886,9 @@ cs_handle() {
     *:L) cs_less ;;
     dash:l) CS_VIEW=logs; CS_LV_BACK=0 ;;
     dash:m|dash:M) CS_VIEW=mem ;;
+    dash:c|dash:C) CS_VIEW=ctx ;;
     mem:m|mem:M|mem:ESC) CS_VIEW=dash ;;
+    ctx:c|ctx:C|ctx:ESC) CS_VIEW=dash ;;
     logs:ESC) CS_VIEW=dash ;;
     logs:ESC'[A'|logs:k) CS_LV_BACK=$((CS_LV_BACK + 1)) ;;
     logs:ESC'[B'|logs:j) [ "$CS_LV_BACK" -gt 0 ] && CS_LV_BACK=$((CS_LV_BACK - 1)) ;;

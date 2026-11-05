@@ -113,6 +113,10 @@ t_keys_move_between_views_and_hosts() {
   cs_handle m && eq "$CS_VIEW" dash || return 1
   cs_handle m && eq "$CS_VIEW" mem || return 1
   cs_handle ESC && eq "$CS_VIEW" dash || return 1
+  cs_handle c && eq "$CS_VIEW" ctx || return 1
+  cs_handle c && eq "$CS_VIEW" dash || return 1
+  cs_handle c && eq "$CS_VIEW" ctx || return 1
+  cs_handle ESC && eq "$CS_VIEW" dash || return 1
   cs_handle $'\t' && eq "$CS_SEL" 1 || return 1
   cs_handle 1 && eq "$CS_SEL" 0 || return 1
   cs_handle 9 && eq "$CS_SEL" 0 || return 1
@@ -222,6 +226,37 @@ t_dashboard_shows_ram_holds() {
   contains "$out" "KV 581M" || return 1
   contains "$out" "pond 781M" || return 1
   contains "$out" "(m detail)"
+}
+
+t_ctxview_shows_breakdown_and_tools() {
+  world
+  printf 'host=nano\nboard=Jetson Orin Nano\nctx_max=65536\nctx_used=14125\nctx_pct=22\nkv_type=q4_0,q4_0\nkv_alloc_mb=267\nkv_used_mb=66\nctx_session_id=sess-123\nctx_session_msgs=19\nctx_session_chars=5138\nctx_memories_cnt=49\nctx_skills_cnt=0\nctx_mcp_cnt=1\nchat_model=gemma-4-E4B-it\n' > "$W/state/h0/full"
+  cs_load 0
+  out="$(cs_ctxview 80 30)"
+  contains "$out" "22% used" || return 1
+  contains "$out" "Messages (Chat History)" || return 1
+  contains "$out" "MCP Tool Declarations" || return 1
+  contains "$out" "System Prompt" || return 1
+  contains "$out" "Memory Files & Context" || return 1
+  contains "$out" "Autocompact Buffer" || return 1
+  contains "$out" "Free Space" || return 1
+  contains "$out" "Total Context Window" || return 1
+  contains "$out" "MCP tools:" || return 1
+  contains "$out" "Memory fragments: 49" || return 1
+  contains "$out" "sess-123"
+}
+
+t_dashboard_shows_ctx_holds() {
+  world
+  printf 'host=nano\nboard=Jetson Orin Nano\nctx_max=65536\nctx_used=14125\nctx_pct=22\nctx_session_chars=5138\nctx_memories_cnt=49\n' > "$W/state/h0/full"
+  cs_load 0
+  out="$(cs_dash_top 80)"
+  contains "$out" "CTX" || return 1
+  contains "$out" "holds" || return 1
+  contains "$out" "messages" || return 1
+  contains "$out" "tools" || return 1
+  contains "$out" "sys" || return 1
+  contains "$out" "(c detail)"
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^t_'); do t "${fn#t_}" "$fn"; done

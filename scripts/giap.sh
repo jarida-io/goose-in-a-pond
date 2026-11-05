@@ -1757,10 +1757,18 @@ ctx_normalize_spec() {
   return 0
 }
 
-# `giap.sh ctx [status|8k|16k|24k|32k|48k|64k|auto|N]`: inspect or configure n_ctx (POND_CONTEXT_SIZE).
+fmt_tok() {
+  awk -v t="${1:-0}" 'BEGIN {
+    if (t >= 1000000) printf "%.1fM", t / 1000000
+    else if (t >= 1000) printf "%.1fk", t / 1000
+    else printf "%d", t
+  }'
+}
+
+# `giap.sh ctx [status|breakdown|8k|16k|24k|32k|48k|64k|auto|N]`: inspect or configure n_ctx (POND_CONTEXT_SIZE).
 action_ctx() {
   local sub="${1:-status}"
-  if [ "$sub" = "status" ]; then
+  if [ "$sub" = "status" ] || [ "$sub" = "breakdown" ]; then
     detect_kv
     head1 "Context window n_ctx  (POND_CONTEXT_SIZE)"
     local model provider
@@ -1773,7 +1781,7 @@ action_ctx() {
       info "Configured:       auto (device_window sizer — 16384 default on Orin Nano)"
     fi
     local lf; lf="$(log_file_today)"
-    local kib=8 slmb=21 nctx="" req="" rsn="" bud="" free_m="" used=""
+    local kib=4 slmb=11 nctx="" req="" rsn="" bud="" free_m="" used=""
     if [ -f "$lf" ]; then
       local last_ctx last_inf
       last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
@@ -1786,8 +1794,6 @@ action_ctx() {
         rsn="$(printf '%s' "$last_ctx" | sed -n 's/.*reason="\([^"]*\)".*/\1/p')"
         bud="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_budget_mb=\([0-9]*\).*/\1/p')"
         free_m="$(printf '%s' "$last_ctx" | sed -n 's/.*free_mb=\([0-9]*\).*/\1/p')"
-        local alloc_mb=$(( ${slmb:-0} + (${nctx:-0} * ${kib:-0} + 512) / 1024 ))
-        info "Last model load:  n_ctx=$nctx (requested=$req, reason=$rsn) · KV alloc ${alloc_mb} MiB / budget ${bud:-?} MiB (${free_m:-?} MiB free)"
       fi
       if [ -n "$last_inf" ]; then
         local pt ct
@@ -1795,18 +1801,141 @@ action_ctx() {
         ct="$(printf '%s' "$last_inf" | sed -n 's/.*completion_tokens=\([0-9]*\).*/\1/p')"
         [ -n "$ct" ] || ct="$(printf '%s' "$last_inf" | sed -n 's/.*output_tokens=\([0-9]*\).*/\1/p')"
         used=$(( ${pt:-0} + ${ct:-0} ))
-        if [ "${nctx:-0}" -gt 0 ] && [ "$used" -gt 0 ]; then
-          local pct=$(( (100 * used + nctx / 2) / nctx ))
-          local used_mb=$(( ${slmb:-0} + (used * ${kib:-0} + 512) / 1024 ))
-          info "Current fill:     $used / $nctx tokens (${pct}%) · active KV ~${used_mb} MiB"
-        fi
       fi
     fi
+
+    [ -n "$nctx" ] && [ "$nctx" -gt 0 ] || nctx="${D_CTX_CFG:-65536}"
+    case "$nctx" in ''|*[!0-9]*) nctx=65536 ;; esac
+    [ -n "$used" ] || used=0
+    local pct=0
+    [ "$nctx" -gt 0 ] && pct=$(( (100 * used + nctx / 2) / nctx ))
+    local alloc_mb=$(( ${slmb:-11} + (${nctx:-65536} * ${kib:-4} + 512) / 1024 ))
+    local used_mb=0
+    [ "$used" -gt 0 ] && used_mb=$(( ${slmb:-11} + (used * ${kib:-4} + 512) / 1024 ))
+
+    local s_id="" s_msgs=0 s_chars=0 mems_cnt=0 skills_cnt=0 mcp_cnt=1
+    if command -v sqlite3 >/dev/null 2>&1 && [ -f "$D_DATA_DIR/pond_system.db" ]; then
+      local s_stats=""
+      s_stats="$(sqlite3 "$D_DATA_DIR/pond_system.db" "
+        SELECT
+          coalesce((SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1), ''),
+          coalesce((SELECT count(*) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+          coalesce((SELECT sum(length(content)) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+          coalesce((SELECT count(*) FROM memory_fragments WHERE lifecycle = 'active'), 0),
+          coalesce((SELECT count(*) FROM user_skills WHERE active = 1), 0),
+          coalesce((SELECT count(*) FROM mcp_servers WHERE enabled = 1), 0);
+      " 2>/dev/null || true)"
+      if [ -n "$s_stats" ]; then
+        IFS='|' read -r s_id s_msgs s_chars mems_cnt skills_cnt mcp_cnt <<< "$s_stats"
+      fi
+    fi
+
+    local tok_sys=1100
+    local tok_tools=$(( 3040 + ${mcp_cnt:-1} * 350 ))
+    local tok_mem=0
+    if [ "${mems_cnt:-0}" -gt 0 ]; then
+      tok_mem=$(( 250 + mems_cnt * 10 ))
+      [ "$tok_mem" -gt 800 ] && tok_mem=800
+    fi
+    local tok_msgs=0
+    if [ "$used" -gt $(( tok_sys + tok_tools + tok_mem )) ]; then
+      tok_msgs=$(( used - tok_sys - tok_tools - tok_mem ))
+    elif [ "$used" -gt 0 ]; then
+      tok_msgs=$(( ${s_chars:-0} / 4 ))
+    fi
+    local tok_free=$(( nctx - used ))
+    [ "$tok_free" -lt 0 ] && tok_free=0
+    local compact_thresh=$(( nctx * 8 / 10 ))
+    local tok_compact=$(( compact_thresh - used ))
+    [ "$tok_compact" -lt 0 ] && tok_compact=0
+
     say ""
-    info "Estimated KV cache RAM at ${kib:-8} KiB/tok + ${slmb:-21} MiB sliding (${D_KV_CFG:-q8_0,q8_0}):"
+    info "Context Window Fill: $pct% used ($(fmt_tok "$used") / $(fmt_tok "$nctx") tokens) · active KV ~${used_mb} MiB"
+    [ -n "$rsn" ] && note "Last sizer decision: n_ctx=$nctx (reason: $rsn, requested: ${req:-$nctx})"
+
+    local bar_w=54
+    local bar_str
+    bar_str="$(awk -v tot="$nctx" -v w="$bar_w" \
+                  -v m="$tok_msgs" -v tl="$tok_tools" -v s="$tok_sys" \
+                  -v mem="$tok_mem" -v f="$tok_free" '
+      BEGIN {
+        if (tot <= 0) tot = 1
+        wm   = int(w * m / tot + 0.5)
+        wtl  = int(w * tl / tot + 0.5)
+        ws   = int(w * s / tot + 0.5)
+        wmem = int(w * mem / tot + 0.5)
+        rem = w - (wm + wtl + ws + wmem)
+        if (rem < 0) rem = 0
+        wf = rem
+        out = ""
+        for (i = 0; i < wm; i++) out = out "█"
+        for (i = 0; i < wtl; i++) out = out "▓"
+        for (i = 0; i < ws; i++) out = out "▒"
+        for (i = 0; i < wmem; i++) out = out "░"
+        for (i = 0; i < wf; i++) out = out "·"
+        while (length(out) < w) out = out "·"
+        print out
+      }')"
+    say "  [$bar_str]"
+    say "  ${C_B}█${C_RST} Messages  ${C_B}▓${C_RST} MCP Tools  ${C_B}▒${C_RST} System Prompt  ${C_B}░${C_RST} Memories  ${C_B}·${C_RST} Free Space"
+    say ""
+
+    say "  COMPONENT                 TOKENS      % USED   % WINDOW   ROLE & DETAILS"
+    say "  ────────────────────────────────────────────────────────────────────────"
+    if [ "$tok_msgs" -gt 0 ]; then
+      printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d messages in active session\n' \
+        "Messages (Chat History)" "$(fmt_tok "$tok_msgs")" \
+        "$(awk -v p="$tok_msgs" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+        "$(awk -v p="$tok_msgs" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+        "${s_msgs:-0}"
+    fi
+    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d MCP extensions registered\n' \
+      "MCP Tool Declarations" "$(fmt_tok "$tok_tools")" \
+      "$(awk -v p="$tok_tools" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+      "$(awk -v p="$tok_tools" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+      "$(( 8 + ${mcp_cnt:-1} ))"
+    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Persona & rules (KV prefix cached)\n' \
+      "System Prompt" "$(fmt_tok "$tok_sys")" \
+      "$(awk -v p="$tok_sys" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+      "$(awk -v p="$tok_sys" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')"
+    if [ "$tok_mem" -gt 0 ]; then
+      printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   <system-context> (%d active)\n' \
+        "Memory Files & Context" "$(fmt_tok "$tok_mem")" \
+        "$(awk -v p="$tok_mem" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
+        "$(awk -v p="$tok_mem" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+        "${mems_cnt:-0}"
+    fi
+    say "  ────────────────────────────────────────────────────────────────────────"
+    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   KV alloc: %d MiB (%s)\n' \
+      "Context Used" "$(fmt_tok "$used")" "100.0" \
+      "$(awk -v u="$used" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*u/t : 0) }')" \
+      "$alloc_mb" "${D_KV_CFG:-q8_0,q8_0}"
+    printf '  %-24s %7s tok        -    %6.1f%%   80%% target (%s until auto-compact)\n' \
+      "Autocompact Buffer" "$(fmt_tok "$tok_compact")" \
+      "$(awk -v b="$tok_compact" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*b/t : 0) }')" \
+      "$(fmt_tok "$tok_compact")"
+    printf '  %-24s %7s tok        -    %6.1f%%   Remaining before window limit\n' \
+      "Free Space" "$(fmt_tok "$tok_free")" \
+      "$(awk -v f="$tok_free" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*f/t : 0) }')"
+    say "  ────────────────────────────────────────────────────────────────────────"
+    printf '  %-24s %7s tok        -   100.0%%   n_ctx (KV: %s KiB/tok + %s MiB sliding)\n' \
+      "Total Context Window" "$(fmt_tok "$nctx")" "${kib:-4}" "${slmb:-11}"
+    say ""
+
+    say "  ${C_B}Details & System Entities${C_RST}"
+    say "  > MCP tools:        $(( 8 + ${mcp_cnt:-1} )) registered extensions (toolkit, vision, memory, knowledge...)"
+    say "  > Memory fragments: ${mems_cnt:-0} active fragments in vector/system database"
+    say "  > Custom skills:    ${skills_cnt:-0} active user skills"
+    if [ -n "$s_id" ]; then
+      say "  > Active session:   $s_id (${s_msgs:-0} messages, ${s_chars:-0} chars)"
+    fi
+    say "  > Compaction:       Hybrid compaction active · $(fmt_tok "$tok_compact") tokens until auto-compact"
+    say ""
+
+    info "Estimated KV cache RAM at ${kib:-4} KiB/tok + ${slmb:-11} MiB sliding (${D_KV_CFG:-q8_0,q8_0}):"
     local r r_tok r_mb fit_note
     for r in "8k:8192" "16k:16384" "24k:24576" "32k:32768" "48k:49152" "64k:65536"; do
-      r_tok="${r#*:}"; r_mb=$(( ${slmb:-21} + (r_tok * ${kib:-8} + 512) / 1024 ))
+      r_tok="${r#*:}"; r_mb=$(( ${slmb:-11} + (r_tok * ${kib:-4} + 512) / 1024 ))
       fit_note=""
       if [ -n "$bud" ]; then
         [ "$r_mb" -le "$bud" ] && fit_note=" (fits ${bud} MiB budget)" || fit_note=" (exceeds ${bud} MiB budget; engine steps down if tight)"

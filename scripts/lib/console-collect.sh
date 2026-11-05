@@ -153,6 +153,23 @@ _cc_pond() {
   if command -v sqlite3 >/dev/null 2>&1 && [ -f "$d/pond_system.db" ]; then
     sqlite3 "$d/pond_system.db" "SELECT key || '=' || value FROM settings WHERE key IN ('chat_model','chat_provider','thinking_mode');" 2>/dev/null
     cur_model="$(sqlite3 "$d/pond_system.db" "SELECT value FROM settings WHERE key = 'chat_model';" 2>/dev/null)"
+    local sess_stats=""
+    sess_stats="$(sqlite3 "$d/pond_system.db" "
+      SELECT
+        coalesce((SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1), ''),
+        coalesce((SELECT count(*) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+        coalesce((SELECT sum(length(content)) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+        coalesce((SELECT count(*) FROM memory_fragments WHERE lifecycle = 'active'), 0),
+        coalesce((SELECT count(*) FROM user_skills WHERE active = 1), 0),
+        coalesce((SELECT count(*) FROM mcp_servers WHERE enabled = 1), 0);
+    " 2>/dev/null)"
+    if [ -n "$sess_stats" ]; then
+      awk -F'|' '{
+        if ($1 != "") printf "ctx_session_id=%s\n", $1
+        printf "ctx_session_msgs=%d\nctx_session_chars=%d\nctx_memories_cnt=%d\nctx_skills_cnt=%d\nctx_mcp_cnt=%d\n",
+          $2, $3, $4, $5, $6
+      }' <<< "$sess_stats"
+    fi
   fi
   ps -eo rss,args 2>/dev/null | awk '
     /matter-server/ && !/awk/ { mat += $1 }
