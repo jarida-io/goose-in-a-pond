@@ -80,7 +80,7 @@ function StepRail({ stepIndex, onJump }: { stepIndex: number; onJump: (i: number
 // ── Inner Wizard (needs OnboardingContext) ────────────────────
 
 function WizardInner({ onComplete }: { onComplete: () => void }) {
-  const { draft, loading } = useOnboarding();
+  const { draft, loading, touched } = useOnboarding();
   const { persist, isPersisting, error, clearError } = useOnboardingPersist();
   const [stepIndex, setStepIndex] = useState(0);
 
@@ -117,18 +117,18 @@ function WizardInner({ onComplete }: { onComplete: () => void }) {
 
   const next = useCallback(async () => {
     clearError();
-    const ok = await persist(currentStep.id, draft);
+    const ok = await persist(currentStep.id, draft, touched);
     if (ok) {
       setStepIndex((i) => Math.min(i + 1, STEPS.length - 1));
     }
-  }, [currentStep.id, draft, persist, clearError]);
+  }, [currentStep.id, draft, touched, persist, clearError]);
 
   const skip = useCallback(async () => {
     clearError();
-    // Skip still persists defaults (non-required steps)
-    await persist(currentStep.id, draft);
+    // Skip persists only whatever the user actually touched before skipping (often nothing).
+    await persist(currentStep.id, draft, touched);
     setStepIndex((i) => Math.min(i + 1, STEPS.length - 1));
-  }, [currentStep.id, draft, persist, clearError]);
+  }, [currentStep.id, draft, touched, persist, clearError]);
 
   const back = useCallback(() => {
     clearError();

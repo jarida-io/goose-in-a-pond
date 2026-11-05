@@ -9,12 +9,22 @@ import { api } from "../../api/PondApiClient";
 export function OnboardingProvider({ children }: { children: React.ReactNode }) {
   const [draft, setDraft] = useState<OnboardingDraft>(DEFAULT_DRAFT);
   const [loading, setLoading] = useState(true);
+  const [touched, setTouched] = useState<Set<keyof OnboardingDraft>>(new Set());
 
+  // The only way a step changes the draft; marks every key it sets as touched, so
+  // `buildSettingsPatch` later knows the user actually set it, not just saw it pre-filled.
   const patch = useCallback((p: Partial<OnboardingDraft>) => {
     setDraft((d) => ({ ...d, ...p }));
+    setTouched((t) => {
+      const next = new Set(t);
+      for (const key of Object.keys(p)) next.add(key as keyof OnboardingDraft);
+      return next;
+    });
   }, []);
 
-  // Resume support: pre-populate draft from saved settings + localStorage
+  // Resume support: pre-populate draft from saved settings + localStorage. Goes through `setDraft`
+  // directly, not `patch` — these are the server's/localStorage's own values, not something the
+  // user just chose, so they must not count as touched.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -25,7 +35,8 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
         const profile = stored ? JSON.parse(stored) : {};
 
         if (cancelled) return;
-        patch({
+        setDraft((d) => ({
+          ...d,
           userName: settings.user_name || DEFAULT_DRAFT.userName,
           preferredName: profile.preferredName || DEFAULT_DRAFT.preferredName,
           birthday: profile.birthday || DEFAULT_DRAFT.birthday,
@@ -43,7 +54,7 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
           ttsVoice: settings.voice_tts_voice || DEFAULT_DRAFT.ttsVoice,
           wakeWord: settings.voice_wake_word || DEFAULT_DRAFT.wakeWord,
           enableMcpMemory: settings.agent_memory_inject ?? DEFAULT_DRAFT.enableMcpMemory,
-        });
+        }));
       } catch {
         // Settings not available yet — use defaults
       } finally {
@@ -51,10 +62,10 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
       }
     })();
     return () => { cancelled = true; };
-  }, [patch]);
+  }, []);
 
   return (
-    <OnboardingContext.Provider value={{ draft, patch, loading }}>
+    <OnboardingContext.Provider value={{ draft, patch, loading, touched }}>
       {children}
     </OnboardingContext.Provider>
   );
