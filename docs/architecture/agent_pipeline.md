@@ -60,10 +60,15 @@ flowchart TD
 | 8. User text | `<user-message>` first, then `<system-context>` holding the dynamic suffix, the `<memories>` block and the answer contract (`answer_contract()`), so the system and tools prefix stays byte-stable across turns |
 | History rewrite | `rewrite_history_at_turn_start` bounds how many earlier pictures are replayed and reduces any transient tool result left in goose's store to its stub; the turn's `TurnSweep` does the same when the turn ends, however it ends ([small-model-tools.md §8.10](./small-model-tools.md)) |
 | Delegation | The turn's delegation authority and device claim (`GooseOrchestrator`, [pai/06-multi-agent-orchestration.md](./pai/06-multi-agent-orchestration.md)) |
-| Loop guards | A repetition guard on identical tool calls; empty-turn recovery (Goose returns an empty turn, GIAP re-engages with a changed prompt); Goose's completeness check armed with the raw request when `goal_check_enabled` (default on) |
+| Loop guards | A repetition guard on identical tool calls; empty-turn recovery (Goose returns an empty turn, GIAP re-engages with a changed prompt); Goose's completeness check armed with the raw request when `goal_check_enabled` (default on). A turn a guard stops after gathering tool results and before replying is asked once for its reply with tools off (`FinalReply`, [scheduling.md](./scheduling.md#a-turn-with-no-reply)) |
 
 Context compaction of the conversation itself belongs to Goose; see
-[token_tracking.md](./token_tracking.md).
+[token_tracking.md](./token_tracking.md). Mid-turn, goose compacts only reactively: when the engine
+refuses a prompt past its window (`ContextLengthExceeded`), `compact_messages` summarises the whole
+conversation, the current turn's tool results included, into one message, keeps the latest user
+message and tells the model to keep calling tools. Everything gathered before that point survives
+only as the summary, so a small model may fetch it again. The adapter logs each replacement as
+`kind="history_replaced"`; the shim trims nothing itself.
 
 ## In the provider (`GiapProviderShim`)
 
@@ -71,6 +76,13 @@ Context compaction of the conversation itself belongs to Goose; see
 `Provider::stream`, where the final `(system, messages, tools)` is visible, it restores GIAP's
 system prompt if Goose changed it, vetoes tools outside the turn's allow-set, and gates the
 provider's endpoint through the egress policy.
+
+Goose also makes auxiliary calls in the session's scope: a compaction's summary, a tool pair's
+summary, a tool-call label. Each carries a system prompt of goose's own and offers no tools, and the
+shim passes it through unchanged. Only a call that offers tools is the agent's own round, so only
+there does a prompt that is not GIAP's mean the turn's extras and skills were lost
+(`kind="system_appendix_dropped"`, `appendix_lost`); an auxiliary pass-through logs
+`kind="system_passthrough_auxiliary"` at debug.
 
 ## After the model (`pond-api`)
 
