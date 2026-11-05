@@ -843,12 +843,36 @@ async fn memories_save_returns_201_and_list_returns_200() {
 #[tokio::test]
 async fn memories_delete_returns_204() {
     let (app, _tmp) = make_app().await;
-    // MockMemoryRepository.delete() is a no-op returning Ok
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/memories",
+            serde_json::json!({"content": "User prefers Celsius"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = saved["id"].as_str().unwrap();
+
+    let resp = app
+        .oneshot(delete(&format!("/api/v1/memories/{id}")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn deleting_a_memory_out_of_reach_reads_as_missing() {
+    let (app, _tmp) = make_app().await;
     let resp = app
         .oneshot(delete("/api/v1/memories/any-id"))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ── Skills tests ──────────────────────────────────────────────────────────────

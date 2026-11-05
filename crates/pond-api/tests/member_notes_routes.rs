@@ -382,8 +382,8 @@ async fn the_interview_runs_in_its_own_session_with_only_its_tools() {
         "{context}"
     );
 
-    // Otieno speaking in Amina's interview session gets an ordinary turn.
-    call(
+    // Amina's interview is her conversation: Otieno's phone cannot add a turn to it.
+    let (status, _) = call(
         &p,
         "otieno-token",
         Method::POST,
@@ -391,11 +391,11 @@ async fn the_interview_runs_in_its_own_session_with_only_its_tools() {
         Some(json!({"message": "Hi", "session_id": session})),
     )
     .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let request = p.agent.last_request().unwrap();
-    assert!(request.interview.is_none());
-    assert_ne!(
-        request.tool_group_allowlist,
-        Some(vec!["giap-interview".to_string()])
+    assert!(
+        request.interview.is_some(),
+        "refused before it reached the agent"
     );
 }
 
