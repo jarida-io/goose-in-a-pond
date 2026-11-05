@@ -183,7 +183,7 @@ pub(super) fn forward_helper_stderr(stderr: ChildStderr) {
                 Admit::Line { dropped } => tracing::warn!(
                     kind = "network_helper_output",
                     dropped,
-                    line = %helper_complaint(&line),
+                    complaint = %helper_complaint(&line),
                     "the networking helper reported a problem"
                 ),
                 Admit::FirstDropped => tracing::warn!(
