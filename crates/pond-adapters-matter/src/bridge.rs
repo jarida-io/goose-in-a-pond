@@ -16,7 +16,8 @@ use crate::client::{MatterClient, MatterEvent};
 use crate::control::SharedMatterClient;
 use crate::notify::MatterNotifier;
 use crate::protocol::{
-    describe, AvailabilityEvent, DeviceEvent, DeviceRemovedEvent, Snapshot, WireDevice, WireReading,
+    describe, AvailabilityEvent, DeviceEvent, DeviceRemovedEvent, Snapshot, WireDevice,
+    WireReading, WireStateChange,
 };
 use crate::server_setup::{revive_local_controller, Revival, SharedServerChild};
 
@@ -291,6 +292,11 @@ pub(crate) async fn run_matter_bridge_with_cache(
                     );
                     publish_reading(&reading, cache, &bus);
                     check_battery(&reading, &registry, &notifier).await;
+                }
+            }
+            "device_state" => {
+                if let Ok(change) = serde_json::from_value::<WireStateChange>(payload) {
+                    bus.publish(BusEvent::Device(change.to_change()));
                 }
             }
             "device_added" | "device_updated" => {

@@ -239,6 +239,7 @@ async fn make_app_full(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 
@@ -538,6 +539,7 @@ async fn prompt_template_delete_system_returns_403() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 
@@ -1371,6 +1373,7 @@ async fn returns_501_when_repos_not_configured() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));

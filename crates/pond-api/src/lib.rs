@@ -4,6 +4,7 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
+pub mod device_events;
 pub mod download_failure;
 pub mod host_guard;
 pub mod idempotency;
@@ -319,6 +320,8 @@ pub struct AppState {
     pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
     /// The voice-sample route's limiter, shared by every caller; it speaks through `tts`.
     pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
+    /// Device state changes for `/devices/events`, kept so a phone can resume.
+    pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
 }

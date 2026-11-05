@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { planControl } from "../src/mapping/control.js";
 import { describeNode } from "../src/mapping/describe.js";
-import { stateOf } from "../src/mapping/state.js";
+import { stateChanges, stateOf } from "../src/mapping/state.js";
 import {
   bareLockNode,
   coOnlyAlarmNode,
@@ -377,5 +377,26 @@ describe("device state", () => {
     expect(describeNode(roller).capabilities.map(c => c.verb)).toEqual(["position"]);
     expect(stateOf(roller).values.find(v => v.name === "tilt")).toBeUndefined();
     expect(() => planControl(roller, "matter-3", "tilt", 40)).not.toThrow();
+  });
+});
+
+describe("state changes", () => {
+  const state = (power: string, brightness: string) => ({
+    device_id: "matter-1",
+    values: [
+      { name: "power", value: power },
+      { name: "brightness", value: brightness },
+      { name: "occupancy", value: "occupied" },
+    ],
+  });
+
+  it("reports everything first, then only what moved, and never a sensor", () => {
+    const last = new Map<string, string>();
+    expect(stateChanges(last, state("off", "40%"))).toEqual([
+      { name: "power", value: "off" },
+      { name: "brightness", value: "40%" },
+    ]);
+    expect(stateChanges(last, state("off", "40%"))).toEqual([]);
+    expect(stateChanges(last, state("on", "40%"))).toEqual([{ name: "power", value: "on" }]);
   });
 });

@@ -159,7 +159,7 @@ The route summary's "Also" column names these.
   companion routes (4 KiB).
 - **Streams**: chat-like SSE routes share `sse_semaphore`; a full semaphore answers
   `503 {"error":"Too many concurrent streams"}` before the stream opens. `/notifications/stream`
-  has its own semaphore. A resumable chat turn also needs a detached-run slot:
+  and `/devices/events` share their own semaphore. A resumable chat turn also needs a detached-run slot:
   `503 {"error":"Too many agent runs in flight ...","kind":"run_cap"}`.
 - **CORS** (`cors_layer`): origins `app://giap` (the packaged desktop renderer), the Vite dev server
   at `http://localhost:1420` and `http://127.0.0.1:1420` in debug builds, the origin in
@@ -349,6 +349,7 @@ The route summary's "Also" column names these.
 | DELETE | /devices/{id} | token +onb | | Unregister; revokes remote access first |
 | POST | /devices/{id}/heartbeat | token +onb | | Refresh `last_seen` |
 | POST | /devices/{id}/offline | token +onb | | Mark a device off |
+| GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
 
@@ -1087,7 +1088,18 @@ itself must keep calling the heartbeat.
 | `DELETE /devices/{id}` | | `204`; `409` with `hub_id` for an endpoint bridged by a Matter hub; `502` if the device could not leave the Matter fabric; `503 revocation_unavailable` |
 | `POST /devices/{id}/heartbeat`, `/offline` | | `{status}` |
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
+| `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+
+**`GET /devices/events`** follows device state as devices report it, so a phone need not read
+every device again to see a change. Each `device_state` event's data is
+`{seq, device_id, key, value, changed_at}`: `value` is a boolean for `power` and the device's own
+words otherwise (`"40%"`). A change is sent when the device reports it, so it confirms a command
+rather than echoing it. Without `after_seq` the stream starts from now. With it, the stream first
+sends what followed that `seq`, or a `resync` event (data `{}`) when the Pond no longer keeps that
+far back (512 changes) or the number is from before a restart; the phone then reads every device
+once and carries on from the next `seq`. Numbers start from the boot time in microseconds, so they
+never repeat across restarts. Devices added or removed are not sent yet.
 
 `PUT /devices/{id}` on a paired client's own row (`device_type` `gotg`, `desktop` or `cli`) is
 that device's or the host's to change; a shared row (a Matter device, a sensor, another pond) is

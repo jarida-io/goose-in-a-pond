@@ -243,6 +243,7 @@ because the round trip through whole mireds is lossy: asked for 2700 a device la
 | `device_removed` | `{device_id}` |
 | `device_availability` | `{device_id, online}` |
 | `reading` | a `Reading` |
+| `device_state` | `{device_id, name, value, at}`: one `StateValue` that changed |
 | `log` | `{level, kind, message, fields?}` |
 
 `device_availability` is a **level report, repeated**, not an edge. Every thirty
@@ -263,6 +264,12 @@ from a missed, mistimed or lost transition within one tick.
 The bridge logs the **changes** at info (`matter_availability_changed`), not the
 reports, so a state change the user sees on a card is in the log file (the file
 filter admits debug from `pond_server` only).
+
+`device_state` is an **edge**: the controller compares each device's `state` with what it last
+sent and names each value that moved, worded as `state` words it. The first change it sees on a
+device sends every value, since nothing was sent before. Sensor values are left out; they travel as
+`reading`. The bridge publishes each as a device state change on the event bus, `power` as a
+boolean, which `GET /devices/events` sends on to phones.
 
 `log` is the controller's own structured record, relayed into `tracing` at the level
 it names. The Rust side also pipes the child's stderr, so a controller GIAP started is
