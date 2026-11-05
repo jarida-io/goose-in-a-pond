@@ -1093,6 +1093,68 @@ select.scat__field--text { width: 264px; }
   color: var(--color-text-on-accent);
 }
 
+/* ── Danger zone ───────────────────────────────────────────────────────── */
+.scat__danger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  margin: var(--space-4) 0 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-destructive-soft);
+  border: 1px solid var(--color-destructive);
+  border-radius: var(--radius-lg);
+}
+.scat__danger b {
+  display: block;
+  font-size: var(--text-base);
+  font-weight: var(--weight-bold);
+  color: var(--color-destructive-fg);
+}
+.scat__danger span {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  max-width: 62ch;
+}
+.scat__dangerBtn { margin-left: auto; }
+
+/* ── Danger modal (factory reset) ─────────────────────────────────────────
+ * Hand-styled rather than HeroUI variants, so "cancel" and "erase" read at a
+ * glance as safe vs. destructive regardless of the surrounding theme.
+ */
+.danger-modal__title { display: flex; align-items: center; gap: 8px; color: var(--color-destructive-fg); }
+.danger-modal__btn {
+  min-height: var(--tap-min);
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.danger-modal__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.danger-modal__btn--safe { background: var(--color-success); }
+.danger-modal__btn--safe:hover:not(:disabled) { background: var(--color-success-fg); }
+.danger-modal__btn--danger { background: var(--color-destructive); }
+.danger-modal__btn--danger:hover:not(:disabled) { background: var(--color-destructive-fg); }
+/* The exact string to type, set apart from the sentence so it's unmistakable. */
+.danger-modal__nameToType {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+  padding: 6px 10px;
+  border: 1px dashed var(--color-destructive);
+  border-radius: var(--radius-md);
+  background: var(--color-destructive-soft);
+  color: var(--color-destructive-fg);
+  width: fit-content;
+  user-select: all;
+}
+
 /* ── Folding, for a 7-inch panel ──────────────────────────────────────────
  *
  * A 1024x600 kiosk has 600px of height. Unfolded, the masthead and the posture

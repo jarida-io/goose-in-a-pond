@@ -71,6 +71,7 @@ async fn make_app() -> Harness {
     let mock_hs = DeviceHandshake(device_id.clone());
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -93,6 +94,8 @@ async fn make_app() -> Harness {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: device_registry.clone(),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),

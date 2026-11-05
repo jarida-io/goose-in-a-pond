@@ -175,6 +175,15 @@ impl SecretRepository for FileSecretRepository {
         let cache = self.cache.read().await;
         Ok(cache.contains_key(key))
     }
+
+    /// One rewrite instead of the default's one-per-key loop.
+    async fn clear_all(&self) -> Result<()> {
+        {
+            let mut cache = self.cache.write().await;
+            cache.clear();
+        }
+        self.persist().await
+    }
 }
 
 /// The store read by a second process on the same data dir, which must never write it: nothing is
@@ -370,6 +379,21 @@ mod tests {
         assert!(!repo.has("MY_KEY").await.unwrap());
         assert!(repo.get("MY_KEY").await.unwrap().is_none());
         assert!(repo.list_keys().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_all_empties_the_store_and_persists_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = FileSecretRepository::new(tmp.path()).unwrap();
+        repo.set("A", "1").await.unwrap();
+        repo.set("B", "2").await.unwrap();
+
+        repo.clear_all().await.unwrap();
+        assert!(repo.list_keys().await.unwrap().is_empty());
+
+        // Reopening re-reads the file, proving the clear was persisted, not just cached.
+        let reopened = FileSecretRepository::new(tmp.path()).unwrap();
+        assert!(reopened.list_keys().await.unwrap().is_empty());
     }
 
     #[tokio::test]

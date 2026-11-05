@@ -20,6 +20,7 @@ import { Models } from "../sections/Models";
 import { Prompts } from "../sections/Prompts";
 import { SettingsCatalogueView } from "../settings/SettingsCatalogue";
 import { Faces } from "../sections/Faces";
+import { Household } from "../sections/Household";
 import { Canvas } from "../sections/Canvas";
 import { Logs } from "../sections/Logs";
 import { Extensions } from "../sections/Extensions";
@@ -42,6 +43,7 @@ function SectionContent({ section }: { section: GuiSection }) {
     case "context":   return <Context />;
     case "settings":  return <SettingsCatalogueView />;
     case "faces":     return <Faces />;
+    case "household": return <Household />;
     case "canvas":    return <Canvas />;
     case "logs":      return <Logs />;
     case "hub":       return null; // rendered by GuiMode before this switch

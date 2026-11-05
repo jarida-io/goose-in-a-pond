@@ -29,6 +29,8 @@ import {
   type FaceModelsResponse,
   type HandshakeResponse,
   type HealthResponse,
+  type HouseholdProfile,
+  type HouseholdRole,
   type HfModel,
   type HfModelFile,
   type ImageAttachment,
@@ -555,6 +557,15 @@ export class PondApiClient {
   }> {
     // Once set up, a reset from the host needs the host credential (or a token the server checks).
     return this.hostRequest("POST", "/api/v1/onboard/reset");
+  }
+
+  /**
+   * Wipes this Pond's household data and reopens onboarding. `pondName` must match the Pond's
+   * real name exactly, or the server refuses with `ApiError.message === "pond_name_mismatch"`;
+   * a held mesh-credit balance refuses with `"payments_held"`.
+   */
+  factoryReset(pondName: string): Promise<{ routines: Schedule[] }> {
+    return this.hostRequest("POST", "/api/v1/factory-reset", { pond_name: pondName });
   }
 
   /** WAV bytes for `text`; throws {@link ApiError} (e.g. 503) when no TTS backend runs. */
@@ -2176,10 +2187,39 @@ export class PondApiClient {
   // ── Face enrollment / identification (Faces section) ──────
   // Face calls are multipart (postMultipart); without `face-onnx` the server answers 503.
 
-  listProfiles(): Promise<{
-    profiles: Array<{ id: string; display_name: string; avatar_emoji: string }>;
-  }> {
+  listProfiles(): Promise<{ profiles: HouseholdProfile[] }> {
     return this.get("/api/v1/profiles");
+  }
+
+  /** Owner-only; 409 if it would leave the household with no owner. */
+  setProfileRole(
+    profileId: string,
+    role: HouseholdRole,
+    guestUntil?: string | null,
+  ): Promise<HouseholdProfile> {
+    return this.put(`/api/v1/profiles/${encodeURIComponent(profileId)}/role`, {
+      role,
+      guest_until: guestUntil ?? null,
+    });
+  }
+
+  /** Owner-only. The devices a guest profile may currently control. */
+  listGuestDeviceAccess(profileId: string): Promise<{ device_ids: string[] }> {
+    return this.get(`/api/v1/profiles/${encodeURIComponent(profileId)}/devices`);
+  }
+
+  /** Owner-only; 404 if the device doesn't exist. Returns the guest's updated allow-list. */
+  allowGuestDevice(profileId: string, deviceId: string): Promise<{ device_ids: string[] }> {
+    return this.put(
+      `/api/v1/profiles/${encodeURIComponent(profileId)}/devices/${encodeURIComponent(deviceId)}`,
+    );
+  }
+
+  /** Owner-only. Returns the guest's updated allow-list. */
+  revokeGuestDevice(profileId: string, deviceId: string): Promise<{ device_ids: string[] }> {
+    return this.del(
+      `/api/v1/profiles/${encodeURIComponent(profileId)}/devices/${encodeURIComponent(deviceId)}`,
+    );
   }
 
   /** A member's stored preferences, in the server's own snake_case spelling. */

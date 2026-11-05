@@ -56,6 +56,7 @@ async fn make_app() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempD
     let session_storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -80,6 +81,8 @@ async fn make_app() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempD
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(MockDeviceRegistry),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),

@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 pub trait RemoteRevocation: Send + Sync {
     /// Record an authenticated device revocation; repeated calls are idempotent.
     async fn queue(&self, device_id: &str) -> Result<()>;
+
+    /// Every device currently enrolled for remote access, for a factory reset to revoke in bulk.
+    async fn enrolled_devices(&self) -> Result<Vec<String>>;
 }
 
 /// Days a device keeps remote access off the household LAN: covers travel, not a lost phone.

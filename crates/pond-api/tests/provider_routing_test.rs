@@ -199,6 +199,7 @@ async fn make_app_with_provider(
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -221,6 +222,8 @@ async fn make_app_with_provider(
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -556,6 +559,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -578,6 +582,8 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -687,6 +693,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -709,6 +716,8 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),

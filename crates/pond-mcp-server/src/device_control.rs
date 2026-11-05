@@ -1,10 +1,15 @@
 //! Device Control MCP server: describe, read and set devices via [`DeviceControlPort`]. The
 //! desktop Hub drives devices through these same tools (`POST /api/v1/tools/invoke`).
 
+use pond_core::user_data::domain::profile::{ProfileScope, Role};
 use pond_core::user_data::ports::device_control::{
     DeviceControlPort, DeviceDescription, DeviceState, ValueSpec,
 };
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry};
+use pond_core::user_data::ports::guest_device_access::GuestDeviceAccess;
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::services::household_permission::{may_control_device, PermissionDecision};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -99,21 +104,127 @@ pub struct DeviceControlMcpServer {
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     /// Resolves natural references ("the light", a friendly name) to backend device ids.
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    /// Rooms an anonymous, unidentified guest voice (`ProfileScope::Guest`) may use devices in.
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
+    /// Devices an invited, identified guest profile (`Role::Guest`) may use.
+    guest_device_access: Arc<dyn GuestDeviceAccess + Send + Sync>,
+    /// Only consulted for `Role::Guest`, to read that profile's `guest_until` expiry.
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
 
 /// Device-reference resolution, shared by every tool that takes a `device_id`.
 impl DeviceControlMcpServer {
+    /// `Guest` carries no identity of its own, so access is "is this device's room on the
+    /// household's guest-accessible list" — a device with no room is refused by default.
+    async fn guest_room_denial(
+        &self,
+        scope: &ProfileScope,
+        devices: &[Device],
+        device_id: &str,
+    ) -> Option<CallToolResult> {
+        if !matches!(scope, ProfileScope::Guest) {
+            return None;
+        }
+        let room_id = devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .and_then(|d| d.room_id.as_deref());
+        let allowed = match room_id {
+            Some(room_id) => self
+                .guest_room_access
+                .is_guest_accessible(room_id)
+                .await
+                .unwrap_or(false),
+            None => false,
+        };
+        if allowed {
+            None
+        } else {
+            Some(guidance(format!(
+                "'{device_id}' isn't in a room guests can use here."
+            )))
+        }
+    }
+
+    /// An invited, identified guest (`Role::Guest`) is restricted to its own allow-list and,
+    /// if time-limited, to before its `guest_until`. Only fires when the resolved role is
+    /// `Guest`; Owner, Member and Developer are untouched, and an anonymous unidentified voice
+    /// is handled separately by `guest_room_denial` (it has no profile to look this up from).
+    async fn guest_device_denial(
+        &self,
+        scope: &ProfileScope,
+        role: Option<Role>,
+        device_id: &str,
+    ) -> Option<CallToolResult> {
+        if role != Some(Role::Guest) {
+            return None;
+        }
+        let ProfileScope::Owner(profile_id) = scope else {
+            return None;
+        };
+        let guest_until = self
+            .profile_repo
+            .get(profile_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.guest_until);
+        let allowed = self
+            .guest_device_access
+            .allowed_devices(profile_id)
+            .await
+            .unwrap_or_default();
+        match may_control_device(role, device_id, &allowed, guest_until, chrono::Utc::now()) {
+            PermissionDecision::Allowed => None,
+            PermissionDecision::Denied { reason, .. } => {
+                Some(guidance(self.named_denial(reason).await))
+            }
+        }
+    }
+
+    /// A denial reason, with the household's owner(s) named when there are any to name — so a
+    /// spoken refusal says who to ask, not just what's missing.
+    async fn named_denial(&self, reason: &str) -> String {
+        let owners: Vec<String> = self
+            .profile_repo
+            .list()
+            .await
+            .map(|profiles| {
+                profiles
+                    .into_iter()
+                    .filter(|p| p.role == Role::Owner)
+                    .map(|p| p.display_name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        match owners.as_slice() {
+            [] => reason.to_string(),
+            [name] => format!("{reason} Ask {name}."),
+            names => format!("{reason} Ask {}.", names.join(" or ")),
+        }
+    }
+
     /// The registered id for a caller's reference, or the guidance to send instead.
     async fn resolve_or_explain(
         &self,
         reference: &str,
         tool: &str,
+        scope: &ProfileScope,
+        role: Option<Role>,
     ) -> Result<String, CallToolResult> {
         match self.registry.list_devices().await {
             Ok(devices) => match resolve_device(reference, &devices) {
-                DeviceResolution::Resolved(id) => Ok(id),
+                DeviceResolution::Resolved(id) => {
+                    if let Some(denial) = self.guest_room_denial(scope, &devices, &id).await {
+                        return Err(denial);
+                    }
+                    if let Some(denial) = self.guest_device_denial(scope, role, &id).await {
+                        return Err(denial);
+                    }
+                    Ok(id)
+                }
                 DeviceResolution::Ambiguous(names) => Err(guidance(format!(
                     "'{reference}' matches several devices: {}. Which one?",
                     names.join(", ")
@@ -137,6 +248,21 @@ impl DeviceControlMcpServer {
             }
         }
     }
+}
+
+/// The calling turn's scope, or `Household` (fully trusted) when none was carried through —
+/// the native-goose-extension path doesn't yet thread a scope into the tool-call context.
+fn scope_of(ctx: &RequestContext<RoleServer>) -> ProfileScope {
+    ctx.extensions
+        .get::<ProfileScope>()
+        .cloned()
+        .unwrap_or(ProfileScope::Household)
+}
+
+/// The calling turn's resolved household role, if the dispatcher carried one through. `None`
+/// here means "not resolved" (an anonymous voice, or no scope at all), not "no role assigned."
+fn role_of(ctx: &RequestContext<RoleServer>) -> Option<Role> {
+    ctx.extensions.get::<Role>().copied()
 }
 
 /// One `render_state` line; pond-desktop's `powerStateOf` (`devicePower.ts`) parses it.
@@ -316,10 +442,16 @@ impl DeviceControlMcpServer {
     pub fn new(
         control: Arc<dyn DeviceControlPort + Send + Sync>,
         registry: Arc<dyn DeviceRegistry + Send + Sync>,
+        guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
+        guest_device_access: Arc<dyn GuestDeviceAccess + Send + Sync>,
+        profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
     ) -> Self {
         Self {
             control,
             registry,
+            guest_room_access,
+            guest_device_access,
+            profile_repo,
             tool_router: Self::tool_router(),
         }
     }
@@ -332,14 +464,17 @@ impl DeviceControlMcpServer {
     )]
     async fn describe_device(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<DescribeDeviceParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         crate::set_current_tool("describe_device");
         let Parameters(p) = params;
         let device_id = p.device_id.trim();
 
-        let device_id = match self.resolve_or_explain(device_id, "describe_device").await {
+        let device_id = match self
+            .resolve_or_explain(device_id, "describe_device", &scope_of(&ctx), role_of(&ctx))
+            .await
+        {
             Ok(id) => id,
             Err(explanation) => return Ok(explanation),
         };
@@ -360,14 +495,14 @@ impl DeviceControlMcpServer {
     )]
     async fn get_device_state(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<DescribeDeviceParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         crate::set_current_tool("get_device_state");
         let Parameters(p) = params;
 
         let device_id = match self
-            .resolve_or_explain(p.device_id.trim(), "get_device_state")
+            .resolve_or_explain(p.device_id.trim(), "get_device_state", &scope_of(&ctx), role_of(&ctx))
             .await
         {
             Ok(id) => id,
@@ -387,9 +522,11 @@ impl DeviceControlMcpServer {
     )]
     async fn set_device_state(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SetDeviceStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let scope = scope_of(&ctx);
+        let role = role_of(&ctx);
         let p = params.0;
         let device_id = p.device_id.trim();
 
@@ -430,7 +567,15 @@ impl DeviceControlMcpServer {
 
         let device_id = match self.registry.list_devices().await {
             Ok(devices) => match resolve_device(device_id, &devices) {
-                DeviceResolution::Resolved(id) => id,
+                DeviceResolution::Resolved(id) => {
+                    if let Some(denial) = self.guest_room_denial(&scope, &devices, &id).await {
+                        return Ok(denial);
+                    }
+                    if let Some(denial) = self.guest_device_denial(&scope, role, &id).await {
+                        return Ok(denial);
+                    }
+                    id
+                }
                 DeviceResolution::Ambiguous(names) => {
                     return Ok(guidance(format!(
                         "'{device_id}' matches several devices: {}. Which one?",
@@ -728,6 +873,9 @@ use tokio::io::DuplexStream;
 struct DeviceControlDeps {
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
+    guest_device_access: Arc<dyn GuestDeviceAccess + Send + Sync>,
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
 }
 
 static DEVICE_CONTROL_DEPS: OnceLock<DeviceControlDeps> = OnceLock::new();
@@ -736,8 +884,17 @@ static DEVICE_CONTROL_DEPS: OnceLock<DeviceControlDeps> = OnceLock::new();
 pub fn init_device_control_deps(
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
+    guest_device_access: Arc<dyn GuestDeviceAccess + Send + Sync>,
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
 ) {
-    let _ = DEVICE_CONTROL_DEPS.set(DeviceControlDeps { control, registry });
+    let _ = DEVICE_CONTROL_DEPS.set(DeviceControlDeps {
+        control,
+        registry,
+        guest_room_access,
+        guest_device_access,
+        profile_repo,
+    });
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
@@ -749,7 +906,13 @@ pub fn spawn_device_control_server(reader: DuplexStream, writer: DuplexStream) {
         );
         return;
     };
-    let server = DeviceControlMcpServer::new(deps.control.clone(), deps.registry.clone());
+    let server = DeviceControlMcpServer::new(
+        deps.control.clone(),
+        deps.registry.clone(),
+        deps.guest_room_access.clone(),
+        deps.guest_device_access.clone(),
+        deps.profile_repo.clone(),
+    );
     crate::serve_builtin("giap-device-control", server, reader, writer);
 }
 
@@ -1128,7 +1291,13 @@ mod tests {
     }
 
     fn test_server() -> DeviceControlMcpServer {
-        DeviceControlMcpServer::new(Arc::new(StubControl), Arc::new(EmptyRegistry))
+        DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(EmptyRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+            Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
+        )
     }
 
     #[test]
@@ -1361,5 +1530,200 @@ mod tests {
         assert_eq!(p.device_id, "lamp");
         assert_eq!(p.power, Some(true));
         assert!(p.extra.contains_key("surprise"));
+    }
+
+    // ── Guest room scoping ────────────────────────────────────────────────────
+
+    struct OneLightInKitchen;
+    #[async_trait]
+    impl DeviceRegistry for OneLightInKitchen {
+        async fn register(
+            &self,
+            _: pond_core::user_data::ports::device_registry::RegisterDeviceRequest,
+        ) -> anyhow::Result<Device> {
+            anyhow::bail!("not used")
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![Device {
+                id: "lamp".into(),
+                name: "Lamp".into(),
+                device_type: "light".into(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec![],
+                registered_at: String::new(),
+                last_seen: None,
+                is_online: true,
+                room_id: Some("room-1".into()),
+            }])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(None)
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FixedGuestAccess(std::collections::HashSet<String>);
+    #[async_trait]
+    impl GuestRoomAccess for FixedGuestAccess {
+        async fn set_guest_accessible(&self, _: &str, _: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn accessible_room_ids(&self) -> anyhow::Result<std::collections::HashSet<String>> {
+            Ok(self.0.clone())
+        }
+        async fn is_guest_accessible(&self, room_id: &str) -> anyhow::Result<bool> {
+            Ok(self.0.contains(room_id))
+        }
+    }
+
+    fn server_with_lamp(guest_accessible_rooms: &[&str]) -> DeviceControlMcpServer {
+        DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(OneLightInKitchen),
+            Arc::new(FixedGuestAccess(
+                guest_accessible_rooms.iter().map(|s| s.to_string()).collect(),
+            )),
+            Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
+        )
+    }
+
+    async fn make_ctx(server: DeviceControlMcpServer) -> RequestContext<RoleServer> {
+        use rmcp::model::RequestId;
+        use rmcp::service::serve_directly;
+
+        let (_client, stream) = tokio::io::duplex(64);
+        let running = serve_directly(server, stream, None);
+        RequestContext::new(RequestId::Number(0), running.peer().clone())
+    }
+
+    fn tool_text(result: &CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_guest_is_refused_a_device_outside_its_granted_rooms() {
+        let server = server_with_lamp(&[]);
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.extensions.insert(ProfileScope::Guest);
+        let result = server
+            .set_device_state(
+                ctx,
+                Parameters(SetDeviceStateParams {
+                    device_id: "lamp".into(),
+                    power: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let text = tool_text(&result);
+        assert!(
+            text.contains("isn't in a room guests can use"),
+            "expected a denial, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_may_use_a_device_in_a_granted_room() {
+        let server = server_with_lamp(&["room-1"]);
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.extensions.insert(ProfileScope::Guest);
+        let result = server
+            .set_device_state(
+                ctx,
+                Parameters(SetDeviceStateParams {
+                    device_id: "lamp".into(),
+                    power: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let text = tool_text(&result);
+        assert!(text.contains("power=on"), "expected success, got: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_guests_denial_names_the_owner_to_ask() {
+        use pond_core::user_data::domain::profile::CreateProfileRequest;
+        use pond_core::user_data::ports::profile::ProfileRepository;
+
+        let profiles: Arc<dyn ProfileRepository + Send + Sync> =
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new());
+        // The first profile created in an empty household becomes its owner.
+        profiles
+            .create(CreateProfileRequest {
+                display_name: "Ada".to_string(),
+                avatar_emoji: "X".to_string(),
+            })
+            .await
+            .unwrap();
+        let guest = profiles
+            .create(CreateProfileRequest {
+                display_name: "Visiting Friend".to_string(),
+                avatar_emoji: "Y".to_string(),
+            })
+            .await
+            .unwrap();
+        profiles.set_role(&guest.id, Role::Guest, None).await.unwrap();
+
+        let server = DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(OneLightInKitchen),
+            Arc::new(FixedGuestAccess(std::collections::HashSet::new())),
+            Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
+            profiles,
+        );
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.extensions.insert(ProfileScope::Owner(guest.id));
+        ctx.extensions.insert(Role::Guest);
+        let result = server
+            .set_device_state(
+                ctx,
+                Parameters(SetDeviceStateParams {
+                    device_id: "lamp".into(),
+                    power: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let text = tool_text(&result);
+        assert!(
+            text.contains("Ask Ada."),
+            "expected the denial to name the owner, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_household_member_ignores_guest_room_scoping() {
+        let server = server_with_lamp(&[]);
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.extensions.insert(ProfileScope::Household);
+        let result = server
+            .set_device_state(
+                ctx,
+                Parameters(SetDeviceStateParams {
+                    device_id: "lamp".into(),
+                    power: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let text = tool_text(&result);
+        assert!(text.contains("power=on"), "expected success, got: {text}");
     }
 }
