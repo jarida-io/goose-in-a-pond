@@ -27,6 +27,7 @@ pub mod sqlite_event_log;
 pub mod sqlite_face_recognition;
 pub mod sqlite_handshake;
 pub mod sqlite_lane_run_log;
+pub mod sqlite_last_action;
 pub mod sqlite_long_task;
 pub mod sqlite_mcp_servers;
 pub mod sqlite_memory;

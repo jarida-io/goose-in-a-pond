@@ -52,6 +52,37 @@ pub struct DeviceStatePatch {
     pub operation: Option<String>,
 }
 
+impl DeviceStatePatch {
+    /// Copies every `Some` field of `other` over this one's, leaving fields `other` left `None`
+    /// as they were. Used to fold several outcomes (or a reading) into one combined patch.
+    pub fn merge_from(&mut self, other: &DeviceStatePatch) {
+        macro_rules! take {
+            ($($field:ident),+ $(,)?) => {
+                $(if other.$field.is_some() { self.$field = other.$field.clone(); })+
+            };
+        }
+        take!(
+            on, brightness, volume, target_temp, locked, hue, saturation, color_temp, fan_speed,
+            fan_mode, position, tilt, valve, mode, operation
+        );
+    }
+
+    /// `full` with every field `template` left `None` cleared to `None` too — `full` restricted
+    /// to the same fields `template` touches.
+    pub fn restricted_to(mut self, template: &DeviceStatePatch) -> DeviceStatePatch {
+        macro_rules! clear_untouched {
+            ($($field:ident),+ $(,)?) => {
+                $(if template.$field.is_none() { self.$field = None; })+
+            };
+        }
+        clear_untouched!(
+            on, brightness, volume, target_temp, locked, hue, saturation, color_temp, fan_speed,
+            fan_mode, position, tilt, valve, mode, operation
+        );
+        self
+    }
+}
+
 /// A named setting and its new value, both in the device's own words.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModeChange {
@@ -226,6 +257,14 @@ pub trait DeviceControlPort: Send + Sync {
         anyhow::bail!("device '{device_id}' cannot report its state")
     }
 
+    /// The same reading as [`Self::state`], but in [`DeviceStatePatch`]'s typed fields instead of
+    /// [`StateValue`]'s display strings — so a caller can feed it straight back to the matching
+    /// `set_*` method to undo a command. Unsupported by default: [`Self::state`]'s names and value
+    /// formatting (`"50%"`, not `50u8`) are backend-specific and not safe to parse generically.
+    async fn state_patch(&self, device_id: &str) -> Result<DeviceStatePatch> {
+        anyhow::bail!("device '{device_id}' cannot report a typed state to undo from")
+    }
+
     /// Choose a named setting (e.g. a wash cycle), as named by [`Self::describe`].
     async fn set_mode(
         &self,
@@ -368,6 +407,53 @@ mod tests {
         assert!(
             error.to_string().contains("lamp-1") && error.to_string().contains("valve"),
             "{error}"
+        );
+
+        let error = PowerOnly.state_patch("lamp-1").await.unwrap_err();
+        assert!(error.to_string().contains("lamp-1"), "{error}");
+    }
+
+    #[test]
+    fn merge_from_overwrites_only_the_fields_the_other_patch_sets() {
+        let mut combined = DeviceStatePatch {
+            on: Some(true),
+            brightness: Some(10),
+            ..Default::default()
+        };
+        combined.merge_from(&DeviceStatePatch {
+            brightness: Some(40),
+            locked: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(
+            combined,
+            DeviceStatePatch {
+                on: Some(true),
+                brightness: Some(40),
+                locked: Some(true),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn restricted_to_clears_every_field_the_template_never_touched() {
+        let full = DeviceStatePatch {
+            on: Some(true),
+            brightness: Some(40),
+            locked: Some(false),
+            ..Default::default()
+        };
+        let template = DeviceStatePatch {
+            brightness: Some(0), // value irrelevant -- only Some-ness is read
+            ..Default::default()
+        };
+        assert_eq!(
+            full.restricted_to(&template),
+            DeviceStatePatch {
+                brightness: Some(40),
+                ..Default::default()
+            }
         );
     }
 }

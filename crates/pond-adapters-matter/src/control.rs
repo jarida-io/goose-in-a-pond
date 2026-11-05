@@ -7,13 +7,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use pond_core::user_data::ports::device_control::{
-    DeviceControlOutcome, DeviceControlPort, DeviceDescription, DeviceState,
+    DeviceControlOutcome, DeviceControlPort, DeviceDescription, DeviceState, DeviceStatePatch,
 };
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use crate::client::{code_of, MatterClient};
-use crate::protocol::{describe, ControlResult, DescribeResult, StateResult};
+use crate::protocol::{describe, ControlResult, DescribeResult, StatePatchResult, StateResult};
 
 /// Live client, swapped in place on reconnect; readers clone the `Arc` and drop the lock at once.
 pub type SharedMatterClient = Arc<RwLock<Arc<MatterClient>>>;
@@ -104,6 +104,16 @@ impl DeviceControlPort for MatterDeviceControl {
         serde_json::from_value::<StateResult>(result)
             .map(|r| r.state)
             .context("the controller did not report the device's state")
+    }
+
+    async fn state_patch(&self, device_id: &str) -> Result<DeviceStatePatch> {
+        let client = self.client.read().await.clone();
+        let result = client
+            .send("state_patch", json!({ "device_id": device_id }))
+            .await?;
+        serde_json::from_value::<StatePatchResult>(result)
+            .map(|r| r.patch)
+            .context("the controller did not report a typed state to undo from")
     }
 
     async fn set_power(&self, device_id: &str, on: bool) -> Result<DeviceControlOutcome> {
