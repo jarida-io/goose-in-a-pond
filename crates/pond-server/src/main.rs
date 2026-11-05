@@ -3190,14 +3190,17 @@ async fn run_server(
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
-        let real_executor = Arc::new(AgentScheduleExecutor::new(
-            agent.clone(),
-            session_storage.clone(),
-            Some(device_control.clone()),
-            settings.schedule_max_concurrent,
-            tts.clone(),
-            Some(settings_repo.clone()),
-        ));
+        let real_executor = Arc::new(
+            AgentScheduleExecutor::new(
+                agent.clone(),
+                session_storage.clone(),
+                Some(device_control.clone()),
+                settings.schedule_max_concurrent,
+                tts.clone(),
+                Some(settings_repo.clone()),
+            )
+            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+        );
         deferred_executor
             .init(
                 real_executor
@@ -5615,6 +5618,14 @@ async fn run_chat(
     let mut chat_service = ChatService::new(agent, session_id.clone(), storage)
         .with_system_prompt(system_prompt)
         .with_thinking_tone(settings.voice_thinking_tone_enabled);
+    // A shared microphone: anyone in the room may speak, unlike a typed turn from the shell.
+    if voice_mode {
+        chat_service = chat_service.with_unrecognised_scope(
+            pond_core::shared::services::chat::unrecognised_voice_scope(Some(Arc::new(
+                SqliteProfileRepository::new(db.system.clone()),
+            ))),
+        );
+    }
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
     }
