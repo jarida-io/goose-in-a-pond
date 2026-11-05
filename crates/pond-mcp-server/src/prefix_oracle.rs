@@ -135,8 +135,11 @@ mod tests {
             .map(|e| format!("{} {}", e.bytes, e.name))
             .collect();
 
-        // Core groups first (`prefix_sort_key` tier 0), then by name.
+        // Core groups first (`prefix_sort_key` tier 0), then by name. `giap-knowledge` joined
+        // the core set on 2026-11-02 so web search is always offered; its keyless tools lead.
         let expected_head = [
+            "giap-knowledge__get_wikipedia_article",
+            "giap-knowledge__read_web_page",
             "giap-memory__forget_memory",
             "giap-memory__recall_memories",
             "giap-memory__save_memory",

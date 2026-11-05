@@ -9,6 +9,12 @@ import sys
 INTERNAL = {"giap-interview", "giap-task-work"}
 
 
+def scored_needs(message):
+    """The needed groups embed-scores scored. A core group (giap-knowledge since 2026-11-02) is
+    loaded without scoring, so a need on it is met whatever the floor and is left out."""
+    return [g for g in message["need"] if g in message["scores"]]
+
+
 def load(path):
     return json.load(open(path))
 
@@ -24,7 +30,7 @@ def tools_at(data, floor):
     missed = []
     for m in data["messages"]:
         chosen = selection(m["scores"], floor)
-        for g in m["need"]:
+        for g in scored_needs(m):
             needed += 1
             if g in chosen:
                 kept += 1
@@ -47,7 +53,7 @@ def describe(values):
 
 def report(name, data, floors):
     print("==", name, data["model_id"])
-    needed_scores = [m["scores"][g] for m in data["messages"] for g in m["need"]]
+    needed_scores = [m["scores"][g] for m in data["messages"] for g in scored_needs(m)]
     unneeded = [s for m in data["messages"] for g, s in m["scores"].items()
                 if g not in m["need"] and g not in INTERNAL]
     print("  needed group cosines  ", describe(needed_scores))
