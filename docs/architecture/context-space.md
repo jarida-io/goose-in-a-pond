@@ -151,9 +151,9 @@ columns stay where they are.
 
 | Column | Meaning |
 |---|---|
-| `id` | UUIDv7, so agent cursors are a single high-water mark |
+| `id` | UUIDv7, so agent cursors are a single high-water mark. It is made when the header is written, never from the item's own date, so a header written late for an old row still sorts after every cursor |
 | `kind` | `message`, `conversation`, `fact`, `entity`, `event`, `media`, `notification`, `mail`, `home_event`, `visit`, `report`, `suggestion`, `trait` |
-| `source_id`, `external_id` | Unique together; ingest is idempotent on them |
+| `source_id`, `external_id` | Unique together; ingest is idempotent on them. An item whose details sit in one of the pond's own tables has `pond:memory`, `pond:session` or `pond:suggestion`, and that row's key |
 | `owner_profile_id` | Required unless `audience = household` (a `CHECK`) |
 | `audience` | `private` (default) or `household`; sharing with named members is a row in `item_shares` |
 | `sensitivity` | `PrivacySensitivity` |
@@ -161,34 +161,49 @@ columns stay where they are.
 | `observed_at`, `valid_until` | When it happened, and when it stops mattering |
 | `title`, `body` | Redacted text: for media, the OCR or caption text when there is any |
 | `context` | One line that places the item: who, when, where it came from, and what it refers to (section 7.3). It is embedded and keyword-indexed with the body |
-| `state` | `active`, `superseded`, `dismissed`, `accepted` |
-| `produced_by` | `ingest`, or the recipe name and its definition hash, so a bad agent version's output can be found and withdrawn |
+| `state` | `active`, `archived` (kept and listed, out of recall: what decay does to an unused fact), `superseded`, `dismissed`, `accepted` |
+| `produced_by` | `ingest`, `pond:` and the name of one of the pond's own writers, or the recipe name and its definition hash, so a bad agent version's output can be found and withdrawn |
 | `confidence` | For derived items |
+| `created_at`, `updated_at` | When the header was written and last changed; the index compares `updated_at` to find a stale vector |
 
-`item_links(from_id, to_id, relation)` records `derived_from`, `evidence_for`, `mentions`,
-`same_as` and `supersedes`.
+Every timestamp in the item tables is RFC 3339 in UTC with milliseconds (`2026-11-05T09:30:15.123Z`),
+enforced by a `GLOB` check. The detail tables keep the four formats they hold today, and the
+backfill reads all four.
+
+`item_links(from_id, relation, to_id)` records `derived_from`, `evidence_for`, `mentions`, `same_as`
+and `supersedes`, read in that order: a conversation is `evidence_for` the fact it taught, and a
+suggestion is `derived_from` its memory. It replaces `memory_edges`, which nothing wrote and whose
+foreign keys named a `memories` table that never existed.
 
 | Kind | Details in | Holds |
 |---|---|---|
-| `fact`, `entity`, `trait` | `memory_fragments` | Segment, importance, `corrects`, kept, tier |
+| `fact`, `entity`, `trait` | `memory_fragments` | Segment, importance, `corrects`, tier (`permanent` is what "kept" means: decay never archives it and consolidation never prunes it) |
 | `message`, `conversation` | `session_messages`, `sessions` | Role, turn and session fields. The rolling summary becomes the conversation's body |
 | `mail`, `notification`, `event` from an account | `context_items` | Sender, thread, start and end, place: what the account sources fill today |
 | `media` | `media_details` (new) | `blob_id` for the encrypted bytes, type, size, content hash |
-| `home_event` | `home_event_details` (new) | Device, and the state before and after |
+| `home_event` | `context_items` until P6, where cameras and sensors write today; P6 adds `home_event_details` | Device, and the state before and after |
 | `visit` | `visit_details` (new) | Place cluster, arrival and departure |
 | `suggestion` | `suggestion_queue` | Status, decision, feedback |
 | `report` | Long-task artifacts | Task and artifact |
 
-A guard test fails the build when a kind names no detail table or no lifecycle.
+Each detail table keeps its own key beside `item_id`. Today's tables stay the authority in P1:
+deleting a header unlinks its row (`ON DELETE SET NULL`), and deleting a row deletes its header (an
+`AFTER DELETE` trigger on every detail table, so a cascade from a session or source takes the
+header too). The new tables are keyed by `item_id` and go with their header.
+
+A guard test fails the build when a kind names no detail table or no lifecycle:
+`Kind::detail_table` and `Kind::lifecycle` are exhaustive matches, and
+`every_item_kind_has_a_detail_table.rs` checks against the migrated schema that each table exists,
+references `items(id)` and drops its header with its row.
 
 ### 4.2 Lifecycle per kind
 
-The lifecycle is declared once, in `pond-core`.
+The lifecycle is declared once, in `pond-core` (`pond_core::items::lifecycle`).
 
 | Kind | Written by | Default audience | Kept | When its source is deleted |
 |---|---|---|---|---|
 | `message`, `conversation` | chat, Conversation | private | Until the conversation is deleted | n/a |
-| `fact`, `entity`, `trait` | agents, the model's own save | private | Until superseded | Deleted once its last `evidence_for` source is gone |
+| `fact`, `entity`, `trait` | agents, the model's own save | private | Until superseded; an unused one decays to `archived` meanwhile | Deleted once its last `evidence_for` source is gone |
 | `media`, `notification`, `mail`, `visit` | ingest | private | Per source setting | n/a: these are sources |
 | `home_event` | ingest | household | 7 days, unless an agent cites it | n/a |
 | `event`, `report` | ingest, agents, long tasks | the owner's | `valid_until` + 30 days; reports until deleted | Deleted when every source is gone |
