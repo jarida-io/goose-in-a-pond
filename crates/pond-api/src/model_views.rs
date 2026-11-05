@@ -262,6 +262,67 @@ pub(crate) async fn role_holders(
     }
 }
 
+/// Where the Memory model stands now: the host's MemAvailable, what the model running gives back
+/// on a switch, and that model's vector id.
+pub(crate) struct MemoryFooting {
+    available_mb: Option<u64>,
+    returns_mb: u64,
+    running: Option<String>,
+}
+
+impl MemoryFooting {
+    pub(crate) fn read(
+        state: &AppState,
+        status: &pond_core::models::ports::model_scheduler::MemoryStatus,
+    ) -> Self {
+        use pond_core::models::domain::{device_budget, embedding_models};
+        use pond_core::models::services::active_embedder::EmbedderState;
+
+        // Only a loaded model gives anything back; one still loading or failed holds nothing yet.
+        let running = match state.embedder.state() {
+            EmbedderState::Ready { model_id, .. } => Some(model_id),
+            _ => None,
+        };
+        let returns_mb = running
+            .as_deref()
+            .and_then(embedding_models::find_by_model_id)
+            .map_or(0, |m| {
+                device_budget::embedder_returns_mb(m, device_budget::budgeted_device())
+            });
+        Self {
+            available_mb: status.available_mb,
+            returns_mb,
+            running,
+        }
+    }
+
+    /// [`device_budget::embedder_room_mb`](pond_core::models::domain::device_budget::embedder_room_mb);
+    /// `None` where the host's memory was not read.
+    pub(crate) fn room_mb(&self) -> Option<u64> {
+        self.available_mb
+            .map(|a| pond_core::models::domain::device_budget::embedder_room_mb(a, self.returns_mb))
+    }
+
+    /// Drops a Memory row's recommendation where this pond could not load the model now.
+    pub(crate) fn weigh(&self, dto: &mut ModelStatusEntry) {
+        use pond_core::models::domain::embedding_models;
+        if dto.category != ModelCategory::Embedding.as_str() || dto.recommended.is_none() {
+            return;
+        }
+        let Some(model) = embedding_models::find(&dto.name) else {
+            return;
+        };
+        let stands = recommended::memory_recommendation_stands(
+            model.ram_estimate_mb(),
+            self.available_mb.map(|a| a + self.returns_mb),
+            self.running.as_deref() == Some(model.model_id),
+        );
+        if !stands {
+            dto.recommended = None;
+        }
+    }
+}
+
 /// What the pond knows, right now, about the models that work beside the catalogue rows.
 #[derive(Debug, Default)]
 pub(crate) struct HelperFacts {

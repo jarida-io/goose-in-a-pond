@@ -117,6 +117,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+.mm-mem__need {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+}
+
+/* A word and an icon in the body text's colour, not the warning's: "Tight" is a reading, not an alarm. */
+.mm-mem__fit {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
 .mm-mem__end {
   display: flex;
   flex-direction: column;

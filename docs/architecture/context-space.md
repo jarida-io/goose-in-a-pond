@@ -298,8 +298,13 @@ What follows:
      it, and MiniLM stays the default. Its similarity floors are its own, measured on the Orin
      (`fixtures/embedding-floors`): tool relevance 0.71 against MiniLM's 0.28, and dedup bands of
      0.97 and 0.92 against the dials MiniLM's scale uses.
-- **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
-  retrieval and video.
+- **Inside `pond-server` on the nano, 2026-11-02**, beside E4B, as MemAvailable (medians of 20
+  reads). EmbeddingGemma 2 on the GPU, placed at boot, gives back 138 MB when turned off, because
+  CUDA keeps its pools (`EG2_CUDA_RETURNS_MB`). all-MiniLM-L6-v2 adds 46 MB of RSS. EmbeddingGemma
+  2 chosen after boot lands on the CPU: 458 MB was available before the switch, under the 800 MB
+  the GPU needs. It added 361 MB of RSS and left 225 MB available, under the margin. The Models
+  page reads this as `embedder_room_mb`.
+- **Not measured:** recall on the household's real store, audio retrieval and video.
 
 ---
 

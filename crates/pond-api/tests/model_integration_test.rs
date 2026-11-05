@@ -2079,6 +2079,7 @@ impl pond_core::models::ports::model_scheduler::ModelScheduler for LoadedSchedul
             available_for_llm_mb: 1000,
             budget_mb: pond_core::models::domain::device_budget::llm_budget_mb(),
             loaded_model: None,
+            available_mb: Some(1000),
         }
     }
 }
@@ -2095,6 +2096,7 @@ impl pond_core::models::ports::model_scheduler::ModelScheduler for DesktopSchedu
             available_for_llm_mb: 22_000,
             budget_mb: 24_576,
             loaded_model: None,
+            available_mb: Some(22_000),
         }
     }
 }
@@ -2139,6 +2141,11 @@ async fn memory_status_counts_what_a_switch_would_free() {
         body["reclaimable_mb"],
         3000u64.min(budget.saturating_sub(1000))
     );
+    assert_eq!(
+        body["embedder_room_mb"],
+        1000 - pond_core::models::domain::device_budget::EMBEDDER_MARGIN_MB,
+        "no Memory model is loaded, so none gives anything back"
+    );
 
     // Another program's model frees nothing the pond holds.
     f.settings
@@ -2152,6 +2159,66 @@ async fn memory_status_counts_what_a_switch_would_free() {
         .await
         .unwrap();
     assert_eq!(body_json(resp).await["reclaimable_mb"], 0);
+}
+
+/// The Orin with too little left for any Memory model beside the conversation model.
+struct FullScheduler;
+
+#[async_trait::async_trait]
+impl pond_core::models::ports::model_scheduler::ModelScheduler for FullScheduler {
+    async fn notify_wake_word(&self) {}
+    fn memory_status(&self) -> pond_core::models::ports::model_scheduler::MemoryStatus {
+        pond_core::models::ports::model_scheduler::MemoryStatus {
+            total_mb: 7620,
+            available_for_llm_mb: 200,
+            budget_mb: pond_core::models::domain::device_budget::llm_budget_mb(),
+            loaded_model: None,
+            available_mb: Some(200),
+        }
+    }
+}
+
+/// The Memory recommendation's row, as `GET /models` lists it on a pond with `scheduler`.
+async fn listed_eg2(scheduler: Scheduler) -> serde_json::Value {
+    use pond_core::models::domain::embedding_models::EMBEDDINGGEMMA_2;
+    let f = pond_with_parts(
+        Arc::new(MockAgent::new()),
+        Parts {
+            scheduler,
+            ..Parts::default()
+        },
+    )
+    .await;
+    f.repo.upsert(&EMBEDDINGGEMMA_2.record()).await.unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(auth_req("GET", "/api/v1/models", None))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    body["embedding"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["name"] == EMBEDDINGGEMMA_2.name))
+        .cloned()
+        .expect("the EmbeddingGemma 2 row")
+}
+
+/// "Recommended" is not shown on a Memory model this pond has no room to load now.
+#[tokio::test]
+async fn the_memory_recommendation_is_weighed_against_the_room_it_has() {
+    let roomy = listed_eg2(Some(Arc::new(LoadedScheduler))).await;
+    assert_eq!(roomy["recommended"]["rank"], "primary");
+
+    let full = listed_eg2(Some(Arc::new(FullScheduler))).await;
+    assert!(full["recommended"].is_null(), "{full}");
+    assert_eq!(full["ram_estimate_mb"], roomy["ram_estimate_mb"]);
+
+    let unread = listed_eg2(None).await;
+    assert_eq!(
+        unread["recommended"]["rank"], "primary",
+        "with nothing read, the suggestion stands"
+    );
 }
 
 /// A desktop's own numbers come through whole, and what a switch frees is measured against its
@@ -2189,6 +2256,10 @@ async fn memory_status_reports_a_desktop_by_its_own_budget() {
     assert_eq!(
         body["reclaimable_mb"], 2_576,
         "never more than the budget is short of"
+    );
+    assert_eq!(
+        body["embedder_room_mb"],
+        22_000 - pond_core::models::domain::device_budget::EMBEDDER_MARGIN_MB
     );
 }
 

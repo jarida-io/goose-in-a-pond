@@ -381,6 +381,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
             busy={actions.busy}
             off={job.off}
             offline={job.offline}
+            room={memory?.embedder_room_mb ?? null}
             onTurnOn={() => void job.turnOn()}
             onUse={(m) => void job.useModel(m)}
             onControl={(m, transfer, action) => void actions.control(m, transfer, action)}

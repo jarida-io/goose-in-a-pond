@@ -878,6 +878,9 @@ export interface ModelMemoryStatus {
   /** The most this pond lets the models take: a desktop's memory less what it keeps for itself, or
    *  a budgeted device's own figure. `available_for_llm_mb` is what is left of it now. */
   budget_mb?: number;
+  /** The room a Memory model has beside the conversation model, counting what the one in use gives
+   *  back on a switch; null where the pond read nothing, absent from an older server. */
+  embedder_room_mb?: number | null;
 }
 
 export interface ModelCapabilities {
