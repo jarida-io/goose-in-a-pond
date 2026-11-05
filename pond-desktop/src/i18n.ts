@@ -76,6 +76,8 @@ void i18n.use(initReactI18next).init({
     redundantReason: 'Web search is built in and already uses your Brave key, so this extension only adds tools to every prompt.',
     remove: 'Remove',
     removeNamed: 'Remove {{name}}',
+    removeConfirm: 'Remove {{name}}? It cannot be installed again while built-in web search is on.',
+    removeConfirmTitle: 'Remove extension',
     removed: '{{name}} removed.',
     removeFailed: 'Could not remove {{name}}: {{error}}',
   }, memory: {

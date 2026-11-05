@@ -5,6 +5,7 @@ import { HubIco } from "../../primitives/HubIco";
 import { DetailShell } from "./DetailShell";
 import { Card, Segment } from "./controls";
 import { api } from "../../../api/PondApiClient";
+import { useConfirm } from "../../../components/shared";
 import { BuiltInSearchNote } from "../../../connections/BuiltInSearchNote";
 import type { Extension, MarketplaceExtension, AddExtensionRequest, Settings } from "../../../api/types";
 
@@ -577,6 +578,7 @@ interface ExtensionsDetailProps {
 
 export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -626,6 +628,12 @@ export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
   }, []);
 
   async function handleRemove(name: string) {
+    const ok = await confirm(t("extensions.removeConfirm", { name }), {
+      title: t("extensions.removeConfirmTitle"),
+      confirmLabel: t("extensions.remove"),
+      destructive: true,
+    });
+    if (!ok) return;
     try {
       await api.removeExtension(name);
       setExtensions((prev) => prev.filter((e) => e.name !== name));
