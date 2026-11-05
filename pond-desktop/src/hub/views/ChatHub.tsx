@@ -38,6 +38,7 @@ import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
 import { useConversationModel } from "../../hooks/useConversationModel";
 import { useDeepResearch } from "../../hooks/useDeepResearch";
 import { NoModelPicks } from "../../components/models/NoModelPicks";
+import { MarkdownText } from "../../components/MarkdownText";
 import "./chat.css";
 
 // ── Types ─────────────────────────────────────────────────────
@@ -407,7 +408,9 @@ export function ChatHubView() {
                     ))}
                   </div>
                 )}
-                {m.text || (m.streaming ? " " : "")}
+                {m.who === "goose" && m.text
+                  ? <MarkdownText source={m.text} />
+                  : m.text || (m.streaming ? " " : "")}
               </div>
               {m.who === "goose" && m.keptResults?.map((kept, i) => (
                 <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
