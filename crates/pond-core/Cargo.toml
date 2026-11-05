@@ -32,6 +32,8 @@ serde_yaml = { workspace = true }
 # Already in this crate's graph through tera; used for the passage ranker's answer types.
 regex = { workspace = true }
 tera = { workspace = true }
+# Parses the embedded factory-defaults config; see `user_data::domain::factory_defaults`.
+toml = { workspace = true }
 thiserror = "1.0"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
