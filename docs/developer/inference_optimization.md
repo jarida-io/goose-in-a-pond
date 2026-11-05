@@ -76,7 +76,7 @@ the code is the knob.
 
 | Stamp | When | What it sets | Log line |
 |---|---|---|---|
-| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V, no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
+| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V with q8_0 when memory is tight (`KvCachePolicy::Q8WhenTight`), no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
 | `apply_platform_settings` | Every other build | `n_gpu_layers 99`, context sized by goose from free memory, `n_batch 512`, flash attention, template-derived tool mode and thinking | `Metal/platform settings applied to model ...`; on aarch64 Linux the same line begins `CPU-ONLY (built without the cuda feature)` |
 | `apply_litert_settings` | LiteRT-LM rows | The engine window and execution backend (`pond_core::models::domain::litert::engine_options`) | `Applied LiteRT-LM settings` |
 
@@ -136,6 +136,43 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   their window, and every partial resume goes through `SessionKv::window_resume`, which resumes in
   place, restores a window checkpoint, or refuses. On the Orin this took E4B's KV at 16K from 476 MiB
   to 152 MiB (q8_0) and decoded 8% faster at depth.
+- **KV cache type: f16 unless memory is tight.** The Jetson stamp asks for f16 K and V, which
+  decode 5-8% faster than q8_0 at depth on the Orin (llama-bench, E4B QAT, depth 8,192: 18.1
+  against 16.7 tok/s), with `kv_cache_policy: Q8WhenTight`. On unified memory the engine fits the
+  window to the memory free after the load (`MemoryFit` in `memory.rs`, `kind="context_sized"`),
+  and `choose_kv_cache` weighs both types there: when f16 would leave the window under
+  `KV_TIGHT_WINDOW` (8,192 tokens) and q8_0, about half the bytes per token, would leave a wider
+  one, the load takes q8_0 for K and V, and every context, snapshot key and failure estimate of the
+  model's turns uses it (`with_fitted_kv_type`). 8,192 is the narrowest rung that leaves a turn
+  about as much again as the ~3,300-token preamble; a narrower window fails a scheduled briefing,
+  which a slower decode only delays. Same window either way, f16 stays. Logged as
+  `kind="kv_cache_type_chosen"` with `preferred_n_ctx` (f16), `q8_n_ctx`, the type chosen and a
+  `reason` (`tight`, `roomy`, `requested_fits`, `q8_no_wider`, `no_candidate` without flash
+  attention). The ladder has a 5,120 rung so a load just above the floor, where q8_0 holds more
+  than 4,096 tokens but not 6,144, still gains from it.
+- **KV estimate on unified memory.** The fit reads the KV layout per layer from the GGUF file's
+  header at load (`KvMeta::read` in `memory.rs`, ggml's `gguf_init_from_file` with no tensor
+  data): `head_count_kv`, the full and sliding key and value widths, `sliding_window` and
+  `sliding_window_pattern`, less `shared_kv_layers`. Not through `LlamaModel::meta_val_str`:
+  llama.cpp keeps only scalar metadata as strings and drops every array, the per-layer pattern
+  among them, which is why the first build of this estimate charged E4B in full on the Orin. Full-attention
+  layers cost bytes per position of the window; sliding layers cost a fixed cache of
+  `GGML_PAD(n_swa + n_ubatch, 256)` cells, which is what llama.cpp's windowed cache
+  (`llama_kv_cache_iswa`) gives them at most, with `n_ubatch` charged at no less than 512 so a
+  picture turn's context is covered. A header without a per-layer pattern or a window is charged
+  every layer in full; when the model slides (it declares a window, sliding widths or a pattern)
+  that is logged as WARN `kind="kv_estimate_fallback"` with the `missing_key`, as is a header
+  that cannot be read. `kind="context_sized"` logs `kv_kib_per_token` (full layers),
+  `sliding_kv_mb`, `full_layers`, `sliding_layers` and `n_swa`. For E4B (4 full and 20 sliding
+  KV layers, 512-position window) at 16K the estimate is 296 MiB in f16 and 157 in q8_0, against
+  286 and 152 measured on the Orin at `n_ubatch` 256 (llama.cpp's sizing gives those exactly);
+  the full-window bound it replaces charged 1,536 MiB. With the 256 MiB compute reserve and the
+  512 MiB margin, E4B gets:
+
+  | Free after the load | KV budget | f16 window | q8_0 window | Chosen |
+  |---|---|---|---|---|
+  | 1,037 MB (2026-11-02, encoder reserved) | 269 MiB | 12,288 | 16,384 | f16, 12,288 |
+  | 1,419 MB (2026-10-28) | 651 MiB | 16,384 | 16,384 | f16, 16,384 |
 - **Stable-prefix snapshot on disk** (`prompt_snapshot.rs`). The longest token prefix every prompt
   for a model has shared (system prompt and tool schemas, never conversation) is saved under goose's
   data directory (`<data_dir>/engine/data/prompt-cache/`), keyed by model file, context size and
