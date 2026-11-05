@@ -3190,14 +3190,17 @@ async fn run_server(
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
-        let real_executor = Arc::new(AgentScheduleExecutor::new(
-            agent.clone(),
-            session_storage.clone(),
-            Some(device_control.clone()),
-            settings.schedule_max_concurrent,
-            tts.clone(),
-            Some(settings_repo.clone()),
-        ));
+        let real_executor = Arc::new(
+            AgentScheduleExecutor::new(
+                agent.clone(),
+                session_storage.clone(),
+                Some(device_control.clone()),
+                settings.schedule_max_concurrent,
+                tts.clone(),
+                Some(settings_repo.clone()),
+            )
+            .with_device_registry(device_registry.clone()),
+        );
         deferred_executor
             .init(
                 real_executor
