@@ -44,7 +44,8 @@
       "category": "productivity",
       "author": "Anthropic",
       "tools": ["brave_web_search", "brave_local_search"],
-      "featured": true,
+      "featured": false,
+      "built_in": "web_search",
       "required_secrets": [
         {
           "key": "BRAVE_API_KEY",

@@ -201,7 +201,8 @@ test.describe("Models section", () => {
       await expect(device).toContainText("LiteRT-LM runs .litertlm files on the GPU, text only.");
       await expect(device).toContainText("Ollama is your own Ollama server; llamafile runs a model packed into one file.");
       const chips = await device.locator(".mm-chip").allInnerTexts();
-      expect(chips.sort()).toEqual(["Found on disk", "Ollama", "Recommended", "Recommended"]);
+      // The one jobs chip names the job the model in use is doing.
+      expect(chips.sort()).toEqual(["Conversation", "Found on disk", "Ollama", "Recommended", "Recommended"]);
       await expect(device.getByText("(detected on disk)")).toHaveCount(0);
     });
 
@@ -255,7 +256,9 @@ test.describe("Models section", () => {
       const helper = { ...e2bQat(), id: "gguf/functiongemma", name: "functiongemma", title: "FunctionGemma 270M", downloaded: true, kind: "helper", recommended_role: "tool", recommended: undefined, companions: [] };
       await mockModels(page, { models: typicalModels({ gguf: [e2bQat({ downloaded: true }), helper] }) });
       await goToModels(page);
-      await expect(page.getByText("FunctionGemma 270M")).toHaveCount(0);
+      const device = page.locator("#mdl-device");
+      await expect(device.getByRole("region", { name: "Conversation" }).getByText("FunctionGemma 270M")).toHaveCount(0);
+      await expect(device.getByRole("region", { name: "Other" }).getByText("FunctionGemma 270M")).toBeVisible();
     });
   });
 

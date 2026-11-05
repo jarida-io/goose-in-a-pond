@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { blockId, inlineText, isWebLink, outlineOf, parseInline, parseMarkdown, type Block, type Inline } from "./markdownBlocks";
+import { blockId, inlineText, isWebLink, markdownToPlainText, outlineOf, parseInline, parseMarkdown, type Block, type Inline } from "./markdownBlocks";
 
 const text = (v: string): Inline => ({ t: "text", v });
 
@@ -288,5 +288,20 @@ describe("an outline", () => {
 
   it("reads the words of nested marks", () => {
     expect(inlineText(parseInline("a *b* `c` ~~d~~ [e](https://x.co)"))).toBe("a b c d e");
+  });
+});
+
+describe("markdownToPlainText", () => {
+  it("keeps the words of headings, bold and bullets and drops their marks", () => {
+    const md = "### Kenya & Nairobi Briefing\n\n**Weather & Climate:**\n*   **Nairobi Current Weather:** 24C, clear\n*   **Exchange Rate:** 129 KES\n\nSee [the source](https://example.com).";
+    const plain = markdownToPlainText(md);
+    expect(plain).toBe(
+      "Kenya & Nairobi Briefing Weather & Climate: Nairobi Current Weather: 24C, clear Exchange Rate: 129 KES See the source.",
+    );
+    expect(plain).not.toMatch(/[*#[\]]/);
+  });
+
+  it("leaves prose unchanged", () => {
+    expect(markdownToPlainText("It is sunny in Nairobi today.")).toBe("It is sunny in Nairobi today.");
   });
 });

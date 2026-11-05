@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use pond_core::mcp::domain::marketplace::BuiltInCapability;
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::mesh::domain::millisats::Millisats;
 use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
@@ -196,6 +197,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        // The household's notice history, scoped to the caller's device and with its read state.
+        .route("/notifications/history", get(notifications_history))
+        .route(
+            "/notifications/history/read",
+            post(mark_notification_history_read),
+        )
         .route("/models/download/control", post(download_control))
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
@@ -257,6 +264,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
+        .route("/devices/events", get(device_events_stream))
         .route("/devices/commission", post(commission_device))
         .route("/devices/discovered", get(discover_devices))
         .route("/matter/status", get(matter_status))
@@ -493,7 +501,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── MCP App Resources ────────────────────────────────────────────────
         .route("/mcp/resources", get(mcp_read_resource))
         .route("/mcp/tools/call", post(mcp_call_tool))
-        .route("/tools/invoke", post(invoke_tool))
+        .route(
+            "/tools/invoke",
+            post(invoke_tool).layer(axum::Extension(Arc::new(
+                crate::idempotency::IdempotentReplies::default(),
+            ))),
+        )
         // ── System Prompt Extras ───────────────────────────────────────────────
         .route(
             "/agent/extras",
@@ -519,6 +532,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/telemetry/summary", get(get_telemetry_summary))
         // ── Event log / telemetry ─────────────────────────────────────────────
         .route("/logs", get(list_logs))
+        .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
@@ -2644,7 +2658,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
 struct TurnAccumulator {
     /// Strips (and captures) Harmony thought channels and `<think>` blocks from visible text.
     thought: crate::thought_filter::ThoughtFilter,
-    /// The assistant's visible answer, as persisted.
+    /// The assistant's visible answer, as persisted: the text written after the turn's last tool
+    /// call. Text before a tool call is working notes and leaves it (see `absorb`).
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
@@ -2702,10 +2717,25 @@ impl TurnAccumulator {
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "{}".to_string()),
                 );
-                StreamStep::Frame(
-                    json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
-                        .to_string(),
-                )
+                let mut frame = json!({"type": "tool_call", "tool": tool, "id": id, "input": input});
+                // Text written before a tool call is the model at work ("let me check the
+                // weather"), not the answer: it leaves `full_text`, and the frame tells the client
+                // to move that trailing text out of the answer into the turn's steps. What the
+                // filter still holds back was never shown and belongs to the notes too: it must
+                // not surface at the head of the answer when the turn ends.
+                let notes = std::mem::take(&mut self.full_text);
+                let _unshown = self.thought.flush();
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call moved out of the answer",
+                    );
+                    frame["working_notes"] = json!(notes);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::ToolResult {
                 tool,
@@ -3798,7 +3828,9 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
-/// List all sessions, ordered by most recently updated first.
+/// List the household's conversations, most recently updated first. Sessions the pond opened for
+/// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
+/// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -3810,7 +3842,25 @@ async fn list_sessions(
     })?;
 
     let mut session_list: Vec<Value> = Vec::with_capacity(sessions.len());
-    for s in &sessions {
+    // The scheduler opens a `sched-` session per run for the engine; it holds no conversation,
+    // so listing it showed every run as an empty "Untitled" chat. Its result is in the run log.
+    let machine = sessions
+        .iter()
+        .filter(|s| {
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        })
+        .count();
+    if machine > 0 {
+        tracing::debug!(
+            target: "giap::trace",
+            kind = "machine_sessions_unlisted",
+            count = machine,
+            "sessions the pond opened for its own work left out of the conversation list",
+        );
+    }
+    for s in sessions.iter().filter(|s| {
+        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+    }) {
         let message_count = state
             .session_storage
             .count_messages(&s.id)
@@ -3870,11 +3920,24 @@ fn derived_session_label(text: &str) -> String {
     }
 }
 
-/// The pond's first answer, for a history card (the title already carries the question).
-/// Capped past any card's width so the client fades the overflow instead of an ellipsis.
+/// The pond's first answer, for a history card (the title already carries the question), as
+/// plain words: a reply written in Markdown showed its `**`, `###` and list bullets in every
+/// conversation list. Capped past any card's width so the client fades the overflow instead of an
+/// ellipsis.
 fn session_preview(text: &str) -> String {
+    use pond_voice::text::{is_hr, strip_inline_md, strip_line_prefix};
     const MAX_CHARS: usize = 240;
-    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_hr(line) && !line.starts_with("```"))
+        .map(|line| strip_inline_md(strip_line_prefix(line)))
+        .collect();
+    let cleaned = plain
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let cleaned = cleaned.trim();
     if cleaned.chars().count() <= MAX_CHARS {
         return cleaned.to_string();
@@ -6472,17 +6535,37 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
+///
+/// `holders` names the catalogue row doing each job as `model_use::RoleHolders` reads it from
+/// settings, the same truth `GET /models` puts on each row as `roles`. `helpers` lists the
+/// models in use that are no catalogue row of their own: the conversation model's picture
+/// encoder and drafter, the camera detector and face recognition.
 async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let assignments: std::collections::HashMap<String, String> = state
-        .model_repo
-        .as_ref()
-        .and_then(|r| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(r.list_assignments())
-            })
-            .ok()
-        })
-        .unwrap_or_default()
+    let (records, assignment_rows) = match state.model_repo.as_ref() {
+        Some(repo) => {
+            let records = repo.list_all().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_catalogue_unreadable",
+                    error = %e,
+                    "catalogue could not be read"
+                );
+                Vec::new()
+            });
+            let assignments = repo.list_assignments().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_assignments_unreadable",
+                    error = %e,
+                    "role assignments could not be read"
+                );
+                Vec::new()
+            });
+            (records, assignments)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let holders = crate::model_views::role_holders(&state, &records, &assignment_rows).await;
+    let helpers = crate::model_views::helper_models(&state, &holders).await;
+    let assignments: std::collections::HashMap<String, String> = assignment_rows
         .into_iter()
         .map(|a| (a.role, a.model_id))
         .collect();
@@ -6507,6 +6590,14 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
             "model": settings.active_embedding_model,
             "provider": settings.embedding_provider,
         },
+        "holders": {
+            "chat": holders.chat,
+            "tool": holders.tool,
+            "asr": holders.asr,
+            "tts": holders.tts,
+            "embedding": holders.embedding,
+        },
+        "helpers": helpers,
         "router_name": state.llm_provider.read().await
             .as_ref()
             .map(|p| p.model_name())
@@ -6517,7 +6608,8 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// GET /api/v1/models/memory-status — returns current LLM memory budget snapshot: the board's on
 /// a budgeted device, the machine's own elsewhere. `budget_mb` is the most the LLM slot may ever
 /// hold here; `reclaimable_mb` is what switching away from the model in use would free, so a fit
-/// check can count it.
+/// check can count it. `embedder_room_mb` is the Memory model's room beside the conversation
+/// model, null where nothing was read.
 async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let status = state
         .model_scheduler
@@ -6532,6 +6624,7 @@ async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "budget_mb":            status.budget_mb,
         "loaded_model":         status.loaded_model,
         "reclaimable_mb":       reclaimable_mb,
+        "embedder_room_mb":     crate::model_views::MemoryFooting::read(&state, &status).room_mb(),
     }))
 }
 
@@ -7018,6 +7111,7 @@ async fn list_models(
         )
     })?;
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
 
     let vision = crate::model_views::gguf_vision_batch(&state, &records).await;
     let fetching_pictures: std::collections::HashSet<String> = state
@@ -7038,8 +7132,16 @@ async fn list_models(
     let mut ollama = vec![];
     let mut embedding = vec![];
 
+    let memory = state
+        .model_scheduler
+        .as_ref()
+        .map(|s| s.memory_status())
+        .unwrap_or_default();
+    let footing = crate::model_views::MemoryFooting::read(&state, &memory);
+
     for m in &records {
-        let mut dto = record_to_dto(m, &assignments, state.engine_availability);
+        let mut dto = record_to_dto(m, &assignments, &holders, state.engine_availability);
+        footing.weigh(&mut dto);
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
@@ -7083,11 +7185,19 @@ async fn scan_models(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     let count = extras.len();
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    // Over the whole catalogue: a job's holder is found by name among every row.
+    let records = model_repo.list_all().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
     let entries: Vec<Value> = extras
         .iter()
         .map(|m| {
-            serde_json::to_value(record_to_dto(m, &assignments, state.engine_availability))
-                .unwrap_or_default()
+            serde_json::to_value(record_to_dto(
+                m,
+                &assignments,
+                &holders,
+                state.engine_availability,
+            ))
+            .unwrap_or_default()
         })
         .collect();
 
@@ -7604,6 +7714,14 @@ async fn activate_model(
         }
     }
 
+    // So a live log viewer sees the swap it is timing against.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "model_activated",
+        role = %role,
+        model_id = %model_id,
+        "a model was assigned to a role"
+    );
     Ok(Json(json!({"role": role, "model_id": model_id})))
 }
 
@@ -11293,6 +11411,87 @@ fn require_own_device(
 }
 
 #[derive(serde::Deserialize)]
+struct DeviceEventsParams {
+    after_seq: Option<u64>,
+}
+
+fn device_event(frame: &crate::device_events::Frame) -> Event {
+    Event::default()
+        .event("device_state")
+        .data(frame.data.to_string())
+}
+
+fn resync_event() -> Event {
+    Event::default().event("resync").data("{}")
+}
+
+/// `GET /api/v1/devices/events?after_seq=N` — device state changes as devices report them. With
+/// `after_seq`, first what followed it, or `resync` when that is no longer kept (see
+/// `crate::device_events`).
+async fn device_events_stream(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<DeviceEventsParams>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    use crate::device_events::Since;
+    // A phone holds this open while its Devices screen is in front, as it holds notifications.
+    let permit = state
+        .notification_sse_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let events = state.device_events.clone();
+    let (since, mut live) = events.open(params.after_seq);
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut last = 0;
+        match since {
+            Since::Resync => yield Ok(resync_event()),
+            Since::Frames(frames) => {
+                last = params.after_seq.unwrap_or(0);
+                for frame in frames {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+            }
+        }
+        loop {
+            match live.recv().await {
+                Ok(frame) if frame.seq > last => {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+                Ok(_) => {}
+                // What it missed is still in the ring, which outlasts the live queue.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (since, again) = events.open(Some(last));
+                    live = again;
+                    match since {
+                        Since::Resync => {
+                            last = 0;
+                            yield Ok(resync_event());
+                        }
+                        Since::Frames(frames) => {
+                            for frame in frames {
+                                last = frame.seq;
+                                yield Ok(device_event(&frame));
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[derive(serde::Deserialize)]
 struct NotificationStreamParams {
     device_id: Option<String>,
 }
@@ -11567,6 +11766,152 @@ async fn acknowledge_notification(
     }
 }
 
+/// The calling device's id, from its pairing token only, plus the history it reads.
+type CallerHistory = (
+    String,
+    Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>,
+);
+
+/// The calling device and the notification history, or the refusal. Like [`caller_queue`]: the
+/// device comes from the token, so a caller reads only what its own device may read.
+fn caller_history(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    operation: &'static str,
+) -> Result<CallerHistory, (StatusCode, Json<Value>)> {
+    let Some(device_id) = proven_device(principal).id().map(str::to_owned) else {
+        tracing::warn!(
+            kind = "notification_history_refused",
+            operation,
+            reason = "no_device",
+            "notifications: history request did not come from a paired device"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ));
+    };
+    let Some(history) = state.notification_history.clone() else {
+        tracing::warn!(
+            kind = "notification_history_unavailable",
+            operation,
+            "notifications: no history wired"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "notification history not available"})),
+        ));
+    };
+    Ok((device_id, history))
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationHistoryParams {
+    limit: Option<usize>,
+}
+
+/// How many notices `GET /notifications/history` returns when the caller does not say.
+const NOTIFICATION_HISTORY_DEFAULT_LIMIT: usize = 100;
+
+/// `GET /api/v1/notifications/history?limit=N` — the household's durable notices the calling
+/// device may read, newest first, each with that device's read state:
+/// `{"device_id": "...", "notifications": [{id, category, title, body, timestamp, data, read}]}`.
+///
+/// `device_id` is the caller's own device, from its token: the id its notification stream must
+/// name, and the suffix its own queued copies carry (`per_device_notification_id`), so a client
+/// can map a copy's id back to the history id. A member's notice is listed only to the devices it
+/// was queued for; live-only status is never listed. `limit` defaults to 100, at most 200.
+async fn notifications_history(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Query(params): axum::extract::Query<NotificationHistoryParams>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "notifications_history") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let limit = params
+        .limit
+        .unwrap_or(NOTIFICATION_HISTORY_DEFAULT_LIMIT)
+        .clamp(
+            1,
+            pond_core::mcp::domain::notification_history::HISTORY_LIST_MAX,
+        );
+    match history.list_for_device(&device_id, limit).await {
+        Ok(entries) => {
+            tracing::debug!(
+                kind = "notification_history_served",
+                count = entries.len(),
+                limit,
+                "notifications: history served"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "device_id": device_id, "notifications": entries })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_failed", error = %e, "notifications: history query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read the notification history"})),
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MarkHistoryReadRequest {
+    ids: Vec<String>,
+}
+
+/// `POST /api/v1/notifications/history/read` with `{"ids": [...]}` — mark these history notices
+/// read for the calling device only. An id the device may not read, or that does not exist, is
+/// skipped silently, so the answer never tells a caller which ids exist. `{"marked": n}` counts
+/// the newly marked; at most 500 ids per request (`400` beyond).
+async fn mark_notification_history_read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Json(request): Json<MarkHistoryReadRequest>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "mark_notification_history_read") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let max = pond_core::mcp::domain::notification_history::HISTORY_MARK_READ_MAX;
+    if request.ids.len() > max {
+        tracing::info!(
+            kind = "notification_history_read_refused",
+            count = request.ids.len(),
+            "notifications: too many ids in one mark-read request"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("at most {max} ids per request")})),
+        );
+    }
+    match history.mark_read(&device_id, &request.ids).await {
+        Ok(marked) => {
+            tracing::info!(
+                kind = "notification_history_marked_read",
+                requested = request.ids.len(),
+                marked,
+                "notifications: history marked read"
+            );
+            (StatusCode::OK, Json(json!({ "marked": marked })))
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_read_failed", error = %e, "notifications: mark read failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not mark the notifications read"})),
+            )
+        }
+    }
+}
+
 // ── Agent tools handler ───────────────────────────────────────────────────────
 
 /// Tools whose listing gets `_meta.ui.resourceUri` pointing at their MCP App resource.
@@ -11741,6 +12086,9 @@ async fn dispatch_tool_direct(
 /// `POST /api/v1/tools/invoke` — run an MCP tool directly, bypassing the LLM.
 async fn invoke_tool(
     State(state): State<Arc<AppState>>,
+    axum::Extension(replies): axum::Extension<Arc<crate::idempotency::IdempotentReplies>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    headers: axum::http::HeaderMap,
     body: Result<Json<InvokeToolRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -11756,7 +12104,40 @@ async fn invoke_tool(
         ));
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
-    dispatch_tool_direct(&state, &qualified, req.args).await
+    let Some(key) = headers.get(crate::idempotency::HEADER) else {
+        return dispatch_tool_direct(&state, &qualified, req.args).await;
+    };
+    let key = key
+        .to_str()
+        .ok()
+        .filter(|key| crate::idempotency::valid_key(key))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_idempotency_key" })),
+            )
+        })?;
+    let caller = proven_device(principal.as_ref());
+    let slot = replies.slot(caller.id().unwrap_or_default(), key);
+    let mut outcome = slot.lock().await;
+    let request = json!({ "tool": qualified, "args": req.args });
+    if let Some(first) = &outcome.request {
+        if *first != request {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "idempotency_key_reused" })),
+            ));
+        }
+    }
+    if let Some(reply) = &outcome.reply {
+        return Ok(Json(reply.clone()));
+    }
+    outcome.request = Some(request);
+    // A failure is not kept: nothing ran, or the tool failed and a resend may try it again.
+    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    reply["idempotency_key"] = json!(key);
+    outcome.reply = Some(reply.clone());
+    Ok(Json(reply))
 }
 
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
@@ -12043,6 +12424,71 @@ async fn list_logs(
     }
 }
 
+/// Live log viewers held open at once: a developer's tool, not something every phone keeps open.
+const LIVE_LOG_STREAMS: usize = 4;
+
+fn live_log_streams() -> &'static Arc<tokio::sync::Semaphore> {
+    static STREAMS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    STREAMS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(LIVE_LOG_STREAMS)))
+}
+
+/// `GET /api/v1/logs/stream` — the Logs viewer, live: a `status` event naming the running chat
+/// model, then each line as `/logs` stores it, scrubbed the same way. `level` filters as there;
+/// a viewer that falls behind gets a `skipped` count instead of the lines it missed.
+async fn stream_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    let Some(mut rx) = state
+        .operational_log
+        .as_ref()
+        .and_then(|repo| repo.subscribe())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "live logs not available" })),
+        ));
+    };
+    let permit = live_log_streams()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let level = params.get("level").cloned();
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let status = json!({
+        "chat_provider": settings.chat_provider,
+        "chat_model": settings.chat_model,
+    });
+
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        yield Ok(Event::default().event("status").data(status.to_string()));
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if level.as_deref().is_some_and(|wanted| wanted != entry.level) {
+                        continue;
+                    }
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok(Event::default().event("log").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    let data = json!({ "count": count }).to_string();
+                    yield Ok(Event::default().event("skipped").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 /// `GET /api/v1/logs/export` — download the event log as a CSV file.
 async fn export_logs_csv(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -12302,7 +12748,15 @@ async fn toggle_extension_handler(
 
 // ── Extension Marketplace ────────────────────────────────────────────────────
 
-/// `GET /api/v1/marketplace` — list available extensions from the curated registry.
+/// What the install route answers for a catalogue entry the built-in web search already covers.
+pub const BUILT_IN_SEARCH_ON: &str = "Web search is built in and already uses your Brave key.";
+
+/// The `reason` beside [`BUILT_IN_SEARCH_ON`], for a client to match instead of the sentence.
+pub const BUILT_IN_SEARCH_ON_REASON: &str = "built_in_web_search_on";
+
+/// `GET /api/v1/marketplace` — list available extensions from the curated registry. An entry that
+/// duplicates a built-in capability also carries `built_in_state`: `on`, `needs_key` or
+/// `knowledge_off`, from [`crate::web_search::built_in_state`].
 async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(mp) = &state.marketplace else {
@@ -12313,7 +12767,26 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
             .into_response();
     };
     match mp.list_available().await {
-        Ok(exts) => Json(json!({"extensions": exts})).into_response(),
+        Ok(exts) => {
+            let search = if exts.iter().any(|e| e.built_in.is_some()) {
+                Some(crate::web_search::built_in_state(&state).await)
+            } else {
+                None
+            };
+            let listed: Vec<serde_json::Value> = exts
+                .iter()
+                .map(|ext| {
+                    let mut entry = json!(ext);
+                    if let (Some(BuiltInCapability::WebSearch), Some(search)) =
+                        (ext.built_in, search)
+                    {
+                        entry["built_in_state"] = json!(search.as_str());
+                    }
+                    entry
+                })
+                .collect();
+            Json(json!({"extensions": listed})).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -12323,6 +12796,7 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
 }
 
 /// `POST /api/v1/marketplace/{id}/install` — optional `{ "secrets": {…} }`; 428 lists missing ones.
+/// 409 refuses an entry the built-in web search covers while that search is on.
 async fn install_marketplace_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -12361,6 +12835,24 @@ async fn install_marketplace_handler(
                 .into_response();
         }
     };
+
+    if ext.built_in == Some(BuiltInCapability::WebSearch)
+        && crate::web_search::built_in_state(&state).await
+            == pond_core::mcp::domain::web_search::BuiltInSearchState::On
+    {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "extension_install_refused",
+            extension = %ext.id,
+            reason = BUILT_IN_SEARCH_ON_REASON,
+            "marketplace install refused: the built-in web search already covers it"
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": BUILT_IN_SEARCH_ON, "reason": BUILT_IN_SEARCH_ON_REASON})),
+        )
+            .into_response();
+    }
 
     let secrets: std::collections::HashMap<String, String> = body
         .and_then(|b| {
@@ -15503,6 +15995,7 @@ fn recipe_extension_to_tool_group(name: &str) -> Option<&'static str> {
         "device" | "developer" => Some("giap-device"),
         // Not `giap-matter`: that's the matter.js websocket protocol, not a tool group.
         "matter" | "home" => Some("giap-device-control"),
+        "vision" => Some("giap-vision"),
         _ => None,
     }
 }
@@ -15709,16 +16202,8 @@ async fn pond_capabilities(
                 .collect()
         })
         .unwrap_or_default();
-    let web_search = settings.ext_knowledge_enabled
-        && match &state.secret_repo {
-            Some(repo) => repo
-                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|key| !key.trim().is_empty()),
-            None => false,
-        };
+    let web_search = crate::web_search::built_in_state(state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
     PondCapabilities {
         presence,
         identified_member: member.is_some(),
@@ -19506,7 +19991,7 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    let mut context = particulars_for(attributed, &profile.preferences);
+    let mut context = particulars_for(attributed, &profile.display_name, &profile.preferences);
     // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
     let notes_are_theirs = attributed
         || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
@@ -19548,20 +20033,19 @@ async fn interview_turn_for(
     }
 }
 
-/// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
+/// The pure half of [`profile_context_for`]: what the prompt may state about this member.
 /// Keys are the contract with `PATCH /api/v1/profiles/{id}`; a camelCase key is ignored.
 fn particulars_for(
     attributed: bool,
+    display_name: &str,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
     if attributed {
-        return ProfileContext::of_member(prefs, Vec::new());
+        return ProfileContext::of_member(display_name, prefs, Vec::new());
     }
     ProfileContext {
-        // Owner-scoped: stated only when the turn is attributed to this person.
-        preferred_name: attributed
-            .then(|| prefs.get("preferred_name").cloned())
-            .flatten(),
+        // Owner-scoped: never stated on a turn that is not this person's own.
+        speaker_name: None,
         birthday: attributed.then(|| prefs.get("birthday").cloned()).flatten(),
         language: attributed.then(|| prefs.get("language").cloned()).flatten(),
         // Household-safe: an accommodation, not a disclosure.
@@ -20902,6 +21386,51 @@ mod tests {
         );
     }
 
+    /// "Let me check the weather" is the model at work: the answer is what follows the last call.
+    #[test]
+    fn text_before_a_tool_call_leaves_the_answer_as_working_notes() {
+        let mut turn = accumulator();
+        let narration = frame_of(turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        }));
+        let shown = narration["content"]
+            .as_str()
+            .expect("content is a string")
+            .to_string();
+
+        let call = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_weather".to_string(),
+            id: "call-1".to_string(),
+            input: None,
+        }));
+        assert_eq!(
+            call["working_notes"], shown,
+            "the client strips exactly what it was shown, so the notes must be that text"
+        );
+        assert!(turn.full_text.is_empty(), "notes are not the answer");
+
+        let second = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_forecast".to_string(),
+            id: "call-2".to_string(),
+            input: None,
+        }));
+        assert!(
+            second.get("working_notes").is_none(),
+            "a call with no text before it carries no notes, not an empty string"
+        );
+
+        turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        });
+        let tail = turn.thought.flush();
+        assert_eq!(
+            format!("{}{tail}", turn.full_text),
+            SENTENCE,
+            "the answer is the text after the last call, whole: none of the held-back \
+             narration may lead it"
+        );
+    }
+
     /// `TurnMetrics` timing is gathered only here, and its consumers have no test in this crate.
     #[test]
     fn a_tool_call_and_its_result_time_the_turn() {
@@ -21243,8 +21772,12 @@ mod tests {
 
     #[test]
     fn an_owner_scoped_turn_states_the_members_particulars() {
-        let ctx = particulars_for(true, &full_prefs());
-        assert_eq!(ctx.preferred_name.as_deref(), Some("Cap"));
+        let ctx = particulars_for(true, "Captain Amina", &full_prefs());
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Cap"),
+            "a preferred name is what the member asked to be called, so it wins"
+        );
         assert_eq!(ctx.birthday.as_deref(), Some("1990-04-02"));
         assert_eq!(ctx.language.as_deref(), Some("sw"));
         assert!(ctx.atypical_speech);
@@ -21253,10 +21786,10 @@ mod tests {
     /// `Household` uses `primary_profile_id`, which may not be the person speaking.
     #[test]
     fn a_household_turn_states_no_ones_particulars() {
-        let ctx = particulars_for(false, &full_prefs());
+        let ctx = particulars_for(false, "Jerry Ochieng", &full_prefs());
         assert_eq!(
-            ctx.preferred_name, None,
-            "an unattributed turn stated the primary member's preferred name"
+            ctx.speaker_name, None,
+            "an unattributed turn named the primary member as the speaker"
         );
         assert_eq!(
             ctx.birthday, None,
@@ -21274,7 +21807,7 @@ mod tests {
     #[test]
     fn the_speech_accommodation_survives_an_unattributed_turn() {
         assert!(
-            particulars_for(false, &full_prefs()).atypical_speech,
+            particulars_for(false, "Jerry Ochieng", &full_prefs()).atypical_speech,
             "the speech accommodation was dropped for unattributed turns; it is not a \
              disclosure and dropping it makes the pond less patient with the household it was \
              configured for"
@@ -21283,12 +21816,47 @@ mod tests {
 
     /// Absent, not `Some("")`: the prompt builder would render "The user's birthday is ."
     #[test]
-    fn a_profile_with_no_preferences_yields_nothing_to_state() {
-        let ctx = particulars_for(true, &std::collections::HashMap::new());
-        assert_eq!(ctx.preferred_name, None);
+    fn a_profile_with_no_preferences_yields_nothing_to_state_but_the_name() {
+        let ctx = particulars_for(true, "Amina", &std::collections::HashMap::new());
+        assert_eq!(ctx.speaker_name.as_deref(), Some("Amina"));
         assert_eq!(ctx.birthday, None);
         assert_eq!(ctx.language, None);
         assert!(!ctx.atypical_speech);
+    }
+
+    /// The owner's phone on the Orin, 2026-11-02: linked, `preferences` `{}`, and "who am I"
+    /// answered "nothing is stored about you", because the speaker's name came only from
+    /// `preferred_name`. Nothing else named the speaker; `{{user_name}}` names whose pond it is.
+    #[test]
+    fn a_linked_member_with_no_preferred_name_is_named_by_their_display_name() {
+        let ctx = particulars_for(
+            true,
+            "Emmanuel Charles Oyugi",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Emmanuel Charles Oyugi"),
+            "a member who never set a preferred name reaches the model unnamed again"
+        );
+    }
+
+    /// A blank preferred name is a cleared field, not a name: the display name still applies.
+    #[test]
+    fn a_blank_preferred_name_falls_back_to_the_display_name() {
+        let blank: std::collections::HashMap<String, String> =
+            [("preferred_name".to_string(), "  ".to_string())].into();
+        assert_eq!(
+            particulars_for(true, "Amina", &blank)
+                .speaker_name
+                .as_deref(),
+            Some("Amina")
+        );
+        assert_eq!(
+            particulars_for(true, " ", &blank).speaker_name,
+            None,
+            "a member with no usable name rendered a speaker line with an empty name"
+        );
     }
 
     /// The desktop's `preferredName`/`atypicalSpeech` spellings, if stored, are silently ignored.
@@ -21299,9 +21867,10 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-        let ctx = particulars_for(true, &camel);
+        let ctx = particulars_for(true, "Amina", &camel);
         assert_eq!(
-            ctx.preferred_name, None,
+            ctx.speaker_name.as_deref(),
+            Some("Amina"),
             "camelCase keys are now read, so the two spellings have silently become \
              equivalent and the writer contract is no longer pinned by anything"
         );
@@ -21321,6 +21890,7 @@ mod tests {
             "developer",
             "matter",
             "home",
+            "vision",
         ];
 
         let mut mapped = 0usize;
@@ -21555,5 +22125,38 @@ mod tests {
             other.mic_enabled = !current.mic_enabled;
             assert!(!save_needs_prewarm(&current, &other));
         }
+    }
+}
+
+#[cfg(test)]
+mod session_preview_tests {
+    use super::session_preview;
+
+    /// The Jetson's "System information" card read "**Operating System and Hardware:** * **OS:**
+    /// Ubuntu 22.04 * **Kernel:** ..." on both the dashboard and the phone.
+    #[test]
+    fn a_markdown_reply_previews_as_plain_words() {
+        let reply = "Here is the current system information for this pond:\n\n\
+                     ### Operating System and Hardware\n\
+                     * **OS:** Ubuntu 22.04\n\
+                     * **Kernel:** 5.15.148-tegra\n\
+                     ---\n\
+                     See [the docs](https://example.org) for more.";
+        assert_eq!(
+            session_preview(reply),
+            "Here is the current system information for this pond: Operating System and \
+             Hardware OS: Ubuntu 22.04 Kernel: 5.15.148-tegra See the docs for more."
+        );
+    }
+
+    #[test]
+    fn a_plain_reply_is_unchanged_and_a_long_one_is_capped() {
+        assert_eq!(session_preview("It will be sunny."), "It will be sunny.");
+        let long = "word ".repeat(100);
+        let preview = session_preview(&long);
+        assert!(
+            preview.ends_with('…') && preview.chars().count() <= 241,
+            "{preview}"
+        );
     }
 }

@@ -15,6 +15,7 @@ vi.mock("../api/PondApiClient", () => ({
     pauseSchedule: vi.fn(),
     resumeSchedule: vi.fn(),
     runScheduleNow: vi.fn(),
+    getScheduleRuns: vi.fn(),
   },
 }));
 
@@ -362,5 +363,40 @@ describe("Schedules create", () => {
     expect(api.createSchedule).toHaveBeenCalledWith(
       expect.objectContaining({ cron: "0 0 8 14 3 * 2099", once: true }),
     );
+  });
+});
+
+describe("Schedules run history", () => {
+  const markdownResult =
+    "**Weather Briefing (Nairobi)**\n\n### Today\n\n*   **Exchange Rate:** 129 KES\n*   **Forecast:** clear";
+
+  it("previews a collapsed run as plain text and renders the expanded run as markdown", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([activeSchedule]);
+    vi.mocked(api.getScheduleRuns).mockResolvedValue([
+      {
+        id: "run-1",
+        schedule_id: activeSchedule.id,
+        status: "completed",
+        result: markdownResult,
+        started_at: new Date().toISOString(),
+      },
+    ]);
+
+    const { container } = renderSchedules();
+    fireEvent.click(await screen.findByText("History"));
+
+    const preview = await waitFor(() => {
+      const el = container.querySelector(".sched-run-row__result");
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    });
+    expect(preview.textContent).toBe("Weather Briefing (Nairobi) Today Exchange Rate: 129 KES Forecast: clear");
+
+    fireEvent.click(preview);
+
+    await waitFor(() => expect(preview.querySelector("strong")?.textContent).toBe("Weather Briefing (Nairobi)"));
+    expect(preview.querySelectorAll("li")).toHaveLength(2);
+    expect(preview.querySelector(".md__h")?.textContent).toBe("Today");
+    expect(preview.textContent).not.toMatch(/\*\*|###/);
   });
 });

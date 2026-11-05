@@ -76,7 +76,7 @@ the code is the knob.
 
 | Stamp | When | What it sets | Log line |
 |---|---|---|---|
-| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V, no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
+| `apply_jetson_settings` | CUDA builds, or any build under a `POND_DEVICE_PROFILE` | `n_gpu_layers 99`, the derived `context_size`, `n_batch 512`, `n_ubatch 256` (512 with a picture add-on), `n_threads 4`, flash attention, f16 K and V with q8_0 when memory is tight (`KvCachePolicy::Q8WhenTight`), no mlock, tool mode and thinking read from the model's chat template | `Applied Jetson Orin Nano CUDA settings`, after `Jetson context sized to fit this model's KV cache in the LLM budget` |
 | `apply_platform_settings` | Every other build | `n_gpu_layers 99`, context sized by goose from free memory, `n_batch 512`, flash attention, template-derived tool mode and thinking | `Metal/platform settings applied to model ...`; on aarch64 Linux the same line begins `CPU-ONLY (built without the cuda feature)` |
 | `apply_litert_settings` | LiteRT-LM rows | The engine window and execution backend (`pond_core::models::domain::litert::engine_options`) | `Applied LiteRT-LM settings` |
 
@@ -94,6 +94,22 @@ never overwrite them.
   between 2,048 and 16,384 (`MAX_CTX` is a latency cap: a cold 16K prefill is about 20 s on the
   Orin). A picture add-on is charged against the budget when declared; an allowlisted Gemma model
   keeps 16,384.
+- **Unified memory, at load** (Linux with an integrated GPU: the Orin). The engine narrows the
+  window it was asked for to what the memory free after the load buys (`MemoryFit` in
+  `goose-local-inference/src/llamacpp/memory.rs`, logged as `kind="context_sized"`). Free is the
+  kernel's `MemFree` once the model's files are out of the page cache, less the picture add-on's
+  weights; from it come a 256 MiB compute reserve (not yet measured with one logits row; replace it
+  with the `compute buffer size` llama.cpp logs on the Orin) and a 512 MiB margin. The KV cost per
+  token is read from the model's metadata and charges every layer that owns KV the full window at
+  the full key width, which over-states sliding-window layers under the windowed cache; the header
+  does not say which layers slide. A window that fits is kept exactly. One that does not steps down
+  16,384 / 12,288 / 8,192 / 6,144 / 4,096 and never below 4,096. The fit is fixed per load, so the
+  retained context and the preamble snapshot's key do not move with free memory turn to turn; a
+  drafter attached after the load measures it again. A prompt is admitted against the narrowed
+  window (`admit_prompt` in `inference_engine.rs`): a set limit (a pin or the request's
+  `context_limit`) admits a prompt past the engine's own memory estimate, but never past the fit,
+  and without one the estimate bounds it too. A prompt longer than the window is
+  `ContextLengthExceeded`, which goose answers by compacting.
 - **Any other machine**: goose sizes the context from free memory, capped by the model's own
   training length.
 - **LiteRT-LM**: fixed per engine, 8,192 tokens on the budgeted device and 16,384 elsewhere
@@ -120,6 +136,43 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   their window, and every partial resume goes through `SessionKv::window_resume`, which resumes in
   place, restores a window checkpoint, or refuses. On the Orin this took E4B's KV at 16K from 476 MiB
   to 152 MiB (q8_0) and decoded 8% faster at depth.
+- **KV cache type: f16 unless memory is tight.** The Jetson stamp asks for f16 K and V, which
+  decode 5-8% faster than q8_0 at depth on the Orin (llama-bench, E4B QAT, depth 8,192: 18.1
+  against 16.7 tok/s), with `kv_cache_policy: Q8WhenTight`. On unified memory the engine fits the
+  window to the memory free after the load (`MemoryFit` in `memory.rs`, `kind="context_sized"`),
+  and `choose_kv_cache` weighs both types there: when f16 would leave the window under
+  `KV_TIGHT_WINDOW` (8,192 tokens) and q8_0, about half the bytes per token, would leave a wider
+  one, the load takes q8_0 for K and V, and every context, snapshot key and failure estimate of the
+  model's turns uses it (`with_fitted_kv_type`). 8,192 is the narrowest rung that leaves a turn
+  about as much again as the ~3,300-token preamble; a narrower window fails a scheduled briefing,
+  which a slower decode only delays. Same window either way, f16 stays. Logged as
+  `kind="kv_cache_type_chosen"` with `preferred_n_ctx` (f16), `q8_n_ctx`, the type chosen and a
+  `reason` (`tight`, `roomy`, `requested_fits`, `q8_no_wider`, `no_candidate` without flash
+  attention). The ladder has a 5,120 rung so a load just above the floor, where q8_0 holds more
+  than 4,096 tokens but not 6,144, still gains from it.
+- **KV estimate on unified memory.** The fit reads the KV layout per layer from the GGUF file's
+  header at load (`KvMeta::read` in `memory.rs`, ggml's `gguf_init_from_file` with no tensor
+  data): `head_count_kv`, the full and sliding key and value widths, `sliding_window` and
+  `sliding_window_pattern`, less `shared_kv_layers`. Not through `LlamaModel::meta_val_str`:
+  llama.cpp keeps only scalar metadata as strings and drops every array, the per-layer pattern
+  among them, which is why the first build of this estimate charged E4B in full on the Orin. Full-attention
+  layers cost bytes per position of the window; sliding layers cost a fixed cache of
+  `GGML_PAD(n_swa + n_ubatch, 256)` cells, which is what llama.cpp's windowed cache
+  (`llama_kv_cache_iswa`) gives them at most, with `n_ubatch` charged at no less than 512 so a
+  picture turn's context is covered. A header without a per-layer pattern or a window is charged
+  every layer in full; when the model slides (it declares a window, sliding widths or a pattern)
+  that is logged as WARN `kind="kv_estimate_fallback"` with the `missing_key`, as is a header
+  that cannot be read. `kind="context_sized"` logs `kv_kib_per_token` (full layers),
+  `sliding_kv_mb`, `full_layers`, `sliding_layers` and `n_swa`. For E4B (4 full and 20 sliding
+  KV layers, 512-position window) at 16K the estimate is 296 MiB in f16 and 157 in q8_0, against
+  286 and 152 measured on the Orin at `n_ubatch` 256 (llama.cpp's sizing gives those exactly);
+  the full-window bound it replaces charged 1,536 MiB. With the 256 MiB compute reserve and the
+  512 MiB margin, E4B gets:
+
+  | Free after the load | KV budget | f16 window | q8_0 window | Chosen |
+  |---|---|---|---|---|
+  | 1,037 MB (2026-11-02, encoder reserved) | 269 MiB | 12,288 | 16,384 | f16, 12,288 |
+  | 1,419 MB (2026-10-28) | 651 MiB | 16,384 | 16,384 | f16, 16,384 |
 - **Stable-prefix snapshot on disk** (`prompt_snapshot.rs`). The longest token prefix every prompt
   for a model has shared (system prompt and tool schemas, never conversation) is saved under goose's
   data directory (`<data_dir>/engine/data/prompt-cache/`), keyed by model file, context size and
@@ -129,8 +182,9 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   real turn finds its prefix cached. Its progress is `state.warmup`.
 - **Logits reservation.** Contexts reserve logits for one output (`with_n_outputs_max`), or for the
   draft depth plus one with a drafter attached, instead of a full vocabulary row per ubatch token.
-- **Weights are mmapped**, so on the Orin the CPU-side tensors stay reclaimable page cache. A picture
-  add-on's encoder is loaded per picture turn, not held resident.
+- **Weights are mmapped**, so on the Orin the CPU-side tensors stay reclaimable page cache. The copy
+  of the GPU-side weights the load leaves in the page cache is released (see [Memory fit](#memory-fit)).
+  A picture add-on's encoder is loaded per picture turn, not held resident.
 
 ### Speculative decoding (MTP)
 
@@ -156,7 +210,7 @@ schemas ([prefill-cost-audit.md](prefill-cost-audit.md)).
 
 | Setting | Values (default first) | Effect |
 |---|---|---|
-| `tool_selection_mode` | `all`, `relevant`, `minimal` | `relevant` sends core groups plus those scored relevant, fixed per session so the KV prefix holds; `minimal` sends only the toolkit hatch and loads groups through `enable_tool_group` |
+| `tool_selection_mode` | `all`, `relevant`, `minimal` | `relevant` sends the core groups (memory, system, toolkit, knowledge, so web search is always offered) plus those scored relevant; the opening message picks them, each later message may add groups scored at or above the threshold and never removes one, so the KV prefix only moves when a group joins; `minimal` sends only the toolkit hatch and loads groups through `enable_tool_group` |
 | `thinking_mode` | `auto`, `on`, `off` | `auto` thinks only on models whose template supports it; on the Orin every thinking token is decode-bound silence |
 | `reasoning_effort` | `brief`, `balanced`, `thorough` | Thinking length when thinking is on |
 | `hybrid_compaction_enabled` | on | Compacts long conversations while the household is quiet, so the next turn does not stall for it |
@@ -187,7 +241,53 @@ at a fraction of that.
   `n_gpu_layers 99`.
 - On the Orin, NvMap cannot reclaim page cache, so a load can fail with `NvMap ... error 12` while
   `free` shows gigabytes available. Drop caches with the pond stopped (see
-  [jetson-power-loss-recovery.md](jetson-power-loss-recovery.md)).
+  [jetson-power-loss-recovery.md](jetson-power-loss-recovery.md)) when the cache is other files'.
+
+### Unified memory and the model's own page cache
+
+The Orin's GPU allocates from system memory through nvmap, which fails a `cudaMalloc` when `MemFree`
+runs low and does not reclaim page cache for it. llama.cpp maps the GGUF and copies the GPU-resident
+weights out of the mapping, so a load leaves those bytes in the page cache as a second copy, and
+llama.cpp reports `MemAvailable` (which counts that cache) as the device's free memory. On
+2026-10-27, switching to Gemma 4 E4B (`UD-Q2_K_XL`, a 3.2 GB file, about 2.2 GB of it on the GPU)
+failed every turn: with 4.0 GB of cache the 2,197 MiB weight allocation failed; after
+`drop_caches` the weights loaded but the cache grew by 2.2 GB, 251 MB stayed free, and a 42 MiB
+allocation and then the 256 MiB KV cache failed. The chat showed "Ran into this error: Execution
+error: null result from llama cpp."
+
+What the engine does now (`goose-local-inference/src/llamacpp/memory.rs`), on Linux with a GPU:
+
+- **Releases the model's files from the page cache** while llama.cpp loads them (its progress
+  callback, every 256 MiB), once the target and its drafter are loaded (or the drafter attaches
+  later), and once a picture add-on's encoder is. A released file's pages this process maps are paged out with
+  `madvise(MADV_PAGEOUT)` (Linux 5.4+; a no-op for file pages of a file the pond user neither owns
+  nor can write), then the file is advised away with `posix_fadvise(POSIX_FADV_DONTNEED)`, which by
+  itself skips mapped pages. Neither changes what the mapping reads: a CPU-side tensor row is read
+  back from disk the next time a token needs it. Logged as `kind="page_cache_released"` with
+  `MemFree` and `Cached` before and after.
+- **Maps the model on the first attempt, reads it on a retry.** Without mmap llama.cpp copies the
+  CPU-side tensors (1,872 MiB for E4B) into host memory nothing can reclaim; mapped, a token reads
+  only its own rows. But a load maps with `MAP_POPULATE` and `MADV_WILLNEED`, so the whole file
+  enters the page cache before the GPU buffers are allocated. On 2026-10-27 a released cache
+  (1,874 to 4,915 MiB free) refilled to 3.3 GB within a mapped retry and the 2,197 MiB weight
+  allocation failed again. So with unified memory the retry reads the file: the buffers are
+  allocated first and the progress release keeps the cache small (`retry_mapped=false`).
+- **Retries a failed allocation once** after releasing the loaded models' files, for the weights
+  and for a context (`kind="model_load_retry"`, with free memory before and after). A second
+  failure with `MemFree` short of what the stage needs plus the 512 MiB margin is
+  `ModelLoadError::OutOfGpuMemory` (`goose-local-inference/src/load_error.rs`,
+  `kind="model_out_of_gpu_memory"`); any other failure keeps llama.cpp's error.
+- **Says so in the chat.** The provider shim counts that typed error per session and
+  `GooseAdapter` replaces goose's "Ran into this error" prose with "The model could not load: the
+  Pond is out of GPU memory. Try a smaller model on the Models page, or restart the Pond."
+  (`kind="turn_out_of_gpu_memory"`), on both chat streaming endpoints.
+
+The preamble snapshot slot (`kv snapshot slot created`) allocates no context; the snapshot is read
+into the one context the turn already has. The drafter's context shares the target's KV.
+
+A row the goose adapter registers for a model takes the device stamp of another row naming the
+same file (`stamped_settings_for` in `goose_agent.rs`), so a live switch no longer leaves the row
+it loads with goose's defaults.
 
 ## Measuring
 

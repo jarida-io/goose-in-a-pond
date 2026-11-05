@@ -25,6 +25,7 @@ import {
   type EventName,
   type Greeting,
   type Reading,
+  type StateChange,
   type Request,
 } from "./protocol.js";
 
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     availabilityChanged: (deviceId: string, online: boolean) =>
       broadcast("device_availability", { device_id: deviceId, online }),
     reading: (reading: Reading) => broadcast("reading", reading),
+    deviceState: (change: StateChange) => broadcast("device_state", change),
   });
 
   // Logs over the socket too: a controller pond-server did not spawn has no stderr relay.
@@ -244,6 +246,11 @@ async function dispatch(controller: Controller, request: Request): Promise<unkno
     case "state": {
       const deviceId = requireDeviceId(params.device_id);
       return { state: controller.state(deviceId) };
+    }
+
+    case "state_patch": {
+      const deviceId = requireDeviceId(params.device_id);
+      return { patch: controller.statePatch(deviceId) };
     }
 
     default:

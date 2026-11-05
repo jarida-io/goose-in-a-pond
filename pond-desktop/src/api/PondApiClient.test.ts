@@ -1373,6 +1373,51 @@ describe("per-instance client id", () => {
   });
 });
 
+// The dashboard and the app pair with the same client_type, so the name is what tells them apart.
+describe("device name at pairing", () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  function mockPairing(): () => { device_name?: string; client_type?: string } {
+    const sent: { device_name?: string; client_type?: string } = {};
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/handshake/pairing-code"))
+        return okJson({ code: "123456", expires_at: future });
+      if (url.includes("/handshake/init")) {
+        sent.client_type = JSON.parse(String(init?.body)).client_type;
+        return okJson({ challenge: "ch", challenge_id: "cid" });
+      }
+      if (url.includes("/handshake/verify")) {
+        sent.device_name = JSON.parse(String(init?.body)).device_name;
+        return okJson({ accepted: true, session_token: "t", refresh_token: "r", expires_at: future });
+      }
+      return okJson({});
+    });
+    return () => sent;
+  }
+
+  afterEach(() => {
+    delete window.giap;
+    localStorage.clear();
+  });
+
+  it("names itself the Pond dashboard in a plain browser", async () => {
+    const sent = mockPairing();
+    await client().pair();
+    expect(sent()).toEqual({ client_type: "desktop", device_name: "Pond dashboard" });
+  });
+
+  it("names itself Pond Desktop inside the desktop app", async () => {
+    window.giap = {
+      serverUrl: "http://localhost:4000",
+      invoke: vi.fn().mockResolvedValue(null),
+      listen: () => () => {},
+    } as unknown as NonNullable<Window["giap"]>;
+    const sent = mockPairing();
+    await client().pair();
+    expect(sent()).toEqual({ client_type: "desktop", device_name: "Pond Desktop" });
+  });
+});
+
 // Pairing registers the desktop as a device row; `is_online` ages out after five minutes of no beat.
 describe("heartbeatSelf()", () => {
   const future = new Date(Date.now() + 3_600_000).toISOString();

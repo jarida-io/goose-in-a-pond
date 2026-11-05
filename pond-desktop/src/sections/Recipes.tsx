@@ -12,17 +12,11 @@ import { isAgentYaml } from "../agents/agentModel";
 import { clearOpenAgent, peekOpenAgent } from "../agents/openAgent";
 import { useAgentEnvironment } from "../agents/useAgentEnvironment";
 import { useRecipeList } from "../agents/useRecipeList";
+import { ScheduleOrRecipe } from "./ScheduleOrRecipe";
+import { TOOL_REACH } from "./toolReach";
 
-// ── Extension vocabulary ──────────────────────────────────────────────────
-// Names `recipe_extension_to_tool_group` (crates/pond-api/src/routes.rs) knows; others round-trip via YAML.
-const EXTENSION_OPTIONS: Array<{ name: string; label: string }> = [
-  { name: "weather", label: "Weather" },
-  { name: "schedule", label: "Schedule" },
-  { name: "memory", label: "Memory" },
-  { name: "device", label: "Devices" },
-  { name: "matter", label: "Home / Matter" },
-  { name: "vision", label: "Vision" },
-];
+// Other extension names round-trip via YAML.
+const EXTENSION_OPTIONS = TOOL_REACH.flatMap((t) => (t.recipe ? [{ name: t.recipe, label: t.label }] : []));
 
 const INPUT_TYPES: RecipeParameter["input_type"][] = ["string", "number", "boolean", "date", "select"];
 const REQUIREMENTS: RecipeParameter["requirement"][] = ["required", "optional"];
@@ -464,6 +458,8 @@ export function Recipes() {
 
       {error && <p className="text-error text-error--sm">{error}</p>}
 
+      <ScheduleOrRecipe />
+
       <AgentSuggestions
         variant="recipes"
         onEnabled={(recipe) => {
@@ -492,7 +488,7 @@ export function Recipes() {
           <h2 className="ag-list__title" id="recipes-other-heading">
             Other recipes{!loading && others.length > 0 ? <span className="ag-list__count"> {others.length}</span> : null}
           </h2>
-          <p className="ag-hint">Repeatable routines you run yourself. They have no schedule of their own.</p>
+          <p className="ag-hint">Tasks you run yourself. They have no schedule of their own.</p>
         </div>
         {loading ? null : others.length === 0 ? (
           <Card className="card">

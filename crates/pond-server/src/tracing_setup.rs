@@ -658,8 +658,7 @@ mod tests {
     #[test]
     fn no_giap_trace_event_is_emitted_at_a_level_the_filter_drops() {
         const GRANDFATHERED: &[&str] = &[
-            // Frequent and user-initiated; promote if a Matter fault needs a captured log.
-            "matter_device_command",
+            // Frequent; promote if a Matter fault needs a captured log.
             "matter_sources_refreshed",
             // Per-turn; its INFO sibling `turn_device_*` covers what's been needed.
             "turn_device_identified",
@@ -667,6 +666,12 @@ mod tests {
             "history_trim_skipped",
             // Fires on every proposals poll on a one-member pond; INFO would flood the log.
             "proposal_caller_sole_member",
+            // Per tool call that followed narration; INFO would log most agentic steps.
+            "working_notes",
+            // Every goose compaction and tool summary call; INFO would log each one.
+            "system_passthrough_auxiliary",
+            // On every conversation-list read once a schedule has run; INFO would flood the log.
+            "machine_sessions_unlisted",
         ];
 
         let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

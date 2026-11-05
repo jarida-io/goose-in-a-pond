@@ -60,14 +60,16 @@ measured on its own scheme's ground, `#FAF3E1` in light and `#131119` in dark:
 | `--color-bg` | `#FAF3E1` · `#131119` | — | Jarida Warm White. The ground. Warm, not neutral |
 | `--color-text` | `#171616` · `#F3F1F8` | 16.32:1 · 16.71:1 | Jarida Charcoal. Body text |
 | `--color-accent` | `#7C3AED` · `#7C3AED` | 5.15:1 · **3.28:1** | The household's accent. Edges, rings, fills — **never body text** |
-| `--border-ink` | `#7C3AED` · `#7C3AED` | 5.15:1 · 3.28:1 | The ink line, and the hard offset shadow. Follows the accent |
+| `--border-ink` | `#7C3AED` · `#7D3BED` | 5.15:1 · 3.32:1 | The ink line, and the hard offset shadow. Follows the accent |
 | `--color-text-secondary` | `#566178` · `rgba(243,241,248,0.55)` | 5.62:1 · 5.65:1 | Slate. Meta, captions, provenance |
 | `--bg-brand-soft` | `#F5F3FF` · `#241C33` | — | Quiet fill |
 
 `design-tokens.css` alone does not give these values. `hub/state/themeStore.ts` writes
 `@jarida/ink`'s tokens inline on `<html>`, and inline beats the stylesheet, so the accent, text and
 fill above are ink's. It then removes ink's `--color-bg`, so the ground is the stylesheet's, and
-re-points `--border-ink` at the chosen accent. Measure what the page computes, not what a file says.
+re-points `--border-ink` at the chosen accent, floored at 3:1 on the page and every panel. Dark
+Purple is 2.97:1 on the `#1E1B26` panel, so its edge moves one step per channel to `#7D3BED`, too
+small to see. Measure what the page computes, not what a file says.
 
 **The accent is not a text colour.** The household picks it under Appearance → Accent. Purple, the
 default, is 5.15:1 on the light ground, enough for body copy, and 3.28:1 on the dark one, which is

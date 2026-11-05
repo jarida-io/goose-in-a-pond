@@ -12,7 +12,7 @@ import { deviceClusters, nodeToDevice } from "./mapping/devices.js";
 import { observedFor, planControl, type Verb } from "./mapping/control.js";
 import { observedOperation, settingClusters } from "./mapping/settings.js";
 import { describeNode } from "./mapping/describe.js";
-import { stateOf } from "./mapping/state.js";
+import { seedStates, stateChanges, stateOf, statePatchOf } from "./mapping/state.js";
 import { readingFor, sensorClusters } from "./mapping/sensors.js";
 import {
   applicationEndpoints,
@@ -37,6 +37,7 @@ import {
   type DeviceStatePatch,
   type DiscoveredDevice,
   type Reading,
+  type StateChange,
 } from "./protocol.js";
 
 /** The ServerNode id, and so the name of its directory under `--storage-path`. Stable: it is the fabric. */
@@ -72,6 +73,7 @@ export interface ControllerEvents {
   deviceRemoved(deviceId: string): void;
   availabilityChanged(deviceId: string, online: boolean): void;
   reading(reading: Reading): void;
+  deviceState(change: StateChange): void;
 }
 
 export class Controller {
@@ -84,6 +86,8 @@ export class Controller {
   #observed = new Map<string, Set<string>>();
   /** The last value published per device and sensor, so a sweep only says what changed. */
   #lastRead = new Map<string, number>();
+  /** Each device's state as last published, so a change says only what moved. */
+  #lastState = new Map<string, Map<string, string>>();
 
   private constructor(node: ServerNode, events: ControllerEvents) {
     this.#node = node;
@@ -346,6 +350,13 @@ export class Controller {
     return stateOf(slice);
   }
 
+  /** The same snapshot as `state`, typed instead of worded -- what GIAP's "undo" replays a
+   * reversed command against. */
+  statePatch(deviceId: string): DeviceStatePatch {
+    const [, slice] = this.#sliceFor(deviceId);
+    return statePatchOf(slice);
+  }
+
   /** Drive a device. Returns what the device state became. */
   async control(deviceId: string, verb: Verb, value: unknown): Promise<DeviceStatePatch> {
     const [peer, slice] = this.#sliceFor(deviceId);
@@ -506,6 +517,10 @@ export class Controller {
   #wireChanges(peer: ClientNode): void {
     const wired = this.#observed.get(peer.id);
     if (wired === undefined) return;
+    const nodeId = peerNodeId(peer);
+    if (nodeId !== undefined) {
+      seedStates(this.#lastState, deviceSlices(snapshotOf(peer, nodeId)).map(stateOf));
+    }
 
     // Clusters this pass declined to watch, logged once at the end.
     const skipped: string[] = [];
@@ -576,6 +591,18 @@ export class Controller {
           if (reading !== undefined) {
             this.#events.reading(reading);
             return;
+          }
+          if (owner !== undefined) {
+            const state = stateOf(owner);
+            let last = this.#lastState.get(state.device_id);
+            if (last === undefined) {
+              last = new Map();
+              this.#lastState.set(state.device_id, last);
+            }
+            const at = new Date().toISOString();
+            for (const change of stateChanges(last, state)) {
+              this.#events.deviceState({ device_id: state.device_id, ...change, at });
+            }
           }
           // Identity changes (name, type, reachability, children) republish every device on the node: a
           // descriptor change is how a bridge adds a child, and Rust treats added/updated alike.

@@ -106,9 +106,9 @@ pub const RECOMMENDED: &[Recommendation] = &[
         reason: "Finds facts in Swahili, Sheng or English, whichever language you ask in",
         measured: &[Measured {
             device: DeviceClass::Orin,
-            summary: "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right \
-                      Swahili or mixed-language fact in its top five 73% of the time, against \
-                      39% for the default",
+            summary: "Searches memory in 18 ms on the graphics processor (GPU) or 41 ms on the \
+                      main processor (CPU). Puts the right Swahili or mixed-language fact in its \
+                      top five 73% of the time, against 39% for all-MiniLM-L6-v2, the default",
             first_reply_s: None,
             tokens_per_second: None,
             window_tokens: None,
@@ -119,6 +119,13 @@ pub const RECOMMENDED: &[Recommendation] = &[
 
 pub fn recommendation_for(model_id: &str) -> Option<&'static Recommendation> {
     RECOMMENDED.iter().find(|r| r.model_id == model_id)
+}
+
+/// Whether a Memory recommendation stands on this pond: not for a model that takes more than
+/// `free_mb`, MemAvailable plus what the model in use gives back, so the margin spent too. The
+/// model running now stands; with nothing read, every one does.
+pub fn memory_recommendation_stands(takes_mb: u64, free_mb: Option<u64>, running: bool) -> bool {
+    running || free_mb.is_none_or(|free| takes_mb <= free)
 }
 
 #[cfg(test)]
@@ -193,5 +200,43 @@ mod tests {
                 .and_then(|m| m.window_tokens),
             Some(16_384)
         );
+    }
+
+    /// DESIGN.md section 6: an acronym is spelled out where it is used, and a comparison names what
+    /// it is compared with.
+    #[test]
+    fn a_measured_sentence_is_plain_language() {
+        for r in RECOMMENDED {
+            for m in r.measured {
+                for (short, spelled) in [
+                    ("GPU", "graphics processor (GPU)"),
+                    ("CPU", "main processor (CPU)"),
+                ] {
+                    assert!(
+                        !m.summary.contains(short) || m.summary.contains(spelled),
+                        "{}: {short}",
+                        r.model_id
+                    );
+                }
+                assert!(
+                    !m.summary.contains("for the default"),
+                    "{}: name the default",
+                    r.model_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_memory_recommendation_goes_only_where_the_model_cannot_load() {
+        use crate::models::domain::embedding_models::EMBEDDINGGEMMA_2;
+        let takes = EMBEDDINGGEMMA_2.ram_estimate_mb();
+        assert!(memory_recommendation_stands(takes, Some(takes), false));
+        assert!(!memory_recommendation_stands(takes, Some(takes - 1), false));
+        assert!(
+            memory_recommendation_stands(takes, Some(0), true),
+            "the model running here has loaded"
+        );
+        assert!(memory_recommendation_stands(takes, None, false));
     }
 }
