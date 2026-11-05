@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { planControl } from "../src/mapping/control.js";
 import { describeNode } from "../src/mapping/describe.js";
-import { stateChanges, stateOf, statePatchOf } from "../src/mapping/state.js";
+import { seedStates, stateChanges, stateOf, statePatchOf } from "../src/mapping/state.js";
 import {
   bareLockNode,
   coOnlyAlarmNode,
@@ -390,6 +390,16 @@ describe("state changes", () => {
       { name: "brightness", value: brightness },
       { name: "occupancy", value: "occupied" },
     ],
+  });
+
+  it("reports only what moved after a seed, and never reseeds a tracked device", () => {
+    const tracked = new Map<string, Map<string, string>>();
+    seedStates(tracked, [state("off", "40%")]);
+    const last = tracked.get("matter-1")!;
+    expect(stateChanges(last, state("off", "60%"))).toEqual([{ name: "brightness", value: "60%" }]);
+    seedStates(tracked, [state("on", "10%")]);
+    expect(tracked.get("matter-1")).toBe(last);
+    expect(stateChanges(last, state("off", "60%"))).toEqual([]);
   });
 
   it("reports everything first, then only what moved, and never a sensor", () => {

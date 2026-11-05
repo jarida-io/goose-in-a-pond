@@ -312,3 +312,14 @@ export function stateChanges(last: Map<string, string>, state: DeviceState): Sta
   for (const v of changed) last.set(v.name, v.value);
   return changed;
 }
+
+/** Records what each device reads now, for devices not yet tracked, so its first change reports
+ *  only what moved rather than every value. */
+export function seedStates(lastState: Map<string, Map<string, string>>, states: DeviceState[]): void {
+  for (const state of states) {
+    if (lastState.has(state.device_id)) continue;
+    const last = new Map<string, string>();
+    stateChanges(last, state);
+    lastState.set(state.device_id, last);
+  }
+}
