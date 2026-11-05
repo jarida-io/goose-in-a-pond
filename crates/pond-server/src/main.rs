@@ -2984,9 +2984,9 @@ async fn run_server(
 
     let last_action: Arc<
         dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
     // (the log only records changes). Anywhere before serving is early enough.
@@ -5156,9 +5156,9 @@ async fn run_chat(
     let db = Database::init(&data_dir).await?;
     let last_action: Arc<
         dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
@@ -9507,7 +9507,9 @@ async fn build_goose_backend(
     device_control: Arc<
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
-    last_action: Arc<dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync>,
+    last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    >,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
@@ -10218,9 +10220,9 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
 
     let last_action: Arc<
         dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_last_action::SqliteLastActionRepository::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,

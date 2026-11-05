@@ -798,8 +798,7 @@ mod tests {
     #[test]
     fn the_state_patch_deserialises_straight_into_the_core_type() {
         let result: StatePatchResult =
-            serde_json::from_value(json!({ "patch": { "locked": true, "valve": false } }))
-                .unwrap();
+            serde_json::from_value(json!({ "patch": { "locked": true, "valve": false } })).unwrap();
         assert_eq!(result.patch.locked, Some(true));
         assert_eq!(result.patch.valve, Some(false));
         assert_eq!(result.patch.on, None);

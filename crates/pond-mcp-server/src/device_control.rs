@@ -529,7 +529,11 @@ impl DeviceControlMcpServer {
         // before anything changes, so undo has a "before" to restore. Either missing (no live
         // turn resolves to a member, or the backend can't report a typed state) just means this
         // command won't be undoable; it still runs.
-        let owner_id = self.last_action.is_some().then(|| self.owner_for(meta)).flatten();
+        let owner_id = self
+            .last_action
+            .is_some()
+            .then(|| self.owner_for(meta))
+            .flatten();
         let before = match &owner_id {
             Some(_) => self.control.state_patch(device_id).await.ok(),
             None => None,
@@ -1821,8 +1825,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(format!("{:?}", result.content).contains("power=on"), "the command still ran");
-        assert_eq!(control.last_call().as_deref(), Some("set_power(lamp-1, on=true)"));
+        assert!(
+            format!("{:?}", result.content).contains("power=on"),
+            "the command still ran"
+        );
+        assert_eq!(
+            control.last_call().as_deref(),
+            Some("set_power(lamp-1, on=true)")
+        );
         assert!(last_action.last_for("amina").await.unwrap().is_none());
     }
 
@@ -1892,7 +1902,10 @@ mod tests {
             "{:?}",
             result.content
         );
-        assert_eq!(control.last_call().as_deref(), Some("set_power(lamp-1, on=false)"));
+        assert_eq!(
+            control.last_call().as_deref(),
+            Some("set_power(lamp-1, on=false)")
+        );
         assert!(
             last_action.last_for("amina").await.unwrap().is_none(),
             "a fully reversed action should be forgotten"

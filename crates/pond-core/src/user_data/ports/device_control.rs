@@ -62,8 +62,21 @@ impl DeviceStatePatch {
             };
         }
         take!(
-            on, brightness, volume, target_temp, locked, hue, saturation, color_temp, fan_speed,
-            fan_mode, position, tilt, valve, mode, operation
+            on,
+            brightness,
+            volume,
+            target_temp,
+            locked,
+            hue,
+            saturation,
+            color_temp,
+            fan_speed,
+            fan_mode,
+            position,
+            tilt,
+            valve,
+            mode,
+            operation
         );
     }
 
@@ -78,8 +91,21 @@ impl DeviceStatePatch {
             };
         }
         clear_untouched!(
-            on, brightness, volume, target_temp, locked, hue, saturation, color_temp, fan_speed,
-            fan_mode, position, tilt, valve, mode, operation
+            on,
+            brightness,
+            volume,
+            target_temp,
+            locked,
+            hue,
+            saturation,
+            color_temp,
+            fan_speed,
+            fan_mode,
+            position,
+            tilt,
+            valve,
+            mode,
+            operation
         );
         if template.hue.is_some() || template.saturation.is_some() || template.color_temp.is_some()
         {
