@@ -51,6 +51,18 @@ void i18n.use(initReactI18next).init({
   }, extensions: {
     noTools: 'Running, no assistant tools here',
     noToolsGeneric: 'This extension is running, but it gives the assistant nothing to use on this Pond.',
+    builtIn: 'Built in',
+    builtInOn: 'Web search is built in and already uses your Brave key.',
+    builtInNeedsKey: 'Web search is built in. Add your Brave key to it instead; no extension is needed.',
+    builtInKnowledgeOff: 'Web search is built in. Turn on Knowledge in Settings to use it; no extension is needed.',
+    turnOnWebSearch: 'Turn on web search',
+    hideWebSearch: 'Hide web search',
+    redundant: 'Not needed',
+    redundantReason: 'Web search is built in and already uses your Brave key, so this extension only adds tools to every prompt.',
+    remove: 'Remove',
+    removeNamed: 'Remove {{name}}',
+    removed: '{{name}} removed.',
+    removeFailed: 'Could not remove {{name}}: {{error}}',
   }, memory: {
     kept: 'Kept',
     segment: {

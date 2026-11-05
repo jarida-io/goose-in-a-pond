@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use pond_core::mcp::domain::marketplace::BuiltInCapability;
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::mesh::domain::millisats::Millisats;
 use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
@@ -12335,7 +12336,15 @@ async fn toggle_extension_handler(
 
 // ── Extension Marketplace ────────────────────────────────────────────────────
 
-/// `GET /api/v1/marketplace` — list available extensions from the curated registry.
+/// What the install route answers for a catalogue entry the built-in web search already covers.
+pub const BUILT_IN_SEARCH_ON: &str = "Web search is built in and already uses your Brave key.";
+
+/// The `reason` beside [`BUILT_IN_SEARCH_ON`], for a client to match instead of the sentence.
+pub const BUILT_IN_SEARCH_ON_REASON: &str = "built_in_web_search_on";
+
+/// `GET /api/v1/marketplace` — list available extensions from the curated registry. An entry that
+/// duplicates a built-in capability also carries `built_in_state`: `on`, `needs_key` or
+/// `knowledge_off`, from [`crate::web_search::built_in_state`].
 async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(mp) = &state.marketplace else {
@@ -12346,7 +12355,26 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
             .into_response();
     };
     match mp.list_available().await {
-        Ok(exts) => Json(json!({"extensions": exts})).into_response(),
+        Ok(exts) => {
+            let search = if exts.iter().any(|e| e.built_in.is_some()) {
+                Some(crate::web_search::built_in_state(&state).await)
+            } else {
+                None
+            };
+            let listed: Vec<serde_json::Value> = exts
+                .iter()
+                .map(|ext| {
+                    let mut entry = json!(ext);
+                    if let (Some(BuiltInCapability::WebSearch), Some(search)) =
+                        (ext.built_in, search)
+                    {
+                        entry["built_in_state"] = json!(search.as_str());
+                    }
+                    entry
+                })
+                .collect();
+            Json(json!({"extensions": listed})).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -12356,6 +12384,7 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
 }
 
 /// `POST /api/v1/marketplace/{id}/install` — optional `{ "secrets": {…} }`; 428 lists missing ones.
+/// 409 refuses an entry the built-in web search covers while that search is on.
 async fn install_marketplace_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -12394,6 +12423,24 @@ async fn install_marketplace_handler(
                 .into_response();
         }
     };
+
+    if ext.built_in == Some(BuiltInCapability::WebSearch)
+        && crate::web_search::built_in_state(&state).await
+            == pond_core::mcp::domain::web_search::BuiltInSearchState::On
+    {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "extension_install_refused",
+            extension = %ext.id,
+            reason = BUILT_IN_SEARCH_ON_REASON,
+            "marketplace install refused: the built-in web search already covers it"
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": BUILT_IN_SEARCH_ON, "reason": BUILT_IN_SEARCH_ON_REASON})),
+        )
+            .into_response();
+    }
 
     let secrets: std::collections::HashMap<String, String> = body
         .and_then(|b| {
@@ -15743,16 +15790,8 @@ async fn pond_capabilities(
                 .collect()
         })
         .unwrap_or_default();
-    let web_search = settings.ext_knowledge_enabled
-        && match &state.secret_repo {
-            Some(repo) => repo
-                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|key| !key.trim().is_empty()),
-            None => false,
-        };
+    let web_search = crate::web_search::built_in_state(state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
     PondCapabilities {
         presence,
         identified_member: member.is_some(),

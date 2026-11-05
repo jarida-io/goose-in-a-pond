@@ -1563,6 +1563,12 @@ export interface SecretRequirement {
   host_only?: boolean;
 }
 
+/**
+ * The built-in web search as `GET /api/v1/marketplace` reports it: `on` with Knowledge on and a
+ * Brave key stored, `needs_key` with no key, `knowledge_off` with the Knowledge extension off.
+ */
+export type BuiltInSearchState = "on" | "needs_key" | "knowledge_off";
+
 export interface MarketplaceExtension {
   id: string;
   name: string;
@@ -1575,6 +1581,10 @@ export interface MarketplaceExtension {
   author: string;
   tools: string[];
   featured: boolean;
+  /** A capability the Pond ships itself that already does this extension's job. */
+  built_in?: "web_search" | null;
+  /** That capability's state on this Pond; present only with `built_in`. */
+  built_in_state?: BuiltInSearchState;
   required_secrets: SecretRequirement[];
 }
 
