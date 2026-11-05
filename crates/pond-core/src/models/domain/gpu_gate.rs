@@ -1,6 +1,7 @@
 //! Keeps ONNX Runtime from setting up a GPU session while ggml computes in this process. Its CUDA
 //! provider calls `cudaDeviceSynchronize` during setup, which is illegal while llama.cpp captures
-//! a CUDA graph, and llama.cpp aborts the process on the broken capture.
+//! a CUDA graph, and llama.cpp aborts the process on the broken capture. The embedder loads through
+//! it too, so its memory reading and its allocation never race a generation making its context.
 
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ struct State {
 #[must_use]
 pub struct ComputeGuard(&'static GpuGate);
 
-/// Held while ONNX Runtime creates or builds a GPU session.
+/// Held while a model is set up: an ONNX Runtime GPU session, or the embedder's load.
 #[must_use]
 pub struct SetupGuard(&'static GpuGate);
 
@@ -89,6 +90,13 @@ impl GpuGate {
         SetupGuard(self)
     }
 
+    /// [`Self::setup_blocking`] from async code; the wait parks a blocking thread, not a worker.
+    pub async fn setup(&'static self) -> SetupGuard {
+        tokio::task::spawn_blocking(move || self.setup_blocking())
+            .await
+            .expect("waiting for a setup does not panic")
+    }
+
     fn try_compute(&'static self) -> Option<ComputeGuard> {
         let mut state = self.lock();
         if state.setting_up {
@@ -149,7 +157,7 @@ fn note_compute_wait(started: Instant) {
             target: "giap::trace",
             kind = "gpu_compute_waited",
             waited_ms = waited.as_millis() as u64,
-            "a decode waited for an ONNX model's GPU setup"
+            "a decode waited for a model's setup"
         );
     }
 }
@@ -268,5 +276,36 @@ mod tests {
             .expect("the decode runs once the setup ends")
             .unwrap();
         let _next_setup = gate.setup_blocking();
+    }
+
+    #[tokio::test]
+    async fn an_embedder_load_waits_out_a_generation_and_holds_the_next_back() {
+        let gate = gate();
+        let generating = gate.compute_blocking();
+        let load = tokio::spawn(gate.setup());
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            !load.is_finished(),
+            "a load beside a generation can stack its allocation on the generation's context"
+        );
+        drop(generating);
+        let loading = tokio::time::timeout(PATIENCE, load)
+            .await
+            .expect("the load runs once the generation ends")
+            .unwrap();
+
+        let next = tokio::spawn(async move {
+            let _guard = gate.compute().await;
+        });
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            !next.is_finished(),
+            "a generation must not make its context during the load"
+        );
+        drop(loading);
+        tokio::time::timeout(PATIENCE, next)
+            .await
+            .expect("the generation runs once the load ends")
+            .unwrap();
     }
 }
