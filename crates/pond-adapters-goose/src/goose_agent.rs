@@ -2274,6 +2274,22 @@ impl GooseAdapter {
             .embedding_provider
             .as_ref()
             .and_then(|p| sel::relevance_floor(p.as_ref()));
+        // A held session keeps its groups when this message can't be scored: the union never
+        // shrinks, and the embedder is not ready for a while after boot or a model switch.
+        if let (Some(held), None, Some(_)) = (&held, &scores, floor) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_kept",
+                session_id = %giap_session_id,
+                reason = "no_scores",
+                groups = held.len(),
+                "tool selection keeps the held groups: this message could not be scored"
+            );
+            return SessionGroups {
+                loaded: sel::clamp_to_permitted(held.clone(), &permitted),
+                permitted,
+            };
+        }
         // Failures widen to all groups: a missing tool is a wrong answer, a surplus one is tokens.
         let selection = match &held {
             None => sel::select_groups(&permitted, scores.as_deref(), floor),

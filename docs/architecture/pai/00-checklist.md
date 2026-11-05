@@ -4300,7 +4300,8 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   `select_groups_for_later_message`, no top-scorer rescue, so small talk adds nothing);
   `union_groups` never removes a held group, whether the opening message, a later one or
   `enable_tool_group` loaded it. The union is persisted only when it grew. Embedding failure
-  still widens to every permitted group, and every path still clamps to the turn's permitted set.
+  still widens an opening message to every permitted group; a later message that cannot be scored
+  keeps the held groups. Every path still clamps to the turn's permitted set.
   `kind="tool_selection_added"` traces a turn that added groups.
 - **PAI-3 cost.** Knowledge adds 253 tokens keyless, 329 with the Brave key, 404 with both keys
   (o200k on the minified schemas), 4.1-6.6% of a 6,144-token prompt. A turn that adds a group
