@@ -68,8 +68,10 @@ impl DeviceStatePatch {
     }
 
     /// `full` with every field `template` left `None` cleared to `None` too — `full` restricted
-    /// to the same fields `template` touches.
+    /// to the same fields `template` touches. Colour counts as one field: a light reads as a
+    /// temperature or a hue, never both, so touching either keeps whichever `full` holds.
     pub fn restricted_to(mut self, template: &DeviceStatePatch) -> DeviceStatePatch {
+        let colour = (self.hue, self.saturation, self.color_temp);
         macro_rules! clear_untouched {
             ($($field:ident),+ $(,)?) => {
                 $(if template.$field.is_none() { self.$field = None; })+
@@ -79,6 +81,10 @@ impl DeviceStatePatch {
             on, brightness, volume, target_temp, locked, hue, saturation, color_temp, fan_speed,
             fan_mode, position, tilt, valve, mode, operation
         );
+        if template.hue.is_some() || template.saturation.is_some() || template.color_temp.is_some()
+        {
+            (self.hue, self.saturation, self.color_temp) = colour;
+        }
         self
     }
 }
@@ -431,6 +437,27 @@ mod tests {
                 on: Some(true),
                 brightness: Some(40),
                 locked: Some(true),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn restricted_to_keeps_the_colour_a_light_was_in_whichever_colour_was_asked_for() {
+        let warm_white = DeviceStatePatch {
+            on: Some(true),
+            color_temp: Some(2700),
+            ..Default::default()
+        };
+        let red = DeviceStatePatch {
+            hue: Some(0),
+            saturation: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            warm_white.restricted_to(&red),
+            DeviceStatePatch {
+                color_temp: Some(2700),
                 ..Default::default()
             }
         );
