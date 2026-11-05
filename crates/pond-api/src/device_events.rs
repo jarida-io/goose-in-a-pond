@@ -94,7 +94,10 @@ impl DeviceEvents {
             return (Since::Frames(Vec::new()), live);
         };
         let oldest = ring.frames.front().map_or(ring.next, |frame| frame.seq);
-        let since = if after + 1 < ring.first || after + 1 < oldest || after >= ring.next {
+        let since = if after.saturating_add(1) < ring.first
+            || after.saturating_add(1) < oldest
+            || after >= ring.next
+        {
             Since::Resync
         } else {
             Since::Frames(
