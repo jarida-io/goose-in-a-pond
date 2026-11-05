@@ -198,9 +198,17 @@ export function Models() {
 
   const helpers = useMemo(() => roles?.helpers ?? [], [roles]);
   const groups = useMemo(() => groupBySection(models, helpers, roles), [models, helpers, roles]);
-  // Memory has its own panel under Jobs, which says which model is in use and offers the rest, so
-  // the device list leaves its section out rather than list the memory model twice.
-  const deviceGroups = useMemo(() => groups.filter((g) => g.key !== "memory"), [groups]);
+  // Memory has its own panel under Jobs, but it cannot delete, so the device list keeps the memory
+  // files on disk (and only those) for their Delete.
+  const deviceGroups = useMemo(
+    () =>
+      groups
+        .map((g) =>
+          g.key === "memory" ? { ...g, models: g.models.filter((m) => m.downloaded), helpers: [] } : g,
+        )
+        .filter((g) => g.models.length > 0 || g.helpers.length > 0),
+    [groups],
+  );
   const comingDown = useCallback((m: ModelEntry) => transferFor(m) !== null, [transferFor]);
 
   /** Rows to fetch: not here, not already a pick above, and with somewhere to fetch them from. */

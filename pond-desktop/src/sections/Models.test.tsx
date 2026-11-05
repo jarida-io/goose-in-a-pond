@@ -268,6 +268,14 @@ describe("On this device", () => {
     expect(within(device).getByText("Llama-3.2-3B-Instruct-Q4_K_M")).toBeTruthy();
   });
 
+  it("keeps a downloaded memory model on this device, where it can be deleted", async () => {
+    setup({ models: [nomicEmbed({ downloaded: true, roles: ["embedding"], section: "memory" })] });
+    renderModels();
+    const device = await band("On this device");
+    const memory = within(device).getByRole("region", { name: "Memory" });
+    expect(within(memory).getByRole("button", { name: /^Delete / })).toBeTruthy();
+  });
+
   it("says on every row which jobs it is doing, and folds what serves a row into that row", async () => {
     const minilm = {
       id: "embedding/all-MiniLM-L6-v2", provider: "embedding", category: "embedding",
