@@ -3870,11 +3870,24 @@ fn derived_session_label(text: &str) -> String {
     }
 }
 
-/// The pond's first answer, for a history card (the title already carries the question).
-/// Capped past any card's width so the client fades the overflow instead of an ellipsis.
+/// The pond's first answer, for a history card (the title already carries the question), as
+/// plain words: a reply written in Markdown showed its `**`, `###` and list bullets in every
+/// conversation list. Capped past any card's width so the client fades the overflow instead of an
+/// ellipsis.
 fn session_preview(text: &str) -> String {
+    use pond_voice::text::{is_hr, strip_inline_md, strip_line_prefix};
     const MAX_CHARS: usize = 240;
-    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_hr(line) && !line.starts_with("```"))
+        .map(|line| strip_inline_md(strip_line_prefix(line)))
+        .collect();
+    let cleaned = plain
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let cleaned = cleaned.trim();
     if cleaned.chars().count() <= MAX_CHARS {
         return cleaned.to_string();
@@ -21594,5 +21607,38 @@ mod tests {
             other.mic_enabled = !current.mic_enabled;
             assert!(!save_needs_prewarm(&current, &other));
         }
+    }
+}
+
+#[cfg(test)]
+mod session_preview_tests {
+    use super::session_preview;
+
+    /// The Jetson's "System information" card read "**Operating System and Hardware:** * **OS:**
+    /// Ubuntu 22.04 * **Kernel:** ..." on both the dashboard and the phone.
+    #[test]
+    fn a_markdown_reply_previews_as_plain_words() {
+        let reply = "Here is the current system information for this pond:\n\n\
+                     ### Operating System and Hardware\n\
+                     * **OS:** Ubuntu 22.04\n\
+                     * **Kernel:** 5.15.148-tegra\n\
+                     ---\n\
+                     See [the docs](https://example.org) for more.";
+        assert_eq!(
+            session_preview(reply),
+            "Here is the current system information for this pond: Operating System and \
+             Hardware OS: Ubuntu 22.04 Kernel: 5.15.148-tegra See the docs for more."
+        );
+    }
+
+    #[test]
+    fn a_plain_reply_is_unchanged_and_a_long_one_is_capped() {
+        assert_eq!(session_preview("It will be sunny."), "It will be sunny.");
+        let long = "word ".repeat(100);
+        let preview = session_preview(&long);
+        assert!(
+            preview.ends_with('…') && preview.chars().count() <= 241,
+            "{preview}"
+        );
     }
 }
