@@ -191,3 +191,25 @@ describe("when the device list cannot be read", () => {
     expect(listDevices.mock.calls.length).toBeGreaterThan(1);
   });
 });
+
+describe("the dashboard or the desktop app on Home", () => {
+  it("reads as open or not open, never as offline", async () => {
+    home = {
+      devices: [
+        { id: "web", name: "Pond dashboard", kind: "other", room: "Unassigned" },
+        { id: "app", name: "Pond Desktop", kind: "other", room: "Unassigned" },
+      ],
+      devicesAreReal: true,
+    };
+    listDevices.mockResolvedValue([
+      { id: "web", name: "Pond dashboard", device_type: "desktop", is_online: false, capabilities: [] },
+      { id: "app", name: "Pond Desktop", device_type: "desktop", is_online: true, capabilities: [] },
+    ]);
+    mount();
+
+    expect(await screen.findByText("Not open")).toBeTruthy();
+    expect(screen.getByText("Open")).toBeTruthy();
+    expect(screen.queryByText(/Offline/)).toBeNull();
+    expect(screen.queryByText("Online")).toBeNull();
+  });
+});

@@ -1,6 +1,7 @@
 import { Monitor, Wifi, WifiOff, Router, Loader } from "lucide-react";
 import { Chip } from "@heroui/react";
 import { registerMcpCard, type McpCardProps } from "../registry";
+import { isOpenWhenUsed, openStateLabel } from "../../sections/clientPresence";
 
 interface Device {
   name: string;
@@ -45,6 +46,8 @@ export function DeviceCard({ data, variant }: McpCardProps) {
   }
 
   const onlineCount = devices.filter((d) => d.is_online).length;
+  // A closed dashboard or CLI is not a device that dropped off.
+  const offlineCount = devices.filter((d) => !d.is_online && !isOpenWhenUsed(d)).length;
   const visible = devices.slice(0, isCompact ? 3 : 8);
 
   return (
@@ -55,9 +58,9 @@ export function DeviceCard({ data, variant }: McpCardProps) {
         <Chip size="sm" variant="soft" style={{ background: "#DCFCE7", color: "#16A34A" }}>
           {onlineCount} online
         </Chip>
-        {onlineCount < devices.length && (
+        {offlineCount > 0 && (
           <Chip size="sm" variant="soft" style={{ background: "#F5F5F5", color: "#8A8A8A" }}>
-            {devices.length - onlineCount} offline
+            {offlineCount} offline
           </Chip>
         )}
       </div>
@@ -67,7 +70,7 @@ export function DeviceCard({ data, variant }: McpCardProps) {
           <div key={i} className="ui-device__item">
             <span
               className={`ui-device__dot ${d.is_online ? "ui-device__dot--online" : "ui-device__dot--offline"}`}
-              title={d.is_online ? "Online" : "Offline"}
+              title={openStateLabel(d) ?? (d.is_online ? "Online" : "Offline")}
             />
             <div className="ui-device__icon" style={{ color: d.is_online ? "#5F5F5F" : "#B5B5B5" }}>
               {d.is_online ? <Wifi size={14} /> : <WifiOff size={14} />}

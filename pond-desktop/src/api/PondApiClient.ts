@@ -318,8 +318,10 @@ export class PondApiClient {
     }
   }
 
-  /** How this client introduces itself when it pairs, and so how the devices list names it. */
-  private deviceName = "Pond Desktop";
+  /** How this client introduces itself when it pairs, and so how the devices list names it.
+   *  The browser dashboard and the desktop app share `client_type: "desktop"`, so only the
+   *  name tells them apart. */
+  private deviceName = isDesktopShell() ? "Pond Desktop" : "Pond dashboard";
 
   setDeviceName(name: string): void {
     this.deviceName = name;

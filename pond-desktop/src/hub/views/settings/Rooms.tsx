@@ -6,6 +6,7 @@ import { DetailShell } from "./DetailShell";
 import { Card, Row } from "./controls";
 import { api } from "../../../api/PondApiClient";
 import type { Device } from "../../../api/types";
+import { openStateLabel } from "../../../sections/clientPresence";
 
 // ─── Room → icon key mapping ───────────────────────────────────
 function roomIconKey(name: string): keyof typeof HP_PATHS | null {
@@ -46,6 +47,8 @@ function groupByRoom(devices: Device[]): Map<string, Device[]> {
 // ─── Device sub-label ─────────────────────────────────────────
 function deviceSubLabel(d: Device): string {
   const type = d.device_type ?? "device";
+  const open = openStateLabel(d);
+  if (open !== null) return `${type} · ${open}`;
   if (!d.is_online) return `${type} · offline`;
   if (d.last_seen) {
     const diff = Date.now() - new Date(d.last_seen).getTime();
@@ -307,7 +310,7 @@ export function RoomsDetail({ go }: RoomsDetailProps) {
                               display: "inline-block",
                               flexShrink: 0,
                             }}
-                            title={d.is_online ? "Online" : "Offline"}
+                            title={openStateLabel(d) ?? (d.is_online ? "Online" : "Offline")}
                           />
                           <DeviceToggle device={d} onFlash={showFlash} />
                         </span>

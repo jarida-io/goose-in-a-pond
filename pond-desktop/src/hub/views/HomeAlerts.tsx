@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { InkButton, InkCard } from "@jarida/ink/react";
 import { api } from "../../api/PondApiClient";
 import { timeSince } from "../../sections/timeSince";
+import { isOpenWhenUsed } from "../../sections/clientPresence";
 import { useHomeData } from "../state/hubDataStore";
 import { nextDueTonight } from "../state/routines";
 import type { Device, Schedule } from "../../api/types";
@@ -68,7 +69,8 @@ export function HomeAlerts({ onNavigate }: HomeAlertsProps) {
   const dueKey = due ? `${due.id}:${due.next_run}` : null;
   const showDue = due !== null && dueKey !== dismissed;
 
-  const offline = devices.find((d) => !d.is_online) ?? null;
+  // A dashboard or app nobody has open is not a device that failed to check in.
+  const offline = devices.find((d) => !d.is_online && !isOpenWhenUsed(d)) ?? null;
 
   async function runNow(schedule: Schedule) {
     setRunning(schedule.id);
