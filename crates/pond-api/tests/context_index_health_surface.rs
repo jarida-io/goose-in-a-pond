@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use pond_api::{build_router, AppState};
-use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
+use pond_core::context::vector_index::{VectorEntry, VectorIndex};
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::models::services::active_embedder::{ActiveEmbedder, EmbedderState};
 use pond_core::shared::mocks::mock_agent::MockAgent;
@@ -18,6 +18,7 @@ use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry, Regis
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_infra::mock_handshake::MockHandshake;
+use pond_infra::sqlite_items::{self, Mode};
 use pond_infra::sqlite_profile::SqliteProfileRepository;
 use pond_infra::sqlite_vector_index::SqliteVectorIndex;
 use serde_json::Value;
@@ -260,32 +261,60 @@ async fn add_memory(h: &Harness, id: &str, profile: &str) {
     .execute(&h.system)
     .await
     .unwrap();
+    sqlite_items::reconcile(&h.system, Mode::All).await.unwrap();
 }
 
-/// A session with a rolling summary and no owner, which `liveness_sql(Summary)` excludes.
-async fn add_unattributed_summary(h: &Harness, id: &str) {
+/// An attributed session with no summary yet: a header with nothing to embed.
+async fn add_unsummarised_session(h: &Harness, id: &str, profile: &str) {
     sqlx::query(
-        "INSERT INTO sessions (id, created_at, profile_id, rolling_summary, \
-         rolling_summary_updated_at) VALUES (?, datetime('now'), NULL, 'we agreed on Tuesday', \
-         datetime('now'))",
+        "INSERT INTO sessions (id, created_at, updated_at, profile_id) \
+         VALUES (?, datetime('now'), datetime('now'), ?)",
     )
     .bind(id)
+    .bind(profile)
     .execute(&h.system)
     .await
     .unwrap();
+    sqlite_items::reconcile(&h.system, Mode::All).await.unwrap();
 }
 
-async fn add_vector(h: &Harness, corpus: Corpus, row_id: &str, model_id: &str) {
+/// A mail item from the member's own source.
+async fn add_mail(h: &Harness, external_id: &str, profile: &str) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO context_sources (id, kind, provider, profile_id, created_at) \
+         VALUES ('mail', 'mail', 'imap', ?, datetime('now'))",
+    )
+    .bind(profile)
+    .execute(&h.system)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO context_items (id, source_id, external_id, profile_id, source_kind, \
+         item_kind, occurred_at, ingested_at, title, body, sensitivity) \
+         VALUES (?, 'mail', ?, ?, 'mail', 'message', datetime('now'), datetime('now'), \
+         'Invoice', 'Due Friday', 'sensitive')",
+    )
+    .bind(format!("mail:{external_id}"))
+    .bind(external_id)
+    .bind(profile)
+    .execute(&h.system)
+    .await
+    .unwrap();
+    sqlite_items::reconcile(&h.system, Mode::All).await.unwrap();
+}
+
+async fn add_vector(h: &Harness, table: &str, row: &str, model_id: &str) {
+    let (item_id, _) = sqlite_items::header_of(&h.system, table, row)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("{table} {row} has no header"));
     h.index
-        .upsert(&VectorEntry {
-            corpus,
-            row_id: row_id.to_string(),
-            chunk_ix: 0,
-            chunk_span: None,
-            model_id: model_id.to_string(),
-            vector: vec![0.1, 0.2, 0.3, 0.4],
-            source_rev: None,
-        })
+        .upsert(&VectorEntry::whole(
+            item_id,
+            model_id.to_string(),
+            vec![0.1, 0.2, 0.3, 0.4],
+            None,
+        ))
         .await
         .unwrap();
 }
@@ -413,8 +442,8 @@ async fn the_coverage_number_leaves_the_process() {
     for id in ["m1", "m2", "m3", "m4"] {
         add_memory(&h, id, &liz).await;
     }
-    add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
-    add_vector(&h, Corpus::Memory, "m2", "some-older-embedder").await;
+    add_vector(&h, "memory_fragments", "m1", STUB_MODEL).await;
+    add_vector(&h, "memory_fragments", "m2", "some-older-embedder").await;
 
     let (status, body) = health(&h).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -496,10 +525,10 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
 
     // A healthy corpus alongside: it is what makes the overall figure look fine.
     add_memory(&h, "m1", &liz).await;
-    add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
+    add_vector(&h, "memory_fragments", "m1", STUB_MODEL).await;
 
     for id in ["s1", "s2", "s3"] {
-        add_unattributed_summary(&h, id).await;
+        add_unsummarised_session(&h, id, &liz).await;
     }
 
     let (status, body) = health(&h).await;
@@ -508,7 +537,7 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
     let summary = corpus_row(&body, "summary");
     assert_eq!(
         summary["rows"], 0,
-        "the predicate excludes all three, so nothing qualifies: {body}"
+        "none of the three has a summary to embed, so nothing qualifies: {body}"
     );
     assert_eq!(
         summary["source_rows"], 3,
@@ -546,9 +575,11 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
     let liz = member(&h).await;
     add_memory(&h, "m1", &liz).await;
 
-    add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
-    add_vector(&h, Corpus::Context, "c1", STUB_MODEL).await;
-    add_vector(&h, Corpus::Context, "c2", STUB_MODEL).await;
+    add_vector(&h, "memory_fragments", "m1", STUB_MODEL).await;
+    add_mail(&h, "c1", &liz).await;
+    add_mail(&h, "c2", &liz).await;
+    add_vector(&h, "context_items", "mail:c1", STUB_MODEL).await;
+    add_vector(&h, "context_items", "mail:c2", STUB_MODEL).await;
 
     let (status, body) = rebuild(&h).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
@@ -568,7 +599,7 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
     // Now "missing", which the slot re-embeds; the source row survives, so nothing is lost.
     let (_, after) = health(&h).await;
     assert_eq!(after["matching"], 0);
-    assert_eq!(after["missing"], 1);
+    assert_eq!(after["missing"], 3);
     assert_eq!(corpus_row(&after, "memory")["rows"], 1);
 
     let (_, again) = rebuild(&h).await;

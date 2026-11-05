@@ -3,23 +3,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
+use pond_core::context::vector_index::{VectorEntry, VectorIndex, MEMORY};
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::user_data::domain::memory::{
-    cosine_similarity, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle,
-    MemorySegment, MemoryTier,
+    MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment, MemoryTier,
 };
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use serde_json;
 use sqlx::{Pool, Sqlite};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::sqlite_items;
-
-/// `needs_embedding`'s limit when every row is wanted.
-const EVERY_ROW: usize = i64::MAX as usize;
 
 pub struct SqliteMemoryRepository {
     pool: Pool<Sqlite>,
@@ -60,9 +55,18 @@ impl SqliteMemoryRepository {
     /// Never fails the caller: the index is derived and the embedding slot repairs it.
     async fn mirror(&self, id: &str, embedding: Option<&[f32]>) {
         let Some(index) = &self.index else { return };
+        let header = match sqlite_items::header_of(&self.pool, "memory_fragments", id).await {
+            Ok(Some(header)) => header,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(memory_id = %id, "vector index write skipped: {e:#}");
+                return;
+            }
+        };
+        let (item_id, rev) = header;
         let outcome = match embedding.filter(|v| !v.is_empty()) {
             // No vector: remove any stale entry (the redactor drops secret-bearing vectors).
-            None => index.remove(Corpus::Memory, id).await,
+            None => index.remove(&item_id).await,
             Some(vector) => {
                 // No model to name (the CLI, or one still loading): leave the entry to the slot.
                 let Some((model_id, dims)) = self.current_model() else {
@@ -78,19 +82,14 @@ impl SqliteMemoryRepository {
                     );
                     return;
                 }
+                // Never chunked: a memory is a sentence or two.
                 index
-                    .upsert(&VectorEntry {
-                        corpus: Corpus::Memory,
-                        row_id: id.to_string(),
-                        // Never chunked: a memory is a sentence or two.
-                        chunk_ix: 0,
-                        chunk_span: None,
+                    .upsert(&VectorEntry::whole(
+                        item_id,
                         model_id,
-                        vector: vector.to_vec(),
-                        // No revision tracked: every text change passes through `update_content`,
-                        // which rewrites this entry.
-                        source_rev: None,
-                    })
+                        vector.to_vec(),
+                        Some(rev),
+                    ))
                     .await
             }
         };
@@ -113,27 +112,22 @@ impl SqliteMemoryRepository {
         Ok(recent)
     }
 
-    /// Rows whose stored vector a query of `query_dims` must not be compared with; `None` keeps
-    /// the width check alone (no index or embedder wired). Equal widths prove nothing.
-    async fn incomparable(&self, query_dims: usize) -> Result<Option<Incomparable>> {
-        let (Some(index), Some(_)) = (&self.index, &self.embedder) else {
-            return Ok(None);
-        };
-        let Some((model_id, _)) = self.current_model().filter(|(_, d)| *d == query_dims) else {
-            return Ok(Some(Incomparable::All));
-        };
-        let stale = index
-            .needs_embedding(Corpus::Memory, &model_id, EVERY_ROW)
-            .await?;
-        Ok(Some(Incomparable::These(stale.into_iter().collect())))
+    /// The current model's vector of a memory, so a caller can band a fact by it.
+    async fn indexed_vector(
+        &self,
+        index: &dyn VectorIndex,
+        item_id: &str,
+        model_id: &str,
+    ) -> Option<Vec<f32>> {
+        match index.get(item_id).await {
+            Ok(Some(entry)) if entry.model_id == model_id => Some(entry.vector),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(item_id = %item_id, "vector index read failed: {e:#}");
+                None
+            }
+        }
     }
-}
-
-enum Incomparable {
-    /// No ready model vouches for any stored vector.
-    All,
-    /// Rows lacking a vector from the current model.
-    These(HashSet<String>),
 }
 
 // ── Embedding BLOB encoding ───────────────────────────────────────────────────
@@ -361,79 +355,41 @@ impl MemoryRepository for SqliteMemoryRepository {
         if scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let incomparable = self.incomparable(query_embedding.len()).await?;
-        if matches!(incomparable, Some(Incomparable::All)) {
+        // The index is the only place vectors are scored; without a model that vouches for the
+        // query's width, nothing is comparable.
+        let (Some(index), Some((model_id, dims))) = (&self.index, self.current_model()) else {
+            return self.recent_without_vectors(scope, limit).await;
+        };
+        if dims != query_embedding.len() {
+            return self.recent_without_vectors(scope, limit).await;
+        }
+        let hits = index
+            .search(query_embedding, &model_id, scope, &MEMORY, limit)
+            .await?;
+        if hits.is_empty() {
             return self.recent_without_vectors(scope, limit).await;
         }
         let (filter, bind) = scope_sql(scope);
-        let query = format!(
-            "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE embedding IS NOT NULL \
+        let sql = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments WHERE item_id = ? \
              AND (lifecycle IS NULL OR lifecycle = 'active') {filter}"
         );
-
-        let rows: Vec<FragmentRow> = match bind {
-            Some(pid) => {
-                sqlx::query_as(&query)
-                    .bind(pid)
-                    .fetch_all(&self.pool)
-                    .await?
+        let mut found = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let mut q = sqlx::query_as::<_, FragmentRow>(&sql).bind(&hit.item_id);
+            if let Some(pid) = bind {
+                q = q.bind(pid);
             }
-            None => sqlx::query_as(&query).fetch_all(&self.pool).await?,
-        };
-
-        if rows.is_empty() {
-            return self.search_recent(scope, limit).await;
+            let Some(row) = q.fetch_optional(&self.pool).await? else {
+                continue;
+            };
+            let mut fragment = row_to_fragment(row);
+            fragment.embedding = self
+                .indexed_vector(index.as_ref(), &hit.item_id, &model_id)
+                .await;
+            found.push(fragment);
         }
-
-        let candidates = rows.len();
-        let mut scored: Vec<(f32, MemoryFragment)> = rows
-            .into_iter()
-            .map(row_to_fragment)
-            .filter_map(|f| {
-                if let Some(Incomparable::These(stale)) = &incomparable {
-                    if stale.contains(&f.id) {
-                        return None;
-                    }
-                }
-                let emb = f.embedding.clone()?;
-                // Other width = other model: its 0.0 cosine looks valid and would crowd out
-                // results and stop the recency fallback below from firing.
-                if emb.len() != query_embedding.len() {
-                    return None;
-                }
-                let score = cosine_similarity(query_embedding, &emb);
-                Some((score, f))
-            })
-            .collect();
-
-        if scored.is_empty() {
-            // Nothing comparable (e.g. the embedding model changed): fall back to keyword recency.
-            if candidates > 0 {
-                tracing::warn!(
-                    incomparable = candidates,
-                    query_dims = query_embedding.len(),
-                    "no embedded memory has a vector from the current embedding model — \
-                     falling back to recency until they are re-embedded"
-                );
-            }
-            if incomparable.is_some() {
-                return self.recent_without_vectors(scope, limit).await;
-            }
-            return self.search_recent(scope, limit).await;
-        }
-        if scored.len() < candidates {
-            tracing::warn!(
-                incomparable = candidates - scored.len(),
-                comparable = scored.len(),
-                "some embedded memories have no vector from the current embedding model \
-                 and were excluded from semantic search"
-            );
-        }
-
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, f)| f).collect())
+        Ok(found)
     }
 
     async fn count_for_profile(&self, profile_id: &str) -> Result<u64> {
@@ -460,13 +416,19 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
+        // Read first: the row's header goes with it.
+        let header = sqlite_items::header_of(&self.pool, "memory_fragments", id).await?;
         sqlx::query("DELETE FROM memory_fragments WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
         // Best effort, not atomic with the delete (separate DB files; WAL makes cross-file
         // transactions non-atomic). `prune_orphans` reconciles; orphans hold no text.
-        self.mirror(id, None).await;
+        if let (Some(index), Some((item_id, _))) = (&self.index, header) {
+            if let Err(e) = index.remove(&item_id).await {
+                tracing::warn!(memory_id = %id, "vector index cleanup failed: {e:#}");
+            }
+        }
         Ok(())
     }
 
@@ -803,6 +765,20 @@ mod tests {
         (SqliteMemoryRepository::new(db.system), tmp)
     }
 
+    /// Semantic search reads only the index, so these stamp vectors as a `dims`-wide model's.
+    async fn make_indexed_repo(dims: usize) -> (SqliteMemoryRepository, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(
+            crate::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
+        );
+        let repo = SqliteMemoryRepository::new(db.system).with_vector_index(
+            index,
+            crate::sqlite_vector_index::tests_support::stamp("m", dims),
+        );
+        (repo, tmp)
+    }
+
     #[tokio::test]
     async fn add_and_search_recent() {
         let (repo, _tmp) = make_repo().await;
@@ -1015,7 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn incomparable_vectors_do_not_crowd_out_the_comparable_one() {
-        let (repo, _tmp) = make_repo().await;
+        let (repo, _tmp) = make_indexed_repo(768).await;
         for i in 0..5 {
             let mut stale =
                 MemoryFragment::from_chat(format!("old{i}"), None, None, format!("stale {i}"));
@@ -1053,7 +1029,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_similar_ranks_by_cosine() {
-        let (repo, _tmp) = make_repo().await;
+        let (repo, _tmp) = make_indexed_repo(4).await;
 
         let mut high =
             MemoryFragment::from_chat("high".to_string(), None, None, "high sim".to_string());

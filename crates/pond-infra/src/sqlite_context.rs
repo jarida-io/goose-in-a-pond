@@ -4,7 +4,6 @@
 //! an item without a redaction pass (a no-op for pipeline rows, a repair otherwise). Rows that
 //! will not load (bad timestamp, unknown kind, blank owner) are dropped, never partial.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,7 +14,7 @@ use pond_core::context::domain::{
 };
 use pond_core::context::ports::{ContextRepository, SourceItemStats};
 use pond_core::context::retention::ContextRetention;
-use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
+use pond_core::context::vector_index::{VectorEntry, VectorIndex, CONTEXT};
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::security::domain::event::PrivacySensitivity;
 use pond_core::security::ports::redactor::Redactor;
@@ -98,17 +97,24 @@ impl SqliteContextRepository {
     }
 
     async fn mirror(&self, item: &ContextItem) {
-        self.mirror_vector(item.id(), item.embedding(), sql_ts(item.ingested_at()))
-            .await
+        self.mirror_vector(item.id(), item.embedding()).await
     }
 
-    /// Never fails the caller: the index is derived and the embedding slot repairs it.
-    /// `ingested_at` is the row's own stamp: a re-sync rewrites it, which flags the vector stale.
-    async fn mirror_vector(&self, id: &str, embedding: Option<&[f32]>, ingested_at: String) {
+    /// Never fails the caller: the index is derived and the embedding slot repairs it. The
+    /// vector is stamped with the header's revision, which a re-sync moves.
+    async fn mirror_vector(&self, id: &str, embedding: Option<&[f32]>) {
         let Some(index) = &self.index else { return };
+        let (item_id, rev) = match sqlite_items::header_of(&self.pool, "context_items", id).await {
+            Ok(Some(header)) => header,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(item_id = %id, "vector index write skipped: {e:#}");
+                return;
+            }
+        };
         let outcome = match embedding.filter(|v| !v.is_empty()) {
             // An upsert without an embedder NULLs the stored vector; the index must follow.
-            None => index.remove(Corpus::Context, id).await,
+            None => index.remove(&item_id).await,
             Some(vector) => {
                 // Unattributable vector: leave it to the slot, not strip another writer's entry.
                 let Some((model_id, dims)) = self.current_model() else {
@@ -124,17 +130,14 @@ impl SqliteContextRepository {
                     );
                     return;
                 }
+                // Whole-text vector; the slot replaces it with passages for a long item.
                 index
-                    .upsert(&VectorEntry {
-                        corpus: Corpus::Context,
-                        row_id: id.to_string(),
-                        // Whole-text vector; the slot clears it before adding passage chunks.
-                        chunk_ix: 0,
-                        chunk_span: None,
+                    .upsert(&VectorEntry::whole(
+                        item_id,
                         model_id,
-                        vector: vector.to_vec(),
-                        source_rev: Some(ingested_at),
-                    })
+                        vector.to_vec(),
+                        Some(rev),
+                    ))
                     .await
             }
         };
@@ -142,31 +145,6 @@ impl SqliteContextRepository {
             tracing::warn!(item_id = %id, "vector index write failed: {e:#}");
         }
     }
-
-    /// Items whose stored vector a query of `query_dims` must not be compared with; `None` keeps
-    /// the width check alone (no index or embedder wired). Equal widths prove nothing.
-    async fn incomparable(&self, query_dims: usize) -> Result<Option<Incomparable>> {
-        let (Some(index), Some(_)) = (&self.index, &self.embedder) else {
-            return Ok(None);
-        };
-        let Some((model_id, _)) = self.current_model().filter(|(_, d)| *d == query_dims) else {
-            return Ok(Some(Incomparable::All));
-        };
-        let stale = index
-            .needs_embedding(Corpus::Context, &model_id, EVERY_ROW)
-            .await?;
-        Ok(Some(Incomparable::These(stale.into_iter().collect())))
-    }
-}
-
-/// `needs_embedding`'s limit when every row is wanted.
-const EVERY_ROW: usize = i64::MAX as usize;
-
-enum Incomparable {
-    /// No ready model vouches for any stored vector.
-    All,
-    /// Items lacking a vector from the current model.
-    These(HashSet<String>),
 }
 
 // ── Encoding ────────────────────────────────────────────────────────────────
@@ -381,12 +359,13 @@ impl ContextRepository for SqliteContextRepository {
 
         // Explicit DELETE, not ON DELETE CASCADE: `PRAGMA foreign_keys` is per connection.
         // Ids are collected first so their vectors go now, not at the next sweep.
-        let doomed: Vec<(String,)> =
-            sqlx::query_as("SELECT id FROM context_items WHERE source_id = ?")
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await
-                .unwrap_or_default();
+        let doomed: Vec<(String,)> = sqlx::query_as(
+            "SELECT item_id FROM context_items WHERE source_id = ? AND item_id IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
         sqlx::query("DELETE FROM context_items WHERE source_id = ?")
             .bind(id)
@@ -395,7 +374,7 @@ impl ContextRepository for SqliteContextRepository {
 
         if let Some(index) = &self.index {
             for (item_id,) in &doomed {
-                if let Err(e) = index.remove(Corpus::Context, item_id).await {
+                if let Err(e) = index.remove(item_id).await {
                     // Best effort: the slot's orphan prune is the backstop.
                     tracing::warn!(item_id = %item_id, "index cleanup on disconnect failed: {e:#}");
                 }
@@ -512,54 +491,30 @@ impl ContextRepository for SqliteContextRepository {
         if scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let incomparable = self.incomparable(query_embedding.len()).await?;
-        if matches!(incomparable, Some(Incomparable::All)) {
+        // The index is the only place vectors are scored, and it vouches for their model.
+        let (Some(index), Some((model_id, dims))) = (&self.index, self.current_model()) else {
+            return Ok(vec![]);
+        };
+        if dims != query_embedding.len() {
             return Ok(vec![]);
         }
+        let hits = index
+            .search(query_embedding, &model_id, scope, &CONTEXT, limit)
+            .await?;
         let (filter, bind) = scope_sql(scope);
-        let query = format!(
-            "SELECT {ITEM_COLUMNS} FROM context_items WHERE embedding IS NOT NULL {filter}"
-        );
-        let mut q = sqlx::query_as::<_, ItemRow>(&query);
-        if let Some(pid) = bind {
-            q = q.bind(pid);
-        }
-        let rows = q.fetch_all(&self.pool).await?;
-
-        let candidates = rows.len();
-        let mut scored: Vec<(ContextItem, f32)> = self
-            .rows_to_items(rows)
-            .into_iter()
-            .filter_map(|item| {
-                if let Some(Incomparable::These(stale)) = &incomparable {
-                    if stale.contains(item.id()) {
-                        return None;
-                    }
+        let query = format!("SELECT {ITEM_COLUMNS} FROM context_items WHERE item_id = ? {filter}");
+        let mut scored = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let mut q = sqlx::query_as::<_, ItemRow>(&query).bind(&hit.item_id);
+            if let Some(pid) = bind {
+                q = q.bind(pid);
+            }
+            if let Some(row) = q.fetch_optional(&self.pool).await? {
+                if let Some(item) = self.rows_to_items(vec![row]).into_iter().next() {
+                    scored.push((item, hit.score));
                 }
-                let emb = item.embedding()?;
-                // Other width = other model: `cosine` yields a valid-looking 0.0, and scored
-                // rows would stop the caller's `is_empty()` keyword fallback from firing.
-                if emb.len() != query_embedding.len() {
-                    return None;
-                }
-                let score = cosine(query_embedding, emb);
-                Some((item, score))
-            })
-            .collect();
-        if scored.len() < candidates {
-            tracing::warn!(
-                incomparable = candidates - scored.len(),
-                comparable = scored.len(),
-                "some context items were embedded by a different model and were \
-                 excluded from semantic search"
-            );
+            }
         }
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.id().cmp(b.0.id()))
-        });
-        scored.truncate(limit);
         Ok(scored)
     }
 
@@ -584,8 +539,8 @@ impl ContextRepository for SqliteContextRepository {
         .fetch_optional(&self.pool)
         .await?;
         // A missing row gets no index entry.
-        if let Some((ingested_at,)) = stamped {
-            self.mirror_vector(id, Some(embedding), ingested_at).await;
+        if stamped.is_some() {
+            self.mirror_vector(id, Some(embedding)).await;
         }
         Ok(())
     }
@@ -678,20 +633,6 @@ impl ContextRepository for SqliteContextRepository {
     }
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        dot / (na * nb)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,11 +647,23 @@ mod tests {
 
     const KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz123456";
 
+    /// Wired to an index under a 2-wide `bge-small`, since semantic search reads only the index.
     async fn make_repo() -> (SqliteContextRepository, Pool<Sqlite>, TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
-        let repo = SqliteContextRepository::new(db.system.clone(), Arc::new(RuleRedactor::new()));
+        let index: Arc<dyn VectorIndex> = Arc::new(
+            crate::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
+        );
+        let repo = SqliteContextRepository::new(db.system.clone(), Arc::new(RuleRedactor::new()))
+            .with_vector_index(
+                index,
+                crate::sqlite_vector_index::tests_support::stamp("bge-small", 2),
+            );
         (repo, db.system, tmp)
+    }
+
+    async fn item_id(pool: &Pool<Sqlite>, row: &str) -> String {
+        crate::sqlite_vector_index::tests_support::item_of(pool, "context_items", row).await
     }
 
     /// Sources FK-reference `profiles`, so a member must exist first.
@@ -1260,25 +1213,22 @@ mod tests {
         ingest(&repo, &src, raw("a", "words", Utc::now()))
             .await
             .unwrap();
-        let stale = || index.needs_embedding(Corpus::Context, "bge-small", 10);
-        assert_eq!(stale().await.unwrap(), vec!["s1:a".to_string()]);
+        let stale = || index.needs_embedding(&CONTEXT, "bge-small", 10);
+        assert_eq!(stale().await.unwrap().len(), 1);
 
         repo.update_embedding("s1:a", &[1.0, 0.0]).await.unwrap();
-        let entry = index.get(Corpus::Context, "s1:a").await.unwrap();
+        let a = item_id(&db.system, "s1:a").await;
+        let entry = index.get(&a).await.unwrap();
         assert_eq!(entry.map(|e| e.model_id).as_deref(), Some("bge-small"));
         assert!(
             stale().await.unwrap().is_empty(),
-            "stamped with the row's own ingest time, so the join counts it current"
+            "stamped with the header's revision, so the join counts it current"
         );
 
         repo.update_embedding("s1:missing", &[1.0, 0.0])
             .await
             .unwrap();
-        assert!(index
-            .get(Corpus::Context, "s1:missing")
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(index.health("bge-small").await.unwrap().matching, 1);
     }
 
     /// Two models of one width are two spaces: only items indexed under the current one score.
@@ -1299,16 +1249,9 @@ mod tests {
             ingest(&repo, &src, raw(external_id, "words", Utc::now()))
                 .await
                 .unwrap();
-            let id = format!("s1:{external_id}");
-            repo.update_embedding(&id, &[1.0, 0.0]).await.unwrap();
+            let id = item_id(&db.system, &format!("s1:{external_id}")).await;
             index
-                .upsert(&VectorEntry::whole(
-                    Corpus::Context,
-                    id,
-                    model.into(),
-                    vec![1.0, 0.0],
-                    None,
-                ))
+                .upsert(&VectorEntry::whole(id, model.into(), vec![1.0, 0.0], None))
                 .await
                 .unwrap();
         }

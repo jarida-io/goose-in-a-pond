@@ -1,5 +1,6 @@
-//! The embedding slot keeps every corpus's vectors current for the chosen model, in counter-phase.
-//! Work is found by the index's staleness join, so there is no queue and a restart resumes.
+//! The embedding slot keeps every indexed item's vector current for the chosen model, in
+//! counter-phase. Work is found by the index's staleness join, so there is no queue and a
+//! restart resumes.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -8,12 +9,10 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use crate::context::chunking::{self, Chunk};
-use crate::context::ports::ContextRepository;
-use crate::context::vector_index::{Corpus, VectorEntry, VectorIndex};
+use crate::context::vector_index::{Stale, VectorEntry, VectorIndex, INDEXED};
+use crate::items::Kind;
 use crate::models::ports::embedding::EmbeddingProvider as _;
 use crate::models::services::active_embedder::{ActiveEmbedder, EmbedLease};
-use crate::user_data::ports::memory_repository::MemoryRepository;
-use crate::user_data::ports::session_storage::SessionStorage;
 
 /// How long one batch may take, so a returning turn waits at most this; a target from the design,
 /// not yet measured against the slot on the Orin.
@@ -28,9 +27,6 @@ const BYTES_PER_TOKEN: usize = 4;
 
 /// Weight of the newest batch in the speed estimate; a choice.
 const SPEED_SMOOTHING: f64 = 0.3;
-
-/// The order corpora are walked in: memory is what recall reads first.
-const ORDER: [Corpus; 3] = [Corpus::Memory, Corpus::Summary, Corpus::Context];
 
 pub fn estimate_tokens(text: &str) -> usize {
     (text.len() / BYTES_PER_TOKEN).max(1)
@@ -96,13 +92,10 @@ pub trait SlotControl: Send + Sync {
     async fn may_continue(&self) -> bool;
 }
 
-/// The stores a pass reads and writes.
+/// The stores a pass reads and writes: the index alone, which reads each item's text from its
+/// header in the same query that finds it stale.
 pub struct SlotStores<'a> {
     pub index: &'a dyn VectorIndex,
-    pub memories: &'a dyn MemoryRepository,
-    pub sessions: &'a dyn SessionStorage,
-    /// `None` where no context store is wired; that corpus is then left alone.
-    pub context: Option<&'a dyn ContextRepository>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,36 +147,44 @@ impl PassReport {
     }
 }
 
-/// One row to embed: its passages are the whole text, or a long context item's chunks.
+/// One item to embed: its passages are the whole text, or a long item's chunks.
 struct Work {
-    corpus: Corpus,
-    row_id: String,
-    /// A summary's revision, read with its text.
-    rev: Option<String>,
+    kind: Kind,
+    item_id: String,
+    /// The header's revision, read with its text.
+    rev: String,
     text: String,
-    /// More than one only for a long context item.
+    /// More than one only for a long ingested item.
     spans: Vec<Chunk>,
     tokens: usize,
 }
 
 impl Work {
-    fn new(corpus: Corpus, row_id: String, text: String, rev: Option<String>) -> Self {
-        let spans = match corpus {
-            Corpus::Context => chunking::chunk(
+    fn new(stale: Stale) -> Self {
+        let Stale {
+            item_id,
+            kind,
+            text,
+            rev,
+        } = stale;
+        let spans = if kind.chunked() {
+            chunking::chunk(
                 &text,
                 chunking::DEFAULT_CHUNK_BYTES,
                 chunking::DEFAULT_OVERLAP_BYTES,
-            ),
-            _ if text.trim().is_empty() => Vec::new(),
-            _ => vec![Chunk {
+            )
+        } else if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![Chunk {
                 start: 0,
                 len: text.len(),
-            }],
+            }]
         };
         let tokens = estimate_tokens(&text);
         Self {
-            corpus,
-            row_id,
+            kind,
+            item_id,
             rev,
             text,
             spans,
@@ -194,10 +195,6 @@ impl Work {
     fn passages(&self) -> impl Iterator<Item = &str> {
         self.spans.iter().filter_map(|s| s.slice(&self.text))
     }
-
-    fn key(&self) -> (Corpus, String) {
-        (self.corpus, self.row_id.clone())
-    }
 }
 
 /// The slot's memory between passes; the runner owns one for the life of the process.
@@ -205,7 +202,7 @@ pub struct EmbeddingSlot {
     sizer: BatchSizer,
     /// Rows this model could not embed or store, skipped until a switch or [`Self::retry_failed`],
     /// so one bad row neither spins a pass nor warns every poll.
-    passed_over: HashSet<(Corpus, String)>,
+    passed_over: HashSet<String>,
     /// Orphans are pruned and health logged once the backlog drains after any write or switch.
     tidy_owed: bool,
     generation: Option<u64>,
@@ -301,110 +298,71 @@ struct Pass<'p, 's> {
     model_id: &'p str,
     generation: u64,
     report: PassReport,
-    /// Rows stored this pass; one the staleness join returns again did not become current.
-    written: HashSet<(Corpus, String)>,
+    /// Items stored this pass; one the staleness join returns again did not become current.
+    written: HashSet<String>,
 }
 
 impl Pass<'_, '_> {
-    /// `None` once every corpus is drained, else why the pass ended early.
+    /// `None` once the backlog is drained, else why the pass ended early.
     async fn walk(&mut self) -> Option<PassEnd> {
-        for corpus in ORDER {
-            if corpus == Corpus::Context && self.stores.context.is_none() {
-                continue;
-            }
-            loop {
-                let passed_over = self
-                    .slot
-                    .passed_over
-                    .iter()
-                    .filter(|(c, _)| *c == corpus)
-                    .count();
-                // Room for rows already passed over, which the join keeps returning.
-                let limit = ROWS_PER_READ + passed_over;
-                let rows = match self.read(corpus, limit).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        tracing::warn!(
-                            corpus = corpus.as_str(),
-                            "embedding slot: could not read the backlog: {e:#}"
-                        );
-                        return Some(PassEnd::StoreFailed);
-                    }
-                };
-                let read = rows.len();
-                let before = self.slot.passed_over.len();
-                let mut fresh = Vec::with_capacity(read);
-                for work in rows {
-                    let key = work.key();
-                    if self.slot.passed_over.contains(&key) {
-                        continue;
-                    }
-                    if self.written.contains(&key) {
-                        tracing::warn!(
-                            corpus = corpus.as_str(),
-                            row_id = %work.row_id,
-                            "embedding slot: a stored vector did not make the row current"
-                        );
-                        self.pass_over(key);
-                        continue;
-                    }
-                    if work.spans.is_empty() {
-                        // Blank text has nothing to embed; it stays out of semantic search.
-                        self.slot.passed_over.insert(key);
-                        continue;
-                    }
-                    fresh.push(work);
+        loop {
+            // Room for items already passed over, which the join keeps returning.
+            let limit = ROWS_PER_READ + self.slot.passed_over.len();
+            let stale = match self
+                .stores
+                .index
+                .needs_embedding(&INDEXED, self.model_id, limit)
+                .await
+            {
+                Ok(stale) => stale,
+                Err(e) => {
+                    tracing::warn!("embedding slot: could not read the backlog: {e:#}");
+                    return Some(PassEnd::StoreFailed);
                 }
-                if fresh.is_empty() {
-                    // A full read of rows passed over grew the set, so the next read reaches past
-                    // them; anything else means nothing new is left.
-                    if read < limit || self.slot.passed_over.len() == before {
-                        break;
-                    }
+            };
+            let read = stale.len();
+            let before = self.slot.passed_over.len();
+            let mut seen = HashSet::with_capacity(read);
+            let mut fresh = Vec::with_capacity(read);
+            for stale in stale {
+                if !seen.insert(stale.item_id.clone())
+                    || self.slot.passed_over.contains(&stale.item_id)
+                {
                     continue;
                 }
-                if let Some(end) = self.embed_all(fresh).await {
-                    return Some(end);
+                let work = Work::new(stale);
+                if self.written.contains(&work.item_id) {
+                    tracing::warn!(
+                        kind = %work.kind,
+                        item_id = %work.item_id,
+                        "embedding slot: a stored vector did not make the item current"
+                    );
+                    self.pass_over(work.item_id);
+                    continue;
                 }
-            }
-        }
-        None
-    }
-
-    async fn read(&self, corpus: Corpus, limit: usize) -> Result<Vec<Work>> {
-        let index = self.stores.index;
-        match corpus {
-            Corpus::Summary => {
-                let ids = index.needs_embedding(corpus, self.model_id, limit).await?;
-                let mut out = Vec::with_capacity(ids.len());
-                for id in dedupe(ids) {
-                    // Read together, or a racing rewrite stamps a newer revision than the text.
-                    let (summary, rev) = self
-                        .stores
-                        .sessions
-                        .get_rolling_summary_with_revision(&id)
-                        .await
-                        .map_err(|e| anyhow!("{e}"))?;
-                    out.push(Work::new(corpus, id, summary.unwrap_or_default(), rev));
+                if work.spans.is_empty() {
+                    // Blank text has nothing to embed; it stays out of semantic search.
+                    self.slot.passed_over.insert(work.item_id);
+                    continue;
                 }
-                Ok(out)
+                fresh.push(work);
             }
-            _ => {
-                let rows = index
-                    .needs_embedding_with_text(corpus, self.model_id, limit)
-                    .await?;
-                let mut seen = HashSet::with_capacity(rows.len());
-                Ok(rows
-                    .into_iter()
-                    .filter(|(id, _)| seen.insert(id.clone()))
-                    .map(|(id, text)| Work::new(corpus, id, text, None))
-                    .collect())
+            if fresh.is_empty() {
+                // A full read of items passed over grew the set, so the next read reaches past
+                // them; anything else means nothing new is left.
+                if read < limit || self.slot.passed_over.len() == before {
+                    return None;
+                }
+                continue;
+            }
+            if let Some(end) = self.embed_all(fresh).await {
+                return Some(end);
             }
         }
     }
 
-    fn pass_over(&mut self, key: (Corpus, String)) {
-        self.slot.passed_over.insert(key);
+    fn pass_over(&mut self, item_id: String) {
+        self.slot.passed_over.insert(item_id);
         self.report.failed += 1;
     }
 
@@ -446,22 +404,22 @@ impl Pass<'_, '_> {
                 };
                 match stored {
                     Ok(()) => {
-                        self.written.insert(work.key());
+                        self.written.insert(work.item_id.clone());
                         self.slot.tidy_owed = true;
-                        match work.corpus {
-                            Corpus::Memory => self.report.memories += 1,
-                            Corpus::Summary => self.report.summaries += 1,
-                            Corpus::Context => self.report.context_items += 1,
+                        match work.kind {
+                            Kind::Conversation => self.report.summaries += 1,
+                            kind if kind.chunked() => self.report.context_items += 1,
+                            _ => self.report.memories += 1,
                         }
                     }
                     Err(e) => {
                         tracing::warn!(
-                            corpus = work.corpus.as_str(),
-                            row_id = %work.row_id,
+                            kind = %work.kind,
+                            item_id = %work.item_id,
                             "embedding slot: left without a vector until the model changes or a \
                              reindex: {e:#}"
                         );
-                        self.pass_over(work.key());
+                        self.pass_over(work.item_id.clone());
                     }
                 }
             }
@@ -480,62 +438,37 @@ impl Pass<'_, '_> {
     }
 
     async fn store(&self, work: &Work, vectors: Vec<Vec<f32>>) -> Result<()> {
+        let index = self.stores.index;
         let first = vectors
             .first()
             .ok_or_else(|| anyhow!("the embedder returned no vector"))?;
-        let id = work.row_id.as_str();
-        match work.corpus {
-            // Writes the row and the index, as every other memory write does.
-            Corpus::Memory => self.stores.memories.update_embedding(id, first).await,
-            Corpus::Summary => {
-                self.stores
-                    .index
-                    .upsert(&VectorEntry::whole(
-                        Corpus::Summary,
-                        work.row_id.clone(),
-                        self.model_id.to_string(),
-                        first.clone(),
-                        work.rev.clone(),
-                    ))
-                    .await
-            }
-            Corpus::Context => {
-                let context = self
-                    .stores
-                    .context
-                    .ok_or_else(|| anyhow!("no context store is wired"))?;
-                // Old passages first: the text may now split into fewer.
-                self.stores.index.remove(Corpus::Context, id).await?;
-                if work.spans.len() == 1 {
-                    // The row and the index, so the store's own search reads this model too.
-                    return context.update_embedding(id, first).await;
-                }
-                // Indexed by passage; the row keeps no vector, as ingest leaves a long item.
-                for (ix, (span, vector)) in work.spans.iter().zip(vectors).enumerate() {
-                    self.stores
-                        .index
-                        .upsert(&VectorEntry {
-                            corpus: Corpus::Context,
-                            row_id: work.row_id.clone(),
-                            chunk_ix: ix as i64,
-                            chunk_span: Some((span.start as i64, span.len as i64)),
-                            model_id: self.model_id.to_string(),
-                            vector,
-                            source_rev: None,
-                        })
-                        .await?;
-                }
-                Ok(())
-            }
+        if work.spans.len() == 1 && !work.kind.chunked() {
+            return index
+                .upsert(&VectorEntry::whole(
+                    work.item_id.clone(),
+                    self.model_id.to_string(),
+                    first.clone(),
+                    Some(work.rev.clone()),
+                ))
+                .await;
         }
+        // Old passages first: the text may now split into fewer.
+        index.remove(&work.item_id).await?;
+        for (ix, (span, vector)) in work.spans.iter().zip(vectors).enumerate() {
+            let whole = work.spans.len() == 1;
+            index
+                .upsert(&VectorEntry {
+                    item_id: work.item_id.clone(),
+                    chunk_ix: ix as i64,
+                    chunk_span: (!whole).then_some((span.start as i64, span.len as i64)),
+                    model_id: self.model_id.to_string(),
+                    vector,
+                    source_rev: Some(work.rev.clone()),
+                })
+                .await?;
+        }
+        Ok(())
     }
-}
-
-fn dedupe(ids: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::with_capacity(ids.len());
-    ids.into_iter()
-        .filter(|id| seen.insert(id.clone()))
-        .collect()
 }
 
 /// Each work's vectors, one per passage. A batch that fails is retried a row at a time, so one
@@ -622,9 +555,7 @@ mod tests {
     use crate::context::vector_index::{IndexHealth, ResolvedHit, VectorHit};
     use crate::models::domain::embedding_models::EmbedderChoice;
     use crate::models::ports::embedding::EmbeddingProvider;
-    use crate::user_data::domain::memory::MemoryFragment;
     use crate::user_data::domain::profile::ProfileScope;
-    use crate::user_data::mocks::mock_session::InMemorySessionStorage;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -632,70 +563,87 @@ mod tests {
     const MODEL: &str = "test-model";
     const DIMS: usize = 3;
 
-    /// Each row's text, and the model the index holds a vector of it under.
-    type Rows = BTreeMap<(Corpus, String), (String, Option<String>)>;
+    struct Item {
+        kind: Kind,
+        text: String,
+        rev: String,
+        /// The model the index holds a current vector of it under.
+        model: Option<String>,
+    }
 
-    /// An index over rows of text, each current for at most one model, like the staleness join.
+    /// An index over items, each current for at most one model, like the staleness join.
     #[derive(Default)]
     struct SpyIndex {
-        rows: Mutex<Rows>,
+        items: Mutex<BTreeMap<String, Item>>,
         upserts: Mutex<Vec<VectorEntry>>,
         tidied: AtomicUsize,
+        /// When false, a write lands but leaves the item stale, as a racing rewrite would.
+        sticks: bool,
     }
 
     impl SpyIndex {
-        fn holding(rows: &[(Corpus, &str, &str, Option<&str>)]) -> Arc<Self> {
-            let index = Self::default();
+        fn holding(items: &[(Kind, &str, &str, Option<&str>)]) -> Arc<Self> {
+            Arc::new(Self::with(items, true))
+        }
+
+        fn with(items: &[(Kind, &str, &str, Option<&str>)], sticks: bool) -> Self {
+            let index = Self {
+                sticks,
+                ..Self::default()
+            };
             {
-                let mut map = index.rows.lock().unwrap();
-                for (corpus, id, text, model) in rows {
+                let mut map = index.items.lock().unwrap();
+                for (kind, id, text, model) in items {
                     map.insert(
-                        (*corpus, id.to_string()),
-                        (text.to_string(), model.map(str::to_string)),
+                        id.to_string(),
+                        Item {
+                            kind: *kind,
+                            text: text.to_string(),
+                            rev: format!("rev-{id}"),
+                            model: model.map(str::to_string),
+                        },
                     );
                 }
             }
-            Arc::new(index)
+            index
         }
 
-        fn model_of(&self, corpus: Corpus, id: &str) -> Option<String> {
-            self.rows.lock().unwrap()[&(corpus, id.to_string())]
-                .1
-                .clone()
+        fn model_of(&self, id: &str) -> Option<String> {
+            self.items.lock().unwrap()[id].model.clone()
         }
 
-        fn stale(&self, corpus: Corpus, model_id: &str, limit: usize) -> Vec<(String, String)> {
-            self.rows
+        fn written(&self) -> Vec<String> {
+            let mut ids: Vec<String> = self
+                .upserts
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|((c, _), (_, m))| *c == corpus && m.as_deref() != Some(model_id))
-                .take(limit)
-                .map(|((_, id), (text, _))| (id.clone(), text.clone()))
-                .collect()
-        }
-
-        fn stamp(&self, corpus: Corpus, id: &str, model_id: &str) {
-            if let Some(row) = self.rows.lock().unwrap().get_mut(&(corpus, id.to_string())) {
-                row.1 = Some(model_id.to_string());
-            }
+                .map(|e| e.item_id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
         }
     }
 
     #[async_trait]
     impl VectorIndex for SpyIndex {
         async fn upsert(&self, e: &VectorEntry) -> Result<()> {
-            self.stamp(e.corpus, &e.row_id, &e.model_id);
+            if self.sticks {
+                if let Some(item) = self.items.lock().unwrap().get_mut(&e.item_id) {
+                    item.model = Some(e.model_id.clone());
+                }
+            }
             self.upserts.lock().unwrap().push(e.clone());
             Ok(())
         }
-        async fn remove(&self, c: Corpus, r: &str) -> Result<()> {
-            if let Some(row) = self.rows.lock().unwrap().get_mut(&(c, r.to_string())) {
-                row.1 = None;
+        async fn remove(&self, id: &str) -> Result<()> {
+            if let Some(item) = self.items.lock().unwrap().get_mut(id) {
+                item.model = None;
             }
             Ok(())
         }
-        async fn get(&self, _c: Corpus, _r: &str) -> Result<Option<VectorEntry>> {
+        async fn get(&self, _id: &str) -> Result<Option<VectorEntry>> {
             Ok(None)
         }
         async fn search(
@@ -703,6 +651,7 @@ mod tests {
             _q: &[f32],
             _m: &str,
             _s: &ProfileScope,
+            _k: &[Kind],
             _l: usize,
         ) -> Result<Vec<VectorHit>> {
             Ok(vec![])
@@ -712,20 +661,26 @@ mod tests {
             _q: &[f32],
             _m: &str,
             _s: &ProfileScope,
+            _k: &[Kind],
             _l: usize,
         ) -> Result<Vec<ResolvedHit>> {
             Ok(vec![])
         }
-        async fn needs_embedding(&self, c: Corpus, m: &str, l: usize) -> Result<Vec<String>> {
-            Ok(self.stale(c, m, l).into_iter().map(|(id, _)| id).collect())
-        }
-        async fn needs_embedding_with_text(
-            &self,
-            c: Corpus,
-            m: &str,
-            l: usize,
-        ) -> Result<Vec<(String, String)>> {
-            Ok(self.stale(c, m, l))
+        async fn needs_embedding(&self, kinds: &[Kind], m: &str, l: usize) -> Result<Vec<Stale>> {
+            let items = self.items.lock().unwrap();
+            let mut stale: Vec<Stale> = items
+                .iter()
+                .filter(|(_, i)| kinds.contains(&i.kind) && i.model.as_deref() != Some(m))
+                .map(|(id, i)| Stale {
+                    item_id: id.clone(),
+                    kind: i.kind,
+                    text: i.text.clone(),
+                    rev: i.rev.clone(),
+                })
+                .collect();
+            stale.sort_by_key(|s| kinds.iter().position(|k| *k == s.kind));
+            stale.truncate(l);
+            Ok(stale)
         }
         async fn prune_orphans(&self) -> Result<u64> {
             self.tidied.fetch_add(1, Ordering::SeqCst);
@@ -733,58 +688,6 @@ mod tests {
         }
         async fn health(&self, _m: &str) -> Result<IndexHealth> {
             Ok(IndexHealth::default())
-        }
-    }
-
-    /// Memory writes that reach the index the way the SQLite store's do, unless told not to.
-    struct IndexedMemories {
-        index: Arc<SpyIndex>,
-        embedder: Arc<ActiveEmbedder>,
-        mirrors: bool,
-        updated: Mutex<Vec<String>>,
-    }
-
-    impl IndexedMemories {
-        fn new(index: &Arc<SpyIndex>, embedder: &Arc<ActiveEmbedder>) -> Self {
-            Self {
-                index: index.clone(),
-                embedder: embedder.clone(),
-                mirrors: true,
-                updated: Mutex::new(vec![]),
-            }
-        }
-        fn updated(&self) -> Vec<String> {
-            self.updated.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl MemoryRepository for IndexedMemories {
-        async fn add(&self, _f: MemoryFragment) -> Result<()> {
-            Ok(())
-        }
-        async fn search_recent(&self, _s: &ProfileScope, _l: usize) -> Result<Vec<MemoryFragment>> {
-            Ok(vec![])
-        }
-        async fn search_similar(
-            &self,
-            _q: &[f32],
-            _s: &ProfileScope,
-            _l: usize,
-        ) -> Result<Vec<MemoryFragment>> {
-            Ok(vec![])
-        }
-        async fn delete(&self, _id: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
-            assert_eq!(embedding.len(), DIMS);
-            self.updated.lock().unwrap().push(id.to_string());
-            if self.mirrors {
-                self.index
-                    .stamp(Corpus::Memory, id, &self.embedder.model_id());
-            }
-            Ok(())
         }
     }
 
@@ -855,81 +758,51 @@ mod tests {
         }
     }
 
-    fn stores<'a>(
-        index: &'a SpyIndex,
-        memories: &'a dyn MemoryRepository,
-        sessions: &'a InMemorySessionStorage,
-        context: Option<&'a dyn ContextRepository>,
-    ) -> SlotStores<'a> {
-        SlotStores {
-            index,
-            memories,
-            sessions,
-            context,
-        }
+    fn stores(index: &SpyIndex) -> SlotStores<'_> {
+        SlotStores { index }
     }
 
-    fn memories(n: usize) -> Vec<(Corpus, String, String)> {
+    fn memories(n: usize) -> Vec<(Kind, String, String)> {
         (0..n)
-            .map(|i| {
-                (
-                    Corpus::Memory,
-                    format!("m{i}"),
-                    format!("Jerry waters bed {i}"),
-                )
-            })
+            .map(|i| (Kind::Fact, format!("m{i}"), format!("Jerry waters bed {i}")))
             .collect()
     }
 
-    fn holding(rows: &[(Corpus, String, String)]) -> Arc<SpyIndex> {
-        let rows: Vec<(Corpus, &str, &str, Option<&str>)> = rows
+    fn holding(items: &[(Kind, String, String)]) -> Arc<SpyIndex> {
+        let items: Vec<(Kind, &str, &str, Option<&str>)> = items
             .iter()
-            .map(|(c, id, text)| (*c, id.as_str(), text.as_str(), None))
+            .map(|(k, id, text)| (*k, id.as_str(), text.as_str(), None))
             .collect();
-        SpyIndex::holding(&rows)
+        SpyIndex::holding(&items)
     }
 
     #[tokio::test]
-    async fn memory_goes_through_the_repository_and_rows_of_another_model_are_redone() {
+    async fn items_of_another_model_are_redone_and_current_ones_left_alone() {
         let index = SpyIndex::holding(&[
-            (Corpus::Memory, "never", "Jerry keeps bees", None),
-            (
-                Corpus::Memory,
-                "old",
-                "Jerry plays chess",
-                Some("old-model"),
-            ),
-            (Corpus::Memory, "current", "Jerry cycles", Some(MODEL)),
+            (Kind::Fact, "never", "Jerry keeps bees", None),
+            (Kind::Trait, "old", "Jerry plays chess", Some("old-model")),
+            (Kind::Fact, "current", "Jerry cycles", Some(MODEL)),
         ]);
         let embedder = embedder(None, 1);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
 
         let report = EmbeddingSlot::new()
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
 
         assert_eq!(report.end, PassEnd::Drained);
         assert_eq!(report.memories, 2);
-        let mut updated = memories.updated();
-        updated.sort();
         assert_eq!(
-            updated,
+            index.written(),
             vec!["never", "old"],
-            "the current row is left alone"
+            "the current item is left alone"
         );
-        assert_eq!(
-            index.model_of(Corpus::Memory, "old").as_deref(),
-            Some(MODEL)
-        );
-        assert!(
-            index.upserts.lock().unwrap().is_empty(),
-            "memory reaches the index only through its repository"
-        );
+        assert_eq!(index.model_of("old").as_deref(), Some(MODEL));
+        assert!(index
+            .upserts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.source_rev == Some(format!("rev-{}", e.item_id))));
         assert_eq!(index.tidied.load(Ordering::SeqCst), 1, "drained, so tidied");
     }
 
@@ -937,20 +810,14 @@ mod tests {
     async fn the_pass_stops_after_one_batch_when_told_to() {
         let index = holding(&memories(5));
         let embedder = embedder(None, 1);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
 
         let report = EmbeddingSlot::new()
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::allowing(0),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::allowing(0))
             .await;
 
         assert_eq!(report.end, PassEnd::Yielded);
         assert_eq!(report.batches, 1);
-        assert_eq!(memories.updated().len(), 1, "the sizer starts at one item");
+        assert_eq!(index.written().len(), 1, "the sizer starts at one item");
         assert_eq!(index.tidied.load(Ordering::SeqCst), 0, "not drained");
     }
 
@@ -958,31 +825,25 @@ mod tests {
     async fn a_switch_between_batches_ends_the_pass() {
         let index = holding(&memories(3));
         let embedder = embedder(None, 1);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
         let control = Control {
             switch: Some(embedder.clone()),
             ..Control::always()
         };
 
         let report = EmbeddingSlot::new()
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &control,
-            )
+            .run_pass(&stores(&index), &embedder, &control)
             .await;
 
         assert_eq!(report.end, PassEnd::ModelChanged);
-        assert_eq!(memories.updated().len(), 1);
+        assert_eq!(index.written().len(), 1);
     }
 
     #[tokio::test]
-    async fn rows_that_fail_end_the_pass_instead_of_spinning() {
+    async fn items_that_fail_end_the_pass_instead_of_spinning() {
         let index = holding(&[
-            (Corpus::Memory, "a".into(), "poison one".into()),
-            (Corpus::Memory, "b".into(), "fine".into()),
-            (Corpus::Memory, "c".into(), "poison two".into()),
+            (Kind::Fact, "a".into(), "poison one".into()),
+            (Kind::Fact, "b".into(), "fine".into()),
+            (Kind::Fact, "c".into(), "poison two".into()),
         ]);
         let calls = Arc::new(AtomicUsize::new(0));
         let embedder = Arc::new(ActiveEmbedder::loaded(Arc::new(Provider {
@@ -990,171 +851,111 @@ mod tests {
             max_batch: 1,
             calls: calls.clone(),
         })));
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
         let mut slot = EmbeddingSlot::new();
 
         let report = tokio::time::timeout(
             Duration::from_secs(5),
-            slot.run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            ),
+            slot.run_pass(&stores(&index), &embedder, &Control::always()),
         )
         .await
-        .expect("a pass over rows that always fail must end");
+        .expect("a pass over items that always fail must end");
         assert_eq!(report.end, PassEnd::Drained);
         assert_eq!((report.memories, report.failed), (1, 2));
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "each row is tried once");
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "each item is tried once");
 
         let again = slot
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
         assert_eq!(again.embedded() + again.failed, 0);
         assert_eq!(calls.load(Ordering::SeqCst), 3, "not retried every poll");
 
         slot.retry_failed();
         let asked = slot
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
         assert_eq!(asked.failed, 2, "a reindex tries them again");
     }
 
     #[tokio::test]
-    async fn a_write_that_leaves_the_row_stale_is_not_retried_in_a_loop() {
-        let index = holding(&memories(2));
+    async fn a_write_that_leaves_the_item_stale_is_not_retried_in_a_loop() {
+        let items: Vec<(Kind, String, String)> = memories(2);
+        let items: Vec<(Kind, &str, &str, Option<&str>)> = items
+            .iter()
+            .map(|(k, id, text)| (*k, id.as_str(), text.as_str(), None))
+            .collect();
+        let index = SpyIndex::with(&items, false);
         let embedder = embedder(None, 1);
-        let memories = IndexedMemories {
-            mirrors: false,
-            ..IndexedMemories::new(&index, &embedder)
-        };
-        let sessions = InMemorySessionStorage::new();
 
         let report = tokio::time::timeout(
             Duration::from_secs(5),
-            EmbeddingSlot::new().run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            ),
+            EmbeddingSlot::new().run_pass(&stores(&index), &embedder, &Control::always()),
         )
         .await
         .expect("must end");
         assert_eq!(report.end, PassEnd::Drained);
-        assert_eq!(memories.updated().len(), 2, "each row written once");
+        assert_eq!(
+            index.upserts.lock().unwrap().len(),
+            2,
+            "each item written once"
+        );
         assert_eq!(report.failed, 2);
     }
 
     #[tokio::test]
-    async fn a_batch_one_row_breaks_is_redone_a_row_at_a_time() {
+    async fn a_batch_one_item_breaks_is_redone_an_item_at_a_time() {
         let index = holding(&[
-            (Corpus::Memory, "a".into(), "fine".into()),
-            (Corpus::Memory, "b".into(), "poison".into()),
-            (Corpus::Memory, "c".into(), "also fine".into()),
+            (Kind::Fact, "a".into(), "fine".into()),
+            (Kind::Fact, "b".into(), "poison".into()),
+            (Kind::Fact, "c".into(), "also fine".into()),
         ]);
         let embedder = embedder(Some("poison"), 8);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
         let mut slot = EmbeddingSlot::new();
-        // Taught that rows are cheap, so the next batch takes all three.
+        // Taught that items are cheap, so the next batch takes all three.
         slot.sizer.record(1, Duration::from_micros(1));
 
         let report = slot
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
         assert_eq!(report.batches, 1);
         assert_eq!((report.memories, report.failed), (2, 1));
     }
 
     #[tokio::test]
-    async fn a_summary_is_indexed_with_the_revision_read_beside_its_text() {
-        let index = SpyIndex::holding(&[(Corpus::Summary, "s1", "", None)]);
+    async fn memory_is_embedded_before_conversations_and_ingested_items() {
+        let index = SpyIndex::holding(&[
+            (Kind::Mail, "a-mail", "Invoice due", None),
+            (Kind::Conversation, "b-chat", "We planned the vents", None),
+            (Kind::Fact, "c-fact", "Jerry keeps bees", None),
+        ]);
         let embedder = embedder(None, 1);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
-        sessions
-            .set_rolling_summary("s1", "We planned the greenhouse vents", "msg-9")
-            .await
-            .unwrap();
-
         let report = EmbeddingSlot::new()
-            .run_pass(
-                &stores(&index, &memories, &sessions, None),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
-
-        assert_eq!(report.summaries, 1);
-        let upserts = index.upserts.lock().unwrap();
-        assert_eq!(upserts.len(), 1);
-        assert_eq!(upserts[0].corpus, Corpus::Summary);
-        assert_eq!(upserts[0].model_id, MODEL);
-        assert!(upserts[0].source_rev.is_some());
+        let order: Vec<String> = index
+            .upserts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.item_id.clone())
+            .collect();
+        assert_eq!(order, vec!["c-fact", "b-chat", "a-mail"]);
+        assert_eq!(
+            (report.memories, report.summaries, report.context_items),
+            (1, 1, 1)
+        );
     }
 
     #[tokio::test]
-    async fn a_long_context_item_is_indexed_by_passage_and_a_short_one_through_its_store() {
-        use crate::context::domain::{ContextItem, ItemKind, ItemParts, SourceKind};
-        use crate::context::mocks::mock_context_repository::MockContextRepository;
-        use crate::security::domain::redaction::RedactionKind;
-        use crate::security::mocks::mock_redactor::MockRedactor;
-
-        let redactor = MockRedactor::replacing("sk-never-present", RedactionKind::ApiKey);
-        let item = |id: &str, body: &str| {
-            ContextItem::from_parts(
-                &redactor,
-                ItemParts {
-                    id: id.into(),
-                    source_id: "mail".into(),
-                    external_id: id.into(),
-                    profile_id: "jerry".into(),
-                    source_kind: SourceKind::Mail,
-                    kind: ItemKind::Message,
-                    occurred_at: chrono::Utc::now(),
-                    ingested_at: chrono::Utc::now(),
-                    title: String::new(),
-                    body: body.into(),
-                    participants: vec![],
-                    stored_sensitivity: None,
-                    embedding: None,
-                },
-            )
-            .unwrap()
-        };
-
+    async fn a_long_ingested_item_is_indexed_by_passage_and_a_short_one_whole() {
         let long = "The invoice for the solar pump is attached. ".repeat(40);
         let index = SpyIndex::holding(&[
-            (Corpus::Context, "short", "Rain tomorrow", None),
-            (Corpus::Context, "long", &long, Some("old-model")),
+            (Kind::Mail, "short", "Rain tomorrow", None),
+            (Kind::Mail, "long", &long, Some("old-model")),
         ]);
         let embedder = embedder(None, 64);
-        let memories = IndexedMemories::new(&index, &embedder);
-        let sessions = InMemorySessionStorage::new();
-        let context = MockContextRepository::new();
-        for (id, text) in [("short", "Rain tomorrow"), ("long", long.as_str())] {
-            context.save_item(&item(id, text)).await.unwrap();
-        }
 
         let report = EmbeddingSlot::new()
-            .run_pass(
-                &stores(&index, &memories, &sessions, Some(&context)),
-                &embedder,
-                &Control::always(),
-            )
+            .run_pass(&stores(&index), &embedder, &Control::always())
             .await;
 
         assert_eq!(report.context_items, 2);
@@ -1166,20 +967,17 @@ mod tests {
         assert!(passages.len() > 1);
         let upserts = index.upserts.lock().unwrap();
         let long_chunks: Vec<&VectorEntry> =
-            upserts.iter().filter(|e| e.row_id == "long").collect();
+            upserts.iter().filter(|e| e.item_id == "long").collect();
         assert_eq!(long_chunks.len(), passages.len());
         assert!(long_chunks
             .iter()
             .all(|e| e.chunk_span.is_some() && e.model_id == MODEL));
-        let stored = |id: &str| {
-            context
-                .all_items()
-                .into_iter()
-                .find(|item| item.id() == id)
-                .and_then(|item| item.embedding().map(<[f32]>::len))
-        };
-        assert_eq!(stored("short"), Some(DIMS));
-        assert_eq!(stored("long"), None, "a long item has no single vector");
+        let short: Vec<&VectorEntry> = upserts.iter().filter(|e| e.item_id == "short").collect();
+        assert_eq!(short.len(), 1);
+        assert_eq!(
+            short[0].chunk_span, None,
+            "a short item is one whole vector"
+        );
     }
 
     #[test]

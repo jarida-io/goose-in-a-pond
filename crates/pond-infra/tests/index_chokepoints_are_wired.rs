@@ -1,7 +1,52 @@
-//! Every production `SqliteMemoryRepository` in `main.rs` must chain the vector index.
+//! Every production `SqliteMemoryRepository` in `main.rs` must chain the vector index, and
+//! memory and context search must score vectors only through it.
 //! A text scan via `include_str!`: pond-server's tests don't run in CI, pond-infra's do.
 
 const MAIN: &str = include_str!("../../pond-server/src/main.rs");
+const MEMORY_STORE: &str = include_str!("../src/sqlite_memory.rs");
+const CONTEXT_STORE: &str = include_str!("../src/sqlite_context.rs");
+const SLOT: &str = include_str!("../../pond-core/src/context/embedding_slot.rs");
+
+fn without_tests(src: &str) -> &str {
+    src.split("#[cfg(test)]\nmod tests").next().unwrap()
+}
+
+/// A vector on a memory or context row carries no model id, and the index's join is what
+/// applies scope and liveness to the item header; scoring the row's own vector skips both.
+#[test]
+fn memory_and_context_search_score_only_through_the_item_index() {
+    for (name, src) in [
+        ("sqlite_memory.rs", MEMORY_STORE),
+        ("sqlite_context.rs", CONTEXT_STORE),
+    ] {
+        let code = without_tests(src);
+        assert!(
+            !code.contains("cosine"),
+            "{name} scores vectors itself again; search must go through VectorIndex::search"
+        );
+        assert!(
+            code.contains(".search(query_embedding"),
+            "{name} no longer searches the index, so this guard is looking at the wrong code"
+        );
+    }
+}
+
+/// The slot writes every vector through the index, under the header revision it read.
+#[test]
+fn the_embedding_slot_writes_only_the_index() {
+    let code = without_tests(SLOT);
+    let stores = code
+        .split("pub struct SlotStores")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("SlotStores is gone; re-read what the slot writes through");
+    assert_eq!(
+        stores.matches(": &'a dyn").count(),
+        1,
+        "SlotStores holds a store besides the index again: {stores}"
+    );
+    assert!(code.contains("source_rev: Some(work.rev.clone())"));
+}
 
 /// `(enclosing fn, reason)` exemptions: only a site with no vector pool may be listed here.
 const EXCLUSIONS: &[(&str, &str)] = &[];

@@ -13,6 +13,7 @@ use pond_core::items::{
     source, timestamp, Audience, ItemId, Kind, Modality, ProducedBy, Relation, Scope, State,
 };
 use pond_core::security::domain::event::PrivacySensitivity;
+use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::{Pool, Sqlite, SqliteConnection};
 
 use crate::rule_redactor::RuleRedactor;
@@ -21,6 +22,35 @@ use crate::rule_redactor::RuleRedactor;
 fn redactor() -> &'static RuleRedactor {
     static REDACTOR: OnceLock<RuleRedactor> = OnceLock::new();
     REDACTOR.get_or_init(RuleRedactor::new)
+}
+
+/// What `scope` may read of `items` aliased `i`, as an `AND` clause and its binds: a member
+/// sees their own, the household's and what is shared with them, the household everything,
+/// a guest nothing. `schema` is `sys.` on the index's connections, which attach this database.
+pub fn scope_sql(scope: &ProfileScope, schema: &str) -> (String, Vec<String>) {
+    match scope {
+        ProfileScope::Owner(id) => (
+            format!(
+                "AND (i.owner_profile_id = ? OR i.audience = 'household' OR EXISTS \
+                 (SELECT 1 FROM {schema}item_shares s WHERE s.item_id = i.id AND s.profile_id = ?))"
+            ),
+            vec![id.clone(), id.clone()],
+        ),
+        ProfileScope::Household => (String::new(), vec![]),
+        ProfileScope::Guest => ("AND 1 = 0".to_string(), vec![]),
+    }
+}
+
+/// An item's id and revision, read through its detail row's key.
+pub async fn header_of(
+    pool: &Pool<Sqlite>,
+    table: &str,
+    key: &str,
+) -> Result<Option<(String, String)>> {
+    let sql = format!(
+        "SELECT i.id, i.updated_at FROM {table} d JOIN items i ON i.id = d.item_id WHERE d.id = ?"
+    );
+    Ok(sqlx::query_as(&sql).bind(key).fetch_optional(pool).await?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1130,12 +1130,19 @@ def _memory_vector(memory_id):
 
 
 def _index_vector(memory_id):
-    """The shared index's vector for a memory, or None."""
+    """The shared index's vector for a memory, found through its item header, or None."""
     if not os.path.exists(VECTORS_DB):
+        return None
+    con = db()
+    item = con.execute(
+        "SELECT item_id FROM memory_fragments WHERE id = ?", (memory_id,)
+    ).fetchone()
+    con.close()
+    if not item or item[0] is None:
         return None
     con = sqlite3.connect(VECTORS_DB)
     row = con.execute(
-        "SELECT vector FROM vectors WHERE corpus = 'memory' AND row_id = ?", (memory_id,)
+        "SELECT vector FROM vectors WHERE item_id = ? AND chunk_ix = 0", (item[0],)
     ).fetchone()
     con.close()
     return row[0] if row else None
@@ -1150,11 +1157,12 @@ def _index_state(memory_id, expected):
 
 
 def _wait_for_vector(memory_id, seconds):
+    """The index's vector for a memory once the slot has made it; the slot writes only the index."""
     import time as _time
 
     deadline = _time.monotonic() + seconds
     while _time.monotonic() < deadline:
-        vector = _memory_vector(memory_id)
+        vector = _index_vector(memory_id)
         if vector is not None:
             return vector
         _time.sleep(0.5)
