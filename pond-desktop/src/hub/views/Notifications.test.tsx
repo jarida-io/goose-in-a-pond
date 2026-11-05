@@ -70,6 +70,12 @@ describe("what the feed will not remember", () => {
     expect(screen.queryByText("Nothing here yet")).toBeNull();
   });
 
+  it("previews a run that wrote markdown as plain text", () => {
+    appState.scheduleRuns = [run({ result: "### Briefing\n\n*   **Exchange Rate:** 129 KES" })];
+    render(<NotificationsView />);
+    expect(screen.getByText("Briefing Exchange Rate: 129 KES")).toBeTruthy();
+  });
+
   it("stays empty when the server is unreachable", () => {
     appState.serverOnline = false;
     render(<NotificationsView />);

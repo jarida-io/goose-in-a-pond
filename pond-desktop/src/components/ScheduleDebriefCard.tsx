@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Chip, Button } from "@heroui/react";
 import type { ScheduleRunNotification } from "../api/types";
+import { MarkdownText } from "./MarkdownText";
 
 // ── Custom hooks ────────────────────────────────────────────────
 
@@ -136,6 +137,18 @@ function extractNumber(obj: Record<string, unknown>, ...keys: string[]): number 
     }
   }
   return 0;
+}
+
+/** The result typed so far, drawn as markdown so a run that wrote headings, bold or bullets shows them formatted. */
+function TypedResult({ displayed, done }: { displayed: string; done: boolean }) {
+  return (
+    <div className="debrief-tw-zone">
+      <div className="debrief-tw">
+        <MarkdownText source={displayed} />
+        {!done && <span className="debrief-cursor" aria-hidden="true" />}
+      </div>
+    </div>
+  );
 }
 
 // ── Router ───────────────────────────────────────────────────────
@@ -343,12 +356,7 @@ function DailyBriefingCard({
         </div>
       </div>
 
-      <div className="debrief-tw-zone">
-        <pre className="debrief-tw">
-          {displayed}
-          {!done && <span className="debrief-cursor" aria-hidden="true" />}
-        </pre>
-      </div>
+      <TypedResult displayed={displayed} done={done} />
 
       <AnimatePresence>
         {bodyVisible && (
@@ -537,12 +545,7 @@ function WeeklyReportCard({
         </div>
       </div>
 
-      <div className="debrief-tw-zone">
-        <pre className="debrief-tw">
-          {displayed}
-          {!done && <span className="debrief-cursor" aria-hidden="true" />}
-        </pre>
-      </div>
+      <TypedResult displayed={displayed} done={done} />
 
       <AnimatePresence>
         {bodyVisible && (
@@ -766,12 +769,7 @@ function GenericDebriefCard({
         </div>
       </div>
 
-      <div className="debrief-tw-zone">
-        <pre className="debrief-tw">
-          {displayed}
-          {!done && <span className="debrief-cursor" aria-hidden="true" />}
-        </pre>
-      </div>
+      <TypedResult displayed={displayed} done={done} />
     </div>
   );
 }

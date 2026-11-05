@@ -16,6 +16,7 @@ import {
   type ScheduleToast,
 } from "./reducer";
 import type { ScheduleRunNotification } from "../api/types";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 
 /** Survives one dropped beat inside the registry's 5-minute online window; stays clear of the per-IP budget. */
 const SELF_HEARTBEAT_MS = 120_000;
@@ -78,7 +79,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
             toast.status !== "running" ? new Date().toISOString() : null,
           durationMs: null,
           read: false,
-          excerpt: (toast.result ?? toast.error ?? "").slice(0, 80),
+          excerpt: markdownToPlainText(toast.result ?? toast.error ?? "").slice(0, 80),
           recipe: inferRecipe(toast.schedule_label),
         };
 
@@ -103,7 +104,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
           finishedAt: r.finished_at ?? null,
           durationMs: r.duration_ms ?? null,
           read: true,
-          excerpt: (r.result ?? r.error ?? "").slice(0, 80),
+          excerpt: markdownToPlainText(r.result ?? r.error ?? "").slice(0, 80),
           recipe: inferRecipe(r.schedule_name),
         }));
         dispatch({ type: "SET_SCHEDULE_RUNS", payload: notifications });

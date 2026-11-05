@@ -12,6 +12,7 @@ import type {
   NotificationCategory,
   NotificationGroup,
 } from "../data/notifications";
+import { markdownToPlainText } from "../../lib/markdownBlocks";
 import "./notifications.css";
 
 // ─── Category icon map ────────────────────────────────────────────────────────
@@ -32,7 +33,8 @@ function formatRunBody(run: ScheduleRunNotification): string {
       if (Array.isArray(arr)) return (arr as string[]).join(" · ");
     } catch { /* fall through */ }
   }
-  return run.result?.slice(0, 100) ?? run.excerpt ?? `Completed${run.durationMs ? ` in ${Math.round(run.durationMs / 1000)}s` : ""}`;
+  if (run.result !== null) return markdownToPlainText(run.result).slice(0, 100);
+  return run.excerpt ?? `Completed${run.durationMs ? ` in ${Math.round(run.durationMs / 1000)}s` : ""}`;
 }
 
 function buildNotificationFromRun(run: ScheduleRunNotification): Notification {

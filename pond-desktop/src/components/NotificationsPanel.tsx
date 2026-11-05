@@ -13,6 +13,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import { api } from "../api/PondApiClient";
 import type { ScheduleRunNotification } from "../api/types";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 
 /* ── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -89,7 +90,7 @@ export function NotificationsPanel({ onOpenDebrief }: Props) {
             finishedAt: r.finished_at ?? null,
             durationMs: r.duration_ms ?? null,
             read: true,
-            excerpt: (r.result ?? r.error ?? "").slice(0, 80),
+            excerpt: markdownToPlainText(r.result ?? r.error ?? "").slice(0, 80),
             recipe: inferRecipe(r.schedule_name),
           }));
           dispatch({ type: "SET_SCHEDULE_RUNS", payload: notifications });
