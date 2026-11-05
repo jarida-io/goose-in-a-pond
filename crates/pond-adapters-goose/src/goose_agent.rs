@@ -23,6 +23,7 @@ use pond_core::models::services::context::prefix_cache::{InvalidationReason, Pre
 use pond_core::models::services::context::token_counting::HeuristicTokenCounter;
 use pond_core::models::services::prompt_builder::build_prompt_partition;
 use pond_core::prompts::PromptState;
+use pond_core::shared::domain::turn_failure::TurnFailure;
 use pond_core::user_data::domain::memory::{cosine_similarity, MemoryFragment};
 use pond_core::user_data::domain::prompt_extra::render_extension_notes;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
@@ -241,12 +242,18 @@ fn hidden_completeness_reply(messages: &[Message], goal: &str) -> Option<String>
 
 /// Drains one turn's stream into the reply a non-streaming caller (a schedule) receives.
 ///
-/// The reply is the turn's text and nothing else: reasoning is not an answer, and tool calls are
-/// recorded in `metadata["tool_calls"]`. A turn whose model wrote no text is an error that says
-/// so, naming the tools it did call, and is logged as `kind="turn_without_reply"` — a run that
-/// only fetched the weather must not read as the engine having failed. So is a turn that ended on
-/// [`EMPTY_TURN_EXHAUSTED_MESSAGE`]: the apology for no reply is not one, and a schedule must not
-/// speak it or record the run as done. A reply wrapped in `<answer>` tags comes without them.
+/// The reply is the turn's visible text and nothing else: reasoning is not an answer, whether it
+/// came as thinking events or as `<think>`-style blocks inside the text, and tool calls are
+/// recorded in `metadata["tool_calls"]`. The text goes through pond-core's [`ThoughtFilter`], as
+/// the streaming path's does before display, so a reply wrapped in `<answer>` tags comes without
+/// them. A turn with no visible text is a [`TurnFailure::NoReply`] or
+/// [`TurnFailure::NoReplyAfterTools`], logged as `kind="turn_without_reply"` with the tools it
+/// called — a run that only fetched the weather must not read as the engine having failed. So is
+/// a turn that ended on [`EMPTY_TURN_EXHAUSTED_MESSAGE`]: the apology for no reply is not one, and
+/// a schedule must not speak it or record the run as done. An error event is classified by
+/// [`engine_failure`].
+///
+/// [`ThoughtFilter`]: pond_core::models::services::thought_filter::ThoughtFilter
 async fn collect_reply(
     session_id: &str,
     mut stream: futures::stream::BoxStream<'static, Result<AgentStreamEvent>>,
@@ -267,32 +274,32 @@ async fn collect_reply(
                 }
             }
             AgentStreamEvent::Error { content } => {
-                return Err(anyhow!(content));
+                return Err(engine_failure(session_id, &content).into());
             }
             _ => {}
         }
     }
 
-    let exhausted = full_text.trim() == EMPTY_TURN_EXHAUSTED_MESSAGE;
-    if full_text.trim().is_empty() || exhausted {
+    let mut filter = pond_core::models::services::thought_filter::ThoughtFilter::new();
+    let mut visible = filter.push(&full_text);
+    visible.push_str(&filter.flush());
+    let visible = visible.trim();
+
+    let exhausted = visible == EMPTY_TURN_EXHAUSTED_MESSAGE;
+    if visible.is_empty() || exhausted {
+        let failure = TurnFailure::without_reply(tool_call_ids.len());
         tracing::warn!(
             target: "giap::trace",
             kind = "turn_without_reply",
+            failure = ?failure,
             exhausted,
+            raw_chars = full_text.len(),
             session_id = %session_id,
             tool_calls = tool_call_ids.len(),
             tools = %tool_names.join(","),
             "the turn ended without any reply text",
         );
-        return Err(if tool_call_ids.is_empty() {
-            anyhow!("The model finished without writing a reply.")
-        } else {
-            anyhow!(
-                "The model made {} tool call(s) ({}) but finished without writing a reply.",
-                tool_call_ids.len(),
-                tool_names.join(", ")
-            )
-        });
+        return Err(failure.into());
     }
 
     let mut metadata = HashMap::new();
@@ -303,19 +310,20 @@ async fn collect_reply(
         );
     }
 
-    let text = match pond_core::models::services::thought_filter::unwrap_answer(&full_text) {
-        Some(inner) => {
-            tracing::info!(
-                target: "giap::trace",
-                kind = "answer_tag_stripped",
-                session_id = %session_id,
-                "the reply carried <answer> tags; they were dropped"
-            );
-            inner.to_string()
-        }
-        None => full_text,
-    };
-    Ok(AgentResponse { text, metadata })
+    if visible != full_text.trim() {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "reply_markup_stripped",
+            session_id = %session_id,
+            answer_tag = pond_core::models::services::thought_filter::has_answer_tag(&full_text),
+            stripped_chars = full_text.trim().len() - visible.len(),
+            "the reply carried reasoning blocks or <answer> tags; they were dropped"
+        );
+    }
+    Ok(AgentResponse {
+        text: visible.to_string(),
+        metadata,
+    })
 }
 
 /// A non-streaming turn's outcome once its engine session's last provider call is known.
@@ -324,8 +332,8 @@ async fn collect_reply(
 /// as the turn's reply text, so [`collect_reply`] alone sees a reply. `failure` is the typed
 /// error the provider shim recorded for the turn's latest call ([`provider_failure`]); when
 /// there is one, the turn failed and the text is not an answer, so a schedule records the run
-/// failed with that error instead of completed with goose's prose. Logged as
-/// `kind="turn_engine_failed"`.
+/// failed instead of completed with goose's prose. The error is the [`TurnFailure`] that
+/// [`engine_failure`] classifies it as, which logs the engine's own text.
 ///
 /// [`provider_failure`]: crate::provider_shim::SessionControls::provider_failure
 fn fail_on_engine_error(
@@ -336,14 +344,52 @@ fn fail_on_engine_error(
     let Some(error) = failure else {
         return reply;
     };
+    Err(engine_failure(session_id, &error).into())
+}
+
+/// Lower-cased fragments of an engine error that mean the model could not load or start.
+///
+/// - `null result from llama cpp`: llama-cpp-2's `LlamaModelLoadError::NullResult`, the load
+///   returning no model. On the Orin on 2026-10-27 the line before it was llama.cpp's
+///   `unable to allocate CUDA0 buffer`.
+/// - `failed to create context`: goose-local-inference could not create the llama.cpp context,
+///   whose KV cache is the allocation that fails when GPU memory is short.
+/// - `out of gpu memory`: the goose fork's typed `ModelLoadError::OutOfGpuMemory`.
+/// - `out of memory`, `unable to allocate`: CUDA's and llama.cpp's own wording, as an HTTP
+///   provider (ollama, llama-server) relays it.
+/// - `engine_create`: LiteRT-LM could not create its engine.
+const MODEL_UNAVAILABLE_MARKERS: &[&str] = &[
+    "null result from llama cpp",
+    "failed to create context",
+    "out of gpu memory",
+    "out of memory",
+    "unable to allocate",
+    "engine_create",
+];
+
+/// The [`TurnFailure`] an engine error ended a turn with: [`TurnFailure::ModelUnavailable`] when
+/// the model could not load or start ([`MODEL_UNAVAILABLE_MARKERS`]), else
+/// [`TurnFailure::Engine`]. Logged with the engine's own text as `kind="turn_engine_failed"`; the
+/// returned failure carries only the plain sentence.
+fn engine_failure(session_id: &str, error: &str) -> TurnFailure {
+    let lowered = error.to_lowercase();
+    let failure = if MODEL_UNAVAILABLE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        TurnFailure::ModelUnavailable
+    } else {
+        TurnFailure::Engine
+    };
     tracing::warn!(
         target: "giap::trace",
         kind = "turn_engine_failed",
+        failure = ?failure,
         session_id = %session_id,
         error = %error,
-        "the turn ended on an engine error; its text is goose's report of it, not a reply",
+        "the turn ended on an engine error; any text is goose's report of it, not a reply",
     );
-    Err(anyhow!("The model could not run: {error}"))
+    failure
 }
 
 /// Goose's report of a provider error, replaced with [`OUT_OF_GPU_MEMORY_REPLY`] when this turn's
@@ -7167,10 +7213,16 @@ mod tests {
         )
         .await
         .expect_err("a turn without text has no reply");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReplyAfterTools)
+        );
         let msg = err.to_string();
-        assert!(msg.contains("2 tool call(s)"), "{msg}");
-        assert!(msg.contains("giap-weather__get_current_weather"), "{msg}");
-        assert!(msg.contains("without writing a reply"), "{msg}");
+        assert_eq!(msg, TurnFailure::NoReplyAfterTools.user_message());
+        assert!(
+            !msg.contains("giap-weather") && !msg.contains('2'),
+            "the tool names and count stay in the log: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -7179,8 +7231,8 @@ mod tests {
             .await
             .expect_err("an empty turn has no reply");
         assert_eq!(
-            err.to_string(),
-            "The model finished without writing a reply."
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReply)
         );
     }
 
@@ -7196,7 +7248,81 @@ mod tests {
         )
         .await
         .expect_err("the apology is not a reply");
-        assert!(err.to_string().contains("without writing a reply"), "{err}");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReply)
+        );
+    }
+
+    /// Text that is only markup is not an answer: a schedule would record it, or say nothing
+    /// aloud, as a completed run.
+    #[tokio::test]
+    async fn a_turn_whose_text_is_only_reasoning_or_empty_tags_has_no_reply() {
+        for text in [
+            "  \n\t ",
+            "<think>the weather is clear, the news is quiet</think>",
+            "<answer>\n</answer>",
+            "<|channel>thought the brief needs three parts<channel|>\n",
+        ] {
+            let err = collect_reply(
+                "sched-test",
+                events(vec![
+                    tool_call("call-1", "giap-weather__get_current_weather"),
+                    AgentStreamEvent::Text {
+                        content: text.to_string(),
+                    },
+                ]),
+            )
+            .await
+            .expect_err("markup alone is not a reply");
+            assert_eq!(
+                err.downcast_ref::<TurnFailure>(),
+                Some(&TurnFailure::NoReplyAfterTools),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_comes_without_the_reasoning_written_into_its_text() {
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Text {
+                content: "<think>keep it short</think>Mainly clear, 23.6 C.".to_string(),
+            }]),
+        )
+        .await
+        .expect("the text after the reasoning is the reply");
+        assert_eq!(reply.text, "Mainly clear, 23.6 C.");
+    }
+
+    /// The Orin's Daily Brief of 2026-11-02: the speculative decode failed mid-stream and goose
+    /// wrote its "Ran into this error" prose as the reply. The provider shim recorded the stream
+    /// item's error, so the turn fails as an engine failure, not as a model that would not load.
+    #[tokio::test]
+    async fn a_turn_whose_speculative_decode_failed_is_an_engine_failure() {
+        let session = crate::provider_shim::SessionControls::default();
+        session.note_provider_outcome(Some(
+            &goose_providers::errors::ProviderError::ExecutionError(
+                "speculative decode: Decode Error 1: NoKvCacheSlot".to_string(),
+            ),
+        ));
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Text {
+                content: "Ran into this error: Execution error: speculative decode: Decode \
+                          Error 1: NoKvCacheSlot.\n\nPlease retry if you think this is a \
+                          transient or recoverable error."
+                    .to_string(),
+            }]),
+        )
+        .await;
+        let err = fail_on_engine_error("sched-test", reply, session.provider_failure())
+            .expect_err("goose's report of the failure is not a reply");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::Engine)
+        );
     }
 
     #[tokio::test]
@@ -7227,7 +7353,57 @@ mod tests {
         )
         .await
         .expect_err("an errored turn is an error");
-        assert_eq!(err.to_string(), "the provider went away");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::Engine)
+        );
+        assert_eq!(err.to_string(), TurnFailure::Engine.user_message());
+    }
+
+    /// A model that could not be loaded mid-stream reads the same as one goose reported in prose.
+    #[tokio::test]
+    async fn an_error_event_from_a_model_that_could_not_load_is_model_unavailable() {
+        let err = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Error {
+                content: "Execution error: Failed to create context: null reference from \
+                          llama.cpp"
+                    .to_string(),
+            }]),
+        )
+        .await
+        .expect_err("an errored turn is an error");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::ModelUnavailable)
+        );
+    }
+
+    /// Every way the engines say the model could not load or start, and errors that are not that.
+    #[test]
+    fn engine_errors_are_classified_by_whether_the_model_could_start() {
+        for unavailable in [
+            "Execution error: null result from llama cpp",
+            "Execution error: Failed to create context: null reference from llama.cpp",
+            "Execution error: out of GPU memory for the context: needs about 542 MiB, 251 MiB free.",
+            "Server error: CUDA out of memory",
+            "error loading model: unable to allocate CUDA0 buffer",
+            "Execution error: LiteRT-LM engine_create returned no handle",
+        ] {
+            assert_eq!(
+                engine_failure("s1", unavailable),
+                TurnFailure::ModelUnavailable,
+                "{unavailable}"
+            );
+        }
+        for other in [
+            "Execution error: Prefill decode failed: NoKvCacheSlot",
+            "Request failed: connection refused",
+            // The chat template's null result is a different failure, with a dot.
+            "Execution error: null result from llama.cpp",
+        ] {
+            assert_eq!(engine_failure("s1", other), TurnFailure::Engine, "{other}");
+        }
     }
 
     /// The Jetson's runs of 2026-10-18 and -20: llama.cpp returned a null result, goose wrote
@@ -7257,8 +7433,13 @@ mod tests {
         let err = fail_on_engine_error("sched-test", reply, session.provider_failure())
             .expect_err("a turn whose model call failed is a failed turn");
         assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::ModelUnavailable),
+            "llama.cpp's null result is the model failing to load"
+        );
+        assert_eq!(
             err.to_string(),
-            "The model could not run: Execution error: null result from llama cpp"
+            TurnFailure::ModelUnavailable.user_message()
         );
     }
 
