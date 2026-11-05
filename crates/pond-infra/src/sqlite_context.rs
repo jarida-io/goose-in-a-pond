@@ -15,6 +15,7 @@ use pond_core::context::domain::{
 use pond_core::context::ports::{ContextRepository, SourceItemStats};
 use pond_core::context::retention::ContextRetention;
 use pond_core::context::vector_index::{VectorEntry, VectorIndex, CONTEXT};
+use pond_core::items::Kind;
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::security::domain::event::PrivacySensitivity;
 use pond_core::security::ports::redactor::Redactor;
@@ -608,6 +609,21 @@ impl ContextRepository for SqliteContextRepository {
                 awaiting_index: awaiting.max(0) as u64,
             })
             .collect())
+    }
+
+    /// Judged on the header: its kind and date, and whether any item links to it.
+    async fn purge_uncited(&self, kind: Kind, before: DateTime<Utc>) -> Result<u64> {
+        let deleted = sqlx::query(
+            "DELETE FROM context_items WHERE item_id IN (SELECT i.id FROM items i \
+             WHERE i.kind = ? AND i.observed_at < ? \
+             AND NOT EXISTS (SELECT 1 FROM item_links l WHERE l.to_id = i.id))",
+        )
+        .bind(kind.as_str())
+        .bind(pond_core::items::timestamp::format(before))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deleted)
     }
 
     async fn purge_expired(&self, retention: &ContextRetention, now: DateTime<Utc>) -> Result<u64> {

@@ -118,8 +118,10 @@ decisions stand:
 - `memory_graph.rs`, and `memory_edges`, whose foreign key names a nonexistent `memories(id)`;
 - `memory_graph_enabled` and `memory_extraction_first_pass_at`, which nothing reads;
 - `AppState.mcp_memory`;
-- `session_messages.embedding`;
-- context retention's `purge_expired`, which nothing calls.
+- `session_messages.embedding`.
+
+Context retention's `purge_expired`, which nothing called, stays: the lifecycle sweep calls it
+once decision 12 is made.
 
 **Defects that go with the old systems** (verified 2026-10-28, and the files are unchanged on
 `0309bf0d`):
@@ -239,6 +241,15 @@ The lifecycle is declared once, in `pond-core` (`pond_core::items::lifecycle`).
 | `suggestion` | Proposal | private | Until decided or `valid_until` | Withdrawn |
 
 Approved actions do not cascade. An accepted reminder is the member's commitment.
+
+**One sweep enforces it** (`pond_core::items::sweep`), on the interval memory cleanup used, in
+place of that timer. Each way of keeping an item is one step, run once however many kinds share
+it: decay for facts and traits (the existing half-life rules, switched by
+`memory_cleanup_enabled`), the source's retention for ingested items, and the seven days of an
+uncited home event. Each pass ends by checking every header against its row. Two parts are not
+on yet. Retention for ingested items is built and tested but off: with today's seven-day cap on
+sensitive items it would delete every mail and calendar item older than a week (decision 12).
+Deleting a fact with its last evidence is not built (decision 13).
 
 ### 4.3 The index
 
@@ -716,7 +727,7 @@ same release. Before any restart on the nano, check that no long task is running
 | Phase | Builds | Deletes | Gate |
 |---|---|---|---|
 | P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM. **Measured 2026-10-31:** it passes for the text encoder in MiniLM's place, on llama.cpp; vision and audio run per batch (5.1) |
-| P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
+| P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy. **Store gate held 2026-11-06 on a copy of the nano's live store** (branches `feat/p1-*`, not merged; `examples/items_gate.rs`): 86 memories, 64 summaries and 153 suggestions became 474 headers (53 facts, 33 traits, 235 conversations, 153 suggestions; 68 household, 406 private) with 242 links, in 154 ms; a second run, and a reopen with two full checks, changed nothing; memory search and recall found a stored memory through the index, and a guest got nothing; 46 memory vectors carried across and 60 summaries waited for the slot. Not yet run there: the full server (turn recall, `giap-memory` through the model, the slot re-embedding), and the volume half |
 | P2 Embedding slot | The slot in the lane's order; the text encoder, wired as 5.1 lists and acquired like any other model; EmbeddingGemma 2 as the recommended Memory model; re-embedding when the household switches | Startup backfill, `IndexMaintenance`, the GGUF provider's own download. MiniLM stays selectable, but one embedder is loaded at a time, since the budget has no room for both | No turn or long-task step measurably slower while it runs. **`LANDED` and `VERIFIED` 2026-11-02 on the Orin:** turns that land mid-pass are as fast as idle ones; the slot holds off between back-to-back turns and re-embeds the store (219 rows) in 2.6 s once they stop. A switch made 3 s into a long-task step loaded nothing until the task settled 68 s later, then re-indexed 86 rows in 4 s |
 | P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
@@ -749,6 +760,8 @@ same release. Before any restart on the nano, check that no long task is running
 | 9 | Mail sign-in beyond app passwords: OAuth for Gmail and Outlook | App passwords first. Read Google's and Microsoft's terms for mail scopes before building OAuth |
 | 10 | Adversarial consolidation by default: three calls a batch | Yes, once P3 shows it fits the Orin's quiet hours |
 | 11 | Where a pond downloads EmbeddingGemma 2's GGUF. Google ships safetensors only, and converting them needs torch, which cannot run beside the pond | Decided 2026-11-01: like any other model, into the models folder (5.1, step 6). The entry names `ggml-org/embeddinggemma-2-GGUF` at a pinned revision and sha256, once its vectors match P0's own conversion, as the chat model's names `unsloth` |
+| 12 | Turn on context retention: the sweep's `purge_expired` and the seven-day home-event expiry. With today's defaults (`retention_sensitive_days = 7`) every mail and calendar item older than a week would go on the first sweep, since nothing has ever enforced the window | Off until decided. Raise the sensitive cap for context items, or keep a week, before turning it on |
+| 13 | Delete a fact when its last `evidence_for` source goes (4.2). Today deleting a conversation keeps what it taught (`memory_fragments.session_id` is `SET NULL`), so this changes what a member's delete does, and the sweep needs a record that a fact once had evidence, which links lose when they cascade | Not built. Decide before P3's Conversation agent starts writing evidence links |
 
 ---
 

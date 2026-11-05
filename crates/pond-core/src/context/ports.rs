@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::context::domain::{ContextItem, ContextSource, SourceKind};
 use crate::context::retention::ContextRetention;
+use crate::items::Kind;
 use crate::user_data::domain::profile::ProfileScope;
 
 #[async_trait]
@@ -72,6 +73,9 @@ pub trait ContextRepository: Send + Sync {
 
     /// Delete everything past its retention window, which depends on kind and sensitivity.
     async fn purge_expired(&self, retention: &ContextRetention, now: DateTime<Utc>) -> Result<u64>;
+
+    /// Delete items of `kind` that happened before `before` and that no other item links to.
+    async fn purge_uncited(&self, kind: Kind, before: DateTime<Utc>) -> Result<u64>;
 }
 
 // ── Asking an account for news, now ─────────────────────────────────────────

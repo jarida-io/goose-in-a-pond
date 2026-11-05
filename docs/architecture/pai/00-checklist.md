@@ -4326,3 +4326,43 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **NOT VERIFIED on the Orin.** Unit and route tests only; E4B's answer to "who am I" with the line
   present has not been run on hardware.
 
+**2026-11-05 — the context space, P1 (data model): the item header, links, the item-keyed index
+and one lifecycle sweep.**
+
+- **What is built** (stacked PRs, `feat/p1-*`; the LUKS2 volume, sealed keys and per-blob keys
+  are a separate track):
+  - `items`, `item_links`, `item_shares` and an `item_id` on every detail table (migration
+    0082); thirteen kinds, each with its detail table and lifecycle declared once in
+    `pond_core::items`, as exhaustive matches; `every_item_kind_has_a_detail_table.rs` checks
+    the migrated schema against them;
+  - a header for every memory, attributed conversation, context item and suggestion, written by
+    each table's writer in the same transaction, backfilled by `Database::init` and checked by
+    `serve` in the background; `sqlite_items.rs` is the only writer (a guard test scans the
+    crates);
+  - the index keyed by item (vectors migration 0003), the slot walking items and writing only
+    the index, memory and context search scoring only through it, and `Corpus` gone;
+  - every scoped read of memories, context items and suggestions judged on the header, with
+    `item_shares`;
+  - one lifecycle sweep in place of the memory cleanup timer.
+- **PAI-1.** A NULL owner means something different in each table, so each maps by its own rule
+  (context-space 4.1): a shared memory is the household's, a conversation with no known speaker
+  gets no header, a suggestion whose member left gets none. A private item needs an owner
+  (`CHECK`). Scope is unchanged for every existing row: a member sees their own and the
+  household's, `Household` everything, a guest nothing.
+- **PAI-2.** Header text passes the rule redactor at `Secrets`; a conversation's header holds its
+  redacted summary while the session keeps the raw one it replays. Summary vectors made from raw
+  text were dropped at the move and re-embedded from the header.
+- **PAI-3.** No prompt change. Turn recall, `giap-memory` search and `recall` read the same
+  index; only the vectors on rows are no longer read.
+- **Invariant 1, PAI-4 to PAI-8.** Untouched.
+- **Verified on the Orin, store only** (2026-11-06, a copy of the nano's live store; the live
+  pond untouched): 474 headers from 86 memories, 64 summaries and 153 suggestions, 242 links, in
+  154 ms; a second run changed nothing; memory search and recall read the index and a guest got
+  nothing. **NOT VERIFIED** with the full server on the Orin: turn recall, `giap-memory` through
+  E4B and the slot's re-embedding of 60 summaries wait for a stop of the nano's pond.
+- **Not done:** context retention and the seven-day home-event expiry are written and tested but
+  off: with the 7-day sensitive cap they would delete mail and calendar items older than a week
+  (decision 12). Facts are not yet deleted when their last evidence goes (decision 13). The
+  unwired code section 3 lists (`memory_graph.rs`, `memory_edges`, two unread settings,
+  `AppState.mcp_memory`, `session_messages.embedding`) is not deleted yet, and the vectors on
+  memory and context rows, no longer read, go with the old columns a release later.

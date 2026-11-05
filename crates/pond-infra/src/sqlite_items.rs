@@ -988,10 +988,20 @@ mod tests {
             vec!["m-new", "m-shared"],
             "her own active memory and the household's"
         );
-        assert_eq!(ids(repo.search_recent(&baraka, 10).await.unwrap()), vec!["m-shared"]);
-        assert!(repo.search_recent(&ProfileScope::Guest, 10).await.unwrap().is_empty());
         assert_eq!(
-            repo.search_recent(&ProfileScope::Household, 10).await.unwrap().len(),
+            ids(repo.search_recent(&baraka, 10).await.unwrap()),
+            vec!["m-shared"]
+        );
+        assert!(repo
+            .search_recent(&ProfileScope::Guest, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repo.search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
             2,
             "the household reads every active memory, as before"
         );
@@ -1001,12 +1011,14 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        sqlx::query("INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)")
-            .bind(&item)
-            .bind(timestamp::now())
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)",
+        )
+        .bind(&item)
+        .bind(timestamp::now())
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             ids(repo.search_recent(&baraka, 10).await.unwrap()),
             vec!["m-new", "m-shared"],
@@ -1026,6 +1038,64 @@ mod tests {
             .map(|q| q.id)
             .collect();
         assert_eq!(offered, vec!["q-house"], "her suggestion stays hers");
+    }
+
+    #[tokio::test]
+    async fn an_uncited_home_event_past_its_days_goes_and_a_cited_one_stays() {
+        use crate::rule_redactor::RuleRedactor;
+        use crate::sqlite_context::SqliteContextRepository;
+        use pond_core::context::ports::ContextRepository;
+        let (_dir, pool) = pond().await;
+        legacy_rows(&pool).await;
+        run(
+            &pool,
+            "INSERT INTO context_sources (id, kind, provider, profile_id, created_at) \
+             VALUES ('cam', 'camera', 'onvif', 'baraka', '2026-10-01T00:00:00Z')",
+        )
+        .await;
+        run(
+            &pool,
+            "INSERT INTO context_items (id, source_id, external_id, profile_id, source_kind, \
+             item_kind, occurred_at, ingested_at, title, body, sensitivity) VALUES \
+             ('cam:old', 'cam', 'old', 'baraka', 'camera', 'event', '2026-10-01T00:00:00Z', \
+              '2026-10-01T00:00:00Z', 'Porch', 'Someone at the door', 'sensitive'), \
+             ('cam:cited', 'cam', 'cited', 'baraka', 'camera', 'event', '2026-10-01T00:00:00Z', \
+              '2026-10-01T00:00:00Z', 'Porch', 'A parcel arrived', 'sensitive'), \
+             ('cam:new', 'cam', 'new', 'baraka', 'camera', 'event', '2026-11-04T00:00:00Z', \
+              '2026-11-04T00:00:00Z', 'Porch', 'The cat', 'sensitive')",
+        )
+        .await;
+        reconcile(&pool, Mode::Missing).await.unwrap();
+        run(
+            &pool,
+            "INSERT INTO item_links (from_id, relation, to_id, created_at) \
+             SELECT m.item_id, 'evidence_for', c.item_id, '2026-11-05T00:00:00.000Z' \
+             FROM memory_fragments m, context_items c WHERE m.id = 'm-new' AND c.id = 'cam:cited'",
+        )
+        .await;
+
+        let repo =
+            SqliteContextRepository::new(pool.clone(), std::sync::Arc::new(RuleRedactor::new()));
+        let cutoff = chrono::DateTime::parse_from_rfc3339("2026-10-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            repo.purge_uncited(Kind::HomeEvent, cutoff).await.unwrap(),
+            1
+        );
+        let left: Vec<String> = sqlx::query_scalar("SELECT id FROM context_items ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            left,
+            vec!["cam:cited", "cam:new", "src:1"],
+            "the mail is not a home event"
+        );
+        assert!(
+            !reconcile(&pool, Mode::All).await.unwrap().changed(),
+            "its header went with it"
+        );
     }
 
     #[tokio::test]
