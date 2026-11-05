@@ -3750,6 +3750,9 @@ impl GooseAdapter {
             let mut held_turn_limit_notice: Option<String> = None;
             // Tool results streamed this turn: what a stopped turn's final reply answers from.
             let mut tool_results_gathered: usize = 0;
+            // Output written up to the latest tool call: text before a call is working notes,
+            // which the answer leaves out, so it never counts as having replied.
+            let mut chars_at_last_call: usize = 0;
             // Set when a guard trips: goose's pull-based stream only flushes its history once
             // polled to the end, so keep draining after cancel, up to this bounded deadline.
             let mut drain_deadline: Option<tokio::time::Instant> = None;
@@ -4005,6 +4008,7 @@ impl GooseAdapter {
                                                     tool_id = %tr.id,
                                                 );
                                                 produced_visible = true;
+                                                chars_at_last_call = total_output_chars;
                                                 yield Ok(AgentStreamEvent::ToolCall {
                                                     id: tr.id.clone(),
                                                     tool: tool_name,
@@ -4429,7 +4433,7 @@ impl GooseAdapter {
                     }
                     // Before the `produced_visible` break: a tool call sets it, and the attempt
                     // that called a tool and then only reasoned is the one this exists for.
-                    let wrote_text = total_output_chars > chars_before;
+                    let wrote_text = total_output_chars > chars_before.max(chars_at_last_call);
                     let reasoned = turn_stats.reasoning_tokens.unwrap_or(0) > reasoning_before;
                     if final_attempt {
                         tracing::info!(
@@ -4448,7 +4452,10 @@ impl GooseAdapter {
                     if let Some(stop) = turn_stop {
                         if !final_attempt
                             && !request.warmup
-                            && final_reply.due_after_stop(total_output_chars > 0, tool_results_gathered > 0)
+                            && final_reply.due_after_stop(
+                                total_output_chars > chars_at_last_call,
+                                tool_results_gathered > 0,
+                            )
                         {
                             tracing::info!(
                                 target: "giap::trace",
@@ -7251,7 +7258,10 @@ mod tests {
         )
         .await
         .expect_err("working notes are not a reply");
-        assert!(err.to_string().contains("without writing a reply"), "{err}");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReplyAfterTools)
+        );
     }
 
     /// The old "Received empty response from Goose agent" read as an engine fault.
