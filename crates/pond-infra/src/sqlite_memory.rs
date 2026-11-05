@@ -219,20 +219,10 @@ fn row_to_fragment(row: FragmentRow) -> MemoryFragment {
     }
 }
 
-/// `AND …` fragment (or empty) for a [`ProfileScope`]; every scoped read goes through it.
-///
-/// - `Owner(id)`: own rows plus unattributed (shared) ones, so household facts stay visible.
-/// - `Household`: no predicate.
-/// - `Guest`: matches nothing, so a missed caller short-circuit fails closed.
-fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
-    match scope {
-        ProfileScope::Owner(id) => (
-            "AND (profile_id = ? OR profile_id IS NULL)",
-            Some(id.as_str()),
-        ),
-        ProfileScope::Household => ("", None),
-        ProfileScope::Guest => ("AND 1 = 0", None),
-    }
+/// `AND …` fragment (or empty) for a [`ProfileScope`]; every scoped read goes through it, and
+/// judges the row by its item header: an unattributed memory's header is the household's.
+fn scope_sql(scope: &ProfileScope) -> (String, Option<&str>) {
+    sqlite_items::row_scope_sql(scope, "memory_fragments.item_id")
 }
 
 const SELECT_ALL: &str = "\

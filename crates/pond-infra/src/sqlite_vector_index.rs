@@ -148,7 +148,7 @@ impl SqliteVectorIndex {
         scope: &ProfileScope,
         kinds: &[Kind],
     ) -> Result<Vec<(String, Kind, f32, String)>> {
-        let (scope_pred, binds) = sqlite_items::scope_sql(scope, "sys.");
+        let (scope_pred, bind) = sqlite_items::scope_sql(scope, "sys.");
         // The JOIN doubles as the existence check: orphans never match.
         let sql = format!(
             "SELECT v.item_id, i.kind, v.vector, v.chunk_start, v.chunk_len, \
@@ -169,8 +169,8 @@ impl SqliteVectorIndex {
             String,
         );
         let mut q = sqlx::query_as::<_, Row>(&sql).bind(model_id);
-        for b in binds {
-            q = q.bind(b);
+        if let Some(id) = bind {
+            q = q.bind(id);
         }
         let mut best: HashMap<String, (String, Kind, f32, String)> = HashMap::new();
         for (item_id, kind, blob, start, len, context, title, body) in
