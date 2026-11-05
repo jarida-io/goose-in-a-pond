@@ -12133,10 +12133,12 @@ async fn invoke_tool(
         return Ok(Json(reply.clone()));
     }
     outcome.request = Some(request);
-    // A failure is not kept: nothing ran, or the tool failed and a resend may try it again.
     let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
     reply["idempotency_key"] = json!(key);
-    outcome.reply = Some(reply.clone());
+    // A failure is not kept: nothing ran, or the device refused and a resend may try it again.
+    if reply["success"] == json!(true) {
+        outcome.reply = Some(reply.clone());
+    }
     Ok(Json(reply))
 }
 
