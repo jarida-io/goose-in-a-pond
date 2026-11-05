@@ -1,0 +1,176 @@
+# Factory defaults for `Settings` (crates/pond-core/src/user_data/domain/settings.rs).
+#
+# Loaded once at startup via `factory_defaults.rs` and used as the stock value for any
+# setting nobody has customized yet. Editing a value here changes what a FRESH install
+# (or any setting nobody has touched) starts with -- it never overwrites a setting a
+# household already chose (see docs/developer/settings-defaults-and-user-intent.md).
+#
+# Keys match `Settings`' own field names. A key this file doesn't list, or can't parse,
+# falls back to the literal baked into `Settings::default_*()` -- so a typo here degrades
+# safely instead of breaking startup.
+
+# ── Assistant identity ────────────────────────────────────────────────────
+prompt_style = "balanced"
+prompt_addendum = ""
+assistant_name = "Goose"
+assistant_personality = "friendly and concise"
+user_name = "Friend"
+timezone = "UTC"
+home_name = ""
+
+# ── LLM behaviour ─────────────────────────────────────────────────────────
+max_tokens = 4096
+temperature = 0.7
+
+# ── Model roles ───────────────────────────────────────────────────────────
+llm_provider = ""
+active_llm_model = ""
+
+# ── Voice pipeline ────────────────────────────────────────────────────────
+wake_word = "hey goose"
+voice_room_enabled = true
+kws_energy_threshold = 0.003
+kws_post_trigger_silence_ms = 400
+kws_cooldown_ms = 2000
+tts_voice = ""
+tts_speed = 1.0
+tts_quality = "q8f16"
+wake_detector = "auto"
+vad_backend = "silero"
+voice_thinking_tone_enabled = true
+audio_sound_test = true
+audio_manage_system = true
+recording_duration = 3
+whisper_url = "http://127.0.0.1:9000"
+
+# ── Active model selection ────────────────────────────────────────────────
+active_whisper_model = ""
+active_tts_model = ""
+embedding_provider = "fastembed"
+
+# ── Weather ───────────────────────────────────────────────────────────────
+weather_enabled = false
+weather_latitude = 0.0
+weather_longitude = 0.0
+weather_location_name = ""
+
+# ── Vision ────────────────────────────────────────────────────────────────
+vision_enabled = false
+vision_camera_url = ""
+vision_classifier_model = ""
+vision_face_recognition_enabled = true
+vision_face_on_motion = true
+picture_support_download_enabled = false
+
+# ── Matter ────────────────────────────────────────────────────────────────
+matter_ws_url = "ws://127.0.0.1:5580/giap"
+matter_ble_enabled = false
+
+# ── Private mesh ──────────────────────────────────────────────────────────
+mesh_enabled = false
+lightning_enabled = false
+mesh_settlement_millisats_per_token = 0
+mesh_lend_token_ceiling = 0
+
+# ── Privacy / sensor access ───────────────────────────────────────────────
+mic_enabled = true
+cameras_enabled = true
+cloud_fallback_enabled = false
+
+# ── Data retention ────────────────────────────────────────────────────────
+event_log_days = 30
+sensor_days = 7
+session_messages_keep = 500
+events_days = 30
+sensitive_days = 7
+
+# ── Thinking / Reasoning ──────────────────────────────────────────────────
+thinking_mode = "auto"
+reasoning_effort = "brief"
+
+# ── Answer Review ─────────────────────────────────────────────────────────
+review_mode = "off"
+review_max_rounds = 1
+review_pass_threshold = 3
+summary_idle_secs = 120
+hybrid_compaction_enabled = true
+
+# ── Agent behaviour ───────────────────────────────────────────────────────
+agent_backend = "goose"
+agent_goose_mode = "auto"
+agent_max_turns = 50
+voice_max_turns = 0
+agent_timeout_secs = 300
+tool_selection_mode = "all"
+security_policy_mode = "audit"
+network_mode = "open"
+prefix_cache_prompt = true
+agent_memory_inject = true
+agent_memory_limit = 5
+schedule_result_notify = true
+system_notices_enabled = true
+tool_output_compaction = true
+suggestion_generation_enabled = true
+memory_extraction_enabled = true
+memory_cleanup_enabled = true
+memory_consolidation_enabled = true
+session_titling_enabled = true
+memory_consolidation_mode = "single"
+
+# ── Memory tuning ─────────────────────────────────────────────────────────
+memory_decay_base_half_life_days = 11.25
+memory_decay_beta = 0.8
+memory_prune_threshold = 0.05
+memory_archive_threshold = 0.15
+memory_cleanup_interval_hours = 6
+memory_consolidation_interval_hours = 24
+memory_consolidation_batch_size = 50
+memory_extraction_max_facts = 3
+memory_extraction_interval_secs = 60
+
+# ── Batch memory extraction ───────────────────────────────────────────────
+memory_extraction_sessions_per_pass = 3
+memory_extraction_window_messages = 20
+memory_extraction_idle_secs = 900
+memory_reinforce_threshold = 0.94
+memory_relate_threshold = 0.78
+memory_date_proposals_enabled = true
+memory_extraction_mode = "write"
+memory_extraction_first_pass_at = ""
+
+# ── Scheduling tuning ─────────────────────────────────────────────────────
+schedule_max_concurrent = 2
+schedule_max_runs_per_task = 50
+
+# ── Context monitoring ────────────────────────────────────────────────────
+goal_check_enabled = true
+context_monitor_enabled = true
+
+# ── Cost comparison ───────────────────────────────────────────────────────
+cloud_input_price_per_million = 2.50
+cloud_output_price_per_million = 10.00
+
+# ── Telemetry ─────────────────────────────────────────────────────────────
+telemetry_enabled = true
+
+# ── Tool call validation ──────────────────────────────────────────────────
+tool_call_validation = true
+
+# ── Post-inference tool request detection ─────────────────────────────────
+tool_request_detection = true
+
+# ── Extension toggles ─────────────────────────────────────────────────────
+ext_enabled = true
+ext_orchestrator_enabled = false
+ext_travel_enabled = false
+unprompted_speech_enabled = false
+quiet_hours_start = "22:00"
+quiet_hours_end = "07:00"
+unprompted_speech_categories = "alert"
+proactive_review_enabled = false
+long_tasks_enabled = true
+agent_activations_enabled = true
+context_ingest_enabled = false
+spoken_pairing_codes = true
+ble_setup_enabled = true
+ext_context_enabled = false
