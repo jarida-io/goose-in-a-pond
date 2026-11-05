@@ -47,7 +47,7 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 | `session_thinking` | Reasoning text kept beside its message when `persist_thinking` is on | `message_id`, `session_id` (both FK, cascade), `block_index`, `content` |
 | `message_attachments` | Metadata for chat image attachments; the bytes live under `<data_dir>/attachments/<session_id>/` | `message_id`, `session_id` (FK, cascade), `ordinal`, `mime_type`, `byte_size`, `file_path` |
 | `engine_session_map` | GIAP session id to the Goose engine's own session id, so a restart resumes the same engine conversation | `session_id` (PK), `engine_session_id` |
-| `session_tool_groups` | Tool groups (MCP extension names) chosen once per session when `tool_selection_mode` narrows | `session_id` (PK), `groups` |
+| `session_tool_groups` | Tool groups (MCP extension names) a session holds when `tool_selection_mode` narrows; only ever grows (a later message or `enable_tool_group` adds) | `session_id` (PK), `groups` |
 
 ### Household, devices and pairing
 

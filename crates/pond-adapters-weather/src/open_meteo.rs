@@ -567,7 +567,7 @@ mod tests {
 
         assert!(block.contains("3-Day Forecast"));
         assert!(block.contains("Nairobi, KE"));
-        assert!(block.contains("2026-05-13"));
+        assert!(block.contains("Wednesday 2026-05-13:"), "{block}");
         assert!(block.contains("26\u{00B0}C/18\u{00B0}C"));
         assert!(block.contains("Rain: 12.3mm (85%)"));
     }

@@ -116,7 +116,7 @@ impl McpToolDispatcher {
     ) -> Self {
         let http_client = crate::build_http_client();
 
-        let weather_server = WeatherMcpServer::new(weather);
+        let weather_server = WeatherMcpServer::new(weather, settings_repo.clone());
         let knowledge_server = KnowledgeMcpServer::new(http_client);
         let memory_server = MemoryMcpServer::new(memory_repo, embedding_provider);
         let schedule_server = scheduler.map(|s| ScheduleMcpServer::new(s, settings_repo.clone()));
@@ -279,7 +279,9 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "location": { "type": "string", "description": "City name. Omit for home location." },
-                "days": { "type": "integer", "description": "Number of days (1-7, default 3)." }
+                "days": { "type": "integer", "description": "1-7 (omitted: 3)." },
+                "day": { "type": "integer", "description": "Days from today." },
+                "date": { "type": "string", "description": "YYYY-MM-DD." }
             }
         }),
         "giap-knowledge__get_wikipedia_article" => json!({
@@ -487,7 +489,15 @@ mod tests {
                 "giap-system__",
                 Box::new(SystemMcpServer::new()) as Box<dyn McpServerBridge>,
             ),
-            ("giap-weather__", Box::new(WeatherMcpServer::new(None))),
+            (
+                "giap-weather__",
+                Box::new(WeatherMcpServer::new(
+                    None,
+                    Arc::new(
+                        pond_core::user_data::mocks::mock_settings::MockSettingsRepository::new(),
+                    ),
+                )),
+            ),
             (
                 "giap-knowledge__",
                 Box::new(KnowledgeMcpServer::new(http_client.clone())),

@@ -181,14 +181,33 @@ func (h *Headscale) Delete(ctx context.Context, id string) error {
 	return h.call(ctx, "DELETE", "/api/v1/node/"+id, nil, nil)
 }
 
+// policyDocument is the complete coordinator policy for these rules and attributes:
+// exactly what Policy writes, and what CurrentPolicy is compared against.
+func policyDocument(rules []Rule, attrs []NodeAttr) ([]byte, error) {
+	return json.Marshal(map[string]any{"acls": rules, "nodeAttrs": attrs, "ssh": []any{}, "tagOwners": map[string]any{}})
+}
+
 // Policy replaces the complete allowlist and node attributes; an empty rule list
 // denies every connection, and an empty attribute list grants no capability.
 func (h *Headscale) Policy(ctx context.Context, rules []Rule, attrs []NodeAttr) error {
-	policy, err := json.Marshal(map[string]any{"acls": rules, "nodeAttrs": attrs, "ssh": []any{}, "tagOwners": map[string]any{}})
+	policy, err := policyDocument(rules, attrs)
 	if err != nil {
 		return err
 	}
 	return h.call(ctx, "PUT", "/api/v1/policy", map[string]string{"policy": string(policy)}, nil)
+}
+
+// CurrentPolicy returns the policy document the coordinator holds. Headscale answers
+// `GET /api/v1/policy` with `{"policy": "<document>", "updatedAt": ...}`, the document
+// being the text last written, kept verbatim; only the document is read.
+func (h *Headscale) CurrentPolicy(ctx context.Context) ([]byte, error) {
+	var response struct {
+		Policy string `json:"policy"`
+	}
+	if err := h.call(ctx, "GET", "/api/v1/policy", nil, &response); err != nil {
+		return nil, err
+	}
+	return []byte(response.Policy), nil
 }
 
 type coordinatorNode struct {

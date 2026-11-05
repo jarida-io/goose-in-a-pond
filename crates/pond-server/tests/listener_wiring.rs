@@ -559,6 +559,27 @@ async fn the_plaintext_listener_never_enrolls_or_renews_remote_access() {
     assert_eq!(plaintext, StatusCode::NOT_FOUND);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_phone_learns_where_outside_access_is_turned_on_while_it_is_off() {
+    let h = harness().await;
+    let path = "/api/v1/remote-access/configuration";
+    let (status, off) = get(&h.listeners.companion, LOOPBACK, path).await;
+    assert_eq!(status, StatusCode::OK, "{off}");
+    assert_eq!(off["enabled"], false);
+    assert_eq!(off["enableFrom"], serde_json::json!(["dashboard"]));
+
+    std::fs::write(
+        h._dir.path().join("embedded-network/config.json"),
+        r#"{"enabled":true}"#,
+    )
+    .unwrap();
+    let (status, on) = get(&h.listeners.companion, LOOPBACK, path).await;
+    assert_eq!(status, StatusCode::OK, "{on}");
+    assert_eq!(on["enabled"], true);
+    assert!(on["enableFrom"].is_null(), "{on}");
+}
+
 /// Expo Go pairs over the plaintext listener with CPace, under the pin that listener's
 /// `/system/info` reports, exactly as the app does in development.
 #[tokio::test]

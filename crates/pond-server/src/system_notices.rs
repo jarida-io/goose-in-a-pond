@@ -20,12 +20,14 @@ use pond_core::mcp::ports::notification::{
 use pond_core::mcp::services::system_notices::{
     disk_is_low, OutageGate, OutageNotice, SystemNotices,
 };
+use pond_core::shared::domain::long_task::LongTask;
 use pond_core::user_data::domain::proposal::Proposal;
 use pond_core::user_data::domain::schedule::{
     RunStatus, Schedule, ScheduleResultEvent, TaskKind, TriggerAction,
 };
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
+use pond_core::user_data::services::reminder_proposal::reminder_session_id;
 
 // Schedule and rule runs
 
@@ -163,28 +165,25 @@ pub fn spawn_schedule_result_notices(
 // Long tasks
 
 /// The owner's notice that a long task they started has ended. `info` for an answer, `alert`
-/// when it could not finish; a tap opens chat, where `task_status` gives the detail.
-pub fn long_task_notification(
-    task_id: &str,
-    goal: &str,
-    finished: bool,
-    body: String,
-) -> Notification {
+/// when it could not finish. A tap opens the conversation the task was started from, where the
+/// answer is reported and `task_status` gives the detail; chat alone when that conversation is
+/// gone.
+pub fn long_task_notification(task: &LongTask, finished: bool, body: String) -> Notification {
     let mut fields = serde_json::Map::new();
-    fields.insert("long_task_id".into(), task_id.into());
+    fields.insert("long_task_id".into(), task.id().into());
     let title = if finished {
         "Task done"
     } else {
         "Task stopped"
     };
     Notification {
-        id: format!("long-task-{task_id}"),
+        id: format!("long-task-{}", task.id()),
         target: String::new(),
         category: if finished { "info" } else { "alert" }.to_string(),
-        title: format!("{title}: {}", truncate_goal(goal)),
+        title: format!("{title}: {}", truncate_goal(task.goal())),
         body,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Chat.merged_into(fields)),
+        data: Some(OpenScreen::chat(task.origin_session_id()).merged_into(fields)),
     }
 }
 
@@ -244,19 +243,19 @@ pub async fn announce_missed_runs(scheduler: &dyn SchedulerPort, sender: &dyn No
 
 /// The member's notification for a proposal awaiting their decision. `action_required`, not
 /// `alert`: the speech gate voices only `alert`, and suggestions shouldn't be read aloud. A tap
-/// opens chat.
-pub fn proposal_notification(proposal_id: &str, summary: String, rationale: &str) -> Notification {
+/// opens chat, at the conversation a reminder was heard in when the proposal came from one.
+pub fn proposal_notification(proposal: &Proposal) -> Notification {
     let mut fields = serde_json::Map::new();
-    fields.insert("proposal_id".into(), proposal_id.into());
-    fields.insert("rationale".into(), rationale.into());
+    fields.insert("proposal_id".into(), proposal.id().into());
+    fields.insert("rationale".into(), proposal.rationale().into());
     Notification {
-        id: format!("proposal-{proposal_id}"),
+        id: format!("proposal-{}", proposal.id()),
         target: String::new(),
         category: "action_required".to_string(),
         title: "A suggestion".to_string(),
-        body: summary,
+        body: proposal.summary(),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Chat.merged_into(fields)),
+        data: Some(OpenScreen::chat(reminder_session_id(proposal)).merged_into(fields)),
     }
 }
 
@@ -264,10 +263,7 @@ pub fn proposal_notification(proposal_id: &str, summary: String, rationale: &str
 pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal) -> MemberDelivery {
     let member = proposal.audience().profile_id();
     let delivery = notifier
-        .notify_member(
-            member,
-            proposal_notification(proposal.id(), proposal.summary(), proposal.rationale()),
-        )
+        .notify_member(member, proposal_notification(proposal))
         .await;
     match &delivery {
         MemberDelivery::Reached(devices) => tracing::info!(
@@ -275,6 +271,7 @@ pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal)
             proposal = %proposal.id(),
             member = %member,
             devices = devices.len(),
+            opens_conversation = reminder_session_id(proposal).is_some(),
             "proposal announced to its member"
         ),
         MemberDelivery::NoPhone => tracing::info!(
@@ -526,6 +523,8 @@ mod tests {
     use super::*;
     use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
     use pond_core::mcp::mocks::mock_notification_sender::{Delivery, MockNotificationSender};
+    use pond_core::shared::domain::long_task::LongTaskBudget;
+    use pond_core::user_data::domain::profile::ProfileScope;
     use pond_core::user_data::domain::proposal::{BusEventRef, ProposalAudience};
     use pond_core::user_data::domain::schedule::{
         SensorTriggerSpec, TriggerCondition, TriggerSource, TriggerSourceKind,
@@ -573,16 +572,87 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_notification_keeps_its_fields_and_opens_chat() {
-        let n = proposal_notification("p-1", "Water the plants?".into(), "It is dry");
+    fn a_reminder_proposal_keeps_its_fields_and_opens_its_conversation() {
+        let n = proposal_notification(&proposal_for("jerry"));
         assert_eq!(n.id, "proposal-p-1");
         assert_eq!(n.category, "action_required");
-        assert_eq!(n.body, "Water the plants?");
         assert_eq!(
             n.data,
-            Some(
-                serde_json::json!({"proposal_id": "p-1", "rationale": "It is dry", "open": "chat"})
+            Some(serde_json::json!({
+                "proposal_id": "p-1",
+                "rationale": "Jerry mentioned the dentist",
+                "open": "chat",
+                "session_id": "sess-1",
+            }))
+        );
+    }
+
+    #[test]
+    fn a_proposal_from_a_sensor_opens_chat_without_a_conversation() {
+        let proposal = Proposal::expiring_after(
+            "p-2",
+            BusEventRef::new(
+                "sensor",
+                Some("plant-1".into()),
+                Some("moisture".into()),
+                chrono::Utc::now(),
             )
+            .unwrap(),
+            "The soil is dry",
+            TaskKind::AgentPrompt {
+                prompt: "Water the plants".into(),
+            },
+            ProposalAudience::for_member("jerry").unwrap(),
+            0.9,
+            chrono::Utc::now(),
+            chrono::Duration::hours(12),
+        )
+        .unwrap();
+        let data = proposal_notification(&proposal).data.unwrap();
+        assert_eq!(data["open"], "chat");
+        assert!(
+            data.get("session_id").is_none(),
+            "a sensor's proposal has no conversation behind it, and must not name the sensor"
+        );
+    }
+
+    fn long_task(origin: Option<&str>) -> LongTask {
+        LongTask::start(
+            ProfileScope::Owner("jerry".into()),
+            None,
+            "How do embassies work?",
+            origin.map(str::to_string),
+            LongTaskBudget::new(4, None).unwrap(),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_finished_long_task_opens_the_conversation_it_was_started_from() {
+        let task = long_task(Some("sess-embassies"));
+        let n = long_task_notification(&task, true, "Here is what I found.".into());
+        assert_eq!(n.id, format!("long-task-{}", task.id()));
+        assert_eq!(n.title, "Task done: How do embassies work?");
+        assert_eq!(n.category, "info");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({
+                "long_task_id": task.id(),
+                "open": "chat",
+                "session_id": "sess-embassies",
+            }))
+        );
+    }
+
+    #[test]
+    fn a_long_task_whose_conversation_is_gone_opens_chat() {
+        let task = long_task(None);
+        let n = long_task_notification(&task, false, "It ran out of steps.".into());
+        assert_eq!(n.category, "alert");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({"long_task_id": task.id(), "open": "chat"}))
         );
     }
 

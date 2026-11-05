@@ -1,5 +1,7 @@
-//! Per-session choice of which `giap-*` groups' schemas reach the prompt. Once per session, as
-//! per-turn churn rewrites the tools JSON and kills KV prefix reuse. Every failure path widens.
+//! Per-session choice of which `giap-*` groups' schemas reach the prompt. The opening message
+//! picks the set; each later message may only ADD to it, since dropping a group strands tool
+//! results the history refers to and every change rewrites the tools JSON (the KV prefix) from
+//! the first changed tool on. Every failure path widens.
 
 use crate::mcp::domain::tool_group::{
     core_group_names, find_group, group_of_tool, is_catalog_extension, TOOLKIT_EXTENSION,
@@ -102,13 +104,51 @@ pub fn relevance_floor(provider: &dyn EmbeddingProvider) -> Option<f32> {
     provider.similarity_floors().map(|f| f.tool_relevance)
 }
 
-/// Groups for a session. No floor, or no scores (no embedder, or scoring failed), means every
-/// available group; else registered core groups, every group at or above `floor`, and the top
+/// Groups for a session's opening message. No floor, or no scores (no embedder, or scoring
+/// failed), means every available group; else registered core groups, every group at or above
+/// `floor`, and the top
 /// non-core scorer.
 pub fn select_groups(
     available: &[String],
     scores: Option<&[GroupScore]>,
     floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, true)
+}
+
+/// Groups a later message of the session asks for, to be merged with [`union_groups`]. As
+/// [`select_groups`] without the top-scorer rescue: the rescue fires on every message, so it would
+/// grow the set by one group per small-talk turn and move the KV prefix each time. A later miss
+/// costs one `enable_tool_group` call, which the opening message has no history to make.
+pub fn select_groups_for_later_message(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, false)
+}
+
+/// `held` with every group of `picked` it lacks, sorted and deduped, and the groups that were
+/// added. Never removes a held group, whatever `picked` says.
+pub fn union_groups(held: &[String], picked: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut added: Vec<String> = picked
+        .iter()
+        .filter(|p| !held.iter().any(|h| h == *p))
+        .cloned()
+        .collect();
+    added.sort();
+    added.dedup();
+    let mut groups: Vec<String> = held.iter().chain(added.iter()).cloned().collect();
+    groups.sort();
+    groups.dedup();
+    (groups, added)
+}
+
+fn pick_groups(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+    rescue_top: bool,
 ) -> ToolSelection {
     if available.is_empty() {
         return ToolSelection::all(available, SelectionBasis::ModeAll);
@@ -140,13 +180,15 @@ pub fn select_groups(
     }
 
     // Rescue the top scorer regardless of the threshold.
-    if let Some(best) = scores
-        .iter()
-        .filter(|s| available.iter().any(|a| a == &s.extension))
-        .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
-        .max_by(|a, b| a.score.total_cmp(&b.score))
-    {
-        chosen.push(best.extension.clone());
+    if rescue_top {
+        if let Some(best) = scores
+            .iter()
+            .filter(|s| available.iter().any(|a| a == &s.extension))
+            .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
+            .max_by(|a, b| a.score.total_cmp(&b.score))
+        {
+            chosen.push(best.extension.clone());
+        }
     }
 
     chosen.sort();
@@ -450,7 +492,7 @@ mod tests {
         assert_eq!(clamp_to_permitted(held.clone(), &permitted), held);
     }
 
-    /// Not even the core set: that alone is 778 tokens, 9.5% of the local prompt budget.
+    /// Not even the core set: with knowledge in it, 879 tokens keyless (o200k, 2026-11-02).
     #[test]
     fn minimal_offers_the_hatch_and_nothing_else() {
         let available = vec![
@@ -551,7 +593,7 @@ mod tests {
         let avail = available();
         let scores = vec![
             score("giap-weather", 0.19),
-            score("giap-knowledge", 0.11),
+            score("giap-schedule", 0.11),
             score("giap-sensors", 0.03),
         ];
         let sel = select_groups(&avail, Some(&scores), MINILM);
@@ -559,7 +601,123 @@ mod tests {
             sel.groups.contains(&"giap-weather".to_string()),
             "top scorer should be rescued"
         );
+        assert!(!sel.groups.contains(&"giap-schedule".to_string()));
+    }
+
+    /// The 2026-10-28 Jetson log: "What has happened to China's stock market?" scored no group
+    /// near the threshold, so the session had no `search_web` and the model said it had no tool.
+    #[test]
+    fn web_search_is_loaded_whatever_the_message_scores() {
+        let avail = available();
+        let scores: Vec<GroupScore> = scorable_groups(&avail)
+            .iter()
+            .map(|(e, _)| score(e, 0.0))
+            .collect();
+        assert!(
+            !scores.iter().any(|s| s.extension == "giap-knowledge"),
+            "giap-knowledge is core, so it is never scored"
+        );
+        for sel in [
+            select_groups(&avail, Some(&scores), MINILM),
+            select_groups_for_later_message(&avail, Some(&scores), MINILM),
+        ] {
+            assert!(
+                sel.groups.contains(&"giap-knowledge".to_string()),
+                "{:?}",
+                sel.groups
+            );
+        }
+    }
+
+    /// Core is not a permission: a scope whose ceiling lacks the group does not get it back.
+    #[test]
+    fn web_search_still_respects_the_permitted_set() {
+        let permitted = vec!["giap-toolkit".to_string(), "giap-weather".to_string()];
+        let scores = vec![score("giap-weather", 0.5)];
+        let sel = select_groups(&permitted, Some(&scores), MINILM);
         assert!(!sel.groups.contains(&"giap-knowledge".to_string()));
+        assert_eq!(
+            sel.groups,
+            vec!["giap-toolkit".to_string(), "giap-weather".to_string()]
+        );
+    }
+
+    /// A guest keeps web search: it reads no household data.
+    #[test]
+    fn a_guest_is_offered_web_search() {
+        use crate::user_data::domain::profile::ProfileScope;
+
+        let permitted = permitted_groups(&available(), &ProfileScope::Guest);
+        let sel = select_groups(&permitted, Some(&[]), MINILM);
+        assert!(
+            sel.groups.contains(&"giap-knowledge".to_string()),
+            "{:?}",
+            sel.groups
+        );
+    }
+
+    // ── Later messages ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_later_message_adds_the_groups_it_reaches_the_threshold_on() {
+        let avail = available();
+        let scores = vec![score("giap-schedule", 0.47), score("giap-weather", 0.05)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        assert_eq!(sel.basis, SelectionBasis::Scored);
+        assert!(sel.groups.contains(&"giap-schedule".to_string()));
+        assert!(!sel.groups.contains(&"giap-weather".to_string()));
+    }
+
+    /// Small talk must not grow the set: every later message would move the KV prefix.
+    #[test]
+    fn a_later_message_rescues_no_top_scorer() {
+        let avail = available();
+        let scores = vec![score("giap-weather", 0.19), score("giap-schedule", 0.11)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        let mut core: Vec<String> = core_group_names().into_iter().map(str::to_string).collect();
+        core.sort();
+        assert_eq!(sel.groups, core, "only the core set, nothing rescued");
+    }
+
+    /// Scoring failed on a later message: widen, as at the opening.
+    #[test]
+    fn a_later_message_with_no_scores_widens_to_everything() {
+        let avail = available();
+        let sel = select_groups_for_later_message(&avail, None, MINILM);
+        assert_eq!(sel.basis, SelectionBasis::NoEmbedder);
+        assert_eq!(sel.groups.len(), avail.len());
+    }
+
+    #[test]
+    fn the_union_never_drops_a_held_group() {
+        let held = vec![
+            "giap-device-control".to_string(),
+            "giap-memory".to_string(),
+            "giap-weather".to_string(),
+        ];
+        let picked = vec!["giap-memory".to_string(), "giap-schedule".to_string()];
+        let (groups, added) = union_groups(&held, &picked);
+        assert_eq!(
+            groups,
+            vec![
+                "giap-device-control".to_string(),
+                "giap-memory".to_string(),
+                "giap-schedule".to_string(),
+                "giap-weather".to_string(),
+            ]
+        );
+        assert_eq!(added, vec!["giap-schedule".to_string()]);
+    }
+
+    #[test]
+    fn a_union_that_adds_nothing_reports_nothing() {
+        let held = vec!["giap-memory".to_string(), "giap-weather".to_string()];
+        let (groups, added) = union_groups(&held, &["giap-weather".to_string()]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
+        let (groups, added) = union_groups(&held, &[]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
     }
 
     #[test]

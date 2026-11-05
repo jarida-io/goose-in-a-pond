@@ -451,12 +451,14 @@ pub async fn apply_after_actions(
                 };
                 let report = deps
                     .sender
-                    .send_to_profile(owner, agent_notification(task.id(), step.role(), text))
+                    .send_to_profile(owner, agent_notification(task, step.role(), text))
                     .await;
                 tracing::info!(
+                    kind = "agent_run_notice_sent",
                     task = %task.id(),
                     agent = %step.role(),
                     member = %owner,
+                    opens_conversation = task.origin_session_id().is_some(),
                     queued = report.queued.len(),
                     failed = report.failed.len(),
                     "an agent's run ended; its owner was told"
@@ -557,18 +559,18 @@ async fn hand_on(
     }
 }
 
-/// The owner's notice that one of their agents finished a run; a tap opens chat, where
-/// `task_status` gives the detail.
-pub fn agent_notification(task_id: &str, agent: &str, summary: &str) -> Notification {
+/// The owner's notice that one of their agents finished a run. A tap opens the conversation the
+/// task was started from, where `task_status` gives the detail; chat alone when there is none.
+pub fn agent_notification(task: &LongTask, agent: &str, summary: &str) -> Notification {
     let mut fields = serde_json::Map::new();
-    fields.insert("long_task_id".into(), task_id.into());
+    fields.insert("long_task_id".into(), task.id().into());
     Notification {
-        id: format!("agent-run-{task_id}"),
+        id: format!("agent-run-{}", task.id()),
         target: String::new(),
         category: "info".to_string(),
         title: format!("From {agent}"),
         body: summary.to_string(),
         timestamp: Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Chat.merged_into(fields)),
+        data: Some(OpenScreen::chat(task.origin_session_id()).merged_into(fields)),
     }
 }

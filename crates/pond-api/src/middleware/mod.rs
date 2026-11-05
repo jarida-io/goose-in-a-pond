@@ -318,6 +318,17 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         "/notifications/{id}/ack",
         Exposure::Authenticated,
     ),
+    // The household's notice history, read and marked by the caller's own device, from its token.
+    (
+        Method::GET,
+        "/notifications/history",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/notifications/history/read",
+        Exposure::Authenticated,
+    ),
     // Protected-router routes guarded by other means: the redirect target, by its PKCE nonce...
     (Method::GET, "/oauth/callback", Exposure::Always),
     // ...and extensions' refresh, checked against internal_extension_token in the handler.
@@ -1273,6 +1284,8 @@ mod tests {
             "GET /models/download/progress = Authenticated".to_string(),
             // The setup radios and why each is off; a token in every state, never tokenless.
             "GET /network/status = Authenticated".to_string(),
+            // The household notice history: the caller's own device, from its token.
+            "GET /notifications/history = Authenticated".to_string(),
             "GET /notifications/pending = Authenticated".to_string(),
             "GET /notifications/stream = Authenticated".to_string(),
             "GET /player/status = HostOnly".to_string(),
@@ -1295,6 +1308,7 @@ mod tests {
             "POST /models/download/control = Authenticated".to_string(),
             "POST /models/{category}/{name}/activate = Authenticated".to_string(),
             "POST /models/{category}/{name}/download = Authenticated".to_string(),
+            "POST /notifications/history/read = Authenticated".to_string(),
             // A woken phone fetches and acknowledges its own queued notices, as the stream would.
             "POST /notifications/{id}/ack = Authenticated".to_string(),
             "POST /onboard = UntilOnboarded".to_string(),

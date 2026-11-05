@@ -179,7 +179,7 @@ take a valid bearer, a 4 KiB body and 20 requests a minute:
 
 | Route | Purpose |
 |---|---|
-| `GET /api/v1/remote-access/configuration` | `{enabled, controlUrl, state, lapsesAt}` |
+| `GET /api/v1/remote-access/configuration` | `{enabled, controlUrl, state, lapsesAt, enableFrom}`; while off, `enableFrom` names where the household can turn it on (`["dashboard"]`), so the app can explain it once the phone is away |
 | `POST /api/v1/remote-access/enrollment` | enroll this phone's node (LAN peer only) |
 | `POST /api/v1/remote-access/recovery`, `GET/POST/DELETE .../recovery/{id}` | request, poll, execute and cancel a recovery (LAN peer only) |
 
@@ -265,6 +265,49 @@ exact shape before anything is signed for them.
 The Pond's node never runs from a cached network map: `cmd/pondnet` sets
 `TS_USE_CACHED_NETMAP=false`, so the packet filter that decides which phones reach the
 Pond is always the coordinator's live one.
+
+### When the node is not running
+
+The helper writes one JSON status line every 2 s: `state`, `addresses`, the keys, and two
+fields for diagnosis. `health` is the backend's own account of what stands in its way (its
+health warnings, which include the last control-server error while it cannot log in),
+redacted of node-authorisation URLs, one line each, sorted, at most four of 300 bytes
+(`healthLines` in `native/pondnet/node.go`). `clockSynchronized` is the kernel's
+`adjtimex` answer to whether the host's clock is disciplined by a time source, the reading
+`timedatectl show -p NTPSynchronized` reports; it is present on Linux only. The Pond bounds
+both again on arrival.
+
+`pond-server` logs, in `pond.log` as well as the journal (`embedded_network/diagnostics.rs`):
+
+| Line | When |
+|---|---|
+| `embedded networking state changed` (INFO) | every state change, as before |
+| `kind=remote_access_not_running` (WARN) | once per outage, after 120 s short of `Running`, with `state`, `down_secs`, `reason` (the `health` lines) and `clock_synchronized` (`yes`, `no` or `unknown`) |
+| `kind=remote_access_running_again` (INFO) | when a reported outage ends, with `down_secs` |
+| `kind=network_helper_output` (WARN) | each line the helper writes to stderr, redacted and bounded, at most 20 a minute; past that one `network_helper_output_limited` line, and the next line logged carries the `dropped` count |
+
+`Stopped` is never an outage. A helper restart continues the outage it interrupted. Outages
+are measured on the monotonic clock, so the hours-long wall-clock jump of a board with no
+working real-time clock, when its time server first answers, does not change `down_secs`.
+The household's own notice (`remote_access_down`, after 5 minutes) is separate; see
+`system_notices.rs`.
+
+The node needs no restart to recover. Its control client retries login and the map poll
+with an n-squared backoff capped at 30 s and jittered by up to 50%
+(`tailscale.com/control/controlclient/auto.go`, pinned in `go.mod`), on monotonic timers, so
+it tries again within 45 s of whatever was in the way clearing. A wrong clock matters only
+through TLS: a certificate is refused while the clock is before its `notBefore`, and
+`reason` then says so (`x509: certificate has expired or is not yet valid`). Reading the
+WARN:
+
+- `reason` names a lookup or connect timeout: the Pond has no route to the coordinator,
+  usually no internet at all. Check `nmcli -t -f STATE general` (`connected (site only)`
+  means the LAN without the internet).
+- `reason` is a certificate date error and `clock_synchronized=no`: the clock. See
+  [the power-cut notes](developer/jetson-power-loss-recovery.md#9-remote-access-after-a-power-cut)
+  and `bash scripts/giap.sh time-sync`.
+- `state=NeedsLogin` or `NeedsMachineAuth`: the coordinator answered and wants the node
+  re-registered or approved; that is not a network problem.
 
 ## Phone side
 

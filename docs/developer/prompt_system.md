@@ -23,6 +23,16 @@ speaker may see personal data) candidate memories. Then:
    - a **dynamic suffix**: `CURRENT CONTEXT` date and time, profile lines and
      `prompt_addendum`, which rides the user message rather than the system prompt.
 
+   The profile lines are `profile_context_lines` (`crates/pond-core/src/prompts.rs`). The first
+   says who is speaking: `You are talking with {name}; "I" means them.`, about 15 tokens with a
+   three-word name (counted by hand, not by the tokenizer); it is kept short because a voice turn's
+   envelope is held under 360 tokens (`goose_agent.rs`). `{{user_name}}` in the template names whose
+   pond this is, not who is speaking, so the speaker line is stated even when the two match.
+   The name is the member's `preferred_name`, else their display name, and is set only when the
+   turn is attributed to them (`ProfileScope::Owner`: a linked device, an explicit binding or a
+   face match). A guest, and an unlinked device on a pond of one (`Household`), are named
+   nothing; see PAI-1 section 4e.
+
    With it off, `build_system_prompt_from_template_full` builds the whole prompt every turn.
 4. **Extension notes.** Active prompt extras (`render_extension_notes`) and a one-line-per-skill
    list (name and description) are appended by the provider shim

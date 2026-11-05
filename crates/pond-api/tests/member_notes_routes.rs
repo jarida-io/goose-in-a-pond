@@ -22,10 +22,12 @@ use pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-/// `amina-token` is Amina's phone and `otieno-token` Otieno's.
+/// `amina-token` is Amina's phone, `otieno-token` Otieno's, and `visitor-token` a phone paired
+/// to nobody.
 struct TwoPhones {
     amina: String,
     otieno: String,
+    visitor: String,
 }
 
 #[async_trait]
@@ -37,12 +39,16 @@ impl Handshake for TwoPhones {
         anyhow::bail!("pairing is not used by this fixture")
     }
     async fn validate_token(&self, token: &str) -> Result<bool> {
-        Ok(matches!(token, "amina-token" | "otieno-token"))
+        Ok(matches!(
+            token,
+            "amina-token" | "otieno-token" | "visitor-token"
+        ))
     }
     async fn caller_for_token(&self, token: &str) -> Result<Option<TokenCaller>> {
         let device = match token {
             "amina-token" => &self.amina,
             "otieno-token" => &self.otieno,
+            "visitor-token" => &self.visitor,
             _ => return Ok(None),
         };
         Ok(Some(TokenCaller {
@@ -107,9 +113,23 @@ async fn pond() -> Pond {
     }
     let (amina, amina_phone) = members[0].clone();
     let (otieno, otieno_phone) = members[1].clone();
+    let visitor_phone = state
+        .device_registry
+        .register(RegisterDeviceRequest {
+            id: None,
+            name: "A visitor's phone".into(),
+            device_type: "gotg".into(),
+            hostname: None,
+            capabilities: vec![],
+            room_id: None,
+        })
+        .await
+        .unwrap()
+        .id;
     state.handshake = Arc::new(TwoPhones {
         amina: amina_phone,
         otieno: otieno_phone,
+        visitor: visitor_phone,
     });
     let interviews = InterviewService::new(
         Arc::new(SqliteProfileInterviewRepository::new(pool.clone())),
@@ -271,6 +291,55 @@ async fn a_members_turn_carries_their_notes_and_never_anothers() {
         assert_ne!(notes[0].instruction, other);
         assert!(request.interview.is_none());
     }
+}
+
+/// "Who am I" from a linked phone: the turn carries that member's name, and only theirs. A phone
+/// paired to nobody, on a pond of two, is a guest and is named nothing.
+#[tokio::test]
+async fn a_turn_names_the_member_whose_phone_it_came_from_and_nobody_else() {
+    let p = pond().await;
+
+    for (token, own, other) in [
+        ("amina-token", "Amina", "Otieno"),
+        ("otieno-token", "Otieno", "Amina"),
+    ] {
+        let (status, _) = call(
+            &p,
+            token,
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(json!({"message": "Who am I?"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let context = p
+            .agent
+            .last_request()
+            .unwrap()
+            .profile_context
+            .expect("a linked member's turn carried no profile context");
+        assert_eq!(context.speaker_name.as_deref(), Some(own));
+        assert_ne!(context.speaker_name.as_deref(), Some(other));
+    }
+
+    let (status, _) = call(
+        &p,
+        "visitor-token",
+        Method::POST,
+        "/api/v1/chat/stream",
+        Some(json!({"message": "Who am I?"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let request = p.agent.last_request().unwrap();
+    assert_eq!(
+        request
+            .profile_context
+            .as_ref()
+            .and_then(|c| c.speaker_name.as_deref()),
+        None,
+        "a phone paired to nobody was told it is a member"
+    );
 }
 
 #[tokio::test]

@@ -19,6 +19,8 @@ the hardware in every row.
 
 | Workstream | Done | Partial | Open or removed | On hardware | Next concrete step |
 |---|---|---|---|---|---|
+| [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Four gaps outside the phase list, two of them found 2026-11-02. **Closed 2026-11-02** (section 4e): a linked member's turn now says who is speaking, by preferred name else display name; before, a member with no `preferred_name` reached the model unnamed and "who am I" answered nothing. **2026-10-28, from a household on the Orin:** a device paired to nobody stays nobody's, because nothing re-attributes a device after pairing (`PUT /devices/{id}` takes no member) and, until `fix/profile-attribution`, neither the dashboard nor `pond-server pairing` could issue a member-bound code, so on a pond of two members every newly paired phone resolved `Guest` and a phone paired before the first member existed could never be linked; that branch adds the issuing side (Pairing-page member picker, `pairing --member`) and refuses a `primary_profile_id` that names no member, and linking still means pairing the phone again (section 4c of the PAI-1 document). `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`). **Closed 2026-11-02** (section 4d): `get_session_messages` and `get_session_attachment` serve a member's conversation only to that member's devices, and the `giap-memory` tools read, save and forget at the live turn's scope, or a helper's clamped one, so one member's turn no longer reaches another's memories. Found then and still open: `GET /sessions` lists every conversation's title and first answer to any paired client, and `POST /chat/stream` checks no ownership of the session it is given | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only; the 2026-11-02 memory-tool and session-read scoping VERIFIED on the Orin 2026-11-02 (two test members on the live pond, release-profile tests, `scripts/live-test.sh`) | Scope `GET /sessions` by the caller, and refuse a turn on another member's session, as the two read routes now are |
+
 | [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Four gaps outside the phase list, two of them found 2026-11-02. **2026-10-28, from a household on the Orin:** a device paired to nobody stays nobody's, because nothing re-attributes a device after pairing (`PUT /devices/{id}` takes no member) and, until `fix/profile-attribution`, neither the dashboard nor `pond-server pairing` could issue a member-bound code, so on a pond of two members every newly paired phone resolved `Guest` and a phone paired before the first member existed could never be linked; that branch adds the issuing side (Pairing-page member picker, `pairing --member`) and refuses a `primary_profile_id` that names no member, and linking still means pairing the phone again (section 4c of the PAI-1 document). `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`). **Closed 2026-11-02** (section 4d): `get_session_messages` and `get_session_attachment` serve a member's conversation only to that member's devices, and the `giap-memory` tools read, save and forget at the live turn's scope, or a helper's clamped one, so one member's turn no longer reaches another's memories. Found then and still open: `GET /sessions` lists every conversation's title and first answer to any paired client, and `POST /chat/stream` checks no ownership of the session it is given **2026-11-02, Voice Match** (section 3.8): a recognised voice is `identification_source = 'voice'`, below `face`, and gives the turn its speaker's context only; `is_draft_decision_permitted` refuses a voice-only actor, rides stay phone-only, and another voice gets a session of its own. | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only; the 2026-11-02 memory-tool and session-read scoping VERIFIED on the Orin 2026-11-02 (two test members on the live pond, release-profile tests, `scripts/live-test.sh`); Voice Match (section 3.8) NOT VERIFIED on the Orin: its route, store and policy tests ran on the Mac 2026-11-02, and no enrolment or recognised wake has run on the device | Enrol two members on the Orin and check a recognised wake names its speaker, a proposal decision from that session is refused, and a second voice's wake starts its own session; then scope `GET /sessions` by the caller, and refuse a turn on another member's session, as the two read routes now are |
 | [PAI-2 Privacy and security guardrails](./02-privacy-and-security-guardrails.md) | 9: P0-P5 (P3's third chokepoint and P5's last senders arrived with P6a and P6b), P6a, P7, P8a | 1: P6b (its outbound-connector-action gate) | Open: P8b, the enforce flip (`security_policy_mode` still defaults to `audit`). Regressed: the staged-action gate went with `giap-draft` on 2026-09-10 (`793556b1`, section 3.6); the one outbound connector action, `book_ride`, is confirmed on the member's own phone instead | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-2) | Fill `Principal.proven_profile_id` from the paired device's member in the auth middleware (it is `None` on every path today), which P8b waits on |
 | [PAI-3 Context governor](./03-context-governor.md) | 7: P1, P2, P3 with P3b, P4, P5, P6, and 4b's completeness check (`goal_check_enabled`) | 0 | None open. Since 2026-09-11 (`465373df`) goose trims and compacts the live conversation: the window reaches it as `GOOSE_CONTEXT_LIMIT`, and `CompactionProfile`'s history budget and output reserve size only `plan_replay` (hydrating a conversation goose's store lost) | VERIFIED on the Orin 2026-08-12, for code before the 2026-09-11 hand-over and the 2026-09-24 `device_budget` move; 4b is NOT VERIFIED on the Orin | Re-run `scripts/pai-bench.sh` PAI-3 on the Orin against the current binary |
@@ -4279,3 +4281,48 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
     targets, and `scripts/live-test.sh` on the deployed binary (PAI-1 section 7).
 - Not done: `GET /sessions` still lists every conversation; `POST /chat/stream` checks no
   ownership of the session it is given (both PAI-1 section 4d).
+
+- Not done: the phone app's embedding setting (an on/off switch, in its own pull request); the
+  desktop surfaces' design gate scored revise, and its fixes are their own pull request.
+
+**2026-11-02 — `relevant` re-picks tool groups on every message and always offers web search
+(touches PAI-3; not a PAI milestone).**
+
+- **What the Orin showed** (2026-10-28 06:20-06:23Z, E4B, `relevant`). "What has happened to
+  China's stock market?" loaded memory, system, toolkit and weather, so no `search_web`, and the
+  model said it had no tool for market data. The set was chosen from the first message only, so
+  "Look it up?" got the same set and an empty turn. "Do a web search on..." made the model enable
+  `giap-knowledge` itself.
+- **What landed.** `giap-knowledge` is core (`tool_group.rs`, decision D1 of
+  `small-model-tools.md`, `relevant` only; `minimal` still offers the hatch alone). Each later
+  message is scored with the same signals and every group at or above the embedder model's floor
+  is added (0.28 on MiniLM, 0.71 on EmbeddingGemma 2; an unmeasured model keeps every group;
+  `select_groups_for_later_message`, no top-scorer rescue, so small talk adds nothing);
+  `union_groups` never removes a held group, whether the opening message, a later one or
+  `enable_tool_group` loaded it. The union is persisted only when it grew. Embedding failure
+  still widens an opening message to every permitted group; a later message that cannot be scored
+  keeps the held groups. Every path still clamps to the turn's permitted set.
+  `kind="tool_selection_added"` traces a turn that added groups.
+- **PAI-3 cost.** Knowledge adds 253 tokens keyless, 329 with the Brave key, 404 with both keys
+  (o200k on the minified schemas), 4.1-6.6% of a 6,144-token prompt. A turn that adds a group
+  re-prefills from the first added tool on; the core block ahead of it keeps its KV. The default
+  tool order moved once (`prefix_oracle.rs`); keyed core tools sort just after the core block.
+  A later turn now runs one to three embeddings, skipped once every permitted group is held.
+- **Not verified on the Orin**, nor by `scripts/live-test.sh`: unit tests only.
+
+**2026-11-02 — PAI-1: a turn says who is speaking.**
+
+- **What is built** (branch `fix/chat-knows-who-is-talking`; PAI-1 section 4e):
+  `ProfileContext.speaker_name` (preferred name, else display name, `Owner` turns only) renders one
+  line in the dynamic suffix: `You are talking with {name}; "I" means them.` It replaces the preferred-name line and is stated even when the name equals `user_name`.
+- **Cause.** Not a regression: the speaker's name only ever came from `preferences.preferred_name`,
+  empty on the Orin's owner; `{{user_name}}` names whose pond it is. The `context-setup` warning is
+  the desktop Context screen's placeholder session on read routes, unrelated.
+- **PAI-1.** `Household` and `Guest` turns name nobody, as P10 requires.
+- **PAI-3.** About 27 tokens (hand count, three-word name) per attributed turn, in the working set rather than the prefix.
+- **Invariant 1.** The line is in the dynamic suffix; a test pins `prefix_hash` across a speaker
+  change.
+- **PAI-2, PAI-4 to PAI-8.** Untouched.
+- **NOT VERIFIED on the Orin.** Unit and route tests only; E4B's answer to "who am I" with the line
+  present has not been run on hardware.
+

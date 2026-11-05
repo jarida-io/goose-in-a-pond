@@ -53,3 +53,7 @@ on both scales. `reinforce` is 0.97.
 **What this does not show.** 66 needed groups and 34 pairs are few, and the cases are written, not
 taken from a household. The tool-selection floor matters only under `tool_selection_mode =
 "relevant"`; the default keeps every group.
+
+**Since this run** `giap-knowledge` is a core group (2026-11-02, `small-model-tools.md` D1), so
+`embed-scores` no longer scores it and `analyse.py` leaves its seven needs out: a core group is
+loaded whatever the floor. The figures above were measured with it scored and were not re-run.

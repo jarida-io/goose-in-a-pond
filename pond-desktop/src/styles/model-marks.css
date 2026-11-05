@@ -145,6 +145,18 @@
   color: var(--color-text);
 }
 
+/* A job the model is doing now: the accent's own edge, so it reads before the source chip. */
+.mm-chip--use {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.mm-uses {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 /* ── Picture support ────────────────────────────────────────────────────── */
 
 .mm-addon {

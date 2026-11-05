@@ -1354,3 +1354,95 @@ describe("a deep research turn", () => {
     });
   });
 });
+
+// ── Working notes ─────────────────────────────────────────────────────────────
+
+describe("text the model wrote while it worked", () => {
+  const NOTES = "Let me check the weather. ";
+
+  it("leaves the answer when a tool call names it as working notes", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+
+    sendTurn({ text: "weather and news?" });
+    await held.push({ type: "text", content: NOTES } as ChatEvent);
+    await held.push({ type: "tool_call", tool: "get_current_weather", id: "t1", working_notes: NOTES } as ChatEvent);
+
+    expect(getChatRun().messages[1].text).toBe("");
+    expect(getChatRun().messages[1].steps).toEqual(["Let me check the weather."]);
+
+    await held.push({ type: "tool_result", tool: "get_current_weather", id: "t1", content: "sunny" } as ChatEvent);
+    await held.push({ type: "text", content: "It is sunny." } as ChatEvent);
+    await held.end();
+
+    const agent = getChatRun().messages[1];
+    expect(agent.text).toBe("It is sunny.");
+    expect(agent.steps).toEqual(["Let me check the weather."]);
+  });
+
+  it("takes the text since the last tool call when the notes do not end the answer", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "text", content: "Weather first. " },
+        { type: "tool_call", tool: "get_current_weather", id: "t1", working_notes: "Weather first. " },
+        { type: "text", content: "Now <think>hmm</think>the news." },
+        { type: "tool_call", tool: "search_web", id: "t2", working_notes: "Now <think>hmm</think>the news." },
+        { type: "text", content: "Sunny, and a draw." },
+      ] as ChatEvent[]) as never,
+    );
+
+    sendTurn({ text: "weather and news?" });
+    await flush();
+
+    const agent = getChatRun().messages[1];
+    expect(agent.text).toBe("Sunny, and a draw.");
+    expect(agent.steps).toEqual(["Weather first.", "Now the news."]);
+  });
+
+  it("keeps the text in the answer for a pond that sends no notes", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "text", content: NOTES },
+        { type: "tool_call", tool: "get_current_weather", id: "t1" },
+        { type: "text", content: "It is sunny." },
+      ] as ChatEvent[]) as never,
+    );
+
+    sendTurn({ text: "weather?" });
+    await flush();
+
+    const agent = getChatRun().messages[1];
+    expect(agent.text).toBe(`${NOTES}It is sunny.`);
+    expect(agent.steps).toBeUndefined();
+  });
+
+  it("moves them out of a turn picked up by reattaching too", async () => {
+    localStorage.setItem(
+      "giap-chat-run",
+      JSON.stringify({ sessionId: "sess-live", runId: "run-7", epoch: "epoch-a", lastSeq: 4 }),
+    );
+    vi.mocked(api.getActiveRun).mockResolvedValue({
+      run_id: "run-7",
+      session_id: "sess-live",
+      state: "running",
+      started_at: "",
+      first_seq: 1,
+      last_seq: 6,
+      epoch: "epoch-a",
+    } as never);
+    vi.mocked(api.reattachRun).mockReturnValue(
+      stream([
+        // Replay starts mid-turn: the notes count text this window never received.
+        { type: "text", content: "the weather. " },
+        { type: "tool_call", tool: "get_current_weather", id: "t1", working_notes: NOTES },
+        { type: "text", content: "It is sunny." },
+      ] as ChatEvent[]) as never,
+    );
+
+    await resumeActiveRun();
+
+    const agent = getChatRun().messages[getChatRun().messages.length - 1];
+    expect(agent.text).toBe("It is sunny.");
+    expect(agent.steps).toEqual(["the weather."]);
+  });
+});

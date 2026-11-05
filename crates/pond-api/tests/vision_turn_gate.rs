@@ -263,6 +263,7 @@ async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -300,6 +301,7 @@ async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     Pond {

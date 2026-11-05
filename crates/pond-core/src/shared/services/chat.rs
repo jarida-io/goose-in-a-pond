@@ -4489,7 +4489,7 @@ mod tests {
         let context: SpeakerContext = Arc::new(|id: String| {
             Box::pin(async move {
                 Some(crate::prompts::ProfileContext {
-                    preferred_name: Some(format!("{id} herself")),
+                    speaker_name: Some(format!("{id} herself")),
                     birthday: None,
                     language: None,
                     atypical_speech: false,
@@ -4523,9 +4523,7 @@ mod tests {
         assert_eq!(last.session_id, moved);
         assert_eq!(last.profile_scope, ProfileScope::Owner("zawadi".into()));
         assert_eq!(
-            last.profile_context
-                .and_then(|c| c.preferred_name)
-                .as_deref(),
+            last.profile_context.and_then(|c| c.speaker_name).as_deref(),
             Some("zawadi herself")
         );
         let events = collector.events.lock().unwrap().clone();

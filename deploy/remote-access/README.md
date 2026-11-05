@@ -186,7 +186,7 @@ admitting.
 | Concurrent operations | 8 |
 | Public requests | 10/s, burst 20 |
 | Coordinator response headers | 10 s |
-| One request / startup or reconciliation | 15 s / 60 s (a reconciliation reads the inventory up to three times) |
+| One request / startup or reconciliation | 15 s / 60 s (a reconciliation reads the inventory once, twice when it changed something) |
 
 Source addresses come from the gateway's last `X-Forwarded-For` hop, believed only from
 `--trusted-proxy` (the pinned `enroll` network); without it every client shares the
@@ -398,6 +398,19 @@ deferred reconciliation logs its error. Logs name transitions and failures, neve
 signatures, auth IDs, QR payloads or credentials. Container logs rotate at 10 MiB, three
 files. Alerts, off-host metrics, disk thresholds and credential-expiry notifications are
 not configured by this package.
+
+The policy is written only when it changed. Every reconciliation and enrollment change
+computes it from the store and the inventory, reads the one Headscale holds
+(`GET /api/v1/policy`), and writes (`PUT`) only when the two differ once decoded, so
+whitespace and key order never count. An idle cycle is one inventory read and one policy
+read: a write makes Headscale re-evaluate the policy for every node and can push a new
+network map to every connected phone. A write logs why: `kind=policy_store_changed` (INFO,
+expected); `kind=policy_drift` (WARN), when Headscale holds something other than what this
+service last wrote, with rule, node-attribute and field counts only, and the policy is put
+back, since nothing else should write it; `kind=policy_unverified` (INFO) for the first
+difference after a start or a failed write; and `kind=policy_read_failed` (WARN), when the
+read fails and the policy is written anyway, enforcing the allowlist rather than trusting
+an unknown state.
 
 To check the embedded DERP relay, send STUN a well-formed request. The relay is
 Tailscale's STUN server, which drops binding requests carrying neither a SOFTWARE

@@ -442,6 +442,14 @@ message predicts one better than any other, which is the same reason memory is c
 (`CORE_RATIONALE`). Its 158 tokens in `minimal` buy the largest gain measured in that mode.
 Take the sharper blurb as well, since it costs nothing and helps any mode that lists the
 group.
+*Decided 2026-11-02, for `relevant` only:* `giap-knowledge` is core (`tool_group.rs`), after the
+Orin missed web search for "What has happened to China's stock market?" on 2026-10-28. `minimal`
+still offers the hatch alone. Measured on the minified tool JSON with the o200k counter, the group
+now costs 253 tokens keyless (`get_wikipedia_article` 111, `read_web_page` 142), 329 with the
+Brave key and 404 with both keys, against 626 for the old core of memory, system and toolkit: 4.1
+to 6.6% of a 6,144-token prompt. Its keyless tools sort into the core block; `search_web` and
+`compute_answer` sort just after it (`prefix_sort_key` tier 1), so storing a key still moves the
+prefix only from that tool on. The default tool order moved once with this change.
 
 **D2. The `<tool-usage>` sentence.** A general rewrite ("never answer from memory a specific
 fact… or any number you would have to work out") moved E2B by two cases and E4B by none (arms

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"tailscale.com/envknob"
+
+	"github.com/Exile10/goose-in-a-pond/native/pondnet"
 )
 
 // The Pond helper must leave tailscale's network-map cache off, read the way the
@@ -41,5 +44,35 @@ func TestAnUnloadableDeviceFallsBackToTheInvite(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), "registering with the invite") {
 		t.Fatalf("the fallback was not reported: %q", warnings.String())
+	}
+}
+
+// The Pond reads each status line as one flat object; the clock reading sits beside the node's
+// own fields, and is left out, not reported false, where the host cannot say.
+func TestAReportIsTheStatusWithTheClockBesideIt(t *testing.T) {
+	unsynchronized := false
+	encoded, err := json.Marshal(report{
+		Status:            pondnet.Status{State: "NoState", Addresses: []string{}, Health: []string{"why"}},
+		ClockSynchronized: &unsynchronized,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flat map[string]any
+	if err := json.Unmarshal(encoded, &flat); err != nil {
+		t.Fatal(err)
+	}
+	if flat["state"] != "NoState" || flat["clockSynchronized"] != false {
+		t.Fatalf("not one flat status: %s", encoded)
+	}
+	if health, ok := flat["health"].([]any); !ok || len(health) != 1 || health[0] != "why" {
+		t.Fatalf("health is missing from the line: %s", encoded)
+	}
+	encoded, err = json.Marshal(report{Status: pondnet.Status{State: "Running", Addresses: []string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "clockSynchronized") || strings.Contains(string(encoded), "health") {
+		t.Fatalf("an unknown clock or no health must be left out: %s", encoded)
 	}
 }

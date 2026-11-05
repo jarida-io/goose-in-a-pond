@@ -393,6 +393,34 @@ export function inlineText(nodes: readonly Inline[]): string {
   return nodes.map((n) => (n.t === "text" || n.t === "code" ? n.v : inlineText(n.c))).join("");
 }
 
+function blocksText(blocks: readonly Block[]): string {
+  return blocks
+    .map((block) => {
+      switch (block.t) {
+        case "p":
+        case "h":
+          return inlineText(block.c);
+        case "ul":
+        case "ol":
+          return block.items.map(blocksText).join(" ");
+        case "table":
+          return [block.head, ...block.rows].map((row) => row.map(inlineText).join(" ")).join(" ");
+        case "quote":
+          return blocksText(block.c);
+        case "code":
+          return block.v;
+        case "hr":
+          return "";
+      }
+    })
+    .join(" ");
+}
+
+/** Some markdown as one line of plain words, with no heading hashes, list bullets, emphasis or link syntax, for a preview. */
+export function markdownToPlainText(source: string): string {
+  return blocksText(parseMarkdown(source)).replace(/\s+/g, " ").trim();
+}
+
 export interface OutlineEntry {
   /** The heading's place among the top-level blocks, which is what its drawn element is named by. */
   index: number;

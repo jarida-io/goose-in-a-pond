@@ -4,8 +4,10 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
+pub mod device_events;
 pub mod download_failure;
 pub mod host_guard;
+pub mod idempotency;
 pub(crate) mod image_normalize;
 pub mod insecure_dev;
 pub(crate) mod member_notes;
@@ -266,6 +268,9 @@ pub struct AppState {
     /// Offline queue, flushed on stream connect to a device that was disconnected.
     pub notification_queue:
         Option<Arc<dyn pond_core::mcp::ports::notification_queue::NotificationQueueRepository>>,
+    /// The household's record of durable notices, read by `GET /notifications/history`.
+    pub notification_history:
+        Option<Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>>,
     /// What producers (`send_notification`, the schedule bridge) send through.
     pub notification_sender:
         Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>>,
@@ -318,6 +323,8 @@ pub struct AppState {
     pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
     /// The voice-sample route's limiter, shared by every caller; it speaks through `tts`.
     pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
+    /// Device state changes for `/devices/events`, kept so a phone can resume.
+    pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
 }
@@ -621,6 +628,12 @@ pub struct ModelStatusEntry {
     /// Why `available` is false, e.g. `litert_library_missing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<pond_core::models::domain::engine::EngineUnavailable>,
+    /// The jobs this row is doing now, read from settings (`model_use::RoleHolders`). Empty for
+    /// a row that holds none; `active` stays the assignment-table flag it always was.
+    #[serde(default)]
+    pub roles: Vec<pond_core::models::domain::model_use::ModelUse>,
+    /// The section both clients list this row under.
+    pub section: pond_core::models::domain::model_use::ModelSection,
 }
 
 /// A row that says nothing about availability was listed by a pond that could run it.

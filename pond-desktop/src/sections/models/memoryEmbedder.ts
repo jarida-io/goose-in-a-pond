@@ -74,6 +74,25 @@ export function memoryCost(m: Pick<ModelEntry, "size_mb" | "downloaded" | "acqui
   return size ? `${size} to download` : "Size not listed";
 }
 
+/** What a model needs while it runs, from the pond's estimate; null where the catalogue lists none. */
+export function memoryNeed(m: Pick<ModelEntry, "ram_estimate_mb">): string | null {
+  const size = formatSize(m.ram_estimate_mb);
+  return size ? `Needs about ${size} while it runs` : null;
+}
+
+export type MemoryFit = "fits" | "tight";
+
+export const FIT_WORD: Record<MemoryFit, string> = { fits: "Fits", tight: "Tight on this pond" };
+
+/** Whether a model's need fits the room the pond reports for a Memory model; null where either is unknown. */
+export function memoryFit(
+  m: Pick<ModelEntry, "ram_estimate_mb">,
+  roomMb: number | null | undefined,
+): MemoryFit | null {
+  if (roomMb == null || !m.ram_estimate_mb) return null;
+  return m.ram_estimate_mb <= roomMb ? "fits" : "tight";
+}
+
 export type EmbedderKind =
   | "off" | "waiting" | "loading" | "downloading" | "missing" | "failed" | "reindexing" | "ready";
 
@@ -91,6 +110,8 @@ export interface EmbedderLine {
   progress: { done: number; total: number } | null;
   /** What a screen reader hears where `text` changes on every poll; the count stays on the progress bar. */
   spoken: string | null;
+  /** The model the line tells the household to choose instead, by catalogue name. */
+  wayOut: string | null;
 }
 
 /** A failed load that is only the pond waiting on a file it fetches itself, which is no fault. */
@@ -101,7 +122,7 @@ export function isFetching(reason: string | null | undefined): boolean {
 function line(kind: EmbedderKind, text: string, over: Partial<EmbedderLine> = {}): EmbedderLine {
   return {
     kind, text, detail: null, retry: false, retryLabel: "Try again", retryingLabel: "Trying again",
-    progress: null, spoken: null, ...over,
+    progress: null, spoken: null, wayOut: null, ...over,
   };
 }
 
@@ -138,13 +159,13 @@ export function embedderLine(
         });
       }
       if (isOutOfMemory(reason)) {
-        const next = embedder.model_id === LIGHTER_CHOICE
-          ? "Try again later."
-          : `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.`;
+        const lighter = embedder.model_id !== LIGHTER_CHOICE;
+        const next = lighter ? `Choose the lighter ${LIGHTER_CHOICE_TEXT}, or try again.` : "Try again later.";
         return line(
           "failed",
-          `There is not enough free memory to load ${title}, so Memory is searching by keyword. ${next}`,
-          { detail: reason, retry: true },
+          `This pond does not have room to load ${title} beside the conversation model, so Memory is searching ` +
+            `by keyword. ${next}`,
+          { detail: reason, retry: true, wayOut: lighter ? LIGHTER_CHOICE : null },
         );
       }
       return line(

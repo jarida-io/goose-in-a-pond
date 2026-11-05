@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ContextIndexHealth, EmbedderHealth } from "../../api/types";
 import {
-  embedderLine, embedderTitle, embedderWatching, holderBadge, holderText, holdsMemory, isOutOfMemory, jobState,
-  memoryChosenText, memoryCost, memoryHolder, memoryIsOff, memoryModels, memoryPress, NEEDS_CONNECTION,
-  resolvedMemoryName,
+  embedderLine, embedderTitle, embedderWatching, FIT_WORD, holderBadge, holderText, holdsMemory, isOutOfMemory,
+  jobState, memoryChosenText, memoryCost, memoryFit, memoryHolder, memoryIsOff, memoryModels, memoryNeed,
+  memoryPress, NEEDS_CONNECTION, resolvedMemoryName,
 } from "./memoryEmbedder";
 import { e4b, eg2, memoryRoles, miniLm, nomicEmbed, NO_ROLES } from "./fixtures";
 import { modelLabel } from "./modelsView";
@@ -162,14 +162,15 @@ describe("what the pond says while it switches", () => {
     );
   });
 
-  it("says plainly that there is not enough memory, and names the lighter model, keeping the raw reason aside", () => {
+  it("says plainly that the pond has no room for it, and names the lighter model, keeping the raw reason aside", () => {
     const line = embedderLine(health({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }));
     expect(line).toMatchObject({ kind: "failed", retry: true, detail: "loading x.gguf on the Gpu: out of memory" });
     expect(line?.text).toBe(
-      "There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword. " +
+      "This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword. " +
         "Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.",
     );
     expect(line?.text).not.toMatch(/Gpu|gguf|out of memory/);
+    expect(line?.wayOut).toBe("all-MiniLM-L6-v2");
   });
 
   it("does not send the lightest model to itself when it is the one that ran out of room", () => {
@@ -177,8 +178,9 @@ describe("what the pond says while it switches", () => {
       health({ state: "failed", model_id: "all-MiniLM-L6-v2", reason: "out of memory" }, { model_id: "all-MiniLM-L6-v2" }),
     );
     expect(line?.text).toBe(
-      "There is not enough free memory to load all-MiniLM-L6-v2, so Memory is searching by keyword. Try again later.",
+      "This pond does not have room to load all-MiniLM-L6-v2 beside the conversation model, so Memory is searching by keyword. Try again later.",
     );
+    expect(line?.wayOut).toBeNull();
   });
 
   it("recognises a load that ran out of room by the words engines use for it", () => {
@@ -322,5 +324,29 @@ describe("what the model's row and line may claim", () => {
       "EmbeddingGemma 2 is chosen and loads at a quiet moment.",
     );
     expect(holderText(null, null)).toBe("Chosen on the Models screen.");
+  });
+});
+
+describe("what a Memory model needs, and whether this pond has room", () => {
+  it("says what a model needs while it runs, from the pond's estimate", () => {
+    expect(memoryNeed(eg2())).toBe("Needs about 368 MB while it runs");
+    expect(memoryNeed(miniLm())).toBe("Needs about 50 MB while it runs");
+    expect(memoryNeed(eg2({ ram_estimate_mb: undefined }))).toBeNull();
+  });
+
+  // The live nano at the re-score: 309 MB available, so 147 MB of room once EmbeddingGemma 2 gives its share back.
+  it("reads the need against the room in a word", () => {
+    expect(memoryFit(miniLm(), 147)).toBe("fits");
+    expect(memoryFit(eg2(), 147)).toBe("tight");
+    expect(memoryFit(eg2(), 368)).toBe("fits");
+    expect(FIT_WORD.fits).toBe("Fits");
+    expect(FIT_WORD.tight).toBe("Tight on this pond");
+  });
+
+  it("claims nothing where the pond read no room or the catalogue lists no need", () => {
+    expect(memoryFit(eg2(), null)).toBeNull();
+    expect(memoryFit(eg2(), undefined)).toBeNull();
+    expect(memoryFit(eg2({ ram_estimate_mb: undefined }), 1000)).toBeNull();
+    expect(memoryFit(eg2(), 0)).toBe("tight");
   });
 });
