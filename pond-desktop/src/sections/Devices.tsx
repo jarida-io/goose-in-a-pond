@@ -1,14 +1,15 @@
 import { useCallback, useState, useEffect } from "react";
-import { Button, Separator } from "@heroui/react";
+import { Button, Separator, Switch } from "@heroui/react";
 import {
   Monitor, Cpu, Activity, Power, Settings, Plus, X, Radio, Smartphone,
-  Lightbulb, Lock, Thermometer, Fan, Blinds, RefreshCw,
+  Lightbulb, Lock, Thermometer, Fan, Blinds, RefreshCw, Pencil, Trash2,
   PlugZap, WashingMachine, Waves, Wind, MonitorPlay, Bot, BellRing, ToggleLeft,
   Router,
   Droplet,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
-import { ApiError, type Device, type MatterStatus } from "../api/types";
+import { ApiError, type Device, type MatterStatus, type Room } from "../api/types";
+import { useConfirm, ErrorBanner } from "../components/shared";
 import { refreshHomeData } from "../hub/state/hubDataStore";
 import { powerStateOf } from "./devicePower";
 import { timeSince } from "./timeSince";
@@ -76,8 +77,102 @@ function canPower(d: Device): boolean {
   return d.capabilities?.includes("power") ?? false;
 }
 
+/** Every room the household has named, each with its devices, plus a final bucket for devices
+ *  whose `room_id` is absent or points at nothing (deleted, or never assigned). Named rooms
+ *  sort alphabetically; "Unassigned" is always last, and only shown when it would hold
+ *  something or there are no named rooms to group by at all. */
+function groupDevicesByRoom(
+  devices: Device[],
+  rooms: Room[],
+): Array<{ room: Room | null; devices: Device[] }> {
+  const byId = new Map(rooms.map((r) => [r.id, r] as const));
+  const grouped = new Map<string, Device[]>();
+  for (const d of devices) {
+    const key = d.room_id && byId.has(d.room_id) ? d.room_id : "";
+    const list = grouped.get(key) ?? [];
+    list.push(d);
+    grouped.set(key, list);
+  }
+  const sections: Array<{ room: Room | null; devices: Device[] }> = rooms
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((room) => ({ room, devices: grouped.get(room.id) ?? [] }));
+  const unassigned = grouped.get("") ?? [];
+  if (unassigned.length > 0 || rooms.length === 0) {
+    sections.push({ room: null, devices: unassigned });
+  }
+  return sections;
+}
+
+interface DeviceCardProps {
+  device: Device;
+  isPoweredOn: boolean | undefined;
+  busy: boolean;
+  onPower: (d: Device) => void;
+  onConfigure: (d: Device) => void;
+}
+
+function DeviceCard({ device: d, isPoweredOn, busy, onPower, onConfigure }: DeviceCardProps) {
+  return (
+    <div className={`device-card${!d.is_online ? " device-card--offline" : ""}`}>
+      {/* Top: icon + name + IP */}
+      <div className="device-card__top">
+        <span className={iconClass(d.device_type, d.is_online)}>
+          <DeviceIcon kind={d.device_type} />
+        </span>
+        <div className="device-card__info">
+          <div className="device-card__name">{d.name}</div>
+          <code className="device-card__ip">
+            {/* `ip_address` is the field the server sends. This read
+                `metadata.ip`, which `list_devices` has never set, so the
+                line rendered an em dash for every device on the fabric. */}
+            {d.ip_address ?? "—"}
+          </code>
+        </div>
+      </div>
+
+      {/* Chips: status + type + last seen */}
+      <div className="device-card__chips">
+        <span className={`device-card__chip device-card__chip--${d.is_online ? "online" : "offline"}`}>
+          <span className="device-card__dot" />
+          {d.is_online ? "online" : "offline"}
+        </span>
+        {d.device_type && (
+          <span className="device-card__chip">{d.device_type}</span>
+        )}
+        <span className="device-card__chip">{lastSeen(d)}</span>
+      </div>
+
+      {/* Actions */}
+      <div className="device-card__actions">
+        {/* Only a device that can be switched. A contact sensor's
+            capability list is empty, and it was being offered "Turn on". */}
+        {canPower(d) && (
+          <button
+            className="device-card__action-btn"
+            onClick={() => onPower(d)}
+            disabled={busy || !d.is_online}
+            type="button"
+          >
+            <Power size={12} /> {isPoweredOn ? "Turn off" : "Turn on"}
+          </button>
+        )}
+        <button
+          className="device-card__action-btn"
+          onClick={() => onConfigure(d)}
+          type="button"
+        >
+          <Settings size={12} /> Configure
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Devices() {
+  const confirm = useConfirm();
   const [devices, setDevices]     = useState<Device[]>([]);
+  const [rooms, setRooms]         = useState<Room[]>([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
   const [showForm, setShowForm]   = useState(false);
@@ -103,9 +198,17 @@ export function Devices() {
   // Configure-modal edit state
   const [editName, setEditName]         = useState("");
   const [editHostname, setEditHostname] = useState("");
-  const [editRoom, setEditRoom]         = useState("");
+  // "" means Unassigned; otherwise a room id from `rooms`.
+  const [editRoomId, setEditRoomId]     = useState("");
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError]       = useState<string | null>(null);
+
+  // Room create/rename modal
+  const [roomModal, setRoomModal] = useState<{ mode: "create" | "rename"; target?: Room } | null>(null);
+  const [roomModalName, setRoomModalName] = useState("");
+  const [roomModalSubmitting, setRoomModalSubmitting] = useState(false);
+  const [roomModalError, setRoomModalError] = useState<string | null>(null);
+  const [guestAccessBusy, setGuestAccessBusy] = useState<string | null>(null);
 
   /** Ask each switchable device its power state; a failed read leaves it absent, not "off". */
   const loadPowerStates = useCallback(async (list: Device[]) => {
@@ -134,10 +237,11 @@ export function Devices() {
 
   const load = useCallback(() => {
     setLoading(true);
-    api.listDevices()
-      .then((list) => {
-        setDevices(list);
-        void loadPowerStates(list);
+    Promise.all([api.listDevices(), api.listRooms().catch(() => [])])
+      .then(([deviceList, roomList]) => {
+        setDevices(deviceList);
+        setRooms(roomList);
+        void loadPowerStates(deviceList);
       })
       .catch((e) => setError(errorText(e)))
       .finally(() => setLoading(false));
@@ -245,7 +349,7 @@ export function Devices() {
     setDetail(d);
     setEditName(d.name);
     setEditHostname(d.hostname ?? "");
-    setEditRoom(d.room ?? "");
+    setEditRoomId(d.room_id ?? "");
     setEditError(null);
   }
 
@@ -258,7 +362,7 @@ export function Devices() {
       const updated = await api.updateDevice(detail.id, {
         name: editName.trim(),
         hostname: editHostname.trim() || undefined,
-        room: editRoom.trim() || undefined,
+        room_id: editRoomId || null,
       });
       setDetail(updated);
       load();
@@ -284,15 +388,90 @@ export function Devices() {
     }
   }
 
+  function openCreateRoom() {
+    setRoomModal({ mode: "create" });
+    setRoomModalName("");
+    setRoomModalError(null);
+  }
+
+  function openRenameRoom(room: Room) {
+    setRoomModal({ mode: "rename", target: room });
+    setRoomModalName(room.name);
+    setRoomModalError(null);
+  }
+
+  function closeRoomModal() {
+    setRoomModal(null);
+    setRoomModalError(null);
+  }
+
+  async function handleSaveRoom() {
+    if (!roomModal) return;
+    const trimmed = roomModalName.trim();
+    if (!trimmed) { setRoomModalError("A room needs a name."); return; }
+    setRoomModalSubmitting(true);
+    setRoomModalError(null);
+    try {
+      if (roomModal.mode === "create") {
+        await api.createRoom(trimmed);
+      } else if (roomModal.target) {
+        await api.renameRoom(roomModal.target.id, trimmed);
+      }
+      closeRoomModal();
+      load();
+    } catch (e) {
+      setRoomModalError(errorText(e));
+    } finally {
+      setRoomModalSubmitting(false);
+    }
+  }
+
+  async function handleDeleteRoom(room: Room) {
+    const ok = await confirm(
+      `Delete "${room.name}"? Any device still placed in it must be moved first.`,
+      { title: "Delete room", confirmLabel: "Delete", destructive: true },
+    );
+    if (!ok) return;
+    try {
+      await api.deleteRoom(room.id);
+      load();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
+  /** Whether an unidentified guest voice may use the devices in this room, household-wide. */
+  async function handleToggleGuestAccess(room: Room, next: boolean) {
+    setGuestAccessBusy(room.id);
+    setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, guest_accessible: next } : r)));
+    try {
+      await api.setRoomGuestAccess(room.id, next);
+    } catch (e) {
+      // Revert: the call failed, so this room's access is whatever it was before.
+      setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, guest_accessible: !next } : r)));
+      setError(errorText(e));
+    } finally {
+      setGuestAccessBusy(null);
+    }
+  }
+
+  const sections = groupDevicesByRoom(devices, rooms);
+
   return (
     <div className="screen screen--devices">
       {/* ── Page header ────────────────────────────────────── */}
       <div className="page-header">
         <div>
           <h1 className="page-header__title">Devices</h1>
-          <p className="dev-header__sub">All registered nodes on your local network.</p>
+          <p className="dev-header__sub">
+            {devices.length} device{devices.length === 1 ? "" : "s"} across{" "}
+            {rooms.length} room{rooms.length === 1 ? "" : "s"}.
+          </p>
         </div>
         <div className="page-header__action">
+          <Button size="sm" variant="outline" className="page-header-btn" onPress={openCreateRoom}>
+            <Plus size={14} /> New room
+          </Button>
           <Button size="sm" variant="primary" className="page-header-btn" onPress={openForm}>
             <Plus size={14} /> Register device
           </Button>
@@ -335,9 +514,9 @@ export function Devices() {
       </section>
 
       {loading && <p className="muted-12">Loading devices…</p>}
-      {error   && <p className="muted-12 text-error">{error}</p>}
+      {error   && <ErrorBanner error={error} />}
 
-      {!loading && !error && devices.length === 0 && (
+      {!loading && !error && devices.length === 0 && rooms.length === 0 && (
         <div className="empty-state">
           <Monitor size={32} />
           <span>No devices registered yet.</span>
@@ -347,66 +526,68 @@ export function Devices() {
         </div>
       )}
 
-      {devices.length > 0 && (
-        <div className="devices-grid">
-          {devices.map((d) => (
-            <div
-              key={d.id}
-              className={`device-card${!d.is_online ? " device-card--offline" : ""}`}
-            >
-              {/* Top: icon + name + IP */}
-              <div className="device-card__top">
-                <span className={iconClass(d.device_type, d.is_online)}>
-                  <DeviceIcon kind={d.device_type} />
+      {!loading && (devices.length > 0 || rooms.length > 0) && (
+        <>
+          {sections.map(({ room, devices: roomDevices }) => (
+            <section className="room-section" key={room?.id ?? "unassigned"}>
+              <div className="room-section__head">
+                <h2 className="room-section__name">{room?.name ?? "Unassigned"}</h2>
+                <span className="room-section__count">
+                  {roomDevices.length} device{roomDevices.length === 1 ? "" : "s"}
                 </span>
-                <div className="device-card__info">
-                  <div className="device-card__name">{d.name}</div>
-                  <code className="device-card__ip">
-                    {/* `ip_address` is the field the server sends. This read
-                        `metadata.ip`, which `list_devices` has never set, so the
-                        line rendered an em dash for every device on the fabric. */}
-                    {d.ip_address ?? "—"}
-                  </code>
+                <span className="room-section__spacer" />
+                {room && (
+                  <>
+                    <span className="room-section__guest">
+                      <Switch
+                        aria-label={`Let a guest use devices in ${room.name}`}
+                        isSelected={room.guest_accessible}
+                        isDisabled={guestAccessBusy === room.id}
+                        onChange={() => handleToggleGuestAccess(room, !room.guest_accessible)}
+                      >
+                        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
+                      </Switch>
+                      Guest access
+                    </span>
+                    <div className="room-section__actions">
+                      <button
+                        className="device-card__action-btn"
+                        onClick={() => openRenameRoom(room)}
+                        type="button"
+                      >
+                        <Pencil size={12} /> Rename
+                      </button>
+                      <button
+                        className="device-card__action-btn"
+                        onClick={() => handleDeleteRoom(room)}
+                        type="button"
+                      >
+                        <Trash2 size={12} /> Delete
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {roomDevices.length === 0 ? (
+                <p className="muted-12">No devices in this room yet.</p>
+              ) : (
+                <div className="devices-grid">
+                  {roomDevices.map((d) => (
+                    <DeviceCard
+                      key={d.id}
+                      device={d}
+                      isPoweredOn={powerOn[d.id]}
+                      busy={busyId === d.id}
+                      onPower={handlePower}
+                      onConfigure={openDetail}
+                    />
+                  ))}
                 </div>
-              </div>
-
-              {/* Chips: status + type + last seen */}
-              <div className="device-card__chips">
-                <span className={`device-card__chip device-card__chip--${d.is_online ? "online" : "offline"}`}>
-                  <span className="device-card__dot" />
-                  {d.is_online ? "online" : "offline"}
-                </span>
-                {d.device_type && (
-                  <span className="device-card__chip">{d.device_type}</span>
-                )}
-                <span className="device-card__chip">{lastSeen(d)}</span>
-              </div>
-
-              {/* Actions */}
-              <div className="device-card__actions">
-                {/* Only a device that can be switched. A contact sensor's
-                    capability list is empty, and it was being offered "Turn on". */}
-                {canPower(d) && (
-                  <button
-                    className="device-card__action-btn"
-                    onClick={() => handlePower(d)}
-                    disabled={busyId === d.id || !d.is_online}
-                    type="button"
-                  >
-                    <Power size={12} /> {powerOn[d.id] ? "Turn off" : "Turn on"}
-                  </button>
-                )}
-                <button
-                  className="device-card__action-btn"
-                  onClick={() => openDetail(d)}
-                  type="button"
-                >
-                  <Settings size={12} /> Configure
-                </button>
-              </div>
-            </div>
+              )}
+            </section>
           ))}
-        </div>
+        </>
       )}
 
       {/* ── Register device modal ─────────────────────────── */}
@@ -488,6 +669,52 @@ export function Devices() {
         </div>
       )}
 
+      {/* ── Create / rename room modal ──────────────────────── */}
+      {roomModal && (
+        <div className="sched-modal__overlay" onClick={closeRoomModal}>
+          <div className="sched-modal__dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="sched-modal__header">
+              <h2 className="sched-modal__title">
+                {roomModal.mode === "create" ? "New room" : `Rename "${roomModal.target?.name}"`}
+              </h2>
+              <button className="sched-modal__close" onClick={closeRoomModal} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <Separator />
+            <div className="sched-modal__body">
+              <div className="sched-modal__field">
+                <label className="sched-modal__label">Name</label>
+                <input
+                  className="sched-modal__input"
+                  placeholder="Kitchen"
+                  value={roomModalName}
+                  onChange={(e) => setRoomModalName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSaveRoom()}
+                  disabled={roomModalSubmitting}
+                  autoFocus
+                />
+              </div>
+              {roomModalError && (
+                <p className="text-error text-error--sm">{roomModalError}</p>
+              )}
+            </div>
+            <Separator />
+            <div className="sched-modal__footer">
+              <Button size="sm" variant="ghost" onPress={closeRoomModal}>Cancel</Button>
+              <Button
+                size="sm"
+                variant="primary"
+                isDisabled={roomModalSubmitting || !roomModalName.trim()}
+                onPress={handleSaveRoom}
+              >
+                {roomModalSubmitting ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Device detail / configure modal ─────────────────── */}
       {detail && (
         <div className="sched-modal__overlay" onClick={() => setDetail(null)}>
@@ -520,14 +747,19 @@ export function Devices() {
                 />
               </div>
               <div className="sched-modal__field">
-                <label className="sched-modal__label">Room <span className="sched-modal__cron-hint">(optional)</span></label>
-                <input
-                  className="sched-modal__input"
-                  placeholder="Living Room"
-                  value={editRoom}
-                  onChange={(e) => setEditRoom(e.target.value)}
+                <label className="sched-modal__label">Room</label>
+                <select
+                  className="sched-modal__select"
+                  style={{ width: "100%" }}
+                  value={editRoomId}
+                  onChange={(e) => setEditRoomId(e.target.value)}
                   disabled={editSubmitting}
-                />
+                >
+                  <option value="">Unassigned</option>
+                  {rooms.map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
               </div>
               <div className="sched-modal__field">
                 <label className="sched-modal__label">Type</label>

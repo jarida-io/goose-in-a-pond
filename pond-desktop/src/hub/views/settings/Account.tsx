@@ -254,8 +254,8 @@ export function AccountDetail({ go }: AccountDetailProps) {
 
   const roomSet = new Set(
     devices
-      .filter((d) => typeof d.room === "string")
-      .map((d) => d.room as string),
+      .filter((d) => typeof d.room_id === "string")
+      .map((d) => d.room_id as string),
   );
   const roomCount = roomSet.size || devices.length;
 
