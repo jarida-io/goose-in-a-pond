@@ -239,6 +239,64 @@ mod tests {
         );
     }
 
+    async fn liz_owns_her_phone(pool: &Pool<Sqlite>) {
+        for (id, name) in [("liz", "Liz"), ("jerry", "Jerry")] {
+            sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
+                .bind(id)
+                .bind(name)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE devices SET profile_id = 'liz' WHERE id = 'phone-liz'")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_device_paired_to_another_member_no_longer_lists_the_first_members_notices() {
+        let (history, pool, _tmp) = fresh().await;
+        liz_owns_her_phone(&pool).await;
+        history
+            .record(
+                &notice("proposal-1"),
+                &HistoryAudience::Devices(vec!["phone-liz".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids(&history, "phone-liz").await, vec!["proposal-1"]);
+
+        // The upsert `register_device` runs when a device pairs again under its own client id.
+        sqlx::query(
+            "INSERT INTO devices (id, name, profile_id) VALUES ('phone-liz', 'phone-liz', 'jerry') \
+             ON CONFLICT(id) DO UPDATE SET profile_id = excluded.profile_id",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(ids(&history, "phone-liz").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_members_devices_no_longer_list_her_notices() {
+        let (history, pool, _tmp) = fresh().await;
+        liz_owns_her_phone(&pool).await;
+        history
+            .record(
+                &notice("proposal-1"),
+                &HistoryAudience::Devices(vec!["phone-liz".into()]),
+            )
+            .await
+            .unwrap();
+
+        sqlx::query("DELETE FROM profiles WHERE id = 'liz'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(ids(&history, "phone-liz").await.is_empty());
+    }
+
     #[tokio::test]
     async fn the_device_that_caused_a_notice_does_not_list_it() {
         let (history, _pool, _tmp) = fresh().await;

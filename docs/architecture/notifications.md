@@ -124,7 +124,8 @@ under its household id, in `notification_history` (migration `0079`), through th
 notice is raised and following the queue's own scoping: a household notice is every device's
 except the one that caused it (`broadcast_except`), and a member's notice (a proposal, a ride link)
 belongs to the devices it was queued for at the time, in `notification_history_recipients`, so a
-member's notice never reaches another member's device or an unattributed shared screen. Read state
+member's notice never reaches another member's device or an unattributed shared screen. A device
+that changes member, or whose member is deleted, drops those rows (migration `0080`). Read state
 is per device (`notification_history_reads`), so marking a notice read on the dashboard leaves it
 unread on a phone. A failed history write is logged (`notification_history_record_failed`) and the
 notice is still delivered. The `chat` process's member notifier (rides) records too.
