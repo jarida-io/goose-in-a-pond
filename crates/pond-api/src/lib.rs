@@ -6,6 +6,7 @@ pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
 pub mod download_failure;
 pub mod host_guard;
+pub mod idempotency;
 pub(crate) mod image_normalize;
 pub mod insecure_dev;
 pub(crate) mod member_notes;
