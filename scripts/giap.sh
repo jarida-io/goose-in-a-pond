@@ -1880,45 +1880,43 @@ action_ctx() {
     say "  ${C_B}█${C_RST} Messages  ${C_B}▓${C_RST} MCP Tools  ${C_B}▒${C_RST} System Prompt  ${C_B}░${C_RST} Memories  ${C_B}·${C_RST} Free Space"
     say ""
 
-    say "  COMPONENT                 TOKENS      % USED   % WINDOW   ROLE & DETAILS"
+    say "  COMPONENT                 TOKENS    % WINDOW   ROLE & DETAILS"
     say "  ────────────────────────────────────────────────────────────────────────"
     if [ "$tok_msgs" -gt 0 ]; then
-      printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d messages in active session\n' \
+      printf '  %-24s %7s tok   %6.1f%%   %d msgs in session (%d%% of prompt)\n' \
         "Messages (Chat History)" "$(fmt_tok "$tok_msgs")" \
-        "$(awk -v p="$tok_msgs" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
         "$(awk -v p="$tok_msgs" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
-        "${s_msgs:-0}"
+        "${s_msgs:-0}" \
+        "$(awk -v p="$tok_msgs" -v u="$used" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
     fi
-    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d MCP extensions registered\n' \
+    printf '  %-24s %7s tok   %6.1f%%   %d MCP extensions (%d%% of prompt)\n' \
       "MCP Tool Declarations" "$(fmt_tok "$tok_tools")" \
-      "$(awk -v p="$tok_tools" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
       "$(awk -v p="$tok_tools" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
-      "$(( 8 + ${mcp_cnt:-1} ))"
-    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Persona & rules (KV prefix cached)\n' \
+      "$(( 8 + ${mcp_cnt:-1} ))" \
+      "$(awk -v p="$tok_tools" -v u="$used" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
+    printf '  %-24s %7s tok   %6.1f%%   Persona & rules (KV prefix cached)\n' \
       "System Prompt" "$(fmt_tok "$tok_sys")" \
-      "$(awk -v p="$tok_sys" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
       "$(awk -v p="$tok_sys" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')"
     if [ "$tok_mem" -gt 0 ]; then
-      printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   <system-context> (%d active)\n' \
+      printf '  %-24s %7s tok   %6.1f%%   <system-context> (%d active fragments)\n' \
         "Memory Files & Context" "$(fmt_tok "$tok_mem")" \
-        "$(awk -v p="$tok_mem" -v u="$used" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
         "$(awk -v p="$tok_mem" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
         "${mems_cnt:-0}"
     fi
     say "  ────────────────────────────────────────────────────────────────────────"
-    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   KV alloc: %d MiB (%s)\n' \
-      "Context Used" "$(fmt_tok "$used")" "100.0" \
+    printf '  %-24s %7s tok   %6.1f%%   KV alloc: %d MiB (%s)\n' \
+      "Context Used" "$(fmt_tok "$used")" \
       "$(awk -v u="$used" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*u/t : 0) }')" \
       "$alloc_mb" "${D_KV_CFG:-q8_0,q8_0}"
-    printf '  %-24s %7s tok        -    %6.1f%%   80%% target (%s until auto-compact)\n' \
+    printf '  %-24s %7s tok   %6.1f%%   80%% target (%s until auto-compact)\n' \
       "Autocompact Buffer" "$(fmt_tok "$tok_compact")" \
       "$(awk -v b="$tok_compact" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*b/t : 0) }')" \
       "$(fmt_tok "$tok_compact")"
-    printf '  %-24s %7s tok        -    %6.1f%%   Remaining before window limit\n' \
+    printf '  %-24s %7s tok   %6.1f%%   Remaining before window limit\n' \
       "Free Space" "$(fmt_tok "$tok_free")" \
       "$(awk -v f="$tok_free" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*f/t : 0) }')"
     say "  ────────────────────────────────────────────────────────────────────────"
-    printf '  %-24s %7s tok        -   100.0%%   n_ctx (KV: %s KiB/tok + %s MiB sliding)\n' \
+    printf '  %-24s %7s tok   100.0%%   n_ctx (KV: %s KiB/tok + %s MiB sliding)\n' \
       "Total Context Window" "$(fmt_tok "$nctx")" "${kib:-4}" "${slmb:-11}"
     say ""
 

@@ -686,46 +686,44 @@ cs_ctxview() {
     "$CS_BOLD" "$CS_GLYPH_CACHE" "$CS_OFF" \
     "$CS_BOLD" "$CS_GLYPH_AVAIL" "$CS_OFF"
 
-  printf '  %-24s %10s   %7s   %7s   %s\n' "COMPONENT" "TOKENS" "% USED" "% WINDOW" "ROLE & DETAILS"
+  printf '  %-24s %10s   %8s   %s\n' "COMPONENT" "TOKENS" "% WINDOW" "ROLE & DETAILS"
   printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
 
   if [ "$t_msgs" -gt 0 ]; then
-    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d msgs in active session\n' \
+    printf '  %-24s %7s tok   %6.1f%%   %d msgs in session (%d%% of prompt)\n' \
       "Messages (Chat History)" "$(cs_tok_fmt "$t_msgs")" \
-      "$(awk -v p="$t_msgs" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
       "$(awk -v p="$t_msgs" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
-      "$s_msgs"
+      "$s_msgs" \
+      "$(awk -v p="$t_msgs" -v u="$cused" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
   fi
-  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   %d MCP extensions registered\n' \
+  printf '  %-24s %7s tok   %6.1f%%   %d extensions (%d%% of prompt)\n' \
     "MCP Tool Declarations" "$(cs_tok_fmt "$t_tools")" \
-    "$(awk -v p="$t_tools" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
     "$(awk -v p="$t_tools" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
-    "$(( 8 + mcp_cnt ))"
-  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Persona & rules (KV prefix cached)\n' \
+    "$(( 8 + mcp_cnt ))" \
+    "$(awk -v p="$t_tools" -v u="$cused" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
+  printf '  %-24s %7s tok   %6.1f%%   Persona & rules (KV prefix cached)\n' \
     "System Prompt" "$(cs_tok_fmt "$t_sys")" \
-    "$(awk -v p="$t_sys" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
     "$(awk -v p="$t_sys" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')"
   if [ "$t_mem" -gt 0 ]; then
-    printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   <system-context> (%d active)\n' \
+    printf '  %-24s %7s tok   %6.1f%%   <system-context> (%d active)\n' \
       "Memory Files & Context" "$(cs_tok_fmt "$t_mem")" \
-      "$(awk -v p="$t_mem" -v u="$cused" 'BEGIN { printf "%.1f", (u>0? 100*p/u : 0) }')" \
       "$(awk -v p="$t_mem" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
       "$mems_cnt"
   fi
   printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
-  printf '  %-24s %7s tok   %6.1f%%   %6.1f%%   Active KV: ~%d MiB\n' \
-    "Context Used" "$(cs_tok_fmt "$cused")" "100.0" \
+  printf '  %-24s %7s tok   %6.1f%%   Active KV: ~%d MiB\n' \
+    "Context Used" "$(cs_tok_fmt "$cused")" \
     "$(awk -v u="$cused" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*u/t : 0) }')" \
     "${kv_used:-0}"
-  printf '  %-24s %7s tok        -    %6.1f%%   80%% target (%s until auto-compact)\n' \
+  printf '  %-24s %7s tok   %6.1f%%   80%% target (%s until auto-compact)\n' \
     "Autocompact Buffer" "$(cs_tok_fmt "$t_compact")" \
     "$(awk -v b="$t_compact" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*b/t : 0) }')" \
     "$(cs_tok_fmt "$t_compact")"
-  printf '  %-24s %7s tok        -    %6.1f%%   Unallocated headroom\n' \
+  printf '  %-24s %7s tok   %6.1f%%   Unallocated headroom\n' \
     "Free Space" "$(cs_tok_fmt "$t_free")" \
     "$(awk -v f="$t_free" -v t="$cmax" 'BEGIN { printf "%.1f", (t>0? 100*f/t : 0) }')"
   printf '  %s\n' "$(cs_rule $(( cols - 4 > 76 ? 76 : cols - 4 )))"
-  printf '  %-24s %7s tok        -   100.0%%   n_ctx (%s · %s KiB/tok)\n\n' \
+  printf '  %-24s %7s tok   100.0%%   n_ctx (%s · %s KiB/tok)\n\n' \
     "Total Context Window" "$(cs_tok_fmt "$cmax")" "$kvt" "$kib"
 
   printf '  > MCP tools:        %d registered extensions (toolkit, vision, memory, weather, knowledge...)\n' "$(( 8 + mcp_cnt ))"
