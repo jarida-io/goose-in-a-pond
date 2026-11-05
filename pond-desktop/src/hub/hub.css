@@ -357,8 +357,19 @@
 
 .wx__main { display: flex; align-items: center; gap: 12px; }
 .wx__icon { display: flex; }
-.wx__temp { font-size: 40px; font-weight: 800; letter-spacing: -1.5px; line-height: 1; }
-.wx__temp span { font-size: 22px; }
+/* Flex with flex-start so the degree sign hangs from the top of the number as a superscript.
+   Inline, it sat on the shared baseline and read as a separate small character below and to the
+   right; and at a fixed 22px it stayed that size when the breakpoints below shrank the number to
+   32px and 28px. In em it scales with whichever size the number is. */
+.wx__temp {
+  display: flex;
+  align-items: flex-start;
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  line-height: 1;
+}
+.wx__temp span { font-size: 0.55em; line-height: 1; }
 .wx__meta { display: flex; flex-direction: column; margin-left: auto; text-align: right; }
 .wx__cond { font-size: 13px; font-weight: 700; }
 .wx__range { font-size: 12px; font-weight: 600; opacity: 0.85; }
