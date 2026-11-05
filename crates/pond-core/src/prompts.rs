@@ -10,8 +10,9 @@ use crate::user_data::domain::settings::Settings;
 /// Per-user profile preferences for the system prompt, extracted from `Profile.preferences`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileContext {
-    /// What the user wants to be called (e.g. "Jerry", "Captain").
-    pub preferred_name: Option<String>,
+    /// Who is speaking: the member's preferred name, else their display name. Set only when the
+    /// turn is attributed to that member, so a guest or an unidentified speaker is never named.
+    pub speaker_name: Option<String>,
     /// User's birthday in ISO format (YYYY-MM-DD), for greetings.
     pub birthday: Option<String>,
     /// BCP-47 language code, e.g. "en", "fr", "sw". When set, Goose responds in that language.
@@ -25,13 +26,20 @@ pub struct ProfileContext {
 
 impl ProfileContext {
     /// What the prompt may state on a turn that is the member's own; the keys are the contract
-    /// with `PATCH /api/v1/profiles/{id}`.
+    /// with `PATCH /api/v1/profiles/{id}`. The speaker is named by their preferred name, else
+    /// their display name: most members never set a preferred name, and "who am I" still needs
+    /// one. A blank value names nobody.
     pub fn of_member(
+        display_name: &str,
         prefs: &std::collections::HashMap<String, String>,
         member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
     ) -> Self {
+        let named = |name: &str| (!name.trim().is_empty()).then(|| name.to_string());
         Self {
-            preferred_name: prefs.get("preferred_name").cloned(),
+            speaker_name: prefs
+                .get("preferred_name")
+                .and_then(|name| named(name))
+                .or_else(|| named(display_name)),
             birthday: prefs.get("birthday").cloned(),
             language: prefs.get("language").cloned(),
             atypical_speech: prefs
@@ -526,19 +534,18 @@ pub fn builtin_template_content(name: &str) -> Option<(&'static str, &'static st
 // ── Sanitization ──────────────────────────────────────────────────────────────
 
 /// Who the pond is talking to, shared by the Goose adapter and `prompt_builder`; any text change
-/// invalidates every cached KV prefix. A preferred name equal to `user_name` adds no line.
-pub fn profile_context_lines(profile: Option<&ProfileContext>, user_name: &str) -> Vec<String> {
+/// invalidates every cached KV prefix.
+///
+/// The speaker line is stated even when the name equals `Settings::user_name`: the template names
+/// whose pond this is, never who is speaking, and a small model will not join the two by itself.
+pub fn profile_context_lines(profile: Option<&ProfileContext>) -> Vec<String> {
     let Some(ctx) = profile else {
         return Vec::new();
     };
-    let user = sanitize_field(user_name, 50);
     let mut lines: Vec<String> = Vec::with_capacity(4);
 
-    if let Some(ref pname) = ctx.preferred_name {
-        let pname = sanitize_field(pname, 50);
-        if !pname.is_empty() && pname != user {
-            lines.push(format!("The user prefers to be called {}.", pname));
-        }
+    if let Some(line) = ctx.speaker_name.as_deref().and_then(speaker_line) {
+        lines.push(line);
     }
 
     if let Some(ref lang) = ctx.language {
@@ -564,6 +571,13 @@ pub fn profile_context_lines(profile: Option<&ProfileContext>, user_name: &str) 
     }
 
     lines
+}
+
+/// The one line that tells the model who is speaking; `None` for a name that sanitizes to nothing.
+/// One line, under 30 tokens for a three-word name: it rides every turn's `<system-context>`.
+fn speaker_line(name: &str) -> Option<String> {
+    let name = sanitize_field(name, 50);
+    (!name.is_empty()).then(|| format!("You are talking with {name}; \"I\" means them."))
 }
 
 /// A BCP-47 code as a language a model recognises. Unknown codes pass through.
@@ -730,7 +744,7 @@ pub fn build_system_prompt_with_profile(
     let base = render_jinja_template(&tmpl, settings, None, profile);
 
     // ── Profile context lines ─────────────────────────────────────────────────
-    let profile_lines = profile_context_lines(profile, &settings.user_name);
+    let profile_lines = profile_context_lines(profile);
 
     let addendum = sanitize_field(&settings.prompt_addendum, 500);
 
@@ -775,7 +789,7 @@ pub fn build_system_prompt_from_template_full(
     };
 
     // ── Profile context lines ─────────────────────────────────────────────────
-    let profile_lines = profile_context_lines(profile, &settings.user_name);
+    let profile_lines = profile_context_lines(profile);
 
     let addendum = sanitize_field(&settings.prompt_addendum, 500);
     let mut parts = vec![base];

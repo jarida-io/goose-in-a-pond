@@ -369,6 +369,7 @@ fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::Speake
                 None => Vec::new(),
             };
             Some(pond_core::prompts::ProfileContext::of_member(
+                &profile.display_name,
                 &profile.preferences,
                 notes,
             ))

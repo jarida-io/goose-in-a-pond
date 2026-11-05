@@ -19506,7 +19506,7 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    let mut context = particulars_for(attributed, &profile.preferences);
+    let mut context = particulars_for(attributed, &profile.display_name, &profile.preferences);
     // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
     let notes_are_theirs = attributed
         || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
@@ -19548,20 +19548,19 @@ async fn interview_turn_for(
     }
 }
 
-/// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
+/// The pure half of [`profile_context_for`]: what the prompt may state about this member.
 /// Keys are the contract with `PATCH /api/v1/profiles/{id}`; a camelCase key is ignored.
 fn particulars_for(
     attributed: bool,
+    display_name: &str,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
     if attributed {
-        return ProfileContext::of_member(prefs, Vec::new());
+        return ProfileContext::of_member(display_name, prefs, Vec::new());
     }
     ProfileContext {
-        // Owner-scoped: stated only when the turn is attributed to this person.
-        preferred_name: attributed
-            .then(|| prefs.get("preferred_name").cloned())
-            .flatten(),
+        // Owner-scoped: never stated on a turn that is not this person's own.
+        speaker_name: None,
         birthday: attributed.then(|| prefs.get("birthday").cloned()).flatten(),
         language: attributed.then(|| prefs.get("language").cloned()).flatten(),
         // Household-safe: an accommodation, not a disclosure.
@@ -21243,8 +21242,12 @@ mod tests {
 
     #[test]
     fn an_owner_scoped_turn_states_the_members_particulars() {
-        let ctx = particulars_for(true, &full_prefs());
-        assert_eq!(ctx.preferred_name.as_deref(), Some("Cap"));
+        let ctx = particulars_for(true, "Captain Amina", &full_prefs());
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Cap"),
+            "a preferred name is what the member asked to be called, so it wins"
+        );
         assert_eq!(ctx.birthday.as_deref(), Some("1990-04-02"));
         assert_eq!(ctx.language.as_deref(), Some("sw"));
         assert!(ctx.atypical_speech);
@@ -21253,10 +21256,10 @@ mod tests {
     /// `Household` uses `primary_profile_id`, which may not be the person speaking.
     #[test]
     fn a_household_turn_states_no_ones_particulars() {
-        let ctx = particulars_for(false, &full_prefs());
+        let ctx = particulars_for(false, "Jerry Ochieng", &full_prefs());
         assert_eq!(
-            ctx.preferred_name, None,
-            "an unattributed turn stated the primary member's preferred name"
+            ctx.speaker_name, None,
+            "an unattributed turn named the primary member as the speaker"
         );
         assert_eq!(
             ctx.birthday, None,
@@ -21274,7 +21277,7 @@ mod tests {
     #[test]
     fn the_speech_accommodation_survives_an_unattributed_turn() {
         assert!(
-            particulars_for(false, &full_prefs()).atypical_speech,
+            particulars_for(false, "Jerry Ochieng", &full_prefs()).atypical_speech,
             "the speech accommodation was dropped for unattributed turns; it is not a \
              disclosure and dropping it makes the pond less patient with the household it was \
              configured for"
@@ -21283,12 +21286,47 @@ mod tests {
 
     /// Absent, not `Some("")`: the prompt builder would render "The user's birthday is ."
     #[test]
-    fn a_profile_with_no_preferences_yields_nothing_to_state() {
-        let ctx = particulars_for(true, &std::collections::HashMap::new());
-        assert_eq!(ctx.preferred_name, None);
+    fn a_profile_with_no_preferences_yields_nothing_to_state_but_the_name() {
+        let ctx = particulars_for(true, "Amina", &std::collections::HashMap::new());
+        assert_eq!(ctx.speaker_name.as_deref(), Some("Amina"));
         assert_eq!(ctx.birthday, None);
         assert_eq!(ctx.language, None);
         assert!(!ctx.atypical_speech);
+    }
+
+    /// The owner's phone on the Orin, 2026-11-02: linked, `preferences` `{}`, and "who am I"
+    /// answered "nothing is stored about you", because the speaker's name came only from
+    /// `preferred_name`. Nothing else named the speaker; `{{user_name}}` names whose pond it is.
+    #[test]
+    fn a_linked_member_with_no_preferred_name_is_named_by_their_display_name() {
+        let ctx = particulars_for(
+            true,
+            "Emmanuel Charles Oyugi",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Emmanuel Charles Oyugi"),
+            "a member who never set a preferred name reaches the model unnamed again"
+        );
+    }
+
+    /// A blank preferred name is a cleared field, not a name: the display name still applies.
+    #[test]
+    fn a_blank_preferred_name_falls_back_to_the_display_name() {
+        let blank: std::collections::HashMap<String, String> =
+            [("preferred_name".to_string(), "  ".to_string())].into();
+        assert_eq!(
+            particulars_for(true, "Amina", &blank)
+                .speaker_name
+                .as_deref(),
+            Some("Amina")
+        );
+        assert_eq!(
+            particulars_for(true, " ", &blank).speaker_name,
+            None,
+            "a member with no usable name rendered a speaker line with an empty name"
+        );
     }
 
     /// The desktop's `preferredName`/`atypicalSpeech` spellings, if stored, are silently ignored.
@@ -21299,9 +21337,10 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-        let ctx = particulars_for(true, &camel);
+        let ctx = particulars_for(true, "Amina", &camel);
         assert_eq!(
-            ctx.preferred_name, None,
+            ctx.speaker_name.as_deref(),
+            Some("Amina"),
             "camelCase keys are now read, so the two spellings have silently become \
              equivalent and the writer contract is no longer pinned by anything"
         );

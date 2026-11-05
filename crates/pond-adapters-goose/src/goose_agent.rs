@@ -6369,7 +6369,7 @@ mod tests {
             ..Default::default()
         };
         let profile = pond_core::prompts::ProfileContext {
-            preferred_name: Some("Amina".into()),
+            speaker_name: Some("Amina".into()),
             birthday: Some("1990-03-14".into()),
             language: Some("en".into()),
             atypical_speech: false,
