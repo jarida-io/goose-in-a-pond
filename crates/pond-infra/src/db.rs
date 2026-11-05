@@ -24,6 +24,7 @@ impl Database {
 
         sqlx::migrate!("migrations/system").run(&system).await?;
         sqlx::migrate!("migrations/logs").run(&logs).await?;
+        backfill_item_headers(&system).await;
 
         // Must follow the system migrations: vector connections ATTACH it and join its tables.
         let vectors = crate::sqlite_vector_index::SqliteVectorIndex::connect(
@@ -55,6 +56,21 @@ impl Database {
             .max_connections(4)
             .connect_with(opts)
             .await?)
+    }
+}
+
+/// Migration 0082's data half: headers are redacted text, which SQL cannot make. A failure
+/// leaves the detail tables as they were, and the next start tries again.
+async fn backfill_item_headers(system: &Pool<Sqlite>) {
+    match crate::sqlite_items::reconcile(system, crate::sqlite_items::Mode::Missing).await {
+        Ok(report) if report.changed() => tracing::info!(
+            created = report.created,
+            removed = report.removed,
+            linked = report.linked,
+            "item headers written for rows that had none"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::error!("item header backfill failed: {e:#}"),
     }
 }
 

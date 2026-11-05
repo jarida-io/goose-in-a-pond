@@ -16,6 +16,8 @@ use sqlx::{Pool, Sqlite};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::sqlite_items;
+
 /// `needs_embedding`'s limit when every row is wanted.
 const EVERY_ROW: usize = i64::MAX as usize;
 
@@ -292,6 +294,7 @@ impl MemoryRepository for SqliteMemoryRepository {
             .last_accessed_at
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
 
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO memory_fragments \
              (id, profile_id, session_id, content, embedding, source, tags, created_at, \
@@ -316,8 +319,10 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(lifecycle_str)
         .bind(&fragment.superseded_by)
         .bind(&fragment.corrects)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlite_items::sync_memory(&mut tx, &fragment.id).await?;
+        tx.commit().await?;
 
         // Write-through after the row is durable, mirroring what the row holds (post-redaction).
         self.mirror(&fragment.id, fragment.embedding.as_deref())
@@ -555,14 +560,17 @@ impl MemoryRepository for SqliteMemoryRepository {
         embedding: Option<&[f32]>,
     ) -> Result<()> {
         // Text and vector in one statement, so no reader sees new words scored as the old ones.
+        let mut tx = self.pool.begin().await?;
         let updated =
             sqlx::query("UPDATE memory_fragments SET content = ?, embedding = ? WHERE id = ?")
                 .bind(content)
                 .bind(embedding.map(vec_to_blob))
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?
                 .rows_affected();
+        sqlite_items::sync_memory(&mut tx, id).await?;
+        tx.commit().await?;
         // A missing row gets no index entry; `None` also drops the old words' entry.
         if updated > 0 {
             self.mirror(id, embedding).await;
@@ -581,11 +589,14 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn update_lifecycle(&self, id: &str, lifecycle: MemoryLifecycle) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE memory_fragments SET lifecycle = ? WHERE id = ?")
             .bind(lifecycle_to_str(&lifecycle))
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        sqlite_items::sync_memory(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -646,13 +657,16 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn mark_superseded(&self, id: &str, superseded_by: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "UPDATE memory_fragments SET lifecycle = 'merged', superseded_by = ? WHERE id = ?",
         )
         .bind(superseded_by)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlite_items::sync_memory(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -711,12 +725,15 @@ impl MemoryRepository for SqliteMemoryRepository {
         importance: f32,
     ) -> anyhow::Result<()> {
         let seg_str = format!("{:?}", segment).to_lowercase();
+        let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE memory_fragments SET segment = ?, importance = ? WHERE id = ?")
             .bind(&seg_str)
             .bind(importance as f64)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        sqlite_items::sync_memory(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(())
     }
 

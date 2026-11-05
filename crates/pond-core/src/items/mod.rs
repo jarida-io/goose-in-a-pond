@@ -1,6 +1,7 @@
 //! The context space's item header (context-space.md section 4.1): one row per piece of
 //! knowledge in `items`, whatever detail table holds the fields only its kind has.
 
+pub mod from_detail;
 pub mod lifecycle;
 pub mod timestamp;
 

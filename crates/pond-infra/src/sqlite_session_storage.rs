@@ -9,9 +9,11 @@ use pond_core::user_data::domain::session::{
     SessionMessage,
 };
 use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
-use sqlx::{Pool, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite, Transaction};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::sqlite_items;
 
 // ── Raw DB row types ──────────────────────────────────────────────────────────
 
@@ -203,6 +205,27 @@ impl SqliteSessionStorage {
     pub fn with_attachment_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.attachment_dir = dir.into();
         self
+    }
+
+    async fn begin(&self) -> Result<Transaction<'static, Sqlite>, SessionStorageError> {
+        self.pool
+            .begin()
+            .await
+            .map_err(|e| SessionStorageError::StorageError(e.to_string()))
+    }
+
+    /// Owner, title and summary all feed the conversation's header, so it moves with them.
+    async fn commit_with_header(
+        &self,
+        mut tx: Transaction<'static, Sqlite>,
+        session_id: &str,
+    ) -> Result<(), SessionStorageError> {
+        sqlite_items::sync_conversation(&mut tx, session_id)
+            .await
+            .map_err(|e| SessionStorageError::StorageError(format!("{e:#}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| SessionStorageError::StorageError(e.to_string()))
     }
 
     /// Best-effort per image: the message is already committed, so a failure only logs.
@@ -402,6 +425,7 @@ impl SessionStorage for SqliteSessionStorage {
         summary: &str,
         through_message_id: &str,
     ) -> Result<(), SessionStorageError> {
+        let mut tx = self.begin().await?;
         sqlx::query(
             "UPDATE sessions SET rolling_summary = ?, rolling_summary_through_id = ?, \
              rolling_summary_updated_at = datetime('now') WHERE id = ?",
@@ -409,9 +433,10 @@ impl SessionStorage for SqliteSessionStorage {
         .bind(summary)
         .bind(through_message_id)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
         Ok(())
     }
 
@@ -502,6 +527,7 @@ impl SessionStorage for SqliteSessionStorage {
         identity: &SessionIdentity,
     ) -> Result<(), SessionStorageError> {
         // Leaves `updated_at` alone: `list_sessions` orders by it, and attribution isn't activity.
+        let mut tx = self.begin().await?;
         let result = sqlx::query(
             "UPDATE sessions SET \
                profile_id                = ?, \
@@ -513,9 +539,10 @@ impl SessionStorage for SqliteSessionStorage {
         .bind(identity.source.as_str())
         .bind(identity.confidence.map(|c| c as f64))
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         if result.rows_affected() == 0 {
             return Err(SessionStorageError::SessionNotFound(session_id.to_string()));
@@ -547,15 +574,17 @@ impl SessionStorage for SqliteSessionStorage {
                AND ? <= (CASE COALESCE(identification_source, '') {cases} ELSE {unattributed} END)"
         );
 
+        let mut tx = self.begin().await?;
         let result = sqlx::query(&sql)
             .bind(identity.profile_id.as_deref())
             .bind(identity.source.as_str())
             .bind(identity.confidence.map(|c| c as f64))
             .bind(session_id)
             .bind(identity.source.rank() as i64)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         if result.rows_affected() > 0 {
             return Ok(true);
@@ -596,6 +625,7 @@ impl SessionStorage for SqliteSessionStorage {
                AND ? <= (CASE COALESCE(identification_source, '') {cases} ELSE {unattributed} END)"
         );
 
+        let mut tx = self.begin().await?;
         let result = sqlx::query(&sql)
             .bind(identity.profile_id.as_deref())
             .bind(identity.source.as_str())
@@ -603,9 +633,10 @@ impl SessionStorage for SqliteSessionStorage {
             .bind(session_id)
             .bind(identity.profile_id.as_deref())
             .bind(identity.source.rank() as i64)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         if result.rows_affected() > 0 {
             return Ok(true);
@@ -734,15 +765,17 @@ impl SessionStorage for SqliteSessionStorage {
     ) -> Result<(), SessionStorageError> {
         self.get_session(session_id).await?; // guard: session must exist
 
+        let mut tx = self.begin().await?;
         sqlx::query(
             "UPDATE sessions SET title = ?, title_source = 'user', \
              title_through_message_id = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(&title)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         Ok(())
     }
@@ -805,15 +838,17 @@ impl SessionStorage for SqliteSessionStorage {
     ) -> Result<(), SessionStorageError> {
         self.get_session(session_id).await?; // guard: session must exist
 
+        let mut tx = self.begin().await?;
         sqlx::query(
             "UPDATE sessions SET title = ?, title_source = 'derived', \
              title_through_message_id = NULL WHERE id = ?",
         )
         .bind(title)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         Ok(())
     }
@@ -827,6 +862,7 @@ impl SessionStorage for SqliteSessionStorage {
     ) -> Result<(), SessionStorageError> {
         self.get_session(session_id).await?; // guard: session must exist
 
+        let mut tx = self.begin().await?;
         sqlx::query(
             "UPDATE sessions SET title = ?, title_source = 'model', \
              title_through_message_id = ? WHERE id = ?",
@@ -834,9 +870,10 @@ impl SessionStorage for SqliteSessionStorage {
         .bind(title)
         .bind(through_message_id)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        self.commit_with_header(tx, session_id).await?;
 
         Ok(())
     }

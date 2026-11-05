@@ -1155,6 +1155,22 @@ fn report_acceleration() {
     }
 }
 
+/// `Database::init` wrote the missing headers; this full pass repairs any a writer left stale,
+/// and a repair is a warning because every writer should have kept its header current.
+fn spawn_item_header_check(system: sqlx::Pool<sqlx::Sqlite>) {
+    tokio::spawn(async move {
+        match pond_infra::sqlite_items::reconcile(&system, pond_infra::sqlite_items::Mode::All)
+            .await
+        {
+            Ok(report) if report.changed() => {
+                tracing::warn!(?report, "item headers repaired at startup")
+            }
+            Ok(_) => tracing::info!("item headers match their rows"),
+            Err(e) => tracing::error!("item header check failed: {e:#}"),
+        }
+    });
+}
+
 async fn run_server(
     static_dir: std::path::PathBuf,
     open: bool,
@@ -1179,6 +1195,7 @@ async fn run_server(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
+    spawn_item_header_check(db.system.clone());
 
     // Idempotent (one stat() once migrated); per-file errors are logged, never fatal.
     match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {

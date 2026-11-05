@@ -191,6 +191,27 @@ deleting a header unlinks its row (`ON DELETE SET NULL`), and deleting a row del
 `AFTER DELETE` trigger on every detail table, so a cascade from a session or source takes the
 header too). The new tables are keyed by `item_id` and go with their header.
 
+**The header each table's rows get** (`pond_core::items::from_detail`). A NULL owner means
+something different in each table, so each has its own rule:
+
+| Table | NULL owner means | Header | Kind | State |
+|---|---|---|---|---|
+| `memory_fragments` | Shared with the household | Household, no owner; otherwise private to the owner | `trait` for a preference or routine, else `fact` | `active`; `archived` as is; `merged` is `superseded`, linked from the memory that replaced it |
+| `sessions` | Nobody knows who was speaking | None until the conversation is attributed; recall never surfaced it. Otherwise private to the speaker | `conversation`: the redacted title and rolling summary | `active` |
+| `context_items` | Impossible (`NOT NULL`) | Private to the source's owner | `mail`, `event` (calendar), `home_event` (cameras, sensors); no header for a source no ingest accepts yet | `active` |
+| `suggestion_queue` | The household: its memory was unattributed | Household, or private to the owner. None for an owner who has left (the column has no foreign key) | `suggestion`, derived from its memory | `queued` is `active`, `taken` is `accepted`, `dismissed` as is |
+
+Every header's text passes the rule redactor at the `Secrets` level, the level memory writes and
+ingest already use, so text stored redacted comes out unchanged. The raw rolling summary stays on
+the session, because that is what a conversation replays. A memory taught in a conversation is
+linked `evidence_for` from it.
+
+Each table's writer syncs its row's header in the same transaction, and
+`sqlite_items.rs` is the only writer of `items` and `item_links` (a guard test scans the crates).
+`Database::init` writes the headers of rows that have none, so every process that opens the
+database migrates it; `serve` then checks every header against its row in the background and
+warns if it had to repair one. Both passes change nothing when run again.
+
 A guard test fails the build when a kind names no detail table or no lifecycle:
 `Kind::detail_table` and `Kind::lifecycle` are exhaustive matches, and
 `every_item_kind_has_a_detail_table.rs` checks against the migrated schema that each table exists,

@@ -150,3 +150,54 @@ fn the_window_never_reaches_back_over_an_earlier_construction() {
         "a bare construction below a wrapped one must NOT inherit its wrapper"
     );
 }
+
+/// Header text is redacted in `sqlite_items.rs`; any other writer of `items` or `item_links`
+/// would store whatever it was handed. Tests below a file's `mod tests` are skipped.
+#[test]
+fn every_item_header_is_written_by_sqlite_items() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut stack = vec![crates.clone()];
+    let mut scanned = 0;
+    let mut writers = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                if name != "target" && name != "tests" && !name.starts_with('.') {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".rs") || name == "sqlite_items.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let code = text
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap()
+                .to_lowercase();
+            scanned += 1;
+            for needle in [
+                "into items ",
+                "into items(",
+                "update items set",
+                "into item_links",
+                "update item_links",
+            ] {
+                if code.contains(needle) {
+                    writers.push(format!("{} ({needle:?})", path.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        scanned > 100,
+        "scanned only {scanned} files; the walk is not finding the crates"
+    );
+    assert!(
+        writers.is_empty(),
+        "these write item headers outside sqlite_items.rs, past its redaction: {writers:#?}"
+    );
+}
