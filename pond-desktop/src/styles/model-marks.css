@@ -145,6 +145,18 @@
   color: var(--color-text);
 }
 
+/* A job the model is doing now: the accent's own edge, so it reads before the source chip. */
+.mm-chip--use {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.mm-uses {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 /* ── Picture support ────────────────────────────────────────────────────── */
 
 .mm-addon {
@@ -259,6 +271,13 @@
   font-family: var(--font-body);
   font-weight: var(--weight-medium);
   color: var(--color-warning-fg);
+}
+
+/* Chosen and on its way: quieter than "In use" until it is. Secondary text, 6.22:1 light and 5.45:1 dark. */
+.mm-fit--wait {
+  font-family: var(--font-body);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
 }
 
 .mm-fit svg {

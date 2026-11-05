@@ -1,15 +1,18 @@
 //! Frames → motion → optional classifier → `CameraEvent`, persisted then published exactly as
-//! `POST /api/v1/camera/events` does.
+//! `POST /api/v1/camera/events` does. With a detector that says where things are, people are
+//! followed from frame to frame instead: one event per person, and their face matched until known.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use pond_core::shared::domain::session_activity::{PresenceTransition, ProfilePresence};
 use pond_core::shared::ports::event_bus::{BusEvent, EventBus};
+use pond_core::user_data::domain::face_recognition::{BoundingBox, FaceLandmarks};
 use pond_core::user_data::domain::sensor::CameraEvent;
 use pond_core::user_data::domain::session::IdentificationSource;
-use pond_core::user_data::domain::vision::{CapturedFrame, EventSignals, Frame};
+use pond_core::user_data::domain::vision::{CapturedFrame, DetectedObject, EventSignals, Frame};
 use pond_core::user_data::ports::camera_storage::CameraStorage;
 use pond_core::user_data::ports::face_recognition::FaceRecognition;
 use pond_core::user_data::ports::vision::{FrameSource, VisionClassifier};
@@ -19,6 +22,7 @@ use crate::annotate::FrameAnnotation;
 use crate::jpeg_decode::{decode_rgb, LumaDecoder};
 use crate::live_feed::LiveCameraRegistry;
 use crate::motion::{MotionConfig, MotionDetector};
+use crate::tracker::{PersonTracker, Track, TrackChange};
 
 #[derive(Debug, Clone)]
 pub struct VisionPipelineConfig {
@@ -41,6 +45,22 @@ impl Default for VisionPipelineConfig {
         }
     }
 }
+
+/// How often the detector looks while it is looking: the hardware analysis branch's rate.
+const CHECK_EVERY: Duration = Duration::from_millis(1000 / crate::gst::ANALYSIS_FPS as u64);
+
+/// How long the detector keeps looking after the last motion while nobody is in view.
+const LOOK_AFTER_MOTION: Duration = Duration::from_secs(5);
+
+/// Change that sets the detector looking, below the motion events' threshold: a person across
+/// the room changes a few percent of the grid, and a look costs the GPU about 8 ms.
+const LOOK_ON_CHANGE: f64 = 0.02;
+
+/// Face matches tried per person before giving up on them: a back turned stays unknown.
+const FACE_TRIES: u32 = 5;
+
+/// The wait between one person's face tries.
+const FACE_RETRY: Duration = Duration::from_secs(1);
 
 /// The recognition to match with now, or `None` without one. Logs when matching is skipped
 /// because the models are not ready, and again when they arrive, rather than on every frame.
@@ -75,6 +95,313 @@ fn ready_face(
     }
 }
 
+/// What one face match found, as events and the live view carry it.
+#[derive(Debug, Clone, Default)]
+struct FaceOutcome {
+    detected: bool,
+    unknown: bool,
+    profile: Option<String>,
+    confidence: Option<f32>,
+    bbox: Option<BoundingBox>,
+    landmarks: Option<FaceLandmarks>,
+}
+
+async fn identify_face(face_rec: &dyn FaceRecognition, jpeg: &[u8], camera: &str) -> FaceOutcome {
+    let details = match face_rec.identify_with_diagnostics(jpeg, None).await {
+        Ok(details) => details,
+        Err(e) => {
+            tracing::warn!(camera, error = %e, "face identification failed");
+            return FaceOutcome::default();
+        }
+    };
+    let ident = details.identification;
+    let mut outcome = FaceOutcome {
+        bbox: details.bbox,
+        landmarks: details.landmarks,
+        ..Default::default()
+    };
+    if ident.identified {
+        tracing::info!(
+            camera,
+            profile = ?ident.profile_id,
+            confidence = ?ident.confidence,
+            "face identified in vision event"
+        );
+        outcome.detected = true;
+        outcome.profile = ident.profile_id;
+        outcome.confidence = ident.confidence;
+    } else if outcome.bbox.is_some() || outcome.landmarks.is_some() || ident.confidence.is_some() {
+        tracing::info!(
+            camera,
+            confidence = ?ident.confidence,
+            "unrecognized face detected in vision event"
+        );
+        outcome.detected = true;
+        outcome.unknown = true;
+        outcome.confidence = ident.confidence;
+    }
+    outcome
+}
+
+/// The picture's width and height from its header alone.
+fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
+        .into_dimensions()
+        .ok()
+}
+
+/// Whether the face found in `jpeg` is `track`'s: inside their box, or they are the only person.
+fn face_belongs(face: &FaceOutcome, track: &Track, people: usize, jpeg: &[u8]) -> bool {
+    let (Some(bbox), true) = (face.bbox, people > 1) else {
+        return true;
+    };
+    let Some((w, h)) = jpeg_size(jpeg) else {
+        return false;
+    };
+    let cx = (bbox.x as f32 + bbox.width as f32 / 2.0) / w as f32;
+    let cy = (bbox.y as f32 + bbox.height as f32 / 2.0) / h as f32;
+    track.bbox.contains(cx, cy)
+}
+
+/// The picture the detector reads: the hardware's own, else the raw frame, else the JPEG decoded.
+fn detector_picture(
+    analysis: Option<Frame>,
+    raw: Option<&Frame>,
+    jpeg: Option<&[u8]>,
+    captured_at: DateTime<Utc>,
+) -> Option<Frame> {
+    analysis
+        .or_else(|| raw.cloned())
+        .or_else(|| jpeg.and_then(|bytes| decode_rgb(bytes, captured_at).ok()))
+}
+
+/// The best label above `floor` among `objects`, the way events name what moved.
+fn best_label(objects: &[DetectedObject], floor: f64) -> Option<(String, f64)> {
+    objects
+        .iter()
+        .filter(|o| o.confidence >= floor)
+        .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+        .map(|o| (o.label.clone(), o.confidence))
+}
+
+/// Who the detector is following, and when it last looked.
+#[derive(Default)]
+struct PeopleWatch {
+    tracker: PersonTracker,
+    last_check: Option<Instant>,
+    moved_at: Option<Instant>,
+    /// The most that changed since the detector last looked, for the motion event it may name.
+    pending_motion: Option<f64>,
+    /// The capture sends its own detector pictures at the detector's rate, so wait for those.
+    paced_by_capture: bool,
+    faces: HashMap<u64, FaceTries>,
+}
+
+/// One followed person's face matching so far.
+struct FaceTries {
+    tries: u32,
+    next_at: Instant,
+    done: bool,
+}
+
+impl PeopleWatch {
+    /// A change worth a motion event, which the next look names.
+    fn moved(&mut self, changed_fraction: f64, now: Instant) {
+        self.moved_at = Some(now);
+        self.pending_motion = Some(
+            self.pending_motion
+                .map_or(changed_fraction, |m| m.max(changed_fraction)),
+        );
+    }
+
+    /// Look while someone is followed or something moved lately, at the detector's rate.
+    fn due(&self, now: Instant, picture_attached: bool) -> bool {
+        let looking = self.tracker.following()
+            || self
+                .moved_at
+                .is_some_and(|at| now.duration_since(at) < LOOK_AFTER_MOTION);
+        let paced = if self.paced_by_capture {
+            picture_attached
+        } else {
+            self.last_check
+                .is_none_or(|at| now.duration_since(at) >= CHECK_EVERY)
+        };
+        looking && paced
+    }
+
+    /// Confirmed people not yet announced, or whose face is still unknown and due another try.
+    fn faces_due(&self, now: Instant) -> Vec<u64> {
+        self.tracker
+            .confirmed()
+            .filter(|t| {
+                self.faces
+                    .get(&t.id)
+                    .is_none_or(|f| !f.done && f.tries < FACE_TRIES && now >= f.next_at)
+            })
+            .map(|t| t.id)
+            .collect()
+    }
+}
+
+/// One event, ready to record.
+struct Draft<'a> {
+    event_type: String,
+    confidence: Option<f64>,
+    changed_fraction: Option<f64>,
+    face: FaceOutcome,
+    jpeg: Option<&'a [u8]>,
+    captured_at: DateTime<Utc>,
+    classify_ms: u64,
+    face_ms: u64,
+    track: Option<u64>,
+}
+
+/// Annotate the live view, filter, snapshot, persist and publish; whether the event was recorded.
+async fn record(
+    draft: Draft<'_>,
+    storage: &dyn CameraStorage,
+    bus: &dyn EventBus,
+    registry: &LiveCameraRegistry,
+    cfg: &VisionPipelineConfig,
+) -> bool {
+    let face = draft.face;
+    let identified_name = face
+        .profile
+        .as_deref()
+        .and_then(|pid| registry.resolve_profile_name(pid));
+    registry.update_annotation(
+        &cfg.camera_id,
+        FrameAnnotation {
+            camera_id: cfg.camera_id.clone(),
+            event_type: Some(draft.event_type.clone()),
+            event_confidence: draft.confidence,
+            changed_fraction: draft.changed_fraction,
+            face_detected: face.detected,
+            face_unknown: face.unknown,
+            identified_profile: face.profile.clone(),
+            identified_name: identified_name.clone(),
+            face_confidence: face.confidence,
+            face_bbox: face.bbox,
+            face_landmarks: face.landmarks,
+            measured_fps: registry.measured_fps(&cfg.camera_id),
+            updated_at: Some(draft.captured_at),
+        },
+    );
+
+    if !registry.bus_config().passes(EventSignals {
+        event_type: &draft.event_type,
+        face_detected: face.detected,
+        face_recognized: face.profile.is_some(),
+        face_unknown: face.unknown,
+    }) {
+        return false;
+    }
+
+    // After the filter, so a dropped event writes nothing and prunes no kept snapshot.
+    // Best-effort: a failed snapshot write must never suppress the event.
+    let snapshot_path = cfg.snapshots.as_ref().and_then(|snap_cfg| {
+        let bytes = draft.jpeg?;
+        match crate::snapshot::write_snapshot_jpeg(
+            snap_cfg,
+            &cfg.camera_id,
+            draft.captured_at,
+            bytes,
+        ) {
+            Ok(path) => Some(path.to_string_lossy().into_owned()),
+            Err(e) => {
+                tracing::warn!(camera = %cfg.camera_id, error = %e, "snapshot write failed");
+                None
+            }
+        }
+    });
+
+    let mut metadata = serde_json::json!({
+        "source": "vision",
+        "face_detected": face.detected,
+        "face_unknown": face.unknown,
+    });
+    if let Some(fraction) = draft.changed_fraction {
+        metadata["changed_fraction"] = serde_json::json!(fraction);
+    }
+    if let Some(track) = draft.track {
+        metadata["track_id"] = serde_json::json!(track);
+    }
+    if let Some(ref pid) = face.profile {
+        metadata["identified_profile"] = serde_json::json!(pid);
+    }
+    if let Some(ref name) = identified_name {
+        metadata["identified_name"] = serde_json::json!(name);
+    }
+    if let Some(conf) = face.confidence {
+        metadata["face_confidence"] = serde_json::json!(conf);
+    }
+    if let Some(bbox) = face.bbox {
+        metadata["face_bbox"] = serde_json::json!({
+            "x": bbox.x,
+            "y": bbox.y,
+            "width": bbox.width,
+            "height": bbox.height,
+        });
+    }
+    if let Some(ref lm) = face.landmarks {
+        metadata["face_landmarks"] = serde_json::json!({
+            "left_eye": lm.left_eye,
+            "right_eye": lm.right_eye,
+            "nose": lm.nose,
+            "left_mouth": lm.left_mouth,
+            "right_mouth": lm.right_mouth,
+        });
+    }
+
+    let mut event = CameraEvent {
+        id: None,
+        camera_id: cfg.camera_id.clone(),
+        event_type: draft.event_type,
+        confidence: draft.confidence,
+        snapshot_path,
+        metadata: Some(metadata.to_string()),
+        acknowledged: false,
+        created_at: Utc::now(),
+    };
+
+    // Persist first, then publish — same contract as the camera route.
+    match storage.record_event(event.clone()).await {
+        Ok(id) => {
+            event.id = Some(id);
+            // From the frame's arrival to now: what a household waits for an event.
+            let latency_ms = (Utc::now() - draft.captured_at).num_milliseconds();
+            tracing::info!(
+                camera = %cfg.camera_id,
+                event_type = %event.event_type,
+                changed_fraction = ?draft.changed_fraction,
+                face_detected = face.detected,
+                track = ?draft.track,
+                latency_ms,
+                classify_ms = draft.classify_ms,
+                face_ms = draft.face_ms,
+                "vision event detected"
+            );
+            registry.publish_event(event.clone());
+            bus.publish(BusEvent::Camera(event));
+            if let Some(profile_id) = face.profile {
+                bus.publish(BusEvent::Presence(ProfilePresence {
+                    profile_id,
+                    transition: PresenceTransition::Arrived,
+                    source: IdentificationSource::Face,
+                    confidence: face.confidence,
+                    session_id: format!("camera:{}", cfg.camera_id),
+                    at: Utc::now(),
+                }));
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!(camera = %cfg.camera_id, error = %e, "failed to persist camera event");
+            false
+        }
+    }
+}
+
 /// Run until the frame source ends (`Ok`) or fails (`Err`); spawn once per camera.
 pub async fn run_vision_pipeline(
     source: &mut dyn FrameSource,
@@ -89,7 +416,13 @@ pub async fn run_vision_pipeline(
     let mut luma_decoder = LumaDecoder::default();
     let mut last_event = last_recorded_event(storage.as_ref(), &cfg.camera_id).await;
     let mut last_luma_decode: Option<Instant> = None;
-    tracing::info!(camera = %cfg.camera_id, "vision pipeline started");
+    let locator = classifier.clone().filter(|c| c.locates());
+    let mut people = PeopleWatch::default();
+    tracing::info!(
+        camera = %cfg.camera_id,
+        follows_people = locator.is_some(),
+        "vision pipeline started"
+    );
     // Recognition may still be downloading; said once when matching stops and once when it starts.
     let mut face_waiting_logged = false;
 
@@ -105,15 +438,15 @@ pub async fn run_vision_pipeline(
         let captured_at = captured.captured_at();
 
         // One JPEG per frame, shared by the live feed, snapshots and face recognition.
-        let (jpeg, raw, luma) = match captured {
+        let (jpeg, raw, luma, analysis) = match captured {
             CapturedFrame::Raw(frame) => match crate::snapshot::frame_to_jpeg_bytes(&frame) {
-                Ok(bytes) => (Some(Arc::new(bytes)), Some(frame), None),
+                Ok(bytes) => (Some(Arc::new(bytes)), Some(frame), None, None),
                 Err(e) => {
                     tracing::debug!(camera = %cfg.camera_id, error = %e, "frame could not be encoded");
-                    (None, Some(frame), None)
+                    (None, Some(frame), None, None)
                 }
             },
-            CapturedFrame::Jpeg(j) => (Some(j.jpeg), None, j.luma),
+            CapturedFrame::Jpeg(j) => (Some(j.jpeg), None, j.luma, j.analysis),
         };
         if let Some(bytes) = &jpeg {
             registry.update_frame(&cfg.camera_id, bytes.clone());
@@ -149,51 +482,189 @@ pub async fn run_vision_pipeline(
             }
             (None, None, None) => None,
         };
-        let Some(changed_fraction) = observed else {
-            continue;
-        };
-        if in_cooldown {
-            continue;
-        }
-
         let min_classifier_conf = bus_cfg.classifier_confidence_threshold;
+        let jpeg_bytes = jpeg.as_deref().map(Vec::as_slice);
+        let motion_fallback = |fraction: f64| ("motion".to_string(), Some(fraction.min(1.0)));
 
-        // Optional enrichment: let the on-device model name what moved.
-        let decoded: Option<Frame> = match (&classifier, &raw, &jpeg) {
-            (Some(_), None, Some(bytes)) => decode_rgb(bytes, captured_at)
-                .map_err(|e| {
-                    tracing::warn!(camera = %cfg.camera_id, error = %e, "candidate frame could not be decoded for the classifier");
-                })
-                .ok(),
-            _ => None,
-        };
-        let classify_started = Instant::now();
-        let (mut event_type, confidence) = match (&classifier, raw.as_ref().or(decoded.as_ref())) {
-            (Some(c), Some(frame)) => match c.classify(frame).await {
-                Ok(dets) => dets
-                    .into_iter()
-                    .filter(|d| d.confidence >= min_classifier_conf)
-                    .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
-                    .map(|d| (d.label, Some(d.confidence)))
-                    .unwrap_or_else(|| ("motion".to_string(), Some(changed_fraction.min(1.0)))),
-                Err(e) => {
-                    tracing::warn!(camera = %cfg.camera_id, error = %e, "classifier failed; emitting motion");
-                    ("motion".to_string(), Some(changed_fraction.min(1.0)))
+        let (mut event_type, confidence, changed_fraction, classify_ms) = match &locator {
+            // People are followed while anything moves or anyone is in view; what else moved is
+            // named by the same look.
+            Some(locator) => {
+                let now = Instant::now();
+                if let Some(fraction) = observed {
+                    people.moved(fraction, now);
+                } else if detector
+                    .last_change()
+                    .is_some_and(|f| f >= LOOK_ON_CHANGE.min(cfg.motion.changed_fraction))
+                {
+                    people.moved_at = Some(now);
                 }
-            },
-            _ => ("motion".to_string(), Some(changed_fraction.min(1.0))),
-        };
+                people.paced_by_capture |= analysis.is_some();
+                if !people.due(now, analysis.is_some()) {
+                    continue;
+                }
+                let Some(picture) =
+                    detector_picture(analysis, raw.as_ref(), jpeg_bytes, captured_at)
+                else {
+                    continue;
+                };
+                people.last_check = Some(now);
+                let detect_started = Instant::now();
+                let objects = match locator.detect(&picture).await {
+                    Ok(objects) => Some(objects),
+                    Err(e) => {
+                        tracing::warn!(camera = %cfg.camera_id, error = %e, "detector failed");
+                        None
+                    }
+                };
+                let detect_ms = detect_started.elapsed().as_millis() as u64;
 
-        let classify_ms = classify_started.elapsed().as_millis() as u64;
+                if let Some(objects) = &objects {
+                    let persons: Vec<_> = objects
+                        .iter()
+                        .filter(|o| o.label == "person" && o.confidence >= min_classifier_conf)
+                        .map(|o| (o.bbox, o.confidence))
+                        .collect();
+                    for change in people.tracker.update(&persons, now) {
+                        match change {
+                            TrackChange::Confirmed(id) => {
+                                tracing::info!(camera = %cfg.camera_id, track = id, detect_ms, "person in view");
+                            }
+                            TrackChange::Lost(id) => {
+                                people.faces.remove(&id);
+                                tracing::info!(camera = %cfg.camera_id, track = id, "person out of view");
+                            }
+                        }
+                    }
+                }
+
+                // Each person: one event when they appear, another once their face is known.
+                let due = people.faces_due(now);
+                let face_rec = (!due.is_empty() && bus_cfg.face_detection_enabled)
+                    .then(|| {
+                        ready_face(
+                            face_recognizer.as_deref(),
+                            &cfg.camera_id,
+                            &mut face_waiting_logged,
+                        )
+                    })
+                    .flatten();
+                let in_view = people.tracker.confirmed().count();
+                // Recognition finds the frame's one best face, so it runs once a look and the
+                // face goes to the person whose box holds it.
+                let mut face_this_look: Option<FaceOutcome> = None;
+                for id in due {
+                    let Some(track) = people.tracker.get(id).cloned() else {
+                        continue;
+                    };
+                    let face_started = Instant::now();
+                    let face = match (&face_rec, jpeg_bytes) {
+                        (Some(rec), Some(bytes)) => {
+                            let found = match &face_this_look {
+                                Some(found) => found.clone(),
+                                None => {
+                                    let found =
+                                        identify_face(rec.as_ref(), bytes, &cfg.camera_id).await;
+                                    face_this_look.insert(found).clone()
+                                }
+                            };
+                            if face_belongs(&found, &track, in_view, bytes) {
+                                found
+                            } else {
+                                FaceOutcome::default()
+                            }
+                        }
+                        _ => FaceOutcome::default(),
+                    };
+                    let face_ms = face_started.elapsed().as_millis() as u64;
+                    let first = !people.faces.contains_key(&id);
+                    let known = face.profile.is_some();
+                    let tries = people.faces.entry(id).or_insert(FaceTries {
+                        tries: 0,
+                        next_at: now,
+                        done: false,
+                    });
+                    tries.tries += 1;
+                    tries.next_at = now + FACE_RETRY;
+                    tries.done |= known || !bus_cfg.face_detection_enabled || jpeg_bytes.is_none();
+                    if !(first || known) {
+                        continue;
+                    }
+                    let draft = Draft {
+                        event_type: "person".to_string(),
+                        confidence: Some(track.confidence),
+                        changed_fraction: observed,
+                        face,
+                        jpeg: jpeg_bytes,
+                        captured_at,
+                        classify_ms: detect_ms,
+                        face_ms,
+                        track: Some(id),
+                    };
+                    if record(draft, storage.as_ref(), bus.as_ref(), registry, &cfg).await {
+                        last_event = Some(Instant::now());
+                    }
+                }
+
+                // While anyone is followed their events speak for whatever moved.
+                let moved = people.pending_motion.take();
+                if people.tracker.following() || in_cooldown {
+                    continue;
+                }
+                let Some(changed_fraction) = moved else {
+                    continue;
+                };
+                let (label, confidence) = objects
+                    .as_deref()
+                    .and_then(|o| best_label(o, min_classifier_conf))
+                    .map(|(label, conf)| (label, Some(conf)))
+                    .unwrap_or_else(|| motion_fallback(changed_fraction));
+                (label, confidence, changed_fraction, detect_ms)
+            }
+            None => {
+                let Some(changed_fraction) = observed else {
+                    continue;
+                };
+                if in_cooldown {
+                    continue;
+                }
+
+                // Optional enrichment: let the on-device model name what moved.
+                let decoded: Option<Frame> = match (&classifier, &raw, jpeg_bytes) {
+                    (Some(_), None, Some(bytes)) => decode_rgb(bytes, captured_at)
+                        .map_err(|e| {
+                            tracing::warn!(camera = %cfg.camera_id, error = %e, "candidate frame could not be decoded for the classifier");
+                        })
+                        .ok(),
+                    _ => None,
+                };
+                let classify_started = Instant::now();
+                let (event_type, confidence) = match (
+                    &classifier,
+                    raw.as_ref().or(decoded.as_ref()),
+                ) {
+                    (Some(c), Some(frame)) => match c.classify(frame).await {
+                        Ok(dets) => dets
+                            .into_iter()
+                            .filter(|d| d.confidence >= min_classifier_conf)
+                            .max_by(|a, b| a.confidence.total_cmp(&b.confidence))
+                            .map(|d| (d.label, Some(d.confidence)))
+                            .unwrap_or_else(|| motion_fallback(changed_fraction)),
+                        Err(e) => {
+                            tracing::warn!(camera = %cfg.camera_id, error = %e, "classifier failed; emitting motion");
+                            motion_fallback(changed_fraction)
+                        }
+                    },
+                    _ => motion_fallback(changed_fraction),
+                };
+                let classify_ms = classify_started.elapsed().as_millis() as u64;
+                (event_type, confidence, changed_fraction, classify_ms)
+            }
+        };
 
         // Face detection and recognition enrichment on person or motion events.
         let face_started = Instant::now();
-        let mut identified_profile = None;
-        let mut face_confidence = None;
-        let mut face_detected = false;
-        let mut face_unknown = false;
-        let mut face_bbox = None;
-        let mut face_landmarks = None;
+        let mut face = FaceOutcome::default();
         let should_check_face = bus_cfg.face_detection_enabled
             && (event_type == "person" || (bus_cfg.face_on_motion && event_type == "motion"));
         if should_check_face {
@@ -202,43 +673,11 @@ pub async fn run_vision_pipeline(
                 &cfg.camera_id,
                 &mut face_waiting_logged,
             ) {
-                match jpeg.as_deref() {
-                    Some(jpeg_bytes) => {
-                        match face_rec.identify_with_diagnostics(jpeg_bytes, None).await {
-                            Ok(details) => {
-                                face_bbox = details.bbox;
-                                face_landmarks = details.landmarks;
-                                let ident = details.identification;
-                                if ident.identified {
-                                    tracing::info!(
-                                        camera = %cfg.camera_id,
-                                        profile = ?ident.profile_id,
-                                        confidence = ?ident.confidence,
-                                        "face identified in vision event"
-                                    );
-                                    face_detected = true;
-                                    identified_profile = ident.profile_id;
-                                    face_confidence = ident.confidence;
-                                } else if details.bbox.is_some()
-                                    || details.landmarks.is_some()
-                                    || ident.confidence.is_some()
-                                {
-                                    tracing::info!(
-                                        camera = %cfg.camera_id,
-                                        confidence = ?ident.confidence,
-                                        "unrecognized face detected in vision event"
-                                    );
-                                    face_detected = true;
-                                    face_unknown = true;
-                                    face_confidence = ident.confidence;
-                                }
-                                if face_detected && event_type == "motion" {
-                                    event_type = "person".to_string();
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(camera = %cfg.camera_id, error = %e, "face identification failed");
-                            }
+                match jpeg_bytes {
+                    Some(bytes) => {
+                        face = identify_face(face_rec.as_ref(), bytes, &cfg.camera_id).await;
+                        if face.detected && event_type == "motion" {
+                            event_type = "person".to_string();
                         }
                     }
                     None => {
@@ -247,129 +686,21 @@ pub async fn run_vision_pipeline(
                 }
             }
         }
-
         let face_ms = face_started.elapsed().as_millis() as u64;
-        let identified_name = identified_profile
-            .as_deref()
-            .and_then(|pid| registry.resolve_profile_name(pid));
 
-        let annotation = FrameAnnotation {
-            camera_id: cfg.camera_id.clone(),
-            event_type: Some(event_type.clone()),
-            event_confidence: confidence,
-            changed_fraction: Some(changed_fraction),
-            face_detected,
-            face_unknown,
-            identified_profile: identified_profile.clone(),
-            identified_name: identified_name.clone(),
-            face_confidence,
-            face_bbox,
-            face_landmarks: face_landmarks.clone(),
-            measured_fps: registry.measured_fps(&cfg.camera_id),
-            updated_at: Some(captured_at),
-        };
-        registry.update_annotation(&cfg.camera_id, annotation.clone());
-
-        if !bus_cfg.passes(EventSignals {
-            event_type: &event_type,
-            face_detected,
-            face_recognized: identified_profile.is_some(),
-            face_unknown,
-        }) {
-            continue;
-        }
-
-        // After the filter, so a dropped event writes nothing and prunes no kept snapshot.
-        // Best-effort: a failed snapshot write must never suppress the event.
-        let snapshot_path = cfg.snapshots.as_ref().and_then(|snap_cfg| {
-            let bytes = jpeg.as_deref()?;
-            match crate::snapshot::write_snapshot_jpeg(snap_cfg, &cfg.camera_id, captured_at, bytes)
-            {
-                Ok(path) => Some(path.to_string_lossy().into_owned()),
-                Err(e) => {
-                    tracing::warn!(camera = %cfg.camera_id, error = %e, "snapshot write failed");
-                    None
-                }
-            }
-        });
-
-        let mut metadata = serde_json::json!({
-            "changed_fraction": changed_fraction,
-            "source": "vision",
-            "face_detected": face_detected,
-            "face_unknown": face_unknown,
-        });
-        if let Some(ref pid) = identified_profile {
-            metadata["identified_profile"] = serde_json::json!(pid);
-        }
-        if let Some(ref name) = identified_name {
-            metadata["identified_name"] = serde_json::json!(name);
-        }
-        if let Some(conf) = face_confidence {
-            metadata["face_confidence"] = serde_json::json!(conf);
-        }
-        if let Some(bbox) = face_bbox {
-            metadata["face_bbox"] = serde_json::json!({
-                "x": bbox.x,
-                "y": bbox.y,
-                "width": bbox.width,
-                "height": bbox.height,
-            });
-        }
-        if let Some(ref lm) = face_landmarks {
-            metadata["face_landmarks"] = serde_json::json!({
-                "left_eye": lm.left_eye,
-                "right_eye": lm.right_eye,
-                "nose": lm.nose,
-                "left_mouth": lm.left_mouth,
-                "right_mouth": lm.right_mouth,
-            });
-        }
-
-        let mut event = CameraEvent {
-            id: None,
-            camera_id: cfg.camera_id.clone(),
+        let draft = Draft {
             event_type,
             confidence,
-            snapshot_path,
-            metadata: Some(metadata.to_string()),
-            acknowledged: false,
-            created_at: Utc::now(),
+            changed_fraction: Some(changed_fraction),
+            face,
+            jpeg: jpeg_bytes,
+            captured_at,
+            classify_ms,
+            face_ms,
+            track: None,
         };
-
-        // Persist first, then publish — same contract as the camera route.
-        match storage.record_event(event.clone()).await {
-            Ok(id) => {
-                event.id = Some(id);
-                // From the frame's arrival to now: what a household waits for an event.
-                let latency_ms = (Utc::now() - captured_at).num_milliseconds();
-                tracing::info!(
-                    camera = %cfg.camera_id,
-                    event_type = %event.event_type,
-                    changed_fraction,
-                    face_detected,
-                    latency_ms,
-                    classify_ms,
-                    face_ms,
-                    "vision event detected"
-                );
-                registry.publish_event(event.clone());
-                bus.publish(BusEvent::Camera(event));
-                if let Some(profile_id) = identified_profile {
-                    bus.publish(BusEvent::Presence(ProfilePresence {
-                        profile_id,
-                        transition: PresenceTransition::Arrived,
-                        source: IdentificationSource::Face,
-                        confidence: face_confidence,
-                        session_id: format!("camera:{}", cfg.camera_id),
-                        at: Utc::now(),
-                    }));
-                }
-                last_event = Some(Instant::now());
-            }
-            Err(e) => {
-                tracing::warn!(camera = %cfg.camera_id, error = %e, "failed to persist camera event");
-            }
+        if record(draft, storage.as_ref(), bus.as_ref(), registry, &cfg).await {
+            last_event = Some(Instant::now());
         }
     };
     tracing::info!(camera = %cfg.camera_id, "vision pipeline stopped");
@@ -411,6 +742,7 @@ mod tests {
                         CapturedFrame::Jpeg(JpegFrame {
                             jpeg: Arc::new(crate::snapshot::frame_to_jpeg_bytes(&f).unwrap()),
                             luma: None,
+                            analysis: None,
                             captured_at: f.captured_at,
                         })
                     })
@@ -1112,6 +1444,7 @@ mod tests {
                 CapturedFrame::Jpeg(JpegFrame {
                     jpeg: Arc::new(b"not a jpeg".to_vec()),
                     luma: Some(l),
+                    analysis: None,
                     captured_at: Utc::now(),
                 })
             })
@@ -1180,5 +1513,355 @@ mod tests {
         )
         .await;
         assert!(ended.unwrap_err().to_string().contains("ffmpeg exited"));
+    }
+
+    /// Finds the same objects in every picture it is shown, and keeps each picture's size.
+    struct Locator {
+        objects: Vec<DetectedObject>,
+        pictures: std::sync::Mutex<Vec<(u32, u32)>>,
+        classified: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Locator {
+        fn seeing(objects: &[(&str, f32)]) -> Arc<Self> {
+            let objects = objects
+                .iter()
+                .map(|&(label, x)| DetectedObject {
+                    label: label.into(),
+                    confidence: 0.9,
+                    bbox: pond_core::user_data::domain::vision::FractionBox {
+                        x,
+                        y: 0.2,
+                        w: 0.2,
+                        h: 0.6,
+                    },
+                })
+                .collect();
+            Arc::new(Self {
+                objects,
+                pictures: Default::default(),
+                classified: Default::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl VisionClassifier for Locator {
+        async fn classify(&self, _frame: &Frame) -> Result<Vec<Detection>> {
+            self.classified
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        fn locates(&self) -> bool {
+            true
+        }
+
+        async fn detect(&self, frame: &Frame) -> Result<Vec<DetectedObject>> {
+            self.pictures
+                .lock()
+                .unwrap()
+                .push((frame.width, frame.height));
+            Ok(self.objects.clone())
+        }
+    }
+
+    /// The detector's own picture, smaller than the camera's so a test can tell them apart.
+    fn analysis_picture() -> Frame {
+        Frame {
+            width: 32,
+            height: 18,
+            rgb: vec![20; Frame::expected_len(32, 18)],
+            captured_at: Utc::now(),
+        }
+    }
+
+    /// Camera JPEGs as the Jetson capture sends them; `with_picture` says which carry the
+    /// detector's picture, and `wait` holds a frame back that long.
+    struct HardwareFrames(VecDeque<(Duration, CapturedFrame)>);
+
+    impl HardwareFrames {
+        fn new(frames: Vec<(Frame, bool, Duration)>) -> Self {
+            Self(
+                frames
+                    .into_iter()
+                    .map(|(f, with_picture, wait)| {
+                        let frame = CapturedFrame::Jpeg(JpegFrame {
+                            jpeg: Arc::new(crate::snapshot::frame_to_jpeg_bytes(&f).unwrap()),
+                            luma: None,
+                            analysis: with_picture.then(analysis_picture),
+                            captured_at: f.captured_at,
+                        });
+                        (wait, frame)
+                    })
+                    .collect(),
+            )
+        }
+
+        /// Still, then something appears and stays for `stay` frames, each with a picture.
+        fn someone_arrives(stay: usize) -> Self {
+            let mut frames = vec![(flat(20), true, Duration::ZERO)];
+            frames.extend((0..stay).map(|_| (with_square(20), true, Duration::ZERO)));
+            Self::new(frames)
+        }
+    }
+
+    #[async_trait]
+    impl FrameSource for HardwareFrames {
+        async fn next_frame(&mut self) -> Result<Option<CapturedFrame>> {
+            let Some((wait, frame)) = self.0.pop_front() else {
+                return Ok(None);
+            };
+            tokio::time::sleep(wait).await;
+            Ok(Some(frame))
+        }
+    }
+
+    /// An unknown face until call `known_from`, then the household's `jerry`.
+    struct FaceAfter {
+        known_from: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl FaceRecognition for FaceAfter {
+        async fn register_face(
+            &self,
+            _profile_id: &str,
+            _image_bytes: &[u8],
+            _bbox: Option<BoundingBox>,
+        ) -> Result<pond_core::user_data::domain::face_recognition::FaceEmbedding> {
+            unimplemented!()
+        }
+
+        async fn identify_face(
+            &self,
+            _image_bytes: &[u8],
+            _bbox: Option<BoundingBox>,
+        ) -> Result<pond_core::user_data::domain::face_recognition::FaceIdentification> {
+            use pond_core::user_data::domain::face_recognition::FaceIdentification;
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            Ok(if call >= self.known_from {
+                FaceIdentification::found("jerry".into(), 0.9)
+            } else {
+                FaceIdentification {
+                    identified: false,
+                    profile_id: None,
+                    confidence: Some(0.2),
+                }
+            })
+        }
+
+        async fn list_embeddings(
+            &self,
+            _profile_id: &str,
+        ) -> Result<Vec<pond_core::user_data::domain::face_recognition::FaceEmbedding>> {
+            Ok(vec![])
+        }
+
+        async fn delete_embeddings(&self, _profile_id: &str) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn pairwise_similarities(
+            &self,
+        ) -> Result<Vec<pond_core::user_data::ports::face_recognition::PairwiseSimilarity>>
+        {
+            Ok(vec![])
+        }
+
+        fn match_threshold(&self) -> f32 {
+            0.7
+        }
+    }
+
+    /// No cooldown, so only the tracking can be what holds events back.
+    fn no_cooldown() -> VisionPipelineConfig {
+        VisionPipelineConfig {
+            min_event_interval: Some(Duration::ZERO),
+            ..cfg()
+        }
+    }
+
+    async fn follow(
+        mut source: HardwareFrames,
+        locator: Arc<Locator>,
+        face: Option<Arc<dyn FaceRecognition>>,
+    ) -> Vec<(CameraEvent, serde_json::Value)> {
+        let storage = Arc::new(MockCameraStorage::new());
+        let registry = LiveCameraRegistry::new();
+        registry.sync_settings(&pond_core::user_data::domain::settings::Settings {
+            vision_event_types: vec!["person".into(), "pet".into(), "motion".into()],
+            ..Default::default()
+        });
+        run_vision_pipeline(
+            &mut source,
+            Some(locator),
+            face.map(|f| Arc::new(FaceRecognitionSlot::ready(f))),
+            storage.clone(),
+            Arc::new(InProcessEventBus::new()),
+            &registry,
+            no_cooldown(),
+        )
+        .await
+        .unwrap();
+        let mut events = storage.list_events("backyard-cam", 100).await.unwrap();
+        events.sort_by_key(|e| e.id);
+        events
+            .into_iter()
+            .map(|e| {
+                let meta = serde_json::from_str(e.metadata.as_deref().unwrap()).unwrap();
+                (e, meta)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_person_who_stays_in_view_is_one_event_and_one_face_try() {
+        let face = Arc::new(FaceAfter {
+            known_from: 1,
+            calls: Default::default(),
+        });
+        let locator = Locator::seeing(&[("person", 0.1)]);
+        let events = follow(
+            HardwareFrames::someone_arrives(8),
+            locator.clone(),
+            Some(face.clone()),
+        )
+        .await;
+
+        assert_eq!(
+            events.len(),
+            1,
+            "one event however long they stay: {events:?}"
+        );
+        let (event, meta) = &events[0];
+        assert_eq!(event.event_type, "person");
+        assert_eq!(meta["track_id"], 1);
+        assert_eq!(meta["identified_profile"], "jerry");
+        assert_eq!(
+            face.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a known face is matched once per person"
+        );
+        assert!(
+            locator.pictures.lock().unwrap().len() >= 7,
+            "the detector keeps looking while they are in view"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_face_is_tried_again_and_announced_once_it_is_known() {
+        let face = Arc::new(FaceAfter {
+            known_from: 2,
+            calls: Default::default(),
+        });
+        let later = FACE_RETRY + Duration::from_millis(100);
+        let source = HardwareFrames::new(vec![
+            (flat(20), true, Duration::ZERO),
+            (with_square(20), true, Duration::ZERO),
+            (with_square(20), true, Duration::ZERO),
+            (with_square(20), true, Duration::ZERO),
+            (with_square(20), true, later),
+            (with_square(20), true, Duration::ZERO),
+        ]);
+        let events = follow(
+            source,
+            Locator::seeing(&[("person", 0.1)]),
+            Some(face.clone()),
+        )
+        .await;
+
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(
+            events[0].1["face_unknown"], true,
+            "announced at once, face unknown"
+        );
+        assert_eq!(events[1].1["identified_profile"], "jerry");
+        assert_eq!(
+            events[0].1["track_id"], events[1].1["track_id"],
+            "the same person"
+        );
+        assert_eq!(face.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn two_people_in_view_are_two_events() {
+        let events = follow(
+            HardwareFrames::someone_arrives(4),
+            Locator::seeing(&[("person", 0.05), ("person", 0.7)]),
+            None,
+        )
+        .await;
+        let tracks: Vec<_> = events.iter().map(|(_, m)| m["track_id"].clone()).collect();
+        assert_eq!(tracks, vec![serde_json::json!(1), serde_json::json!(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_person_too_small_for_a_motion_event_still_sets_the_detector_looking() {
+        let storage = Arc::new(MockCameraStorage::new());
+        let mut cfg = no_cooldown();
+        cfg.motion.changed_fraction = 0.9;
+        run_vision_pipeline(
+            &mut HardwareFrames::someone_arrives(3),
+            Some(Locator::seeing(&[("person", 0.1)])),
+            None,
+            storage.clone(),
+            Arc::new(InProcessEventBus::new()),
+            &LiveCameraRegistry::new(),
+            cfg,
+        )
+        .await
+        .unwrap();
+        let events = storage.list_events("backyard-cam", 10).await.unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "person");
+    }
+
+    #[tokio::test]
+    async fn two_people_seen_at_once_cost_one_face_match() {
+        let face = Arc::new(FaceAfter {
+            known_from: 99,
+            calls: Default::default(),
+        });
+        let events = follow(
+            HardwareFrames::someone_arrives(3),
+            Locator::seeing(&[("person", 0.05), ("person", 0.7)]),
+            Some(face.clone()),
+        )
+        .await;
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(face.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn motion_without_people_is_named_by_the_detectors_look() {
+        let locator = Locator::seeing(&[("pet", 0.4)]);
+        let events = follow(HardwareFrames::someone_arrives(1), locator.clone(), None).await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0.event_type, "pet");
+        assert!(events[0].1.get("track_id").is_none());
+        assert_eq!(
+            locator.classified.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no second model run to name it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_detector_only_reads_the_capture_s_own_pictures() {
+        // The picture rides on every other frame, as the 5 fps branch does under a faster camera.
+        let mut frames = vec![(flat(20), true, Duration::ZERO)];
+        frames.extend((0..8).map(|i| (with_square(20), i % 2 == 0, Duration::ZERO)));
+        let locator = Locator::seeing(&[("person", 0.1)]);
+        follow(HardwareFrames::new(frames), locator.clone(), None).await;
+
+        let pictures = locator.pictures.lock().unwrap().clone();
+        assert_eq!(pictures.len(), 4, "one look per picture: {pictures:?}");
+        assert!(
+            pictures.iter().all(|&size| size == (32, 18)),
+            "never a CPU decode of the camera's JPEG: {pictures:?}"
+        );
     }
 }

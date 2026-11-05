@@ -344,13 +344,19 @@ See [wake-word-calibration.md](wake-word-calibration.md).
 ### pairing
 
 ```bash
-pond-server pairing [--refresh]
+pond-server pairing [--refresh] [--member <PROFILE_ID>]
 ```
 
 Asks the running server (`127.0.0.1:<.runtime_api_port>`, with the host credential) for the current
 pairing code, or for a new one when none is live or `--refresh` is given. Prints the six-digit code,
-its expiry, where the phone connects, the key it pins, and a QR code for Goose On The Go. Fails if
-the server is not running under this account.
+its expiry, whose the device that pairs with it becomes, where the phone connects, the key it pins,
+and a QR code for Goose On The Go. Fails if the server is not running under this account.
+
+Without `--member` the server decides whose the device becomes: a household of one binds it to that
+member, any other household binds it to nobody, and a device that belongs to nobody is a guest once
+there are two members. `--member <PROFILE_ID>` (an `id` from `GET /api/v1/profiles`) always issues a
+fresh code for that member. A phone that is already paired is linked to its member by pairing it
+again with such a code: the app keeps its install id, so the same device row takes the new owner.
 
 ### setup-code
 

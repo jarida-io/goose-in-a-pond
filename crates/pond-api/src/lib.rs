@@ -4,10 +4,13 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
+pub mod device_events;
 pub mod download_failure;
 pub mod host_guard;
+pub mod idempotency;
 pub(crate) mod image_normalize;
 pub mod insecure_dev;
+pub(crate) mod member_notes;
 pub mod middleware;
 pub mod model_acquisition;
 pub(crate) mod model_views;
@@ -20,8 +23,10 @@ pub mod pond_admin;
 pub mod quiet_pass;
 mod report_export;
 pub mod rides;
+pub mod room_voice;
 pub mod routes;
 pub mod runs;
+pub mod speech_model;
 pub mod spoken_code;
 pub mod spotify_focus;
 #[cfg(feature = "test-support")]
@@ -29,6 +34,8 @@ pub mod test_support;
 pub mod thought_filter;
 pub mod tool_context;
 pub mod uber_accounts;
+pub mod voice_agent;
+mod voice_match;
 pub mod voice_sample;
 pub mod web_search;
 
@@ -58,12 +65,12 @@ use pond_core::mcp::ports::extension_marketplace::ExtensionMarketplace;
 use pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort;
 use pond_core::mcp::ports::mcp_server::McpServerRepository;
 use pond_core::models::ports::agent::Agent;
-use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
 use pond_core::models::ports::model_repository::ModelRepository;
 use pond_core::models::ports::model_scheduler::ModelScheduler;
 use pond_core::models::ports::provider::LlmProvider;
 use pond_core::models::ports::voice_output::VoiceOutput;
+use pond_core::models::services::active_embedder::ActiveEmbedder;
 use pond_core::security::ports::handshake::Handshake;
 use pond_core::security::ports::policy::SecurityPolicy;
 use pond_core::security::ports::telemetry::TelemetryPort;
@@ -113,6 +120,10 @@ pub struct AppState {
     pub agent: Arc<dyn Agent>,
     /// Warm-up status for `GET /api/v1/warmup`; `std` lock since its writer is a sync callback.
     pub warmup: Arc<std::sync::RwLock<WarmupStatus>>,
+    /// Serve's room voice loop, behind `/voice/room`; `None` where serve runs none.
+    pub room_voice: Option<Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>>,
+    /// Voice Match's speaker model and enrolment takes; `None` where serve built none.
+    pub voice_match: Option<Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine>>,
     /// Hot-swappable when role assignments change; `None` inside the lock falls back to `agent`.
     pub llm_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
     /// Local llamafile base URL, kept so settings changes can rebuild the ModelRouter live.
@@ -134,13 +145,13 @@ pub struct AppState {
     pub matter: Option<Arc<dyn pond_core::user_data::ports::matter_runtime::MatterRuntimePort>>,
     /// Memory fragment repository for semantic/recency-based retrieval.
     pub memory_repo: Arc<dyn MemoryRepository + Send + Sync>,
-    /// `None` until a real embedding model is configured.
-    pub embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
+    /// The Memory-role embedder, switched live by [`apply_embedding_choice`]; off in tests.
+    pub embedder: Arc<ActiveEmbedder>,
     /// The personal-context index retrieval reads; `None` on CLI paths and in tests.
-    /// Don't copy the model id here: [`Self::embedding_provider`] owns it, and a copy drifts.
+    /// Don't copy the model id here: [`Self::embedder`] owns it, and a copy drifts.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
-    /// Wakes the maintenance sweep to refill after the rebuild route clears the index.
-    /// `None` with no sweep to wake; the route still clears, and the next process refills.
+    /// The embedding slot's bell, rung after the rebuild route clears the index.
+    /// `None` with no slot to wake; the route still clears, and the next process refills.
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
     /// Inference lane jobs and run-now; `None` (CLI, tests) is reported as no lane, not as empty.
     pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,
@@ -257,6 +268,9 @@ pub struct AppState {
     /// Offline queue, flushed on stream connect to a device that was disconnected.
     pub notification_queue:
         Option<Arc<dyn pond_core::mcp::ports::notification_queue::NotificationQueueRepository>>,
+    /// The household's record of durable notices, read by `GET /notifications/history`.
+    pub notification_history:
+        Option<Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>>,
     /// What producers (`send_notification`, the schedule bridge) send through.
     pub notification_sender:
         Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>>,
@@ -309,6 +323,8 @@ pub struct AppState {
     pub spoken_codes: Arc<crate::spoken_code::SpokenCodes>,
     /// The voice-sample route's limiter, shared by every caller; it speaks through `tts`.
     pub voice_samples: Arc<crate::voice_sample::VoiceSamples>,
+    /// Device state changes for `/devices/events`, kept so a phone can resume.
+    pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
 }
@@ -354,6 +370,18 @@ fn unix_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or_default()
 }
+
+/// Applies the embedding settings now: a new model replaces the loaded one and loads in the
+/// background, so a save never waits on a model load.
+pub async fn apply_embedding_choice(
+    state: &AppState,
+    settings: &pond_core::user_data::domain::settings::Settings,
+) {
+    let choice = pond_core::models::domain::embedding_models::EmbedderChoice::resolve(settings);
+    state.embedder.choose(choice).await;
+}
+
+pub use voice_agent::{compile_voice_prefill, spawn_voice_prefill};
 
 /// Background prefix warm-up, mirrored into `state.warmup`; a failed warm-up just starts cold.
 pub fn spawn_prefix_prewarm(state: Arc<AppState>, voice_mode: bool) -> tokio::task::JoinHandle<()> {
@@ -600,6 +628,12 @@ pub struct ModelStatusEntry {
     /// Why `available` is false, e.g. `litert_library_missing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<pond_core::models::domain::engine::EngineUnavailable>,
+    /// The jobs this row is doing now, read from settings (`model_use::RoleHolders`). Empty for
+    /// a row that holds none; `active` stays the assignment-table flag it always was.
+    #[serde(default)]
+    pub roles: Vec<pond_core::models::domain::model_use::ModelUse>,
+    /// The section both clients list this row under.
+    pub section: pond_core::models::domain::model_use::ModelSection,
 }
 
 /// A row that says nothing about availability was listed by a pond that could run it.
@@ -707,12 +741,13 @@ fn build_transport_router(state: Arc<AppState>, static_dir: Option<std::path::Pa
     ));
 
     let mut router = Router::new().nest("/api/v1", routes::api_routes(state.clone()));
-    if let Some(static_dir) = static_dir {
-        router = router
+    router = match static_dir {
+        Some(static_dir) => router
             .route("/dev/test", axum::routing::get(routes::dev_test_page))
             .route("/dev/face", axum::routing::get(routes::dev_face_page))
-            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone()));
-    }
+            .fallback(move |uri: axum::http::Uri| routes::serve_web(uri, static_dir.clone())),
+        None => router.fallback(routes::api_not_found),
+    };
     router
         .layer(axum::middleware::from_fn(middleware::log_requests))
         // Must come after log_requests: axum applies layers in reverse order.

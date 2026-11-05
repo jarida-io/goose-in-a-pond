@@ -22,6 +22,7 @@ import { KeptResultNote } from "../components/KeptResultNote";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
+import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
 import { AttachmentTray } from "../components/AttachmentTray";
 import { ComposerMenu } from "../components/ComposerMenu";
 import { ResearchModeChip } from "../components/ResearchModeChip";
@@ -53,6 +54,7 @@ import { useConversationModel } from "../hooks/useConversationModel";
 import { useDeepResearch } from "../hooks/useDeepResearch";
 import { ModelSwitcher } from "../components/ModelSwitcher";
 import { NoModelPicks } from "../components/models/NoModelPicks";
+import { MarkdownText } from "../components/MarkdownText";
 
 export function Chat() {
   const state    = useAppState();
@@ -272,11 +274,12 @@ export function Chat() {
     api.listSessions()
       .then((list) => {
         setSessions(list);
-        setView(list.length > 0 ? "history" : "thread");
+        // Unless something opened a screen meanwhile, such as a notification's conversation.
+        setView((v) => v ?? (list.length > 0 ? "history" : "thread"));
       })
       .catch((err) => {
         console.warn("Could not list conversations (non-fatal):", err);
-        setView("thread");
+        setView((v) => v ?? "thread");
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.serverOnline]);
@@ -294,7 +297,7 @@ export function Chat() {
   }, [view, busy, run.completedTurns]);
 
   /** Open one conversation from the wall, growing it out of the card pressed. */
-  const openConversation = useCallback((id: string, origin: OpenOrigin) => {
+  const openConversation = useCallback((id: string, origin: OpenOrigin | null) => {
     setOpenOrigin(origin);
     setView("thread");
     acknowledgeCompletion();
@@ -304,6 +307,20 @@ export function Chat() {
     // Opening another conversation stops the current turn rather than let it answer unseen.
     void openSession(id, { stopCurrentRun: true });
   }, [dispatch, leaveResearch]);
+
+  // A conversation a notification asked for, taken once. It opens only if the Pond has it for this
+  // dashboard: one deleted since, or another member's (both read as missing), leaves the chat where
+  // it would have opened anyway.
+  const requested = state.requestedConversation;
+  useEffect(() => {
+    if (!requested || !state.serverOnline) return;
+    dispatch({ type: "TAKE_CONVERSATION_REQUEST" });
+    api.getSessionMessages(requested, 1)
+      .then(() => openConversation(requested, null))
+      .catch((err) => {
+        console.warn("[notifications] the conversation a notice named could not be opened; showing chat:", err);
+      });
+  }, [requested, state.serverOnline, dispatch, openConversation]);
 
   const beginTitleEdit = useCallback(() => {
     if (!getChatRun().sessionId) return;
@@ -432,7 +449,7 @@ export function Chat() {
     }
 
     if (asResearch) {
-      sendTurn({ text, deepResearch: true });
+      sendTurn({ text, deepResearch: true, deepResearchAnswer: deepResearch.answer });
       leaveResearch();
       setAttachError(null);
       return;
@@ -442,7 +459,7 @@ export function Chat() {
     sendTurn({ text, attachments });
     setAttachments([]);
     setAttachError(null);
-  }, [input, attachments, busy, state.serverOnline, gateBlocked, deepResearch.on, leaveResearch]);
+  }, [input, attachments, busy, state.serverOnline, gateBlocked, deepResearch.on, deepResearch.answer, leaveResearch]);
 
   // On the busy -> idle edge: refresh the list (it carries the server-derived title) and refocus.
   const prevBusyRef = useRef(busy);
@@ -754,6 +771,9 @@ export function Chat() {
                     ))}
                   </div>
                 )}
+                {msg.role === "agent" && msg.steps && msg.steps.length > 0 && (
+                  <StepsDisclosure steps={msg.steps} />
+                )}
                 {msg.role === "agent" && msg.keptResults?.map((kept, i) => (
                   <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
                 ))}
@@ -817,7 +837,9 @@ export function Chat() {
                       </div>
                     </div>
                   ) : (
-                    msg.text || (msg.streaming
+                    msg.role === "agent" && msg.text && !msg.error
+                      ? <MarkdownText source={msg.text} />
+                      : msg.text || (msg.streaming
                       ? msg.status
                         ? <ThinkingPlaceholder status={msg.status} />
                         : <span className="stream-dots"><span /><span /><span /></span>
@@ -955,7 +977,15 @@ export function Chat() {
           reply queues the message instead of being swallowed. */}
       {busy && <TypingIndicator seed={turnSeed} />}
 
-      {deepResearch.on && <ResearchModeChip variant="classic" waiting={busy} onLeave={onLeaveResearch} />}
+      {deepResearch.on && (
+        <ResearchModeChip
+          variant="classic"
+          waiting={busy}
+          onLeave={onLeaveResearch}
+          answer={deepResearch.answer}
+          onAnswer={deepResearch.setAnswer}
+        />
+      )}
 
       <div className={`chat2__composer${busy ? " is-busy" : ""}`}>
         <ComposerMenu

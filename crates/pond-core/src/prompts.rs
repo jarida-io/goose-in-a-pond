@@ -10,14 +10,44 @@ use crate::user_data::domain::settings::Settings;
 /// Per-user profile preferences for the system prompt, extracted from `Profile.preferences`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileContext {
-    /// What the user wants to be called (e.g. "Jerry", "Captain").
-    pub preferred_name: Option<String>,
+    /// Who is speaking: the member's preferred name, else their display name. Set only when the
+    /// turn is attributed to that member, so a guest or an unidentified speaker is never named.
+    pub speaker_name: Option<String>,
     /// User's birthday in ISO format (YYYY-MM-DD), for greetings.
     pub birthday: Option<String>,
     /// BCP-47 language code, e.g. "en", "fr", "sw". When set, Goose responds in that language.
     pub language: Option<String>,
     /// If true, Goose phrasing should be patient and forgiving of non-standard speech.
     pub atypical_speech: bool,
+    /// The speaker's own standing notes; set only when the turn is theirs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
+}
+
+impl ProfileContext {
+    /// What the prompt may state on a turn that is the member's own; the keys are the contract
+    /// with `PATCH /api/v1/profiles/{id}`. The speaker is named by their preferred name, else
+    /// their display name: most members never set a preferred name, and "who am I" still needs
+    /// one. A blank value names nobody.
+    pub fn of_member(
+        display_name: &str,
+        prefs: &std::collections::HashMap<String, String>,
+        member_notes: Vec<crate::user_data::domain::prompt_extra::PromptExtra>,
+    ) -> Self {
+        let named = |name: &str| (!name.trim().is_empty()).then(|| name.to_string());
+        Self {
+            speaker_name: prefs
+                .get("preferred_name")
+                .and_then(|name| named(name))
+                .or_else(|| named(display_name)),
+            birthday: prefs.get("birthday").cloned(),
+            language: prefs.get("language").cloned(),
+            atypical_speech: prefs
+                .get("accessibility_atypical_speech")
+                .is_some_and(|v| v == "true"),
+            member_notes,
+        }
+    }
 }
 
 // ── Runtime prompt state ──────────────────────────────────────────────────────
@@ -151,7 +181,8 @@ Clear, direct language; no pipeline control tokens. \
 Your reply is the answer itself, not an account of how you got it: anything in angle \
 brackets, the tools you called and any reminder the system gives you are plumbing and \
 stay out of it. If you fell short, say which part you could not do, in ordinary words. \
-Asked outright how you know something, say so plainly.";
+Asked outright how you know something, say so plainly. \
+Reply in the language the user writes in.";
 
 // The session-title prompt lives in `shared::services::session_title`, beside its normaliser.
 
@@ -175,7 +206,8 @@ Concise, practical answers. No pipeline artifacts.
 Your reply is the answer, not the route to it. Angle-bracket tags, tool calls \
 and system reminders are plumbing — never mention them; if you fell short, say \
 which part, plainly. Asked how you know, say.{% if tools_offered %} Only tools in your \
-schema; beyond them, say so.{% endif %}
+schema; beyond them, say so. Call a tool without announcing it; answer once you \
+have what you need.{% endif %} Reply in the language the user writes in.
 </instructions>
 
 <context-handling>
@@ -240,8 +272,8 @@ The result, never the route to it. Angle-bracket tags, tool names, steps and sys
 reminders are machinery — never mention them. Fell short? Say which part, \
 plainly. Asked how you know, say.
 General copilot: writing, research, coding, planning{% if tools_offered %}, home control{% endif %}.
-{% if tools_offered %}Only tools in your schema.
-{% endif %}
+{% if tools_offered %}Only tools in your schema. Call tools silently; answer once done.
+{% endif %}Reply in the user's language.
 </instructions>
 <context-handling>
 <system-context> = date, time, <memories> — data, not a question. Answer \
@@ -297,7 +329,8 @@ not approximations. No role delimiters or pipeline artifacts.
 State the result, not the route; a one-line plan before a multi-step task, no \
 running commentary. Angle-bracket tags, tool names and system reminders are \
 harness internals — never quote them; report a shortfall in domain terms: what \
-you could not determine. Asked how you know, answer.{% if tools_offered %} Only tools in your schema.{% endif %}
+you could not determine. Asked how you know, answer.{% if tools_offered %} Only tools in your schema.{% endif %} \
+Reply in the language the user writes in.
 </instructions>
 <context-handling>
 <system-context> (date/time, <memories>) is context, never a question — respond \
@@ -359,7 +392,9 @@ questions. Short clear answers, conversational tone, no pipeline artifacts.
 I give you the answer, not the story of how I got it. Angle brackets, tool \
 names, system reminders — machinery; I never mention it. If I came up short, I \
 say what I couldn't find. Ask me straight out how I know and I'll tell you.\
-{% if tools_offered %} I only use the tools I've been given.{% endif %}
+{% if tools_offered %} I only use the tools I've been given, and quietly: no \
+announcing, just the answer once I have it.{% endif %} I reply in the language \
+you write to me in.
 </instructions>
 <context-handling>
 <system-context> (time, date, <memories>) is context, not a question — I only \
@@ -464,6 +499,35 @@ pub const BUILTIN_PROMPT_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The text inside a template's `<voice-mode>` section, tags and their line breaks excluded.
+pub fn voice_mode_body(template: &str) -> Option<&str> {
+    let (start, end) = voice_mode_span(template)?;
+    template.get(start..end)
+}
+
+/// `template` with its `<voice-mode>` text replaced by `body`, which Tera prints as written: it
+/// is the household's text, and a brace in it must not become a template tag.
+pub fn with_voice_mode_body(template: &str, body: &str) -> Option<String> {
+    let (start, end) = voice_mode_span(template)?;
+    // `{%` is the only way out of a raw block, so the text cannot hold one.
+    let body = body.replace("{%", "{ %");
+    let mut out = String::with_capacity(template.len() + body.len() + 32);
+    out.push_str(template.get(..start)?);
+    out.push_str("{% raw %}");
+    out.push_str(&body);
+    out.push_str("{% endraw %}");
+    out.push_str(template.get(end..)?);
+    Some(out)
+}
+
+fn voice_mode_span(template: &str) -> Option<(usize, usize)> {
+    const OPEN: &str = "<voice-mode>\n";
+    const CLOSE: &str = "\n</voice-mode>";
+    let start = template.find(OPEN)? + OPEN.len();
+    let end = start + template.get(start..)?.find(CLOSE)?;
+    Some((start, end))
+}
+
 /// Factory-default `(content, description)` for a built-in name; `None` for any other name.
 pub fn builtin_template_content(name: &str) -> Option<(&'static str, &'static str)> {
     BUILTIN_PROMPT_TEMPLATES
@@ -475,19 +539,18 @@ pub fn builtin_template_content(name: &str) -> Option<(&'static str, &'static st
 // ── Sanitization ──────────────────────────────────────────────────────────────
 
 /// Who the pond is talking to, shared by the Goose adapter and `prompt_builder`; any text change
-/// invalidates every cached KV prefix. A preferred name equal to `user_name` adds no line.
-pub fn profile_context_lines(profile: Option<&ProfileContext>, user_name: &str) -> Vec<String> {
+/// invalidates every cached KV prefix.
+///
+/// The speaker line is stated even when the name equals `Settings::user_name`: the template names
+/// whose pond this is, never who is speaking, and a small model will not join the two by itself.
+pub fn profile_context_lines(profile: Option<&ProfileContext>) -> Vec<String> {
     let Some(ctx) = profile else {
         return Vec::new();
     };
-    let user = sanitize_field(user_name, 50);
     let mut lines: Vec<String> = Vec::with_capacity(4);
 
-    if let Some(ref pname) = ctx.preferred_name {
-        let pname = sanitize_field(pname, 50);
-        if !pname.is_empty() && pname != user {
-            lines.push(format!("The user prefers to be called {}.", pname));
-        }
+    if let Some(line) = ctx.speaker_name.as_deref().and_then(speaker_line) {
+        lines.push(line);
     }
 
     if let Some(ref lang) = ctx.language {
@@ -513,6 +576,13 @@ pub fn profile_context_lines(profile: Option<&ProfileContext>, user_name: &str) 
     }
 
     lines
+}
+
+/// The one line that tells the model who is speaking; `None` for a name that sanitizes to nothing.
+/// One line, under 30 tokens for a three-word name: it rides every turn's `<system-context>`.
+fn speaker_line(name: &str) -> Option<String> {
+    let name = sanitize_field(name, 50);
+    (!name.is_empty()).then(|| format!("You are talking with {name}; \"I\" means them."))
 }
 
 /// A BCP-47 code as a language a model recognises. Unknown codes pass through.
@@ -679,7 +749,7 @@ pub fn build_system_prompt_with_profile(
     let base = render_jinja_template(&tmpl, settings, None, profile);
 
     // ── Profile context lines ─────────────────────────────────────────────────
-    let profile_lines = profile_context_lines(profile, &settings.user_name);
+    let profile_lines = profile_context_lines(profile);
 
     let addendum = sanitize_field(&settings.prompt_addendum, 500);
 
@@ -724,7 +794,7 @@ pub fn build_system_prompt_from_template_full(
     };
 
     // ── Profile context lines ─────────────────────────────────────────────────
-    let profile_lines = profile_context_lines(profile, &settings.user_name);
+    let profile_lines = profile_context_lines(profile);
 
     let addendum = sanitize_field(&settings.prompt_addendum, 500);
     let mut parts = vec![base];

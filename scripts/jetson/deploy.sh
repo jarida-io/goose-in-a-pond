@@ -69,7 +69,15 @@ else
   # First, so a package that fails its checks stops the deploy before the device changes.
   # shellcheck source=../lib/litert-setup.sh
   source "${REPO_ROOT}/scripts/lib/litert-setup.sh"
-  REMOTE_LITERT="${JETSON_DATA_DIR:-.local/share/goose-in-a-pond}/$(litert_device_subdir)"
+  # A pond run by agamemnon keeps its data where only agamemnon writes, which the login reaches
+  # through the sudo rule `giap.sh service-account` gave it.
+  REMOTE_AS=""
+  REMOTE_DATA="${JETSON_DATA_DIR:-}"
+  if [ "$(jetson_ssh "sed -n 's/^User=//p' /etc/systemd/system/goose-in-a-pond.service 2>/dev/null | head -1")" = agamemnon ]; then
+    REMOTE_AS="sudo -n -u agamemnon"
+    [ -n "$REMOTE_DATA" ] || REMOTE_DATA=/var/lib/goose-in-a-pond
+  fi
+  REMOTE_LITERT="${REMOTE_DATA:-.local/share/goose-in-a-pond}/$(litert_device_subdir)"
   LITERT_DIR="$(litert_recorded_dir linux-arm64)"
   echo "==> [1/5] LiteRT-LM library -> ${HOST}:${REMOTE_LITERT}"
   if [ -z "${LITERT_DIR}" ]; then
@@ -81,8 +89,8 @@ else
     echo "  Rebuild it: bash scripts/giap.sh litert build linux-arm64" >&2
     exit 1
   else
-    jetson_ssh "mkdir -p '${REMOTE_LITERT}'"
-    jetson_rsync "${LITERT_DIR}/" "${REMOTE_LITERT}/"
+    jetson_ssh "${REMOTE_AS:+$REMOTE_AS }mkdir -p '${REMOTE_LITERT}'"
+    jetson_rsync "${LITERT_DIR}/" "${REMOTE_LITERT}/" "${REMOTE_AS:+$REMOTE_AS rsync}"
     # The manifest's first line describes the build; every other line is a sha256sum line.
     jetson_ssh "cd '${REMOTE_LITERT}' \
       && tail -n +2 MANIFEST.sha256 | sha256sum -c --quiet --strict - \
@@ -126,7 +134,7 @@ fi
 if [ "${RESTART}" -eq 0 ]; then
   JETSON_POND_SETTLED=1
   echo "==> [5/5] Service left as it is (--no-restart)"
-  echo "    Start it with: ssh ${HOST} systemctl --user start goose-in-a-pond.service"
+  echo "    Start it with: ssh ${HOST} ${JETSON_POND_START_HINT}"
   exit 0
 fi
 
@@ -136,7 +144,8 @@ echo "==> [5/5] Restarting service + health check"
 # which is tens of seconds on this board -- a fixed `sleep 4` reported HTTP 000
 # and a failed deploy for a service that was starting perfectly normally.
 JETSON_POND_SETTLED=1
-jetson_ssh "systemctl --user restart goose-in-a-pond.service || exit 1
+jetson_ssh "$JETSON_POND_FNS
+  pond_ctl restart || exit 1
   rm -f ~/${JETSON_REMOTE_DIR}/${JETSON_POND_STOPPED_MARK}
   for i in \$(seq 1 60); do
     code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/api/v1/health 2>/dev/null)
@@ -144,7 +153,7 @@ jetson_ssh "systemctl --user restart goose-in-a-pond.service || exit 1
     sleep 10
   done
   echo 'API: never answered 200 within 10 minutes' >&2
-  systemctl --user --no-pager status goose-in-a-pond.service | head -12 >&2
+  pond_status | head -12 >&2
   exit 1"
 
 # The HTTP listener is loopback-only; phones use pinned HTTPS (normally 4443). Same port both

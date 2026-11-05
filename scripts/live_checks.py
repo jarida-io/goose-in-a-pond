@@ -317,6 +317,20 @@ def section_deletion(jerry, liz):
                   ("bound", body and body.get("bound") is True)):
         return
 
+    # A display name is not a member's id: a household once stored one and matched nobody.
+    code, body = call("PUT", "/api/v1/settings", {"primary_profile_id": "Liz"})
+    expect(
+        "primary_profile_id refuses a name that is not a member's id",
+        code,
+        422,
+        body,
+        (
+            "names the field",
+            body is not None
+            and any(f.get("field") == "primary_profile_id" for f in body.get("fields", [])),
+        ),
+    )
+
     # Make Liz the primary member, so the dangling-reference fix is exercised.
     code, _ = call("PUT", "/api/v1/settings", {"primary_profile_id": liz})
     check("set Liz as primary member", code == 200)
@@ -1101,7 +1115,7 @@ def section_redaction():
 VECTORS_DB = os.path.join(DATA_DIR, "pond_vectors.db")
 
 # Stored by live-test.sh with no vector while the first server is down, so only the second
-# server's boot backfill can have embedded it.
+# server's embedding slot can have embedded it.
 UNEMBEDDED_BEFORE_RESTART_ID = "live-unembedded-before-restart"
 
 
@@ -1164,6 +1178,29 @@ def _embedder_dims(label):
         )
         return None
     return health.get("dims")
+
+
+def _wait_for_embedder(seconds):
+    """Waits until the embedder has loaded and the index holds every row.
+
+    It loads in the background after boot, never inside a request, so a memory saved before
+    then is embedded later. The write-path checks need it loaded, and a catch-up still running
+    would embed the redacted credential they expect to have no vector yet.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + seconds
+    health = None
+    while _time.monotonic() < deadline:
+        code, health = call("GET", "/api/v1/context/index/health")
+        if code == 200 and isinstance(health, dict):
+            state = (health.get("embedder") or {}).get("state")
+            if state in ("off", "failed"):
+                return
+            if state == "ready" and not health.get("missing") and not health.get("mismatched"):
+                return
+        _time.sleep(0.5)
+    print("NOTE  the embedder was not ready and current after %ds: %s" % (seconds, health))
 
 
 def section_memory_vectors():
@@ -1238,12 +1275,11 @@ def section_memory_vectors():
 
 
 def section_memory_vectors_after_restart():
-    """Both repairs for a memory with no vector: the next boot, and the sweep rung by hand.
+    """Both repairs for a memory with no vector: the embedding slot after boot, and Reindex.
 
-    The sweep runs last, after `section_lane_clock_after_restart`, which needs every job but
-    titling never to have run.
+    Runs last: Reindex empties the whole index, which the slot then refills.
     """
-    print("\n=== memory vectors after a restart: the boot backfill and the sweep ===")
+    print("\n=== memory vectors after a restart: the embedding slot and Reindex ===")
     dims = _embedder_dims("memory vectors after a restart")
     if not dims:
         return
@@ -1261,7 +1297,7 @@ def section_memory_vectors_after_restart():
         return
     vector = _wait_for_vector(UNEMBEDDED_BEFORE_RESTART_ID, 30)
     check(
-        "the boot backfill embedded it",
+        "the embedding slot embedded it after boot",
         vector is not None and len(vector) == width,
         "no vector after 30s" if vector is None else "%d bytes" % len(vector),
     )
@@ -1271,7 +1307,7 @@ def section_memory_vectors_after_restart():
         _index_state(UNEMBEDDED_BEFORE_RESTART_ID, vector),
     )
 
-    # A save whose embed failed after boot: only the sweep repairs it.
+    # A save whose embed failed after boot: the slot repairs it, here at once through Reindex.
     sweep_id = "live-unembedded-sweep"
     con = db()
     con.execute(
@@ -1281,17 +1317,17 @@ def section_memory_vectors_after_restart():
     )
     con.commit()
     con.close()
-    code, body = call("POST", "/api/v1/lane/jobs/index_maintenance/run")
+    code, body = call("POST", "/api/v1/context/index/rebuild")
     if expect(
-        "the index sweep can be rung",
+        "Reindex rings the embedding slot",
         code,
         200,
         body,
-        ("it woke", lambda b: isinstance(b, dict) and b.get("woken") is True),
+        ("it is refilling", lambda b: isinstance(b, dict) and b.get("refilling") is True),
     ):
         swept = _wait_for_vector(sweep_id, 60)
         check(
-            "the sweep embedded a memory stored without a vector",
+            "the slot embedded a memory stored without a vector",
             swept is not None and len(swept) == width,
             "no vector after 60s" if swept is None else "%d bytes" % len(swept),
         )
@@ -1404,6 +1440,47 @@ def section_policy_telemetry():
         after["events"]["truncated"] is False,
         str(after["events"]),
     )
+
+
+# ── The household's notification history ──────────────────────────────────────
+
+def section_notification_history(label="the notice history", after_pairing=False):
+    """The dashboard's notification centre reads `GET /notifications/history`.
+
+    Under POND_DEV_ALLOW_LOOPBACK the caller is `Principal::loopback()`, which names no device,
+    so the history must refuse it rather than serve an unscoped household list (a member's
+    notices included). The scoped, authorised read is asserted with real paired tokens and the
+    bypass off, in `remote_auth_checks.py`. Here: the route is registered on the real binary,
+    its migration applied to a database on disk, and, on the restart pass (after
+    `setup_code_checks.py pairing` claimed this pond), that pairing's notice survived the restart.
+    """
+    print("\n=== %s ===" % label)
+    code, body = call("GET", "/api/v1/notifications/history")
+    expect(
+        "%s refuses a caller with no device" % label,
+        code,
+        403,
+        body,
+        ("says why", isinstance(body, dict) and "paired device" in body.get("error", "")),
+    )
+    code, body = call("POST", "/api/v1/notifications/history/read", {"ids": []})
+    expect("%s mark-read refuses a caller with no device" % label, code, 403, body)
+
+    con = db()
+    try:
+        applied = con.execute(
+            "SELECT success FROM _sqlx_migrations WHERE description = 'notification history'"
+        ).fetchone()
+        rows = con.execute("SELECT COUNT(*) FROM notification_history").fetchone()[0]
+    finally:
+        con.close()
+    check("%s: its migration applied" % label, applied == (1,), str(applied))
+    if after_pairing:
+        check(
+            "%s: the pairing that claimed this pond is still recorded" % label,
+            rows >= 1,
+            "%s rows" % rows,
+        )
 
 
 # ── The batch memory-extraction engine ───────────────────────────────────────
@@ -1559,6 +1636,11 @@ def section_inference_lane():
         # answered.
         ("says whether this process has a lane at all", lambda b: "lane" in b),
         ("carries a job list", lambda b: isinstance(b.get("jobs"), list)),
+        (
+            "shows whether the embedding slot is running",
+            lambda b: b.get("lane") is False
+            or isinstance(b.get("embedding_slot", {}).get("running"), bool),
+        ),
     )
 
     jobs = body.get("jobs", []) if isinstance(body, dict) else []
@@ -1579,7 +1661,6 @@ def section_inference_lane():
         "titling",
         "proactive_review",
         "summary_refresh",
-        "index_maintenance",
         "memory_extraction",
     ]
     check(
@@ -2075,12 +2156,14 @@ def main():
         section_picture_support_after_restart()
         section_memory_vectors_after_restart()
         section_vision_after_restart()
+        section_notification_history("the notice history after a restart", after_pairing=True)
     else:
         section_schema()
         jerry, liz = section_identity()
         section_deletion(jerry, liz)
         section_legacy_rows(jerry)
         section_secret_store()
+        _wait_for_embedder(60)
         section_redaction()
         section_memory_vectors()
         section_network_mode()
@@ -2096,6 +2179,7 @@ def main():
         section_inference_lane()
         section_composed_suggestions()
         section_reminders_surface()
+        section_notification_history()
         section_vision()
         # Last: it moves the chat model to a local one for a moment, and puts it back.
         section_picture_support()

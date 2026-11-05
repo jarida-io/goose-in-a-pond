@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use pond_core::models::domain::curated::{self, CuratedModel};
+use pond_core::models::domain::embedding_models::{EmbeddingModel, EMBEDDING_MODELS};
 use pond_core::models::domain::model_record::{BinaryRecord, ModelCategory, ModelRecord};
 use pond_core::models::ports::model_catalog_provider::ModelCatalogProvider;
 
@@ -96,8 +97,22 @@ fn whisper_record(name: &str, filename: &str, size_mb: u64, language: &str) -> M
     }
 }
 
-fn whisper_models() -> Vec<ModelRecord> {
-    vec![
+/// A Whisper fetched at its pinned revision and checked against its SHA-256 on the way in.
+fn pinned_whisper_record(
+    p: &pond_core::models::domain::whisper_models::PinnedWhisper,
+) -> ModelRecord {
+    ModelRecord {
+        description: p.description.to_string(),
+        size_mb: p.size_mb(),
+        url: Some(p.url()),
+        quantization: Some(p.quantization.to_string()),
+        asr_size: Some(p.size.to_string()),
+        ..whisper_record(p.name, p.filename, p.size_mb(), p.language)
+    }
+}
+
+pub(crate) fn whisper_models() -> Vec<ModelRecord> {
+    let mut models = vec![
         whisper_record("tiny", "ggml-tiny.bin", 75, "multilingual"),
         whisper_record("tiny.en", "ggml-tiny.en.bin", 75, "en"),
         whisper_record("base", "ggml-base.bin", 142, "multilingual"),
@@ -112,7 +127,13 @@ fn whisper_models() -> Vec<ModelRecord> {
             809,
             "multilingual",
         ),
-    ]
+    ];
+    models.extend(
+        pond_core::models::domain::whisper_models::PINNED
+            .iter()
+            .map(pinned_whisper_record),
+    );
+    models
 }
 
 // ── Kokoro TTS ────────────────────────────────────────────────────────────────
@@ -248,81 +269,12 @@ fn curated_record(pick: &CuratedModel) -> ModelRecord {
 
 // ── Embedding ────────────────────────────────────────────────────────────────
 
+/// GGUF rows download their pinned file into `models/embedding`; fastembed rows name no file.
 fn embedding_models() -> Vec<ModelRecord> {
-    vec![
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "all-MiniLM-L6-v2"),
-            category: ModelCategory::Embedding,
-            name: "all-MiniLM-L6-v2".to_string(),
-            filename: None, // fastembed downloads automatically
-            description: "all-MiniLM-L6-v2 — fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.".to_string(),
-            size_mb: 23,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(50),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "bge-small-en-v1.5"),
-            category: ModelCategory::Embedding,
-            name: "bge-small-en-v1.5".to_string(),
-            filename: None,
-            description: "BGE Small EN v1.5 — high-quality English embedding model. 33 MB, 384 dimensions.".to_string(),
-            size_mb: 33,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(70),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-        ModelRecord {
-            id: ModelRecord::id_for(&ModelCategory::Embedding, "nomic-embed-text-v1.5"),
-            category: ModelCategory::Embedding,
-            name: "nomic-embed-text-v1.5".to_string(),
-            filename: None,
-            description: "Nomic Embed Text v1.5 — 768-dimension model with Matryoshka support (truncate to 256/384 dims). 274 MB.".to_string(),
-            size_mb: 274,
-            url: None,
-            hf_id: None,
-            ram_estimate_mb: Some(350),
-            recommended_role: Some("embedding".to_string()),
-            context_length: None,
-            quantization: None,
-            asr_language: None,
-            asr_size: None,
-            tts_engine: None,
-            tts_voice_name: None,
-            config_filename: None,
-            config_url: None,
-            tts_url: None,
-            sample_rate: None,
-            downloaded: false,
-            is_custom: false,
-        },
-    ]
+    EMBEDDING_MODELS
+        .iter()
+        .map(EmbeddingModel::record)
+        .collect()
 }
 
 // ── Ollama (local) ────────────────────────────────────────────────────────────
@@ -465,6 +417,33 @@ mod tests {
         }
     }
 
+    /// The room bench's pick: offered for the ASR role, fetched at its pin, sized as it is.
+    #[test]
+    fn small_en_q5_1_is_offered_at_its_pinned_revision() {
+        use pond_core::models::domain::whisper_models::{REPO, REVISION};
+        let row = whisper_models()
+            .into_iter()
+            .find(|m| m.name == "small.en-q5_1")
+            .expect("a catalogue row");
+        assert_eq!(row.id, "whisper/small.en-q5_1");
+        assert_eq!(row.filename.as_deref(), Some("ggml-small.en-q5_1.bin"));
+        assert_eq!(row.recommended_role.as_deref(), Some("asr"));
+        assert_eq!(row.size_mb, 182);
+        assert_eq!(
+            (row.asr_size.as_deref(), row.asr_language.as_deref()),
+            (Some("small"), Some("en"))
+        );
+        assert!(
+            row.description.contains("30% to 14%"),
+            "{}",
+            row.description
+        );
+        let url = row.url.unwrap();
+        let (repo, revision, filename) = pond_hf_cache::parse_hf_url(&url).expect("an HF URL");
+        assert_eq!((repo.as_str(), revision.as_str()), (REPO, REVISION));
+        assert!(curated::file_pin(&repo, &revision, &filename).is_some());
+    }
+
     /// The download pins what the URL names; a `main` URL would fetch whatever is there now.
     #[test]
     fn every_pick_downloads_its_pinned_revision() {
@@ -478,6 +457,28 @@ mod tests {
             assert_eq!(m.id, pin.id());
             assert_eq!(m.size_mb, pin.size_mb(), "{}", m.name);
             assert_eq!(m.category, pin.category());
+        }
+    }
+
+    #[test]
+    fn the_embedding_rows_are_the_table() {
+        let rows: Vec<ModelRecord> = static_models()
+            .into_iter()
+            .filter(|m| m.category == ModelCategory::Embedding)
+            .collect();
+        assert_eq!(rows.len(), EMBEDDING_MODELS.len());
+        for (row, model) in rows.iter().zip(EMBEDDING_MODELS) {
+            assert_eq!(row.id, model.id());
+            match model.gguf() {
+                Some(file) => {
+                    let url = row.url.as_deref().expect("a GGUF row downloads");
+                    let (repo, revision, name) =
+                        pond_hf_cache::parse_hf_url(url).expect("an HF URL");
+                    assert_eq!(curated::file_pin(&repo, &revision, &name), Some(file.pin()));
+                    assert_eq!(row.filename.as_deref(), Some(file.filename));
+                }
+                None => assert!(row.filename.is_none() && row.url.is_none(), "{}", row.name),
+            }
         }
     }
 

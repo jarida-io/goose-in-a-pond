@@ -27,8 +27,14 @@ pub struct Notification {
 /// The set is closed on purpose. A client validates `open` against its own allow-list and ignores
 /// anything else, so a value added here does nothing until the client learns it, and a client
 /// talking to an older pond, which sends no hint, opens its default screen as before.
-/// [`OpenScreen::Schedule`] becomes `{"open": "schedule", "schedule_id": "...", "run_id": "..."}`;
-/// every other screen carries only its name, e.g. `{"open": "devices"}`.
+/// [`OpenScreen::Schedule`] becomes `{"open": "schedule", "schedule_id": "...", "run_id": "..."}`
+/// and [`OpenScreen::ScheduleDetail`] the same without `run_id`; [`OpenScreen::Chat`] becomes
+/// `{"open": "chat", "session_id": "..."}` when it names a conversation and `{"open": "chat"}`
+/// when it does not; every other screen carries only its name, e.g. `{"open": "devices"}`.
+///
+/// An id rides beside the screen rather than replacing it, so a client that does not read the id
+/// still opens the right screen, and one that cannot open the id (unknown, deleted, another
+/// member's) falls back to that screen too.
 ///
 /// `models`, `extensions` and `remote_access` (2026-10-27) are newer than the app's allow-list:
 /// an app that does not know one opens where it was, exactly as for a notice with no hint.
@@ -36,10 +42,13 @@ pub struct Notification {
 pub enum OpenScreen {
     /// The schedules list, with the schedule and the run the notification reports on.
     Schedule { schedule_id: String, run_id: String },
+    /// One schedule's detail screen, where a missed run is answered.
+    ScheduleDetail { schedule_id: String },
     /// The paired and smart-home devices list.
     Devices,
-    /// The chat screen.
-    Chat,
+    /// The chat screen, at the conversation the notice is about when there is one: the
+    /// conversation a long task was started from, or the one a reminder was heard in.
+    Chat { session_id: Option<String> },
     /// The models screen: downloads, and the disk space they take.
     Models,
     /// The extensions screen: what the assistant can use, and what failed to start.
@@ -49,6 +58,17 @@ pub enum OpenScreen {
 }
 
 impl OpenScreen {
+    /// The chat screen at `session_id`, or the chat screen alone when there is none. A blank id
+    /// names no conversation.
+    pub fn chat(session_id: Option<&str>) -> Self {
+        Self::Chat {
+            session_id: session_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+        }
+    }
+
     /// The hint as a complete `data` payload.
     pub fn data(&self) -> serde_json::Value {
         serde_json::Value::Object(self.fields())
@@ -74,8 +94,17 @@ impl OpenScreen {
                 fields.insert("run_id".into(), run_id.as_str().into());
                 "schedule"
             }
+            Self::ScheduleDetail { schedule_id } => {
+                fields.insert("schedule_id".into(), schedule_id.as_str().into());
+                "schedule"
+            }
+            Self::Chat { session_id } => {
+                if let Some(session_id) = session_id {
+                    fields.insert("session_id".into(), session_id.as_str().into());
+                }
+                "chat"
+            }
             Self::Devices => "devices",
-            Self::Chat => "chat",
             Self::Models => "models",
             Self::Extensions => "extensions",
             Self::RemoteAccess => "remote_access",
@@ -93,9 +122,10 @@ pub trait NotificationSender: Send + Sync {
     async fn send(&self, notification: Notification) -> Result<()>;
 
     /// A transient status for whichever screens are connected right now (the model warming up):
-    /// published live as a broadcast, never queued for a phone and never pushed. A phone that was
-    /// asleep through it has no use for it later. Use [`Self::broadcast`] for anything the
-    /// household should hear about.
+    /// published live as a broadcast, never queued for a phone, never pushed and never kept in the
+    /// household's history. A phone that was asleep through it has no use for it later. Its
+    /// `data` carries `"transient": true`, so a notification centre can leave it out. Use
+    /// [`Self::broadcast`] for anything the household should hear about.
     async fn publish_live(&self, notification: Notification) -> Result<()>;
 
     /// A household-wide notice: every connected screen sees it live, and every paired phone
@@ -157,9 +187,19 @@ mod tests {
     }
 
     #[test]
+    fn a_schedule_detail_hint_names_the_schedule_and_no_run() {
+        let hint = OpenScreen::ScheduleDetail {
+            schedule_id: "sched-1".into(),
+        };
+        assert_eq!(
+            hint.data(),
+            json!({"open": "schedule", "schedule_id": "sched-1"})
+        );
+    }
+
+    #[test]
     fn every_other_hint_carries_only_the_screen() {
         assert_eq!(OpenScreen::Devices.data(), json!({"open": "devices"}));
-        assert_eq!(OpenScreen::Chat.data(), json!({"open": "chat"}));
         assert_eq!(OpenScreen::Models.data(), json!({"open": "models"}));
         assert_eq!(OpenScreen::Extensions.data(), json!({"open": "extensions"}));
         assert_eq!(
@@ -169,14 +209,24 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_hint_names_its_conversation_when_it_has_one() {
+        assert_eq!(
+            OpenScreen::chat(Some("sess-1")).data(),
+            json!({"open": "chat", "session_id": "sess-1"})
+        );
+        assert_eq!(OpenScreen::chat(None).data(), json!({"open": "chat"}));
+        assert_eq!(OpenScreen::chat(Some("  ")).data(), json!({"open": "chat"}));
+    }
+
+    #[test]
     fn merging_keeps_the_existing_fields_and_the_hint_owns_open() {
-        let fields = json!({"proposal_id": "p-1", "rationale": "why", "open": "bogus"});
+        let fields = json!({"proposal_id": "p-1", "rationale": "why", "open": "bogus", "session_id": "forged"});
         let serde_json::Value::Object(fields) = fields else {
             unreachable!("a json object literal")
         };
         assert_eq!(
-            OpenScreen::Chat.merged_into(fields),
-            json!({"proposal_id": "p-1", "rationale": "why", "open": "chat"})
+            OpenScreen::chat(Some("sess-1")).merged_into(fields),
+            json!({"proposal_id": "p-1", "rationale": "why", "open": "chat", "session_id": "sess-1"})
         );
     }
 }

@@ -6,8 +6,9 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/jetson-remote-test.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/jetson-remote-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 PASSED=0; FAILED=0
 # t <name> <function>: the function runs in a subshell, so environment changes never leak.
@@ -30,6 +31,8 @@ world() {
   W="$SCRATCH/w.$RANDOM$RANDOM"; mkdir -p "$W/home" "$W/bin"
   export HOME="$W/home" PATH="$W/bin:$TOOLS" W
   export JETSON_RETRY_DELAY=0 JETSON_POLL_SECONDS=0 JETSON_FOLLOW_PATIENCE=5
+  # No system unit unless a test makes one: the host running the tests may have the real one.
+  export JETSON_POND_UNIT="$W/no-unit"
   unset GIAP_STATE_DIR
   : >"$W/ssh.log"; : >"$W/rsync.log"; : >"$W/reachable"
   printf 'nano.local\n' >"$W/hostname"
@@ -175,7 +178,7 @@ test_a_short_device_stops_the_pond_for_the_build_only_when_it_restarts_it() {
   jetson_ssh() { printf '%s\n' "$*" >>"$W/remote.log"; case "$*" in *MemAvailable*) cat "$W/free" ;; esac; }
   echo 380 >"$W/free"
   out="$(jetson_make_room_for_build 1)" || return 1
-  contains "$out" "stopping the pond" && contains "$(cat "$W/remote.log")" "systemctl --user stop" || return 1
+  contains "$out" "stopping the pond" && contains "$(cat "$W/remote.log")" "pond_ctl stop" || return 1
   : >"$W/remote.log"
   out="$(jetson_make_room_for_build 0 2>&1)" || return 1
   contains "$out" "may run out of memory" && lacks "$(cat "$W/remote.log")" "systemctl" || return 1
@@ -210,6 +213,28 @@ test_the_pond_stays_stopped_while_the_build_runs() {
   mkdir -p "$HOME/.cache/giap-deploy"; touch "$HOME/$MARK" "$W/build-running"
   out="$(jetson_restore_pond 2>&1)" || return 1
   contains "$out" "Run the deploy again" && lacks "$(cat "$W/systemctl.log")" "start" && [ -f "$HOME/$MARK" ]
+}
+
+test_a_pond_run_by_agamemnon_is_stopped_and_started_through_the_logins_sudo_rule() {
+  world; device_shell
+  printf '#!/bin/sh\necho "sudo $*" >>"$W/systemctl.log"\n[ "$1" = -n ] && shift\n"$@"\n' >"$W/bin/sudo"
+  chmod +x "$W/bin/sudo"
+  printf '[Service]\nUser=agamemnon\n' >"$W/unit"
+  export JETSON_POND_UNIT="$W/unit"
+  jetson_make_room_for_build 1 >/dev/null || return 1
+  contains "$(cat "$W/systemctl.log")" "sudo -n systemctl stop goose-in-a-pond.service" || return 1
+  lacks "$(cat "$W/systemctl.log")" "--user" || return 1
+  jetson_restore_pond >/dev/null 2>&1 || return 1
+  contains "$(cat "$W/systemctl.log")" "sudo -n systemctl start goose-in-a-pond.service"
+}
+
+test_a_copy_into_a_pond_run_by_agamemnon_writes_as_agamemnon() {
+  world; JETSON_ADDR=192.168.1.11; JETSON_NAME=nano.local; JETSON_ALIAS=nano
+  jetson_rsync "$W/src/" "/var/lib/goose-in-a-pond/lib/litert/" "sudo -n -u agamemnon rsync" || return 1
+  contains "$(cat "$W/rsync.log")" "--rsync-path=sudo -n -u agamemnon rsync" || return 1
+  : >"$W/rsync.log"
+  jetson_rsync "$W/src/" ".local/share/goose-in-a-pond/lib/litert/" || return 1
+  lacks "$(cat "$W/rsync.log")" "--rsync-path"
 }
 
 test_a_pond_no_deploy_stopped_or_one_already_started_is_left_alone() {

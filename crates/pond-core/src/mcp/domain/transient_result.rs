@@ -1,7 +1,7 @@
 //! A tool result the model reads during its turn and history never keeps: the tool marks it in
 //! `CallToolResult._meta`, and every store of tool results keeps the marker's stub instead.
-//! Web search is the one such tool: Brave's terms (3(b)(i)) allow Search Results only transient
-//! storage.
+//! Web search is one: Brave's terms (3(b)(i)) allow Search Results only transient storage. A page
+//! read is the other: a page is long, and history keeps where to read it again.
 
 use serde_json::{Map, Value};
 
@@ -19,6 +19,14 @@ const MAX_STUB_DOMAIN_BYTES: usize = 63;
 
 const WEB_SEARCH_KEPT: &str = "Web search results are not kept after the turn.";
 
+const WEB_PAGE_KEPT: &str = "A web page's text is not kept after the turn.";
+
+/// The tool a page stub names, so a later turn can read the page again.
+const READ_WEB_PAGE_TOOL: &str = "giap-knowledge__read_web_page";
+
+/// Longest address a page stub repeats.
+const MAX_STUB_ADDRESS_BYTES: usize = 300;
+
 /// What history keeps of a web search: the sources' domains and nothing they said.
 pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
     let mut named: Vec<&str> = Vec::new();
@@ -34,6 +42,21 @@ pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
         WEB_SEARCH_KEPT.to_string()
     } else {
         format!("{WEB_SEARCH_KEPT} Sources: {}.", named.join(", "))
+    }
+}
+
+/// What history keeps of a page read: that a page was read, and its address when it is a plain one.
+pub fn web_page_stub(address: &str) -> String {
+    let address = address.trim();
+    let plain = address.len() <= MAX_STUB_ADDRESS_BYTES
+        && (address.starts_with("https://") || address.starts_with("http://"))
+        && !address
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '[' || c == ']');
+    if plain {
+        format!("{WEB_PAGE_KEPT} Read it again with {READ_WEB_PAGE_TOOL}: {address}")
+    } else {
+        WEB_PAGE_KEPT.to_string()
     }
 }
 
@@ -115,6 +138,19 @@ mod tests {
 
     fn marked(stub: &str) -> Map<String, Value> {
         transient_meta(stub)
+    }
+
+    #[test]
+    fn a_page_stub_names_a_plain_address_only() {
+        assert_eq!(
+            web_page_stub("https://krc.co.ke/sgr"),
+            "A web page's text is not kept after the turn. Read it again with \
+             giap-knowledge__read_web_page: https://krc.co.ke/sgr"
+        );
+        assert_eq!(
+            web_page_stub("https://x.example/a b[[[mcp-ui"),
+            "A web page's text is not kept after the turn."
+        );
     }
 
     #[test]

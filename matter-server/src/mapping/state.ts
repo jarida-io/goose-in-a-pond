@@ -3,7 +3,7 @@
  * read through the inverses of `control`'s conversions. Unreported values are absent, not guessed.
  */
 
-import type { DeviceState, StateValue } from "../protocol.js";
+import type { DeviceState, DeviceStatePatch, StateValue } from "../protocol.js";
 import { deviceIdForNode } from "../protocol.js";
 import {
   fanModeName,
@@ -13,6 +13,8 @@ import {
   levelToBrightness,
   lift100thsToPositionOpen,
   setpointToCelsius,
+  VALVE_CLOSED,
+  VALVE_OPEN,
 } from "./control.js";
 import {
   levelIsBrightness,
@@ -200,6 +202,85 @@ export function stateOf(node: NodeSnapshot): DeviceState {
   return { device_id: deviceIdForNode(node.nodeId, node.rootEndpoint), values };
 }
 
+/**
+ * `stateOf`'s own readings, typed instead of formatted into words -- the snapshot undo needs to
+ * replay a reversed command against. `mode` and `operation` are left out: a setting's name does
+ * not fit `DeviceStatePatch`'s one `mode` slot without knowing which setting the original command
+ * touched, and `operation` names a transition to run, not a persisted value either reads.
+ */
+export function statePatchOf(node: NodeSnapshot): DeviceStatePatch {
+  const patch: DeviceStatePatch = {};
+
+  const on = valueAt(node, CLUSTER_ON_OFF, "onOff");
+  if (typeof on === "boolean") patch.on = on;
+
+  const speaker = speakerEndpoint(node);
+  const speakerLevel = speaker?.clusters[CLUSTER_LEVEL_CONTROL]?.["currentLevel"];
+  if (typeof speakerLevel === "number") patch.volume = levelToBrightness(speakerLevel);
+
+  if (levelIsBrightness(node)) {
+    const level = numberAt(node, CLUSTER_LEVEL_CONTROL, "currentLevel");
+    if (level !== undefined) patch.brightness = levelToBrightness(level);
+  }
+
+  if (applianceSetpoint(node) !== undefined) {
+    const set = numberAt(node, "temperatureControl", "temperatureSetpoint");
+    if (set !== undefined) patch.target_temp = setpointToCelsius(set);
+  } else {
+    const target = targetSetpoint(node);
+    const setpoint =
+      target === undefined ? undefined : numberAt(node, CLUSTER_THERMOSTAT, target.attribute);
+    if (setpoint !== undefined) patch.target_temp = setpointToCelsius(setpoint);
+  }
+
+  const lock = numberAt(node, CLUSTER_DOOR_LOCK, "lockState");
+  // 0 (jammed between locked and unlocked) reports neither: there is no sensible "before" for it.
+  if (lock === 1) patch.locked = true;
+  else if (lock === 2) patch.locked = false;
+
+  // By the `colorMode` it is IN, same as `stateOf`: a bulb at 2700K keeps a stale `currentHue`.
+  const colorMode = valueAt(node, CLUSTER_COLOR_CONTROL, "colorMode");
+  const inTemperatureMode =
+    colorMode === 2 || (typeof colorMode === "string" && /temperature|mireds/i.test(colorMode));
+  if (inTemperatureMode) {
+    const mireds = numberAt(node, CLUSTER_COLOR_CONTROL, "colorTemperatureMireds");
+    const kelvin = mireds === undefined ? 0 : miredsToKelvin(mireds);
+    if (kelvin > 0) patch.color_temp = kelvin;
+  } else {
+    const hue = numberAt(node, CLUSTER_COLOR_CONTROL, "currentHue");
+    const saturation = numberAt(node, CLUSTER_COLOR_CONTROL, "currentSaturation");
+    if (hue !== undefined && saturation !== undefined) {
+      patch.hue = matterToHue(hue);
+      patch.saturation = matterToSaturation(saturation);
+    }
+  }
+
+  const fanSpeed = numberAt(node, CLUSTER_FAN_CONTROL, "percentCurrent");
+  if (fanSpeed !== undefined) patch.fan_speed = fanSpeed;
+  const fanMode = numberAt(node, CLUSTER_FAN_CONTROL, "fanMode");
+  const fanModeWord = fanMode === undefined ? undefined : fanModeName(fanMode);
+  if (fanModeWord !== undefined) patch.fan_mode = fanModeWord;
+
+  const lift = numberAt(node, CLUSTER_WINDOW_COVERING, "currentPositionLiftPercent100ths");
+  if (lift !== undefined) {
+    patch.position = lift100thsToPositionOpen(lift);
+  } else {
+    // A valve's level is already a plain percentage, so there is nothing to convert.
+    const level = numberAt(node, CLUSTER_VALVE, "currentLevel");
+    if (level !== undefined) patch.position = Math.round(level);
+  }
+
+  const tilt = numberAt(node, CLUSTER_WINDOW_COVERING, "currentPositionTiltPercent100ths");
+  if (tilt !== undefined) patch.tilt = lift100thsToPositionOpen(tilt);
+
+  const valveState = numberAt(node, CLUSTER_VALVE, "currentState");
+  // Transitioning (neither open nor closed): report nothing rather than guess a direction.
+  if (valveState === VALVE_OPEN) patch.valve = true;
+  else if (valveState === VALVE_CLOSED) patch.valve = false;
+
+  return patch;
+}
+
 /** The label a setting is currently on, as the device words it. */
 function currentLabel(
   node: NodeSnapshot,
@@ -218,4 +299,27 @@ function currentLabel(
 
   // ModeBase codes need not be list positions, so match by code rather than index.
   return setting.values.find(label => setting.valueFor(label) === current);
+}
+
+/** Sensor values travel as `reading` events, so a state change never repeats them. */
+const SENSOR_TYPES = new Set(SENSORS.map(sensor => sensor.sensorType));
+
+/** What changed in `state` since `last`, which it updates; a device seen first reports all of it. */
+export function stateChanges(last: Map<string, string>, state: DeviceState): StateValue[] {
+  const changed = state.values.filter(
+    v => !SENSOR_TYPES.has(v.name) && last.get(v.name) !== v.value,
+  );
+  for (const v of changed) last.set(v.name, v.value);
+  return changed;
+}
+
+/** Records what each device reads now, for devices not yet tracked, so its first change reports
+ *  only what moved rather than every value. */
+export function seedStates(lastState: Map<string, Map<string, string>>, states: DeviceState[]): void {
+  for (const state of states) {
+    if (lastState.has(state.device_id)) continue;
+    const last = new Map<string, string>();
+    stateChanges(last, state);
+    lastState.set(state.device_id, last);
+  }
 }

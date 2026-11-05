@@ -222,10 +222,12 @@ identical row is a different person's fact):
 | Same | lexical duplicate of one of the 50 most recent rows (`DEDUP_RECENT_WINDOW`, plus rows this window wrote), or cosine to the nearest of 5 neighbours at or above `memory_reinforce_threshold` (0.94) | dropped |
 | Related | cosine at or above `memory_relate_threshold` (0.78) | dropped |
 | New | cosine below 0.78 | written |
-| Unscored | the embed failed or no neighbour has a vector | written |
+| Unscored | the embed failed, no neighbour has a vector, or the embedding model has no measured floors | written |
 
 The settings source marks both thresholds as unmeasured defaults; `shadow` mode exists to measure
-them on real history.
+them on real history. Both are cosines on MiniLM's scale, so the cosine bands apply only under a
+model whose table row carries floors (`EmbeddingModel::floors`, MiniLM's alone today); under any
+other, EmbeddingGemma 2 included, the lexical test alone dedups.
 
 The lexical test is `is_duplicate_content()` in `memory_relevance.rs`, layered because a token
 measure alone is blind to meaning-bearing differences:
@@ -277,10 +279,11 @@ Preference, "working on / my project / deadline" Project, "right now / currently
 anything else Knowledge. `save_memory` also takes `supersedes` (ids marked `merged`) and
 `corrects`.
 
-Rows written without a vector are embedded by the index-maintenance lane job
-(`run_memory_embedding_sweep`, `pond-core/src/context/index_maintenance.rs`) and by a backfill
-spawned at startup (`memory_relevance::run_backfill`, then `run_dimension_repair` for rows
-embedded by another model).
+Rows written without a vector, and rows whose vector the index holds under another model, are
+embedded by the embedding slot (`pond-core/src/context/embedding_slot.rs`, run by
+`pond-server/src/embedding_slot_runner.rs`). It finds them by the index's staleness join, writes
+through `MemoryRepository::update_embedding` (row and index together), and runs only while no turn,
+compaction or due long-task step needs the device.
 
 ## Recall and injection
 
@@ -399,7 +402,6 @@ persist in `lane_job_runs` (migration `0059`) so a restart does not make every j
 | `titling` | none |
 | `proactive_review` | none |
 | `summary_refresh` | none |
-| `index_maintenance` | embeds memory rows that have no vector |
 | `memory_extraction` | writes memories and reminders |
 | `suggestion_generation` | composes Home suggestions from memories into `suggestion_queue` (migration `0058`), gated by `suggestion_generation_enabled` |
 
@@ -432,8 +434,8 @@ waiving its quiet period, interval floor and activity gate.
 
 `POST` and `PUT /api/v1/memories` embed with the same provider and index the extraction path
 uses. A row stored without a vector (the embedder failed, or the redactor dropped a vector of a
-credential) is embedded later by the boot backfill or by the index maintenance sweep, which runs in
-household quiet.
+credential) is embedded later by the embedding slot, at the next moment nothing the household waits
+on needs the device.
 
 ## Settings
 
@@ -463,7 +465,7 @@ household quiet.
 | `memory_consolidation_interval_hours` | 24 | Minimum gap between runs |
 | `memory_consolidation_batch_size` | 50 | Rows per run (floor 6) |
 | `suggestion_generation_enabled` | true | Compose suggestions from memories |
-| `embedding_provider` | `fastembed` | `fastembed`, `gguf` or `none`; `none` stops batch extraction |
+| `embedding_provider` | `fastembed` | `none` turns semantic search off and stops batch extraction; `auto`, `fastembed` and `gguf` all mean on, with the engine taken from `active_embedding_model` |
 | `memory_graph_enabled` | false | Stored, but nothing reads it: graph retrieval over `memory_edges` is not wired |
 
 ## Database

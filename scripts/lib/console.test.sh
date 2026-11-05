@@ -7,8 +7,9 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/console-test.XXXXXX")" && pwd)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/console-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 PASSED=0; FAILED=0
 t() {
@@ -179,6 +180,15 @@ t_once_draws_turns_and_a_failed_load() {
 t_without_a_terminal_the_console_says_so() {
   out="$(cd "$REPO" && bash scripts/giap.sh console < /dev/null 2>&1)"
   contains "$out" "the console needs a terminal"
+}
+
+t_a_system_unit_names_the_data_directory() {
+  world
+  printf '[Service]\nUser=agamemnon\nEnvironment="POND_DATA_DIR=/var/lib/goose-in-a-pond"\n' >"$W/unit"
+  uname() { echo Linux; }
+  eq "$(unset POND_DATA_DIR; CC_SYSTEM_UNIT="$W/unit" console_data_dir)" "/var/lib/goose-in-a-pond" || return 1
+  eq "$(POND_DATA_DIR=/elsewhere CC_SYSTEM_UNIT="$W/unit" console_data_dir)" "/elsewhere" || return 1
+  eq "$(unset POND_DATA_DIR XDG_DATA_HOME; CC_SYSTEM_UNIT="$W/none" console_data_dir)" "$HOME/.local/share/goose-in-a-pond"
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^t_'); do t "${fn#t_}" "$fn"; done

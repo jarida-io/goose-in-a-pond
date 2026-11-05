@@ -149,6 +149,8 @@ async fn app_with(
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -173,7 +175,7 @@ async fn app_with(
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -211,6 +213,7 @@ async fn app_with(
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -248,6 +251,7 @@ async fn app_with(
         setup_claims,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     (

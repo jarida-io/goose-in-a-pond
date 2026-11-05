@@ -290,6 +290,7 @@ scope, keeps its account until someone runs `giap.sh service-account`.
 | Sound | `loginctl enable-linger agamemnon` starts its user manager at boot, which runs its own PulseAudio (or PipeWire) like any login's; the unit sets `XDG_RUNTIME_DIR=/run/user/<uid>` so ALSA's `default` and `pactl` reach it |
 | Unit | `/etc/systemd/system/goose-in-a-pond.service`, `User=agamemnon`, after `user@<uid>.service` |
 | Power | the sudoers rule `giap.sh admin-card` writes names `agamemnon` |
+| Login | `/etc/sudoers.d/goose-in-a-pond-login`: the login may start, stop and restart the unit and run commands as `agamemnon` (`sudo -n -u agamemnon ...`) without a password, so deploys and builds run unattended |
 
 ```bash
 bash scripts/giap.sh service-account          # move this pond to agamemnon (sudo)
@@ -299,8 +300,10 @@ bash scripts/giap.sh service-account undo     # back to the account, unit and da
 
 The move keeps what undo needs in `/var/lib/goose-in-a-pond-admin/before-agamemnon/` (root only):
 the old scope, user, data directory and unit file. Undo leaves the account in place, locked and
-owning nothing (`sudo userdel agamemnon` removes it). A desktop shell on the same board runs its
-voice loop as the login, which can no longer write the pond's data; see
+owning nothing (`sudo userdel agamemnon` removes it), and removes the login's drop-in. After a
+move, run the pond's own commands as it: `sudo -u agamemnon env POND_DATA_DIR=/var/lib/goose-in-a-pond
+XDG_RUNTIME_DIR=/run/user/$(id -u agamemnon) <checkout>/target/release/pond-server chat --voice`. The
+desktop app's voice loop does not do this yet; see
 [what this does not cover yet](../architecture/pond-administrator.md#not-in-this-change).
 
 ### Wi-Fi from the BLE setup channel (the polkit grant)

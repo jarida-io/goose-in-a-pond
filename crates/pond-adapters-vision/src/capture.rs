@@ -4,15 +4,15 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use pond_core::user_data::domain::vision::{CapturedFrame, JpegFrame, LumaPlane, FPS_RANGE};
+use pond_core::user_data::domain::vision::{CapturedFrame, Frame, JpegFrame, LumaPlane, FPS_RANGE};
 use pond_core::user_data::ports::vision::FrameSource;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::ffmpeg_source::{checked_input, resolve_ffmpeg_bin, CaptureConfig, FfmpegFrameSource};
@@ -161,6 +161,8 @@ enum Candidate {
         head: HardwareHead,
         live: (u32, u32),
         luma: (u32, u32),
+        /// The detector's picture, [`gst::ANALYSIS_WIDTH`] wide at the live picture's shape.
+        analysis: (u32, u32),
     },
     CameraJpeg {
         args: Vec<String>,
@@ -199,7 +201,12 @@ fn plan(
     let hardware =
         |out: &mut Vec<Candidate>, head: HardwareHead, live: (u32, u32), luma: (u32, u32)| {
             if engines.runs(&head) {
-                out.push(Candidate::Hardware { head, live, luma });
+                out.push(Candidate::Hardware {
+                    head,
+                    live,
+                    luma,
+                    analysis: scaled(live, gst::ANALYSIS_WIDTH),
+                });
             }
         };
     match probe {
@@ -313,14 +320,29 @@ fn start(
     engines: &JetsonEngines,
 ) -> Result<Box<dyn FrameSource>> {
     Ok(match candidate {
-        Candidate::Hardware { head, live, luma } => {
+        Candidate::Hardware {
+            head,
+            live,
+            luma,
+            analysis,
+        } => {
             let Some(launch) = engines.gst_launch.as_deref() else {
                 bail!("gst-launch-1.0 is not installed");
             };
-            let args = gst::pipeline_args(head, cfg.fps, *live, *luma)?;
-            let process =
-                CaptureProcess::spawn(launch.as_os_str(), &args, "gst-launch-1.0", &cfg.input)?;
-            Box::new(HardwareSource::new(process, *luma, cfg.fps))
+            let args = gst::pipeline_args(head, cfg.fps, *live, *luma, *analysis)?;
+            let (process, pictures) = CaptureProcess::spawn_with_second_stream(
+                launch.as_os_str(),
+                &args,
+                "gst-launch-1.0",
+                &cfg.input,
+            )?;
+            Box::new(HardwareSource::new(
+                process,
+                Some(Box::new(pictures)),
+                *luma,
+                *analysis,
+                cfg.fps,
+            ))
         }
         Candidate::CameraJpeg { args } => {
             let process = CaptureProcess::spawn(ffmpeg, args, "ffmpeg", &cfg.input)?;
@@ -551,6 +573,7 @@ impl FrameSource for CameraJpegSource {
                     return Ok(Some(CapturedFrame::Jpeg(JpegFrame {
                         jpeg: Arc::new(jpeg),
                         luma: None,
+                        analysis: None,
                         captured_at: Utc::now(),
                     })));
                 }
@@ -566,27 +589,118 @@ impl FrameSource for CameraJpegSource {
     }
 }
 
-/// gst-launch's multipart stream: each live JPEG paired with the luma VIC scaled from it.
+/// gst-launch's multipart stream: each live JPEG paired with the luma VIC scaled from it. The
+/// detector's RGBA pictures come on a stream of their own, and the latest rides on the next pair.
 struct HardwareSource {
     process: CaptureProcess,
     parser: MultipartParser,
     luma_size: (u32, u32),
+    analysis_size: (u32, u32),
     // videorate let 20+ fps through at max-rate=5 on a live H.264 RTSP stream.
     gate: RateGate,
+    picture_gate: RateGate,
     jpeg: Option<Vec<u8>>,
     luma: Option<Vec<u8>>,
+    pictures: Option<Pictures>,
 }
 
+/// The newest detector picture, kept by a task reading the pictures' stream as fast as it comes.
+struct Pictures {
+    latest: Arc<Mutex<Option<Vec<u8>>>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+type PictureStream = Box<dyn AsyncRead + Send + Unpin>;
+
 impl HardwareSource {
-    fn new(process: CaptureProcess, luma_size: (u32, u32), fps: u32) -> Self {
+    fn new(
+        process: CaptureProcess,
+        pictures: Option<PictureStream>,
+        luma_size: (u32, u32),
+        analysis_size: (u32, u32),
+        fps: u32,
+    ) -> Self {
+        let pictures = pictures.map(|stream| {
+            let latest = Arc::new(Mutex::new(None));
+            let reader = tokio::spawn(read_pictures(stream, analysis_size, latest.clone()));
+            Pictures { latest, reader }
+        });
         Self {
             process,
             parser: MultipartParser::new(gst::BOUNDARY),
             luma_size,
+            analysis_size,
             gate: RateGate::new(fps),
+            picture_gate: RateGate::new(gst::ANALYSIS_FPS),
             jpeg: None,
             luma: None,
+            pictures,
         }
+    }
+
+    /// The newest picture when the detector is due one.
+    fn take_picture(&mut self, now: Instant) -> Option<Frame> {
+        let mut latest = self.pictures.as_ref()?.latest.lock().ok()?;
+        if latest.is_none() || !self.picture_gate.admit(now) {
+            return None;
+        }
+        latest
+            .take()
+            .map(|rgba| rgba_to_frame(&rgba, self.analysis_size))
+    }
+}
+
+impl Drop for HardwareSource {
+    fn drop(&mut self) {
+        if let Some(pictures) = &self.pictures {
+            pictures.reader.abort();
+        }
+    }
+}
+
+/// Keeps the newest RGBA picture of `size` from `stream` until it ends or stops making sense.
+async fn read_pictures(
+    mut stream: PictureStream,
+    (width, height): (u32, u32),
+    latest: Arc<Mutex<Option<Vec<u8>>>>,
+) {
+    let mut parser = MultipartParser::new(gst::BOUNDARY);
+    loop {
+        loop {
+            match parser.next_part() {
+                Ok(Some(Part::Raw(rgba))) if rgba.len() == (width * height * 4) as usize => {
+                    if let Ok(mut slot) = latest.lock() {
+                        *slot = Some(rgba);
+                    }
+                }
+                Ok(Some(_)) | Err(_) => {
+                    tracing::warn!(
+                        "the detector's pictures are not {width}x{height} RGBA; people are not followed"
+                    );
+                    return;
+                }
+                Ok(None) => break,
+            }
+        }
+        let buf = parser.buffer_mut();
+        buf.reserve(READ_CHUNK);
+        if !matches!(stream.read_buf(buf).await, Ok(n) if n > 0) {
+            return;
+        }
+    }
+}
+
+/// RGBA from VIC as the packed RGB the detector reads.
+fn rgba_to_frame(rgba: &[u8], (width, height): (u32, u32)) -> Frame {
+    let rgb = rgba
+        .chunks_exact(4)
+        .flat_map(|px| [px[0], px[1], px[2]])
+        .collect();
+    Frame {
+        width,
+        height,
+        rgb,
+        captured_at: Utc::now(),
     }
 }
 
@@ -601,15 +715,17 @@ impl FrameSource for HardwareSource {
                     Part::Jpeg(bytes) => self.jpeg = Some(bytes),
                     Part::Raw(bytes) if bytes.len() == (w * h) as usize => self.luma = Some(bytes),
                     Part::Raw(bytes) => bail!(
-                        "the hardware pipeline sent {} luma bytes, expected {}x{}",
+                        "the hardware pipeline sent {} raw bytes, expected luma {}x{}",
                         bytes.len(),
                         w,
                         h
                     ),
                 }
+                let now = Instant::now();
                 match (self.jpeg.take(), self.luma.take()) {
-                    (Some(_), Some(_)) if !self.gate.admit(Instant::now()) => {}
+                    (Some(_), Some(_)) if !self.gate.admit(now) => {}
                     (Some(jpeg), Some(pixels)) => {
+                        let analysis = self.take_picture(now);
                         return Ok(Some(CapturedFrame::Jpeg(JpegFrame {
                             jpeg: Arc::new(jpeg),
                             luma: Some(LumaPlane {
@@ -617,6 +733,7 @@ impl FrameSource for HardwareSource {
                                 height: h,
                                 pixels,
                             }),
+                            analysis,
                             captured_at: Utc::now(),
                         })));
                     }
@@ -767,6 +884,7 @@ mod tests {
                 },
                 live: (640, 360),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         assert_eq!(
@@ -780,6 +898,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             },
             "the raw sizes lack 640x360, so the smallest that covers it"
         );
@@ -849,6 +968,7 @@ mod tests {
                 },
                 live: (640, 360),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         assert!(matches!(
@@ -891,6 +1011,7 @@ mod tests {
                 },
                 live: (1280, 720),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         let mut no_argus = jetson();
@@ -911,20 +1032,46 @@ mod tests {
         let started = Instant::now();
         let mut source = start(candidate, cfg, &resolve_ffmpeg_bin(), engines)?;
         let mut first = None;
+        let mut analysed = 0;
+        let mut first_at = None;
         for _ in 0..n {
             let frame = tokio::time::timeout(FIRST_FRAME_TIMEOUT, source.next_frame()).await??;
             let Some(CapturedFrame::Jpeg(frame)) = frame else {
                 bail!("expected a JPEG frame, got {frame:?}");
             };
             first.get_or_insert(started.elapsed());
+            first_at.get_or_insert_with(Instant::now);
             let picture = crate::jpeg_decode::decode_rgb(&frame.jpeg, frame.captured_at)?;
-            if let Candidate::Hardware { live, luma, .. } = candidate {
+            if let Candidate::Hardware {
+                live,
+                luma,
+                analysis,
+                ..
+            } = candidate
+            {
                 assert_eq!((picture.width, picture.height), *live, "live picture size");
                 let plane = frame.luma.expect("the hardware path pairs a luma plane");
                 assert_eq!((plane.width, plane.height), *luma, "luma size");
+                if let Some(picture) = frame.analysis {
+                    assert_eq!((picture.width, picture.height), *analysis, "detector size");
+                    assert!(picture.is_well_formed());
+                    analysed += 1;
+                }
             }
         }
         source.close().await;
+        if matches!(candidate, Candidate::Hardware { .. }) {
+            assert!(analysed > 0, "no detector picture in {n} frames");
+            // A branch that stalls the mux still lets a frame through now and then.
+            let rate =
+                (n - 1) as f64 / first_at.expect("n is at least one").elapsed().as_secs_f64();
+            assert!(
+                rate >= f64::from(cfg.fps) / 3.0,
+                "{:.1} fps against {} asked",
+                rate,
+                cfg.fps
+            );
+        }
         Ok(first.expect("n is at least one"))
     }
 
@@ -972,7 +1119,7 @@ mod tests {
         std::thread::spawn(move || serve_mjpeg(listener));
         let cfg = CaptureConfig {
             input: url.clone(),
-            fps: 5,
+            fps: 10,
             ..Default::default()
         };
         let info = probe_stream(&resolve_ffmpeg_bin(), &url, InputKind::Http).await;
@@ -988,7 +1135,7 @@ mod tests {
             ),
             "{plan:?}"
         );
-        let first = frames_through(&plan[0], &cfg, 5).await.unwrap();
+        let first = frames_through(&plan[0], &cfg, 10).await.unwrap();
         eprintln!(
             "{}: first frame after {} ms",
             plan[0].describe(),
@@ -1100,6 +1247,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             }
         );
         assert_eq!(
@@ -1146,6 +1294,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             }
         );
         assert_eq!(scaled((1920, 1080), 640), (640, 360));
@@ -1205,7 +1354,7 @@ mod tests {
         ]
         .concat();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), NO_RATE_LIMIT);
+        let mut source = HardwareSource::new(process, None, (4, 2), (3, 3), NO_RATE_LIMIT);
         let mut got = Vec::new();
         let ended = loop {
             match source.next_frame().await {
@@ -1227,13 +1376,86 @@ mod tests {
         assert!(ended.to_string().contains("camera stream ended"), "{ended}");
     }
 
+    /// Pairs from `stream`, with the pictures read off their own stream before the first pair.
+    async fn with_pictures(
+        stream: &[u8],
+        pictures: Vec<u8>,
+    ) -> (tempfile::TempDir, HardwareSource) {
+        let (dir, process) = replay(stream);
+        let pictures: PictureStream = Box::new(std::io::Cursor::new(pictures));
+        let mut source =
+            HardwareSource::new(process, Some(pictures), (4, 2), (3, 3), NO_RATE_LIMIT);
+        (&mut source.pictures.as_mut().unwrap().reader)
+            .await
+            .unwrap();
+        (dir, source)
+    }
+
+    fn pairs(n: u8) -> Vec<u8> {
+        (1..=n)
+            .flat_map(|i| [part("image/jpeg", &[i]), part("video/x-raw", &[i; 8])].concat())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_newest_picture_rides_on_the_next_pair_without_its_alpha() {
+        let older = vec![9; 36];
+        let newer: Vec<u8> = (0..36).collect();
+        let pictures = [part("video/x-raw", &older), part("video/x-raw", &newer)].concat();
+        let (_dir, mut source) = with_pictures(&pairs(2), pictures).await;
+        let mut seen = Vec::new();
+        while let Ok(Some(CapturedFrame::Jpeg(f))) = source.next_frame().await {
+            let analysis = f.analysis.map(|a| (a.width, a.height, a.rgb[..6].to_vec()));
+            seen.push((f.jpeg.to_vec(), analysis));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (vec![1], Some((3, 3, vec![0, 1, 2, 4, 5, 6]))),
+                (vec![2], None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pictures_never_come_faster_than_the_detector_looks() {
+        let (_dir, mut source) = with_pictures(&pairs(2), part("video/x-raw", &[7; 36])).await;
+        let first = source.next_frame().await.unwrap();
+        assert!(matches!(first, Some(CapturedFrame::Jpeg(ref f)) if f.analysis.is_some()));
+        *source.pictures.as_ref().unwrap().latest.lock().unwrap() = Some(vec![8; 36]);
+        match source.next_frame().await.unwrap() {
+            Some(CapturedFrame::Jpeg(f)) => assert!(f.analysis.is_none(), "within 1/5 s"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            source
+                .pictures
+                .as_ref()
+                .unwrap()
+                .latest
+                .lock()
+                .unwrap()
+                .is_some(),
+            "kept for the next pair once due"
+        );
+    }
+
+    #[tokio::test]
+    async fn pictures_of_the_wrong_size_stop_the_pictures_not_the_frames() {
+        let (_dir, mut source) = with_pictures(&pairs(1), part("video/x-raw", &[7; 5])).await;
+        match source.next_frame().await.unwrap() {
+            Some(CapturedFrame::Jpeg(f)) => assert!(f.analysis.is_none()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn the_hardware_stream_is_held_to_the_setting_whatever_videorate_does() {
         let stream: Vec<u8> = (0..4u8)
             .flat_map(|i| [part("image/jpeg", &[i]), part("video/x-raw", &[i; 8])].concat())
             .collect();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), 1);
+        let mut source = HardwareSource::new(process, None, (4, 2), (3, 3), 1);
         match source.next_frame().await.unwrap() {
             Some(CapturedFrame::Jpeg(f)) => assert_eq!(*f.jpeg, vec![0]),
             other => panic!("unexpected {other:?}"),
@@ -1248,9 +1470,9 @@ mod tests {
     async fn a_luma_part_of_the_wrong_size_is_an_error() {
         let stream = [part("image/jpeg", b"j1"), part("video/x-raw", &[0; 5])].concat();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), NO_RATE_LIMIT);
+        let mut source = HardwareSource::new(process, None, (4, 2), (3, 3), NO_RATE_LIMIT);
         let err = source.next_frame().await.unwrap_err().to_string();
-        assert!(err.contains("expected 4x2"), "{err}");
+        assert!(err.contains("expected luma 4x2"), "{err}");
     }
 
     #[tokio::test]

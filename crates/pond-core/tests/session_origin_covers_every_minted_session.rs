@@ -21,8 +21,18 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
         "an HTTP request opened it; the id is the caller's or a fresh UUID -- a person",
     ),
     (
+        "crates/pond-core/src/user_data/services/profile_interview.rs",
+        "a member's own phone asked for their setup interview (`POST /profiles/{id}/interview`); \
+         the id is a fresh UUID -- a person",
+    ),
+    (
         "crates/pond-server/src/main.rs",
         "the terminal voice/chat CLI's own session -- a person, in another process",
+    ),
+    (
+        "crates/pond-core/src/shared/services/chat.rs",
+        "a voice loop's first turn (`with_session_on_first_turn`): someone in the room spoke to \
+         the pond, and room voice minted the id as a fresh UUID -- a person",
     ),
     (
         "crates/pond-server/src/schedule_executors.rs",

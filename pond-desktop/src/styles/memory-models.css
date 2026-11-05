@@ -1,0 +1,288 @@
+/* ─── The Memory job ────────────────────────────────────────────────────────
+ *
+ * Flat rows on a hairline: the page already spends the ink edge and the offset on its cards. State is
+ * a word, not a hue; the one accent is a download's own bar from model-marks.css.
+ *
+ * Text, measured on --color-surface (light, dark):
+ *   --color-text            18.06:1, 15.12:1
+ *   --color-text-secondary   6.22:1,  5.45:1   cost, caption, detail
+ *   --color-warning-fg       7.09:1, 10.15:1   a model that did not load
+ * On the status box's own ground, --color-bg (measured in the page, light and dark):
+ *   --color-warning-fg       6.41:1, 11.21:1   the failed line
+ *   --color-text-secondary   5.62:1,  5.65:1   the pond's own reason
+ */
+
+.mm-memory {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.mm-memory__intro {
+  margin: 0;
+  max-width: 62ch;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  color: var(--color-text-secondary);
+}
+
+.mm-memory__rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-memory__more {
+  align-self: flex-start;
+}
+
+/* ── One model ──────────────────────────────────────────────────────────── */
+
+.mm-mem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--row-height-lg);
+  padding: var(--space-3) 0;
+}
+
+.mm-mem + .mm-mem {
+  border-top: 1px solid var(--color-border);
+}
+
+.mm-mem__text {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mm-mem__name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+}
+
+.mm-mem__title {
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.mm-mem__why {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  color: var(--color-text);
+}
+
+/* Numbers someone measured on this kind of machine, set as the picks set them: mono, with the date under. */
+.mm-mem__measured {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-border-strong);
+}
+
+.mm-mem__numbers {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--color-text);
+}
+
+.mm-mem__caption {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.mm-mem__cost {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mm-mem__need {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+}
+
+/* A word and an icon in the body text's colour, not the warning's: "Tight" is a reading, not an alarm. */
+.mm-mem__fit {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.mm-mem__end {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+/* Why the button beside it is resting: secondary text on the card, 6.22:1 light and 5.45:1 dark. */
+.mm-mem__note {
+  max-width: 32ch;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+
+.mm-mem__xfer {
+  flex: 1 1 100%;
+}
+
+/* ── Where the switch has got to ────────────────────────────────────────── */
+
+.mm-embedder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.mm-embedder__line {
+  display: flex;
+  flex: 1 1 220px;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  color: var(--color-text);
+}
+
+.mm-embedder__icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--color-text-secondary);
+}
+
+.mm-embedder[data-kind="failed"] .mm-embedder__line,
+.mm-embedder[data-kind="failed"] .mm-embedder__icon {
+  color: var(--color-warning-fg);
+}
+
+/* Nothing to attend to: the sentence stays and the box goes, so only a switch in progress draws one. */
+.mm-embedder[data-kind="ready"] {
+  padding: 0;
+  border-color: transparent;
+  background: none;
+}
+
+/* A measure, not the accent: slate on paper, as the fit bar is. */
+.mm-embedder__track {
+  flex: 1 1 100%;
+  height: 6px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.mm-embedder__fill {
+  display: block;
+  height: 100%;
+  background: var(--color-text-tertiary);
+  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The pond's own words, for whoever has to look into it. */
+.mm-embedder__why {
+  flex: 1 1 100%;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.mm-embedder__retry {
+  margin-left: auto;
+}
+
+/* The pond's own words stay one press away, with the retry on the same row. */
+.mm-embedder__actions {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* Secondary text on the status box's ground, 5.62:1 light and 5.65:1 dark. A text button, not a pill:
+   the box is chrome, so only the retry carries an edge. */
+.mm-embedder__more {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--tap-min);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.mm-embedder__more:hover {
+  color: var(--color-text);
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mm-embedder__fill {
+    transition: none;
+  }
+}
+
+/* Read aloud in place of a line that would otherwise be spoken again on every poll. */
+.mm-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Above a coverage figure it explains, so the two read as one panel. */
+.mm-embedder--above {
+  margin-bottom: var(--space-3);
+}

@@ -3,9 +3,11 @@ pub mod providers;
 pub mod voice;
 
 // Services that stay at the `models/services/` root.
+pub mod active_embedder;
 pub mod history_manager;
 pub mod model_service;
 pub mod prompt_builder;
+pub mod reply_filter;
 pub mod thought_filter;
 
 // Re-exports keeping the flat `models::services::<name>` paths resolving.

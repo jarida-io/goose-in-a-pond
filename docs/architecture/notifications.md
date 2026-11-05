@@ -6,22 +6,59 @@ How a notice from the Pond reaches a household member's phone. The routes themse
 A notification is `Notification {id, target, category, title, body, timestamp, data}`
 (`crates/pond-core/src/mcp/ports/notification.rs`). `category` is `alert`, `info` or
 `action_required`; `target` is a device id or `"broadcast"`; `data` is an optional JSON object
-that may carry an `open` route hint (written only through `OpenScreen`) or an `action` payload
-(see [rides and maps](rides-and-maps.md)). Every producer goes through the `NotificationSender`
+that may carry an `open` route hint (see [Route hints](#route-hints-2026-11-04)) or an `action`
+payload (see [rides and maps](rides-and-maps.md)). Every producer goes through the `NotificationSender`
 port, implemented by `BroadcastNotificationSender` (`crates/pond-infra/src/broadcast_notification_sender.rs`),
 which caps the title at 200 characters and the body at 2000.
+
+## Route hints (2026-11-04)
+
+What a tap on a notice opens. The Pond writes `data.open` only through `OpenScreen`
+(`crates/pond-core/src/mcp/ports/notification.rs`), so the set of screens is closed:
+
+| `open` | Extra keys | Opens |
+|---|---|---|
+| `schedule` | `schedule_id`, and `run_id` for a run's result | the schedules list at that schedule (`ScheduleDetail`, without `run_id`, is the missed-run question) |
+| `chat` | `session_id` when the notice is about a conversation | that conversation; the chat screen when there is no `session_id` |
+| `devices`, `models`, `extensions`, `remote_access` | none | that screen |
+
+**The id rides beside the screen, never instead of it.** A client that does not read an id still
+opens the right screen, and a client that cannot open the id opens the screen alone. Each client
+validates both: `open` against its own allow-list (an unknown value opens nothing, and the app
+stays where it was), and an id against the shape the Pond mints (`[A-Za-z0-9_-]{1,128}`); a
+malformed id is dropped and the screen kept. A conversation that is gone, or is another member's,
+is answered as missing by `GET /sessions/{id}/messages`; the client then opens the chat screen
+alone. Nothing about a hint can crash a client or open anything outside its allow-list.
+
+**Which notices name a conversation.** Before 2026-11-04 every `chat` hint was bare, so "Open
+chat" on "Task done: ..." landed on the chat list, not the conversation the task reported to.
+
+| Notice | `session_id` is | When there is none |
+|---|---|---|
+| long task done or stopped (`long-task-{id}`) | the task's `origin_session_id`, the conversation it was started from and reports back to | the conversation was deleted (the column is cleared), or the task was started outside one |
+| an agent's run (`agent-run-{id}`) | the same, for the task the agent ran | as above |
+| proposal (`proposal-{id}`) from a reminder | the conversation the reminder was heard in (the trigger's `source_id`, `reminder_session_id` in `user_data/services/reminder_proposal.rs`) | the proposal came from the proactive reviewer (a sensor, a camera, a device): no conversation is behind it, and the trigger's `source_id` (a device id) is never sent as one |
+
+Schedule results keep `open: "schedule"`. A scheduled prompt runs in a `sched-{id}-{time}`
+session the scheduler creates, but its turn is not written to `session_messages`, so that
+conversation would open empty; the run's own result is on the schedules screen.
+
+The phone keeps its own route name for a conversation, `conversation` (its notice that a reply
+finished); it turns a Pond `chat` hint with a `session_id` into that route on arrival. The Pond
+never sends `conversation`, so a phone from before 2026-11-04 opens its chat tab for these notices,
+exactly as it did.
 
 ## Delivery classes
 
 Each producer picks how far its notice goes, through one `NotificationSender` method:
 
-| Method | Reaches | Queued and pushed to phones |
-|---|---|---|
-| `publish_live` | screens connected right now | never: transient status (the model warming up) |
-| `broadcast` | the household: connected screens, and every paired phone's own copy | yes |
-| `broadcast_except(device)` | every paired phone but `device`, which caused it | yes; no live broadcast copy, since the stream would hand that to `device` too |
-| `send` | one device | yes |
-| `MemberNotifier::notify_member` | one member's own devices, never a broadcast | yes |
+| Method | Reaches | Queued and pushed to phones | In the household's history |
+|---|---|---|---|
+| `publish_live` | screens connected right now | never: transient status (the model warming up) | never; marked `data.transient = true` |
+| `broadcast` | the household: connected screens, and every paired phone's own copy | yes | every device |
+| `broadcast_except(device)` | every paired phone but `device`, which caused it | yes; no live broadcast copy, since the stream would hand that to `device` too | every device but `device` |
+| `send` | one device | yes | that device |
+| `MemberNotifier::notify_member` | one member's own devices, never a broadcast | yes | that member's devices at the time |
 
 Before 2026-10-27 the warm-up status ("Pond is getting ready", "Pond is ready") went through
 `broadcast`, so once broadcasts became durable every restart queued and pushed both to every paired
@@ -69,6 +106,61 @@ bounded either way.
 The pruning pass (every 6 h) deletes delivered rows after 7 days, every row after 30 days, and
 anything beyond a device's newest 500 (`NOTIFICATIONS_*` in `crates/pond-infra/src/pruning.rs`).
 
+The household's history (below) keeps the same 30-day and 500-row caps, counted over the whole
+household rather than per device.
+
+## The household's history and the dashboard (2026-10-28)
+
+Before 2026-10-28 the dashboard's notification centre listed only schedule runs: it subscribed to
+`/schedules/events` and nothing else, so every notice in the catalogue below reached the phones and
+never the dashboard. The queue could not serve it either: it holds per-phone copies only, none at
+all for a household without a paired phone, and none for a member's notice to a member without one.
+
+**The history.** `BroadcastNotificationSender::with_history` records every durable notice once,
+under its household id, in `notification_history` (migration `0079`), through the
+`NotificationHistory` port (`crates/pond-core/src/mcp/ports/notification_history.rs`, SQLite adapter
+`crates/pond-infra/src/sqlite_notification_history.rs`). Who may read a row is its
+`HistoryAudience` (`crates/pond-core/src/mcp/domain/notification_history.rs`), decided when the
+notice is raised and following the queue's own scoping: a household notice is every device's
+except the one that caused it (`broadcast_except`), and a member's notice (a proposal, a ride link)
+belongs to the devices it was queued for at the time, in `notification_history_recipients`, so a
+member's notice never reaches another member's device or an unattributed shared screen. A device
+that changes member, or whose member is deleted, drops those rows (migration `0080`). Read state
+is per device (`notification_history_reads`), so marking a notice read on the dashboard leaves it
+unread on a phone. A failed history write is logged (`notification_history_record_failed`) and the
+notice is still delivered. The `chat` process's member notifier (rides) records too.
+
+**Live-only status is not history.** A `publish_live` notice (the warm-up) is never recorded, and
+carries `data.transient = true` on the stream so a centre can leave it out. It is not listed even
+transiently: the dashboard's warm-up banner (`/warmup`) already shows that state, and a list entry
+saying "Pond is ready" would only be stale by the time anyone read it.
+
+**The dashboard.** `AppContext` runs two fetch-based streams (`state/liveFeeds.ts`; an
+`EventSource` cannot send the session token, and the old one on `/schedules/events` was refused by
+every Pond without the loopback bypass) that reconnect with a growing pause (2 s up to 60 s):
+
+1. On every (re)connect, `GET /notifications/history`, which also names the dashboard's own device
+   id; then `GET /notifications/stream?device_id=` for that id.
+2. Every notice is merged by household id (`state/householdNotices.ts`): a copy addressed to this
+   device carries `"{id}:{device_id}"` and is mapped back, so the live copy and the history row are
+   one entry. A notice read on either side stays read.
+3. A schedule-result notice (`open: "schedule"`) whose run already has a card in the centre is
+   folded into that card, which keeps its "View on Canvas"; one whose run has no card is listed.
+4. Each notice is styled by its category (`info`, `alert`, `action_required`), and its `open` hint
+   opens the dashboard's section: `schedule` the schedules, `devices`, `chat`, `models`,
+   `extensions` their own, `remote_access` the Pairing page that holds remote access. An unknown
+   hint offers no action. A `chat` hint with a `session_id` (2026-11-04: a long task, an agent's
+   run, a suggestion from a reminder) opens that conversation: the chat screen asks the Pond for
+   it first, and stays on its wall when the Pond has no such conversation for this dashboard
+   (`openSessionId` in `pond-desktop/src/state/householdNotices.ts`, `requestedConversation` in
+   the reducer).
+5. "Mark all read", or opening one notice, marks it read at once and on the Pond with
+   `POST /notifications/history/read`; a failure says so on the page. Schedule-run cards keep their
+   in-memory read state. The bell counts unread runs plus unread listed notices.
+
+A history read that fails (a dashboard with no paired device, such as one on loopback under
+`POND_DEV_ALLOW_LOOPBACK`, gets `403`) shows "could not be loaded" on the page and keeps retrying.
+
 ## Setting up push
 
 Without a key the Pond still queues every notice, and a phone receives it the next time it opens
@@ -101,7 +193,9 @@ name in the first column.
 | schedule result | a schedule or rule run finishes (`ScheduleResultEvent`) | `Schedule: {label}` / the run's result or error | `info`, `alert` when it failed | `schedule` + ids | household | none per run; skipped when `schedule_result_notify` is off, and when a rule with a `Notify` action completed (that action already spoke); a failure is always announced |
 | rule `Notify` action | a sensor, camera or device rule fires | the rule's own title / body | `alert` | none | household | the rule's `cooldown_secs` |
 | `send_notification` tool | the model calls it | the tool's title / body | the tool's | none | household | none |
-| proposal | the proactive reviewer, or a reminder from conversation (2026-10-27), makes a proposal | `A suggestion` / the proposal's summary | `action_required` | `chat` | that member's devices only | one per proposal (`proposal-{id}`); the shared daily proposal cap |
+| proposal | the proactive reviewer, or a reminder from conversation (2026-10-27), makes a proposal | `A suggestion` / the proposal's summary | `action_required` | `chat`, with the reminder's conversation (2026-11-04) | that member's devices only | one per proposal (`proposal-{id}`); the shared daily proposal cap |
+| long task | a member's long task (deep research included) finishes or stops | `Task done: {goal}` / `Task stopped: {goal}`, the answer or the reason | `info` / `alert` | `chat`, with the conversation it was started from (2026-11-04) | the task's owner's devices only | one per task (`long-task-{id}`) |
+| agent run | one of a member's agents finished a run with something to say | `From {agent}` / its summary | `info` | `chat`, with the task's conversation (2026-11-04) | the task's owner's devices only | one per task (`agent-run-{id}`) |
 | pairing | a device pairs, or a pairing verification fails | `New device paired` / `Failed pairing attempt` | `info` / `alert` | `devices` | household | failures: one per 10 minutes |
 | Matter | device added, device left, pairing failed, controller unreachable / back, first-run set-up started / finished | see `pond-adapters-matter/src/notify.rs` | `info` / `alert` | `devices` | household | alerts one per 10 minutes per kind; "back" only after an announced outage; a removal the Pond asked for is silent |
 | ride links and offers | `giap-travel` | see [rides and maps](rides-and-maps.md) | | `action` payload | the member who asked | |
@@ -155,6 +249,7 @@ default. Whether only the removed device's owner, or only household admins, shou
 ### The app
 
 The phone validates `open` against its own allow-list (`services/notification-link.ts` in
-goose-on-the-go) and ignores a value it does not know, opening where it was. `models`, `extensions`
+goose-on-the-go) and ignores a value it does not know, opening where it was. A `chat` hint with a
+`session_id` opens that conversation from goose-on-the-go `fix/notification-popup-and-open` on. `models`, `extensions`
 and `remote_access` open the app's Models, Extensions and Remote access screens from
 goose-on-the-go `feature/notification-open-system-screens` on; an older app ignores them.

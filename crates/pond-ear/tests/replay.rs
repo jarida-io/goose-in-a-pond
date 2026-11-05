@@ -431,3 +431,68 @@ fn the_replys_echo_does_not_barge_in_but_a_voice_over_it_does() {
         }
     }
 }
+
+#[test]
+fn with_segments_on_the_ear_reports_speech_outside_listen_and_never_runs_the_cnn() {
+    let st = stream();
+    let mut runs = Vec::new();
+    for chunk in [1usize, 511, 1_600, 50_000] {
+        // At threshold 0 the CNN would fire on its first hop, if it ran at all.
+        let mut cfg = config(0.0, true);
+        cfg.segments = true;
+        let mut ear = Ear::new(cfg, Household::default()).unwrap();
+        assert!(ear.segments());
+        let ev = replay(&mut ear, &st, chunk);
+        assert!(
+            ear.take_scores().is_empty(),
+            "chunk {chunk}: the wake CNN ran"
+        );
+        runs.push((chunk, ev));
+    }
+    let (_, first) = &runs[0];
+    for (chunk, ev) in &runs[1..] {
+        assert_eq!(ev, first, "chunk {chunk}");
+    }
+    assert!(!first.iter().any(|e| e.starts_with("Wake")), "{first:?}");
+
+    let mut cfg = config(0.0, true);
+    cfg.segments = true;
+    let mut ear = Ear::new(cfg, Household::default()).unwrap();
+    let mut segments = Vec::new();
+    for (k, c) in st.mic.chunks(1_600).enumerate() {
+        let m = k * 1_600;
+        if let Some(&(_, act)) = st.acts.iter().find(|(at, _)| *at == m) {
+            match act {
+                Act::Listen => {
+                    ear.listen(ear.front().samples());
+                }
+                Act::Set(s) => {
+                    ear.set_state(s);
+                }
+            }
+        }
+        for e in ear.push(c) {
+            if let Event::Segment { start, end, .. } = e {
+                assert!(
+                    ear.state() != State::Listen,
+                    "a segment was reported while listening"
+                );
+                assert!(start < end && end <= ear.front().samples());
+                segments.push((start, end));
+            }
+        }
+    }
+    eprintln!(
+        "segments {:?} s",
+        segments
+            .iter()
+            .map(|&(s, e)| (s as f64 / S as f64, e as f64 / S as f64))
+            .collect::<Vec<_>>()
+    );
+    if silero().is_some() {
+        assert!(
+            segments.iter().any(|&(s, e)| s < S / 2 && e > 3 * S),
+            "the first voice (0 to 4 s) was not one segment: {segments:?}"
+        );
+    }
+}

@@ -58,11 +58,10 @@ impl Handshake for MockHandshake {
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "localhost".to_string()),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
-            capabilities: vec![
-                "chat".to_string(),
-                "devices".to_string(),
-                "settings".to_string(),
-            ],
+            capabilities: crate::sqlite_handshake::POND_CAPABILITIES
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
             rejection_reason: None,
             // The mock has no TLS identity and accepts no binding, so it has
             // nothing to prove.

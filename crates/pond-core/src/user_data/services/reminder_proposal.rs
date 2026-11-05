@@ -115,6 +115,18 @@ pub fn proposal_from_reminder(
     })
 }
 
+/// The conversation a reminder-born proposal was heard in: the trigger's `source_id`, which
+/// [`proposal_from_reminder`] fills with the reminder's session. `None` for a proposal from any
+/// other trigger (a sensor, a camera, the reviewer), which has no conversation behind it.
+pub fn reminder_session_id(proposal: &Proposal) -> Option<&str> {
+    let trigger = proposal.trigger();
+    if trigger.kind() == REMINDER_TRIGGER_KIND {
+        trigger.source_id()
+    } else {
+        None
+    }
+}
+
 /// What one promotion run came to.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PromotionReport {
@@ -422,6 +434,37 @@ mod tests {
             r.said_at,
             "the feedback loop reasons about when the conversation happened"
         );
+    }
+
+    #[test]
+    fn a_reminder_proposal_names_the_conversation_it_was_heard_in() {
+        let r = reminder("r1", Some("profile-jerry"));
+        let proposal = proposal_from_reminder(&r, "p1", Utc::now()).unwrap();
+        assert_eq!(reminder_session_id(&proposal), Some(r.session_id.as_str()));
+    }
+
+    #[test]
+    fn a_proposal_from_another_trigger_names_no_conversation() {
+        let proposal = Proposal::expiring_after(
+            "p2",
+            BusEventRef::new(
+                "sensor",
+                Some("plant-1".into()),
+                Some("moisture".into()),
+                Utc::now(),
+            )
+            .unwrap(),
+            "the soil is dry",
+            TaskKind::AgentPrompt {
+                prompt: "Water the plants".into(),
+            },
+            ProposalAudience::for_member("profile-jerry").unwrap(),
+            0.9,
+            Utc::now(),
+            PROPOSAL_TTL,
+        )
+        .unwrap();
+        assert_eq!(reminder_session_id(&proposal), None);
     }
 
     #[tokio::test]

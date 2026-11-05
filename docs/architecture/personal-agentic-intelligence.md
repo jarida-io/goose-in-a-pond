@@ -169,7 +169,7 @@ PAI-3 Context governor ── PAI-4 Compaction ── PAI-5 Thinking │
 
 | Doc | Workstream | Requirement | Depends on | Status |
 |---|---|---|---|---|
-| [01](./pai/01-identity-and-profile-boundaries.md) | Identity and profile boundaries | Hard profile boundaries | — | **P1-P10 LANDED.** VERIFIED on the Orin 2026-08-12. Open outside the phase list: `get_session_messages` and `get_session_attachment` take no `Principal`; the `giap-memory` MCP tools search at `ProfileScope::Household`; `language` is collected at onboarding and never written to `profiles.preferences` |
+| [01](./pai/01-identity-and-profile-boundaries.md) | Identity and profile boundaries | Hard profile boundaries | — | **P1-P10 LANDED.** VERIFIED on the Orin 2026-08-12. Open outside the phase list: `language` is collected at onboarding and never written to `profiles.preferences`; `GET /sessions` lists every conversation to any paired client, and `POST /chat/stream` checks no ownership of the session it is given (the session reads and the `giap-memory` tools were scoped to the caller on 2026-11-02) |
 | [02](./pai/02-privacy-and-security-guardrails.md) | Privacy and security guardrails | Privacy/security guardrails | 01 | **P0-P5, P6a, P7, P8a LANDED; P6b partial; P8b blocked.** VERIFIED on the Orin 2026-08-12. `UNGATED_SENDERS` is empty and `MAX_UNGATED` is 0. P6b's outbound-connector-action gate is open, and the `giap-draft` staging gate was deleted on 2026-09-10; P8b waits on `Principal.proven_profile_id`, which is `None` on every path |
 | [03](./pai/03-context-governor.md) | Context governor | Large context, used fully | — | **P1-P6 and 4b LANDED.** VERIFIED on the Orin 2026-08-12, before goose took back trimming and compaction of the live conversation (2026-09-11) and before the `device_budget` move (2026-09-24); the re-run is owed |
 | [04](./pai/04-smart-compaction.md) | Smart compaction | Smart compaction | 03 | **Mostly superseded on 2026-09-11, when goose took back the live conversation.** P5 (prefix-cache state), P7a (the compact route, now calling goose) and P7b (`ContextPressureNote`) stand; P6's job is `run_quiet_compaction`; P1 is inert and P3 runs only on replay; P2 and P4 were deleted. Per-phase table at the top of the document's section 4 |
@@ -326,6 +326,14 @@ takes `ReusePrefix` (verified — 17 tools on both turns, prefill 3 258 ms then 
 
 **Status (2026-10-23):** `tool_selection_mode` still defaults to `all`
 (`Settings::default_tool_selection_mode`); a third mode, `minimal`, now exists beside `relevant`.
+
+**Status (2026-11-02):** `relevant` no longer chooses from the first message alone. Every later
+message is scored the same way and the groups it reaches the embedder model's floor on are added to the
+session's set; nothing held is ever removed (`tool_selection::union_groups`), so the prefix moves
+only on a turn that adds a group, from the first added tool on. `giap-knowledge` is now core, so
+web search is offered from the first turn. Found on the Orin on 2026-10-28: "What has happened to
+China's stock market?" loaded no knowledge group, the model said it had no tool, and the
+follow-up "Look it up?" reused the same set and produced an empty turn.
 
 **The reason it is not already the default is a real objection, and sharper than "it sometimes
 mis-scores".** The set is chosen from the FIRST message, i.e. at the least informed moment of the

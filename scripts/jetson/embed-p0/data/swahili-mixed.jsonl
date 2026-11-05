@@ -1,0 +1,69 @@
+{"id": "sw01", "kind": "sw-doc/en-query", "doc": "Mama ana mzio wa karanga.", "query": "What is mum allergic to?"}
+{"id": "sw02", "kind": "sw-doc/en-query", "doc": "Baba anakunywa dawa ya shinikizo la damu kila asubuhi.", "query": "Which medicine does dad take every morning?"}
+{"id": "sw03", "kind": "sw-doc/en-query", "doc": "Amara anaogopa mbwa tangu alipoumwa na mbwa wa jirani.", "query": "Why is Amara scared of dogs?"}
+{"id": "sw04", "kind": "sw-doc/en-query", "doc": "Funguo za ziada za gari ziko kwenye droo ya jikoni.", "query": "Where are the spare car keys?"}
+{"id": "sw05", "kind": "sw-doc/en-query", "doc": "Bibi anaishi Kisumu karibu na ziwa.", "query": "Where does grandma live?"}
+{"id": "sw06", "kind": "sw-doc/en-query", "doc": "Tunalipa kodi ya nyumba tarehe tano kila mwezi.", "query": "When is the rent due?"}
+{"id": "sw07", "kind": "sw-doc/en-query", "doc": "Shule ya Amara itafungwa kwa likizo ya Desemba wiki ijayo.", "query": "When does Amara's school close for the holidays?"}
+{"id": "sw08", "kind": "sw-doc/en-query", "doc": "Fundi bomba anaitwa Otieno na nambari yake iko kwenye friji.", "query": "Who is our plumber?"}
+{"id": "sw09", "kind": "sw-doc/en-query", "doc": "Wanjiku hapendi chakula chenye pilipili nyingi.", "query": "Does Wanjiku like spicy food?"}
+{"id": "sw10", "kind": "sw-doc/en-query", "doc": "Mtoto alipewa chanjo ya surua mwezi uliopita.", "query": "Has the baby had the measles vaccine?"}
+{"id": "sw11", "kind": "sw-doc/en-query", "doc": "Mafuta ya injini ya gari yanabadilishwa kila kilomita elfu tano.", "query": "How often does the car need an oil change?"}
+{"id": "sw12", "kind": "sw-doc/en-query", "doc": "Paka wetu anaitwa Simba na anakula samaki tu.", "query": "What does our cat eat?"}
+{"id": "sw13", "kind": "sw-doc/en-query", "doc": "Tangi la maji juu ya paa linavuja tangu mvua kubwa.", "query": "Is the water tank leaking?"}
+{"id": "sw14", "kind": "sw-doc/en-query", "doc": "Nenosiri la WiFi limeandikwa nyuma ya ruta.", "query": "Where can I find the WiFi password?"}
+{"id": "sw15", "kind": "sw-doc/en-query", "doc": "Mjomba Juma anafanya kazi katika benki huko Mombasa.", "query": "Where does uncle Juma work?"}
+{"id": "sw16", "kind": "sw-doc/en-query", "doc": "Ugali hupikwa kwa unga wa mahindi na maji tu.", "query": "How do you cook ugali?"}
+{"id": "sw17", "kind": "sw-doc/en-query", "doc": "Tunaenda kanisani kila Jumapili saa tatu asubuhi.", "query": "What time do we go to church on Sunday?"}
+{"id": "sw18", "kind": "sw-doc/en-query", "doc": "Daktari alisema Baba apunguze chumvi na sukari.", "query": "What did the doctor tell dad to cut down on?"}
+{"id": "sw19", "kind": "sw-doc/en-query", "doc": "Jirani wetu Mama Njeri anauza mayai na maziwa.", "query": "Who sells eggs nearby?"}
+{"id": "sw20", "kind": "sw-doc/en-query", "doc": "Mlinzi wa usiku anaingia kazini saa mbili usiku.", "query": "When does the night guard start his shift?"}
+{"id": "sw21", "kind": "sw-doc/en-query", "doc": "Amara anapenda kuogelea kuliko kucheza mpira.", "query": "Which sport does Amara prefer?"}
+{"id": "sw22", "kind": "sw-doc/en-query", "doc": "Bili ya umeme inalipwa kwa M-Pesa kupitia paybill.", "query": "How do we pay the electricity bill?"}
+{"id": "sw23", "kind": "en-doc/sw-query", "doc": "The generator needs diesel every two weeks.", "query": "Jenereta inajazwa dizeli mara ngapi?"}
+{"id": "sw24", "kind": "en-doc/sw-query", "doc": "Grandpa's birthday party is at the farm in Nakuru.", "query": "Sherehe ya kuzaliwa ya babu itafanyika wapi?"}
+{"id": "sw25", "kind": "en-doc/sw-query", "doc": "The school fees for third term are still unpaid.", "query": "Je, karo ya shule ya muhula wa tatu imelipwa?"}
+{"id": "sw26", "kind": "en-doc/sw-query", "doc": "Our dog Rex has a vet appointment on Friday.", "query": "Mbwa ana miadi na daktari wa wanyama lini?"}
+{"id": "sw27", "kind": "en-doc/sw-query", "doc": "The house help is off every Thursday afternoon.", "query": "Msaidizi wa nyumbani hayuko kazini siku gani?"}
+{"id": "sw28", "kind": "en-doc/sw-query", "doc": "The tomatoes in the greenhouse have blight.", "query": "Nyanya za kwenye kitalu zina ugonjwa gani?"}
+{"id": "sw29", "kind": "en-doc/sw-query", "doc": "Wanjiku is pregnant and due in March.", "query": "Wanjiku anatarajia kujifungua lini?"}
+{"id": "sw30", "kind": "en-doc/sw-query", "doc": "The landlord promised to fix the gate this week.", "query": "Mwenye nyumba aliahidi kurekebisha nini?"}
+{"id": "sw31", "kind": "mixed-doc/en-query", "doc": "Mresh wangu Kevo ameniomba doo ya kurent nyumba.", "query": "Who asked me for rent money?"}
+{"id": "sw32", "kind": "mixed-doc/en-query", "doc": "Kesho niko na meeting na client saa nne, so usiniwekee lunch.", "query": "Do I have a meeting tomorrow?"}
+{"id": "sw33", "kind": "mixed-doc/en-query", "doc": "Amara ako na homework ya maths, mumsaidie after dinner.", "query": "Does Amara have homework tonight?"}
+{"id": "sw34", "kind": "mixed-doc/en-query", "doc": "Matatu ya town inapita stage saa kumi na mbili asubuhi.", "query": "When does the first matatu to town leave?"}
+{"id": "sw35", "kind": "mixed-doc/mixed-query", "doc": "Nimeweka reminder ya kulipa fees ya swimming next week.", "query": "Je, kuna reminder ya swimming fees?"}
+{"id": "sw36", "kind": "mixed-doc/en-query", "doc": "Cucu anataka tumtumie pesa ya dawa via M-Pesa.", "query": "Does grandma need money for medicine?"}
+{"id": "sw37", "kind": "mixed-doc/mixed-query", "doc": "Fridge imeharibika na fundi atakuja Monday.", "query": "Fundi wa fridge anakuja lini?"}
+{"id": "sw38", "kind": "mixed-doc/mixed-query", "doc": "Battery ya inverter imeisha pumzi, tunahitaji kununua mpya.", "query": "Inverter battery iko sawa?"}
+{"id": "sw39", "kind": "mixed-doc/en-query", "doc": "Mathe ameniambia nisisahau kubuy unga ya chapati.", "query": "What did mum ask me to buy?"}
+{"id": "sw40", "kind": "mixed-doc/en-query", "doc": "Wifi iko slow sana tangu Safaricom wabadilishe router.", "query": "Why is the internet slow?"}
+{"id": "sw41", "kind": "sw-doc/sw-query", "doc": "Nyumba ya babu ina paa la bati jekundu.", "query": "Paa la nyumba ya babu lina rangi gani?"}
+{"id": "sw42", "kind": "sw-doc/sw-query", "doc": "Mvua ikinyesha, barabara ya kuja nyumbani hujaa matope.", "query": "Barabara ya nyumbani ikoje wakati wa mvua?"}
+{"id": "sw43", "kind": "sw-doc/sw-query", "doc": "Mwalimu wa darasa wa Amara ni Bi. Akinyi.", "query": "Mwalimu wa Amara anaitwa nani?"}
+{"id": "sw44", "kind": "sw-doc/sw-query", "doc": "Tunahifadhi mchele na maharagwe kwenye stoo nyuma ya jikoni.", "query": "Chakula kikavu kinawekwa wapi?"}
+{"id": "swd01", "kind": "distractor", "doc": "Mama anapenda chai ya tangawizi asubuhi."}
+{"id": "swd02", "kind": "distractor", "doc": "Baba ana miadi ya kunyoa nywele Jumamosi."}
+{"id": "swd03", "kind": "distractor", "doc": "Amara alipata zawadi ya kuogelea shuleni."}
+{"id": "swd04", "kind": "distractor", "doc": "Funguo za nyumba ziko kwa mlinzi."}
+{"id": "swd05", "kind": "distractor", "doc": "Bibi alipika pilau siku ya Krismasi."}
+{"id": "swd06", "kind": "distractor", "doc": "Tunalipa maji kila mwezi kwa kampuni ya kaunti."}
+{"id": "swd07", "kind": "distractor", "doc": "The car insurance renews in January."}
+{"id": "swd08", "kind": "distractor", "doc": "Our neighbour's dog barks all night."}
+{"id": "swd09", "kind": "distractor", "doc": "Kevo alirudi kutoka Nairobi jana usiku."}
+{"id": "swd10", "kind": "distractor", "doc": "Wanjiku anafanya kazi hospitalini kama muuguzi."}
+{"id": "swd11", "kind": "distractor", "doc": "Simba the cat sleeps on the sofa all afternoon."}
+{"id": "swd12", "kind": "distractor", "doc": "Jikoni kuna jiko la gesi na jiko la mkaa."}
+{"id": "swd13", "kind": "distractor", "doc": "Daktari wa meno yuko Westlands."}
+{"id": "swd14", "kind": "distractor", "doc": "The router is in the living room next to the TV."}
+{"id": "swd15", "kind": "distractor", "doc": "Tunaenda sokoni Jumamosi kununua mboga."}
+{"id": "swd16", "kind": "distractor", "doc": "Amara's best friend is called Zawadi."}
+{"id": "swd17", "kind": "distractor", "doc": "Fundi wa umeme alirekebisha soketi za chumbani."}
+{"id": "swd18", "kind": "distractor", "doc": "Babu anafuga ng'ombe na mbuzi shambani."}
+{"id": "swd19", "kind": "distractor", "doc": "Mama Njeri ana watoto watatu."}
+{"id": "swd20", "kind": "distractor", "doc": "Generator iko kwenye kibanda nyuma ya nyumba."}
+{"id": "swd21", "kind": "distractor", "doc": "The school bus picks Amara up at half past six."}
+{"id": "swd22", "kind": "distractor", "doc": "Tulinunua tangi jipya la maji mwaka jana."}
+{"id": "swd23", "kind": "distractor", "doc": "Wanjiku alienda kliniki kwa uchunguzi jana."}
+{"id": "swd24", "kind": "distractor", "doc": "The landlord lives in Karen."}
+{"id": "swd25", "kind": "distractor", "doc": "Nauli ya matatu kwenda town ni shilingi mia moja."}

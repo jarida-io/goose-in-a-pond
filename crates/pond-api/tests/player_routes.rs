@@ -245,7 +245,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -263,6 +263,8 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         model_scheduler: None,
         mcp_memory: None,
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         account_sync: None,
         extension_manager: manager.map(|m| m as Arc<dyn ExtensionManagerPort>),
         mcp_server_repo: Some(installed),
@@ -284,6 +286,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -321,6 +324,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 

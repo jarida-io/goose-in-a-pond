@@ -154,3 +154,17 @@ describe("the mode", () => {
     expect(second.result.current.on).toBe(false);
   });
 });
+
+describe("how much the pond writes", () => {
+  it("leaves it to the pond until the person picks, and keeps their pick across questions", async () => {
+    answer({ available: true });
+    const { result } = renderHook(() => useDeepResearch(true));
+    await waitFor(() => expect(result.current.access).toBe("available"));
+    expect(result.current.answer).toBe("auto");
+    act(() => result.current.setAnswer("short"));
+    act(() => result.current.enter());
+    act(() => result.current.leave());
+    act(() => result.current.enter());
+    expect(result.current.answer).toBe("short");
+  });
+});

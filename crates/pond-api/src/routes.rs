@@ -13,12 +13,14 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use pond_core::mcp::domain::marketplace::BuiltInCapability;
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::mesh::domain::millisats::Millisats;
 use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
 use pond_core::mesh::domain::trust_scope::TrustScope;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::models::services::active_embedder::EmbedderState;
 use pond_core::models::services::context::context_governor::{
     ContextGovernor, ContextInputs, EngineWindow,
 };
@@ -36,7 +38,8 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
+    routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
+    SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
@@ -194,6 +197,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        // The household's notice history, scoped to the caller's device and with its read state.
+        .route("/notifications/history", get(notifications_history))
+        .route(
+            "/notifications/history/read",
+            post(mark_notification_history_read),
+        )
         .route("/models/download/control", post(download_control))
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
@@ -201,6 +210,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     // ───────────── Protected routes (require onboarding) ─────────────
     let protected_routes = Router::new()
         .route("/transcribe", post(transcribe))
+        // Serve's room voice: its state, the switch, its events and its interrupt.
+        .route(
+            "/voice/room",
+            get(crate::room_voice::status).put(crate::room_voice::set_enabled),
+        )
+        .route("/voice/room/events", get(crate::room_voice::events))
+        .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
+        .route("/voice/room/pause", post(crate::room_voice::pause))
+        .route("/voice/room/resume", post(crate::room_voice::resume))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
@@ -246,6 +264,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
+        .route("/devices/events", get(device_events_stream))
         .route("/devices/commission", post(commission_device))
         .route("/devices/discovered", get(discover_devices))
         .route("/matter/status", get(matter_status))
@@ -354,6 +373,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/run-now", post(run_schedule_now))
+        .route("/schedules/{id}/missed/run", post(run_missed_schedule))
+        .route("/schedules/{id}/missed/skip", post(skip_missed_schedule))
         .route("/schedules/{id}/runs", get(list_schedule_runs))
         .route("/schedules/events", get(schedule_events_sse))
         // ── Sensor rules ───────────────────────────────────────────────────
@@ -480,18 +501,38 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── MCP App Resources ────────────────────────────────────────────────
         .route("/mcp/resources", get(mcp_read_resource))
         .route("/mcp/tools/call", post(mcp_call_tool))
-        .route("/tools/invoke", post(invoke_tool))
+        .route(
+            "/tools/invoke",
+            post(invoke_tool).layer(axum::Extension(Arc::new(
+                crate::idempotency::IdempotentReplies::default(),
+            ))),
+        )
         // ── System Prompt Extras ───────────────────────────────────────────────
         .route(
             "/agent/extras",
             get(list_prompt_extras).post(upsert_prompt_extra),
         )
         .route("/agent/extras/{key}", delete(delete_prompt_extra))
+        // A member's own notes and setup interview, from that member's own devices.
+        .route("/profiles/{id}/notes", get(crate::member_notes::list_notes))
+        .route(
+            "/profiles/{id}/notes/{key}",
+            put(crate::member_notes::put_note).delete(crate::member_notes::delete_note),
+        )
+        .route(
+            "/profiles/{id}/interview",
+            get(crate::member_notes::interview_status).post(crate::member_notes::start_interview),
+        )
+        .route(
+            "/profiles/{id}/interview/approve",
+            post(crate::member_notes::approve_interview),
+        )
         // ── Turn-level telemetry ──────────────────────────────────────────────
         .route("/telemetry/turns", get(get_telemetry_turns))
         .route("/telemetry/summary", get(get_telemetry_summary))
         // ── Event log / telemetry ─────────────────────────────────────────────
         .route("/logs", get(list_logs))
+        .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
@@ -564,6 +605,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/power", get(crate::pond_admin::power))
         .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
         .route("/admin/power/restart", post(crate::pond_admin::restart))
+        .route(
+            "/agents/voice",
+            get(crate::voice_agent::get_voice_agent)
+                .put(crate::voice_agent::put_voice_agent)
+                .delete(crate::voice_agent::reset_voice_agent),
+        )
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -583,7 +630,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/faces/identify", post(identify_face_handler))
         .route("/faces/identify-burst", post(burst_identify_face_handler))
         .route("/faces/enroll-quality", post(enroll_quality_handler))
-        .route("/faces/profile/{profile_id}", get(list_face_enrollments))
+        .route(
+            "/faces/profile/{profile_id}",
+            get(list_face_enrollments).delete(delete_face_enrollments),
+        )
+        // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
+        .route("/voice/takes", post(crate::voice_match::post_take))
+        .route("/voice/prints", get(crate::voice_match::get_prints))
+        .route("/voice/prints/model", post(crate::voice_match::fetch_model))
+        .route(
+            "/voice/prints/{profile_id}",
+            delete(crate::voice_match::delete_prints),
+        )
         .route(
             "/faces/profile/{profile_id}/threshold",
             get(get_profile_threshold_handler)
@@ -643,9 +701,18 @@ fn file_response(path: &str, bytes: Vec<u8>) -> Response<axum::body::Body> {
         .into_response()
 }
 
+/// An `/api/` path no route serves. Never the dashboard: a client would read its `200` as a
+/// write that succeeded.
+pub async fn api_not_found() -> Response<axum::body::Body> {
+    (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+}
+
 /// Serves the embedded UI, else `static_dir` (dev); extensionless paths get `index.html`.
 pub async fn serve_web(uri: axum::http::Uri, static_dir: std::path::PathBuf) -> impl IntoResponse {
     let raw = uri.path().trim_start_matches('/');
+    if raw == "api" || raw.starts_with("api/") {
+        return api_not_found().await;
+    }
     let rel = if raw.is_empty() { "index.html" } else { raw };
 
     if embedded_ui_present() {
@@ -905,7 +972,8 @@ async fn emit_pairing_outcome(
     } else {
         tracing::warn!(
             kind = "pairing_rejected",
-            device = device_name.unwrap_or("unnamed"),
+            // A phone's name is often its owner's ("Amina's iPhone").
+            named = device_name.is_some(),
             reason = reason.unwrap_or("unspecified"),
             method,
             "pairing rejected"
@@ -1517,7 +1585,10 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    let mut body = json!({"status": "completed"});
+    let mut body = json!({
+        "status": "completed",
+        "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
+    });
     if completing {
         if let Some(key) = crate::pond_admin::first_activation_key(&state, principal.as_ref()).await
         {
@@ -1525,6 +1596,23 @@ async fn complete_onboarding(
         }
     }
     Ok(Json(body))
+}
+
+/// The owner's setup interview, offered once setup completes: where it stands and how to start it.
+async fn owner_interview_offer(state: &Arc<AppState>, owner: Option<&str>) -> Value {
+    let Some(owner) = owner.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    let Some(service) = crate::member_notes::interview_service(state) else {
+        return Value::Null;
+    };
+    let current = service.get(owner).await.ok().flatten();
+    let view = crate::member_notes::interview_json(owner, current.as_ref());
+    json!({
+        "profile_id": owner,
+        "status": view["status"],
+        "start": format!("/api/v1/profiles/{owner}/interview"),
+    })
 }
 
 /// The device that claimed the pond paired before it had members, so it belonged to nobody; it
@@ -1539,7 +1627,8 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             device = device.unwrap_or("unknown"),
             error = %why,
             "onboarding completed, but the device that claimed this pond was not attributed \
-             to its owner; it stays unattributed until a pairing code or Devices binds it"
+             to its owner; it stays unattributed until it pairs again with a code issued for a \
+             member"
         );
     };
     let claimant = match claims.claimed_by().await {
@@ -1744,6 +1833,10 @@ struct ChatRequest {
     /// The member asked for deep research: the pond starts a research task on the message.
     #[serde(default)]
     deep_research: bool,
+    /// How long that research's answer should be: `short`, `report`, or `auto` (or absent) for
+    /// the planner to read from the ask. Anything else is read as `auto`.
+    #[serde(default)]
+    deep_research_answer: Option<String>,
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
@@ -2577,7 +2670,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
 struct TurnAccumulator {
     /// Strips (and captures) Harmony thought channels and `<think>` blocks from visible text.
     thought: crate::thought_filter::ThoughtFilter,
-    /// The assistant's visible answer, as persisted.
+    /// The assistant's visible answer, as persisted: the text written after the turn's last tool
+    /// call. Text before a tool call is working notes and leaves it (see `absorb`).
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
@@ -2635,10 +2729,25 @@ impl TurnAccumulator {
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "{}".to_string()),
                 );
-                StreamStep::Frame(
-                    json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
-                        .to_string(),
-                )
+                let mut frame = json!({"type": "tool_call", "tool": tool, "id": id, "input": input});
+                // Text written before a tool call is the model at work ("let me check the
+                // weather"), not the answer: it leaves `full_text`, and the frame tells the client
+                // to move that trailing text out of the answer into the turn's steps. What the
+                // filter still holds back was never shown and belongs to the notes too: it must
+                // not surface at the head of the answer when the turn ends.
+                let notes = std::mem::take(&mut self.full_text);
+                let _unshown = self.thought.flush();
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call moved out of the answer",
+                    );
+                    frame["working_notes"] = json!(notes);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::ToolResult {
                 tool,
@@ -2945,7 +3054,15 @@ async fn drive_turn(
     // the prime's own `task_start` call is, so the chat card finds it live and in history.
     let deep_research_task = match req.deep_research_for.as_deref() {
         None => None,
-        Some(member) => match start_deep_research(state, member, &req.message, &session_id).await {
+        Some(member) => match start_deep_research(
+            state,
+            member,
+            &req.message,
+            &session_id,
+            req.deep_research_answer.as_deref(),
+        )
+        .await
+        {
             Ok(research) => Some(research),
             Err(e) => {
                 let data =
@@ -2959,6 +3076,15 @@ async fn drive_turn(
 
     use pond_core::shared::domain::agent::AgentRequest;
 
+    // The speaker's own setup interview runs in this session: its state, and only its tools.
+    let interview = interview_turn_for(state, &session_id, &turn_scope).await;
+    let tool_group_allowlist = match &interview {
+        Some(_) => Some(vec![
+            pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.to_string(),
+        ]),
+        None => req.tool_group_allowlist.clone(),
+    };
+
     let agent_req = AgentRequest {
         message: req.message.clone(),
         session_id: session_id.clone(),
@@ -2968,10 +3094,11 @@ async fn drive_turn(
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
         profile_context: profile_context_for(state, &turn_scope).await,
-        tool_group_allowlist: req.tool_group_allowlist.clone(),
+        tool_group_allowlist,
         warmup: false,
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
+        interview: interview.map(|turn| turn.context),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -3099,7 +3226,10 @@ async fn drive_turn(
                                     }
                                 }
                             } else {
-                                tracing::warn!("Unrecognised tool-call envelope: {body}");
+                                tracing::warn!(
+                                    body_chars = body.chars().count(),
+                                    "Unrecognised tool-call envelope"
+                                );
                             }
                         }
                     }
@@ -3710,7 +3840,9 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
-/// List all sessions, ordered by most recently updated first.
+/// List the household's conversations, most recently updated first. Sessions the pond opened for
+/// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
+/// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -3722,7 +3854,25 @@ async fn list_sessions(
     })?;
 
     let mut session_list: Vec<Value> = Vec::with_capacity(sessions.len());
-    for s in &sessions {
+    // The scheduler opens a `sched-` session per run for the engine; it holds no conversation,
+    // so listing it showed every run as an empty "Untitled" chat. Its result is in the run log.
+    let machine = sessions
+        .iter()
+        .filter(|s| {
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        })
+        .count();
+    if machine > 0 {
+        tracing::debug!(
+            target: "giap::trace",
+            kind = "machine_sessions_unlisted",
+            count = machine,
+            "sessions the pond opened for its own work left out of the conversation list",
+        );
+    }
+    for s in sessions.iter().filter(|s| {
+        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+    }) {
         let message_count = state
             .session_storage
             .count_messages(&s.id)
@@ -3782,11 +3932,24 @@ fn derived_session_label(text: &str) -> String {
     }
 }
 
-/// The pond's first answer, for a history card (the title already carries the question).
-/// Capped past any card's width so the client fades the overflow instead of an ellipsis.
+/// The pond's first answer, for a history card (the title already carries the question), as
+/// plain words: a reply written in Markdown showed its `**`, `###` and list bullets in every
+/// conversation list. Capped past any card's width so the client fades the overflow instead of an
+/// ellipsis.
 fn session_preview(text: &str) -> String {
+    use pond_voice::text::{is_hr, strip_inline_md, strip_line_prefix};
     const MAX_CHARS: usize = 240;
-    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_hr(line) && !line.starts_with("```"))
+        .map(|line| strip_inline_md(strip_line_prefix(line)))
+        .collect();
+    let cleaned = plain
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let cleaned = cleaned.trim();
     if cleaned.chars().count() <= MAX_CHARS {
         return cleaned.to_string();
@@ -4040,14 +4203,43 @@ async fn set_message_feedback_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether the caller may read this conversation: their own member's, or nobody's.
+/// The caller is resolved from their device alone; resolving from the session asked for would
+/// make every unattributed caller that session's member.
+async fn caller_may_read_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> bool {
+    let principal = principal.map(|axum::Extension(p)| p);
+    let caller = read_only_caller_scope(state, principal, None).await;
+    match state.session_storage.get_session_identity(session_id).await {
+        Ok(identity) => identity.readable_by(&caller),
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read whose conversation this is");
+            false
+        }
+    }
+}
+
 /// Session messages: the newest `limit` (≤500) by default, or oldest-first from `offset`.
 async fn get_session_messages(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::models::domain::message::Role;
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, so an id can't be probed either.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     let limit: usize = params
         .get("limit")
@@ -4351,7 +4543,7 @@ async fn retitle_session(
                 kind = "session_retitled",
                 trigger = "manual_one",
                 session_id = %session_id,
-                title = %title,
+                title_chars = title.chars().count(),
             );
             json!({ "session_id": session_id, "outcome": "retitled", "title": title })
         }
@@ -4387,20 +4579,22 @@ fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Serves one attachment's raw bytes; `session_id` must own it, so ids can't cross sessions.
+/// Serves one attachment's raw bytes, if `session_id` owns it and the caller may read that session.
 /// Bearer-protected, so not usable as a bare `<img src>`; the desktop fetches it with its token.
 async fn get_session_attachment(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     use axum::response::IntoResponse;
 
-    let owns_it = state
-        .session_storage
-        .list_session_attachments(&session_id)
-        .await
-        .map(|atts| atts.iter().any(|a| a.id == attachment_id))
-        .unwrap_or(false);
+    let owns_it = caller_may_read_session(&state, principal.as_ref(), &session_id).await
+        && state
+            .session_storage
+            .list_session_attachments(&session_id)
+            .await
+            .map(|atts| atts.iter().any(|a| a.id == attachment_id))
+            .unwrap_or(false);
     if !owns_it {
         return Err((
             StatusCode::NOT_FOUND,
@@ -5766,6 +5960,64 @@ fn geocode_target(
     (name_changed || coords_unset).then(|| name.to_string())
 }
 
+/// `primary_profile_id` must name a household member or be cleared (`null` or `""`).
+///
+/// It is a key-value row, not a foreign key, so nothing else stops a display name landing in it,
+/// and a dashboard once offered it as a free-text box: one household typed its owner's name, and
+/// every reader that looks the id up (the claimant's attribution at onboarding completion, the
+/// `Household` prompt particulars) then found nobody, without a word.
+async fn refuse_primary_profile_that_is_not_a_member(
+    state: &Arc<AppState>,
+    patch: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(id) = patch
+        .get("primary_profile_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    match state.profile_repo.get(id).await {
+        Ok(Some(member)) => {
+            tracing::info!(
+                kind = "primary_profile_set",
+                profile_id = %member.id,
+                "the household's primary member is set"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::warn!(
+                kind = "primary_profile_refused",
+                value = %id,
+                "refused a primary_profile_id that names no household member"
+            );
+            let message = "Choose a household member. This takes a member's id from \
+                           GET /api/v1/profiles, not a name.";
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("primary_profile_id: {message}"),
+                    "fields": [{ "field": "primary_profile_id", "message": message }],
+                })),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = "primary_profile_unverified",
+                error = %e,
+                "could not read the household members, so primary_profile_id was not saved"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Could not check that household member, so nothing was saved.",
+                })),
+            ))
+        }
+    }
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -5809,6 +6061,8 @@ async fn update_settings(
             })),
         ));
     }
+
+    refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -5885,6 +6139,15 @@ async fn update_settings(
         }
     }
 
+    // What was learned of the old phrase is not the new one's: its pronunciations go now, and
+    // the CNN's enrolment results once the save lands. Another member's run never resets them.
+    let phrase_changed = pond_voice::text::normalize_transcript(&current.voice_wake_word)
+        != pond_voice::text::normalize_transcript(&merged.voice_wake_word);
+    if phrase_changed {
+        merged.voice_wake_word_transcriptions.clear();
+        write_keys.insert("voice_wake_word_transcriptions".to_string());
+    }
+
     state
         .settings_repo
         .update_fields(&merged, Some(&write_keys))
@@ -5901,8 +6164,17 @@ async fn update_settings(
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
     }
 
+    if phrase_changed {
+        crate::voice_match::wake_phrase_changed(&state).await;
+    }
+
     // Privacy controls must apply now, not at the next restart.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
+    if current.voice_room_enabled != merged.voice_room_enabled {
+        if let Some(room) = &state.room_voice {
+            room.set_enabled(merged.voice_room_enabled).await;
+        }
+    }
     let cameras = pond_adapters_vision::LiveCameraRegistry::global();
     cameras.sync_settings(&merged);
     cameras.notify_settings_changed();
@@ -5985,6 +6257,13 @@ async fn update_settings(
                 }
             }
         }
+    }
+
+    // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
+    crate::apply_embedding_choice(&state, &merged).await;
+
+    if current.active_whisper_model != merged.active_whisper_model {
+        crate::speech_model::switch_soon(&merged.active_whisper_model);
     }
 
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
@@ -6268,17 +6547,37 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
+///
+/// `holders` names the catalogue row doing each job as `model_use::RoleHolders` reads it from
+/// settings, the same truth `GET /models` puts on each row as `roles`. `helpers` lists the
+/// models in use that are no catalogue row of their own: the conversation model's picture
+/// encoder and drafter, the camera detector and face recognition.
 async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let assignments: std::collections::HashMap<String, String> = state
-        .model_repo
-        .as_ref()
-        .and_then(|r| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(r.list_assignments())
-            })
-            .ok()
-        })
-        .unwrap_or_default()
+    let (records, assignment_rows) = match state.model_repo.as_ref() {
+        Some(repo) => {
+            let records = repo.list_all().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_catalogue_unreadable",
+                    error = %e,
+                    "catalogue could not be read"
+                );
+                Vec::new()
+            });
+            let assignments = repo.list_assignments().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_assignments_unreadable",
+                    error = %e,
+                    "role assignments could not be read"
+                );
+                Vec::new()
+            });
+            (records, assignments)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let holders = crate::model_views::role_holders(&state, &records, &assignment_rows).await;
+    let helpers = crate::model_views::helper_models(&state, &holders).await;
+    let assignments: std::collections::HashMap<String, String> = assignment_rows
         .into_iter()
         .map(|a| (a.role, a.model_id))
         .collect();
@@ -6303,6 +6602,14 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
             "model": settings.active_embedding_model,
             "provider": settings.embedding_provider,
         },
+        "holders": {
+            "chat": holders.chat,
+            "tool": holders.tool,
+            "asr": holders.asr,
+            "tts": holders.tts,
+            "embedding": holders.embedding,
+        },
+        "helpers": helpers,
         "router_name": state.llm_provider.read().await
             .as_ref()
             .map(|p| p.model_name())
@@ -6313,7 +6620,8 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// GET /api/v1/models/memory-status — returns current LLM memory budget snapshot: the board's on
 /// a budgeted device, the machine's own elsewhere. `budget_mb` is the most the LLM slot may ever
 /// hold here; `reclaimable_mb` is what switching away from the model in use would free, so a fit
-/// check can count it.
+/// check can count it. `embedder_room_mb` is the Memory model's room beside the conversation
+/// model, null where nothing was read.
 async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let status = state
         .model_scheduler
@@ -6328,6 +6636,7 @@ async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "budget_mb":            status.budget_mb,
         "loaded_model":         status.loaded_model,
         "reclaimable_mb":       reclaimable_mb,
+        "embedder_room_mb":     crate::model_views::MemoryFooting::read(&state, &status).room_mb(),
     }))
 }
 
@@ -6814,6 +7123,7 @@ async fn list_models(
         )
     })?;
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
 
     let vision = crate::model_views::gguf_vision_batch(&state, &records).await;
     let fetching_pictures: std::collections::HashSet<String> = state
@@ -6834,8 +7144,16 @@ async fn list_models(
     let mut ollama = vec![];
     let mut embedding = vec![];
 
+    let memory = state
+        .model_scheduler
+        .as_ref()
+        .map(|s| s.memory_status())
+        .unwrap_or_default();
+    let footing = crate::model_views::MemoryFooting::read(&state, &memory);
+
     for m in &records {
-        let mut dto = record_to_dto(m, &assignments, state.engine_availability);
+        let mut dto = record_to_dto(m, &assignments, &holders, state.engine_availability);
+        footing.weigh(&mut dto);
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
@@ -6879,11 +7197,19 @@ async fn scan_models(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     let count = extras.len();
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    // Over the whole catalogue: a job's holder is found by name among every row.
+    let records = model_repo.list_all().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
     let entries: Vec<Value> = extras
         .iter()
         .map(|m| {
-            serde_json::to_value(record_to_dto(m, &assignments, state.engine_availability))
-                .unwrap_or_default()
+            serde_json::to_value(record_to_dto(
+                m,
+                &assignments,
+                &holders,
+                state.engine_availability,
+            ))
+            .unwrap_or_default()
         })
         .collect();
 
@@ -6997,8 +7323,8 @@ async fn download_model(
     // Gigabytes for a model nothing here can run.
     refuse_unavailable_engine(&state, &m, "download")?;
 
-    // fastembed downloads embedding models itself on first use.
-    if cat == ModelCategory::Embedding {
+    // fastembed downloads its own models on first use; a GGUF embedder is a file like any other.
+    if cat == ModelCategory::Embedding && m.filename.is_none() {
         return Ok(Json(
             json!({"status": "ready", "name": name, "note": "Embedding model will download automatically on first use"}),
         ));
@@ -7360,6 +7686,7 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_whisper_model", name.clone())
                 .await;
+            crate::speech_model::switch_soon(&name);
         }
         "tts" => {
             let _ = settings_repo
@@ -7375,7 +7702,10 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_embedding_model", name.clone())
                 .await;
-            // Leaves `embedding_provider` alone: the engine is a separate choice from the model.
+            // The model brings its own engine; `embedding_provider` stays the on/off switch.
+            if let Ok(settings) = settings_repo.get().await {
+                crate::apply_embedding_choice(&state, &settings).await;
+            }
         }
         _ => {}
     }
@@ -7396,6 +7726,14 @@ async fn activate_model(
         }
     }
 
+    // So a live log viewer sees the swap it is timing against.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "model_activated",
+        role = %role,
+        model_id = %model_id,
+        "a model was assigned to a role"
+    );
     Ok(Json(json!({"role": role, "model_id": model_id})))
 }
 
@@ -8403,6 +8741,20 @@ async fn delete_profile(
                 })),
             )
         })?;
+
+    // Explicit, since `PRAGMA foreign_keys` is per connection: the member's notes and interview.
+    if let Some(interviews) = crate::member_notes::interview_service(&state) {
+        interviews.forget_member(&id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!(
+                        "could not remove the member's notes, so the member was not deleted: {e}"
+                    )
+                })),
+            )
+        })?;
+    }
 
     // `primary_profile_id` is a KV row, not a foreign key, so clear it by hand before the delete.
     // Both failures abort: proceeding would leave it dangling.
@@ -10412,6 +10764,9 @@ struct ApiCreateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring; ignored if `fire_at` is set.
     #[serde(default)]
     once: bool,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    ask_if_missed: bool,
 }
 
 /// `POST /api/v1/schedules` — create a new scheduled task.
@@ -10489,6 +10844,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10548,9 +10904,26 @@ async fn update_schedule(
         }
     };
 
-    let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+    // Refused here, not by the store, so a 404 still means only that there is no such task.
+    match &api_req.kind {
+        Some(TaskKind::SensorTrigger(spec)) => {
+            if let Some((status, body)) = rule_spec_rejection(spec) {
+                return (status, Json(body));
+            }
+        }
+        Some(TaskKind::Routine { actions }) => {
+            if let Some(why) = routine_rejection(actions) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": why})));
+            }
+        }
+        _ => {}
+    }
+    let kind = api_req
+        .kind
+        .or_else(|| api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p }));
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10572,12 +10945,15 @@ struct ApiUpdateScheduleRequest {
     cron: Option<String>,
     timezone: Option<String>,
     prompt: Option<String>,
+    /// Replaces the task's kind, such as a routine's actions; wins over `prompt`.
+    kind: Option<TaskKind>,
     /// Fire once at this instant instead of recurring.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Fire once at `cron`'s next occurrence instead of recurring.
     #[serde(default)]
     once: bool,
+    ask_if_missed: Option<bool>,
 }
 
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
@@ -10632,6 +11008,47 @@ async fn run_schedule_now(
     };
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+/// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
+async fn run_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+}
+
+/// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
+async fn skip_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+}
+
+/// The first answer settles a missed run; a later one is `409`, as is answering none.
+async fn answer_missed_schedule(
+    state: &AppState,
+    id: &str,
+    answer: MissedRunAnswer,
+) -> (StatusCode, Json<Value>) {
+    let Some(scheduler) = &state.scheduler else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "scheduler not configured"})),
+        );
+    };
+    match scheduler.answer_missed_run(id, answer).await {
+        Ok(()) => match answer {
+            MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+            MissedRunAnswer::Skip => (StatusCode::OK, Json(json!({"skipped": id}))),
+        },
+        Err(e) if e.downcast_ref::<NoMissedRun>().is_some() => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": e.to_string(), "code": "no_missed_run"})),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -10836,6 +11253,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -10908,6 +11326,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -11001,6 +11420,87 @@ fn require_own_device(
     }
     tracing::debug!(operation, "device authorization accepted");
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DeviceEventsParams {
+    after_seq: Option<u64>,
+}
+
+fn device_event(frame: &crate::device_events::Frame) -> Event {
+    Event::default()
+        .event("device_state")
+        .data(frame.data.to_string())
+}
+
+fn resync_event() -> Event {
+    Event::default().event("resync").data("{}")
+}
+
+/// `GET /api/v1/devices/events?after_seq=N` — device state changes as devices report them. With
+/// `after_seq`, first what followed it, or `resync` when that is no longer kept (see
+/// `crate::device_events`).
+async fn device_events_stream(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<DeviceEventsParams>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    use crate::device_events::Since;
+    // A phone holds this open while its Devices screen is in front, as it holds notifications.
+    let permit = state
+        .notification_sse_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let events = state.device_events.clone();
+    let (since, mut live) = events.open(params.after_seq);
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut last = 0;
+        match since {
+            Since::Resync => yield Ok(resync_event()),
+            Since::Frames(frames) => {
+                last = params.after_seq.unwrap_or(0);
+                for frame in frames {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+            }
+        }
+        loop {
+            match live.recv().await {
+                Ok(frame) if frame.seq > last => {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+                Ok(_) => {}
+                // What it missed is still in the ring, which outlasts the live queue.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (since, again) = events.open(Some(last));
+                    live = again;
+                    match since {
+                        Since::Resync => {
+                            last = 0;
+                            yield Ok(resync_event());
+                        }
+                        Since::Frames(frames) => {
+                            for frame in frames {
+                                last = frame.seq;
+                                yield Ok(device_event(&frame));
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[derive(serde::Deserialize)]
@@ -11278,6 +11778,152 @@ async fn acknowledge_notification(
     }
 }
 
+/// The calling device's id, from its pairing token only, plus the history it reads.
+type CallerHistory = (
+    String,
+    Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>,
+);
+
+/// The calling device and the notification history, or the refusal. Like [`caller_queue`]: the
+/// device comes from the token, so a caller reads only what its own device may read.
+fn caller_history(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    operation: &'static str,
+) -> Result<CallerHistory, (StatusCode, Json<Value>)> {
+    let Some(device_id) = proven_device(principal).id().map(str::to_owned) else {
+        tracing::warn!(
+            kind = "notification_history_refused",
+            operation,
+            reason = "no_device",
+            "notifications: history request did not come from a paired device"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ));
+    };
+    let Some(history) = state.notification_history.clone() else {
+        tracing::warn!(
+            kind = "notification_history_unavailable",
+            operation,
+            "notifications: no history wired"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "notification history not available"})),
+        ));
+    };
+    Ok((device_id, history))
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationHistoryParams {
+    limit: Option<usize>,
+}
+
+/// How many notices `GET /notifications/history` returns when the caller does not say.
+const NOTIFICATION_HISTORY_DEFAULT_LIMIT: usize = 100;
+
+/// `GET /api/v1/notifications/history?limit=N` — the household's durable notices the calling
+/// device may read, newest first, each with that device's read state:
+/// `{"device_id": "...", "notifications": [{id, category, title, body, timestamp, data, read}]}`.
+///
+/// `device_id` is the caller's own device, from its token: the id its notification stream must
+/// name, and the suffix its own queued copies carry (`per_device_notification_id`), so a client
+/// can map a copy's id back to the history id. A member's notice is listed only to the devices it
+/// was queued for; live-only status is never listed. `limit` defaults to 100, at most 200.
+async fn notifications_history(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Query(params): axum::extract::Query<NotificationHistoryParams>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "notifications_history") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let limit = params
+        .limit
+        .unwrap_or(NOTIFICATION_HISTORY_DEFAULT_LIMIT)
+        .clamp(
+            1,
+            pond_core::mcp::domain::notification_history::HISTORY_LIST_MAX,
+        );
+    match history.list_for_device(&device_id, limit).await {
+        Ok(entries) => {
+            tracing::debug!(
+                kind = "notification_history_served",
+                count = entries.len(),
+                limit,
+                "notifications: history served"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "device_id": device_id, "notifications": entries })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_failed", error = %e, "notifications: history query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read the notification history"})),
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MarkHistoryReadRequest {
+    ids: Vec<String>,
+}
+
+/// `POST /api/v1/notifications/history/read` with `{"ids": [...]}` — mark these history notices
+/// read for the calling device only. An id the device may not read, or that does not exist, is
+/// skipped silently, so the answer never tells a caller which ids exist. `{"marked": n}` counts
+/// the newly marked; at most 500 ids per request (`400` beyond).
+async fn mark_notification_history_read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Json(request): Json<MarkHistoryReadRequest>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "mark_notification_history_read") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let max = pond_core::mcp::domain::notification_history::HISTORY_MARK_READ_MAX;
+    if request.ids.len() > max {
+        tracing::info!(
+            kind = "notification_history_read_refused",
+            count = request.ids.len(),
+            "notifications: too many ids in one mark-read request"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("at most {max} ids per request")})),
+        );
+    }
+    match history.mark_read(&device_id, &request.ids).await {
+        Ok(marked) => {
+            tracing::info!(
+                kind = "notification_history_marked_read",
+                requested = request.ids.len(),
+                marked,
+                "notifications: history marked read"
+            );
+            (StatusCode::OK, Json(json!({ "marked": marked })))
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_read_failed", error = %e, "notifications: mark read failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not mark the notifications read"})),
+            )
+        }
+    }
+}
+
 // ── Agent tools handler ───────────────────────────────────────────────────────
 
 /// Tools whose listing gets `_meta.ui.resourceUri` pointing at their MCP App resource.
@@ -11452,6 +12098,9 @@ async fn dispatch_tool_direct(
 /// `POST /api/v1/tools/invoke` — run an MCP tool directly, bypassing the LLM.
 async fn invoke_tool(
     State(state): State<Arc<AppState>>,
+    axum::Extension(replies): axum::Extension<Arc<crate::idempotency::IdempotentReplies>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    headers: axum::http::HeaderMap,
     body: Result<Json<InvokeToolRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -11467,7 +12116,42 @@ async fn invoke_tool(
         ));
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
-    dispatch_tool_direct(&state, &qualified, req.args).await
+    let Some(key) = headers.get(crate::idempotency::HEADER) else {
+        return dispatch_tool_direct(&state, &qualified, req.args).await;
+    };
+    let key = key
+        .to_str()
+        .ok()
+        .filter(|key| crate::idempotency::valid_key(key))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_idempotency_key" })),
+            )
+        })?;
+    let caller = proven_device(principal.as_ref());
+    let slot = replies.slot(caller.id().unwrap_or_default(), key);
+    let mut outcome = slot.lock().await;
+    let request = json!({ "tool": qualified, "args": req.args });
+    if let Some(first) = &outcome.request {
+        if *first != request {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "idempotency_key_reused" })),
+            ));
+        }
+    }
+    if let Some(reply) = &outcome.reply {
+        return Ok(Json(reply.clone()));
+    }
+    outcome.request = Some(request);
+    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    reply["idempotency_key"] = json!(key);
+    // A failure is not kept: nothing ran, or the device refused and a resend may try it again.
+    if reply["success"] == json!(true) {
+        outcome.reply = Some(reply.clone());
+    }
+    Ok(Json(reply))
 }
 
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
@@ -11620,6 +12304,7 @@ async fn agent_chat_stream(
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -11687,7 +12372,10 @@ async fn agent_chat_stream(
                                 }
                             }
                         } else {
-                            tracing::warn!("Unrecognised tool-call envelope: {body}");
+                            tracing::warn!(
+                                body_chars = body.chars().count(),
+                                "Unrecognised tool-call envelope"
+                            );
                         }
                     }
                 }
@@ -11748,6 +12436,71 @@ async fn list_logs(
         )
             .into_response(),
     }
+}
+
+/// Live log viewers held open at once: a developer's tool, not something every phone keeps open.
+const LIVE_LOG_STREAMS: usize = 4;
+
+fn live_log_streams() -> &'static Arc<tokio::sync::Semaphore> {
+    static STREAMS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    STREAMS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(LIVE_LOG_STREAMS)))
+}
+
+/// `GET /api/v1/logs/stream` — the Logs viewer, live: a `status` event naming the running chat
+/// model, then each line as `/logs` stores it, scrubbed the same way. `level` filters as there;
+/// a viewer that falls behind gets a `skipped` count instead of the lines it missed.
+async fn stream_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    let Some(mut rx) = state
+        .operational_log
+        .as_ref()
+        .and_then(|repo| repo.subscribe())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "live logs not available" })),
+        ));
+    };
+    let permit = live_log_streams()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let level = params.get("level").cloned();
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let status = json!({
+        "chat_provider": settings.chat_provider,
+        "chat_model": settings.chat_model,
+    });
+
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        yield Ok(Event::default().event("status").data(status.to_string()));
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if level.as_deref().is_some_and(|wanted| wanted != entry.level) {
+                        continue;
+                    }
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok(Event::default().event("log").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    let data = json!({ "count": count }).to_string();
+                    yield Ok(Event::default().event("skipped").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// `GET /api/v1/logs/export` — download the event log as a CSV file.
@@ -12009,7 +12762,15 @@ async fn toggle_extension_handler(
 
 // ── Extension Marketplace ────────────────────────────────────────────────────
 
-/// `GET /api/v1/marketplace` — list available extensions from the curated registry.
+/// What the install route answers for a catalogue entry the built-in web search already covers.
+pub const BUILT_IN_SEARCH_ON: &str = "Web search is built in and already uses your Brave key.";
+
+/// The `reason` beside [`BUILT_IN_SEARCH_ON`], for a client to match instead of the sentence.
+pub const BUILT_IN_SEARCH_ON_REASON: &str = "built_in_web_search_on";
+
+/// `GET /api/v1/marketplace` — list available extensions from the curated registry. An entry that
+/// duplicates a built-in capability also carries `built_in_state`: `on`, `needs_key` or
+/// `knowledge_off`, from [`crate::web_search::built_in_state`].
 async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(mp) = &state.marketplace else {
@@ -12020,7 +12781,26 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
             .into_response();
     };
     match mp.list_available().await {
-        Ok(exts) => Json(json!({"extensions": exts})).into_response(),
+        Ok(exts) => {
+            let search = if exts.iter().any(|e| e.built_in.is_some()) {
+                Some(crate::web_search::built_in_state(&state).await)
+            } else {
+                None
+            };
+            let listed: Vec<serde_json::Value> = exts
+                .iter()
+                .map(|ext| {
+                    let mut entry = json!(ext);
+                    if let (Some(BuiltInCapability::WebSearch), Some(search)) =
+                        (ext.built_in, search)
+                    {
+                        entry["built_in_state"] = json!(search.as_str());
+                    }
+                    entry
+                })
+                .collect();
+            Json(json!({"extensions": listed})).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -12030,6 +12810,7 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
 }
 
 /// `POST /api/v1/marketplace/{id}/install` — optional `{ "secrets": {…} }`; 428 lists missing ones.
+/// 409 refuses an entry the built-in web search covers while that search is on.
 async fn install_marketplace_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -12068,6 +12849,24 @@ async fn install_marketplace_handler(
                 .into_response();
         }
     };
+
+    if ext.built_in == Some(BuiltInCapability::WebSearch)
+        && crate::web_search::built_in_state(&state).await
+            == pond_core::mcp::domain::web_search::BuiltInSearchState::On
+    {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "extension_install_refused",
+            extension = %ext.id,
+            reason = BUILT_IN_SEARCH_ON_REASON,
+            "marketplace install refused: the built-in web search already covers it"
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": BUILT_IN_SEARCH_ON, "reason": BUILT_IN_SEARCH_ON_REASON})),
+        )
+            .into_response();
+    }
 
     let secrets: std::collections::HashMap<String, String> = body
         .and_then(|b| {
@@ -13949,6 +14748,7 @@ async fn upsert_prompt_extra(
         instruction: req.instruction,
         active: req.active,
         sort_order: req.sort_order,
+        profile_id: None,
     };
     if let Err(violation) = extra.validate() {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
@@ -13971,6 +14771,35 @@ async fn upsert_prompt_extra(
     };
     if let Err(violation) = check_active_set(&existing, &extra) {
         return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+    }
+    // A member's turn reads the household's notes and theirs, so each such pair must still fit.
+    let members = match repo.list_all_members().await {
+        Ok(notes) => notes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut owners: Vec<&str> = members
+        .iter()
+        .filter_map(|n| n.profile_id.as_deref())
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    for owner in owners {
+        let mut turn: Vec<PromptExtra> = existing.clone();
+        turn.extend(
+            members
+                .iter()
+                .filter(|n| n.profile_id.as_deref() == Some(owner))
+                .cloned(),
+        );
+        if let Err(violation) = check_active_set(&turn, &extra) {
+            return prompt_extra_refusal(&extra.key, Some(&extra.instruction), violation);
+        }
     }
     match repo.upsert(&extra).await {
         Ok(()) => {
@@ -14111,13 +14940,18 @@ fn default_source() -> String {
     "api".to_string()
 }
 
-/// The text's document vector, or `None` to leave the row for the index sweep; never fails a save.
+/// The text's document vector, or `None` to leave the row for the embedding slot; never fails a save.
 async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
-    let embedder = state.embedding_provider.as_ref()?;
-    match embedder.embed(text).await {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+    if !state.embedder.available() {
+        return None;
+    }
+    match state.embedder.embed(text).await {
         Ok(vector) => Some(vector),
         Err(e) => {
-            tracing::warn!("could not embed a memory; the index sweep will embed it later: {e:#}");
+            tracing::warn!(
+                "could not embed a memory; the embedding slot will embed it later: {e:#}"
+            );
             None
         }
     }
@@ -14291,7 +15125,7 @@ async fn extraction_status(
 // Both routes answer `lane: false` when this process has no lane, not an empty job list.
 
 /// `GET /api/v1/lane` — what every background job is doing and waiting for.
-/// Figures are up to one poll old (15 min for the index sweep), hence `observed_secs_ago`.
+/// Figures are as of each job's last tick; the embedding slot runs beside the lane.
 async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     let Some(lane) = state.lane.as_ref() else {
         return Json(json!({ "lane": false, "jobs": [] }));
@@ -14343,6 +15177,10 @@ async fn lane_status(State(state): State<Arc<AppState>>) -> impl axum::response:
         "running": snapshot.running.map(|j| j.as_str()),
         "running_title": snapshot.running.map(|j| j.title()),
         "running_for_secs": snapshot.running_for_secs,
+        "embedding_slot": {
+            "running": snapshot.embedding_slot_running_for_secs.is_some(),
+            "running_for_secs": snapshot.embedding_slot_running_for_secs,
+        },
     }))
 }
 
@@ -15171,6 +16009,7 @@ fn recipe_extension_to_tool_group(name: &str) -> Option<&'static str> {
         "device" | "developer" => Some("giap-device"),
         // Not `giap-matter`: that's the matter.js websocket protocol, not a tool group.
         "matter" | "home" => Some("giap-device-control"),
+        "vision" => Some("giap-vision"),
         _ => None,
     }
 }
@@ -15201,7 +16040,12 @@ async fn list_recipes(State(state): State<Arc<AppState>>) -> impl axum::response
     };
     match repo.list().await {
         Ok(recipes) => {
-            let views: Vec<Value> = recipes.iter().map(recipe_view_json).collect();
+            // The Voice agent's edit is no member's own agent; `/agents/voice` shows it.
+            let views: Vec<Value> = recipes
+                .iter()
+                .filter(|r| !crate::voice_agent::is_voice_row(r))
+                .map(recipe_view_json)
+                .collect();
             Json(json!(views)).into_response()
         }
         Err(e) => (
@@ -15251,6 +16095,13 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    if req.name.trim() == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "`voice` is the shipped Voice agent; edit it at /agents/voice"})),
+        )
+            .into_response();
+    }
     let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
     let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
@@ -15275,7 +16126,7 @@ async fn create_recipe(
 
 /// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
 /// the plaintext development listener and not the tailnet, whose node also connects from here.
-fn on_this_host(
+pub(crate) fn on_this_host(
     peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     insecure_dev: bool,
     tailnet: bool,
@@ -15288,7 +16139,7 @@ fn on_this_host(
 /// The member a request acts for when it saves an agent: its paired device's member, else, from
 /// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
 /// nobody too, never the primary member, who may be someone else.
-async fn acting_member(
+pub(crate) async fn acting_member(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     on_host: bool,
@@ -15365,16 +16216,8 @@ async fn pond_capabilities(
                 .collect()
         })
         .unwrap_or_default();
-    let web_search = settings.ext_knowledge_enabled
-        && match &state.secret_repo {
-            Some(repo) => repo
-                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|key| !key.trim().is_empty()),
-            None => false,
-        };
+    let web_search = crate::web_search::built_in_state(state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
     PondCapabilities {
         presence,
         identified_member: member.is_some(),
@@ -15467,6 +16310,9 @@ fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::Sqlite
     pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
 }
 
+/// Room for a short answer of 150 words with its links, and a margin for a model that ran over.
+const SHORT_ANSWER_VIEW_CHARS: usize = 4000;
+
 /// One task as the chat card shows it: its steps with their agents, and its artifacts without
 /// their bodies.
 async fn long_task_view(
@@ -15477,12 +16323,27 @@ async fn long_task_view(
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
     let artifacts = repo.list_artifacts(task.id()).await?;
-    let result = pond_core::shared::services::long_task_runner::result_artifact(&artifacts)
+    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
         .map(|a| a.id.clone());
+    // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
+    let answer_text = match (&result, task.answer()) {
+        (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {
+            repo.get_artifact(task.id(), id).await?.map(|artifact| {
+                artifact
+                    .body()
+                    .chars()
+                    .take(SHORT_ANSWER_VIEW_CHARS)
+                    .collect::<String>()
+            })
+        }
+        _ => None,
+    };
     Ok(json!({
         "id": task.id(),
         "goal": task.goal(),
         "kind": task.kind(),
+        "answer": task.answer(),
+        "answer_text": answer_text,
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
@@ -15590,30 +16451,29 @@ async fn start_deep_research(
     member: &str,
     question: &str,
     session_id: &str,
+    answer: Option<&str>,
 ) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
+    use pond_core::shared::domain::long_task::AnswerShape;
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
     use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
     let repo = long_task_repo(state);
+    let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
     let task = pond_core::shared::services::deep_research::research_task(
         member,
         question,
         session_id,
         chrono::Utc::now(),
-    )?;
-    repo.create_task(&task).await?;
+    )?
+    .with_answer(answer);
     // The helpers start in empty windows; what was said before the ask reaches them only here.
-    if let Some(body) = deep_research_brief(state, session_id, question).await {
-        let brief = pond_core::shared::domain::long_task::Artifact::new(
-            task.id(),
-            None,
-            pond_core::shared::domain::long_task::ArtifactKind::Note,
-            pond_core::shared::services::long_task_runner::BRIEF_TITLE,
-            "What the conversation said before the ask",
+    let brief = deep_research_brief(state, session_id, question)
+        .await
+        .map(|body| OpeningBrief {
+            summary: "What the conversation said before the ask",
             body,
-            chrono::Utc::now(),
-        )?;
-        repo.insert_artifact(&brief).await?;
-    }
+        });
+    let task = open_task(&repo, task, brief).await?;
     let open = repo
         .list_tasks(LongTaskOwnerFilter::Everyone, false)
         .await?;
@@ -15624,12 +16484,14 @@ async fn start_deep_research(
         task_id = %task.id(),
         origin_session_id = %session_id,
         research = true,
+        answer = task.answer().as_str(),
         position = place.as_ref().map(|p| p.position),
         "a member asked for deep research"
     );
     Ok(pond_core::shared::domain::agent::DeepResearchTurn {
         task_id: task.id().to_string(),
         waiting: place.as_ref().and_then(waiting_line),
+        answer: task.answer(),
     })
 }
 
@@ -15786,6 +16648,7 @@ async fn long_task_queue(
             "id": task.id(),
             "goal": task.goal(),
             "kind": task.kind(),
+            "answer": task.answer(),
             "state": task.state(),
             "origin_session_id": task.origin_session_id(),
             "created_at": task.created_at(),
@@ -15888,7 +16751,12 @@ async fn long_task_report(
     if events.is_empty() {
         events = report::itinerary_events(&markdown, task.created_at().date_naive());
     }
-    Ok((markdown, events, sections.len()))
+    let shown = if report::holds_its_sections(summary.as_deref().unwrap_or(""), &sections) {
+        0
+    } else {
+        sections.len()
+    };
+    Ok((markdown, events, shown))
 }
 
 /// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
@@ -16161,6 +17029,7 @@ async fn prefill_agents(
         .into_iter()
         .filter_map(Result::ok)
         .collect();
+    agents.extend(crate::voice_agent::voice_prefill_role(state).await);
     agents.extend(long_task_runner::step_roles(&recipes));
     agents
 }
@@ -16169,7 +17038,6 @@ async fn prefill_agents(
 /// agent's prefill stands.
 async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
     use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
-    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
     use pond_core::shared::services::prefill_progress::process_prefill_progress;
 
     let progress = process_prefill_progress();
@@ -16192,29 +17060,50 @@ async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::respon
         .await
         .iter()
         .map(|role| {
-            let name = role.name();
-            let is_default = is_default_agent(name);
-            let record = records.get(name);
-            let status = prefill_state(
+            prefill_row(
                 role,
-                is_default,
-                record,
-                build.current.as_deref() == Some(name),
-                queued.includes(name),
-                failed.contains(name),
+                records.get(role.name()),
+                &build,
+                &queued,
+                &failed,
                 now,
                 retention,
-            );
-            json!({
-                "agent": name,
-                "kind": if is_default { "default" } else { "member" },
-                "status": status,
-                "compiled_at": record.and_then(|r| r.compiled_at),
-                "last_used_at": record.and_then(|r| r.last_used_at),
-            })
+            )
         })
         .collect();
     Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// One agent's row of `GET /agents/prefills`.
+pub(crate) fn prefill_row(
+    role: &pond_core::shared::domain::orchestration::AgentRole,
+    record: Option<&pond_core::shared::domain::agent_prefill::PrefillRecord>,
+    build: &pond_core::shared::services::prefill_progress::PrefillBuild,
+    queued: &pond_core::shared::services::prefill_progress::RebuildRequests,
+    failed: &std::collections::BTreeSet<String>,
+    now: chrono::DateTime<chrono::Utc>,
+    retention: u32,
+) -> Value {
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    let name = role.name();
+    let is_default = is_default_agent(name);
+    let status = prefill_state(
+        role,
+        is_default,
+        record,
+        build.current.as_deref() == Some(name),
+        queued.includes(name),
+        failed.contains(name),
+        now,
+        retention,
+    );
+    json!({
+        "agent": name,
+        "kind": if is_default { "default" } else { "member" },
+        "status": status,
+        "compiled_at": record.and_then(|r| r.compiled_at),
+        "last_used_at": record.and_then(|r| r.last_used_at),
+    })
 }
 
 /// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
@@ -16234,14 +17123,22 @@ async fn rebuild_agent_prefill(
         )
             .into_response();
     }
-    pond_core::shared::services::prefill_progress::process_prefill_progress()
-        .request_rebuild(Some(&name));
+    // Serve's prewarm compiles the Voice agent, not the long-task pass.
+    if name == pond_core::shared::services::voice_agent::VOICE_AGENT {
+        crate::spawn_voice_prefill(state.clone());
+    } else {
+        pond_core::shared::services::prefill_progress::process_prefill_progress()
+            .request_rebuild(Some(&name));
+    }
     (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
 }
 
 /// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
-async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+async fn rebuild_all_prefills(
+    State(state): State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
     pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    crate::spawn_voice_prefill(state);
     (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
 }
 
@@ -16531,6 +17428,13 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if crate::voice_agent::is_voice_row(&existing) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "the Voice agent is edited at /agents/voice"})),
+        )
+            .into_response();
+    }
     if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
         let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
         if !widened.is_empty() {
@@ -16632,8 +17536,8 @@ async fn run_recipe(
     })?;
 
     let recipe = match repo.get_by_name(&name).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
+        Ok(Some(r)) if !crate::voice_agent::is_voice_row(&r) => r,
+        Ok(_) => {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("Recipe '{}' not found", name)})),
@@ -16740,6 +17644,7 @@ async fn run_recipe(
         tool_group_allowlist,
         suggestion_context: None,
         deep_research: false,
+        deep_research_answer: None,
         deep_research_for: None,
     };
 
@@ -18062,19 +18967,54 @@ async fn delete_user_biometrics(
     State(state): State<Arc<AppState>>,
     Path(profile_id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let face = face_service(&state)?;
-    let deleted = face.delete_embeddings(&profile_id).await.map_err(|e| {
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    // Forget everything: the voice first, so a face store that is not ready cannot keep it.
+    let voice_deleted = crate::voice_match::forget_voice(&state, &profile_id)
+        .await
+        .map_err(internal)?;
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(internal)?;
+
+    Ok(Json(json!({
+        "profile_id":      profile_id,
+        "face_embeddings_deleted": faces_deleted,
+        "voice_prints_deleted": voice_deleted,
+    })))
+}
+
+/// A member's enrolled faces, through face recognition when it is up, else straight from its
+/// table, so forgetting never waits on a model.
+async fn delete_faces(state: &Arc<AppState>, profile_id: &str) -> anyhow::Result<u64> {
+    match face_service(state) {
+        Ok(face) => face.delete_embeddings(profile_id).await,
+        Err(_) => Ok(
+            sqlx::query("DELETE FROM face_embeddings WHERE profile_id = ?")
+                .bind(profile_id)
+                .execute(&state.db.system)
+                .await?
+                .rows_affected(),
+        ),
+    }
+}
+
+/// `DELETE /api/v1/faces/profile/{profile_id}`: their face only; a Voice Match stays.
+async fn delete_face_enrollments(
+    State(state): State<Arc<AppState>>,
+    Path(profile_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let faces_deleted = delete_faces(&state, &profile_id).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
         )
     })?;
-
-    Ok(Json(json!({
-        "profile_id":      profile_id,
-        "face_embeddings_deleted": deleted,
-        // `voice_prints_deleted` joins this once voice prints are stored.
-    })))
+    Ok(Json(
+        json!({"profile_id": profile_id, "faces_deleted": faces_deleted}),
+    ))
 }
 
 // ── Proactive proposals ──────────────────────────────────────────────────────
@@ -18107,9 +19047,21 @@ async fn proposal_caller(
     session_id: &str,
     device: &ProvenDevice,
 ) -> Result<(ProfileScope, ProposalAudience), (StatusCode, Json<Value>)> {
-    let scope = resolve_turn_scope(state, session_id, device).await;
+    proposal_caller_with_source(state, session_id, device)
+        .await
+        .map(|(scope, audience, _)| (scope, audience))
+}
+
+/// [`proposal_caller`] with how the caller is known, which a decision must check.
+async fn proposal_caller_with_source(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> Result<(ProfileScope, ProposalAudience, IdentificationSource), (StatusCode, Json<Value>)> {
+    let resolved = resolve_turn_identity(state, session_id, device).await;
+    let (scope, source) = (resolved.scope, resolved.source);
     match ProposalAudience::from_scope(&scope) {
-        Ok(audience) => Ok((scope, audience)),
+        Ok(audience) => Ok((scope, audience, source)),
         // Never `Guest`: that means 2+ members, so a fallthrough would pick one by row order.
         Err(_) if matches!(scope, ProfileScope::Household) => {
             let members: Vec<String> = state
@@ -18128,7 +19080,7 @@ async fn proposal_caller(
                             "nobody identified this caller and this household has one member, \
                              so the proposal is theirs"
                         );
-                        Ok((ProfileScope::Owner(only.clone()), audience))
+                        Ok((ProfileScope::Owner(only.clone()), audience, source))
                     }
                     Err(e) => Err(proposal_caller_refusal(session_id, &e.to_string())),
                 },
@@ -18249,7 +19201,8 @@ async fn decide_proposal(
     // Device from the principal; a body `device_id` is a 400 (`deny_unknown_fields`).
     let device = proven_device(principal.as_ref());
     let Json(request) = body.map_err(|_| bad_body())?;
-    let (scope, _audience) = proposal_caller(&state, &request.session_id, &device).await?;
+    let (scope, _audience, source) =
+        proposal_caller_with_source(&state, &request.session_id, &device).await?;
 
     // Expired, decided, user-staged draft and absent all get the same 404 on purpose.
     let proposal = proposal_repo(&state)
@@ -18274,6 +19227,7 @@ async fn decide_proposal(
     // `PROPOSAL_SESSION_ID` is the sentinel session `SqliteProposalRepository::save` writes.
     if let Err(reason) = is_draft_decision_permitted(
         Some(&scope),
+        source,
         &request.session_id,
         Some(proposal.audience().profile_id()),
         PROPOSAL_SESSION_ID,
@@ -18319,6 +19273,15 @@ async fn resolve_turn_scope(
     session_id: &str,
     device: &ProvenDevice,
 ) -> ProfileScope {
+    resolve_turn_identity(state, session_id, device).await.scope
+}
+
+/// [`resolve_turn_scope`] with the evidence it rested on, for decisions a voice match may not make.
+async fn resolve_turn_identity(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> identity_resolution::ResolvedIdentity {
     // `rung` takes the `Result` so a failed read can't be flattened into "unattributed".
     let device_rung = match device.id() {
         None => DeviceRung::NoDevice,
@@ -18392,7 +19355,6 @@ async fn resolve_turn_scope(
         session: &identity,
         household_has_multiple_members,
     })
-    .scope
 }
 
 /// The device the *pond* proved; every turn-resolving handler must get its device here.
@@ -18863,9 +19825,24 @@ async fn detect_location(
     }))
 }
 
+/// The embedder's lifecycle, so a switch reads as loading or failed rather than as lost vectors.
+fn embedder_status(state: &EmbedderState) -> Value {
+    json!({
+        "state": state.as_str(),
+        "model_id": state.model_id(),
+        "reason": match state {
+            EmbedderState::Failed { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        },
+    })
+}
+
 async fn context_index_health(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::models::ports::embedding::EmbeddingProvider as _;
+
+    let embedder_state = state.embedder.state();
     let no_index = |reason: &str| {
         Json(json!({
             "indexed": false,
@@ -18874,6 +19851,7 @@ async fn context_index_health(
             "dims": Value::Null,
             "coverage": Value::Null,
             "corpora": [],
+            "embedder": embedder_status(&embedder_state),
         }))
     };
 
@@ -18881,10 +19859,12 @@ async fn context_index_health(
         return Ok(no_index(NO_VECTOR_INDEX));
     };
     // No embedder, no model to ask about; "all missing" would look like a wiped index instead.
-    let Some(embedder) = state.embedding_provider.as_ref() else {
+    if embedder_state == EmbedderState::Off {
         return Ok(no_index(NO_EMBEDDING_MODEL));
-    };
+    }
+    let embedder = &state.embedder;
 
+    // While a model loads, coverage is counted for it: the rows it will have to embed.
     let model_id = embedder.model_id();
     let health = index.health(&model_id).await.map_err(|e| {
         tracing::warn!(error = %e, "could not read personal-context index health");
@@ -18899,6 +19879,7 @@ async fn context_index_health(
 
     Ok(Json(json!({
         "indexed": true,
+        "embedder": embedder_status(&embedder_state),
         "model_id": model_id,
         "dims": embedder.dimensions(),
         "rows": rows,
@@ -18924,8 +19905,8 @@ async fn context_index_health(
     })))
 }
 
-/// `POST /api/v1/context/index/rebuild` -- empty the index so the maintenance sweep refills it.
-/// The sweep fills only absent vectors, so this repairs a changed embedder; nothing is lost.
+/// `POST /api/v1/context/index/rebuild` -- empty the index so the embedding slot refills it.
+/// Every row's source survives, so the slot re-embeds all of it; nothing is lost.
 async fn rebuild_context_index(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -18979,14 +19960,13 @@ async fn rebuild_context_index(
 
     tracing::info!(cleared, "personal-context index cleared for rebuild");
 
-    // Wake the idle-gated sweep (the user isn't idle). `notify_one` stores a permit, so a sweep
-    // mid-pass still runs a fresh pass afterwards.
+    // `notify_one` stores a permit, so a slot mid-pass still runs a fresh pass afterwards.
     let refilling = match state.index_reindex.as_ref() {
         Some(notify) => {
             notify.notify_one();
             true
         }
-        // No sweep to wake; the next process rebuilds from the emptied table.
+        // No slot to wake; the next process rebuilds from the emptied table.
         None => false,
     };
 
@@ -19025,20 +20005,61 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    Some(particulars_for(attributed, &profile.preferences))
+    let mut context = particulars_for(attributed, &profile.display_name, &profile.preferences);
+    // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
+    let notes_are_theirs = attributed
+        || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
+    if notes_are_theirs {
+        if let Some(repo) = &state.prompt_extra_repo {
+            match repo.list_for_profile(&profile_id).await {
+                Ok(notes) => context.member_notes = notes,
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not read the speaker's own notes; this turn goes without them"
+                ),
+            }
+        }
+    }
+    Some(context)
 }
 
-/// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
+/// The interview this turn runs, when the session is the speaker's own open interview.
+async fn interview_turn_for(
+    state: &Arc<AppState>,
+    session_id: &str,
+    scope: &ProfileScope,
+) -> Option<pond_core::user_data::services::profile_interview::InterviewTurn> {
+    let speaker = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
+        ProfileScope::Guest => return None,
+    };
+    let service = crate::member_notes::interview_service(state)?;
+    match service
+        .turn_for_session(session_id, &speaker, chrono::Utc::now())
+        .await
+    {
+        Ok(turn) => turn,
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "could not read the session's interview");
+            None
+        }
+    }
+}
+
+/// The pure half of [`profile_context_for`]: what the prompt may state about this member.
 /// Keys are the contract with `PATCH /api/v1/profiles/{id}`; a camelCase key is ignored.
 fn particulars_for(
     attributed: bool,
+    display_name: &str,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
+    if attributed {
+        return ProfileContext::of_member(display_name, prefs, Vec::new());
+    }
     ProfileContext {
-        // Owner-scoped: stated only when the turn is attributed to this person.
-        preferred_name: attributed
-            .then(|| prefs.get("preferred_name").cloned())
-            .flatten(),
+        // Owner-scoped: never stated on a turn that is not this person's own.
+        speaker_name: None,
         birthday: attributed.then(|| prefs.get("birthday").cloned()).flatten(),
         language: attributed.then(|| prefs.get("language").cloned()).flatten(),
         // Household-safe: an accommodation, not a disclosure.
@@ -19046,6 +20067,7 @@ fn particulars_for(
             .get("accessibility_atypical_speech")
             .map(|v| v == "true")
             .unwrap_or(false),
+        member_notes: Vec::new(),
     }
 }
 
@@ -19560,6 +20582,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),
@@ -20376,6 +21400,51 @@ mod tests {
         );
     }
 
+    /// "Let me check the weather" is the model at work: the answer is what follows the last call.
+    #[test]
+    fn text_before_a_tool_call_leaves_the_answer_as_working_notes() {
+        let mut turn = accumulator();
+        let narration = frame_of(turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        }));
+        let shown = narration["content"]
+            .as_str()
+            .expect("content is a string")
+            .to_string();
+
+        let call = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_weather".to_string(),
+            id: "call-1".to_string(),
+            input: None,
+        }));
+        assert_eq!(
+            call["working_notes"], shown,
+            "the client strips exactly what it was shown, so the notes must be that text"
+        );
+        assert!(turn.full_text.is_empty(), "notes are not the answer");
+
+        let second = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_forecast".to_string(),
+            id: "call-2".to_string(),
+            input: None,
+        }));
+        assert!(
+            second.get("working_notes").is_none(),
+            "a call with no text before it carries no notes, not an empty string"
+        );
+
+        turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        });
+        let tail = turn.thought.flush();
+        assert_eq!(
+            format!("{}{tail}", turn.full_text),
+            SENTENCE,
+            "the answer is the text after the last call, whole: none of the held-back \
+             narration may lead it"
+        );
+    }
+
     /// `TurnMetrics` timing is gathered only here, and its consumers have no test in this crate.
     #[test]
     fn a_tool_call_and_its_result_time_the_turn() {
@@ -20717,8 +21786,12 @@ mod tests {
 
     #[test]
     fn an_owner_scoped_turn_states_the_members_particulars() {
-        let ctx = particulars_for(true, &full_prefs());
-        assert_eq!(ctx.preferred_name.as_deref(), Some("Cap"));
+        let ctx = particulars_for(true, "Captain Amina", &full_prefs());
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Cap"),
+            "a preferred name is what the member asked to be called, so it wins"
+        );
         assert_eq!(ctx.birthday.as_deref(), Some("1990-04-02"));
         assert_eq!(ctx.language.as_deref(), Some("sw"));
         assert!(ctx.atypical_speech);
@@ -20727,10 +21800,10 @@ mod tests {
     /// `Household` uses `primary_profile_id`, which may not be the person speaking.
     #[test]
     fn a_household_turn_states_no_ones_particulars() {
-        let ctx = particulars_for(false, &full_prefs());
+        let ctx = particulars_for(false, "Jerry Ochieng", &full_prefs());
         assert_eq!(
-            ctx.preferred_name, None,
-            "an unattributed turn stated the primary member's preferred name"
+            ctx.speaker_name, None,
+            "an unattributed turn named the primary member as the speaker"
         );
         assert_eq!(
             ctx.birthday, None,
@@ -20748,7 +21821,7 @@ mod tests {
     #[test]
     fn the_speech_accommodation_survives_an_unattributed_turn() {
         assert!(
-            particulars_for(false, &full_prefs()).atypical_speech,
+            particulars_for(false, "Jerry Ochieng", &full_prefs()).atypical_speech,
             "the speech accommodation was dropped for unattributed turns; it is not a \
              disclosure and dropping it makes the pond less patient with the household it was \
              configured for"
@@ -20757,12 +21830,47 @@ mod tests {
 
     /// Absent, not `Some("")`: the prompt builder would render "The user's birthday is ."
     #[test]
-    fn a_profile_with_no_preferences_yields_nothing_to_state() {
-        let ctx = particulars_for(true, &std::collections::HashMap::new());
-        assert_eq!(ctx.preferred_name, None);
+    fn a_profile_with_no_preferences_yields_nothing_to_state_but_the_name() {
+        let ctx = particulars_for(true, "Amina", &std::collections::HashMap::new());
+        assert_eq!(ctx.speaker_name.as_deref(), Some("Amina"));
         assert_eq!(ctx.birthday, None);
         assert_eq!(ctx.language, None);
         assert!(!ctx.atypical_speech);
+    }
+
+    /// The owner's phone on the Orin, 2026-11-02: linked, `preferences` `{}`, and "who am I"
+    /// answered "nothing is stored about you", because the speaker's name came only from
+    /// `preferred_name`. Nothing else named the speaker; `{{user_name}}` names whose pond it is.
+    #[test]
+    fn a_linked_member_with_no_preferred_name_is_named_by_their_display_name() {
+        let ctx = particulars_for(
+            true,
+            "Emmanuel Charles Oyugi",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Emmanuel Charles Oyugi"),
+            "a member who never set a preferred name reaches the model unnamed again"
+        );
+    }
+
+    /// A blank preferred name is a cleared field, not a name: the display name still applies.
+    #[test]
+    fn a_blank_preferred_name_falls_back_to_the_display_name() {
+        let blank: std::collections::HashMap<String, String> =
+            [("preferred_name".to_string(), "  ".to_string())].into();
+        assert_eq!(
+            particulars_for(true, "Amina", &blank)
+                .speaker_name
+                .as_deref(),
+            Some("Amina")
+        );
+        assert_eq!(
+            particulars_for(true, " ", &blank).speaker_name,
+            None,
+            "a member with no usable name rendered a speaker line with an empty name"
+        );
     }
 
     /// The desktop's `preferredName`/`atypicalSpeech` spellings, if stored, are silently ignored.
@@ -20773,9 +21881,10 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-        let ctx = particulars_for(true, &camel);
+        let ctx = particulars_for(true, "Amina", &camel);
         assert_eq!(
-            ctx.preferred_name, None,
+            ctx.speaker_name.as_deref(),
+            Some("Amina"),
             "camelCase keys are now read, so the two spellings have silently become \
              equivalent and the writer contract is no longer pinned by anything"
         );
@@ -20795,6 +21904,7 @@ mod tests {
             "developer",
             "matter",
             "home",
+            "vision",
         ];
 
         let mut mapped = 0usize;
@@ -21029,5 +22139,38 @@ mod tests {
             other.mic_enabled = !current.mic_enabled;
             assert!(!save_needs_prewarm(&current, &other));
         }
+    }
+}
+
+#[cfg(test)]
+mod session_preview_tests {
+    use super::session_preview;
+
+    /// The Jetson's "System information" card read "**Operating System and Hardware:** * **OS:**
+    /// Ubuntu 22.04 * **Kernel:** ..." on both the dashboard and the phone.
+    #[test]
+    fn a_markdown_reply_previews_as_plain_words() {
+        let reply = "Here is the current system information for this pond:\n\n\
+                     ### Operating System and Hardware\n\
+                     * **OS:** Ubuntu 22.04\n\
+                     * **Kernel:** 5.15.148-tegra\n\
+                     ---\n\
+                     See [the docs](https://example.org) for more.";
+        assert_eq!(
+            session_preview(reply),
+            "Here is the current system information for this pond: Operating System and \
+             Hardware OS: Ubuntu 22.04 Kernel: 5.15.148-tegra See the docs for more."
+        );
+    }
+
+    #[test]
+    fn a_plain_reply_is_unchanged_and_a_long_one_is_capped() {
+        assert_eq!(session_preview("It will be sunny."), "It will be sunny.");
+        let long = "word ".repeat(100);
+        let preview = session_preview(&long);
+        assert!(
+            preview.ends_with('…') && preview.chars().count() <= 241,
+            "{preview}"
+        );
     }
 }

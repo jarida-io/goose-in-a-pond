@@ -24,6 +24,7 @@ rules when matching events cross the event bus.
                          AgentPrompt   agent.chat() in session sched-{id}-{unix_ts}
                          Webhook       HTTP POST through the egress gate
                          SensorTrigger each of the rule's actions
+                         Routine       each device action in order, no agent
                                                  │
                        ScheduleResultEvent broadcast ──> SSE /api/v1/schedules/events
                                                     └──> push notifications
@@ -31,8 +32,8 @@ rules when matching events cross the event bus.
 
 ## Domain types (`pond-core/src/user_data/domain/schedule.rs`)
 
-- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`, or
-  `SensorTrigger(SensorTriggerSpec)`. `TaskKind::is_event_triggered()` is true for a sensor rule,
+- **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`,
+  `SensorTrigger(SensorTriggerSpec)`, or `Routine { actions }`. `TaskKind::is_event_triggered()` is true for a sensor rule,
   which gets no timer; the rules engine fires it through `run_now`.
 - **`SensorTriggerSpec`**: `source` (`TriggerSource`: kind `Sensor` / `Camera` / `Device`, optional
   `device_id` and `signal`; unset fields match anything), `condition` (`TriggerCondition`: an
@@ -43,10 +44,13 @@ rules when matching events cross the event bus.
 - **`TriggerAction`**: `AgentPrompt { prompt }`, `DevicePower { device_id, on }`,
   `Notify { title, body }`.
 - **`Schedule`**: id, label, cron, fire_at, timezone (IANA), kind, paused, currently_running,
-  last_run, next_run, created_at. `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
+  last_run, next_run, created_at, `ask_if_missed`, and `missed_run` (`MissedRun {due_at}`, the
+  missed fire time waiting for an answer; see [Missed runs](#missed-runs)). `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
   and `"@event"` for a sensor rule; neither is ever parsed.
-- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed`), result, error,
-  started_at, finished_at, duration_ms.
+- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed` / `Skipped`),
+  result, error, started_at, finished_at, duration_ms, and `caught_up_from` on a missed run someone
+  chose to make late. A `Skipped` run is a missed fire time that did not happen: `started_at` is when
+  it was due and `result` says why (`JsonRunHistory::record_skipped`). It sends no notification.
 - **`ScheduleResultEvent`**: broadcast when a run starts and when it finishes.
 - **`OneShotTimePassed`**: the error for resuming a paused one-shot whose instant has passed.
 
@@ -110,13 +114,81 @@ the turn's reply. The executor took that as the answer, so the Jetson recorded s
 `completed` and notified the household with goose's prose. The provider shim now records the
 typed `ProviderError` of each session's latest provider call (`SessionControls::provider_failure`,
 cleared when a later call starts, as after a compaction and retry), and the adapter's `chat()`
-turns a reply whose turn ended on one into an `Err` ("The model could not run: <error>"), logged
-as `kind="turn_engine_failed"`. The scheduler records the run `failed` with that error, so its
-notification says it failed; the executor logs `kind="schedule_prompt_failed"`. The streaming
-chat path is unchanged: there the user still sees goose's text. A run that speaks its reply
-(`voice_mode`, added on main after this change) streams it into the audio bus, and that path
-does not see the provider failure yet: such a run is still recorded `completed`, and the error
-text is spoken.
+turns a reply whose turn ended on one into an `Err`, logged as `kind="turn_engine_failed"`. The
+scheduler records the run `failed` with that error, so its notification says it failed; the
+executor logs `kind="schedule_prompt_failed"`. The streaming
+chat path is unchanged: there the user still sees goose's text.
+
+**A spoken run is checked before it is spoken (2026-11-02).** A run that speaks its reply
+(`voice_mode`) used to stream the turn's tokens straight into the audio bus, bypassing `chat()`
+and so every check above. On the Orin the Daily Brief was recorded `completed` with an empty
+result on 2026-10-29 (twice), -30 and -31, the first after goose's "Context limit exceeded after
+compaction", and on 2026-11-02 with goose's "Ran into this error: Execution error: speculative
+decode: Decode Error 1: NoKvCacheSlot." as its result, which was also spoken aloud. (That decode
+error came from a goose build before the fork's `f110ef44d`, which carries on without drafting
+when the verify batch finds no cache slot; the provider shim records any such mid-stream error
+typed, `SessionControls::provider_failure`.) Every `AgentPrompt` run now goes through `chat()`,
+and a spoken one is spoken (`AudioBus::speak_text`) only once it has an answer; a failed turn is
+a failed run and says nothing aloud. The tool calls take most of a run, so the first word comes
+only seconds later than it did when streamed. `AudioBus::speak_stream`, used by nothing else, is
+gone.
+
+`chat()` also judges the reply by its visible text: the turn's text goes through pond-core's
+`ThoughtFilter`, as the streaming path's does before display, so a reply that is only a
+`<think>`-style block, an empty `<answer></answer>` or whitespace is a `NoReply` or
+`NoReplyAfterTools` failure, and a reply's reasoning blocks and `<answer>` tags never reach the
+run's result (`kind="reply_markup_stripped"`).
+
+**A failed run's error is a plain sentence (2026-11-02).** The run's error is shown as written on
+the dashboard's Schedules history, the Canvas brief card and the phone's Recent runs, and it was
+engineer text: "The model could not run: Execution error: null result from llama cpp", or "The
+model made 13 tool call(s) (giap-toolkit__enable_tool_group, ...) but finished without writing a
+reply." The adapter's `chat()` now fails a turn with a typed
+`pond_core::shared::domain::turn_failure::TurnFailure`, whose text is its `user_message()`:
+
+| Failure | When | Stored as the run's error |
+|---|---|---|
+| `ModelUnavailable` | the model could not load or start (out of GPU or system memory, a failed load) | Goose could not start its model, most likely because the Pond ran out of memory. It will try again next time; if this keeps happening, choose a smaller model on the Models page. |
+| `NoReplyAfterTools` | the model called tools, then wrote no answer | Goose looked things up but stopped before writing the answer. Try again, or reword the request. |
+| `NoReply` | no tool call and no answer | Goose did not write an answer this time. Try again, or reword the request. |
+| `Engine` | any other engine error | Goose's model stopped with an error. Try again; the Pond's logs have the details. |
+
+Callers tell the kind with `error.downcast_ref::<TurnFailure>()`, never by matching the text. The
+engine's own error, the tools called and their count stay in the logs, on the failure edge:
+`kind="turn_without_reply"` (with `tools` and `tool_calls`) and `kind="turn_engine_failed"` (with
+`error`), both with `failure`, and the executor's `kind="schedule_prompt_failed"` adds `failure`
+beside `task_id`. The adapter decides `ModelUnavailable` from the engine's error text
+(`MODEL_UNAVAILABLE_MARKERS` in `goose_agent.rs`): llama-cpp-2's "null result from llama cpp" is
+`LlamaModelLoadError::NullResult`, the load itself returning nothing; on the Orin on 2026-10-27 the
+log line before it was llama.cpp's `unable to allocate CUDA0 buffer`. `POST /api/v1/chat` goes
+through the same `chat()` and so now answers with the same sentences. Runs recorded before this
+keep the text they were stored with: run history is `schedule_runs.json`, not a database table,
+and nothing rewrites it.
+
+## Missed runs
+
+A recurring schedule with `ask_if_missed` asks before running a fire time the pond slept through,
+instead of skipping it as every other schedule does. When the pond starts
+(`CronSchedulerAdapter::ask_about_a_missed_run`), such a schedule, unless it is paused, takes the
+latest occurrence of its cron after it last fired (`missed_occurrence`) and keeps it as
+`missed_run`. Only the latest is asked about, however long the outage. A question still open from
+before closes as a `Skipped` run, "Nobody answered before the next run", once a newer fire time has
+passed. One-shots, which already fire late, and event rules ignore the setting.
+
+Once notifications are ready, `serve` asks every paired phone about each waiting question
+(`announce_missed_runs` in `pond-server/src/system_notices.rs`): an `action_required` broadcast,
+"Morning routine didn't run at 06:30. Run it now?", in the schedule's time zone, whose tap opens
+that schedule (`OpenScreen::ScheduleDetail`). The question is answered through
+`SchedulerPort::answer_missed_run` (`POST /schedules/{id}/missed/run` or `.../skip`). The answer
+is taken under the scheduler's lock, so the first one settles it and a later one is refused with
+`NoMissedRun`. Run starts it now with `caught_up_from` set; skip records it `Skipped`, "Skipped by
+a household member". A question also closes, as a skipped run, when the schedule's next fire time
+comes first ("Nobody answered before the next run") or when `ask_if_missed` is switched off
+("Asking was turned off"). `asked_through` keeps the latest missed time asked about, so an
+answered question is not asked again after a restart.
+
+The decision reads `last_run`, so a schedule that asks writes it to disk as each run starts
+(`durable_fire_stamp`); otherwise a stale stamp would ask about a run that happened.
 
 ## Execution flow
 
@@ -132,6 +204,11 @@ text is spoken.
    - **Webhook**: `POST` to the URL, checked and recorded by the egress gate
      (`EgressPurpose::Schedules`); a non-2xx status fails the run.
    - **SensorTrigger**: runs every action; the run fails only when no action succeeded.
+   - **Routine**: runs every action in order through device control, never the agent, and
+     carries on past a failed one. The run fails if any action failed: its error names what did
+     not run (`did not run: water-heater-plug`) and its result still lists every action's
+     outcome (`ActionsFailed`, which `run_outcome` unpacks). The store refuses a routine with no
+     actions or with an `agent_prompt` action (`routine_rejection`), on create and on update.
 5. `JsonRunHistory::record_finish()` records the result or error and duration, and a
    `Completed` / `Failed` event is broadcast.
 6. The task is marked not running.
@@ -163,6 +240,17 @@ recoveries in the stream decide whether it gets an answer:
   and, on the `local` / `gguf` engines, reasoning is switched off, then restored. It is logged as
   `kind="final_reply_asked"` and `kind="final_reply_result"`. The user's Thinking setting is not
   changed.
+- When a guard stops the turn before it replied and after it gathered at least one tool result
+  (the repetition guard on an identical tool call, the completeness-check re-arm cap, or goose's
+  `max_turns` cap), the same final reply is asked once more, with tools off as well: for that call
+  the session's allow-set is emptied, so the provider shim offers no tools and the call that
+  tripped the guard cannot recur, then it is put back. It runs on a fresh cancellation token,
+  since the guard cancelled the turn's own. Both log lines carry `reason` (`identical_tool_call`,
+  `goal_recheck`, `turn_limit`, or `reasoned_without_reply` for the case above) and `tools_off`.
+  One final reply a turn, whichever asks first. Goose's turn-cap notice is held until then: a
+  final reply that writes text answers in its place, and otherwise the notice streams as before.
+  Seen on the Jetson on 2026-10-28, when a scheduled brief made thirteen calls, lost its early
+  results to three compactions, fetched the weather a fourth time and was stopped with no reply.
 
 A turn that still has no text fails the run with an error naming the tools it called, logged as
 `kind="turn_without_reply"`.

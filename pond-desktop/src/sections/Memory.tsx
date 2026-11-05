@@ -35,7 +35,6 @@ import { PageHeader, useConfirm, SkeletonList } from "../components/shared";
 import type {
   ContextCorpus,
   ContextCorpusCoverage,
-  ContextIndexHealth,
   ExtractionStatus,
   MemoryFragment,
   MemorySegment,
@@ -43,6 +42,9 @@ import type {
   Settings,
 } from "../api/types";
 import { coverageNote, coverageState, formatCoverage, type CoverageState } from "./indexCoverage";
+import { EmbedderStatus } from "../components/models/MemoryModels";
+import { useEmbedderHealth } from "../hooks/useEmbedderHealth";
+import { embedderLine } from "./models/memoryEmbedder";
 
 // ── Segment metadata ──────────────────────────────────────────
 
@@ -822,23 +824,19 @@ function CorpusCoverageRow({ row }: { row: ContextCorpusCoverage }) {
 
 export function IndexCoveragePanel() {
   const confirm = useConfirm();
-  const [health, setHealth] = useState<ContextIndexHealth | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { health, loading, error: readError, downloading, refresh, retry, retrying } = useEmbedderHealth();
+  const [actionError, setActionError] = useState<string | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
   const [notice, setNotice] = useState("");
+  const error = actionError ?? readError;
+  const line = embedderLine(health, { downloading });
+  // The coverage figure below already says "ready"; the line speaks only while something is moving or wrong.
+  const spoken = line && line.kind !== "ready" ? line : null;
 
   function load() {
-    setLoading(true);
-    setError(null);
-    api
-      .getContextIndexHealth()
-      .then(setHealth)
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
+    setActionError(null);
+    void refresh();
   }
-
-  useEffect(() => { load(); }, []);
 
   async function handleRebuild() {
     const ok = await confirm(
@@ -858,7 +856,7 @@ export function IndexCoveragePanel() {
       );
       load();
     } catch (e) {
-      setError(String(e));
+      setActionError(String(e));
     } finally {
       setRebuilding(false);
     }
@@ -904,9 +902,18 @@ export function IndexCoveragePanel() {
           </p>
         )}
 
+        {spoken && (
+          <EmbedderStatus
+            className="mm-embedder--above"
+            line={spoken}
+            retrying={retrying}
+            onRetry={() => void retry().catch((e) => setActionError(e instanceof Error ? e.message : String(e)))}
+          />
+        )}
+
         {loading ? (
           <div className="mem-card__meta-item">Reading the index…</div>
-        ) : !health ? null : !health.indexed ? (
+        ) : !health ? null : health.embedder?.state === "off" ? null : !health.indexed ? (
           // Embeddings off is a working pond (the server answers 200): show its sentence, never a 0%.
           <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "4px 8px" }}>
             <span style={{ color: "var(--color-warning-fg)", display: "flex", flexShrink: 0, marginTop: 2 }} aria-hidden="true">

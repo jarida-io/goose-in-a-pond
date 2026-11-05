@@ -10,6 +10,7 @@ import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
 import { GooseAvatar } from "./chat/GooseAvatar";
 import { TypingIndicator } from "./chat/TypingIndicator";
+import { StepsDisclosure } from "./chat/StepsDisclosure";
 import { ResultCard } from "./chat/ResultCard";
 import type { CardKind } from "./chat/ResultCard";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
@@ -38,6 +39,7 @@ import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
 import { useConversationModel } from "../../hooks/useConversationModel";
 import { useDeepResearch } from "../../hooks/useDeepResearch";
 import { NoModelPicks } from "../../components/models/NoModelPicks";
+import { MarkdownText } from "../../components/MarkdownText";
 import "./chat.css";
 
 // ── Types ─────────────────────────────────────────────────────
@@ -58,6 +60,7 @@ interface Row {
   longTaskIds?: string[];
   images?: string[];
   keptResults?: KeptResult[];
+  steps?: string[];
 }
 
 // ── Constants ─────────────────────────────────────────────────
@@ -102,6 +105,7 @@ function toRow(m: Message): Row {
     longTaskIds: m.longTaskIds,
     images: m.images,
     keptResults: m.keptResults,
+    steps: m.steps,
   };
 }
 
@@ -294,7 +298,7 @@ export function ChatHubView() {
       setText("");
 
       if (asResearch) {
-        sendTurn({ text: t, deepResearch: true });
+        sendTurn({ text: t, deepResearch: true, deepResearchAnswer: deepResearch.answer });
         leaveResearch();
         setAttachError(null);
         return;
@@ -305,7 +309,7 @@ export function ChatHubView() {
       setAttachments([]);
       setAttachError(null);
     },
-    [text, attachments, busy, gateBlocked, deepResearch.on, leaveResearch],
+    [text, attachments, busy, gateBlocked, deepResearch.on, deepResearch.answer, leaveResearch],
   );
 
   // Take focus back when the model stops.
@@ -399,6 +403,7 @@ export function ChatHubView() {
                 <SubagentTree runs={m.delegations} />
               )}
               {m.who === "goose" && <LongTaskCards ids={m.longTaskIds} longTasks={longTasks} variant="hub" />}
+              {m.who === "goose" && m.steps && m.steps.length > 0 && <StepsDisclosure steps={m.steps} />}
               <div className={`ch-bubble ch-bubble--${m.who}`}>
                 {m.images && m.images.length > 0 && (
                   <div className="ch-bubble__images">
@@ -407,7 +412,9 @@ export function ChatHubView() {
                     ))}
                   </div>
                 )}
-                {m.text || (m.streaming ? " " : "")}
+                {m.who === "goose" && m.text
+                  ? <MarkdownText source={m.text} />
+                  : m.text || (m.streaming ? " " : "")}
               </div>
               {m.who === "goose" && m.keptResults?.map((kept, i) => (
                 <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
@@ -476,7 +483,15 @@ export function ChatHubView() {
       <AttachmentTray attachments={attachments} onRemove={removeAttachment} />
       {attachError && <p className="attach-error" role="alert">{attachError}</p>}
 
-      {deepResearch.on && <ResearchModeChip variant="hub" waiting={false} onLeave={onLeaveResearch} />}
+      {deepResearch.on && (
+        <ResearchModeChip
+          variant="hub"
+          waiting={false}
+          onLeave={onLeaveResearch}
+          answer={deepResearch.answer}
+          onAnswer={deepResearch.setAnswer}
+        />
+      )}
 
       {/* Input */}
       <div className="chat2__input">

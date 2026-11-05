@@ -6,8 +6,11 @@ use pond_audio_out::AudioBus;
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::AgentRequest;
+use pond_core::shared::domain::turn_failure::TurnFailure;
 use pond_core::user_data::domain::profile::ProfileScope;
-use pond_core::user_data::domain::schedule::{TaskKind, TriggerAction};
+use pond_core::user_data::domain::schedule::{
+    routine_rejection, ActionsFailed, TaskKind, TriggerAction,
+};
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::session_storage::SessionStorage;
@@ -113,40 +116,28 @@ impl AgentScheduleExecutor {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         tracing::info!("[scheduler] executing prompt for task {task_id} (speak={should_speak})");
 
-        if should_speak {
-            if let Some(bus) = &self.audio_bus {
-                match self.agent.chat_stream(request.clone()).await {
-                    Ok(stream) => {
-                        tracing::info!(
-                            "[scheduler] task {task_id}: streaming tokens into audio bus"
-                        );
-                        let full_text = bus.speak_stream(stream, true).await?;
-                        tracing::info!(
-                            "[scheduler] task {task_id} completed ({} chars, speech finished)",
-                            full_text.len()
-                        );
-                        return Ok(full_text);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[scheduler] task {task_id}: chat_stream failed ({e}), falling back to batch chat"
-                        );
-                    }
-                }
-            }
-        }
-
+        // A run that speaks goes through `chat` too, and is spoken only once it has an answer.
+        // Streaming the tokens into the speaker spoke goose's "Ran into this error: ..." prose
+        // aloud and recorded it, or an empty reply, as a completed run (the Orin's Daily Brief,
+        // 2026-10-29 to 2026-11-02): only `chat` checks the turn's provider failure and its text.
+        // The tool calls take most of a run, so the first word comes only seconds later.
+        //
         // An engine failure is an `Err` from the adapter, never reply text, so the run is failed.
+        // The scheduler stores the error's text as the run's, which the household reads. A
+        // `TurnFailure`'s text is its plain sentence; the adapter logged the engine's detail.
         let response = match self.agent.chat(request).await {
             Ok(response) => response,
             Err(e) => {
+                let failure = e.downcast_ref::<TurnFailure>().copied();
                 tracing::warn!(
                     kind = "schedule_prompt_failed",
                     task_id = %task_id,
+                    failure = ?failure,
                     error = %e,
                     "[scheduler] task {task_id} failed"
                 );
@@ -208,6 +199,45 @@ impl AgentScheduleExecutor {
             }
         }
     }
+
+    /// Run every action of a routine, even after one fails: a dead plug must not leave the
+    /// lights off. Fails if any action failed, naming those.
+    async fn run_routine(&self, task_id: &str, actions: &[TriggerAction]) -> Result<String> {
+        if let Some(why) = routine_rejection(actions) {
+            bail!("task {task_id}: {why}");
+        }
+        let mut outcomes = Vec::with_capacity(actions.len());
+        let mut failed = Vec::new();
+        for action in actions {
+            match self.run_trigger_action(task_id, action).await {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(e) => {
+                    tracing::warn!("[routine] task {task_id} action failed: {e}");
+                    let what = action_target(action);
+                    outcomes.push(format!("{what} failed: {e}"));
+                    failed.push(what);
+                }
+            }
+        }
+        let outcomes = outcomes.join(" · ");
+        if failed.is_empty() {
+            return Ok(outcomes);
+        }
+        Err(ActionsFailed {
+            error: format!("did not run: {}", failed.join(", ")),
+            outcomes,
+        }
+        .into())
+    }
+}
+
+/// What an action acts on, to name it when it fails.
+fn action_target(action: &TriggerAction) -> String {
+    match action {
+        TriggerAction::DevicePower { device_id, .. } => device_id.clone(),
+        TriggerAction::Notify { .. } => "the notification".to_string(),
+        TriggerAction::AgentPrompt { .. } => "the assistant".to_string(),
+    }
 }
 
 #[async_trait]
@@ -217,6 +247,7 @@ impl ScheduleExecutor for AgentScheduleExecutor {
 
         match kind {
             TaskKind::AgentPrompt { prompt } => self.run_agent_prompt(task_id, prompt).await,
+            TaskKind::Routine { actions } => self.run_routine(task_id, actions).await,
             TaskKind::Webhook { webhook_url } => {
                 tracing::info!("[scheduler] firing webhook for task {task_id}: {webhook_url}");
                 // A user-typed URL is the most direct exfiltration path: `begin` gates it and
@@ -342,35 +373,151 @@ mod tests {
     use futures::stream::BoxStream;
     use pond_core::models::ports::agent::{AgentResponse, AgentStreamEvent};
     use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+    use pond_core::user_data::ports::device_control::{DeviceControlOutcome, DeviceStatePatch};
 
-    /// An engine whose model call failed: the adapter reports it as an `Err`.
-    struct FailingEngine;
+    /// An engine whose turn failed: the adapter reports it as an `Err` carrying a `TurnFailure`.
+    struct FailingEngine(TurnFailure);
 
     #[async_trait]
     impl Agent for FailingEngine {
         async fn chat(&self, _request: AgentRequest) -> Result<AgentResponse> {
-            bail!("The model could not run: Execution error: null result from llama cpp")
+            Err(self.0.into())
         }
 
         async fn chat_stream(
             &self,
             _request: AgentRequest,
         ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
-            unimplemented!("a schedule runs through chat")
+            unimplemented!("a schedule runs through chat, spoken or not")
         }
     }
 
+    /// An engine whose turn answered `self.0`.
+    struct AnsweringEngine(&'static str);
+
+    #[async_trait]
+    impl Agent for AnsweringEngine {
+        async fn chat(&self, _request: AgentRequest) -> Result<AgentResponse> {
+            Ok(AgentResponse {
+                text: self.0.to_string(),
+                metadata: Default::default(),
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: AgentRequest,
+        ) -> Result<BoxStream<'static, Result<AgentStreamEvent>>> {
+            unimplemented!("a schedule runs through chat, spoken or not")
+        }
+    }
+
+    /// A speaker that counts what it was asked to say.
+    #[derive(Default)]
+    struct CountingSpeaker(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl VoiceOutput for CountingSpeaker {
+        async fn speak(&self, _text: &str) -> Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Settings under which a schedule speaks now: unprompted speech on, quiet hours elsewhere.
+    /// The settings mock keeps only some fields, and not these.
+    struct SpeakingSettings(pond_core::user_data::domain::settings::Settings);
+
+    impl SpeakingSettings {
+        fn now() -> Self {
+            let mut settings = pond_core::user_data::domain::settings::Settings {
+                unprompted_speech_enabled: true,
+                timezone: "UTC".to_string(),
+                ..Default::default()
+            };
+            let now = chrono::Utc::now();
+            settings.quiet_hours_start = (now + chrono::Duration::hours(2))
+                .format("%H:%M")
+                .to_string();
+            settings.quiet_hours_end = (now + chrono::Duration::hours(3))
+                .format("%H:%M")
+                .to_string();
+            Self(settings)
+        }
+    }
+
+    #[async_trait]
+    impl SettingsRepository for SpeakingSettings {
+        async fn get(&self) -> Result<pond_core::user_data::domain::settings::Settings> {
+            Ok(self.0.clone())
+        }
+        async fn update(&self, _: &pond_core::user_data::domain::settings::Settings) -> Result<()> {
+            unimplemented!("a schedule only reads settings")
+        }
+        async fn get_key(&self, _: &str) -> Result<Option<String>> {
+            unimplemented!("a schedule only reads settings")
+        }
+        async fn set_key(&self, _: &str, _: String) -> Result<()> {
+            unimplemented!("a schedule only reads settings")
+        }
+    }
+
+    async fn run_spoken(agent: Arc<dyn Agent>, speaker: Arc<CountingSpeaker>) -> Result<String> {
+        AgentScheduleExecutor::new(
+            agent,
+            Arc::new(InMemorySessionStorage::new()),
+            None,
+            1,
+            Some(speaker),
+            Some(Arc::new(SpeakingSettings::now())),
+        )
+        .execute(
+            "daily-brief",
+            &TaskKind::AgentPrompt {
+                prompt: "Give me my daily brief".to_string(),
+            },
+        )
+        .await
+    }
+
+    /// The Orin's Daily Brief of 2026-11-02 streamed goose's "Ran into this error: ..." into the
+    /// speaker and recorded it as the completed run's result; on 2026-10-29 to -31 it recorded an
+    /// empty result as completed. A spoken run is now a `chat` turn: failed, and silent.
     #[tokio::test]
-    async fn an_errored_turn_is_a_failed_run_carrying_the_error() {
+    async fn a_spoken_run_whose_turn_failed_is_a_failed_run_and_says_nothing() {
+        let speaker = Arc::new(CountingSpeaker::default());
+        for failure in [TurnFailure::Engine, TurnFailure::NoReplyAfterTools] {
+            let err = run_spoken(Arc::new(FailingEngine(failure)), speaker.clone())
+                .await
+                .expect_err("a failed turn is a failed run");
+            assert_eq!(err.to_string(), failure.user_message());
+        }
+        assert_eq!(speaker.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_spoken_run_speaks_the_answer_it_records() {
+        let speaker = Arc::new(CountingSpeaker::default());
+        let result = run_spoken(
+            Arc::new(AnsweringEngine("Mainly clear today.")),
+            speaker.clone(),
+        )
+        .await
+        .expect("an answered turn is a completed run");
+        assert_eq!(result, "Mainly clear today.");
+        assert!(speaker.0.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    async fn run_failing(failure: TurnFailure) -> anyhow::Error {
         let executor = AgentScheduleExecutor::new(
-            Arc::new(FailingEngine),
+            Arc::new(FailingEngine(failure)),
             Arc::new(InMemorySessionStorage::new()),
             None,
             1,
             None,
             None,
         );
-        let err = executor
+        executor
             .execute(
                 "task-1",
                 &TaskKind::AgentPrompt {
@@ -378,10 +525,131 @@ mod tests {
                 },
             )
             .await
-            .expect_err("an engine failure must not be recorded as a completed run");
+            .expect_err("a failed turn must not be recorded as a completed run")
+    }
+
+    /// The scheduler stores `error.to_string()` as the run's error, which the dashboard and the
+    /// phone show; the Orin's run of 2026-10-27 stored llama.cpp's "null result" there.
+    #[tokio::test]
+    async fn a_model_that_could_not_load_is_a_failed_run_with_a_plain_sentence() {
+        let err = run_failing(TurnFailure::ModelUnavailable).await;
         assert_eq!(
             err.to_string(),
-            "The model could not run: Execution error: null result from llama cpp"
+            TurnFailure::ModelUnavailable.user_message()
+        );
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::ModelUnavailable),
+            "the kind stays typed for anything downstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_called_tools_but_never_answered_is_a_failed_run_with_a_plain_sentence() {
+        let err = run_failing(TurnFailure::NoReplyAfterTools).await;
+        assert_eq!(
+            err.to_string(),
+            TurnFailure::NoReplyAfterTools.user_message()
+        );
+    }
+
+    /// Switches every device but `water-heater-plug`, which is offline; keeps what it switched.
+    #[derive(Default)]
+    struct OfflinePlug(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl DeviceControlPort for OfflinePlug {
+        async fn set_power(&self, device_id: &str, on: bool) -> Result<DeviceControlOutcome> {
+            if device_id == "water-heater-plug" {
+                bail!("device offline");
+            }
+            self.0.lock().unwrap().push(device_id.to_string());
+            Ok(DeviceControlOutcome::new(
+                device_id,
+                DeviceStatePatch {
+                    on: Some(on),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn set_brightness(&self, _: &str, _: u8) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+        async fn set_target_temp(&self, _: &str, _: f32) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+        async fn set_locked(&self, _: &str, _: bool) -> Result<DeviceControlOutcome> {
+            unimplemented!("a routine here only switches power")
+        }
+    }
+
+    fn power(device_id: &str) -> TriggerAction {
+        TriggerAction::DevicePower {
+            device_id: device_id.to_string(),
+            on: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_routine_runs_every_action_without_the_assistant_and_names_what_failed() {
+        let devices = Arc::new(OfflinePlug::default());
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine(TurnFailure::Engine)),
+            Arc::new(InMemorySessionStorage::new()),
+            Some(devices.clone()),
+            1,
+            None,
+            None,
+        );
+        let routine = TaskKind::Routine {
+            actions: vec![
+                power("water-heater-plug"),
+                power("kitchen-lights"),
+                power("porch-light"),
+            ],
+        };
+
+        let err = executor
+            .execute("morning", &routine)
+            .await
+            .expect_err("a routine with a failed device is a failed run");
+
+        assert_eq!(
+            *devices.0.lock().unwrap(),
+            ["kitchen-lights", "porch-light"]
+        );
+        let failed = err
+            .downcast_ref::<ActionsFailed>()
+            .expect("the outcomes travel with it");
+        assert_eq!(failed.error, "did not run: water-heater-plug");
+        assert!(
+            failed.outcomes.contains("kitchen-lights switched on"),
+            "{}",
+            failed.outcomes
+        );
+        assert!(
+            failed.outcomes.contains("water-heater-plug failed"),
+            "{}",
+            failed.outcomes
+        );
+    }
+
+    #[tokio::test]
+    async fn a_routine_whose_devices_all_answer_completes() {
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine(TurnFailure::Engine)),
+            Arc::new(InMemorySessionStorage::new()),
+            Some(Arc::new(OfflinePlug::default())),
+            1,
+            None,
+            None,
+        );
+        let routine = TaskKind::Routine {
+            actions: vec![power("kitchen-lights")],
+        };
+        assert_eq!(
+            executor.execute("morning", &routine).await.unwrap(),
+            "kitchen-lights switched on"
         );
     }
 }

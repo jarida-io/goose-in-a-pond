@@ -1,14 +1,13 @@
-//! Per-session choice of which `giap-*` groups' schemas reach the prompt. Once per session, as
-//! per-turn churn rewrites the tools JSON and kills KV prefix reuse. Every failure path widens.
+//! Per-session choice of which `giap-*` groups' schemas reach the prompt. The opening message
+//! picks the set; each later message may only ADD to it, since dropping a group strands tool
+//! results the history refers to and every change rewrites the tools JSON (the KV prefix) from
+//! the first changed tool on. Every failure path widens.
 
 use crate::mcp::domain::tool_group::{
     core_group_names, find_group, group_of_tool, is_catalog_extension, TOOLKIT_EXTENSION,
     TOOL_GROUPS,
 };
-
-/// Cosine floor for a non-core group on all-MiniLM-L6-v2 (unrelated ~0.00-0.15, on-topic >0.40).
-/// Low because a missing group costs a ~10s round trip, a surplus one only prompt tokens.
-pub const DEFAULT_RELEVANCE_THRESHOLD: f32 = 0.28;
+use crate::models::ports::embedding::EmbeddingProvider;
 
 /// Cosine similarity of the session's opening context against one group.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +23,8 @@ pub enum SelectionBasis {
     ModeAll,
     /// No embedder available, or embedding/scoring failed — widened to all.
     NoEmbedder,
+    /// The embedder's model has no measured floor, so no cosine can rule a group out.
+    Unmeasured,
     /// Scored against group descriptions.
     Scored,
     /// `tool_selection_mode = "minimal"`: the toolkit hatch only, no scoring.
@@ -98,16 +99,63 @@ pub fn scorable_groups(available: &[String]) -> Vec<(&'static str, &'static str)
         .collect()
 }
 
-/// Groups for a session. No scores (no embedder, or scoring failed) means every available group;
-/// else registered core groups, every group at or above `threshold`, and the top non-core scorer.
+/// The embedder model's floor for [`select_groups`]; `None` where it was never measured.
+pub fn relevance_floor(provider: &dyn EmbeddingProvider) -> Option<f32> {
+    provider.similarity_floors().map(|f| f.tool_relevance)
+}
+
+/// Groups for a session's opening message. No floor, or no scores (no embedder, or scoring
+/// failed), means every available group; else registered core groups, every group at or above
+/// `floor`, and the top
+/// non-core scorer.
 pub fn select_groups(
     available: &[String],
     scores: Option<&[GroupScore]>,
-    threshold: f32,
+    floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, true)
+}
+
+/// Groups a later message of the session asks for, to be merged with [`union_groups`]. As
+/// [`select_groups`] without the top-scorer rescue: the rescue fires on every message, so it would
+/// grow the set by one group per small-talk turn and move the KV prefix each time. A later miss
+/// costs one `enable_tool_group` call, which the opening message has no history to make.
+pub fn select_groups_for_later_message(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, false)
+}
+
+/// `held` with every group of `picked` it lacks, sorted and deduped, and the groups that were
+/// added. Never removes a held group, whatever `picked` says.
+pub fn union_groups(held: &[String], picked: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut added: Vec<String> = picked
+        .iter()
+        .filter(|p| !held.iter().any(|h| h == *p))
+        .cloned()
+        .collect();
+    added.sort();
+    added.dedup();
+    let mut groups: Vec<String> = held.iter().chain(added.iter()).cloned().collect();
+    groups.sort();
+    groups.dedup();
+    (groups, added)
+}
+
+fn pick_groups(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+    rescue_top: bool,
 ) -> ToolSelection {
     if available.is_empty() {
         return ToolSelection::all(available, SelectionBasis::ModeAll);
     }
+    let Some(threshold) = floor else {
+        return ToolSelection::all(available, SelectionBasis::Unmeasured);
+    };
     let Some(scores) = scores else {
         return ToolSelection::all(available, SelectionBasis::NoEmbedder);
     };
@@ -132,13 +180,15 @@ pub fn select_groups(
     }
 
     // Rescue the top scorer regardless of the threshold.
-    if let Some(best) = scores
-        .iter()
-        .filter(|s| available.iter().any(|a| a == &s.extension))
-        .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
-        .max_by(|a, b| a.score.total_cmp(&b.score))
-    {
-        chosen.push(best.extension.clone());
+    if rescue_top {
+        if let Some(best) = scores
+            .iter()
+            .filter(|s| available.iter().any(|a| a == &s.extension))
+            .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
+            .max_by(|a, b| a.score.total_cmp(&b.score))
+        {
+            chosen.push(best.extension.clone());
+        }
     }
 
     chosen.sort();
@@ -224,6 +274,20 @@ where
         .collect()
 }
 
+/// Every tool but the setup interview's, which only an interview turn is offered.
+pub fn without_interview_tools<'a, I>(tools: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    tools
+        .into_iter()
+        .filter(|name| {
+            group_of_tool(name) != Some(crate::mcp::domain::tool_group::INTERVIEW_EXTENSION)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Prefixes of goose's own injected tools: not personal data, and the shim's allow-set already
 /// vetoes them. Listed so the guest filter does not default-deny them.
 const ENGINE_TOOL_PREFIXES: &[&str] = &["platform", "recipe", "dynamic_task"];
@@ -300,6 +364,70 @@ mod tests {
     }
     use super::*;
 
+    #[test]
+    fn an_ordinary_turn_never_holds_the_interviews_tools() {
+        let sep = crate::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
+        let save = format!(
+            "{}{sep}save_notes",
+            crate::mcp::domain::tool_group::INTERVIEW_EXTENSION
+        );
+        let weather = format!("giap-weather{sep}get_weather");
+        assert_eq!(without_interview_tools([&save, &weather]), vec![weather]);
+    }
+
+    /// The shipped embedder's floor, which every scored case below was tuned on.
+    const MINILM: Option<f32> = Some(0.28);
+
+    #[test]
+    fn each_measured_model_keeps_its_own_floor() {
+        use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
+        assert_eq!(ALL_MINILM_L6_V2.floors.map(|f| f.tool_relevance), MINILM);
+        // Its cosines sit higher: unneeded groups score 0.50-0.82, where MiniLM's sit near zero.
+        assert_eq!(
+            EMBEDDINGGEMMA_2.floors.map(|f| f.tool_relevance),
+            Some(0.71)
+        );
+    }
+
+    /// A cosine on an unmeasured scale rules nothing out, however low it is.
+    #[test]
+    fn a_model_without_a_measured_floor_keeps_every_group() {
+        let avail = available();
+        let scores: Vec<GroupScore> = scorable_groups(&avail)
+            .iter()
+            .map(|(ext, _)| score(ext, 0.0))
+            .collect();
+        let sel = select_groups(&avail, Some(&scores), None);
+        assert_eq!(sel.basis, SelectionBasis::Unmeasured);
+        assert_eq!(sel.groups.len(), avail.len());
+
+        let narrowed = select_groups(&avail, Some(&scores), MINILM);
+        assert_eq!(narrowed.basis, SelectionBasis::Scored);
+        assert!(narrowed.groups.len() < avail.len(), "MiniLM still narrows");
+    }
+
+    /// The floor comes from the model the embedder runs, looked up by the id it stamps.
+    #[test]
+    fn the_floor_is_read_off_the_embedders_model() {
+        struct Named(&'static str);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Named {
+            async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+                Ok(vec![0.0])
+            }
+            fn dimensions(&self) -> usize {
+                1
+            }
+            fn model_id(&self) -> String {
+                self.0.to_string()
+            }
+        }
+        assert_eq!(relevance_floor(&Named("all-MiniLM-L6-v2")), MINILM);
+        assert_eq!(relevance_floor(&Named("embeddinggemma-2-256")), Some(0.71));
+        assert_eq!(relevance_floor(&Named("nomic-embed-text-v1.5")), None);
+        assert_eq!(relevance_floor(&Named("not-a-catalogue-model")), None);
+    }
+
     fn available() -> Vec<String> {
         TOOL_GROUPS
             .iter()
@@ -318,7 +446,7 @@ mod tests {
     #[test]
     fn no_scores_falls_back_to_every_group() {
         let avail = available();
-        let sel = select_groups(&avail, None, DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, None, MINILM);
         assert_eq!(sel.basis, SelectionBasis::NoEmbedder);
         assert_eq!(sel.groups.len(), avail.len());
         for ext in &avail {
@@ -328,7 +456,7 @@ mod tests {
 
     #[test]
     fn empty_availability_is_not_a_crash() {
-        let sel = select_groups(&[], None, DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&[], None, MINILM);
         assert!(sel.groups.is_empty());
         assert_eq!(sel.basis, SelectionBasis::ModeAll);
     }
@@ -364,7 +492,7 @@ mod tests {
         assert_eq!(clamp_to_permitted(held.clone(), &permitted), held);
     }
 
-    /// Not even the core set: that alone is 778 tokens, 9.5% of the local prompt budget.
+    /// Not even the core set: with knowledge in it, 879 tokens keyless (o200k, 2026-11-02).
     #[test]
     fn minimal_offers_the_hatch_and_nothing_else() {
         let available = vec![
@@ -417,7 +545,7 @@ mod tests {
             .iter()
             .map(|(e, _)| score(e, 0.0))
             .collect();
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         for c in core_group_names() {
             assert!(sel.groups.contains(&c.to_string()), "core {c} was dropped");
         }
@@ -436,7 +564,7 @@ mod tests {
                 s.score = 0.61;
             }
         }
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert_eq!(sel.basis, SelectionBasis::Scored);
         // Core + weather, and nothing else.
         assert_eq!(sel.groups.len(), core_group_names().len() + 1);
@@ -453,7 +581,7 @@ mod tests {
             score("giap-schedule", 0.30),
             score("giap-knowledge", 0.02),
         ];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         for want in ["giap-device", "giap-device-control", "giap-schedule"] {
             assert!(sel.groups.contains(&want.to_string()), "{want} missing");
         }
@@ -465,15 +593,131 @@ mod tests {
         let avail = available();
         let scores = vec![
             score("giap-weather", 0.19),
-            score("giap-knowledge", 0.11),
+            score("giap-schedule", 0.11),
             score("giap-sensors", 0.03),
         ];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(
             sel.groups.contains(&"giap-weather".to_string()),
             "top scorer should be rescued"
         );
+        assert!(!sel.groups.contains(&"giap-schedule".to_string()));
+    }
+
+    /// The 2026-10-28 Jetson log: "What has happened to China's stock market?" scored no group
+    /// near the threshold, so the session had no `search_web` and the model said it had no tool.
+    #[test]
+    fn web_search_is_loaded_whatever_the_message_scores() {
+        let avail = available();
+        let scores: Vec<GroupScore> = scorable_groups(&avail)
+            .iter()
+            .map(|(e, _)| score(e, 0.0))
+            .collect();
+        assert!(
+            !scores.iter().any(|s| s.extension == "giap-knowledge"),
+            "giap-knowledge is core, so it is never scored"
+        );
+        for sel in [
+            select_groups(&avail, Some(&scores), MINILM),
+            select_groups_for_later_message(&avail, Some(&scores), MINILM),
+        ] {
+            assert!(
+                sel.groups.contains(&"giap-knowledge".to_string()),
+                "{:?}",
+                sel.groups
+            );
+        }
+    }
+
+    /// Core is not a permission: a scope whose ceiling lacks the group does not get it back.
+    #[test]
+    fn web_search_still_respects_the_permitted_set() {
+        let permitted = vec!["giap-toolkit".to_string(), "giap-weather".to_string()];
+        let scores = vec![score("giap-weather", 0.5)];
+        let sel = select_groups(&permitted, Some(&scores), MINILM);
         assert!(!sel.groups.contains(&"giap-knowledge".to_string()));
+        assert_eq!(
+            sel.groups,
+            vec!["giap-toolkit".to_string(), "giap-weather".to_string()]
+        );
+    }
+
+    /// A guest keeps web search: it reads no household data.
+    #[test]
+    fn a_guest_is_offered_web_search() {
+        use crate::user_data::domain::profile::ProfileScope;
+
+        let permitted = permitted_groups(&available(), &ProfileScope::Guest);
+        let sel = select_groups(&permitted, Some(&[]), MINILM);
+        assert!(
+            sel.groups.contains(&"giap-knowledge".to_string()),
+            "{:?}",
+            sel.groups
+        );
+    }
+
+    // ── Later messages ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_later_message_adds_the_groups_it_reaches_the_threshold_on() {
+        let avail = available();
+        let scores = vec![score("giap-schedule", 0.47), score("giap-weather", 0.05)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        assert_eq!(sel.basis, SelectionBasis::Scored);
+        assert!(sel.groups.contains(&"giap-schedule".to_string()));
+        assert!(!sel.groups.contains(&"giap-weather".to_string()));
+    }
+
+    /// Small talk must not grow the set: every later message would move the KV prefix.
+    #[test]
+    fn a_later_message_rescues_no_top_scorer() {
+        let avail = available();
+        let scores = vec![score("giap-weather", 0.19), score("giap-schedule", 0.11)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        let mut core: Vec<String> = core_group_names().into_iter().map(str::to_string).collect();
+        core.sort();
+        assert_eq!(sel.groups, core, "only the core set, nothing rescued");
+    }
+
+    /// Scoring failed on a later message: widen, as at the opening.
+    #[test]
+    fn a_later_message_with_no_scores_widens_to_everything() {
+        let avail = available();
+        let sel = select_groups_for_later_message(&avail, None, MINILM);
+        assert_eq!(sel.basis, SelectionBasis::NoEmbedder);
+        assert_eq!(sel.groups.len(), avail.len());
+    }
+
+    #[test]
+    fn the_union_never_drops_a_held_group() {
+        let held = vec![
+            "giap-device-control".to_string(),
+            "giap-memory".to_string(),
+            "giap-weather".to_string(),
+        ];
+        let picked = vec!["giap-memory".to_string(), "giap-schedule".to_string()];
+        let (groups, added) = union_groups(&held, &picked);
+        assert_eq!(
+            groups,
+            vec![
+                "giap-device-control".to_string(),
+                "giap-memory".to_string(),
+                "giap-schedule".to_string(),
+                "giap-weather".to_string(),
+            ]
+        );
+        assert_eq!(added, vec!["giap-schedule".to_string()]);
+    }
+
+    #[test]
+    fn a_union_that_adds_nothing_reports_nothing() {
+        let held = vec!["giap-memory".to_string(), "giap-weather".to_string()];
+        let (groups, added) = union_groups(&held, &["giap-weather".to_string()]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
+        let (groups, added) = union_groups(&held, &[]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
     }
 
     #[test]
@@ -485,7 +729,7 @@ mod tests {
             "giap-weather".into(),
         ];
         let scores = vec![score("giap-schedule", 0.99), score("giap-weather", 0.50)];
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(!sel.groups.contains(&"giap-schedule".to_string()));
         assert!(sel.groups.contains(&"giap-weather".to_string()));
         // giap-memory / giap-system are core but not registered here.
@@ -573,7 +817,7 @@ mod tests {
         );
 
         // No embedder — the widening path, which is what a fresh Jetson takes.
-        let selection = select_groups(&permitted, None, DEFAULT_RELEVANCE_THRESHOLD);
+        let selection = select_groups(&permitted, None, MINILM);
         for c in &denied_core {
             assert!(
                 !selection.groups.iter().any(|g| g == c),
@@ -590,7 +834,7 @@ mod tests {
             .iter()
             .map(|(e, _)| score(e, 0.0))
             .collect();
-        let sel = select_groups(&avail, Some(&scores), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&scores), MINILM);
         assert!(sel.groups.contains(&"my-home-assistant-mcp".to_string()));
     }
 
@@ -729,7 +973,7 @@ mod tests {
             },
         ];
         let merged = merge_scores(&[question, mems]);
-        let sel = select_groups(&avail, Some(&merged), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&merged), MINILM);
         assert!(
             sel.groups.contains(&"giap-weather".to_string()),
             "got {:?}",
@@ -762,7 +1006,7 @@ mod tests {
             },
         ];
         let merged = merge_scores(&[question, skill]);
-        let sel = select_groups(&avail, Some(&merged), DEFAULT_RELEVANCE_THRESHOLD);
+        let sel = select_groups(&avail, Some(&merged), MINILM);
         assert!(
             sel.groups.contains(&"giap-schedule".to_string()),
             "got {:?}",
@@ -793,9 +1037,9 @@ mod tests {
         assert_eq!(
             knowledge.description,
             "Looking things up, working things out and searching the web: encyclopedia articles \
-             about people, places and events, exact arithmetic, unit conversions and dates, and \
-             the web for anything current, local or specific, such as news, opening hours, \
-             prices and products."
+             about people, places and events, exact arithmetic, unit conversions and dates, the \
+             web for anything current, local or specific, such as news, opening hours, prices \
+             and products, and reading a web page from its link."
         );
         let note = dormant_groups_note(&available(), &[], |_| false);
         assert!(

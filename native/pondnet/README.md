@@ -75,7 +75,10 @@ and the process restarted. The household authority is built in a staging directo
 renamed into place, so a crash during first setup leaves nothing half-written.
 
 The public machine key is available before registration; the public node key comes from
-the coordinator-backed status after it. Neither exposes a private key. Enrollment
+the coordinator-backed status after it. Neither exposes a private key. The status also
+carries `health`, the backend's redacted health warnings (the last control-server error while
+it cannot log in, for one), and `cmd/pondnet` adds `clockSynchronized` on Linux; see
+[when the node is not running](../../docs/remote-access.md#when-the-node-is-not-running). Enrollment
 approvals bind the pending authorization ID and machine key to one locally paired
 device. If Headscale completes a registration but its response is lost, reconciliation
 matches the durable intent to exactly one inventory entry with that machine key in the

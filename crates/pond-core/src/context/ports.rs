@@ -45,10 +45,11 @@ pub trait ContextRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(ContextItem, f32)>>;
 
-    /// Items with no vector yet, for the background embedding backfill.
+    /// Items with no vector yet.
     async fn search_unembedded(&self, limit: usize) -> Result<Vec<ContextItem>>;
 
-    /// Attach a vector to a stored item.
+    /// Attach a vector to a stored item, and index it under the model loaded now; the embedding
+    /// slot holds a lease so that is the model that made it.
     async fn update_embedding(&self, id: &str, embedding: &[f32]) -> Result<()>;
 
     /// How many items a member owns. Used to say what deleting them removes.

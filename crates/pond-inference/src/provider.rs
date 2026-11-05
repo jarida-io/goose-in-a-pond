@@ -590,7 +590,7 @@ fn generation_task(
                     serde_json::from_str(&args_str).unwrap_or_else(|e| {
                         tracing::warn!(
                             tool = %name,
-                            args = %args_str,
+                            args_chars = args_str.chars().count(),
                             error = %e,
                             "failed to parse merged tool arguments"
                         );

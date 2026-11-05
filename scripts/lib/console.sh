@@ -484,7 +484,9 @@ cs_restart() {
   IFS= read -rsn1 k < /dev/tty
   [ "$k" = y ] || [ "$k" = Y ] || { cs_say "not restarted"; return; }
   cs_say "restarting the pond on ${CS_NAMES[$CS_SEL]}..." 30; cs_frame
-  local cmd='systemctl --user restart goose-in-a-pond.service && sleep 2 && echo "service $(systemctl --user is-active goose-in-a-pond.service)"'
+  # A pond run by agamemnon restarts through the login's sudo rule (giap.sh service-account).
+  # shellcheck disable=SC2016  # expanded by the pond host's shell
+  local cmd='if grep -qs "^User=agamemnon$" /etc/systemd/system/goose-in-a-pond.service; then sudo -n systemctl restart goose-in-a-pond.service && sleep 2 && echo "service $(systemctl is-active goose-in-a-pond.service)"; else systemctl --user restart goose-in-a-pond.service && sleep 2 && echo "service $(systemctl --user is-active goose-in-a-pond.service)"; fi'
   if [ -z "$host" ]; then out="$(bash -c "$cmd" 2>&1)"
   else
     # shellcheck disable=SC2046

@@ -7,8 +7,12 @@ the phrase in this household's voices: the user reads a few sentences containing
 the server stores the phrase *as heard* (a mishearing such as "gus" for "goose") as an extra
 trigger.
 
-The "hey goose" CNN in `crates/pond-ear` is a separate detector that the voice loop does not load
-([pond-ear](developer/pond-ear.md)). Calibration has no effect on it.
+Where the ear runs ([pond-ear](developer/pond-ear.md)), Whisper keeps the wake word but reads
+only the speech segments the ear endpoints on echo-cancelled audio, never a window on a timer,
+and matches them against the same triggers (`pond_voice::text::wake_triggers`). The ear's "hey
+goose" CNN is used only when `voice_wake_detector` is `hey_goose`, or `auto` once a calibration
+shows the CNN hears the household; nothing records that result yet, so `auto` means Whisper.
+Calibration has no effect on the CNN.
 
 ## What the detector matches
 

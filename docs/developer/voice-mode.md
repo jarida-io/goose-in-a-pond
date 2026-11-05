@@ -1,23 +1,29 @@
 # Voice mode
 
-One loop: wake word, request, working tone, spoken answer. The terminal (`pond-server chat --voice`)
-and the desktop app run the same loop; the desktop spawns it as a child process
+One loop: wake word, request, working tone, spoken answer. Serve runs it in the room on the pond's
+own microphone and speaker (`room_voice.rs`, `GET /api/v1/voice/room`), and the desktop attaches to
+that; the terminal (`pond-server chat --voice`) runs the same loop, and the desktop spawns it as a
+child process where serve's room cannot listen
 ([Desktop voice: the child process](voice-desktop-child-process.md)).
 
 | Stage | Code |
 |---|---|
 | Microphone (one owner, 16 kHz mono ring) | `crates/pond-audio` (`pond_audio::spawn`, `MicHandle`) |
 | Device choice and supervision | `crates/pond-adapters-audio-devices`, started in `run_chat` with `Role::Voice` |
-| Wake word | `WhisperKeywordDetector` in `crates/pond-adapters-whisper/src/lib.rs` |
-| End of speech | `pond-adapters-silero` (`vad_backend = "silero"`, the default) or an RMS gate |
+| Which front end listens | `build_listening` in `crates/pond-server/src/voice_rig.rs` |
+| Wake word | The ear (`crates/pond-adapters-ear`): the "hey goose" CNN or Whisper on each speech segment (`voice_wake_detector`); without Silero, `WhisperKeywordDetector` in `crates/pond-adapters-whisper/src/lib.rs` |
+| End of speech | The ear's Silero endpointer on echo-cancelled audio; without the ear, `pond-adapters-silero` or an RMS gate |
+| Interrupting a reply | The ear's `InterruptWatch`: the wake word, or an enrolled voice; without the ear, energy barge-in |
 | Speech to text | `WhisperRsInput` in `crates/pond-adapters-whisper/src/in_process.rs` (whisper-rs 0.16, in process) |
 | The turn | `ChatService::run_loop` and `stream_response_inner` in `crates/pond-core/src/shared/services/chat.rs` |
 | Speech text | `crates/pond-voice/src/text.rs` ([TTS text normalization](../tts-text-normalization.md)) |
 | Text to speech | `KokoroOutput` in `crates/pond-adapters-kokoro` |
 | Playback, wake ping, working tone | `crates/pond-audio-out` |
 
-`crates/pond-ear` (a hand-written wake word, VAD, echo canceller and Voice Match) is not wired into
-this loop yet; see [pond-ear](pond-ear.md).
+The ear runs `crates/pond-ear` (a hand-written wake word, VAD, echo canceller and Voice Match) on
+its own thread; see [pond-ear](pond-ear.md). It is chosen whenever Silero is available and
+`vad_backend` is not `rms`. Voice Match is not enrolled by anything yet, so an interrupt today is the
+wake word.
 
 ## Running it
 
@@ -87,7 +93,7 @@ Under `--json-events` the refusal is an `error` line and `exit: already_running`
 |---|---|
 | Wake word heard | a two-note ping (C6 then E6, about 220 ms) |
 | Working | a soft chime (G4 + E5) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false` |
-| Answer ready | the tone stops and the reply is spoken clause by clause as it streams |
+| Answer ready | the tone stops and the reply is spoken as it streams: a short first clause, then whole sentences |
 | Tool calls | shown in the UI (`tool_call`/`tool_result`), never spoken; the tone keeps playing |
 
 There is no spoken filler and no tool narration: both would have to finish playing before the

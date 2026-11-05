@@ -30,8 +30,10 @@ test("Hub visual screenshot", async ({ page }) => {
   console.log(`Drawer width: ${drawerWidth}px (expected 344)`);
   await page.keyboard.press("Escape");
 
-  const hasVoiceButton = await page.locator(".dash__voice").isVisible();
-  console.log(`Talk-to-Goose button visible: ${hasVoiceButton}`);
+  // Above 1100px the composer's mic replaces the dock's, so exactly one shows.
+  const hasTalkButton = await page.locator(".hcomposer__talk").isVisible();
+  const hasDockVoice = await page.locator(".dash__voice").isVisible();
+  console.log(`Hold-to-talk visible: ${hasTalkButton}, dock mic visible: ${hasDockVoice}`);
 
   const hasPills = await page.locator(".rpills").isVisible();
   console.log(`Room pills visible: ${hasPills} (expected false -- removed in dbdf02a1)`);
@@ -64,14 +66,13 @@ test("Hub visual screenshot", async ({ page }) => {
     console.log(`  [${i}] tag=${tag} aria-label="${label}"`);
   }
 
-  // A11y: the asking column; each of its three states is valid, so this reports, not asserts.
-  const offers = page.locator(".sq__offer");
+  // A11y: above 1100px the offers are chips under the composer, not the asking column's rows.
+  const offers = page.locator("button.sq__chip");
   const offerCount = await offers.count();
-  const quiet = await page.locator(".sq__quiet").count();
-  console.log(`\nAsking column -- offers: ${offerCount}, quiet line: ${quiet > 0}`);
+  console.log(`\nOffer chips: ${offerCount}`);
   for (let i = 0; i < Math.min(offerCount, 3); i++) {
-    const prompt = await offers.nth(i).locator(".sq__offer-prompt").textContent();
-    const why = await offers.nth(i).locator(".sq__offer-why").textContent();
+    const prompt = await offers.nth(i).textContent();
+    const why = await offers.nth(i).getAttribute("title");
     console.log(`  offer[${i}] "${prompt}" -- ${why}`);
   }
 
@@ -87,12 +88,13 @@ test("Hub visual screenshot", async ({ page }) => {
   // 344px declared, plus up to 2px of border a side depending on box-sizing.
   expect(drawerWidth).toBeGreaterThanOrEqual(344);
   expect(drawerWidth).toBeLessThanOrEqual(348);
-  expect(hasVoiceButton).toBe(true);
-  // Every offer meets the hub's 44px tap floor and carries the fact behind it.
+  expect(hasTalkButton).toBe(true);
+  expect(hasDockVoice).toBe(false);
+  // Every chip reaches the hub's 44px tap floor through `.reach` and carries the fact behind it.
   for (let i = 0; i < offerCount; i++) {
-    const box = await offers.nth(i).boundingBox();
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
-    const why = (await offers.nth(i).locator(".sq__offer-why").textContent()) ?? "";
+    await expect(offers.nth(i)).toBeVisible();
+    await expect(offers.nth(i)).toHaveClass(/\breach\b/);
+    const why = (await offers.nth(i).getAttribute("title")) ?? "";
     expect(why.trim().length).toBeGreaterThan(0);
   }
   expect(hasPills, "room pills were deleted in dbdf02a1; this must stay false").toBe(false);

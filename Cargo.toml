@@ -12,6 +12,8 @@ members = [
     "crates/pond-adapters-audio-devices",
     # The ear: wake word, Voice Match, endpointing and echo cancellation. Std only, no crates.
     "crates/pond-ear",
+    # The ear on its own thread behind the voice ports, fed the mic and everything played.
+    "crates/pond-adapters-ear",
     "crates/pond-core",
     "crates/pond-api",
     "crates/pond-hf-cache",
@@ -247,6 +249,7 @@ pond-adapters-lightning = { path = "crates/pond-adapters-lightning" }
 pond-api               = { path = "crates/pond-api" }
 pond-hf-cache          = { path = "crates/pond-hf-cache" }
 pond-ear               = { path = "crates/pond-ear" }
+pond-adapters-ear      = { path = "crates/pond-adapters-ear" }
 pond-infra             = { path = "crates/pond-infra" }
 pond-net               = { path = "crates/pond-net" }
 pond-connect           = { path = "crates/pond-connect" }
@@ -323,8 +326,8 @@ cpal = { path = "vendor/cpal" }
 # path this used made the fork unbuildable anywhere but my Mac. Pinned by full SHA so a
 # device build and a laptop build are the same code -- move the rev deliberately, never
 # by pointing at a branch.
-llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "8ac8291a42c9641b23aeba48d80ecffc774f304e" }
-llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "8ac8291a42c9641b23aeba48d80ecffc774f304e" }
+llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c" }
+llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c" }
 
 [patch."https://github.com/lightsparkdev/frost"]
 frost-core = { git = "https://github.com/Exile10/frost", rev = "280c861abcc3f00edfae523b393e5dbb3a1eb249" }

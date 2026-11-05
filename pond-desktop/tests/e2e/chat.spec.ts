@@ -129,6 +129,33 @@ test.describe("Chat section — response rendering", () => {
     await expect(page.getByText(/task/i)).toBeVisible({ timeout: 10_000 });
   });
 
+  test("text written before a tool call stays out of the answer, behind Steps", async ({ page }) => {
+    await page.route("**/api/v1/chat/stream", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+        body: mockSseStream([
+          { type: "text", content: "Let me check the weather. " },
+          { type: "tool_call", tool: "giap__get_current_weather", id: "t1", working_notes: "Let me check the weather. " },
+          { type: "text", content: "It will be sunny." },
+          { done: true, session_id: "e2e-session", model_role: "chat" },
+        ]),
+      }),
+    );
+
+    await goToChat(page);
+    const textarea = page.locator("textarea").first();
+    await textarea.fill("will it be sunny?");
+    await textarea.press("Meta+Enter");
+
+    await expect(page.getByText("It will be sunny.")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Let me check the weather.")).toHaveCount(0);
+    const steps = page.getByRole("button", { name: "Steps" });
+    await expect(steps).toHaveAttribute("aria-expanded", "false");
+    await steps.click();
+    await expect(page.getByText("Let me check the weather.")).toBeVisible();
+  });
+
   test("token usage appears in model role badge when reported", async ({ page }) => {
     await page.route("**/api/v1/chat/stream", (route) =>
       route.fulfill({

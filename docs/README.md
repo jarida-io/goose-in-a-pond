@@ -58,6 +58,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [PAI-7 Proactive intelligence](architecture/pai/07-proactive-intelligence.md) | |
 | [PAI-8 Personal context streaming](architecture/pai/08-personal-context-streaming.md) | |
 | [Personal-context index](architecture/personal-context-index.md) | The local vector index behind PAI-8 |
+| [Context space](architecture/context-space.md) | Designed: one item header over each kind's own table, one multimodal index and context agents (as recipes) in place of memories, summaries, the index and suggestions |
 | [Context and reasoning roadmap](architecture/context-and-reasoning-roadmap.md) | Phases A to F, with status |
 
 ## Models and inference
@@ -82,7 +83,8 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 |---|---|
 | [Voice mode](developer/voice-mode.md) | The voice stack, crate by crate |
 | [Desktop voice child process](developer/voice-desktop-child-process.md) | `chat --voice --json-events` and the Electron side |
-| [pond-ear](developer/pond-ear.md) | Wake word, Voice Match, endpointing, echo cancellation; built and measured, not yet wired into the voice loop |
+| [pond-ear](developer/pond-ear.md) | Wake word, Voice Match, endpointing, echo cancellation; runs behind the voice loop through `pond-adapters-ear` |
+| [Voice Match](voice-match.md) | Who is speaking in the room: enrolment, the wake detector choice, and what a voice match may not do |
 | [Wake word calibration](wake-word-calibration.md) | Tuning the wake word |
 | [TTS text normalisation](tts-text-normalization.md) | What happens to text before Kokoro speaks it |
 | [Voice pipeline efficiency](voice-pipeline-efficiency.md) | Latency budget and what spends it |
@@ -116,6 +118,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [Music player](architecture/music-player.md) | Apple Music and Spotify ([extension](../extensions/music/README.md)) |
 | [Rides and maps](architecture/rides-and-maps.md) | Uber on the household's own account |
 | [Calendar and mail](guides/connect-calendar-and-mail.html) | Connecting CalDAV and IMAP |
+| [Schedules and recipes](schedules-and-recipes.md) | What each is, how they differ, which tools each can use |
 
 ## Extending GIAP
 

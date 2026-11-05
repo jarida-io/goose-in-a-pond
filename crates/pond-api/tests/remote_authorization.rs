@@ -52,6 +52,8 @@ async fn make_app() -> Harness {
     }
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),
@@ -74,7 +76,7 @@ async fn make_app() -> Harness {
         room_registry,
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         account_sync: None,
@@ -115,6 +117,7 @@ async fn make_app() -> Harness {
         notification_queue: Some(Arc::new(
             pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(pool.clone()),
         )),
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -156,6 +159,7 @@ async fn make_app() -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 

@@ -167,7 +167,7 @@ impl AudioFocus for SpotifyFocus {
         tracing::info!(
             target: "giap::trace",
             kind = "spotify_paused_for_speech",
-            device = now["device"]["name"].as_str().unwrap_or(""),
+            device = now["device"]["id"].as_str().unwrap_or(""),
             "paused Spotify while GIAP speaks (Spotify's Developer Policy III.7)"
         );
         Some(Paused {

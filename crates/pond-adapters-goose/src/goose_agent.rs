@@ -23,6 +23,7 @@ use pond_core::models::services::context::prefix_cache::{InvalidationReason, Pre
 use pond_core::models::services::context::token_counting::HeuristicTokenCounter;
 use pond_core::models::services::prompt_builder::build_prompt_partition;
 use pond_core::prompts::PromptState;
+use pond_core::shared::domain::turn_failure::TurnFailure;
 use pond_core::user_data::domain::memory::{cosine_similarity, MemoryFragment};
 use pond_core::user_data::domain::prompt_extra::render_extension_notes;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
@@ -53,6 +54,88 @@ const MEMORY_CANDIDATE_FANOUT: usize = 8;
 /// Candidate-pool floor, so a small `agent_memory_limit` still ranks beyond the newest rows.
 const MEMORY_CANDIDATE_FLOOR: usize = 40;
 
+/// A voice turn's memories are decoded before its first word is spoken: about four short lines.
+const VOICE_MEMORY_TOKEN_BUDGET: usize = 150;
+
+/// The memory budget a turn gets: its window's, capped on a voice turn.
+fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
+    match is_voice {
+        true => window_budget.min(VOICE_MEMORY_TOKEN_BUDGET),
+        false => window_budget,
+    }
+}
+
+/// The ranked fragments that fit `budget`, estimated at four characters a token; the first
+/// always fits.
+fn fragments_within<'a>(
+    ranked: impl IntoIterator<Item = &'a MemoryFragment>,
+    budget: usize,
+) -> (Vec<&'a MemoryFragment>, usize) {
+    let mut tokens_used: usize = 0;
+    let mut kept = Vec::new();
+    for m in ranked {
+        let estimated_tokens = m.content.len() / 4 + 1;
+        if tokens_used + estimated_tokens > budget && !kept.is_empty() {
+            break;
+        }
+        tokens_used += estimated_tokens;
+        kept.push(m);
+    }
+    (kept, tokens_used)
+}
+
+/// What rides one turn's user message: the words first, so a past turn's envelope is a suffix
+/// cut, then `<system-context>` with the answer contract last, nearest where the model writes.
+#[derive(Default)]
+struct TurnEnvelope<'a> {
+    message: &'a str,
+    suggestion: Option<String>,
+    research: Option<String>,
+    dynamic_suffix: &'a str,
+    interview: Option<&'a str>,
+    member_notes: &'a str,
+    memories: &'a str,
+}
+
+impl TurnEnvelope<'_> {
+    fn render(&self) -> String {
+        let mut msg = String::with_capacity(512 + self.message.len());
+        msg.push_str("<user-message>\n");
+        msg.push_str(self.message);
+        msg.push_str("\n</user-message>\n");
+        // Always emitted, since the answer contract is unconditional.
+        msg.push_str("<system-context>\n");
+        for part in [self.suggestion.as_deref(), self.research.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            msg.push_str(part);
+            msg.push('\n');
+        }
+        if !self.dynamic_suffix.is_empty() {
+            msg.push_str(self.dynamic_suffix);
+            msg.push('\n');
+        }
+        if let Some(interview) = self.interview {
+            msg.push_str(interview);
+            msg.push('\n');
+        }
+        if !self.member_notes.is_empty() {
+            msg.push_str(self.member_notes);
+            msg.push('\n');
+        }
+        if !self.memories.is_empty() {
+            msg.push_str("<memories>\n");
+            msg.push_str(self.memories);
+            msg.push_str("\n</memories>\n");
+        }
+        msg.push_str(&pond_core::models::services::answer_contract::answer_contract());
+        msg.push('\n');
+        msg.push_str("</system-context>");
+        msg
+    }
+}
+
 /// Verbatim copy of Goose's private `MAX_TURNS_MESSAGE`: GIAP's only sign a turn hit the cap.
 const GOOSE_MAX_TURNS_MESSAGE: &str = "I've reached the maximum number of actions I can do without user input. Would you like me to continue?";
 
@@ -63,6 +146,12 @@ const GOOSE_EMPTY_TURN_MESSAGE: &str =
 /// How goose's agent loop opens the text it writes in place of a provider error.
 /// Only picks which text to replace; a picture failure comes typed from the provider shim.
 const GOOSE_PROVIDER_ERROR_PREFIX: &str = "Ran into this error: ";
+
+/// The reply in place of goose's "Ran into this error: ..." when the model could not load or
+/// start for lack of GPU memory, as the provider shim recorded it typed. Both chat streaming
+/// endpoints run through [`GooseAdapter::chat_stream`], so both show this.
+const OUT_OF_GPU_MEMORY_REPLY: &str = "The model could not load: the Pond is out of GPU memory. \
+Try a smaller model on the Models page, or restart the Pond.";
 
 /// Verbatim prefix of goose's notification each time its completeness check re-arms.
 const GOOSE_GOAL_NOTIFICATION_PREFIX: &str = "Goal: ";
@@ -126,21 +215,6 @@ fn canonical_args_fingerprint(args: Option<&serde_json::Map<String, serde_json::
     hasher.finish()
 }
 
-/// GIAP's prompt tag names; any in visible output means the model echoed scaffolding.
-const SCAFFOLD_TAGS: &[&str] = &[
-    "<system-context>",
-    "<user-message>",
-    "<answer-contract>",
-    "<memories>",
-    "<turn-context>",
-];
-
-/// Whether visible output is GIAP's prompt scaffolding echoed back; handled like an empty turn.
-fn looks_like_leaked_scaffold(text: &str) -> bool {
-    let trimmed = text.trim();
-    SCAFFOLD_TAGS.iter().any(|tag| trimmed.contains(tag))
-}
-
 /// The model's reply to goose's completeness check, read back from the engine's history.
 ///
 /// Goose appends the check as an invisible user message and hides the model's prose reply to
@@ -168,12 +242,19 @@ fn hidden_completeness_reply(messages: &[Message], goal: &str) -> Option<String>
 
 /// Drains one turn's stream into the reply a non-streaming caller (a schedule) receives.
 ///
-/// The reply is the turn's text and nothing else: reasoning is not an answer, and tool calls are
-/// recorded in `metadata["tool_calls"]`. A turn whose model wrote no text is an error that says
-/// so, naming the tools it did call, and is logged as `kind="turn_without_reply"` — a run that
-/// only fetched the weather must not read as the engine having failed. So is a turn that ended on
-/// [`EMPTY_TURN_EXHAUSTED_MESSAGE`]: the apology for no reply is not one, and a schedule must not
-/// speak it or record the run as done. A reply wrapped in `<answer>` tags comes without them.
+/// The reply is the text written after the turn's last tool call and nothing else: reasoning is
+/// not an answer, whether it came as thinking events or as `<think>`-style blocks inside the text;
+/// text before a tool call is the model at work ("let me check the weather"); and tool calls are
+/// recorded in `metadata["tool_calls"]`. The text goes through pond-core's [`ThoughtFilter`], as
+/// the streaming path's does before display, so a reply wrapped in `<answer>` tags comes without
+/// them. A turn with no such text is a [`TurnFailure::NoReply`] or
+/// [`TurnFailure::NoReplyAfterTools`], logged as `kind="turn_without_reply"` with the tools it
+/// called — a run that only fetched the weather must not read as the engine having failed, nor
+/// store its narration as the result. So is a turn that ended on [`EMPTY_TURN_EXHAUSTED_MESSAGE`]:
+/// the apology for no reply is not one, and a schedule must not speak it or record the run as
+/// done. An error event is classified by [`engine_failure`].
+///
+/// [`ThoughtFilter`]: pond_core::models::services::thought_filter::ThoughtFilter
 async fn collect_reply(
     session_id: &str,
     mut stream: futures::stream::BoxStream<'static, Result<AgentStreamEvent>>,
@@ -188,38 +269,49 @@ async fn collect_reply(
                 full_text.push_str(&content);
             }
             AgentStreamEvent::ToolCall { id, tool, .. } => {
+                let notes = std::mem::take(&mut full_text);
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        session_id = %session_id,
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call left out of the reply",
+                    );
+                }
                 tool_call_ids.push(id);
                 if !tool_names.contains(&tool) {
                     tool_names.push(tool);
                 }
             }
             AgentStreamEvent::Error { content } => {
-                return Err(anyhow!(content));
+                return Err(engine_failure(session_id, &content).into());
             }
             _ => {}
         }
     }
 
-    let exhausted = full_text.trim() == EMPTY_TURN_EXHAUSTED_MESSAGE;
-    if full_text.trim().is_empty() || exhausted {
+    let mut filter = pond_core::models::services::thought_filter::ThoughtFilter::new();
+    let mut visible = filter.push(&full_text);
+    visible.push_str(&filter.flush());
+    let visible = visible.trim();
+
+    let exhausted = visible == EMPTY_TURN_EXHAUSTED_MESSAGE;
+    if visible.is_empty() || exhausted {
+        let failure = TurnFailure::without_reply(tool_call_ids.len());
         tracing::warn!(
             target: "giap::trace",
             kind = "turn_without_reply",
+            failure = ?failure,
             exhausted,
+            raw_chars = full_text.len(),
             session_id = %session_id,
             tool_calls = tool_call_ids.len(),
             tools = %tool_names.join(","),
             "the turn ended without any reply text",
         );
-        return Err(if tool_call_ids.is_empty() {
-            anyhow!("The model finished without writing a reply.")
-        } else {
-            anyhow!(
-                "The model made {} tool call(s) ({}) but finished without writing a reply.",
-                tool_call_ids.len(),
-                tool_names.join(", ")
-            )
-        });
+        return Err(failure.into());
     }
 
     let mut metadata = HashMap::new();
@@ -230,19 +322,20 @@ async fn collect_reply(
         );
     }
 
-    let text = match pond_core::models::services::thought_filter::unwrap_answer(&full_text) {
-        Some(inner) => {
-            tracing::info!(
-                target: "giap::trace",
-                kind = "answer_tag_stripped",
-                session_id = %session_id,
-                "the reply carried <answer> tags; they were dropped"
-            );
-            inner.to_string()
-        }
-        None => full_text,
-    };
-    Ok(AgentResponse { text, metadata })
+    if visible != full_text.trim() {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "reply_markup_stripped",
+            session_id = %session_id,
+            answer_tag = pond_core::models::services::thought_filter::has_answer_tag(&full_text),
+            stripped_chars = full_text.trim().len() - visible.len(),
+            "the reply carried reasoning blocks or <answer> tags; they were dropped"
+        );
+    }
+    Ok(AgentResponse {
+        text: visible.to_string(),
+        metadata,
+    })
 }
 
 /// A non-streaming turn's outcome once its engine session's last provider call is known.
@@ -251,8 +344,8 @@ async fn collect_reply(
 /// as the turn's reply text, so [`collect_reply`] alone sees a reply. `failure` is the typed
 /// error the provider shim recorded for the turn's latest call ([`provider_failure`]); when
 /// there is one, the turn failed and the text is not an answer, so a schedule records the run
-/// failed with that error instead of completed with goose's prose. Logged as
-/// `kind="turn_engine_failed"`.
+/// failed instead of completed with goose's prose. The error is the [`TurnFailure`] that
+/// [`engine_failure`] classifies it as, which logs the engine's own text.
 ///
 /// [`provider_failure`]: crate::provider_shim::SessionControls::provider_failure
 fn fail_on_engine_error(
@@ -263,25 +356,96 @@ fn fail_on_engine_error(
     let Some(error) = failure else {
         return reply;
     };
+    Err(engine_failure(session_id, &error).into())
+}
+
+/// Lower-cased fragments of an engine error that mean the model could not load or start.
+///
+/// - `null result from llama cpp`: llama-cpp-2's `LlamaModelLoadError::NullResult`, the load
+///   returning no model. On the Orin on 2026-10-27 the line before it was llama.cpp's
+///   `unable to allocate CUDA0 buffer`.
+/// - `failed to create context`: goose-local-inference could not create the llama.cpp context,
+///   whose KV cache is the allocation that fails when GPU memory is short.
+/// - `out of gpu memory`: the goose fork's typed `ModelLoadError::OutOfGpuMemory`.
+/// - `out of memory`, `unable to allocate`: CUDA's and llama.cpp's own wording, as an HTTP
+///   provider (ollama, llama-server) relays it.
+/// - `engine_create`: LiteRT-LM could not create its engine.
+const MODEL_UNAVAILABLE_MARKERS: &[&str] = &[
+    "null result from llama cpp",
+    "failed to create context",
+    "out of gpu memory",
+    "out of memory",
+    "unable to allocate",
+    "engine_create",
+];
+
+/// The [`TurnFailure`] an engine error ended a turn with: [`TurnFailure::ModelUnavailable`] when
+/// the model could not load or start ([`MODEL_UNAVAILABLE_MARKERS`]), else
+/// [`TurnFailure::Engine`]. Logged with the engine's own text as `kind="turn_engine_failed"`; the
+/// returned failure carries only the plain sentence.
+fn engine_failure(session_id: &str, error: &str) -> TurnFailure {
+    let lowered = error.to_lowercase();
+    let failure = if MODEL_UNAVAILABLE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        TurnFailure::ModelUnavailable
+    } else {
+        TurnFailure::Engine
+    };
     tracing::warn!(
         target: "giap::trace",
         kind = "turn_engine_failed",
+        failure = ?failure,
         session_id = %session_id,
         error = %error,
-        "the turn ended on an engine error; its text is goose's report of it, not a reply",
+        "the turn ended on an engine error; any text is goose's report of it, not a reply",
     );
-    Err(anyhow!("The model could not run: {error}"))
+    failure
+}
+
+/// Goose's report of a provider error, replaced with [`OUT_OF_GPU_MEMORY_REPLY`] when this turn's
+/// calls ran out of GPU memory (`out_of_memory`, from the provider shim's typed count). Logged as
+/// `kind="turn_out_of_gpu_memory"`; any other text passes through.
+fn replace_out_of_gpu_memory_report(session_id: &str, text: String, out_of_memory: bool) -> String {
+    if !(out_of_memory && text.starts_with(GOOSE_PROVIDER_ERROR_PREFIX)) {
+        return text;
+    }
+    tracing::warn!(
+        target: "giap::trace",
+        kind = "turn_out_of_gpu_memory",
+        session_id = %session_id,
+        goose_report = %text,
+        "the turn ended on the model running out of GPU memory; telling the household plainly"
+    );
+    OUT_OF_GPU_MEMORY_REPLY.to_string()
 }
 
 /// Appended when re-engaging after an empty turn: an unchanged prompt gets the same reply.
 const EMPTY_TURN_STEER: &str = "(Your previous attempt produced only internal reasoning and no reply. \
 Do not reason further — either call the tool you already decided on, or write the answer directly.)";
 
-/// The final reply's request: the answer from what the turn already has, not the question again.
-/// Asked with reasoning off, so "do not reason" is the engine's setting as well as the words.
+/// Appended after an attempt wrote a tool call as text, which the engine cannot run.
+const TEXT_CALL_STEER: &str = "(Your previous attempt wrote a tool call as plain text, so it did \
+not run. Call the tool through the tool-call format, or write the answer directly.)";
+
+/// The final reply's request after a guard stopped the turn: the answer from what the turn already
+/// has, with tools off. Asked with reasoning off, so "do not reason" is the engine's setting as well
+/// as the words. "Final" is said outright: asked to answer early, Gemma 4 E4B otherwise wrote a plan
+/// ("I am currently gathering that information") and the schedule stored it as the run's result.
 const FINAL_REPLY_PROMPT: &str = "(You have not replied yet. Write your reply to the request \
-above now, from what you already have, without reasoning first. If part of it could not be done, \
-or you have no tool for it, say so plainly instead of guessing.)";
+above now, from what you already have, without reasoning first. This reply is final: do not say \
+you are gathering or will do anything. Name any part you could not get, plainly, instead of \
+guessing.)";
+
+/// The final reply's request when an attempt reasoned but wrote nothing and no guard stopped it:
+/// tools are still on, so the model may fetch what the request still needs before answering. On
+/// the Jetson a Daily Brief stalled after one weather call; told to answer "from what you already
+/// have", it wrote a plan instead of fetching the rest.
+const FINAL_REPLY_CONTINUE_PROMPT: &str = "(You have not replied yet. If the request above still \
+needs information you have not fetched, call the tools for it now; then write the reply, without \
+reasoning first. This reply is final: do not say you are gathering or will do anything. Name any \
+part you could not get, plainly, instead of guessing.)";
 
 /// The one final reply a turn may ask for when an attempt reasoned but wrote no reply.
 ///
@@ -304,6 +468,47 @@ impl FinalReply {
         }
         self.asked = true;
         true
+    }
+
+    /// Whether a turn a guard stopped is followed by the final reply, claiming it if so.
+    ///
+    /// A guard ends a turn the model was still working on, often after it had gathered most of
+    /// what was asked: the Jetson's Daily Brief made thirteen calls, re-fetched the weather a
+    /// fourth time and was stopped with nothing written. The answer is asked for once, with tools
+    /// off, from what the turn already has. Only when the turn has no reply of its own and at
+    /// least one tool result to answer from; at most once a turn, shared with [`Self::due`].
+    fn due_after_stop(&mut self, replied: bool, gathered_results: bool) -> bool {
+        if self.asked || replied || !gathered_results {
+            return false;
+        }
+        self.asked = true;
+        true
+    }
+}
+
+/// The `reason` of a final reply asked because an attempt reasoned but wrote no reply.
+const REASONED_WITHOUT_REPLY: &str = "reasoned_without_reply";
+
+/// Why a guard ended a turn the model was still working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnStop {
+    /// One tool called with identical arguments more than [`MAX_IDENTICAL_TOOL_CALLS_PER_TURN`]
+    /// times.
+    IdenticalToolCall,
+    /// Goose's completeness check re-armed more than [`MAX_GOAL_RECHECKS_PER_TURN`] times.
+    GoalRecheck,
+    /// Goose's own cap on tool rounds (`max_turns`), the turn's tool-call budget.
+    TurnLimit,
+}
+
+impl TurnStop {
+    /// The `reason` field of `kind="turn_repetition_guard"` and `kind="final_reply_asked"`.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IdenticalToolCall => "identical_tool_call",
+            Self::GoalRecheck => "goal_recheck",
+            Self::TurnLimit => "turn_limit",
+        }
     }
 }
 
@@ -342,6 +547,9 @@ struct SessionGroups {
     /// The ceiling. Never widened by anything the model can say.
     permitted: Vec<String>,
 }
+
+/// Each scorable tool group's description vector.
+type GroupVectors = Arc<Vec<(String, Vec<f32>)>>;
 
 /// Adapter: the `Agent` port on the Goose framework.
 pub struct GooseAdapter {
@@ -406,20 +614,26 @@ pub struct GooseAdapter {
     /// Read-only source of the rolling summary for the trimmer; `None` just skips the splice.
     giap_session_storage:
         Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
+    /// Where the household's edit of the Voice agent lives; `None` runs the shipped one.
+    recipe_repo: Option<Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository>>,
+    /// The Voice agent's last thinking choice (`VoiceThinking as u8`), for the sync `capabilities`.
+    voice_thinking: std::sync::atomic::AtomicU8,
     /// Engine-reported prompt tokens per session (trimmer feedback); an Arc the stream can hold.
     last_prompt_tokens_arc: std::sync::OnceLock<Arc<Mutex<HashMap<String, u32>>>>,
     /// Tool set from the last `list_tools()`; cleared when extensions change.
     cached_tools: tokio::sync::RwLock<Option<std::collections::HashSet<String>>>,
     /// Sessions whose Goose default extensions are already stripped (once per session).
     defaults_stripped: Mutex<HashSet<String>>,
-    /// Session id -> chosen tool groups, held fixed so the tools JSON (and KV prefix) don't churn.
+    /// Session id -> chosen tool groups. Only ever grows within a session (a later message or
+    /// `enable_tool_group` adds), so the tools JSON (and KV prefix) never loses a tool mid-way.
     /// Persisted in `pond_system.db`, so a restart keeps groups the model enabled itself.
     session_tool_groups: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
     /// Session id -> groups it may EVER hold; the enable hatch widens only within this.
     /// Not persisted: recomputed from scope on restore, as a stored boundary can go stale.
     session_permitted_groups: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
-    /// Group-description embeddings. No `Option` inside: a failed first try must not stick.
-    group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
+    /// Group-description vectors with the embedder generation that made them; a switched model
+    /// recomputes them, since its queries live in another space.
+    group_embeddings: tokio::sync::RwLock<Option<(u64, GroupVectors)>>,
     /// In-process picture support: the one state every vision path shares.
     pictures: Arc<crate::vision_encoder::PictureSupport>,
     /// Keeps transient tool results out of goose's store once their turn is over.
@@ -534,12 +748,16 @@ impl GooseAdapter {
             last_prefix_hash: Mutex::new(0),
             prefix_cache: Mutex::new(PrefixCacheState::new(0, std::time::Instant::now())),
             giap_session_storage: None,
+            recipe_repo: None,
+            voice_thinking: std::sync::atomic::AtomicU8::new(
+                pond_core::shared::services::voice_agent::VoiceThinking::Auto as u8,
+            ),
             last_prompt_tokens_arc: std::sync::OnceLock::new(),
             cached_tools: tokio::sync::RwLock::new(None),
             defaults_stripped: Mutex::new(HashSet::new()),
             session_tool_groups: tokio::sync::RwLock::new(HashMap::new()),
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
-            group_embeddings: tokio::sync::OnceCell::new(),
+            group_embeddings: tokio::sync::RwLock::new(None),
             pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
             transient_sweeps: crate::transient_history::TransientSweeps::default(),
         })
@@ -1335,8 +1553,8 @@ impl GooseAdapter {
         }
     }
 
-    /// Whether this turn's prompt carries `<vision>`. `voice` is the INSTANCE flag: it matches
-    /// `capabilities()` and, fixed per process, can't flip the KV-cached prefix between turns.
+    /// Whether this turn's prompt carries `<vision>`. `voice` is the TURN's flag: a phone's spoken
+    /// turn has no attachment either, and its prefix differs from a typed turn's anyway.
     fn vision_section_applies(
         provider: &str,
         model: &str,
@@ -1348,16 +1566,13 @@ impl GooseAdapter {
 
     /// Whether this turn's prompt carries `<thinking>` (and `enable_thinking`). "auto" reads the
     /// model file, not the capability cache, which is stale on turn one and would move the prefix.
+    /// A spoken turn passes the Voice agent's mode (`VoiceThinking::mode`).
     fn thinking_section_applies(
         mode: &str,
         provider: &str,
         model: &str,
         data_dir: Option<&std::path::Path>,
-        voice: bool,
     ) -> bool {
-        if voice {
-            return false;
-        }
         match mode {
             "on" => true,
             "off" => false,
@@ -1901,7 +2116,7 @@ impl GooseAdapter {
         if scope.excludes_everything() {
             return Vec::new();
         }
-        if let Some(provider) = &self.embedding_provider {
+        if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
             match provider.embed_query(message).await {
                 Ok(query_vector) => {
@@ -1950,40 +2165,46 @@ impl GooseAdapter {
     }
 
     // ── Per-session tool selection ──────────────────────────────────────────
-    /// Group-description vectors, cached on first success; `None` means "don't narrow".
-    /// Failures aren't cached (the embedder may still be downloading), so a later session retries.
-    async fn group_description_embeddings(&self) -> Option<&Vec<(String, Vec<f32>)>> {
-        self.group_embeddings
-            .get_or_try_init(|| async {
-                let provider = self.embedding_provider.as_ref().ok_or(())?;
-                let available: Vec<String> = registered_extensions().to_vec();
-                let scorable =
-                    pond_core::mcp::services::tool_selection::scorable_groups(&available);
-                let mut out = Vec::with_capacity(scorable.len());
-                for (extension, description) in scorable {
-                    match provider.embed(description).await {
-                        Ok(v) => out.push((extension.to_string(), v)),
-                        // Unscored groups stay dormant until the escape hatch pulls them in.
-                        Err(e) => {
-                            tracing::warn!("tool selection: embedding '{extension}' failed: {e}")
-                        }
-                    }
-                }
-                // Empty is a failure: `Err` leaves the cell unset so a later session retries.
-                if out.is_empty() {
-                    return Err(());
-                }
-                Ok(out)
-            })
-            .await
-            .ok()
+    /// Group-description vectors for the current model, cached per embedder generation; `None`
+    /// means "don't narrow". Failures aren't cached (the model may still be loading).
+    async fn group_description_embeddings(&self) -> Option<(u64, GroupVectors)> {
+        // A model with no measured floor narrows nothing, so its embeds would be wasted.
+        let provider = self.embedding_provider.as_ref().filter(|p| {
+            p.available()
+                && pond_core::mcp::services::tool_selection::relevance_floor(p.as_ref()).is_some()
+        })?;
+        let generation = provider.generation();
+        if let Some((cached, vectors)) = self.group_embeddings.read().await.as_ref() {
+            if *cached == generation {
+                return Some((generation, vectors.clone()));
+            }
+        }
+        let available: Vec<String> = registered_extensions().to_vec();
+        let scorable = pond_core::mcp::services::tool_selection::scorable_groups(&available);
+        let mut out = Vec::with_capacity(scorable.len());
+        for (extension, description) in scorable {
+            match provider.embed(description).await {
+                Ok(v) => out.push((extension.to_string(), v)),
+                // Unscored groups stay dormant until the escape hatch pulls them in.
+                Err(e) => tracing::warn!("tool selection: embedding '{extension}' failed: {e}"),
+            }
+        }
+        // Empty is a failure, and a switch mid-way mixed two models: neither is cached.
+        if out.is_empty() || provider.generation() != generation {
+            return None;
+        }
+        let vectors: GroupVectors = Arc::new(out);
+        *self.group_embeddings.write().await = Some((generation, vectors.clone()));
+        Some((generation, vectors))
     }
 
-    /// This session's tool groups, sticky: per-turn re-scoring would break KV prefix reuse.
+    /// This session's tool groups. The opening message picks them; every later message is scored
+    /// the same way and may only ADD groups (`tool_selection::union_groups`): a group dropped
+    /// mid-conversation strands tool results the history refers to, and moves the KV prefix.
     async fn resolve_session_tool_groups(
         &self,
         giap_session_id: &str,
-        first_message: &str,
+        message: &str,
         memories: &str,
         skills: &str,
         scope: &ProfileScope,
@@ -1991,61 +2212,34 @@ impl GooseAdapter {
     ) -> SessionGroups {
         use pond_core::mcp::services::tool_selection as sel;
 
-        // Filtered up front, which sticks: `select_groups` filters core groups by `available`.
+        // Filtered up front, which sticks: selection filters core groups by `permitted` too.
         let permitted = self.permitted_groups(scope);
+        self.remember_permitted(giap_session_id, &permitted).await;
 
-        if let Some(cached) = self
-            .session_tool_groups
-            .read()
-            .await
-            .get(giap_session_id)
-            .cloned()
-        {
-            // Clamp to what is permitted NOW: scope is re-derived per turn, and an Owner turn
-            // may have filled this cache before a Guest (or failed-rung) turn reads it.
-            let cached =
-                pond_core::mcp::services::tool_selection::clamp_to_permitted(cached, &permitted);
-            self.remember_permitted(giap_session_id, &permitted).await;
-            return SessionGroups {
-                loaded: cached,
-                permitted,
-            };
-        }
-
-        if let Some(storage) = &self.giap_session_storage {
-            if let Ok(Some(groups)) = storage.get_session_tool_groups(giap_session_id).await {
-                if !groups.is_empty() {
-                    // Stored per session, scope is per turn: clamp to what is permitted now.
-                    let groups = pond_core::mcp::services::tool_selection::clamp_to_permitted(
-                        groups, &permitted,
-                    );
-                    self.session_tool_groups
-                        .write()
-                        .await
-                        .insert(giap_session_id.to_string(), groups.clone());
-                    self.remember_permitted(giap_session_id, &permitted).await;
-                    tracing::debug!(
-                        session_id = %giap_session_id,
-                        groups = ?groups,
-                        "tool selection: restored persisted groups"
-                    );
-                    return SessionGroups {
-                        loaded: groups,
-                        permitted,
-                    };
-                }
+        // Held unclamped, so a wider speaker's groups survive a narrower turn; every return
+        // clamps to what is permitted NOW, as scope is re-derived per turn.
+        let held = self.held_session_tool_groups(giap_session_id).await;
+        if let Some(held) = &held {
+            // "minimal" never scores; and with every permitted group held, scoring adds nothing.
+            if minimal || permitted.iter().all(|p| held.contains(p)) {
+                return SessionGroups {
+                    loaded: sel::clamp_to_permitted(held.clone(), &permitted),
+                    permitted,
+                };
             }
         }
 
-        let available: Vec<String> = permitted.clone();
-
-        // "minimal": the hatch only, no scoring. After the cache and persisted row so groups
-        // the model enabled earlier this session come back without another round trip.
+        // "minimal": the hatch only, no scoring. After the held groups so ones the model enabled
+        // earlier this session come back without another round trip.
         if minimal {
-            let selection = sel::minimal_groups(&available);
-            self.persist_session_tool_groups(giap_session_id, &selection.groups)
-                .await;
-            self.remember_permitted(giap_session_id, &permitted).await;
+            let selection = sel::minimal_groups(&permitted);
+            Self::merge_session_tool_groups(
+                &self.session_tool_groups,
+                self.giap_session_storage.as_deref(),
+                giap_session_id,
+                &selection.groups,
+            )
+            .await;
             tracing::info!(
                 target: "giap::trace",
                 kind = "tool_selection",
@@ -2063,57 +2257,62 @@ impl GooseAdapter {
         }
 
         // Scored separately and max-merged, so a kilobyte of memories can't drown a short question.
-        let signals = sel::selection_signals(first_message, memories, skills);
-
-        // Failures widen to all groups: a missing tool is a wrong answer, a surplus one is tokens.
+        let signals = sel::selection_signals(message, memories, skills);
         let scores: Option<Vec<sel::GroupScore>> = match (
             self.group_description_embeddings().await,
-            self.embedding_provider.as_ref(),
+            self.embedding_provider.as_deref(),
         ) {
-            (Some(group_vectors), Some(provider)) => {
-                let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
-                let mut failed = None;
-                for signal in &signals {
-                    match provider.embed(signal).await {
-                        Ok(query) => per_signal.push(
-                            group_vectors
-                                .iter()
-                                .map(|(extension, v)| sel::GroupScore {
-                                    extension: extension.clone(),
-                                    score: cosine_similarity(&query, v),
-                                })
-                                .collect(),
-                        ),
-                        Err(e) => failed = Some(e),
-                    }
-                }
-                match (per_signal.is_empty(), failed) {
-                    // Every signal failed to embed: widen.
-                    (true, Some(e)) => {
-                        tracing::warn!("tool selection: embedding the opening message failed: {e}");
-                        None
-                    }
-                    (true, None) => None,
-                    // Score whatever embedded; don't drop a good signal because another failed.
-                    _ => Some(sel::merge_scores(&per_signal)),
-                }
+            (Some((generation, group_vectors)), Some(provider)) => {
+                let scores = Self::score_signals(provider, &group_vectors, &signals).await;
+                // The model changed under the scoring: its signals and groups are two spaces.
+                scores.filter(|_| provider.generation() == generation)
             }
             _ => None,
         };
 
-        let selection = sel::select_groups(
-            &available,
-            scores.as_deref(),
-            sel::DEFAULT_RELEVANCE_THRESHOLD,
-        );
+        let floor = self
+            .embedding_provider
+            .as_ref()
+            .and_then(|p| sel::relevance_floor(p.as_ref()));
+        // A held session keeps its groups when this message can't be scored: the union never
+        // shrinks, and the embedder is not ready for a while after boot or a model switch.
+        if let (Some(held), None, Some(_)) = (&held, &scores, floor) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_kept",
+                session_id = %giap_session_id,
+                reason = "no_scores",
+                groups = held.len(),
+                "tool selection keeps the held groups: this message could not be scored"
+            );
+            return SessionGroups {
+                loaded: sel::clamp_to_permitted(held.clone(), &permitted),
+                permitted,
+            };
+        }
+        // Failures widen to all groups: a missing tool is a wrong answer, a surplus one is tokens.
+        let selection = match &held {
+            None => sel::select_groups(&permitted, scores.as_deref(), floor),
+            Some(_) => sel::select_groups_for_later_message(&permitted, scores.as_deref(), floor),
+        };
 
+        if matches!(selection.basis, sel::SelectionBasis::Unmeasured) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_widened",
+                session_id = %giap_session_id,
+                reason = "floor_unmeasured",
+                groups = permitted.len(),
+                "tool selection keeps every group: the embedding model's floor is unmeasured"
+            );
+        }
         // Make a failed narrowing visible; otherwise it looks like mode = "relevant" worked.
         if matches!(selection.basis, sel::SelectionBasis::NoEmbedder) {
             tracing::warn!(
                 target: "giap::trace",
                 kind = "tool_selection_widened",
                 session_id = %giap_session_id,
-                reason = if self.embedding_provider.is_none() {
+                reason = if !self.embedding_provider.as_ref().is_some_and(|p| p.available()) {
                     "no_embedder"
                 } else {
                     "embed_failed"
@@ -2134,36 +2333,146 @@ impl GooseAdapter {
                     .collect();
                 tracing::debug!(
                     session_id = %giap_session_id,
-                    threshold = sel::DEFAULT_RELEVANCE_THRESHOLD,
+                    threshold = ?floor,
                     top_scores = %top.join(" "),
                     "tool selection: group scores"
                 );
             }
         }
 
-        self.persist_session_tool_groups(giap_session_id, &selection.groups)
-            .await;
-        self.remember_permitted(giap_session_id, &permitted).await;
+        let (groups, added) = Self::merge_session_tool_groups(
+            &self.session_tool_groups,
+            self.giap_session_storage.as_deref(),
+            giap_session_id,
+            &selection.groups,
+        )
+        .await;
+        if held.is_some() && !added.is_empty() {
+            // The tools block changes from the first added tool on, so this turn re-prefills
+            // from there; the core block ahead of it keeps its KV.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "tool_selection_added",
+                session_id = %giap_session_id,
+                added = ?added,
+                groups = ?groups,
+                "a later message added tool groups to the session"
+            );
+        }
         SessionGroups {
-            loaded: selection.groups,
+            loaded: sel::clamp_to_permitted(groups, &permitted),
             permitted,
         }
     }
 
-    /// Caches in-process and persists; a failed persist only costs stickiness across restarts.
-    async fn persist_session_tool_groups(&self, giap_session_id: &str, groups: &[String]) {
-        self.session_tool_groups
-            .write()
+    /// The groups this session already holds: the in-process cache, else the persisted row, which
+    /// is cached on the way. `None` when selection has never run for the session.
+    async fn held_session_tool_groups(&self, giap_session_id: &str) -> Option<Vec<String>> {
+        if let Some(cached) = self
+            .session_tool_groups
+            .read()
             .await
-            .insert(giap_session_id.to_string(), groups.to_vec());
-        if let Some(storage) = &self.giap_session_storage {
-            if let Err(e) = storage
-                .set_session_tool_groups(giap_session_id, groups)
-                .await
-            {
-                tracing::warn!("tool selection: persisting groups failed: {e}");
+            .get(giap_session_id)
+            .cloned()
+        {
+            return Some(cached);
+        }
+        let storage = self.giap_session_storage.as_ref()?;
+        match storage.get_session_tool_groups(giap_session_id).await {
+            Ok(Some(stored)) if !stored.is_empty() => {
+                // Merged, not inserted: a concurrent turn may have filled the cache meanwhile.
+                let (held, _) = Self::merge_session_tool_groups(
+                    &self.session_tool_groups,
+                    None,
+                    giap_session_id,
+                    &stored,
+                )
+                .await;
+                tracing::debug!(
+                    session_id = %giap_session_id,
+                    groups = ?held,
+                    "tool selection: read back the persisted groups"
+                );
+                Some(held)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %giap_session_id,
+                    "tool selection: reading the persisted groups failed, selecting afresh: {e}"
+                );
+                None
             }
         }
+    }
+
+    /// Every signal's cosine against every group vector, max-merged across signals. `None`, which
+    /// widens, when no signal embedded; a signal that failed does not sink one that embedded.
+    async fn score_signals(
+        provider: &dyn EmbeddingProvider,
+        group_vectors: &[(String, Vec<f32>)],
+        signals: &[String],
+    ) -> Option<Vec<pond_core::mcp::services::tool_selection::GroupScore>> {
+        use pond_core::mcp::services::tool_selection as sel;
+
+        let mut per_signal: Vec<Vec<sel::GroupScore>> = Vec::with_capacity(signals.len());
+        let mut failed = None;
+        for signal in signals {
+            match provider.embed(signal).await {
+                Ok(query) => per_signal.push(
+                    group_vectors
+                        .iter()
+                        .map(|(extension, v)| sel::GroupScore {
+                            extension: extension.clone(),
+                            score: cosine_similarity(&query, v),
+                        })
+                        .collect(),
+                ),
+                Err(e) => failed = Some(e),
+            }
+        }
+        match (per_signal.is_empty(), failed) {
+            (true, Some(e)) => {
+                tracing::warn!("tool selection: embedding the message failed: {e}");
+                None
+            }
+            (true, None) => None,
+            _ => Some(sel::merge_scores(&per_signal)),
+        }
+    }
+
+    /// Unions `picked` into the session's held groups, never removing one, and persists the result
+    /// when it grew. Always leaves an entry, so `enable_tool_group` finds the session narrowing.
+    /// Returns the held groups after the merge and the ones it added. A failed persist only costs
+    /// the groups across a restart.
+    async fn merge_session_tool_groups(
+        held: &tokio::sync::RwLock<HashMap<String, Vec<String>>>,
+        storage: Option<&dyn pond_core::user_data::ports::session_storage::SessionStorage>,
+        giap_session_id: &str,
+        picked: &[String],
+    ) -> (Vec<String>, Vec<String>) {
+        let (groups, added) = {
+            let mut map = held.write().await;
+            let entry = map.entry(giap_session_id.to_string()).or_default();
+            let (groups, added) =
+                pond_core::mcp::services::tool_selection::union_groups(entry, picked);
+            entry.clone_from(&groups);
+            (groups, added)
+        };
+        if !added.is_empty() {
+            if let Some(storage) = storage {
+                if let Err(e) = storage
+                    .set_session_tool_groups(giap_session_id, &groups)
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %giap_session_id,
+                        "tool selection: persisting groups failed: {e}"
+                    );
+                }
+            }
+        }
+        (groups, added)
     }
 
     /// The groups this scope may ever hold; the rule is `tool_selection::permitted_groups`.
@@ -2309,6 +2618,36 @@ impl GooseAdapter {
         self
     }
 
+    /// The agent recipes, so a spoken turn runs the household's edit of the Voice agent.
+    pub fn with_recipe_repo(
+        mut self,
+        repo: Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository>,
+    ) -> Self {
+        self.recipe_repo = Some(repo);
+        self
+    }
+
+    /// The Voice agent a spoken turn runs: the household's edit, or the shipped one when there is
+    /// none or it does not read.
+    async fn voice_agent(&self) -> pond_core::shared::services::voice_agent::VoiceAgent {
+        use pond_core::shared::services::voice_agent::{
+            voice_agent_from_row, VoiceAgent, VOICE_AGENT,
+        };
+        let Some(repo) = &self.recipe_repo else {
+            return VoiceAgent::default();
+        };
+        match repo.get_by_name(VOICE_AGENT).await {
+            Ok(row) => voice_agent_from_row(row.as_ref()).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "the Voice agent's edit does not read; using the shipped one");
+                VoiceAgent::default()
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "the Voice agent's edit could not be read; using the shipped one");
+                VoiceAgent::default()
+            }
+        }
+    }
+
     /// Session storage, so the turn trimmer can splice in the rolling `<conversation-summary>`.
     pub fn with_giap_session_storage(
         mut self,
@@ -2358,10 +2697,7 @@ impl GooseAdapter {
 
                 if needs_register {
                     // Keep existing tuning: a default would drop the Jetson `context_size` stamp.
-                    let mut settings = registry
-                        .get_model(&stem)
-                        .map(|entry| entry.settings.clone())
-                        .unwrap_or_default();
+                    let mut settings = stamped_settings_for(registry, &stem, &local_path);
                     // Probed from this file's own chat template; live turns resolve to this row.
                     settings.tool_calling = crate::model_traits::tool_mode_for_gguf(&local_path);
                     let entry = LocalModelEntry {
@@ -2549,14 +2885,40 @@ impl GooseAdapter {
         let voice_instance = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
         let is_voice = Self::voice_turn(voice_instance, request.voice_mode);
 
-        // Voice disables thinking (it wastes TTS time and can leak as speech). Drives both the
-        // prompt's <thinking> section and the engine's `enable_thinking`, which must agree.
+        // A spoken turn runs the Voice agent: its text in `<voice-mode>`, its tools, its turn cap.
+        let voice_agent = if is_voice {
+            self.voice_agent().await
+        } else {
+            pond_core::shared::services::voice_agent::VoiceAgent::default()
+        };
+        let template_content = if is_voice {
+            pond_core::shared::services::voice_agent::voice_template(
+                &template_content,
+                &voice_agent,
+            )
+            .into_owned()
+        } else {
+            template_content
+        };
+
+        // A spoken turn thinks as the Voice agent chooses; its reasoning is never spoken or shown
+        // (`reasoning_frames_enabled`). Drives both the prompt's <thinking> section and the
+        // engine's `enable_thinking`, which must agree.
+        let thinking_mode = match is_voice {
+            true => voice_agent.thinking.mode(&settings.thinking_mode),
+            false => settings.thinking_mode.as_str(),
+        };
+        if is_voice {
+            self.voice_thinking.store(
+                voice_agent.thinking as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         let thinking_enabled = Self::thinking_section_applies(
-            &settings.thinking_mode,
+            thinking_mode,
             &settings.chat_provider,
             &settings.chat_model,
             self.data_dir.as_deref(),
-            is_voice,
         );
 
         // One profile per turn, from what `apply_goose_env_knobs` cached, for every budget below.
@@ -2603,7 +2965,7 @@ impl GooseAdapter {
             Self::vision_section_applies(
                 &settings.chat_provider,
                 &settings.chat_model,
-                voice_instance,
+                is_voice,
                 self.data_dir.as_deref(),
             ),
             prompt_state.compact_prompt,
@@ -2685,9 +3047,27 @@ impl GooseAdapter {
 
         // Outside prefix_hash by design; <extension-notes> sets it apart from core prompt sections.
         // Checked and escaped again here: rows saved before the write rules may break them.
-        if let Ok(extras) = extras_result {
-            shim_appendix.extend(render_extension_notes(&extras));
+        let household_extras = extras_result.unwrap_or_default();
+        shim_appendix.extend(render_extension_notes(&household_extras));
+        // Every turn of an interview's session is one, so its standing rules prefill once there.
+        if request.interview.is_some() {
+            shim_appendix
+                .push(pond_core::user_data::domain::profile_interview::INTERVIEW_RULES.to_string());
         }
+
+        // The speaker's own notes ride their turn once per conversation, never the shared prefix.
+        let member_notes_for_user_msg = match request.profile_context.as_ref() {
+            Some(profile) if !profile.member_notes.is_empty() => {
+                let earlier = self.earlier_user_texts(&goose_sid).await;
+                pond_core::user_data::domain::prompt_extra::member_notes_block(
+                    &household_extras,
+                    &profile.member_notes,
+                    &earlier,
+                )
+                .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
 
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
@@ -2728,17 +3108,10 @@ impl GooseAdapter {
 
             memory_candidates.truncate(compaction_profile.max_memory_fragments);
 
-            let token_budget = compaction_profile.memory_token_budget;
-            let mut tokens_used: usize = 0;
-            let mut budgeted: Vec<&MemoryFragment> = Vec::new();
-            for (m, _) in &memory_candidates {
-                let estimated_tokens = m.content.len() / 4 + 1;
-                if tokens_used + estimated_tokens > token_budget && !budgeted.is_empty() {
-                    break;
-                }
-                tokens_used += estimated_tokens;
-                budgeted.push(m);
-            }
+            let token_budget =
+                memory_token_budget(compaction_profile.memory_token_budget, is_voice);
+            let (budgeted, tokens_used) =
+                fragments_within(memory_candidates.iter().map(|(m, _)| m), token_budget);
 
             if !budgeted.is_empty() {
                 use pond_core::models::services::context::memory_block;
@@ -2763,7 +3136,10 @@ impl GooseAdapter {
                     fragments_available = memory_candidates.len(),
                     tokens_used,
                     token_budget,
-                    semantic = self.embedding_provider.is_some(),
+                    semantic = self
+                        .embedding_provider
+                        .as_ref()
+                        .is_some_and(|p| p.available()),
                     "Memory injection (budget from CompactionProfile ctx={})",
                     effective_ctx,
                 );
@@ -2791,9 +3167,13 @@ impl GooseAdapter {
                 dynamic_suffix_for_user_msg.push_str("\n\n");
                 dynamic_suffix_for_user_msg.push_str(&sched_ctx);
             }
-            if let Some(vision_ctx) = pond_mcp_server::vision_runtime_context().await {
-                dynamic_suffix_for_user_msg.push_str("\n\n");
-                dynamic_suffix_for_user_msg.push_str(&vision_ctx);
+            // A voice turn goes without the camera's status, which changes every turn and is
+            // decoded before the first word; its vision tools can still ask the camera.
+            if !is_voice {
+                if let Some(vision_ctx) = pond_mcp_server::vision_runtime_context().await {
+                    dynamic_suffix_for_user_msg.push_str("\n\n");
+                    dynamic_suffix_for_user_msg.push_str(&vision_ctx);
+                }
             }
         }
 
@@ -2936,7 +3316,8 @@ impl GooseAdapter {
         let mut dormant_groups_note = String::new();
         // Entitlement (all it could widen to; bounds delegation). `None` in "all" mode.
         let mut entitled_tools: Option<HashSet<String>> = None;
-        let allowed_tools = if settings.tool_selection_narrows() {
+        // An interview turn is narrowed to the interview's own group below, which no selection loads.
+        let allowed_tools = if settings.tool_selection_narrows() && request.interview.is_none() {
             let groups = self
                 .resolve_session_tool_groups(
                     &session_id,
@@ -3000,14 +3381,26 @@ impl GooseAdapter {
         // A standing rule, not news: in the appendix it is prefilled once per session instead of on
         // every turn (86 tokens a turn while it rode the envelope). The shim strips Goose's
         // <turn-context>, so this note is the model's only turn budget.
-        let max_turns = settings.effective_max_turns(is_voice);
+        // The Voice agent's own cap stands in for `voice_max_turns`, still within the agent's.
+        let turn_settings = match voice_agent.max_turns.filter(|_| is_voice) {
+            Some(cap) => {
+                std::borrow::Cow::Owned(pond_core::user_data::domain::settings::Settings {
+                    voice_max_turns: cap,
+                    ..settings.clone()
+                })
+            }
+            None => std::borrow::Cow::Borrowed(&settings),
+        };
+        let max_turns = turn_settings.effective_max_turns(is_voice);
         shim_appendix.push(pond_core::models::services::turn_budget::turn_budget_note(
-            (!settings.turns_are_uncapped(is_voice)).then_some(max_turns),
+            (!turn_settings.turns_are_uncapped(is_voice)).then_some(max_turns),
         ));
         // Standing too: the CURRENT CONTEXT line is news each turn, the rule for reading it is not.
         shim_appendix.push(pond_core::models::services::prompt_builder::TEMPORAL_RULE.to_string());
-        shim_appendix.push(
-            "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
+        // An interview turn holds none of these tools.
+        if request.interview.is_none() {
+            shim_appendix.push(
+                "VISION, CAMERAS, SCHEDULES & REMINDERS:\n\
              - Camera feed & face annotations (`giap-vision`, TEXT-FIRST): \
                1) Call `get_recent_camera_events` FIRST for who is in the room, recent activity, \
                or historical face sightings — it returns live face/motion/person detections as \
@@ -3028,8 +3421,9 @@ impl GooseAdapter {
                `update_schedule` / `schedule_action` (`delete` | `pause` | `resume` | `run_now`) \
                to inspect or control them. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
-                .to_string(),
-        );
+                    .to_string(),
+            );
+        }
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
@@ -3080,6 +3474,32 @@ impl GooseAdapter {
             }
         });
 
+        // The groups the household turned off for the Voice agent, from both sets: only ever
+        // narrower than the prime's.
+        let voice_keeps = |tool: &String| {
+            pond_core::mcp::domain::tool_group::group_of_tool(tool)
+                .is_none_or(|group| voice_agent.keeps_group(group))
+        };
+        let (allowed_tools, entitled_tools): (HashSet<String>, Option<HashSet<String>>) =
+            if is_voice && !voice_agent.tool_groups_off.is_empty() {
+                let before = allowed_tools.len();
+                let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps).collect();
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "voice_agent_tools_off",
+                    session_id = %session_id,
+                    groups = ?voice_agent.tool_groups_off,
+                    removed = before - kept.len(),
+                    "the Voice agent's groups that are off were withheld from the turn"
+                );
+                (
+                    kept,
+                    entitled_tools.map(|t| t.into_iter().filter(voice_keeps).collect()),
+                )
+            } else {
+                (allowed_tools, entitled_tools)
+            };
+
         // A long task's work tools belong to its helpers alone: a turn has no step to work on.
         let allowed_tools: HashSet<String> =
             pond_core::mcp::services::tool_selection::subtract_helper_only_tools(
@@ -3092,6 +3512,18 @@ impl GooseAdapter {
                 .into_iter()
                 .collect()
         });
+        // The interview's tools belong to its own turns; anywhere else they could reach notes.
+        let (allowed_tools, entitled_tools) = if request.interview.is_some() {
+            (allowed_tools, entitled_tools)
+        } else {
+            use pond_core::mcp::services::tool_selection::without_interview_tools;
+            (
+                without_interview_tools(allowed_tools.iter())
+                    .into_iter()
+                    .collect(),
+                entitled_tools.map(|t| without_interview_tools(t.iter()).into_iter().collect()),
+            )
+        };
 
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
@@ -3173,6 +3605,7 @@ impl GooseAdapter {
             None
         };
         let image_failures_at_start = session_controls.image_failures();
+        let gpu_memory_failures_at_start = session_controls.gpu_memory_failures();
         let pictures = self.pictures.clone();
 
         // ── 7. GooseMode from model_role ──────────────────────────────────────
@@ -3184,40 +3617,22 @@ impl GooseAdapter {
 
         // ── 8. Run the agentic loop ───────────────────────────────────────────
         // Everything per-turn rides the user message so the system+tools prefix stays byte-stable.
-        let user_text = {
-            let mut msg = String::with_capacity(512 + request.message.len());
-            // `<user-message>` must come FIRST: stripping the trailing envelope from past turns
-            // is then a suffix cut, keeping the prefix byte-identical for KV reuse.
-            msg.push_str("<user-message>\n");
-            msg.push_str(&request.message);
-            msg.push_str("\n</user-message>\n");
-            // Always emitted, since the answer contract is unconditional.
-            msg.push_str("<system-context>\n");
-            if let Some(ref sc) = request.suggestion_context {
-                msg.push_str(&sc.render_envelope());
-                msg.push('\n');
-            }
-            if let Some(ref research) = request.deep_research_task {
-                msg.push_str(&pond_core::shared::services::deep_research::turn_note(
-                    research,
-                ));
-                msg.push('\n');
-            }
-            if !dynamic_suffix_for_user_msg.is_empty() {
-                msg.push_str(&dynamic_suffix_for_user_msg);
-                msg.push('\n');
-            }
-            if !memory_block_for_user_msg.is_empty() {
-                msg.push_str("<memories>\n");
-                msg.push_str(&memory_block_for_user_msg);
-                msg.push_str("\n</memories>\n");
-            }
-            // Last, nearest where the model writes: restates the part of the prefix that decays.
-            msg.push_str(&pond_core::models::services::answer_contract::answer_contract());
-            msg.push('\n');
-            msg.push_str("</system-context>");
-            msg
-        };
+        let user_text = TurnEnvelope {
+            message: &request.message,
+            suggestion: request
+                .suggestion_context
+                .as_ref()
+                .map(|sc| sc.render_envelope()),
+            research: request
+                .deep_research_task
+                .as_ref()
+                .map(pond_core::shared::services::deep_research::turn_note),
+            dynamic_suffix: &dynamic_suffix_for_user_msg,
+            interview: request.interview.as_deref(),
+            member_notes: &member_notes_for_user_msg,
+            memories: &memory_block_for_user_msg,
+        }
+        .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
         let turn_text = user_text.clone();
         let turn_images = request.images.clone();
@@ -3343,10 +3758,24 @@ impl GooseAdapter {
             let mut goal_rechecks: u32 = 0;
             let mut picture_failure_reported = false;
             let mut tool_call_counts: HashMap<(String, u64), usize> = HashMap::new();
-            let mut guard_tripped = false;
+            // Set when a guard ends the turn; the turn is never re-engaged after it, and gets at
+            // most the final reply, with tools off (`FinalReply::due_after_stop`).
+            let mut turn_stop: Option<TurnStop> = None;
+            // Goose's turn-cap notice, held until the turn knows whether the final reply answers
+            // in its place; streamed as before when it does not.
+            let mut held_turn_limit_notice: Option<String> = None;
+            // Tool results streamed this turn: what a stopped turn's final reply answers from.
+            let mut tool_results_gathered: usize = 0;
+            // Output written up to the latest tool call: text before a call is working notes,
+            // which the answer leaves out, so it never counts as having replied.
+            let mut chars_at_last_call: usize = 0;
             // Set when a guard trips: goose's pull-based stream only flushes its history once
             // polled to the end, so keep draining after cancel, up to this bounded deadline.
             let mut drain_deadline: Option<tokio::time::Instant> = None;
+            // The token goose checks. A guard cancels it to stop the turn, so a final reply after
+            // the stop runs on a fresh one, cancelled like the first when the stream drops.
+            let mut engine_cancel = cancel_token.clone();
+            let mut _final_reply_cancel_guard: Option<tokio_util::sync::DropGuard> = None;
 
             tracing::info!(
                 target: "giap::trace",
@@ -3370,13 +3799,22 @@ impl GooseAdapter {
                 let mut final_reply = FinalReply::default();
                 // Set when the next attempt is the final reply rather than the question again.
                 let mut final_reply_next = false;
+                // Set when an attempt wrote a tool call as text, so the next is told how to call.
+                let mut wrote_text_call = false;
+                // Why the final reply was asked for: `REASONED_WITHOUT_REPLY` or a `TurnStop`.
+                let mut final_reply_reason = REASONED_WITHOUT_REPLY;
                 'attempts: loop {
                     let final_attempt = std::mem::take(&mut final_reply_next);
                     let attempt_text = if attempt == 0 {
                         turn_text.clone()
+                    } else if std::mem::take(&mut wrote_text_call) {
+                        format!("{turn_text}\n\n{TEXT_CALL_STEER}")
                     } else {
                         format!("{turn_text}\n\n{EMPTY_TURN_STEER}")
                     };
+                    // Echoed prompt blocks out, and a call written as text held back from the user.
+                    let mut reply_filter =
+                        pond_core::models::services::reply_filter::ReplyFilter::new();
                     let attempt_msg =
                         attach_images(Message::user().with_text(&attempt_text), &turn_images);
                     // Arms Goose's completeness check; session-keyed, as streams run concurrently.
@@ -3405,6 +3843,9 @@ impl GooseAdapter {
                     // off (its round would only be hidden), and reasoning is off for this call.
                     let mut reasoning_lifted = false;
                     let mut thinking_before_lift = None;
+                    // A stopped turn's final reply runs with no tools; its allow-set waits here.
+                    let tools_off = final_attempt && turn_stop.is_some();
+                    let mut tools_withheld: Option<HashSet<String>> = None;
                     let attempt_msg = if final_attempt {
                         agent_clone.set_session_goal(&turn_goose_sid, None).await;
                         if let Some((provider, _, off)) = &reasoning_off_engine {
@@ -3425,11 +3866,26 @@ impl GooseAdapter {
                                 ),
                             }
                         }
-                        Message::user().with_text(FINAL_REPLY_PROMPT)
+                        if tools_off {
+                            // After a guard, the answer and nothing else: an empty allow-set has
+                            // the shim offer no tools, so the call that tripped it cannot recur.
+                            tools_withheld = guard_controls.allowed_tools_snapshot();
+                            guard_controls.set_allowed_tools(HashSet::new());
+                            // The guard cancelled the turn's token and left it draining.
+                            let fresh = CancellationToken::new();
+                            _final_reply_cancel_guard = Some(fresh.clone().drop_guard());
+                            engine_cancel = fresh;
+                            drain_deadline = None;
+                        }
+                        Message::user().with_text(if tools_off {
+                            FINAL_REPLY_PROMPT
+                        } else {
+                            FINAL_REPLY_CONTINUE_PROMPT
+                        })
                     } else {
                         attempt_msg
                     };
-                let mut goose_stream = match agent_clone.reply(attempt_msg, attempt_cfg, Some(cancel_token.clone())).await {
+                let mut goose_stream = match agent_clone.reply(attempt_msg, attempt_cfg, Some(engine_cancel.clone())).await {
                     Ok(s) => s,
                     Err(e) => {
                         yield Ok(AgentStreamEvent::Error { content: e.to_string() });
@@ -3531,11 +3987,12 @@ impl GooseAdapter {
                                                         repeats,
                                                         "the model called one tool with identical arguments {repeats} times in a turn; stopping it",
                                                     );
+                                                    let stop = TurnStop::IdenticalToolCall;
                                                     tracing::info!(
                                                         target: "giap::trace",
                                                         kind = "turn_repetition_guard",
                                                         session_id = %session_id,
-                                                        reason = "identical_tool_call",
+                                                        reason = stop.as_str(),
                                                         tool = %tool_name,
                                                         repeats,
                                                         goal_rechecks,
@@ -3543,13 +4000,13 @@ impl GooseAdapter {
                                                     // Disarm, or the NEXT turn starts armed with
                                                     // this question (we skip Goose's own clear).
                                                     agent_clone.set_session_goal(&turn_goose_sid, None).await;
-                                                    guard_tripped = true;
+                                                    turn_stop = Some(stop);
                                                     yield Ok(AgentStreamEvent::TurnLimitReached {
                                                         max_turns: MAX_IDENTICAL_TOOL_CALLS_PER_TURN as u32,
                                                     });
                                                     // Cancel, then drain: goose checks the token
                                                     // only when polled; the repeat never runs.
-                                                    cancel_token.cancel();
+                                                    engine_cancel.cancel();
                                                     drain_deadline = Some(
                                                         tokio::time::Instant::now() + GUARD_DRAIN_TIMEOUT,
                                                     );
@@ -3567,6 +4024,7 @@ impl GooseAdapter {
                                                     tool_id = %tr.id,
                                                 );
                                                 produced_visible = true;
+                                                chars_at_last_call = total_output_chars;
                                                 yield Ok(AgentStreamEvent::ToolCall {
                                                     id: tr.id.clone(),
                                                     tool: tool_name,
@@ -3585,21 +4043,22 @@ impl GooseAdapter {
                                                     goal_rechecks,
                                                     "the completeness check re-armed {goal_rechecks} times in one turn; stopping it re-answering",
                                                 );
+                                                let stop = TurnStop::GoalRecheck;
                                                 tracing::info!(
                                                     target: "giap::trace",
                                                     kind = "turn_repetition_guard",
                                                     session_id = %session_id,
-                                                    reason = "goal_recheck",
+                                                    reason = stop.as_str(),
                                                     goal_rechecks,
                                                 );
                                                 agent_clone.set_session_goal(&turn_goose_sid, None).await;
-                                                guard_tripped = true;
+                                                turn_stop = Some(stop);
                                                 yield Ok(AgentStreamEvent::TurnLimitReached {
                                                     max_turns: MAX_GOAL_RECHECKS_PER_TURN,
                                                 });
                                                 // Drain, don't break: the shown answer is still
                                                 // unflushed in goose's `messages_to_add`.
-                                                cancel_token.cancel();
+                                                engine_cancel.cancel();
                                                 drain_deadline = Some(
                                                     tokio::time::Instant::now() + GUARD_DRAIN_TIMEOUT,
                                                 );
@@ -3667,10 +4126,13 @@ impl GooseAdapter {
                                                 tracing::warn!(
                                                     tool = %tool_name,
                                                     tool_id = %tr.id,
-                                                    error = %content_text,
+                                                    // Can echo what it was asked: the log drain
+                                                    // hides it unless a developer may see it.
+                                                    tool_error = %content_text,
                                                     "tool call failed",
                                                 );
                                             }
+                                            tool_results_gathered += 1;
                                             yield Ok(AgentStreamEvent::ToolResult {
                                                 id: tr.id.clone(),
                                                 tool: tool_name,
@@ -3685,6 +4147,13 @@ impl GooseAdapter {
                                 // Raw: the SSE ThoughtFilter strips think tags across chunks, and a
                                 // per-chunk strip here would eat close tags it is waiting for.
                                 let raw_text = msg.as_concat_text();
+                                // Out of GPU memory: goose's prose is llama.cpp's "null result",
+                                // which says nothing the household can act on.
+                                let raw_text = replace_out_of_gpu_memory_report(
+                                    &session_id,
+                                    raw_text,
+                                    guard_controls.gpu_memory_failures() > gpu_memory_failures_at_start,
+                                );
                                 // Refused picture: goose's prose names a screen GIAP lacks, so
                                 // use pond-core's line and hold the encoder at could-not-start.
                                 let raw_text = match local_picture_spec {
@@ -3701,39 +4170,53 @@ impl GooseAdapter {
                                     }
                                     _ => raw_text,
                                 };
+                                // Goose's own notices, not the model's words, so never filtered.
+                                let goose_notice = raw_text.trim() == GOOSE_EMPTY_TURN_MESSAGE
+                                    || raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE;
+                                let raw_text = if goose_notice {
+                                    raw_text
+                                } else {
+                                    reply_filter.push(&raw_text)
+                                };
                                 if !raw_text.is_empty() && raw_text.trim() == GOOSE_EMPTY_TURN_MESSAGE {
                                     // Swallowed so the recovery loop below re-engages.
                                     tracing::warn!(
                                         session_id = %session_id,
                                         "goose reported an empty turn",
                                     );
-                                } else if !raw_text.is_empty() && looks_like_leaked_scaffold(&raw_text) {
-                                    // Echoed prompt scaffolding gets the empty-turn recovery.
-                                    tracing::warn!(
+                                } else if !raw_text.is_empty() && raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE {
+                                    // Goose's turn cap, streamed as text. Held, with the structured
+                                    // event that lets a client offer Continue, until the turn knows
+                                    // whether the final reply answers in the notice's place.
+                                    tracing::info!(
+                                        target: "giap::trace",
+                                        kind = "turn_limit_reached",
                                         session_id = %session_id,
-                                        leaked = %raw_text,
-                                        "model echoed internal scaffolding instead of answering",
+                                        max_turns,
                                     );
+                                    produced_visible = true;
+                                    turn_stop = Some(TurnStop::TurnLimit);
+                                    held_turn_limit_notice = Some(raw_text);
                                 } else if !raw_text.is_empty() {
-                                    // Goose streams its turn-cap notice as text; also re-emit it
-                                    // as a structured event so a client can offer Continue.
-                                    let hit_turn_limit = raw_text.trim() == GOOSE_MAX_TURNS_MESSAGE;
                                     produced_visible = true;
                                     emitted_text = true;
                                     total_output_chars += raw_text.len();
                                     yield Ok(AgentStreamEvent::Text { content: raw_text });
-                                    if hit_turn_limit {
-                                        tracing::info!(
-                                            target: "giap::trace",
-                                            kind = "turn_limit_reached",
-                                            session_id = %session_id,
-                                            max_turns,
-                                        );
-                                        yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
-                                    }
                                 }
                             }
                             goose::agents::AgentEvent::HistoryReplaced(_) => {
+                                // Mid-turn, goose compacts only when the engine refuses a prompt
+                                // past its window; the results gathered so far live on only in
+                                // its summary, so the model may fetch them again.
+                                tracing::info!(
+                                    target: "giap::trace",
+                                    kind = "history_replaced",
+                                    session_id = %session_id,
+                                    after_inference = turn_stats.inference_count,
+                                    tool_results = tool_results_gathered,
+                                    "goose replaced this session's history, usually with a \
+                                     compaction summary",
+                                );
                                 yield Ok(AgentStreamEvent::Status { content: "Compacting context...".to_string() });
                             }
                             // Per inference: the last input is the context load; outputs sum.
@@ -3844,6 +4327,29 @@ impl GooseAdapter {
                     if let Some(content) = reasoning.flush() {
                         yield Ok(AgentStreamEvent::Thinking { content });
                     }
+                    let tail = reply_filter.finish();
+                    if !tail.is_empty() {
+                        produced_visible = true;
+                        emitted_text = true;
+                        total_output_chars += tail.len();
+                        yield Ok(AgentStreamEvent::Text { content: tail });
+                    }
+                    if reply_filter.scaffold_blocks() > 0 {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            blocks = reply_filter.scaffold_blocks(),
+                            "model echoed internal scaffolding; dropped it from the reply",
+                        );
+                    }
+                    if let Some(call) = reply_filter.text_call() {
+                        // Shown as nothing, so the empty-turn recovery re-asks with the steer.
+                        tracing::warn!(
+                            session_id = %session_id,
+                            written_chars = call.chars().count(),
+                            "model wrote a tool call as text instead of calling it",
+                        );
+                        wrote_text_call = true;
+                    }
                     // Reasoning back on before anything else runs, this turn's or the next. A turn
                     // that re-stamped the flag meanwhile (the record is no longer `None`) wins.
                     if reasoning_lifted {
@@ -3877,6 +4383,10 @@ impl GooseAdapter {
                             }
                         }
                     }
+                    // The turn's tools back once a stopped turn's final reply has run.
+                    if let Some(tools) = tools_withheld.take() {
+                        guard_controls.set_allowed_tools(tools);
+                    }
                     // An errored attempt is never retried: the user already has the error.
                     if stream_failed {
                         break 'attempts;
@@ -3892,16 +4402,24 @@ impl GooseAdapter {
                                     .conversation
                                     .map(|c| c.messages().clone())
                                     .unwrap_or_default();
-                                match hidden_completeness_reply(&messages, goal) {
-                                    Some(reply) if looks_like_leaked_scaffold(&reply) => {
+                                let hidden = hidden_completeness_reply(&messages, goal);
+                                let shown = hidden.as_deref().map(|reply| {
+                                    let mut filter =
+                                        pond_core::models::services::reply_filter::ReplyFilter::new();
+                                    let mut shown = filter.push(reply);
+                                    shown.push_str(&filter.finish());
+                                    shown
+                                });
+                                match (hidden, shown) {
+                                    (Some(hidden), Some(shown)) if shown.trim().is_empty() => {
                                         tracing::warn!(
                                             session_id = %session_id,
-                                            leaked = %reply,
-                                            "the completeness check's hidden reply echoes \
-                                             internal scaffolding; not showing it",
+                                            leaked_chars = hidden.chars().count(),
+                                            "the completeness check's hidden reply is only echoed \
+                                             scaffolding or a written call; not showing it",
                                         );
                                     }
-                                    Some(reply) => {
+                                    (Some(_), Some(reply)) => {
                                         tracing::info!(
                                             target: "giap::trace",
                                             kind = "completeness_reply_shown",
@@ -3915,7 +4433,7 @@ impl GooseAdapter {
                                         total_output_chars += reply.len();
                                         yield Ok(AgentStreamEvent::Text { content: reply });
                                     }
-                                    None => {}
+                                    _ => {}
                                 }
                             }
                             Err(e) => {
@@ -3929,24 +4447,58 @@ impl GooseAdapter {
                             }
                         }
                     }
-                    // A guard-stopped turn is never re-engaged (don't rely on `produced_visible`).
-                    if guard_tripped {
-                        break 'attempts;
-                    }
                     // Before the `produced_visible` break: a tool call sets it, and the attempt
                     // that called a tool and then only reasoned is the one this exists for.
-                    let wrote_text = total_output_chars > chars_before;
+                    let wrote_text = total_output_chars > chars_before.max(chars_at_last_call);
                     let reasoned = turn_stats.reasoning_tokens.unwrap_or(0) > reasoning_before;
                     if final_attempt {
                         tracing::info!(
                             target: "giap::trace",
                             kind = "final_reply_result",
                             session_id = %session_id,
+                            reason = final_reply_reason,
                             wrote_text,
                             called_tools = produced_visible && !wrote_text,
                             reasoning_off = reasoning_lifted,
+                            tools_off,
                         );
-                    } else if !request.warmup && final_reply.due(wrote_text, reasoned) {
+                    }
+                    // A guard-stopped turn is never re-engaged (don't rely on `produced_visible`);
+                    // it gets at most the final reply, with tools off.
+                    if let Some(stop) = turn_stop {
+                        if !final_attempt
+                            && !request.warmup
+                            && final_reply.due_after_stop(
+                                total_output_chars > chars_at_last_call,
+                                tool_results_gathered > 0,
+                            )
+                        {
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "final_reply_asked",
+                                session_id = %session_id,
+                                goose_sid = %turn_goose_sid,
+                                reason = stop.as_str(),
+                                tool_results = tool_results_gathered,
+                                reasoning_off = reasoning_off_engine.is_some(),
+                                tools_off = true,
+                                "a guard stopped the turn before it replied; asking once, with \
+                                 tools off, for the reply from what it gathered",
+                            );
+                            final_reply_reason = stop.as_str();
+                            final_reply_next = true;
+                            continue 'attempts;
+                        }
+                        if final_attempt && wrote_text && held_turn_limit_notice.take().is_some() {
+                            tracing::info!(
+                                session_id = %session_id,
+                                "the final reply answered in place of goose's turn-cap notice",
+                            );
+                            yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
+                        }
+                        break 'attempts;
+                    }
+                    if !final_attempt && !request.warmup && final_reply.due(wrote_text, reasoned) {
                         tracing::info!(
                             target: "giap::trace",
                             kind = "final_reply_asked",
@@ -3956,8 +4508,10 @@ impl GooseAdapter {
                             reasoning_tokens =
                                 turn_stats.reasoning_tokens.unwrap_or(0) - reasoning_before,
                             reasoning_off = reasoning_off_engine.is_some(),
+                            reason = REASONED_WITHOUT_REPLY,
                             "an attempt reasoned but wrote no reply; asking once for the reply",
                         );
+                        final_reply_reason = REASONED_WITHOUT_REPLY;
                         final_reply_next = true;
                         continue 'attempts;
                     }
@@ -3996,6 +4550,13 @@ impl GooseAdapter {
                         ),
                     });
                 }
+            // Goose's turn-cap notice, when no final reply answered in its place, streams as it
+            // always has: the text, then the event that lets a client offer Continue.
+            if let Some(notice) = held_turn_limit_notice.take() {
+                total_output_chars += notice.len();
+                yield Ok(AgentStreamEvent::Text { content: notice });
+                yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
+            }
             // `attempt` already counts attempts beyond the first (0 on an ordinary turn).
             turn_stats.reengagements = attempt as u32;
 
@@ -4121,6 +4682,7 @@ impl AgentPort for GooseAdapter {
             warmup: true,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let shape = if voice_mode {
@@ -4131,8 +4693,13 @@ impl AgentPort for GooseAdapter {
         // Home shows that the pond is building caches while this runs, under the name a person
         // knows rather than the shape's.
         let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        let warming = if voice_mode {
+            pond_core::shared::services::voice_agent::VOICE_AGENT
+        } else {
+            "assistant"
+        };
         building.begin(1);
-        building.working_on("assistant");
+        building.working_on(warming);
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
             use futures::StreamExt;
             for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
@@ -4153,7 +4720,7 @@ impl AgentPort for GooseAdapter {
         })
         .await;
 
-        building.finished("assistant", matches!(outcome, Ok(Ok(()))));
+        building.finished(warming, matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {
@@ -4199,10 +4766,15 @@ impl AgentPort for GooseAdapter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        // Voice: thinking wastes TTS time; vision/audio inputs go unused.
-        // `vision_section_applies` reads this same flag, so voice prompts never claim vision.
+        // Voice: thinking only as the Voice agent last chose; vision/audio inputs go unused.
+        // A voice turn's prompt never claims vision either: `vision_section_applies` takes the
+        // turn's flag, which this one forces on.
         if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {
-            caps.thinking = false;
+            let off = pond_core::shared::services::voice_agent::VoiceThinking::Off as u8;
+            caps.thinking &= self
+                .voice_thinking
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != off;
             caps.vision = false;
             caps.audio_input = false;
         }
@@ -4667,38 +5239,51 @@ impl GooseAdapter {
 
         // A `Message` event is a fragment, not a turn; `ChildTurns` owns the assembly rule.
         let mut turns = crate::orchestrator::ChildTurns::default();
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(goose::agents::AgentEvent::Message(msg)) => {
-                    // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
-                    crate::orchestrator::child_stream_step(
-                        &mut turns,
-                        msg.role == rmcp::model::Role::Assistant,
-                        &msg.as_concat_text(),
-                    );
-                    // Never read `msg.content` here; it bypasses the reasoning gate.
-                    for tool in crate::orchestrator::child_tool_names(&msg) {
-                        crate::orchestrator::report_child_progress(
-                            &plan.parent_session_id,
-                            &plan.task_id,
-                            &plan.role,
-                            pond_core::shared::domain::agent::SubagentStatus::Tool,
-                            Some(tool),
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        role = %plan.role,
-                        "subagent stream error, ending the run: {e}"
-                    );
-                    break;
-                }
+        drain_child_stream(&mut stream, &mut turns, &plan).await;
+        drop(stream);
+
+        let mut drafted = None;
+        if crate::orchestrator::should_nudge(&plan, turns.turns(), cancel.is_cancelled()) {
+            let text = plan
+                .nudge
+                .as_ref()
+                .map(|n| n.text.clone())
+                .unwrap_or_default();
+            tracing::info!(
+                target: "giap::trace",
+                kind = "subagent_nudged",
+                role = %plan.role,
+                turns = turns.turns(),
+                "a helper stopped without reporting; asking it once to report"
+            );
+            turns.other_role_message();
+            drafted = turns.last_completed().map(str::to_string);
+            let nudge_config = goose::agents::SessionConfig {
+                id: plan.child_session_id.clone(),
+                schedule_id: None,
+                max_turns: Some(crate::orchestrator::NUDGE_TURNS),
+                retry_config: None,
+            };
+            let again = goose::session_context::with_session_id(
+                Some(plan.child_session_id.clone()),
+                async {
+                    child
+                        .reply(
+                            Message::user().with_text(&text),
+                            nudge_config,
+                            Some(cancel.clone()),
+                        )
+                        .await
+                },
+            )
+            .await;
+            match again {
+                Ok(mut stream) => drain_child_stream(&mut stream, &mut turns, &plan).await,
+                Err(e) => tracing::warn!(role = %plan.role, "the nudge could not start: {e}"),
             }
         }
-        drop(stream);
         let (last_text, assistant_turns) = turns.finish();
+        let last_text = crate::orchestrator::after_nudge(drafted, last_text);
 
         // Post-run read: an extension can arrive without `add_extension` (e.g. `default_enabled`).
         loaded_extensions.extend(
@@ -4714,6 +5299,47 @@ impl GooseAdapter {
             assistant_turns,
             loaded_extensions,
         })
+    }
+}
+
+/// Reads one child reply to its end, counting its turns and reporting its tool calls.
+async fn drain_child_stream<S, E>(
+    stream: &mut S,
+    turns: &mut crate::orchestrator::ChildTurns,
+    plan: &crate::orchestrator::ChildPlan,
+) where
+    S: futures::Stream<Item = Result<goose::agents::AgentEvent, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(goose::agents::AgentEvent::Message(msg)) => {
+                // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
+                crate::orchestrator::child_stream_step(
+                    turns,
+                    msg.role == rmcp::model::Role::Assistant,
+                    &msg.as_concat_text(),
+                );
+                // Never read `msg.content` here; it bypasses the reasoning gate.
+                for tool in crate::orchestrator::child_tool_names(&msg) {
+                    crate::orchestrator::report_child_progress(
+                        &plan.parent_session_id,
+                        &plan.task_id,
+                        &plan.role,
+                        pond_core::shared::domain::agent::SubagentStatus::Tool,
+                        Some(tool),
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    role = %plan.role,
+                    "subagent stream error, ending the run: {e}"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -4920,6 +5546,38 @@ fn canonical_model_stem(model_name: &str, gguf_dir: &std::path::Path) -> String 
         }
     }
     stem.to_string()
+}
+
+/// The settings a (re-)registered row starts from: those of another row already naming the same
+/// file, else the row's own, else defaults.
+///
+/// The device stamp (`apply_jetson_settings` in pond-adapters-local-inference) tunes the rows
+/// naming a file that exist when it runs. On a live model switch this adapter can register its
+/// canonical row afterwards, and that row started from defaults: no Jetson window, cache types,
+/// batch sizes or thread count for the model the household then talks to. The row's own settings
+/// lose to a sibling because a row moved to another file carries the old file's stamp.
+fn stamped_settings_for(
+    registry: &goose::providers::local_inference::local_model_registry::LocalModelRegistry,
+    stem: &str,
+    local_path: &std::path::Path,
+) -> goose::providers::local_inference::local_model_registry::ModelSettings {
+    let file = crate::registry_rows::resolve(local_path);
+    let sibling = registry
+        .list_models()
+        .iter()
+        .find(|entry| entry.id != stem && crate::registry_rows::resolve(&entry.local_path) == file);
+    match (sibling, registry.get_model(stem)) {
+        (Some(entry), _) => {
+            tracing::info!(
+                row = stem,
+                from = %entry.id,
+                "registered row takes the device settings of a row naming the same file"
+            );
+            entry.settings.clone()
+        }
+        (None, Some(entry)) => entry.settings.clone(),
+        (None, None) => Default::default(),
+    }
 }
 
 /// Driven by the always-on `giap-toolkit` extension, so it's reachable in any narrowed session.
@@ -5145,6 +5803,163 @@ mod tests {
         );
     }
 
+    // ── Tool groups re-picked on every message ────────────────────────────
+
+    /// Embeds only the texts it was given; anything else fails, as a broken embedder would.
+    struct FixedEmbedder(HashMap<&'static str, Vec<f32>>);
+
+    #[async_trait]
+    impl EmbeddingProvider for FixedEmbedder {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            self.0
+                .get(text)
+                .cloned()
+                .ok_or_else(|| anyhow!("no vector for {text:?}"))
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// MiniLM's tool-relevance floor, which the later-message fixtures were written against.
+    fn minilm_floor() -> Option<f32> {
+        pond_core::models::domain::embedding_models::ALL_MINILM_L6_V2
+            .floors
+            .map(|f| f.tool_relevance)
+    }
+
+    fn catalog() -> Vec<String> {
+        pond_core::mcp::domain::tool_group::TOOL_GROUPS
+            .iter()
+            .map(|g| g.extension.to_string())
+            .collect()
+    }
+
+    /// The opening message loaded weather, the model enabled device control, and the session
+    /// then asks for a reminder: schedule joins, and nothing already held leaves.
+    #[tokio::test]
+    async fn a_later_message_adds_the_group_it_scores_on_and_keeps_every_held_one() {
+        use pond_core::mcp::services::tool_selection as sel;
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let opening = strings(&[
+            "giap-device-control",
+            "giap-knowledge",
+            "giap-memory",
+            "giap-system",
+            "giap-toolkit",
+            "giap-weather",
+        ]);
+        let storage = InMemorySessionStorage::new();
+        storage
+            .set_session_tool_groups("s1", &opening)
+            .await
+            .unwrap();
+        let held = tokio::sync::RwLock::new(HashMap::from([("s1".to_string(), opening.clone())]));
+
+        let embedder = FixedEmbedder(HashMap::from([("Remind me at six", vec![1.0, 0.0])]));
+        let group_vectors = vec![
+            ("giap-schedule".to_string(), vec![1.0, 0.0]),
+            ("giap-weather".to_string(), vec![0.0, 1.0]),
+        ];
+        let signals = sel::selection_signals("Remind me at six", "", "");
+        let scores = GooseAdapter::score_signals(&embedder, &group_vectors, &signals).await;
+        let picked =
+            sel::select_groups_for_later_message(&catalog(), scores.as_deref(), minilm_floor());
+        assert!(
+            !picked.groups.iter().any(|g| g == "giap-weather"),
+            "the fixture must leave a held group out of the pick, or 'never removes' is untested"
+        );
+
+        let (groups, added) =
+            GooseAdapter::merge_session_tool_groups(&held, Some(&storage), "s1", &picked.groups)
+                .await;
+
+        assert_eq!(added, strings(&["giap-schedule"]));
+        for kept in &opening {
+            assert!(groups.contains(kept), "{kept} was dropped: {groups:?}");
+        }
+        assert!(groups.iter().any(|g| g == "giap-schedule"));
+        assert_eq!(held.read().await.get("s1"), Some(&groups));
+        assert_eq!(
+            storage.get_session_tool_groups("s1").await.unwrap(),
+            Some(groups),
+            "the widened set must survive a restart"
+        );
+    }
+
+    /// A later message the embedder cannot read widens, as the opening one does.
+    #[tokio::test]
+    async fn a_later_message_that_fails_to_embed_widens_to_every_group() {
+        use pond_core::mcp::services::tool_selection as sel;
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let embedder = FixedEmbedder(HashMap::new());
+        let group_vectors = vec![("giap-schedule".to_string(), vec![1.0, 0.0])];
+        let signals = sel::selection_signals("Look it up?", "", "");
+        let scores = GooseAdapter::score_signals(&embedder, &group_vectors, &signals).await;
+        assert!(scores.is_none());
+
+        let picked =
+            sel::select_groups_for_later_message(&catalog(), scores.as_deref(), minilm_floor());
+        let storage = InMemorySessionStorage::new();
+        let held = tokio::sync::RwLock::new(HashMap::from([(
+            "s1".to_string(),
+            strings(&["giap-memory", "giap-toolkit"]),
+        )]));
+        let (groups, _) =
+            GooseAdapter::merge_session_tool_groups(&held, Some(&storage), "s1", &picked.groups)
+                .await;
+
+        let mut everything = catalog();
+        everything.sort();
+        assert_eq!(groups, everything);
+        assert_eq!(
+            storage.get_session_tool_groups("s1").await.unwrap(),
+            Some(everything)
+        );
+    }
+
+    /// Nothing new means no write: the store is on eMMC and this runs every turn.
+    #[tokio::test]
+    async fn a_message_that_adds_nothing_writes_nothing() {
+        use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;
+        use pond_core::user_data::ports::session_storage::SessionStorage;
+
+        let storage = InMemorySessionStorage::new();
+        let held = tokio::sync::RwLock::new(HashMap::from([(
+            "s1".to_string(),
+            strings(&["giap-knowledge", "giap-memory"]),
+        )]));
+        let (groups, added) = GooseAdapter::merge_session_tool_groups(
+            &held,
+            Some(&storage),
+            "s1",
+            &strings(&["giap-memory"]),
+        )
+        .await;
+
+        assert!(added.is_empty());
+        assert_eq!(groups, strings(&["giap-knowledge", "giap-memory"]));
+        assert_eq!(storage.get_session_tool_groups("s1").await.unwrap(), None);
+    }
+
+    /// `enable_tool_group` refuses a session with no entry, so even an empty pick leaves one.
+    #[tokio::test]
+    async fn the_first_merge_leaves_an_entry_even_when_it_picks_nothing() {
+        let held = tokio::sync::RwLock::new(HashMap::new());
+        let (groups, added) = GooseAdapter::merge_session_tool_groups(&held, None, "s1", &[]).await;
+        assert!(groups.is_empty() && added.is_empty());
+        assert_eq!(held.read().await.get("s1"), Some(&Vec::new()));
+    }
+
     // ── thinking section stability ────────────────────────────────────────
 
     /// Turns 1 and 2 must agree in "auto", or every session re-prefills on its second turn.
@@ -5154,24 +5969,21 @@ mod tests {
             "auto",
             "ollama",
             "gemma-4-E2B-it",
-            None,
-            false
+            None
         ));
         assert!(!GooseAdapter::thinking_section_applies(
             "auto",
             "ollama",
             "llama-3.2-3b",
-            None,
-            false
+            None
         ));
     }
 
     #[test]
     fn auto_thinking_gives_the_same_answer_twice() {
         for model in ["gemma-4-E2B-it", "llama-3.2-3b", "NVIDIA-Nemotron3-Nano-4B"] {
-            let first = GooseAdapter::thinking_section_applies("auto", "local", model, None, false);
-            let second =
-                GooseAdapter::thinking_section_applies("auto", "local", model, None, false);
+            let first = GooseAdapter::thinking_section_applies("auto", "local", model, None);
+            let second = GooseAdapter::thinking_section_applies("auto", "local", model, None);
             assert_eq!(first, second, "{model} answered differently on turn 2");
         }
     }
@@ -5217,31 +6029,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_thinking_modes_ignore_the_model_and_voice_always_wins() {
+    fn explicit_thinking_modes_ignore_the_model_and_voice_follows_its_agent() {
         assert!(GooseAdapter::thinking_section_applies(
             "on",
             "ollama",
             "llama-3.2-3b",
-            None,
-            false
+            None
         ));
         assert!(!GooseAdapter::thinking_section_applies(
             "off",
             "ollama",
             "gemma-4-E2B-it",
-            None,
-            false
+            None
         ));
-        for mode in ["on", "off", "auto"] {
-            assert!(
-                !GooseAdapter::thinking_section_applies(
-                    mode,
+        // A spoken turn passes the Voice agent's mode, which follows the household's on auto.
+        use pond_core::shared::services::voice_agent::VoiceThinking;
+        for (voice, household, thinks) in [
+            (VoiceThinking::Off, "on", false),
+            (VoiceThinking::On, "off", true),
+            (VoiceThinking::Auto, "off", false),
+            (VoiceThinking::Auto, "on", true),
+        ] {
+            assert_eq!(
+                GooseAdapter::thinking_section_applies(
+                    voice.mode(household),
                     "ollama",
                     "gemma-4-E2B-it",
                     None,
-                    true
                 ),
-                "voice mode must suppress <thinking> regardless of mode ({mode})"
+                thinks,
+                "{voice:?} over a household on {household}"
             );
         }
     }
@@ -5573,6 +6390,195 @@ mod tests {
             gate < authority,
             "delegation must not regain a withheld tool"
         );
+    }
+
+    /// A typical member's turn in a new conversation: what the envelope after their words costs,
+    /// typed and spoken, in the chars/4 count the memory budget uses.
+    fn typical_member_envelope(is_voice: bool) -> String {
+        use pond_core::models::services::context::memory_block;
+        use pond_core::user_data::domain::memory::{MemoryFragment, MemorySegment};
+        use pond_core::user_data::domain::prompt_extra::{member_notes_block, PromptExtra};
+        let settings = pond_core::user_data::domain::settings::Settings {
+            assistant_name: "Goose".into(),
+            timezone: "Africa/Nairobi".into(),
+            ..Default::default()
+        };
+        let profile = pond_core::prompts::ProfileContext {
+            speaker_name: Some("Amina".into()),
+            birthday: Some("1990-03-14".into()),
+            language: Some("en".into()),
+            atypical_speech: false,
+            member_notes: Vec::new(),
+        };
+        let state = pond_core::prompts::PromptState {
+            current_date: "Monday, 2 November 2026".into(),
+            current_time: "half past five".into(),
+            voice_mode: is_voice,
+            available_tools: Vec::new(),
+            thinking_enabled: !is_voice,
+            compact_prompt: false,
+            native_tools_json: true,
+            tools_offered: true,
+            prefix_hash: None,
+        };
+        let mut suffix = pond_core::models::services::prompt_builder::build_prompt_partition(
+            &settings,
+            Some(&profile),
+            &state,
+            pond_core::prompts::PROMPT_BALANCED,
+        )
+        .dynamic_suffix;
+        suffix.push_str(
+            "\n\n## Upcoming Scheduled Tasks\n- Water the plants: every day at 18:00 (next in \
+             30 minutes)\n- Bin day reminder: Tuesdays at 07:00 (next tomorrow)",
+        );
+        if !is_voice {
+            suffix.push_str(
+                "\n\n## Vision Bus Status\n- Camera `default` active (target 30 fps, measured \
+                 29.7 fps; latest: 1 person (0.91), 1 chair (0.62) at 17:29:58)\n- Live annotated \
+                 video feed: `/api/v1/camera/default/stream?annotated=1`\n- Annotated snapshot: \
+                 `/api/v1/camera/default/snapshot?annotated=1`",
+            );
+        }
+        let note = |key: &str, text: &str| PromptExtra {
+            key: key.into(),
+            instruction: text.into(),
+            active: true,
+            sort_order: 0,
+            profile_id: Some("amina".into()),
+        };
+        let notes = member_notes_block(
+            &[],
+            &[
+                note("diet", "I am vegetarian."),
+                note("units", "Use Celsius and kilometres."),
+            ],
+            &[],
+        )
+        .unwrap_or_default();
+        let remembered = [
+            "Amina works as a nurse and does night shifts on Thursdays.",
+            "Amina's daughter Zuri is seven and has swimming lessons on Saturday mornings.",
+            "Amina prefers short answers in the morning.",
+            "The family car is a blue Toyota that is due for a service in December.",
+            "Amina is learning Swahili and likes to be asked a word of the day.",
+            "Amina's mother lives in Mombasa and visits every Easter.",
+            "Amina is allergic to cats.",
+            "The household's Wi-Fi router is in the study on the top shelf.",
+            "Amina wants a reminder to call the plumber about the kitchen tap.",
+            "Amina runs 5 km on Sunday mornings along the river path.",
+            "Amina's favourite tea is ginger with honey.",
+            "Zuri's school pick-up is at 15:30 on weekdays.",
+        ];
+        let fragments: Vec<MemoryFragment> = remembered
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                MemoryFragment::from_extraction(
+                    format!("m{i}"),
+                    None,
+                    text.to_string(),
+                    MemorySegment::Preference,
+                    0.6,
+                    None,
+                )
+            })
+            .collect();
+        let (kept, _) = fragments_within(&fragments, memory_token_budget(500, is_voice));
+        let memories = kept
+            .iter()
+            .map(|m| memory_block::line(Some("preference"), &m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let envelope = TurnEnvelope {
+            message: "What's the weather like tomorrow?",
+            dynamic_suffix: &suffix,
+            member_notes: &notes,
+            memories: &memories,
+            ..TurnEnvelope::default()
+        }
+        .render();
+        let after_words = envelope
+            .split_once("</user-message>\n")
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default();
+        after_words
+    }
+
+    /// Two notes, two schedules and a dozen memories: the notes and the schedules stay, so the
+    /// camera status and the memory cap are what a voice turn saves.
+    #[test]
+    fn a_voice_turns_envelope_stays_under_360_tokens_for_a_typical_member() {
+        use pond_core::models::ports::token_counter::TokenCounter as _;
+        let count = |text: &str| HeuristicTokenCounter.count(text);
+        let typed = count(&typical_member_envelope(false));
+        let spoken = count(&typical_member_envelope(true));
+        assert!(
+            spoken < 360,
+            "a voice turn decodes {spoken} tokens before its first word"
+        );
+        assert!(
+            typed - spoken >= 100,
+            "voice {spoken} saves too little on typed {typed}"
+        );
+        assert!(!typical_member_envelope(true).contains("Vision Bus Status"));
+    }
+
+    #[test]
+    fn a_voice_turn_skips_the_camera_status_and_caps_its_memories() {
+        assert_eq!(memory_token_budget(500, false), 500);
+        assert_eq!(memory_token_budget(500, true), VOICE_MEMORY_TOKEN_BUDGET);
+        assert_eq!(memory_token_budget(100, true), 100);
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let gate = at("if !is_voice {");
+        let vision = at("pond_mcp_server::vision_runtime_context()");
+        assert!(
+            gate < vision && vision - gate <= 2,
+            "the camera status is not behind the voice gate"
+        );
+        let budget = at("memory_token_budget(compaction_profile.memory_token_budget, is_voice)");
+        assert!(budget < vision);
+    }
+
+    /// The Voice agent narrows what the guest rule left, and both readers see the narrowed set.
+    #[test]
+    fn the_voice_agents_groups_are_withheld_after_the_guest_rule_and_before_both_readers() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let guest = at("subtract_guest_denied_tools(");
+        let voice = at("if is_voice && !voice_agent.tool_groups_off.is_empty()");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        let authority = at("self.turn_authorities.publish(");
+        assert!(guest < voice, "a guest's subtraction comes first");
+        assert!(voice < allow_set, "the shim must get the narrowed set");
+        assert!(
+            voice < authority,
+            "delegation must not regain a group turned off"
+        );
+    }
+
+    /// A phone's spoken turn is a voice turn on a serve adapter, whose instance flag is off.
+    #[test]
+    fn the_vision_section_follows_the_turns_voice_flag() {
+        let lines = stream_body_code();
+        let call = lines
+            .iter()
+            .position(|l| l.contains("Self::vision_section_applies("))
+            .expect("the turn no longer asks whether `<vision>` applies; re-anchor this test");
+        let args = lines[call..call + 6].join("\n");
+        assert!(args.contains("is_voice,"), "{args}");
+        assert!(!args.contains("voice_instance"), "{args}");
     }
 
     /// Production source lines with `//` comments cut, so prose can't satisfy a guard.
@@ -6227,6 +7233,53 @@ mod tests {
         assert_eq!(reply.metadata["tool_calls"], "[\"call-1\"]");
     }
 
+    /// A brief stored as "Let me check the weather.Let me look up the news.Good morning..." reads
+    /// as the model thinking aloud; the result is only what it wrote once the tools were done.
+    #[tokio::test]
+    async fn text_before_a_tool_call_is_not_part_of_the_reply() {
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![
+                AgentStreamEvent::Text {
+                    content: "Let me check the weather.".to_string(),
+                },
+                tool_call("call-1", "giap-weather__get_current_weather"),
+                AgentStreamEvent::Text {
+                    content: "Now the news.".to_string(),
+                },
+                tool_call("call-2", "giap-knowledge__web_search"),
+                AgentStreamEvent::Text {
+                    content: "Good morning. Mainly clear, 23.6 C.".to_string(),
+                },
+            ]),
+        )
+        .await
+        .expect("a turn that answered after its tools is a reply");
+        assert_eq!(reply.text, "Good morning. Mainly clear, 23.6 C.");
+        assert_eq!(reply.metadata["tool_calls"], "[\"call-1\",\"call-2\"]");
+    }
+
+    /// Narration followed by a tool call and then silence never answered: storing "Let me check
+    /// the weather." as the run's result would record a failed run as done.
+    #[tokio::test]
+    async fn a_turn_whose_only_text_came_before_its_tool_call_has_no_reply() {
+        let err = collect_reply(
+            "sched-test",
+            events(vec![
+                AgentStreamEvent::Text {
+                    content: "Let me check the weather.".to_string(),
+                },
+                tool_call("call-1", "giap-weather__get_current_weather"),
+            ]),
+        )
+        .await
+        .expect_err("working notes are not a reply");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReplyAfterTools)
+        );
+    }
+
     /// The old "Received empty response from Goose agent" read as an engine fault.
     #[tokio::test]
     async fn a_turn_with_tool_calls_and_no_text_says_so() {
@@ -6242,10 +7295,16 @@ mod tests {
         )
         .await
         .expect_err("a turn without text has no reply");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReplyAfterTools)
+        );
         let msg = err.to_string();
-        assert!(msg.contains("2 tool call(s)"), "{msg}");
-        assert!(msg.contains("giap-weather__get_current_weather"), "{msg}");
-        assert!(msg.contains("without writing a reply"), "{msg}");
+        assert_eq!(msg, TurnFailure::NoReplyAfterTools.user_message());
+        assert!(
+            !msg.contains("giap-weather") && !msg.contains('2'),
+            "the tool names and count stay in the log: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -6254,8 +7313,8 @@ mod tests {
             .await
             .expect_err("an empty turn has no reply");
         assert_eq!(
-            err.to_string(),
-            "The model finished without writing a reply."
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReply)
         );
     }
 
@@ -6271,7 +7330,81 @@ mod tests {
         )
         .await
         .expect_err("the apology is not a reply");
-        assert!(err.to_string().contains("without writing a reply"), "{err}");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::NoReply)
+        );
+    }
+
+    /// Text that is only markup is not an answer: a schedule would record it, or say nothing
+    /// aloud, as a completed run.
+    #[tokio::test]
+    async fn a_turn_whose_text_is_only_reasoning_or_empty_tags_has_no_reply() {
+        for text in [
+            "  \n\t ",
+            "<think>the weather is clear, the news is quiet</think>",
+            "<answer>\n</answer>",
+            "<|channel>thought the brief needs three parts<channel|>\n",
+        ] {
+            let err = collect_reply(
+                "sched-test",
+                events(vec![
+                    tool_call("call-1", "giap-weather__get_current_weather"),
+                    AgentStreamEvent::Text {
+                        content: text.to_string(),
+                    },
+                ]),
+            )
+            .await
+            .expect_err("markup alone is not a reply");
+            assert_eq!(
+                err.downcast_ref::<TurnFailure>(),
+                Some(&TurnFailure::NoReplyAfterTools),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_comes_without_the_reasoning_written_into_its_text() {
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Text {
+                content: "<think>keep it short</think>Mainly clear, 23.6 C.".to_string(),
+            }]),
+        )
+        .await
+        .expect("the text after the reasoning is the reply");
+        assert_eq!(reply.text, "Mainly clear, 23.6 C.");
+    }
+
+    /// The Orin's Daily Brief of 2026-11-02: the speculative decode failed mid-stream and goose
+    /// wrote its "Ran into this error" prose as the reply. The provider shim recorded the stream
+    /// item's error, so the turn fails as an engine failure, not as a model that would not load.
+    #[tokio::test]
+    async fn a_turn_whose_speculative_decode_failed_is_an_engine_failure() {
+        let session = crate::provider_shim::SessionControls::default();
+        session.note_provider_outcome(Some(
+            &goose_providers::errors::ProviderError::ExecutionError(
+                "speculative decode: Decode Error 1: NoKvCacheSlot".to_string(),
+            ),
+        ));
+        let reply = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Text {
+                content: "Ran into this error: Execution error: speculative decode: Decode \
+                          Error 1: NoKvCacheSlot.\n\nPlease retry if you think this is a \
+                          transient or recoverable error."
+                    .to_string(),
+            }]),
+        )
+        .await;
+        let err = fail_on_engine_error("sched-test", reply, session.provider_failure())
+            .expect_err("goose's report of the failure is not a reply");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::Engine)
+        );
     }
 
     #[tokio::test]
@@ -6302,7 +7435,57 @@ mod tests {
         )
         .await
         .expect_err("an errored turn is an error");
-        assert_eq!(err.to_string(), "the provider went away");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::Engine)
+        );
+        assert_eq!(err.to_string(), TurnFailure::Engine.user_message());
+    }
+
+    /// A model that could not be loaded mid-stream reads the same as one goose reported in prose.
+    #[tokio::test]
+    async fn an_error_event_from_a_model_that_could_not_load_is_model_unavailable() {
+        let err = collect_reply(
+            "sched-test",
+            events(vec![AgentStreamEvent::Error {
+                content: "Execution error: Failed to create context: null reference from \
+                          llama.cpp"
+                    .to_string(),
+            }]),
+        )
+        .await
+        .expect_err("an errored turn is an error");
+        assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::ModelUnavailable)
+        );
+    }
+
+    /// Every way the engines say the model could not load or start, and errors that are not that.
+    #[test]
+    fn engine_errors_are_classified_by_whether_the_model_could_start() {
+        for unavailable in [
+            "Execution error: null result from llama cpp",
+            "Execution error: Failed to create context: null reference from llama.cpp",
+            "Execution error: out of GPU memory for the context: needs about 542 MiB, 251 MiB free.",
+            "Server error: CUDA out of memory",
+            "error loading model: unable to allocate CUDA0 buffer",
+            "Execution error: LiteRT-LM engine_create returned no handle",
+        ] {
+            assert_eq!(
+                engine_failure("s1", unavailable),
+                TurnFailure::ModelUnavailable,
+                "{unavailable}"
+            );
+        }
+        for other in [
+            "Execution error: Prefill decode failed: NoKvCacheSlot",
+            "Request failed: connection refused",
+            // The chat template's null result is a different failure, with a dot.
+            "Execution error: null result from llama.cpp",
+        ] {
+            assert_eq!(engine_failure("s1", other), TurnFailure::Engine, "{other}");
+        }
     }
 
     /// The Jetson's runs of 2026-10-18 and -20: llama.cpp returned a null result, goose wrote
@@ -6332,8 +7515,13 @@ mod tests {
         let err = fail_on_engine_error("sched-test", reply, session.provider_failure())
             .expect_err("a turn whose model call failed is a failed turn");
         assert_eq!(
+            err.downcast_ref::<TurnFailure>(),
+            Some(&TurnFailure::ModelUnavailable),
+            "llama.cpp's null result is the model failing to load"
+        );
+        assert_eq!(
             err.to_string(),
-            "The model could not run: Execution error: null result from llama cpp"
+            TurnFailure::ModelUnavailable.user_message()
         );
     }
 
@@ -6977,6 +8165,68 @@ mod tests {
         assert_eq!(
             state("ollama", "llama3.2:3b", None),
             Some(EncoderState::NotDeclared)
+        );
+    }
+
+    /// The Jetson's E4B turns of 2026-10-27 read "Ran into this error: Execution error: null
+    /// result from llama cpp." Once the shim has counted the turn out of GPU memory, the household
+    /// reads what happened and what to do instead.
+    #[test]
+    fn goose_prose_for_running_out_of_gpu_memory_becomes_a_plain_reply() {
+        let goose_text = format!(
+            "{GOOSE_PROVIDER_ERROR_PREFIX}Execution error: out of GPU memory for the context: \
+             needs about 542 MiB, 251 MiB free.\n\nPlease retry if you think this is a transient \
+             or recoverable error."
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", goose_text.clone(), true),
+            OUT_OF_GPU_MEMORY_REPLY
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", goose_text.clone(), false),
+            goose_text,
+            "another failure keeps goose's report"
+        );
+        assert_eq!(
+            replace_out_of_gpu_memory_report("s1", "Mainly clear.".to_string(), true),
+            "Mainly clear.",
+            "an answer is never replaced"
+        );
+    }
+
+    /// The canonical row registered after the device stamp starts from the stamped sibling naming
+    /// the same file, not from defaults; a row alone keeps its own settings.
+    #[test]
+    fn a_registered_row_takes_the_stamp_of_a_row_naming_its_file() {
+        use goose::providers::local_inference::local_model_registry::LocalModelRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gemma-4-E4B-it-qat-UD-Q2_K_XL.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        let mut stamped = crate::registry_rows::test_entry("gemma-4-E4B-it-qat-UD-Q2_K_XL", &file);
+        stamped.settings.context_size = Some(16_384);
+        stamped.settings.n_gpu_layers = Some(99);
+        let registry = LocalModelRegistry {
+            models: vec![stamped],
+        };
+        let settings = stamped_settings_for(&registry, "gemma-4-E4B-it-qat", &file);
+        assert_eq!(settings.context_size, Some(16_384));
+        assert_eq!(settings.n_gpu_layers, Some(99));
+
+        let other = dir.path().join("other.gguf");
+        std::fs::write(&other, b"GGUF").unwrap();
+        let mut alone = crate::registry_rows::test_entry("other", &other);
+        alone.settings.context_size = Some(8_192);
+        let registry = LocalModelRegistry {
+            models: vec![alone],
+        };
+        assert_eq!(
+            stamped_settings_for(&registry, "other", &other).context_size,
+            Some(8_192)
+        );
+        assert_eq!(
+            stamped_settings_for(&registry, "new", &file).context_size,
+            None,
+            "no row names the file: defaults"
         );
     }
 
@@ -7643,7 +8893,7 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("the stream no longer contains `{needle}`"))
         };
-        let guard = position("if guard_tripped {");
+        let guard = position("if let Some(stop) = turn_stop {");
         let decided = position("final_reply.due(");
         let visible = position("if produced_visible {");
         assert!(
@@ -7651,6 +8901,143 @@ mod tests {
             "the final reply is decided at line {decided}; it belongs after the guard break \
              (line {guard}) and before the `produced_visible` break (line {visible})",
         );
+    }
+
+    /// The Jetson's Daily Brief, 2026-10-28: thirteen tool calls gathered the weather, the
+    /// schedules and five searches, then a fourth identical weather call tripped the guard and the
+    /// run failed with no reply. A stopped turn with results and no reply is asked for its answer.
+    #[test]
+    fn a_turn_the_repetition_guard_stopped_is_asked_for_its_answer_once() {
+        let mut final_reply = FinalReply::default();
+        assert!(
+            final_reply.due_after_stop(false, true),
+            "a turn stopped after gathering results ends with no reply unless it is asked for one"
+        );
+        assert!(
+            !final_reply.due_after_stop(false, true),
+            "the final reply was asked for twice in one turn"
+        );
+        assert!(
+            !final_reply.due(false, true),
+            "the stopped turn's final reply and the reasoning one share one ask a turn"
+        );
+    }
+
+    #[test]
+    fn a_stopped_turn_that_replied_or_gathered_nothing_gets_no_final_reply() {
+        // It already answered: the guard only cut off more work.
+        assert!(!FinalReply::default().due_after_stop(true, true));
+        // Nothing gathered: there is nothing to answer from that the question did not have.
+        assert!(!FinalReply::default().due_after_stop(false, false));
+        // A reasoning final reply already asked this turn uses up the one ask.
+        let mut final_reply = FinalReply::default();
+        assert!(final_reply.due(false, true));
+        assert!(!final_reply.due_after_stop(false, true));
+    }
+
+    #[test]
+    fn every_turn_stop_logs_its_own_reason() {
+        let reasons = [
+            TurnStop::IdenticalToolCall,
+            TurnStop::GoalRecheck,
+            TurnStop::TurnLimit,
+        ]
+        .map(TurnStop::as_str);
+        assert_eq!(
+            reasons,
+            ["identical_tool_call", "goal_recheck", "turn_limit"]
+        );
+        assert!(!reasons.contains(&REASONED_WITHOUT_REPLY));
+    }
+
+    /// In the stop branch the final reply is decided before the turn ends; a `break` first and
+    /// a stopped turn could never be asked.
+    #[test]
+    fn a_stopped_turn_decides_its_final_reply_before_it_ends() {
+        let lines = stream_body_code();
+        let stop = lines
+            .iter()
+            .position(|l| l.contains("if let Some(stop) = turn_stop {"))
+            .expect("the stream no longer branches on `turn_stop`");
+        let after = &lines[stop..];
+        let asked = after
+            .iter()
+            .position(|l| l.contains("final_reply.due_after_stop("))
+            .expect("the stop branch no longer asks for the final reply");
+        let ended = after
+            .iter()
+            .position(|l| l.contains("break 'attempts;"))
+            .expect("the stop branch no longer ends the turn");
+        assert!(
+            asked < ended,
+            "the stop branch ends the turn before deciding the final reply"
+        );
+    }
+
+    /// The final reply after a guard offers no tools, so the call that tripped it cannot recur,
+    /// and runs on a fresh token, as the guard cancelled the turn's; the allow-set comes back
+    /// before the attempt's first exit.
+    #[test]
+    fn a_stopped_turns_final_reply_runs_without_tools_on_a_fresh_token() {
+        let lines = stream_body_code();
+        let position = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("the stream no longer contains `{needle}`"))
+        };
+        let final_branch = position("let attempt_msg = if final_attempt {");
+        let reply = position("agent_clone.reply(attempt_msg");
+        let window = lines[final_branch..reply].join("\n");
+        for needle in [
+            "if tools_off {",
+            "set_allowed_tools(HashSet::new())",
+            "engine_cancel = fresh;",
+            "drain_deadline = None;",
+        ] {
+            assert!(
+                window.contains(needle),
+                "the final reply no longer does `{needle}` before its call. Window:\n{window}"
+            );
+        }
+        assert!(
+            lines[reply].contains("Some(engine_cancel.clone())"),
+            "the engine call does not take the token a final reply can replace"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("cancel_token.cancel()")),
+            "a guard cancels the turn's own token, which a final reply cannot replace"
+        );
+        let engine_end = position("'engine: loop {");
+        let returned = position("guard_controls.set_allowed_tools(tools);");
+        let failed = position("if stream_failed {");
+        assert!(
+            engine_end < returned && returned < failed,
+            "the allow-set comes back at line {returned}; it belongs after the engine loop and \
+             before the attempt's first exit (line {failed})"
+        );
+    }
+
+    /// A stall with tools still on may fetch what is missing; only a guard-stopped turn answers
+    /// from what it has. Either way the reply is final, so it cannot claim work it is not doing:
+    /// the Jetson's Daily Brief stored "I am currently gathering that information" as its result.
+    #[test]
+    fn the_final_reply_asks_to_fetch_only_while_tools_are_on_and_never_promises_work() {
+        let lines = stream_body_code();
+        let window = lines.join("\n");
+        assert!(
+            window.contains("if tools_off {\n                            FINAL_REPLY_PROMPT")
+                && window
+                    .contains("} else {\n                            FINAL_REPLY_CONTINUE_PROMPT"),
+            "a final reply with tools on must get the prompt that lets it fetch, and one without \
+             tools the prompt that answers from what it has"
+        );
+        for prompt in [FINAL_REPLY_PROMPT, FINAL_REPLY_CONTINUE_PROMPT] {
+            assert!(prompt.contains("This reply is final"), "{prompt}");
+            assert!(prompt.contains("do not say you are gathering"), "{prompt}");
+        }
+        assert!(FINAL_REPLY_CONTINUE_PROMPT.contains("call the tools for it now"));
+        assert!(!FINAL_REPLY_PROMPT.contains("call the tools"));
     }
 
     /// Reasoning off must not outlive the final reply: lifted before the call, restored after the
@@ -7702,31 +9089,17 @@ mod tests {
         assert_ne!(GOOSE_EMPTY_TURN_MESSAGE, EMPTY_TURN_EXHAUSTED_MESSAGE);
     }
 
-    /// Verbatim from a mesh-borrowed model that echoed the wrapper tag instead of answering.
+    /// An echo of any tag the envelope wraps a turn in is dropped, and the answer after it kept.
     #[test]
-    fn a_leaked_answer_contract_tag_is_recognised() {
-        assert!(looks_like_leaked_scaffold(
-            "<answer-contract> When is today? </answer-contract>"
-        ));
-    }
-
-    #[test]
-    fn every_injected_scaffold_tag_is_recognised() {
+    fn every_envelope_tag_is_one_the_reply_filter_drops() {
+        use pond_core::models::services::reply_filter::{ReplyFilter, SCAFFOLD_TAGS};
         for tag in SCAFFOLD_TAGS {
-            let leaked = format!("some preamble {tag} and more");
-            assert!(looks_like_leaked_scaffold(&leaked), "tag: {tag}");
+            let mut filter = ReplyFilter::new();
+            let echoed = format!("<{tag}>\necho\n</{tag}>\nThe answer.");
+            let mut shown = filter.push(&echoed);
+            shown.push_str(&filter.finish());
+            assert_eq!(shown.trim(), "The answer.", "tag: {tag}");
         }
-    }
-
-    /// Only GIAP's bracketed tag names trip this, not the same words in prose.
-    #[test]
-    fn an_ordinary_answer_is_not_mistaken_for_leaked_scaffolding() {
-        assert!(!looks_like_leaked_scaffold(
-            "The sky is blue on a clear day."
-        ));
-        assert!(!looks_like_leaked_scaffold(
-            "Today's context and your message history look fine."
-        ));
     }
 
     /// The knob set doubles as the change signature that gates `set_var`.
@@ -8012,6 +9385,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

@@ -13,7 +13,7 @@ pipe. For third-party servers see [Building Extensions](extensions.md).
 | `giap-system` | `system.rs` | `get_current_time`, `get_system_info`, `send_notification` | `ext_system_enabled` |
 | `giap-schedule` | `schedule.rs` | `list_schedules`, `set_timer`, `create_schedule`, `schedule_action`, `world_clock` | `ext_schedule_enabled` (and a scheduler) |
 | `giap-weather` | `weather.rs` | `get_current_weather`, `get_weather_forecast` | `ext_weather_enabled` |
-| `giap-knowledge` | `knowledge.rs`, `web_search.rs`, `wolfram.rs` | `get_wikipedia_article`, `search_web`, `compute_answer` | `ext_knowledge_enabled` |
+| `giap-knowledge` | `knowledge.rs`, `web_search.rs`, `web_page.rs`, `wolfram.rs` | `get_wikipedia_article`, `search_web`, `read_web_page`, `compute_answer` | `ext_knowledge_enabled` |
 | `giap-device` | `device.rs` | `list_registered_devices`, `set_audio_device`, `get_user_profile`, `list_skills`, `load_skill` | `ext_device_enabled` |
 | `giap-device-control` | `device_control.rs` | `describe_device`, `get_device_state`, `set_device_state` | `ext_device_enabled` |
 | `giap-sensors` | `sensors.rs` | `get_sensor_reading`, `get_sensor_history`, `list_sensors` | `ext_sensor_enabled` |
@@ -21,7 +21,7 @@ pipe. For third-party servers see [Building Extensions](extensions.md).
 | `giap-context` | `context.rs` | `search_context`, `recall`, `get_recent_context` | `ext_context_enabled` (off by default) |
 | `giap-orchestrator` | `orchestrator.rs` | `delegate`, `check_task` | `ext_orchestrator_enabled` (off by default) |
 
-37 tools. Registration is in `register_giap_extensions`
+38 tools. Registration is in `register_giap_extensions`
 (`crates/pond-adapters-goose/src/giap_registration.rs`). `GIAP_NO_TOOLS` registers none.
 `search_web` and `compute_answer` are offered only while their keys (`BRAVE_SEARCH_API_KEY`,
 `WOLFRAM_APP_ID`) are stored (`TOOL_REQUIREMENTS` in `crates/pond-core/src/mcp/domain/tool_group.rs`).
@@ -90,8 +90,8 @@ helpers in `crates/pond-mcp-server/src/format.rs`:
 | `format_not_configured(feature, signup_url)` | A tool that cannot work without a key |
 | `format_degraded` / `degrade_result` | A keyless fallback's answer, with a note appended |
 
-Budgets in use: Wikipedia extracts 4,000 bytes, `search_web` 1,800 (2,400 wide), `compute_answer`
-1,800.
+Budgets in use: Wikipedia extracts 4,000 bytes, `search_web` 1,800 (2,400 wide), `read_web_page`
+1,800 of quoted lines or one 3,200-byte part, `compute_answer` 1,800.
 
 A result that a desktop card renders starts with a `[[[mcp-ui:<kind>:<json>]]]` line (weather,
 knowledge). The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`

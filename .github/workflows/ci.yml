@@ -196,6 +196,7 @@ jobs:
             -p pond-audio-out \
             -p pond-adapters-audio-devices \
             -p pond-ear \
+            -p pond-adapters-ear \
             -p pond-core \
             -p pond-infra \
             -p pond-infra-scheduler \
@@ -226,6 +227,7 @@ jobs:
             -p pond-audio-out \
             -p pond-adapters-audio-devices \
             -p pond-ear \
+            -p pond-adapters-ear \
             -p pond-core \
             -p pond-infra \
             -p pond-infra-scheduler \
@@ -488,6 +490,18 @@ jobs:
 
       - name: Tests
         run: bash scripts/lib/connect-setup.test.sh
+
+  # The clock's host side (scripts/lib/time-sync.sh): the doctor's synchronisation and pool-only
+  # lines, and the timesyncd drop-in's write, idempotence, dry run, failed restart and removal,
+  # against a scratch root and fake timedatectl and systemctl.
+  time-sync:
+    name: Clock host scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/time-sync.test.sh
 
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.

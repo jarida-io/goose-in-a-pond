@@ -1,15 +1,20 @@
 //! Device Control MCP server: describe, read and set devices via [`DeviceControlPort`]. The
 //! desktop Hub drives devices through these same tools (`POST /api/v1/tools/invoke`).
 
+use chrono::Utc;
+use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::device_control::{
-    DeviceControlPort, DeviceDescription, DeviceState, ValueSpec,
+    DeviceControlPort, DeviceDescription, DeviceState, DeviceStatePatch, ModeChange, ValueSpec,
 };
 use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry};
+use pond_core::user_data::ports::last_action::{LastActionRepository, LastDeviceAction};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
+        ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -26,6 +31,14 @@ use std::sync::Arc;
 pub struct DescribeDeviceParams {
     /// Device id, name, or a natural reference like "the fan".
     pub device_id: String,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// No fields of its own: undo acts on whoever is asking, not on anything they name.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct UndoLastActionParams {
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -99,12 +112,36 @@ pub struct DeviceControlMcpServer {
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     /// Resolves natural references ("the light", a friendly name) to backend device ids.
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    /// What "undo" would reverse, kept one per member; `None` where no change can be recorded.
+    last_action: Option<Arc<dyn LastActionRepository + Send + Sync>>,
+    /// Live turns by engine session; `None` reads the registry installed with the orchestrator.
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+    children: Arc<ChildSessionRegistry>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
 
 /// Device-reference resolution, shared by every tool that takes a `device_id`.
 impl DeviceControlMcpServer {
+    /// The calling member, if the live turn behind this call resolves to one. `None` for an
+    /// unidentified speaker or a household-wide context -- their commands are still carried out,
+    /// just never remembered for "undo" (there is nobody specific to remember them for).
+    fn owner_for(&self, meta: &Meta) -> Option<String> {
+        let session = crate::session_from_meta(meta)?;
+        let turns = self
+            .turns
+            .clone()
+            .or_else(|| crate::installed_orchestrator_deps().map(|deps| deps.authorities()));
+        let scope = turns
+            .and_then(|turns| turns.authority_for_engine_session(&session))
+            .map(|authority| authority.profile_scope().clone())
+            .or_else(|| self.children.scope_of(&session))?;
+        match scope {
+            ProfileScope::Owner(id) => Some(id),
+            ProfileScope::Household | ProfileScope::Guest => None,
+        }
+    }
+
     /// The registered id for a caller's reference, or the guidance to send instead.
     async fn resolve_or_explain(
         &self,
@@ -320,8 +357,31 @@ impl DeviceControlMcpServer {
         Self {
             control,
             registry,
+            last_action: None,
+            turns: None,
+            children: process_child_sessions(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Remembers each member's last command, so "undo"/"rudisha" can reverse it. Without this,
+    /// commands still run, just nothing is kept to undo.
+    pub fn with_last_action(mut self, repo: Arc<dyn LastActionRepository + Send + Sync>) -> Self {
+        self.last_action = Some(repo);
+        self
+    }
+
+    /// Resolves callers from these registries instead of the process's own -- for tests, which
+    /// must not share live-turn state with the rest of the test binary.
+    #[cfg(test)]
+    fn with_registries(
+        mut self,
+        turns: Arc<TurnAuthorityRegistry>,
+        children: Arc<ChildSessionRegistry>,
+    ) -> Self {
+        self.turns = Some(turns);
+        self.children = children;
+        self
     }
 
     #[tool(
@@ -387,10 +447,18 @@ impl DeviceControlMcpServer {
     )]
     async fn set_device_state(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SetDeviceStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let p = params.0;
+        self.run_set_device_state(&ctx.meta, params.0).await
+    }
+
+    /// The body of `set_device_state`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_set_device_state(
+        &self,
+        meta: &Meta,
+        p: SetDeviceStateParams,
+    ) -> Result<CallToolResult, ErrorData> {
         let device_id = p.device_id.trim();
 
         if device_id.is_empty() {
@@ -457,15 +525,34 @@ impl DeviceControlMcpServer {
         };
         let device_id = device_id.as_str();
 
+        // Who to remember this command for, and what the device was before it -- read now,
+        // before anything changes, so undo has a "before" to restore. Either missing (no live
+        // turn resolves to a member, or the backend can't report a typed state) just means this
+        // command won't be undoable; it still runs.
+        let owner_id = self
+            .last_action
+            .is_some()
+            .then(|| self.owner_for(meta))
+            .flatten();
+        let before = match &owner_id {
+            Some(_) => self.control.state_patch(device_id).await.ok(),
+            None => None,
+        };
+
         let mut applied: Vec<String> = Vec::new();
         // Anything the device declined to do, said in its own sentence.
         let mut notes: Vec<String> = Vec::new();
+        // Only the fields this call actually changed, in the values the backend confirmed.
+        let mut requested = DeviceStatePatch::default();
 
         if let Some(on) = p.power {
             match self.control.set_power(device_id, on).await {
-                Ok(_) => applied.push(format!("power={}", if on { "on" } else { "off" })),
+                Ok(_) => {
+                    applied.push(format!("power={}", if on { "on" } else { "off" }));
+                    requested.on = Some(on);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set power on '{device_id}': {e}"
                     )))
                 }
@@ -474,9 +561,12 @@ impl DeviceControlMcpServer {
         if let Some(b) = p.brightness {
             let pct = b.min(100);
             match self.control.set_brightness(device_id, pct).await {
-                Ok(_) => applied.push(format!("brightness={pct}%")),
+                Ok(_) => {
+                    applied.push(format!("brightness={pct}%"));
+                    requested.brightness = Some(pct);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set brightness on '{device_id}': {e}"
                     )))
                 }
@@ -484,9 +574,12 @@ impl DeviceControlMcpServer {
         }
         if let Some(t) = p.target_temp {
             match self.control.set_target_temp(device_id, t).await {
-                Ok(_) => applied.push(format!("target_temp={t}°C")),
+                Ok(_) => {
+                    applied.push(format!("target_temp={t}°C"));
+                    requested.target_temp = Some(t);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set temperature on '{device_id}': {e}"
                     )))
                 }
@@ -494,16 +587,28 @@ impl DeviceControlMcpServer {
         }
         if let Some(locked) = p.locked {
             match self.control.set_locked(device_id, locked).await {
-                Ok(_) => applied.push(format!("locked={locked}")),
-                Err(e) => return Ok(guidance(format!("Couldn't (un)lock '{device_id}': {e}"))),
+                Ok(_) => {
+                    applied.push(format!("locked={locked}"));
+                    requested.locked = Some(locked);
+                }
+                Err(e) => {
+                    return Ok(device_failed(format!(
+                        "Couldn't (un)lock '{device_id}': {e}"
+                    )))
+                }
             }
         }
         if let Some(open) = p.valve {
             match self.control.set_valve(device_id, open).await {
-                Ok(_) => applied.push(format!("valve={}", if open { "open" } else { "closed" })),
+                Ok(_) => {
+                    applied.push(format!("valve={}", if open { "open" } else { "closed" }));
+                    requested.valve = Some(open);
+                }
                 Err(e) => {
                     let asked = if open { "open" } else { "close" };
-                    return Ok(guidance(format!("Couldn't {asked} '{device_id}': {e}")));
+                    return Ok(device_failed(format!(
+                        "Couldn't {asked} '{device_id}': {e}"
+                    )));
                 }
             }
         }
@@ -512,9 +617,13 @@ impl DeviceControlMcpServer {
             let hue = p.hue.unwrap_or(0) % 360;
             let sat = p.saturation.unwrap_or(100).min(100);
             match self.control.set_color(device_id, hue, sat).await {
-                Ok(_) => applied.push(format!("colour=hue {hue}°/sat {sat}%")),
+                Ok(_) => {
+                    applied.push(format!("colour=hue {hue}°/sat {sat}%"));
+                    requested.hue = Some(hue);
+                    requested.saturation = Some(sat);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set colour on '{device_id}': {e}"
                     )))
                 }
@@ -523,9 +632,12 @@ impl DeviceControlMcpServer {
         if let Some(level) = p.volume {
             let pct = level.min(100);
             match self.control.set_volume(device_id, pct).await {
-                Ok(_) => applied.push(format!("volume={pct}%")),
+                Ok(_) => {
+                    applied.push(format!("volume={pct}%"));
+                    requested.volume = Some(pct);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set volume on '{device_id}': {e}"
                     )))
                 }
@@ -534,9 +646,12 @@ impl DeviceControlMcpServer {
         // Its own action, never substituted for hue: hue on a tunable-white bulb is rejected.
         if let Some(kelvin) = p.color_temp {
             match self.control.set_color_temp(device_id, kelvin).await {
-                Ok(_) => applied.push(format!("color_temp={kelvin}K")),
+                Ok(_) => {
+                    applied.push(format!("color_temp={kelvin}K"));
+                    requested.color_temp = Some(kelvin);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set colour temperature on '{device_id}': {e}"
                     )))
                 }
@@ -545,9 +660,12 @@ impl DeviceControlMcpServer {
         if let Some(speed) = p.fan_speed {
             let pct = speed.min(100);
             match self.control.set_fan_speed(device_id, pct).await {
-                Ok(_) => applied.push(format!("fan_speed={pct}%")),
+                Ok(_) => {
+                    applied.push(format!("fan_speed={pct}%"));
+                    requested.fan_speed = Some(pct);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set fan speed on '{device_id}': {e}"
                     )))
                 }
@@ -555,9 +673,12 @@ impl DeviceControlMcpServer {
         }
         if let Some(mode) = p.fan_mode.as_deref() {
             match self.control.set_fan_mode(device_id, mode).await {
-                Ok(_) => applied.push(format!("fan_mode={mode}")),
+                Ok(_) => {
+                    applied.push(format!("fan_mode={mode}"));
+                    requested.fan_mode = Some(mode.to_string());
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set fan mode on '{device_id}': {e}"
                     )))
                 }
@@ -574,11 +695,20 @@ impl DeviceControlMcpServer {
             match self.control.set_mode(device_id, setting, value).await {
                 // Reported in the device's own label, which may differ from what was typed.
                 Ok(outcome) => match outcome.applied.mode {
-                    Some(mode) => applied.push(format!("{}={}", mode.setting, mode.value)),
-                    None => applied.push(format!("{setting}={value}")),
+                    Some(mode) => {
+                        applied.push(format!("{}={}", mode.setting, mode.value));
+                        requested.mode = Some(mode);
+                    }
+                    None => {
+                        applied.push(format!("{setting}={value}"));
+                        requested.mode = Some(ModeChange {
+                            setting: setting.to_string(),
+                            value: value.to_string(),
+                        });
+                    }
                 },
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set {setting} on '{device_id}': {e}"
                     )))
                 }
@@ -588,27 +718,40 @@ impl DeviceControlMcpServer {
             match self.control.set_operation(device_id, operation).await {
                 Ok(outcome) => {
                     match render_operation(operation, outcome.applied.operation.as_deref()) {
-                        OperationNote::Reached(text) => applied.push(text),
+                        OperationNote::Reached(text) => {
+                            applied.push(text);
+                            requested.operation = Some(operation.to_string());
+                        }
                         OperationNote::Missed(text) => notes.push(text),
                     }
                 }
-                Err(e) => return Ok(guidance(format!("Couldn't {operation} '{device_id}': {e}"))),
+                Err(e) => {
+                    return Ok(device_failed(format!(
+                        "Couldn't {operation} '{device_id}': {e}"
+                    )))
+                }
             }
         }
         if let Some(open) = p.tilt {
             let pct = open.min(100);
             match self.control.set_tilt(device_id, pct).await {
-                Ok(_) => applied.push(format!("tilt={pct}% open")),
-                Err(e) => return Ok(guidance(format!("Couldn't tilt '{device_id}': {e}"))),
+                Ok(_) => {
+                    applied.push(format!("tilt={pct}% open"));
+                    requested.tilt = Some(pct);
+                }
+                Err(e) => return Ok(device_failed(format!("Couldn't tilt '{device_id}': {e}"))),
             }
         }
 
         if let Some(open) = p.position {
             let pct = open.min(100);
             match self.control.set_position(device_id, pct).await {
-                Ok(_) => applied.push(format!("position={pct}% open")),
+                Ok(_) => {
+                    applied.push(format!("position={pct}% open"));
+                    requested.position = Some(pct);
+                }
                 Err(e) => {
-                    return Ok(guidance(format!(
+                    return Ok(device_failed(format!(
                         "Couldn't set position on '{device_id}': {e}"
                     )))
                 }
@@ -621,6 +764,22 @@ impl DeviceControlMcpServer {
                 "Nothing to set on '{device_id}' — no state was given. \
                  describe_device lists what it accepts."
             )));
+        }
+
+        // Best-effort: a device with nothing recorded, or no member to record it for, still ran
+        // the command above -- it just won't be offered for "undo".
+        if let (Some(owner_id), Some(last_action), Some(before)) =
+            (&owner_id, &self.last_action, before)
+        {
+            let action = LastDeviceAction {
+                device_id: device_id.to_string(),
+                before: before.restricted_to(&requested),
+                after: requested.clone(),
+                recorded_at: Utc::now(),
+            };
+            if let Err(e) = last_action.record(owner_id, action).await {
+                tracing::warn!(error = %e, device_id, "could not remember this command for undo");
+            }
         }
 
         // Separate sentences: what took effect, then anything the device did not do.
@@ -638,11 +797,190 @@ impl DeviceControlMcpServer {
 
         Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
     }
+
+    /// Replays every `Some` field of `patch` through the matching `set_*` call, continuing
+    /// through the rest even where one fails. Kept separate from `run_set_device_state`'s own
+    /// per-field matching, which stops at the first error: undo needs to know exactly how much
+    /// of the reversal went through, not just the first problem.
+    ///
+    /// `patch.mode`/`patch.operation` aside, the fields line up with `set_*`'s own 1:1 verbs. A
+    /// command's `operation` (start/stop/pause/resume) is never replayed here -- it names a
+    /// transition, not a state, so there's nothing for undo to put it back to.
+    async fn apply_patch(
+        &self,
+        device_id: &str,
+        patch: &DeviceStatePatch,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut applied = Vec::new();
+        let mut failed = Vec::new();
+
+        if let Some(on) = patch.on {
+            match self.control.set_power(device_id, on).await {
+                Ok(_) => applied.push(format!("power={}", if on { "on" } else { "off" })),
+                Err(e) => failed.push(format!("power ({e})")),
+            }
+        }
+        if let Some(pct) = patch.brightness {
+            match self.control.set_brightness(device_id, pct).await {
+                Ok(_) => applied.push(format!("brightness={pct}%")),
+                Err(e) => failed.push(format!("brightness ({e})")),
+            }
+        }
+        if let Some(pct) = patch.volume {
+            match self.control.set_volume(device_id, pct).await {
+                Ok(_) => applied.push(format!("volume={pct}%")),
+                Err(e) => failed.push(format!("volume ({e})")),
+            }
+        }
+        if let Some(t) = patch.target_temp {
+            match self.control.set_target_temp(device_id, t).await {
+                Ok(_) => applied.push(format!("target_temp={t}°C")),
+                Err(e) => failed.push(format!("target_temp ({e})")),
+            }
+        }
+        if let Some(locked) = patch.locked {
+            match self.control.set_locked(device_id, locked).await {
+                Ok(_) => applied.push(format!("locked={locked}")),
+                Err(e) => failed.push(format!("lock ({e})")),
+            }
+        }
+        if patch.hue.is_some() || patch.saturation.is_some() {
+            let hue = patch.hue.unwrap_or(0);
+            let sat = patch.saturation.unwrap_or(100);
+            match self.control.set_color(device_id, hue, sat).await {
+                Ok(_) => applied.push(format!("colour=hue {hue}°/sat {sat}%")),
+                Err(e) => failed.push(format!("colour ({e})")),
+            }
+        }
+        if let Some(kelvin) = patch.color_temp {
+            match self.control.set_color_temp(device_id, kelvin).await {
+                Ok(_) => applied.push(format!("color_temp={kelvin}K")),
+                Err(e) => failed.push(format!("color_temp ({e})")),
+            }
+        }
+        if let Some(pct) = patch.fan_speed {
+            match self.control.set_fan_speed(device_id, pct).await {
+                Ok(_) => applied.push(format!("fan_speed={pct}%")),
+                Err(e) => failed.push(format!("fan_speed ({e})")),
+            }
+        }
+        if let Some(mode) = patch.fan_mode.as_deref() {
+            match self.control.set_fan_mode(device_id, mode).await {
+                Ok(_) => applied.push(format!("fan_mode={mode}")),
+                Err(e) => failed.push(format!("fan_mode ({e})")),
+            }
+        }
+        if let Some(pct) = patch.position {
+            match self.control.set_position(device_id, pct).await {
+                Ok(_) => applied.push(format!("position={pct}% open")),
+                Err(e) => failed.push(format!("position ({e})")),
+            }
+        }
+        if let Some(pct) = patch.tilt {
+            match self.control.set_tilt(device_id, pct).await {
+                Ok(_) => applied.push(format!("tilt={pct}% open")),
+                Err(e) => failed.push(format!("tilt ({e})")),
+            }
+        }
+        if let Some(open) = patch.valve {
+            match self.control.set_valve(device_id, open).await {
+                Ok(_) => applied.push(format!("valve={}", if open { "open" } else { "closed" })),
+                Err(e) => failed.push(format!("valve ({e})")),
+            }
+        }
+        if let Some(mode) = &patch.mode {
+            match self
+                .control
+                .set_mode(device_id, &mode.setting, &mode.value)
+                .await
+            {
+                Ok(_) => applied.push(format!("{}={}", mode.setting, mode.value)),
+                Err(e) => failed.push(format!("{} ({e})", mode.setting)),
+            }
+        }
+
+        (applied, failed)
+    }
+
+    #[tool(
+        description = "Reverses the asking member's own most recent device change (power, \
+                       brightness, lock, colour, fan, position...) back to what it was right \
+                       before. Only one step back, and only their own last command -- undoing \
+                       twice in a row finds nothing left to undo rather than redoing it. Say \
+                       which device only if the member explicitly names one to undo; otherwise \
+                       call with no arguments and it finds the right one itself."
+    )]
+    async fn undo_last_action(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        _params: Parameters<UndoLastActionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_undo_last_action(&ctx.meta).await
+    }
+
+    /// The body of `undo_last_action`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_undo_last_action(&self, meta: &Meta) -> Result<CallToolResult, ErrorData> {
+        let Some(last_action) = self.last_action.clone() else {
+            return Ok(guidance("There's nothing to undo.".to_string()));
+        };
+        let Some(owner_id) = self.owner_for(meta) else {
+            return Ok(guidance(
+                "I can't tell who's asking, so there's nothing for me to undo.".to_string(),
+            ));
+        };
+        let action = match last_action.last_for(&owner_id).await {
+            Ok(Some(action)) => action,
+            Ok(None) => return Ok(guidance("There's nothing to undo.".to_string())),
+            Err(e) => return Ok(guidance(format!("Couldn't look up what to undo: {e}"))),
+        };
+
+        let (applied, failed) = self.apply_patch(&action.device_id, &action.before).await;
+
+        if failed.is_empty() {
+            // Fully reversed: forget it, so a second "undo" right after finds nothing rather
+            // than undoing the undo.
+            if let Err(e) = last_action.clear(&owner_id).await {
+                tracing::warn!(
+                    error = %e,
+                    device_id = %action.device_id,
+                    "undo succeeded but could not forget it"
+                );
+            }
+            let message = if applied.is_empty() {
+                format!("Nothing to undo on '{}'.", action.device_id)
+            } else {
+                format!(
+                    "Undid the last command on {}: {}.",
+                    action.device_id,
+                    applied.join(", ")
+                )
+            };
+            Ok(CallToolResult::success(vec![ContentBlock::text(message)]))
+        } else {
+            // Left in place on purpose: part of the reversal didn't take, so the record still
+            // has something correct to retry from instead of this looking already handled.
+            let mut message = format!(
+                "Could only partly undo the last command on '{}'",
+                action.device_id
+            );
+            if !applied.is_empty() {
+                message.push_str(&format!(" (reverted {})", applied.join(", ")));
+            }
+            message.push_str(&format!(": {} didn't take.", failed.join("; ")));
+            Ok(guidance(message))
+        }
+    }
 }
 
 /// Error-as-guidance: the LLM reads this and adapts (per the MCP server standard).
 fn guidance(msg: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(msg)])
+}
+
+/// A command the device refused or never got: no other tool can fix it (the MCP server standard's
+/// error case), and `/tools/invoke` keeps no reply for it, so a resent tap tries the device again.
+fn device_failed(msg: String) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(msg)])
 }
 
 // ── Natural device resolution (pure, unit-tested) ────────────────────────────
@@ -728,6 +1066,7 @@ use tokio::io::DuplexStream;
 struct DeviceControlDeps {
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    last_action: Arc<dyn LastActionRepository + Send + Sync>,
 }
 
 static DEVICE_CONTROL_DEPS: OnceLock<DeviceControlDeps> = OnceLock::new();
@@ -736,8 +1075,13 @@ static DEVICE_CONTROL_DEPS: OnceLock<DeviceControlDeps> = OnceLock::new();
 pub fn init_device_control_deps(
     control: Arc<dyn DeviceControlPort + Send + Sync>,
     registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    last_action: Arc<dyn LastActionRepository + Send + Sync>,
 ) {
-    let _ = DEVICE_CONTROL_DEPS.set(DeviceControlDeps { control, registry });
+    let _ = DEVICE_CONTROL_DEPS.set(DeviceControlDeps {
+        control,
+        registry,
+        last_action,
+    });
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
@@ -749,7 +1093,8 @@ pub fn spawn_device_control_server(reader: DuplexStream, writer: DuplexStream) {
         );
         return;
     };
-    let server = DeviceControlMcpServer::new(deps.control.clone(), deps.registry.clone());
+    let server = DeviceControlMcpServer::new(deps.control.clone(), deps.registry.clone())
+        .with_last_action(deps.last_action.clone());
     crate::serve_builtin("giap-device-control", server, reader, writer);
 }
 
@@ -762,6 +1107,7 @@ mod tests {
     use pond_core::user_data::ports::device_control::{
         DeviceControlOutcome, DeviceStatePatch, StateValue,
     };
+    use std::sync::Mutex;
     use OperationNote::{Missed, Reached};
 
     use pond_core::user_data::ports::device_control::{
@@ -1361,5 +1707,387 @@ mod tests {
         assert_eq!(p.device_id, "lamp");
         assert_eq!(p.power, Some(true));
         assert!(p.extra.contains_key("surprise"));
+    }
+
+    // ── Remembering a command, for "undo" ────────────────────────────────────
+
+    struct OneDevice(Device);
+    #[async_trait]
+    impl DeviceRegistry for OneDevice {
+        async fn register(
+            &self,
+            _: pond_core::user_data::ports::device_registry::RegisterDeviceRequest,
+        ) -> anyhow::Result<Device> {
+            anyhow::bail!("not used")
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![self.0.clone()])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(Some(self.0.clone()))
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn meta_for(session: &str) -> Meta {
+        let mut m = Meta::new();
+        m.0.insert(
+            crate::session_meta::SESSION_ID_META_KEY.to_string(),
+            serde_json::Value::String(session.to_string()),
+        );
+        m
+    }
+
+    /// Publishes a live turn naming `scope` as the speaker; hold the returned lease or the turn
+    /// reads as ended and the call resolves nobody.
+    fn turn_as(
+        turns: &Arc<TurnAuthorityRegistry>,
+        session: &str,
+        scope: pond_core::user_data::domain::profile::ProfileScope,
+    ) -> pond_core::shared::services::turn_authority::TurnAuthorityLease {
+        turns.publish(
+            session,
+            pond_core::shared::domain::orchestration::DelegationAuthority::for_turn(
+                session.to_string(),
+                scope,
+                ["giap-device-control__set_device_state"],
+            ),
+            Default::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_identified_members_command_is_remembered_with_its_before_state() {
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::mocks::mock_device_control::RecordingDeviceControl;
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let control = Arc::new(RecordingDeviceControl::default());
+        control.set_power("lamp-1", false).await.unwrap(); // the state before the command under test
+
+        let last_action = Arc::new(MockLastActionRepository::default());
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let children = Arc::new(ChildSessionRegistry::new());
+        let server = DeviceControlMcpServer::new(
+            control.clone(),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(last_action.clone())
+        .with_registries(turns.clone(), children);
+
+        let _lease = turn_as(&turns, "engine-amina", ProfileScope::Owner("amina".into()));
+        server
+            .run_set_device_state(
+                &meta_for("engine-amina"),
+                SetDeviceStateParams {
+                    device_id: "lamp-1".into(),
+                    power: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let remembered = last_action.last_for("amina").await.unwrap().unwrap();
+        assert_eq!(remembered.device_id, "lamp-1");
+        assert_eq!(
+            remembered.before,
+            DeviceStatePatch {
+                on: Some(false),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            remembered.after,
+            DeviceStatePatch {
+                on: Some(true),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_callers_command_still_runs_but_is_not_remembered() {
+        use pond_core::user_data::mocks::mock_device_control::RecordingDeviceControl;
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let control = Arc::new(RecordingDeviceControl::default());
+        let last_action = Arc::new(MockLastActionRepository::default());
+        let server = DeviceControlMcpServer::new(
+            control.clone(),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(last_action.clone())
+        .with_registries(
+            Arc::new(TurnAuthorityRegistry::new()),
+            Arc::new(ChildSessionRegistry::new()),
+        );
+
+        // No turn published for this session: nobody resolves.
+        let result = server
+            .run_set_device_state(
+                &meta_for("engine-nobody"),
+                SetDeviceStateParams {
+                    device_id: "lamp-1".into(),
+                    power: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            format!("{:?}", result.content).contains("power=on"),
+            "the command still ran"
+        );
+        assert_eq!(
+            control.last_call().as_deref(),
+            Some("set_power(lamp-1, on=true)")
+        );
+        assert!(last_action.last_for("amina").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn without_last_action_wired_the_command_runs_unaffected() {
+        let server = DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        );
+
+        let result = server
+            .run_set_device_state(
+                &meta_for("engine-amina"),
+                SetDeviceStateParams {
+                    device_id: "lamp-1".into(),
+                    power: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(format!("{:?}", result.content).contains("power=on"));
+    }
+
+    // ── Undoing a remembered command ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn undo_restores_the_before_state_and_forgets_it() {
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::mocks::mock_device_control::RecordingDeviceControl;
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let control = Arc::new(RecordingDeviceControl::default());
+        control.set_power("lamp-1", false).await.unwrap(); // the state before the command under test
+
+        let last_action = Arc::new(MockLastActionRepository::default());
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let children = Arc::new(ChildSessionRegistry::new());
+        let server = DeviceControlMcpServer::new(
+            control.clone(),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(last_action.clone())
+        .with_registries(turns.clone(), children);
+
+        let _lease = turn_as(&turns, "engine-amina", ProfileScope::Owner("amina".into()));
+        server
+            .run_set_device_state(
+                &meta_for("engine-amina"),
+                SetDeviceStateParams {
+                    device_id: "lamp-1".into(),
+                    power: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(last_action.last_for("amina").await.unwrap().is_some());
+
+        let result = server
+            .run_undo_last_action(&meta_for("engine-amina"))
+            .await
+            .unwrap();
+
+        assert!(
+            format!("{:?}", result.content).contains("power=off"),
+            "{:?}",
+            result.content
+        );
+        assert_eq!(
+            control.last_call().as_deref(),
+            Some("set_power(lamp-1, on=false)")
+        );
+        assert!(
+            last_action.last_for("amina").await.unwrap().is_none(),
+            "a fully reversed action should be forgotten"
+        );
+    }
+
+    #[tokio::test]
+    async fn undoing_with_nothing_recorded_says_so() {
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let last_action = Arc::new(MockLastActionRepository::default());
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(last_action)
+        .with_registries(turns.clone(), Arc::new(ChildSessionRegistry::new()));
+
+        let _lease = turn_as(&turns, "engine-amina", ProfileScope::Owner("amina".into()));
+        let result = server
+            .run_undo_last_action(&meta_for("engine-amina"))
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", result.content).contains("nothing to undo"));
+    }
+
+    #[tokio::test]
+    async fn undoing_for_an_unidentified_caller_says_so() {
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let server = DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(Arc::new(MockLastActionRepository::default()))
+        .with_registries(
+            Arc::new(TurnAuthorityRegistry::new()),
+            Arc::new(ChildSessionRegistry::new()),
+        );
+
+        // No turn published for this session: nobody resolves.
+        let result = server
+            .run_undo_last_action(&meta_for("engine-nobody"))
+            .await
+            .unwrap();
+
+        assert!(format!("{:?}", result.content).contains("can't tell who's asking"));
+    }
+
+    /// Succeeds locking, fails unlocking -- so undo (which unlocks, to restore an unlocked
+    /// "before") fails on exactly that one field while its other field still reverts.
+    #[derive(Default)]
+    struct JammedUnlockControl {
+        state: Mutex<DeviceStatePatch>,
+    }
+    impl JammedUnlockControl {
+        fn seed(&self, on: bool, locked: bool) {
+            let mut s = self.state.lock().unwrap();
+            s.on = Some(on);
+            s.locked = Some(locked);
+        }
+    }
+    #[async_trait]
+    impl DeviceControlPort for JammedUnlockControl {
+        async fn set_power(&self, id: &str, on: bool) -> anyhow::Result<DeviceControlOutcome> {
+            self.state.lock().unwrap().on = Some(on);
+            Ok(DeviceControlOutcome::new(
+                id,
+                DeviceStatePatch {
+                    on: Some(on),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn set_brightness(
+            &self,
+            id: &str,
+            percent: u8,
+        ) -> anyhow::Result<DeviceControlOutcome> {
+            Ok(DeviceControlOutcome::new(
+                id,
+                DeviceStatePatch {
+                    brightness: Some(percent),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn set_target_temp(
+            &self,
+            id: &str,
+            celsius: f32,
+        ) -> anyhow::Result<DeviceControlOutcome> {
+            Ok(DeviceControlOutcome::new(
+                id,
+                DeviceStatePatch {
+                    target_temp: Some(celsius),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn set_locked(&self, id: &str, locked: bool) -> anyhow::Result<DeviceControlOutcome> {
+            if !locked {
+                anyhow::bail!("'{id}' is jammed and will not unlock");
+            }
+            self.state.lock().unwrap().locked = Some(locked);
+            Ok(DeviceControlOutcome::new(
+                id,
+                DeviceStatePatch {
+                    locked: Some(locked),
+                    ..Default::default()
+                },
+            ))
+        }
+        async fn state_patch(&self, _id: &str) -> anyhow::Result<DeviceStatePatch> {
+            Ok(self.state.lock().unwrap().clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partly_failed_undo_leaves_the_record_in_place() {
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::mocks::mock_last_action::MockLastActionRepository;
+
+        let control = Arc::new(JammedUnlockControl::default());
+        control.seed(false, false); // lamp off, door unlocked, before the command under test
+
+        let last_action = Arc::new(MockLastActionRepository::default());
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = DeviceControlMcpServer::new(
+            control.clone(),
+            Arc::new(OneDevice(device("lamp-1", "Lamp", "light"))),
+        )
+        .with_last_action(last_action.clone())
+        .with_registries(turns.clone(), Arc::new(ChildSessionRegistry::new()));
+
+        let _lease = turn_as(&turns, "engine-amina", ProfileScope::Owner("amina".into()));
+        server
+            .run_set_device_state(
+                &meta_for("engine-amina"),
+                SetDeviceStateParams {
+                    device_id: "lamp-1".into(),
+                    power: Some(true),
+                    locked: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let recorded_before_undo = last_action.last_for("amina").await.unwrap().unwrap();
+
+        let result = server
+            .run_undo_last_action(&meta_for("engine-amina"))
+            .await
+            .unwrap();
+
+        let text = format!("{:?}", result.content);
+        assert!(text.contains("power=off"), "{text}"); // this half of the undo went through
+        assert!(text.contains("jammed"), "{text}"); // this half didn't
+
+        assert_eq!(
+            last_action.last_for("amina").await.unwrap(),
+            Some(recorded_before_undo),
+            "a partly failed undo must not forget the action -- there's still something to retry"
+        );
     }
 }

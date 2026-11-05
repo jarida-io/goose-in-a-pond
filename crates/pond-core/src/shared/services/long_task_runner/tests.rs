@@ -229,7 +229,7 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
     };
     let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
 
-    assert!(plan(&research).contains("deep research"));
+    assert!(plan(&research).contains("This is research"));
     assert!(
         plan(&research).contains(RESULT_TITLE),
         "the plan ends in the report the card opens"
@@ -242,8 +242,47 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
         plan(&research).contains("Do not plan a step that combines"),
         "a compile step would repeat every section in the joined report"
     );
-    assert!(!plan(&general).contains("deep research"));
-    assert!(!work(&general).contains("deep research"));
+    assert!(!plan(&general).contains("This is research"));
+    assert!(!work(&general).contains("This is research"));
+}
+
+#[test]
+fn the_brief_sizes_the_answer_by_the_members_choice_or_asks_the_planner_to() {
+    let research = |answer| {
+        task_in(LongTaskState::Running, None)
+            .with_kind(LongTaskKind::Research)
+            .with_answer(answer)
+    };
+    let step_b = step("b", 0, &[], StepState::Pending, 0);
+    let plan =
+        |task: &LongTask| planner_brief(task, &[], &[], &[], &PlanReason::Fresh, None, t(10));
+    let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
+
+    let short = research(AnswerShape::Short);
+    assert!(plan(&short).contains("wants a short answer"));
+    assert!(
+        !plan(&short).contains("three parts"),
+        "no sections for a short answer"
+    );
+    assert!(
+        !plan(&short).contains("plan_write's answer"),
+        "the member already chose"
+    );
+    assert!(work(&short).contains("150 words"));
+    assert!(!work(&short).contains("400 to 900"));
+
+    let report = research(AnswerShape::Report);
+    assert!(plan(&report).contains("three parts"));
+    assert!(!plan(&report).contains("wants a short answer"));
+    assert!(work(&report).contains("400 to 900"));
+
+    let auto = research(AnswerShape::Auto);
+    assert!(plan(&auto).contains("plan_write's answer"));
+    assert!(plan(&auto).contains("wants a short answer") && plan(&auto).contains("three parts"));
+
+    let general = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    assert!(plan(&general).contains("wants a short answer"));
+    assert!(work(&general).contains("150 words"));
 }
 
 fn run(status: TaskStatus, result: Option<&str>) -> TaskRun {
@@ -574,7 +613,7 @@ fn a_made_agent_gets_only_the_tasks_tools_and_the_workers_budget() {
         instructions: "Compare matatu and SGR fares.".into(),
         tools: vec![
             "giap-knowledge".into(),
-            "giap-device".into(),
+            "giap-device-control".into(),
             "giap-made-up".into(),
         ],
     };
@@ -626,4 +665,135 @@ fn step_parts(step: &PlanStep) -> PlanStepParts {
         finished_at: step.finished_at(),
         agent: step.agent().cloned(),
     }
+}
+
+#[test]
+fn a_short_answers_notification_reads_its_links_as_words_and_stops_at_a_word() {
+    assert_eq!(
+        notification_text("Jerry was seen at 16:10 ([camera events](https://pond.local/e))."),
+        "Jerry was seen at 16:10 (camera events)."
+    );
+    assert_eq!(notification_text("## Answer\nYes."), "Answer\nYes.");
+    let long = "word ".repeat(400);
+    let cut = notification_text(&long);
+    assert!(cut.ends_with("word..."), "{cut}");
+    assert!(cut.chars().count() <= NOTIFICATION_CHARS + 3);
+}
+
+#[test]
+fn a_short_answer_without_a_result_title_still_has_an_answer_and_a_report_does_not_guess() {
+    let found = ArtifactSummary {
+        id: "f1".into(),
+        task_id: "task-1".into(),
+        step_key: Some(StepKey::parse("look").unwrap()),
+        kind: ArtifactKind::Findings,
+        title: "Current Presence and Camera Status".into(),
+        summary: "Nobody is in frame.".into(),
+        tokens: 40,
+        created_at: t(5),
+    };
+    let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
+    assert_eq!(
+        answer_artifact(&short, std::slice::from_ref(&found)).map(|a| a.id.as_str()),
+        Some("f1")
+    );
+    assert!(answer_artifact(&report, std::slice::from_ref(&found)).is_none());
+}
+
+#[test]
+fn only_the_plans_last_open_step_is_told_to_save_the_result() {
+    let a = step("a", 0, &[], StepState::Completed, 1);
+    let b = step("b", 1, &[], StepState::Pending, 0);
+    let c = step("c", 2, &[], StepState::Pending, 0);
+    let steps = [a, b.clone(), c.clone()];
+    assert!(last_step_line(&steps, &b).is_none());
+    assert!(last_step_line(&steps, &c).unwrap().contains("\"Result\""));
+}
+
+#[test]
+fn a_short_answer_left_only_in_a_summary_becomes_its_result() {
+    let mut done = step("look", 0, &[], StepState::Running, 1);
+    done.record(
+        &StepOutcome::new(
+            OutcomeKind::Completed,
+            "Flying is quickest: about an hour in the air.",
+            Vec::new(),
+            None,
+        ),
+        t(9),
+    )
+    .unwrap();
+    let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    let result = summary_as_result(&short, std::slice::from_ref(&done), &[], t(10))
+        .expect("the summary is the answer");
+    assert_eq!(result.title(), RESULT_TITLE);
+    assert!(result.body().contains("about an hour"));
+    let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
+    assert!(summary_as_result(&report, std::slice::from_ref(&done), &[], t(10)).is_none());
+}
+
+#[test]
+fn a_reply_holding_work_is_kept_as_the_steps_draft() {
+    let task = task_in(LongTaskState::Running, None);
+    let plan = "## Saturday\n".to_string()
+        + &"- 09:00 Breakfast by the lake, then a boat ride to Crescent Island. ".repeat(12);
+    let key = StepKey::parse("draft-itinerary").unwrap();
+    let middle = ReplyDraft {
+        key: key.clone(),
+        last: false,
+    };
+    let kept = reply_as_draft(
+        &task,
+        &middle,
+        &run(TaskStatus::Completed, Some(&plan)),
+        t(5),
+    )
+    .expect("a plan written as a reply is kept");
+    assert_eq!(kept.title(), "Saturday");
+    assert_eq!(kept.body(), plan.trim());
+    assert_eq!(
+        kept.step_key().map(|k| k.to_string()).as_deref(),
+        Some("draft-itinerary")
+    );
+
+    let last = ReplyDraft { key, last: true };
+    let result = reply_as_draft(&task, &last, &run(TaskStatus::Completed, Some(&plan)), t(5));
+    assert_eq!(
+        result.map(|a| a.title().to_string()).as_deref(),
+        Some(RESULT_TITLE)
+    );
+
+    assert!(
+        reply_as_draft(
+            &task,
+            &middle,
+            &run(TaskStatus::Completed, Some("I could not save it.")),
+            t(5)
+        )
+        .is_none(),
+        "a sign-off is not work"
+    );
+    assert!(
+        reply_as_draft(&task, &middle, &run(TaskStatus::Failed, Some(&plan)), t(5)).is_none(),
+        "a failed run's text is not handed on"
+    );
+}
+
+#[test]
+fn a_draft_without_a_heading_is_named_from_its_key() {
+    let task = task_in(LongTaskState::Running, None);
+    let text = "The train is faster and costs less than most buses. ".repeat(10);
+    let draft = ReplyDraft {
+        key: StepKey::parse("draft-comfort").unwrap(),
+        last: false,
+    };
+    let kept = reply_as_draft(
+        &task,
+        &draft,
+        &run(TaskStatus::Completed, Some(&text)),
+        t(5),
+    )
+    .unwrap();
+    assert_eq!(kept.title(), "Comfort");
 }

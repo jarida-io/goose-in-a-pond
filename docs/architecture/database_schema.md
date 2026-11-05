@@ -47,7 +47,7 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 | `session_thinking` | Reasoning text kept beside its message when `persist_thinking` is on | `message_id`, `session_id` (both FK, cascade), `block_index`, `content` |
 | `message_attachments` | Metadata for chat image attachments; the bytes live under `<data_dir>/attachments/<session_id>/` | `message_id`, `session_id` (FK, cascade), `ordinal`, `mime_type`, `byte_size`, `file_path` |
 | `engine_session_map` | GIAP session id to the Goose engine's own session id, so a restart resumes the same engine conversation | `session_id` (PK), `engine_session_id` |
-| `session_tool_groups` | Tool groups (MCP extension names) chosen once per session when `tool_selection_mode` narrows | `session_id` (PK), `groups` |
+| `session_tool_groups` | Tool groups (MCP extension names) a session holds when `tool_selection_mode` narrows; only ever grows (a later message or `enable_tool_group` adds) | `session_id` (PK), `groups` |
 
 ### Household, devices and pairing
 
@@ -131,10 +131,10 @@ Never write sensor, camera or telemetry rows to `db.system`; they live here.
 
 The table deliberately has no text column and no foreign keys. A source row and its vector cannot
 be deleted atomically across files under WAL, so orphans are expected; an orphan holds only an
-offset, resolves to nothing on the join, and `VectorIndex::prune_orphans` (called from
-`crates/pond-core/src/context/index_maintenance.rs`) removes it. Retrieval filters on `model_id`,
-so vectors from a different embedder are never scored together. Deleting the file is safe: the pond
-re-embeds.
+offset, resolves to nothing on the join, and `VectorIndex::prune_orphans` (called by the embedding
+slot, `crates/pond-core/src/context/embedding_slot.rs`, once its backlog drains) removes it.
+Retrieval filters on `model_id`, so vectors from a different embedder are never scored together.
+Deleting the file is safe: the slot re-embeds every row from its source.
 
 ---
 

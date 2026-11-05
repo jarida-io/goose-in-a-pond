@@ -43,6 +43,8 @@ async fn make_app() -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -67,7 +69,7 @@ async fn make_app() -> Harness {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -105,6 +107,7 @@ async fn make_app() -> Harness {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel::<Notification>(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -142,6 +145,7 @@ async fn make_app() -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 
@@ -623,4 +627,47 @@ async fn devices_self_requires_a_token() {
     let h = make_app().await;
     let (status, body) = device_self(&h, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+}
+
+/// The household of 2026-10-27, end to end through the routes: a phone that paired before the
+/// pond had any member stays nobody's once members exist, a code issued with no body still binds
+/// nobody once there are two, and the one way back is pairing the same phone again with a code
+/// issued for its member. No `profile_id` is written by hand anywhere in this test.
+#[tokio::test]
+async fn a_phone_paired_before_any_member_existed_is_claimed_by_pairing_again_for_its_member() {
+    let h = make_app().await;
+    let (_, before_members) = issue(&h.loopback, None).await;
+    let first = pair(&h, &code_of(&before_members), "a57-install").await;
+
+    let emmanuel = a_member(&h, "Emmanuel Charles Oyugi").await;
+    a_member(&h, "Jerry").await;
+    let (status, body) = device_self(&h, Some(&first)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(
+        body["profile"].is_null(),
+        "creating members attributes no device already paired; body: {body}"
+    );
+
+    let (_, no_body) = issue(&h.loopback, None).await;
+    assert!(
+        no_body["profile_id"].is_null(),
+        "with two members a code nobody was named for binds nobody; body: {no_body}"
+    );
+
+    let (status, for_him) = issue(
+        &h.loopback,
+        Some(&format!(r#"{{"profile_id":"{emmanuel}"}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {for_him}");
+    let again = pair(&h, &code_of(&for_him), "a57-install").await;
+
+    let (status, body) = device_self(&h, Some(&again)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["device_id"], "a57-install",
+        "the same install id, so the same device row; body: {body}"
+    );
+    assert_eq!(body["profile"]["id"], emmanuel, "body: {body}");
+    assert_eq!(body["profile"]["display_name"], "Emmanuel Charles Oyugi");
 }

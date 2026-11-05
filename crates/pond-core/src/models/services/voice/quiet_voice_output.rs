@@ -8,6 +8,7 @@ use async_trait::async_trait;
 
 use super::quiet::{Quiet, QuietHold};
 use crate::models::ports::voice_output::VoiceOutput;
+use pond_voice::text::SpeechUnit;
 
 /// How long a sound waits for other audio to pause before it plays anyway.
 pub const WAIT_FOR_QUIET: Duration = Duration::from_millis(1500);
@@ -52,6 +53,10 @@ impl VoiceOutput for QuietVoiceOutput {
 
     async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
         self.inner.synthesize(text).await
+    }
+
+    async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+        self.inner.synthesize_unit(unit).await
     }
 
     async fn play_audio(&self, audio: Vec<u8>) -> Result<()> {
@@ -149,6 +154,12 @@ mod tests {
         async fn synthesize(&self, _text: &str) -> Result<Option<Vec<u8>>> {
             Ok(Some(vec![0]))
         }
+        async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
+            if unit.boundary == pond_voice::text::Boundary::Paragraph {
+                lock(&self.0).push("paragraph");
+            }
+            Ok(Some(vec![0]))
+        }
         async fn play_audio(&self, _audio: Vec<u8>) -> Result<()> {
             lock(&self.0).push("play");
             Ok(())
@@ -184,6 +195,17 @@ mod tests {
 
     fn said(log: &Log) -> Vec<&'static str> {
         lock(log).clone()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_units_boundary_passes_through() {
+        let (out, log) = voice(Duration::ZERO);
+        let unit = SpeechUnit::new(
+            "The end of a paragraph.",
+            pond_voice::text::Boundary::Paragraph,
+        );
+        out.synthesize_unit(&unit).await.unwrap();
+        assert_eq!(said(&log), ["paragraph"]);
     }
 
     #[tokio::test(start_paused = true)]

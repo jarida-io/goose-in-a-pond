@@ -6,6 +6,9 @@ import { Card, Row, Toggle } from "./controls";
 import { api } from "../../../api/PondApiClient";
 import type { MemoryFragment, MemorySegment } from "../../../api/types";
 import { segmentLabel } from "../../../memory/labels";
+import { EmbedderStatus } from "../../../components/models/MemoryModels";
+import { useEmbedderHealth } from "../../../hooks/useEmbedderHealth";
+import { embedderLine, holderText } from "../../../sections/models/memoryEmbedder";
 
 // ─── Icon path strings ────────────────────────────────────────
 const TRASH_PATH =
@@ -226,8 +229,15 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [showComposer, setShowComposer] = useState(false);
   const [compactionEnabled, setCompactionEnabled] = useState(false);
-  // Mirrors the sections Settings view: both UIs ship, so the control must exist in both.
-  const [embeddingProvider, setEmbeddingProvider] = useState("fastembed");
+  // Mirrors the Settings catalogue: both UIs ship, so the switch must exist in both. Any value but "none" is on.
+  // Null until the pond's settings arrive: the switch claims neither position before then.
+  const [semanticOn, setSemanticOn] = useState<boolean | null>(null);
+  /** The switch keeps its own state, so a refused save has to remount it to put it back. */
+  const [switchKey, setSwitchKey] = useState(0);
+  /** Each settings read remounts the switches with what the pond said; a press alone keeps focus where it is. */
+  const [settingsRead, setSettingsRead] = useState(0);
+  const [settingsFailed, setSettingsFailed] = useState(false);
+  const embedder = useEmbedderHealth();
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -240,24 +250,23 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Read apart from the list, so a list that fails to load cannot leave the switches on their defaults.
+    void api
+      .getSettings()
+      .then((settings) => {
+        setCompactionEnabled(settings.memory_consolidation_enabled === true);
+        setSemanticOn(settings.embedding_provider !== "none");
+        setSettingsFailed(false);
+        setSettingsRead((n) => n + 1);
+      })
+      .catch(() => setSettingsFailed(true));
     try {
-      const [fragments, settings] = await Promise.all([
-        api.listMemories(100),
-        api.getSettings().catch(() => null),
-      ]);
+      const fragments = await api.listMemories(100);
       // Only show active lifecycle memories; fall back for old API (no lifecycle field)
       const active = fragments.filter(
         (m) => !m.lifecycle || m.lifecycle === "active",
       );
       setMems(active);
-      if (settings != null) {
-        setCompactionEnabled(
-          settings.memory_consolidation_enabled === true,
-        );
-        if (settings.embedding_provider) {
-          setEmbeddingProvider(settings.embedding_provider);
-        }
-      }
     } catch (e) {
       console.warn("[MemoryDetail] API offline — using mock fallback:", e);
       setMems(MOCK_MEMS);
@@ -302,20 +311,21 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
     }
   }
 
-  async function handleChangeEmbeddingProvider(next: string) {
-    const previous = embeddingProvider;
-    setEmbeddingProvider(next);
+  async function handleToggleSemantic(on: boolean) {
+    setSemanticOn(on);
     try {
       await api.updateSettings(
-        { embedding_provider: next } as Parameters<typeof api.updateSettings>[0],
+        { embedding_provider: on ? "auto" : "none" } as Parameters<typeof api.updateSettings>[0],
       );
       showFlash(
-        next === "none"
-          ? "Embeddings off — recall falls back to keywords"
-          : "Embedding provider changed. Existing memories keep their old vectors until they are re-embedded.",
+        on
+          ? "Search by meaning is on. The pond reads memories again at the next quiet moment."
+          : "Search by meaning is off. Memory searches by keyword.",
       );
+      void embedder.refresh();
     } catch (e) {
-      setEmbeddingProvider(previous);
+      setSemanticOn(!on);
+      setSwitchKey((k) => k + 1);
       showFlash(`Settings update failed: ${String(e)}`, false);
     }
   }
@@ -334,6 +344,7 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
   }
 
   const visibleMems = mems;
+  const embedderSaid = embedderLine(embedder.health, { downloading: embedder.downloading });
 
   return (
     <DetailShell
@@ -418,31 +429,55 @@ export function MemoryDetail({ go }: MemoryDetailProps) {
           sub="Merge and dedupe at 3:00 AM to keep memory lean"
           control={
             <Toggle
+              key={settingsRead}
               on={compactionEnabled}
               onChange={handleToggleCompaction}
+              label="Compact memory nightly"
             />
           }
         />
       </Card>
 
       {/* How memories are searched */}
-      <Card title="Semantic search">
+      <Card title="Search by meaning">
         <Row
-          label="Embedding provider"
-          sub="GGUF uses the same engine as chat and is the one that starts on a Jetson. Changing this changes the vector space, so existing memories stop matching until they are re-embedded."
+          label="Search by meaning"
+          sub="Find a memory by what it means, not only the words in it. Off, Memory searches by keyword."
           control={
-            <select
-              className="native-select"
-              aria-label="Embedding provider"
-              value={embeddingProvider}
-              onChange={(e) => handleChangeEmbeddingProvider(e.target.value)}
-            >
-              <option value="fastembed">FastEmbed (local ONNX)</option>
-              <option value="gguf">GGUF (llama.cpp, on-device)</option>
-              <option value="none">None (keyword only)</option>
-            </select>
+            semanticOn === null ? (
+              settingsFailed ? (
+                <span className="hm-ctl-note">Could not read this setting</span>
+              ) : (
+                <span className="hm-skel hm-skel--toggle" aria-hidden="true" />
+              )
+            ) : (
+              <Toggle
+                key={`${settingsRead}-${switchKey}`}
+                on={semanticOn}
+                onChange={handleToggleSemantic}
+                label="Search by meaning"
+              />
+            )
           }
         />
+        <Row
+          label="Model"
+          sub={holderText(embedderSaid, semanticOn ? embedder.health?.embedder?.model_id : null)}
+          control={
+            <button className="mm-btn" type="button" onClick={() => go("models")}>
+              Choose a model
+            </button>
+          }
+        />
+        <div className="hm-embed">
+          <EmbedderStatus
+            line={embedderSaid}
+            onRetry={() =>
+              void embedder.retry().catch((e) => showFlash(String(e instanceof Error ? e.message : e), false))
+            }
+            retrying={embedder.retrying}
+          />
+        </div>
       </Card>
 
       {/* Memory list */}

@@ -75,6 +75,8 @@ export interface Settings {
   // Voice pipeline
   voice_wake_word?: string;
   voice_wake_word_transcriptions?: string[];
+  /** The pond listens through its own microphone and answers on its speaker (room voice). */
+  voice_room_enabled?: boolean;
   /** Suggestor ids never offered on Home; per kind, as a suggestion has no durable id. */
   suggestions_muted?: string[];
   voice_recording_duration_secs?: number;
@@ -128,6 +130,7 @@ export interface Settings {
 
   // Active model selection
   active_embedding_model?: string;
+  /** `"none"` is off; any other value is on, and the Memory-role model picks the engine. */
   embedding_provider?: string;
 
   // Voice KWS tuning
@@ -418,21 +421,30 @@ export interface Schedule {
   prompt: string;
   enabled: boolean;
   timezone?: string;
-  kind?: { type: "agent_prompt"; prompt: string } | { type: "webhook"; webhook_url: string };
+  kind?:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; webhook_url: string }
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
   last_run?: string;
   next_run?: string;
   created_at?: string;
+  /** Ask before running a fire time missed while the Pond was down. */
+  ask_if_missed?: boolean;
+  /** The missed fire time waiting for an answer. */
+  missed_run?: { due_at: string } | null;
 }
 
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */
@@ -440,7 +452,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;
@@ -451,6 +463,31 @@ export interface ScheduleRunNotification {
   excerpt: string;
   /** Inferred recipe type from schedule name/prompt */
   recipe: string | null;
+}
+
+/**
+ * One household notice from the Pond (`GET /notifications/history`, or live from
+ * `/notifications/stream`), always under its household id: a device's own queued copy carries
+ * `"{id}:{device}"`, which `historyId` maps back.
+ */
+export interface HouseholdNotice {
+  id: string;
+  /** `info`, `alert` or `action_required`; anything else renders as `info`. */
+  category: string;
+  title: string;
+  body: string;
+  /** RFC 3339, as the Pond stamped it. */
+  timestamp: string;
+  /** The payload: `open` names the screen a tap opens; `kind` names a system notice. */
+  data: Record<string, unknown> | null;
+  /** Whether this device marked it read. */
+  read: boolean;
+}
+
+/** `GET /notifications/history`: the caller's own device id and what it may read, newest first. */
+export interface NotificationHistoryResponse {
+  device_id: string;
+  notifications: HouseholdNotice[];
 }
 
 /** Context passed when navigating to Canvas to view a schedule debrief. */
@@ -515,6 +552,8 @@ export interface LaneStatus {
   running?: string | null;
   running_title?: string | null;
   running_for_secs?: number | null;
+  /** The embedding slot runs beside the lane, never holding its slot. */
+  embedding_slot?: { running: boolean; running_for_secs: number | null };
 }
 
 /** What asking for a job to run now did. */
@@ -595,8 +634,22 @@ export interface ContextCorpusCoverage {
   coverage: number | null;
 }
 
+/** Where the Memory-role embedder is in its life: `chosen` waits for a quiet moment to load. */
+export type EmbedderState = "off" | "chosen" | "loading" | "ready" | "failed";
+
+/** Mirrors `embedder_status` in pond-api routes.rs; present whether or not an index exists. */
+export interface EmbedderHealth {
+  state: EmbedderState;
+  /** The stamp on its vectors, which is not always the catalogue name (`embeddinggemma-2-256`). */
+  model_id: string | null;
+  /** The pond's own words for a failed load; null in every other state. */
+  reason: string | null;
+}
+
 /** How much of what the pond knows retrieval can currently reach. */
 export interface ContextIndexHealth {
+  /** Absent from a pond that predates the live embedder switch. */
+  embedder?: EmbedderHealth;
   indexed: boolean;
   /** Why there is nothing to report. Sent only when `indexed` is false. */
   reason?: string;
@@ -784,6 +837,32 @@ export interface ModelEntry {
   available?: boolean;
   /** Why `available` is false. */
   unavailable_reason?: ModelUnavailableReason;
+  /** The jobs the pond says this row is doing now, read from its settings. Absent on older ponds. */
+  roles?: ModelUse[];
+  /** The section the pond lists this row under. Absent on older ponds. */
+  section?: ModelSection;
+}
+
+/** A job a model on the pond is doing: the first five held by a catalogue row, the rest by a model
+ *  that works beside one (`pictures`, `drafter`) or by a camera model with no row. */
+export type ModelUse =
+  | "chat" | "tool" | "asr" | "tts" | "embedding" | "pictures" | "drafter" | "camera" | "faces";
+
+/** The sections the Models page lists, in this order. */
+export const MODEL_SECTIONS = [
+  "conversation", "listening", "speaking", "memory", "pictures", "other",
+] as const;
+export type ModelSection = (typeof MODEL_SECTIONS)[number];
+
+/** A model the pond has in use that is not a catalogue row: `helpers` of `GET /models/active-roles`. */
+export interface HelperModel {
+  id: string;
+  /** Null when the pond has no name for it but the job's. */
+  title: string | null;
+  uses: ModelUse[];
+  section: ModelSection;
+  /** The catalogue row it works for, as `{category}/{name}`. */
+  serves: string | null;
 }
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
@@ -824,6 +903,9 @@ export interface ModelMemoryStatus {
   /** The most this pond lets the models take: a desktop's memory less what it keeps for itself, or
    *  a budgeted device's own figure. `available_for_llm_mb` is what is left of it now. */
   budget_mb?: number;
+  /** The room a Memory model has beside the conversation model, counting what the one in use gives
+   *  back on a switch; null where the pond read nothing, absent from an older server. */
+  embedder_room_mb?: number | null;
 }
 
 export interface ModelCapabilities {
@@ -1010,6 +1092,10 @@ export interface LongTask {
   state: LongTaskState;
   /** Absent from an older pond, which only has general tasks. */
   kind?: LongTaskKind;
+  /** How long the answer is meant to be; absent from an older pond. `auto` until its planner decides. */
+  answer?: ResearchAnswer;
+  /** A finished short answer's whole text, shown on the card; `null` for anything else. */
+  answer_text?: string | null;
   origin_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1087,7 +1173,12 @@ export interface ChatStreamRequest {
   resumable?: boolean;
   /** The message is a research question: the pond starts deep research on it. */
   deep_research?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide from the question. */
+  deep_research_answer?: ResearchAnswer;
 }
+
+/** How long a long task's answer should be: `auto` leaves it to the pond's reading of the ask. */
+export type ResearchAnswer = "auto" | "short" | "report";
 
 /**
  * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the
@@ -1187,6 +1278,8 @@ export interface ChatEvent {
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
   result?: unknown;         // for "tool_call" events
+  /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
+  working_notes?: string;
   error?: string;           // for "error" events
   /** Optional MCP-APP UI rendering hint from backend */
   ui?: {
@@ -1288,9 +1381,14 @@ export interface RecoveryRequest {
 export interface PairingCodeResponse {
   code: string | null;
   expires_at?: string;
+  /** The household member a device pairing with this code becomes; null binds it to nobody. */
+  profile_id?: string | null;
   /** Where a phone connects and which key it pins; sent only on this host-only route. */
   pairing: PairingMaterial;
 }
+
+/** Whose a device pairing with a new code becomes: a named member, or explicitly nobody. */
+export type PairingCodeBinding = { profile_id: string } | { unattributed: true };
 
 export interface PairingMaterial {
   hostname: string;
@@ -1314,6 +1412,8 @@ export interface ModelActiveRoles {
   asr:        ModelRoleAssignment | null;
   tts:        ModelRoleAssignment | null;
   embedding:  ModelRoleAssignment | null;
+  /** Models in use beside the catalogue rows. Absent on older ponds. */
+  helpers?:   HelperModel[];
 }
 
 // ── Sessions ──────────────────────────────────────────────────
@@ -1521,6 +1621,12 @@ export interface SecretRequirement {
   host_only?: boolean;
 }
 
+/**
+ * The built-in web search as `GET /api/v1/marketplace` reports it: `on` with Knowledge on and a
+ * Brave key stored, `needs_key` with no key, `knowledge_off` with the Knowledge extension off.
+ */
+export type BuiltInSearchState = "on" | "needs_key" | "knowledge_off";
+
 export interface MarketplaceExtension {
   id: string;
   name: string;
@@ -1533,6 +1639,10 @@ export interface MarketplaceExtension {
   author: string;
   tools: string[];
   featured: boolean;
+  /** A capability the Pond ships itself that already does this extension's job. */
+  built_in?: "web_search" | null;
+  /** That capability's state on this Pond; present only with `built_in`. */
+  built_in_state?: BuiltInSearchState;
   required_secrets: SecretRequirement[];
 }
 

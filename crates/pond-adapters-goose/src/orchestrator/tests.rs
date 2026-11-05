@@ -153,6 +153,8 @@ struct FakeRunnerState {
     helper_during_run: Mutex<Vec<(bool, bool)>>,
     /// The parent the child's session resolved to during the run, as a tool server sees it.
     parent_during_run: Mutex<Vec<Option<String>>>,
+    /// The scope the child's session resolved to during the run, as a tool server sees it.
+    scope_during_run: Mutex<Vec<Option<ProfileScope>>>,
 }
 
 struct FakeRunner {
@@ -237,6 +239,14 @@ impl ChildRunner for FakeRunner {
             .push(
                 pond_core::shared::services::child_sessions::process_child_sessions()
                     .parent_of(&plan.child_session_id),
+            );
+        self.state
+            .scope_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(
+                pond_core::shared::services::child_sessions::process_child_sessions()
+                    .scope_of(&plan.child_session_id),
             );
         self.state
             .plans
@@ -514,6 +524,26 @@ async fn a_childs_engine_calls_are_helper_calls() {
             .parent_of(&child)
             .is_none(),
         "a finished child must stop resolving to {parent}"
+    );
+
+    // The child's own clamped scope, which `giap-memory` reads, and only while it runs.
+    let planned = state.plans.lock().unwrap_or_else(|e| e.into_inner())[0]
+        .profile_scope
+        .clone();
+    assert_eq!(planned, ProfileScope::Household, "the fixture's spec scope");
+    assert_eq!(
+        *state
+            .scope_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![Some(planned)],
+        "a running child must resolve to its plan's scope, or its memory tools refuse or widen"
+    );
+    assert!(
+        pond_core::shared::services::child_sessions::process_child_sessions()
+            .scope_of(&child)
+            .is_none(),
+        "a finished child must stop resolving to a scope"
     );
 }
 
@@ -1704,16 +1734,28 @@ fn child_loop_source() -> String {
     body[..end].to_string()
 }
 
-/// Just the drain loop: the method as a whole legitimately calls `turns.finish()`.
+/// Just the drain loop, `drain_child_stream`, which reads both the child's reply and a nudge's.
+/// The method as a whole legitimately calls `turns.finish()`.
 fn child_drain_loop() -> String {
     let body = child_loop_source();
-    let at = body
+    assert!(
+        body.contains("drain_child_stream(&mut stream") && !body.contains("stream.next()"),
+        "run_child_agent reads a reply stream itself instead of through drain_child_stream, so \
+         the tripwires below no longer see the loop that runs"
+    );
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/goose_agent.rs"))
+            .expect("goose_agent.rs is next door");
+    let code = strip_line_comments(&source);
+    let at = code
+        .find("async fn drain_child_stream")
+        .expect("the child loop no longer has its own drain function");
+    let rest = &code[at..];
+    let at = rest
         .find("while let Some(event) = stream.next().await")
         .expect("the child loop no longer drains the reply stream");
-    let rest = &body[at..];
-    let end = rest
-        .find("drop(stream);")
-        .expect("the drain loop no longer ends by dropping the stream");
+    let rest = &rest[at..];
+    let end = rest.find("\n}\n").unwrap_or(rest.len());
     rest[..end].to_string()
 }
 
@@ -3081,4 +3123,55 @@ async fn a_background_run_still_needs_a_live_parent_turn() {
         "expected the stale-parent refusal, got: {refusal}"
     );
     assert!(state.opened.lock().unwrap().is_empty());
+}
+
+// ── The report nudge ────────────────────────────────────────────────────────
+
+#[test]
+fn only_a_child_that_stopped_on_its_own_without_reporting_is_nudged() {
+    let role = role("researcher", &["giap-weather"]);
+    let env = env_with(
+        "ollama",
+        parent_tools(&[("giap-weather", &["get_weather"])]),
+    );
+    let plain =
+        build_child_plan(&spec_for(&role, &["giap-weather"]), "child-1", &env, None).unwrap();
+    assert!(
+        !should_nudge(&plain, 1, false),
+        "a chat delegation has no step to report"
+    );
+
+    let reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = reported.clone();
+    let spec = spec_for(&role, &["giap-weather"]).nudging(ReportNudge {
+        text: "report now".to_string(),
+        reported: Arc::new(move || seen.load(Ordering::SeqCst)),
+    });
+    let plan = build_child_plan(&spec, "child-1", &env, None).unwrap();
+    assert!(should_nudge(&plan, 1, false));
+    assert!(
+        !should_nudge(&plan, plan.max_turns, false),
+        "out of turns: its retry gets more"
+    );
+    assert!(!should_nudge(&plan, 1, true), "a stopped run stays stopped");
+    reported.store(true, Ordering::SeqCst);
+    assert!(!should_nudge(&plan, 1, false), "it has already reported");
+}
+
+#[test]
+fn a_nudged_child_keeps_the_work_it_wrote_before_the_nudge() {
+    let work = "Saturday: boat ride at 09:00, lunch at the lake. ".repeat(10);
+    assert_eq!(
+        after_nudge(Some(work.clone()), Some("I will report now.".into())).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(
+        after_nudge(Some(work.clone()), None).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(
+        after_nudge(Some("Short.".into()), Some(work.clone())).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(after_nudge(None, None), None);
 }

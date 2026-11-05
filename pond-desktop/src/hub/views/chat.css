@@ -1994,6 +1994,21 @@
 .think__body p { margin: 0 0 var(--space-3); }
 .think__body p:last-child { margin-bottom: 0; }
 
+/* Working notes: what the model said while it worked, which is not the answer.
+   Fainter than thinking, since the tool chips beside it already say what ran. */
+.think--steps .think__toggle {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-tertiary);
+}
+
+.think--steps .think__toggle:hover { color: var(--color-text-secondary); }
+
+.think--steps .think__body {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}
+
 @keyframes think-open {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: none; }

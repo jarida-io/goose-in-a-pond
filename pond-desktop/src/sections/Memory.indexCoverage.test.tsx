@@ -4,12 +4,16 @@ import { IndexCoveragePanel } from "./Memory";
 import { coverageState, coverageNote, formatCoverage } from "./indexCoverage";
 import { ConfirmProvider } from "../components/shared";
 import { api } from "../api/PondApiClient";
-import type { ContextCorpusCoverage, ContextIndexHealth } from "../api/types";
+import type { ContextCorpusCoverage, ContextIndexHealth, EmbedderHealth } from "../api/types";
+import { memoryRoles } from "./models/fixtures";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
     getContextIndexHealth: vi.fn(),
     rebuildContextIndex: vi.fn(),
+    getActiveRoles: vi.fn(),
+    activateModel: vi.fn(),
+    getDownloadProgress: vi.fn(),
   },
 }));
 
@@ -204,5 +208,121 @@ describe("IndexCoveragePanel", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(mocked(api.rebuildContextIndex)).not.toHaveBeenCalled();
+  });
+});
+
+/** The thin index with the embedder's own report beside it. */
+function switching(embedder: Partial<EmbedderHealth>, over: Partial<ContextIndexHealth> = {}): ContextIndexHealth {
+  return {
+    ...thinlyIndexed(),
+    model_id: "embeddinggemma-2-256",
+    dims: 256,
+    embedder: { state: "ready", model_id: "embeddinggemma-2-256", reason: null, ...embedder },
+    ...over,
+  };
+}
+
+describe("IndexCoveragePanel: the embedder", () => {
+  it("says it searches by keyword while the model loads", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(switching({ state: "loading" }, { matching: 0 }));
+    renderPanel();
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toBe("Searching by keyword while EmbeddingGemma 2 loads");
+  });
+
+  it("counts the re-index from the numbers the panel already shows", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(
+      switching({}, { rows: 95, matching: 40, missing: 0, mismatched: 55, coverage: 40 / 95 }),
+    );
+    renderPanel();
+    expect(await screen.findByText("Reading memories again: 40 of 95 items")).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Items read again" }).getAttribute("aria-valuetext")).toBe("40 of 95 items");
+    expect(screen.getByText("40 of 95 rows searchable")).toBeTruthy();
+  });
+
+  it("keeps quiet once every row is reachable: the figure below already says so", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(
+      switching({}, { rows: 95, matching: 95, missing: 0, coverage: 1 }),
+    );
+    renderPanel();
+    await screen.findByText("95 of 95 rows searchable");
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says a failed load in plain words, keeps the pond's own reason behind Details, and asks again without clearing anything", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(
+      switching({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    );
+    mocked(api.getActiveRoles).mockResolvedValue(memoryRoles("embeddinggemma-2"));
+    mocked(api.activateModel).mockResolvedValue(undefined as never);
+    renderPanel();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
+    expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
+    expect(within(alert).getByText(/on the Gpu: out of memory/)).toBeTruthy();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(mocked(api.activateModel)).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"),
+    );
+    expect(mocked(api.rebuildContextIndex)).not.toHaveBeenCalled();
+  });
+
+  it("reads a file still coming down as progress, not a failure", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(
+      switching(
+        { state: "failed", reason: "embeddinggemma-2-Q8_0.gguf is not on disk; the models pipeline is downloading it" },
+        { matching: 0 },
+      ),
+    );
+    mocked(api.getDownloadProgress).mockResolvedValue({
+      downloads: [{ filename: "embeddinggemma-2-Q8_0.gguf", category: "embedding", downloaded_bytes: 1, total_bytes: 3, status: "downloading" }],
+    });
+    renderPanel();
+    expect((await screen.findByRole("status")).textContent).toBe(
+      "Searching by keyword until EmbeddingGemma 2 finishes downloading",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says a model whose file is neither here nor coming down is not here yet, and fetches it on request", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue(
+      switching(
+        { state: "failed", reason: "embeddinggemma-2-Q8_0.gguf is not on disk; the models pipeline is downloading it" },
+        { matching: 0 },
+      ),
+    );
+    mocked(api.getDownloadProgress).mockResolvedValue({ downloads: [] });
+    mocked(api.getActiveRoles).mockResolvedValue(memoryRoles("embeddinggemma-2"));
+    mocked(api.activateModel).mockResolvedValue(undefined as never);
+    renderPanel();
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain("EmbeddingGemma 2 is not on this device yet, so Memory is searching by keyword.");
+    fireEvent.click(within(status).getByRole("button", { name: "Download" }));
+    await waitFor(() =>
+      expect(mocked(api.activateModel)).toHaveBeenCalledWith("embedding", "embeddinggemma-2", "embedding"),
+    );
+  });
+
+  it("says search by meaning is off in the pond's household words, and no figure", async () => {
+    mocked(api.getContextIndexHealth).mockResolvedValue({
+      indexed: false,
+      reason: "no embedding model is configured, so nothing has been indexed and retrieval falls back to recency",
+      model_id: null,
+      dims: null,
+      coverage: null,
+      corpora: [],
+      embedder: { state: "off", model_id: null, reason: null },
+    });
+    renderPanel();
+    expect((await screen.findByRole("status")).textContent).toBe(
+      "Search by meaning is off. Memory searches by keyword.",
+    );
+    // The line is the whole answer: the server's sentence about a configured model would repeat it in jargon.
+    expect(screen.queryByText("Nothing is indexed")).toBeNull();
+    expect(screen.queryByText("0%")).toBeNull();
   });
 });

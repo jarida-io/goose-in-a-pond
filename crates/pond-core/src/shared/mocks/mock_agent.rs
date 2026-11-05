@@ -1,4 +1,6 @@
-use crate::models::ports::agent::{Agent, AgentRequest, AgentResponse, AgentStreamEvent};
+use crate::models::ports::agent::{
+    Agent, AgentRequest, AgentResponse, AgentStreamEvent, WarmupPhase,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
@@ -10,6 +12,8 @@ pub struct MockAgent {
     last_request: Mutex<Option<AgentRequest>>,
     /// Every session id `forget_session` was called with, in order.
     forgotten: Mutex<Vec<String>>,
+    /// The `voice_mode` of every prewarm, in order.
+    prewarms: Mutex<Vec<bool>>,
 }
 
 impl MockAgent {
@@ -17,7 +21,13 @@ impl MockAgent {
         Self {
             last_request: Mutex::new(None),
             forgotten: Mutex::new(Vec::new()),
+            prewarms: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The `voice_mode` of every prewarm asked for, in order.
+    pub fn prewarms(&self) -> Vec<bool> {
+        self.prewarms.lock().unwrap().clone()
     }
 
     /// The most recent `AgentRequest` passed to `chat` or `chat_stream`.
@@ -35,6 +45,16 @@ impl MockAgent {
 impl Agent for MockAgent {
     async fn forget_session(&self, session_id: &str) {
         self.forgotten.lock().unwrap().push(session_id.to_string());
+    }
+
+    async fn prewarm(
+        &self,
+        voice_mode: bool,
+        progress: std::sync::Arc<dyn Fn(WarmupPhase) + Send + Sync>,
+    ) {
+        self.prewarms.lock().unwrap().push(voice_mode);
+        progress(WarmupPhase::Warming);
+        progress(WarmupPhase::Ready);
     }
 
     async fn chat(&self, request: AgentRequest) -> Result<AgentResponse> {
@@ -88,6 +108,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
         let response = agent.chat(request).await.unwrap();
         assert_eq!(response.text, "Echo: Hello, Pond!");
@@ -110,6 +131,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         };
         let mut stream = agent.chat_stream(request).await.unwrap();
 

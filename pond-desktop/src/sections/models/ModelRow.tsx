@@ -1,11 +1,13 @@
 import { Download, Trash2 } from "lucide-react";
-import type { ModelEntry, ModelMemoryStatus } from "../../api/types";
-import { AddOnLine, FitCell, PicturesChoice, SourceChip, TransferView } from "../../components/models/ModelMarks";
+import type { HelperModel, ModelEntry, ModelMemoryStatus, ModelUse } from "../../api/types";
+import {
+  AddOnLine, FitCell, PicturesChoice, ServedMarks, SourceChip, TransferView, UseChips,
+} from "../../components/models/ModelMarks";
 import type { ModelTransfer, TransferAction } from "./modelDownloads";
 import {
   type RoleKey, ROLES, addOnOf, downloadSummary, fitReading, fitsOnlyWithoutPictures, formatBytes,
   formatSize, modelFacts, modelFullName, modelLabel, offersPictures, picturesOf, sourceChip,
-  unavailableNote,
+  unavailableNote, jobLabel, servedUses, helperAbout,
 } from "./modelsView";
 
 export interface ModelRowProps {
@@ -14,6 +16,10 @@ export interface ModelRowProps {
   inUse: boolean;
   /** The jobs this row can take: one "Use" each. */
   roles: RoleKey[];
+  /** The jobs this row is doing now, each shown as a chip by its name. */
+  uses: ModelUse[];
+  /** The models in use that serve this row, such as its drafter, said on the row as part of it. */
+  helpers: HelperModel[];
   transfer: ModelTransfer | null;
   /** The household's choice on the tick box, for a row not yet on the device. */
   withPictures: boolean;
@@ -28,14 +34,15 @@ export interface ModelRowProps {
 
 /** One model, on the device or still to fetch. It says what it is, what it costs and what it can do. */
 export function ModelRow({
-  model, memory, inUse, roles, transfer, withPictures, busy, onWithPictures, onUse, onDelete,
-  onDownload, onAddPictures, onControl,
+  model, memory, inUse, roles, uses, helpers, transfer, withPictures, busy, onWithPictures, onUse,
+  onDelete, onDownload, onAddPictures, onControl,
 }: ModelRowProps) {
   const title = modelLabel(model);
   const full = modelFullName(model);
   const chip = sourceChip(model);
   const facts = modelFacts(model);
   const addOn = addOnOf(model);
+  const served = servedUses(helpers, addOn);
   const onDevice = model.downloaded === true;
   const choice = offersPictures(model);
   const fit = fitReading(model, memory, { inUse, withPictures: choice && withPictures });
@@ -50,6 +57,7 @@ export function ModelRow({
       <div className="mdl-row__id">
         <div className="mdl-row__idline">
           <span className="mdl-row__name" title={title}>{title}</span>
+          <UseChips uses={uses} />
           {chip && <SourceChip chip={chip} />}
         </div>
         {facts.length > 0 && <span className="mdl-row__facts">{facts.join(" · ")}</span>}
@@ -70,6 +78,11 @@ export function ModelRow({
                 onAdd={onDevice && addOn.kind === "add" ? onAddPictures : undefined}
               />
             )}
+          </div>
+        )}
+        {served.length > 0 && (
+          <div className="mdl-row__addon">
+            <ServedMarks uses={served} />
           </div>
         )}
       </div>
@@ -138,6 +151,24 @@ export function ModelRow({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** A model the pond has in use that serves no listed row, such as the camera's detector or face
+ *  recognition: named by the pond where it can be, else by its job. It is information only. */
+export function HelperRow({ helper }: { helper: HelperModel }) {
+  const job = helper.uses[0] ? jobLabel(helper.uses[0]) : null;
+  const title = helper.title?.trim() || job || helper.id;
+  return (
+    <div className="mdl-row" data-inuse="true">
+      <div className="mdl-row__id">
+        <div className="mdl-row__idline">
+          <span className="mdl-row__name" title={title}>{title}</span>
+          <UseChips uses={helper.uses} />
+        </div>
+        {helper.uses[0] && <span className="mdl-row__facts">{helperAbout(helper.uses[0])}</span>}
+      </div>
     </div>
   );
 }

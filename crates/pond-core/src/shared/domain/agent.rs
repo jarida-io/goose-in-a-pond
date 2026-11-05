@@ -55,6 +55,9 @@ pub struct AgentRequest {
     /// research, so the reply acknowledges it rather than answering the question itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_research_task: Option<DeepResearchTurn>,
+    /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interview: Option<String>,
 }
 
 /// A research task started for this turn, and where it waits when others are ahead of it.
@@ -64,6 +67,9 @@ pub struct DeepResearchTurn {
     /// What the prime tells the person about the line; `None` when the task runs at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<String>,
+    /// How long the answer is meant to be, so the prime promises what will come.
+    #[serde(default)]
+    pub answer: crate::shared::domain::long_task::AnswerShape,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +235,25 @@ impl fmt::Display for WorkflowState {
     }
 }
 
+/// A household member Voice Match recognised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceSpeaker {
+    pub profile_id: String,
+    pub name: String,
+}
+
+/// What ended a turn early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptReason {
+    /// An enrolled household voice spoke over the reply.
+    Voice,
+    /// The wake word, said during the turn.
+    WakeWord,
+    /// The interrupt button in a client.
+    Button,
+}
+
 /// Events emitted during the workflow loop (for UI / logging / NDJSON hooks).
 ///
 /// # NDJSON contract (terminal-voice-in-desktop, Architecture A)
@@ -249,7 +274,12 @@ impl fmt::Display for WorkflowState {
 /// {"event":"error","message":"..."}
 /// {"event":"exit","reason":"stdin_eof"}       // stdin_eof | dismissed | error
 /// {"event":"audio_level","rms":0.42}          // wait/recording mic level, throttled
+/// {"event":"wake","who":null}                 // or {"profile_id":"..","name":".."}
+/// {"event":"interrupt","why":"wake_word"}     // voice | wake_word | button
 /// ```
+///
+/// `wake` and `interrupt` come only from a loop with an interrupt watch (the ear); without one
+/// the stream is exactly the older contract.
 ///
 /// `UserInput` and `AgentOutput` are legacy internal-only variants retained for
 /// the tracing hook and existing call sites; they carry no external contract
@@ -286,6 +316,10 @@ pub enum WorkflowEvent {
     Exit { reason: String },
     /// Live mic input level during `wait`/`recording`, throttled by the emitter.
     AudioLevel { rms: f32 },
+    /// The wake word was heard; `who` is the member Voice Match recognised, if any.
+    Wake { who: Option<VoiceSpeaker> },
+    /// The turn in flight was ended early, persisting nothing.
+    Interrupt { why: InterruptReason },
     /// Internal-only user input text; `to_ndjson` skips it.
     UserInput(String),
     /// Internal-only full agent output text; `to_ndjson` skips it.
@@ -471,6 +505,36 @@ mod ndjson_golden_tests {
     }
 
     #[test]
+    fn wake_line_matches_contract() {
+        assert_eq!(
+            WorkflowEvent::Wake { who: None }.to_ndjson().unwrap(),
+            r#"{"event":"wake","who":null}"#
+        );
+        let who = VoiceSpeaker {
+            profile_id: "p-1".to_string(),
+            name: "Ana".to_string(),
+        };
+        assert_eq!(
+            WorkflowEvent::Wake { who: Some(who) }.to_ndjson().unwrap(),
+            r#"{"event":"wake","who":{"profile_id":"p-1","name":"Ana"}}"#
+        );
+    }
+
+    #[test]
+    fn interrupt_line_matches_contract() {
+        for (why, name) in [
+            (InterruptReason::Voice, "voice"),
+            (InterruptReason::WakeWord, "wake_word"),
+            (InterruptReason::Button, "button"),
+        ] {
+            assert_eq!(
+                WorkflowEvent::Interrupt { why }.to_ndjson().unwrap(),
+                format!(r#"{{"event":"interrupt","why":"{name}"}}"#)
+            );
+        }
+    }
+
+    #[test]
     fn legacy_variants_are_not_serialized_to_ndjson() {
         assert!(WorkflowEvent::UserInput("hi".to_string())
             .to_ndjson()
@@ -509,6 +573,7 @@ mod agent_request_scope_tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         }
     }
 

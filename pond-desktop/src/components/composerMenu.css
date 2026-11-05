@@ -149,6 +149,51 @@
   color: var(--color-text);
 }
 
+/* Chrome, so a hairline: the chosen length is marked the way the context views mark theirs. */
+.rchip-len {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.rchip-len__opt {
+  position: relative;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+/* The look stays 32px; the press reaches --tap-min on the block axis only, as touch.css does. */
+.rchip-len__opt::after {
+  content: "";
+  position: absolute;
+  inset: calc((var(--tap-min) - 32px) / -2) 0;
+}
+
+.rchip-len__opt:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.rchip-len__opt[aria-pressed="true"] {
+  border-color: var(--border-ink);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+.rchip-len__opt:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .rchip__wait {
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
@@ -160,6 +205,12 @@
 
 .rchip-row--hub .rchip {
   min-height: 36px;
+  font-size: var(--text-base);
+}
+
+/* A panel read from across a room: each length clears the tap size on its own. */
+.rchip-row--hub .rchip-len__opt {
+  min-height: var(--tap-min);
   font-size: var(--text-base);
 }
 

@@ -20,10 +20,11 @@ export type Consumer =
 
 /** Where a picker's options come from when they are not a fixed list. `chat-models` adds LiteRT-LM
  *  models to `llm-models`: they can hold the conversation, the tool-call helper cannot. */
-export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs";
+export type OptionSource = "llm-models" | "chat-models" | "whisper-models" | "tts-voices" | "embedding-models" | "llm-providers" | "time-zones" | "audio-inputs" | "audio-outputs" | "household-members";
 
 export type Control =
-  | { kind: "toggle" }
+  /** A boolean, unless `values` names the two strings a text setting takes for on and off. */
+  | { kind: "toggle"; values?: { on: string; off: string } }
   | { kind: "text"; placeholder?: string }
   | { kind: "number"; step?: number; min?: number; max?: number; unit?: string }
   /** A short, consequential choice — all options visible without opening anything. */
@@ -92,7 +93,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Who lives here",
         entries: [
           { key: "user_name", label: "Your name", description: "What the pond should call you.", control: { kind: "text", placeholder: "Friend" }, consumer: "live" },
-          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "text", placeholder: "Not set" }, consumer: "live" },
+          // A picker, never a text box: the value is a member's id, and a typed name was stored and matched nobody.
+          { key: "primary_profile_id", label: "Household profile", description: "The main person this pond belongs to.", control: { kind: "lookup", source: "household-members", placeholder: "Not set" }, consumer: "live" },
         ],
       },
       {
@@ -169,13 +171,14 @@ export const CATALOGUE: CatalogueCategory[] = [
       {
         name: "Wake word",
         entries: [
-          { key: "voice_wake_word", label: "Wake word", description: "The phrase that wakes the pond. Capitalisation does not matter.", control: { kind: "text", placeholder: "goose" }, consumer: "live", validate: wakePhrase },
+          { key: "voice_wake_word", label: "Wake word", description: "The phrase that wakes the pond. Capitalisation does not matter.", control: { kind: "text", placeholder: "hey goose" }, consumer: "live", validate: wakePhrase },
           { key: "voice_wake_word_transcriptions", label: "Learned pronunciations", description: "Alternative spellings learned while training the wake word, so it still answers.", control: { kind: "text", placeholder: "Not calibrated" }, consumer: "live" },
         ],
       },
       {
         name: "Listening",
         entries: [
+          { key: "voice_room_enabled", label: "Listen in this room", description: "The pond listens for its wake word through its own microphone and answers on its speaker, wherever a microphone and speaker work together.", control: { kind: "toggle" }, consumer: "live" },
           { key: "voice_kws_energy_threshold", label: "Ignore sound quieter than", description: "How loud a sound must be before the pond bothers listening for its name.", control: { kind: "number", step: 0.001, min: 0, max: 1 }, consumer: "live", validate: range(0, 1) },
           { key: "voice_kws_post_trigger_silence_ms", label: "Stop after silence", description: "How long a pause means you have finished speaking.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
           { key: "voice_kws_cooldown_ms", label: "Wait before listening again", description: "How long to wait after answering before listening for its name again.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
@@ -260,18 +263,15 @@ export const CATALOGUE: CatalogueCategory[] = [
         ],
       },
       {
-        name: "Embeddings",
+        name: "Search by meaning",
         entries: [
           {
-            key: "embedding_provider", label: "Embedding provider", description: "What makes your memories searchable.", consumer: "live",
-            control: { kind: "radio", options: [
-              { value: "gguf",      label: "On-device (GGUF)", hint: "Runs through llama.cpp. The only one that starts on a Jetson" },
-              { value: "fastembed", label: "FastEmbed",        hint: "ONNX Runtime. Does not initialise on the Orin" },
-              { value: "none",      label: "Off",              hint: "No semantic memory or context search" },
-            ] },
-            validate: oneOf(["fastembed", "gguf", "none"]),
+            key: "embedding_provider", label: "Search memories by meaning", description: "Find a memory by what it means, not only the words in it. Off, Memory searches by keyword. The model is chosen on the Models page.", consumer: "live",
+            // "none" is off; every other stored value, including the older "fastembed" and "gguf", is on.
+            control: { kind: "toggle", values: { on: "auto", off: "none" } },
+            validate: oneOf(["auto", "fastembed", "gguf", "none"]),
           },
-          { key: "active_embedding_model", label: "Embedding model", ownedBy: "models", description: "The model used to make memories searchable. Chosen on the Models page.", control: { kind: "lookup", source: "embedding-models", placeholder: "Not set" }, consumer: "live" },
+          { key: "active_embedding_model", label: "Memory model", ownedBy: "models", description: "The model used to make memories searchable. Chosen on the Models page.", control: { kind: "lookup", source: "embedding-models", placeholder: "Not set" }, consumer: "live" },
         ],
       },
     ],

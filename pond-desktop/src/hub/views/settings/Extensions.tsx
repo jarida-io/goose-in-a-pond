@@ -5,6 +5,8 @@ import { HubIco } from "../../primitives/HubIco";
 import { DetailShell } from "./DetailShell";
 import { Card, Segment } from "./controls";
 import { api } from "../../../api/PondApiClient";
+import { useConfirm } from "../../../components/shared";
+import { BuiltInSearchNote } from "../../../connections/BuiltInSearchNote";
 import type { Extension, MarketplaceExtension, AddExtensionRequest, Settings } from "../../../api/types";
 
 // ─── Icon path strings ────────────────────────────────────────
@@ -61,9 +63,11 @@ interface McpRowProps {
   ext: Extension;
   toggling: boolean;
   onToggle: (name: string, next: boolean) => void;
+  /** Set when the built-in web search already does this extension's job: offers its removal. */
+  onRemoveRedundant?: (name: string) => void;
 }
 
-function McpRow({ ext, toggling, onToggle }: McpRowProps) {
+function McpRow({ ext, toggling, onToggle, onRemoveRedundant }: McpRowProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const sv = statusVariant(ext);
@@ -89,6 +93,19 @@ function McpRow({ ext, toggling, onToggle }: McpRowProps) {
           {sv === "idle" && (
             <span className="ext2__desc">
               {t("extensions.noTools")}: {ext.status_reason || t("extensions.noToolsGeneric")}
+            </span>
+          )}
+          {onRemoveRedundant && (
+            <span className="ext2__desc">
+              {t("extensions.redundant")}: {t("extensions.redundantReason")}{" "}
+              <button
+                className="mrow__btn"
+                type="button"
+                onClick={() => onRemoveRedundant(ext.name)}
+                aria-label={t("extensions.removeNamed", { name: ext.name })}
+              >
+                {t("extensions.remove")}
+              </button>
             </span>
           )}
         </div>
@@ -137,6 +154,7 @@ interface MarketplaceModalProps {
 }
 
 function MarketplaceModal({ installedNames, onClose, onInstalled }: MarketplaceModalProps) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<MarketplaceExtension[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -247,7 +265,9 @@ function MarketplaceModal({ installedNames, onClose, onInstalled }: MarketplaceM
                     </div>
                     <span className="ext2__desc">{m.description}</span>
                   </div>
-                  {isInstalled ? (
+                  {m.built_in_state ? (
+                    <span className="ext2__kind ext2__kind--builtin">{t("extensions.builtIn")}</span>
+                  ) : isInstalled ? (
                     <span className="mrow__loaded" style={{ fontSize: 12 }}>
                       <Check size={11} color="#16A34A" strokeWidth={3} /> Installed
                     </span>
@@ -271,6 +291,11 @@ function MarketplaceModal({ installedNames, onClose, onInstalled }: MarketplaceM
                   by {m.author} · {m.category}
                   {m.required_secrets.length > 0 && " · requires credentials"}
                 </div>
+                {m.built_in_state && (
+                  <div style={{ paddingLeft: 36 }}>
+                    <BuiltInSearchNote state={m.built_in_state} className="ext2__desc" />
+                  </div>
+                )}
               </div>
             );
           })}
@@ -552,6 +577,8 @@ interface ExtensionsDetailProps {
 }
 
 export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
+  const { t } = useTranslation();
+  const confirm = useConfirm();
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -559,6 +586,8 @@ export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const [showMarketplace, setShowMarketplace] = useState(false);
   const [showAddServer, setShowAddServer] = useState(false);
+  /** Installed names the built-in web search makes redundant, from the marketplace listing. */
+  const [redundant, setRedundant] = useState<Set<string>>(new Set());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showFlash(text: string, ok = true) {
@@ -584,6 +613,35 @@ export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listMarketplace()
+      .then((list) => {
+        if (cancelled) return;
+        setRedundant(new Set(
+          list.filter((m) => m.built_in_state === "on").flatMap((m) => [m.id.toLowerCase(), m.name.toLowerCase()]),
+        ));
+      })
+      .catch((e) => console.warn("[ExtensionsDetail] marketplace unreadable; no redundancy shown:", e));
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleRemove(name: string) {
+    const ok = await confirm(t("extensions.removeConfirm", { name }), {
+      title: t("extensions.removeConfirmTitle"),
+      confirmLabel: t("extensions.remove"),
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await api.removeExtension(name);
+      setExtensions((prev) => prev.filter((e) => e.name !== name));
+      showFlash(t("extensions.removed", { name }));
+    } catch (e) {
+      showFlash(t("extensions.removeFailed", { name, error: String(e) }), false);
+    }
+  }
 
   useEffect(() => {
     loadData();
@@ -732,6 +790,7 @@ export function ExtensionsDetail({ go }: ExtensionsDetailProps) {
                   ext={ext}
                   toggling={toggling === ext.name}
                   onToggle={handleToggle}
+                  onRemoveRedundant={redundant.has(ext.name.toLowerCase()) ? handleRemove : undefined}
                 />
               ))
             )}

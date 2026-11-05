@@ -32,15 +32,6 @@ pub fn has_answer_tag(s: &str) -> bool {
     s.contains(ANSWER_OPEN) || s.contains(ANSWER_CLOSE)
 }
 
-/// The reply inside an `<answer>` wrapper, for text that is not streamed; `None` when unwrapped.
-pub fn unwrap_answer(text: &str) -> Option<&str> {
-    let inner = text
-        .trim()
-        .strip_prefix(ANSWER_OPEN)?
-        .strip_suffix(ANSWER_CLOSE)?;
-    (!inner.contains(ANSWER_OPEN) && !inner.contains(ANSWER_CLOSE)).then(|| inner.trim())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
     Normal,
@@ -145,7 +136,7 @@ fn strip_standalones(s: &str) -> String {
 
 /// Emittable byte length of `s`: only a tail that is a *proper* marker prefix is withheld,
 /// since a complete one would be held forever. Markers are ASCII, so this is a char boundary.
-fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
+pub(crate) fn safe_emit_len(s: &str, markers: &[&str]) -> usize {
     let longest = markers.iter().map(|m| m.len()).max().unwrap_or(0);
     let earliest = s.len().saturating_sub(longest.saturating_sub(1));
 
@@ -287,12 +278,6 @@ mod tests {
             "It is 21 degrees."
         );
         assert_eq!(run(&["<ans", "wer>Hi.</an", "swer>"]), "Hi.");
-        assert_eq!(unwrap_answer(" <answer> Hi. </answer>\n"), Some("Hi."));
-        assert_eq!(unwrap_answer("Hi."), None);
-        assert_eq!(
-            unwrap_answer("<answer>a</answer> and <answer>b</answer>"),
-            None
-        );
     }
     // ── Holdback behaviour ─────────────────────────────────────────────────
     // A fixed-size holdback would make text trail generation and freeze mid-word on slowdowns.

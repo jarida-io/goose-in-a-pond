@@ -122,6 +122,8 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -143,7 +145,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -203,6 +205,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         api_port: 4000,
         weather_provider: None,
@@ -220,6 +223,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 

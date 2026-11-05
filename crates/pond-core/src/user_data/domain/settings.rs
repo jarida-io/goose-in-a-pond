@@ -85,14 +85,19 @@ pub const REVIEW_MODES: &[&str] = &["off", "on", "auto"];
 /// How memory consolidation is run.
 pub const CONSOLIDATION_MODES: &[&str] = &["single", "adversarial"];
 
-/// Which engine computes embeddings.
-pub const EMBEDDING_PROVIDERS: &[&str] = &["fastembed", "gguf", "none"];
+/// Semantic search on or off ("none"). The Memory-role model picks the engine; "fastembed" and
+/// "gguf" are older values that mean on.
+pub const EMBEDDING_PROVIDERS: &[&str] = &["auto", "fastembed", "gguf", "none"];
 
 /// Kokoro quality tiers, smallest first.
 pub const TTS_QUALITIES: &[&str] = &["q4", "q4f16", "q8", "q8f16", "fp16", "fp32"];
 
 /// Speech detectors: `rms` (energy gate, fooled by steady noise) or `silero` (2 MB ONNX model).
 pub const VAD_BACKENDS: &[&str] = &["rms", "silero"];
+
+/// Wake detectors with the ear: `auto` lets the household's calibration choose, `hey_goose` is the
+/// ear's CNN (that phrase only), `whisper` transcribes the ear's speech segments.
+pub const WAKE_DETECTORS: &[&str] = &["auto", "hey_goose", "whisper"];
 
 /// A factory default that changed after installs existed, adopted once by `migration`.
 /// Saved snapshots pin every key, so only a stored value equal to `old_default` is rewritten.
@@ -133,6 +138,12 @@ pub const DEFAULT_ADOPTIONS: &[DefaultAdoption] = &[
         old_default: "8",
         new_default: "0",
         migration: "0053",
+    },
+    DefaultAdoption {
+        key: "voice_wake_word",
+        old_default: "goose",
+        new_default: "hey goose",
+        migration: "0076",
     },
 ];
 
@@ -218,6 +229,15 @@ pub struct Settings {
     #[serde(default)]
     pub voice_wake_word_transcriptions: Vec<String>,
 
+    /// Which detector hears the wake word when the ear runs (`WAKE_DETECTORS`).
+    #[serde(default = "Settings::default_wake_detector")]
+    pub voice_wake_detector: String,
+
+    /// Serve listens through the pond's own microphone and answers on its speaker, wherever a
+    /// microphone and speaker pair works.
+    #[serde(default = "Settings::default_voice_room_enabled")]
+    pub voice_room_enabled: bool,
+
     /// Suggestor ids muted on Home; per kind, as a derived suggestion has no durable id.
     #[serde(default)]
     pub suggestions_muted: Vec<String>,
@@ -288,8 +308,7 @@ pub struct Settings {
     #[serde(default)]
     pub active_embedding_model: String,
 
-    /// `gguf` (llama.cpp) is the on-device path and needs the `local-inference` build.
-    /// fastembed's ONNX Runtime does not initialise on the Jetson Orin.
+    /// Off when "none"; any other value is on, with the engine taken from `active_embedding_model`.
     #[serde(default = "Settings::default_embedding_provider")]
     pub embedding_provider: String,
 
@@ -816,6 +835,8 @@ impl Default for Settings {
             llm_temperature: Self::default_temperature(),
             llm_provider: Self::default_llm_provider(),
             voice_wake_word: Self::default_wake_word(),
+            voice_wake_detector: Self::default_wake_detector(),
+            voice_room_enabled: Self::default_voice_room_enabled(),
             voice_kws_energy_threshold: Self::default_kws_energy_threshold(),
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
@@ -992,8 +1013,13 @@ impl Settings {
     fn default_llm_provider() -> String {
         "".to_string()
     }
+    /// Two words: "goose" alone is said in passing, and the ear's CNN knows only this phrase.
     fn default_wake_word() -> String {
-        "goose".to_string()
+        "hey goose".to_string()
+    }
+    /// On: the pond is a room device first, and it runs only where a mic and speaker pair works.
+    fn default_voice_room_enabled() -> bool {
+        true
     }
     fn default_kws_energy_threshold() -> f32 {
         0.003
@@ -1012,6 +1038,10 @@ impl Settings {
     }
     fn default_tts_quality() -> String {
         "q8f16".to_string()
+    }
+    /// The calibration decides: the CNN missed most real voices it was not trained on.
+    fn default_wake_detector() -> String {
+        "auto".to_string()
     }
     /// A one-time 2 MB download beats shipping a detector that can't tell a fridge from a voice.
     fn default_vad_backend() -> String {
@@ -1590,7 +1620,7 @@ mod tests {
         assert_eq!(s.assistant_name, "Goose");
         assert_eq!(s.llm_max_tokens, 4096);
         assert_eq!(s.llm_temperature, 0.7);
-        assert_eq!(s.voice_wake_word, "goose");
+        assert_eq!(s.voice_wake_word, "hey goose");
         assert_eq!(s.retention_event_log_days, 30);
         assert!(s.tool_call_validation);
     }
@@ -2035,6 +2065,8 @@ mod tests {
             "voice_max_turns",
             // No control yet.
             "vad_backend",
+            // Its control comes with the phone's Voice agent page, beside the detector it reports.
+            "voice_wake_detector",
             // Needs a `vision-onnx` build; its UI comes with the Models-tab vision section.
             "vision_classifier_model",
             // No control yet; owed one on the Privacy section, beside `network_mode`.
@@ -2190,6 +2222,9 @@ mod tests {
             "voice_wake_word",
             "voice_wake_word_transcriptions",
             "voice_whisper_url",
+            // The phone's Voice agent page and the desktop catalogue's Listening group; it also
+            // answers `PUT /voice/room`.
+            "voice_room_enabled",
             "weather_enabled",
             "weather_latitude",
             "weather_location_name",

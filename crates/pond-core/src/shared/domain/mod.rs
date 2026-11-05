@@ -6,5 +6,6 @@ pub mod pond_admin;
 pub mod role_block;
 pub mod session_activity;
 pub mod time_tick;
+pub mod turn_failure;
 pub mod turn_stats;
 pub mod wipe;

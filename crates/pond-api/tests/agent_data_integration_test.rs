@@ -139,6 +139,8 @@ async fn make_app_full(
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -162,7 +164,7 @@ async fn make_app_full(
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -200,6 +202,7 @@ async fn make_app_full(
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -237,6 +240,7 @@ async fn make_app_full(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 
@@ -438,6 +442,8 @@ async fn prompt_template_delete_system_returns_403() {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -459,7 +465,7 @@ async fn prompt_template_delete_system_returns_403() {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -497,6 +503,7 @@ async fn prompt_template_delete_system_returns_403() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -534,6 +541,7 @@ async fn prompt_template_delete_system_returns_403() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 
@@ -763,6 +771,7 @@ async fn prompt_extra_delete_with_a_malformed_key_is_refused_unless_a_legacy_row
         instruction: "legacy".into(),
         active: true,
         sort_order: 0,
+        profile_id: None,
     })
     .await
     .unwrap();
@@ -791,6 +800,7 @@ async fn hostile_rows_stored_in_the_database_cannot_close_the_note_wrapper() {
             instruction: instruction.into(),
             active: true,
             sort_order,
+            profile_id: None,
         })
         .await
         .unwrap();
@@ -1267,6 +1277,8 @@ async fn returns_501_when_repos_not_configured() {
     mock_hs.add_valid_token("test-token".to_string()).await;
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -1288,7 +1300,7 @@ async fn returns_501_when_repos_not_configured() {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -1326,6 +1338,7 @@ async fn returns_501_when_repos_not_configured() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1363,6 +1376,7 @@ async fn returns_501_when_repos_not_configured() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -1439,6 +1453,152 @@ async fn invoke_tool_400_when_tool_missing() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Counts its runs, waits a little in each so resends can overlap, and fails (an error) or
+/// refuses (`success: false`, as a device that did not answer reports) the first run when asked to.
+#[derive(Default)]
+struct CountingDispatcher {
+    runs: std::sync::atomic::AtomicUsize,
+    fail_first: bool,
+    refuse_first: bool,
+}
+
+#[async_trait::async_trait]
+impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for CountingDispatcher {
+    async fn dispatch(
+        &self,
+        tool_name: &str,
+        _arguments: serde_json::Value,
+    ) -> anyhow::Result<pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult> {
+        let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        anyhow::ensure!(!(self.fail_first && run == 0), "the lamp did not answer");
+        let refused = self.refuse_first && run == 0;
+        Ok(
+            pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
+                content: format!("run {run} of {tool_name}"),
+                success: !refused,
+                keep: None,
+            },
+        )
+    }
+    async fn available_tools(&self) -> Vec<String> {
+        vec!["giap-device-control__set_device_state".to_string()]
+    }
+}
+
+fn tap(key: Option<&str>, power: bool) -> Request<Body> {
+    let mut request = post(
+        "/api/v1/tools/invoke",
+        serde_json::json!({
+            "server": "giap-device-control",
+            "tool": "set_device_state",
+            "args": { "device_id": "lamp-1", "power": power }
+        }),
+    );
+    if let Some(key) = key {
+        request
+            .headers_mut()
+            .insert("Idempotency-Key", key.parse().unwrap());
+    }
+    request
+}
+
+async fn counting_app(
+    fail_first: bool,
+) -> (axum::Router, Arc<CountingDispatcher>, tempfile::TempDir) {
+    let dispatcher = Arc::new(CountingDispatcher {
+        fail_first,
+        ..Default::default()
+    });
+    let (app, tmp) = make_app_with_dispatcher(Some(dispatcher.clone())).await;
+    (app, dispatcher, tmp)
+}
+
+fn runs(dispatcher: &CountingDispatcher) -> usize {
+    dispatcher.runs.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_resent_tap_is_answered_from_its_first_run() {
+    let (app, dispatcher, _tmp) = counting_app(false).await;
+    let first = app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = body_json(first).await;
+    assert_eq!(first["idempotency_key"], "tap-1");
+
+    let again = app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(body_json(again).await, first);
+    assert_eq!(runs(&dispatcher), 1);
+
+    app.oneshot(tap(Some("tap-2"), true)).await.unwrap();
+    assert_eq!(runs(&dispatcher), 2, "a new key is a new tap");
+}
+
+#[tokio::test]
+async fn a_resend_that_overlaps_the_first_run_waits_for_its_answer() {
+    let (app, dispatcher, _tmp) = counting_app(false).await;
+    let (a, b) = tokio::join!(
+        app.clone().oneshot(tap(Some("tap-1"), true)),
+        app.clone().oneshot(tap(Some("tap-1"), true)),
+    );
+    assert_eq!(body_json(a.unwrap()).await, body_json(b.unwrap()).await);
+    assert_eq!(runs(&dispatcher), 1);
+}
+
+#[tokio::test]
+async fn a_tap_without_a_key_runs_every_time_and_echoes_nothing() {
+    let (app, dispatcher, _tmp) = counting_app(false).await;
+    let body = body_json(app.clone().oneshot(tap(None, true)).await.unwrap()).await;
+    assert!(body.get("idempotency_key").is_none(), "{body}");
+    app.oneshot(tap(None, true)).await.unwrap();
+    assert_eq!(runs(&dispatcher), 2);
+}
+
+#[tokio::test]
+async fn a_key_reused_for_another_command_is_refused() {
+    let (app, dispatcher, _tmp) = counting_app(false).await;
+    app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    let other = app.oneshot(tap(Some("tap-1"), false)).await.unwrap();
+    assert_eq!(other.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(other).await["error"], "idempotency_key_reused");
+    assert_eq!(runs(&dispatcher), 1);
+}
+
+#[tokio::test]
+async fn a_failed_tap_is_not_kept_so_its_resend_runs() {
+    let (app, dispatcher, _tmp) = counting_app(true).await;
+    let failed = app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let resent = app.oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(resent.status(), StatusCode::OK);
+    assert_eq!(body_json(resent).await["idempotency_key"], "tap-1");
+    assert_eq!(runs(&dispatcher), 2);
+}
+
+#[tokio::test]
+async fn a_tap_the_device_refused_is_not_kept_so_its_resend_runs() {
+    let dispatcher = Arc::new(CountingDispatcher {
+        refuse_first: true,
+        ..Default::default()
+    });
+    let (app, _tmp) = make_app_with_dispatcher(Some(dispatcher.clone())).await;
+    let refused = app.clone().oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::OK);
+    assert_eq!(body_json(refused).await["success"], false);
+    let resent = app.oneshot(tap(Some("tap-1"), true)).await.unwrap();
+    assert_eq!(body_json(resent).await["success"], true);
+    assert_eq!(runs(&dispatcher), 2);
+}
+
+#[tokio::test]
+async fn an_unusable_key_is_refused_before_anything_runs() {
+    let (app, dispatcher, _tmp) = counting_app(false).await;
+    let resp = app.oneshot(tap(Some("two words"), true)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(runs(&dispatcher), 0);
 }
 
 // ── Session identity ─────────────────────────────────────────────────────────
@@ -1767,6 +1927,74 @@ async fn deleting_someone_else_does_not_touch_the_primary_setting() {
 
     let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
     assert_eq!(settings["primary_profile_id"], jerry);
+}
+
+/// A household on 2026-10-27 typed its owner's display name into a free-text "Household profile"
+/// box; the pond stored it, and every reader that looks the id up found nobody, silently.
+#[tokio::test]
+async fn a_primary_profile_that_names_no_member_is_refused_and_nothing_is_saved() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let jerry = seed_profile(&app, "Jerry").await;
+    app.clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": jerry }),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(put(
+            "/api/v1/settings",
+            serde_json::json!({ "primary_profile_id": "Jerry", "home_name": "Exile" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["fields"][0]["field"], "primary_profile_id",
+        "a form marks the box from `fields`; body: {body}"
+    );
+
+    let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
+    assert_eq!(
+        settings["primary_profile_id"], jerry,
+        "a refused patch must not replace the member already named"
+    );
+    assert_ne!(
+        settings["home_name"], "Exile",
+        "a refused patch saves none of its keys"
+    );
+}
+
+#[tokio::test]
+async fn the_primary_profile_takes_a_member_and_can_be_cleared() {
+    let (app, _storage, _tmp) = make_app_with_sessions().await;
+    let liz = seed_profile(&app, "Liz").await;
+
+    for (value, expected) in [
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::json!(""), serde_json::Value::Null),
+        (serde_json::json!(liz), serde_json::json!(liz)),
+        (serde_json::Value::Null, serde_json::Value::Null),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(put(
+                "/api/v1/settings",
+                serde_json::json!({ "primary_profile_id": value }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "writing {value}");
+        let settings = body_json(app.clone().oneshot(get("/api/v1/settings")).await.unwrap()).await;
+        assert_eq!(
+            settings["primary_profile_id"], expected,
+            "after writing {value}"
+        );
+    }
 }
 
 // ── Profile context follows the speaker ──────────────────────────────────────

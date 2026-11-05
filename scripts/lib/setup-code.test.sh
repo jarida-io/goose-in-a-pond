@@ -9,8 +9,10 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/setup-code-test.XXXXXX")" && pwd)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/setup-code-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+SCRATCH="$(cd "$SCRATCH" && pwd)"
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
 PASSED=0; FAILED=0
@@ -239,12 +241,12 @@ test_doctor_asks_as_the_service_account_and_never_for_a_password() {
   chmod +x "$W/bin/sudo"
   echo claimed > "$FAKE_STATE"
   setup_code_doctor "$W/bin/pond-server" "$W/data" agamemnon >/dev/null
-  eq "$SETUP_CODE_LEVEL" ok
-  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data"
-  local out
-  out="$(SUDO_LOCKED=1 setup_code_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$SETUP_CODE_LEVEL")"
-  contains "$out" "kept by agamemnon"
-  contains "$out" "level=info"
+  eq "$SETUP_CODE_LEVEL" ok || return 1
+  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data" || return 1
+  : > "$LOG"
+  SUDO_LOCKED=1 setup_code_doctor "$W/bin/pond-server" "$W/data" agamemnon
+  contains "$(logged)" "kept by agamemnon" || return 1
+  eq "$SETUP_CODE_LEVEL" info || return 1
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do t "$fn" "$fn"; done

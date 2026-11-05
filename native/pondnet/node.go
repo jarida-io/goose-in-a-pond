@@ -14,8 +14,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 	"tailscale.com/envknob"
@@ -82,6 +85,44 @@ type Status struct {
 	AuthURL    string   `json:"authUrl,omitempty"`
 	NodeKey    string   `json:"nodeKey,omitempty"`
 	MachineKey string   `json:"machineKey"`
+	// Health is the backend's own account of what stands between it and a working node, such as
+	// the last error from the control server while it cannot log in. Without it a node that
+	// cannot reach its coordinator sits in NoState and says nothing at all. Redacted, one line
+	// per warning and bounded by [healthLines], so it is fit for a log.
+	Health []string `json:"health,omitempty"`
+}
+
+// Bounds on [Status.Health]. The backend raises a handful of warnings at most, and one error can
+// quote a whole server response.
+const (
+	maxHealthLines     = 4
+	maxHealthLineBytes = 300
+)
+
+// healthLines makes the backend's health warnings fit to log: each redacted, folded onto one
+// line and cut to [maxHealthLineBytes], sorted so the same warnings always read the same, and
+// at most [maxHealthLines] of them.
+func healthLines(warnings []string) []string {
+	var lines []string
+	for _, warning := range warnings {
+		line := strings.Join(strings.Fields(Redact(warning)), " ")
+		if line == "" {
+			continue
+		}
+		if len(line) > maxHealthLineBytes {
+			cut := maxHealthLineBytes
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = line[:cut] + "..."
+		}
+		lines = append(lines, line)
+	}
+	sort.Strings(lines)
+	if len(lines) > maxHealthLines {
+		lines = lines[:maxHealthLines]
+	}
+	return lines
 }
 
 // Node owns its state lock and userspace networking stack until Close.
@@ -185,7 +226,7 @@ func (n *Node) Snapshot() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	result := Status{State: s.BackendState, Addresses: []string{}, AuthURL: s.AuthURL}
+	result := Status{State: s.BackendState, Addresses: []string{}, AuthURL: s.AuthURL, Health: healthLines(s.Health)}
 	encoded, err := n.store.ReadState(ipn.MachineKeyStateKey)
 	var machine key.MachinePrivate
 	if err != nil || machine.UnmarshalText(encoded) != nil || machine.IsZero() {

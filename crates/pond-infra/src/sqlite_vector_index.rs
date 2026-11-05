@@ -348,8 +348,9 @@ impl VectorIndex for SqliteVectorIndex {
             None => String::new(),
         };
         let extra = liveness_sql(corpus);
+        // DISTINCT: a chunked row matches once per stale passage.
         let sql = format!(
-            "SELECT s.{id_col} FROM {table} s \
+            "SELECT DISTINCT s.{id_col} FROM {table} s \
              LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
              WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
              LIMIT ?"
@@ -378,7 +379,7 @@ impl VectorIndex for SqliteVectorIndex {
         let extra = liveness_sql(corpus);
         let text = text_sql(corpus);
         let sql = format!(
-            "SELECT s.{id_col}, {text} FROM {table} s \
+            "SELECT DISTINCT s.{id_col}, {text} FROM {table} s \
              LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
              WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
              LIMIT ?"
@@ -390,53 +391,6 @@ impl VectorIndex for SqliteVectorIndex {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
-    }
-
-    async fn backfill_from_source(
-        &self,
-        corpus: Corpus,
-        model_id: &str,
-        expected_dims: usize,
-    ) -> Result<u64> {
-        // Pure SQL across the ATTACH: copies vectors the source already holds, no inference.
-        let (table, id_col) = source_table(corpus);
-        // Sessions hold no vectors; the summary embedding sweep owns that corpus.
-        if corpus == Corpus::Summary {
-            return Ok(0);
-        }
-        let extra = liveness_sql(corpus);
-        // Width filter: a vector from another model must not be restamped with this one.
-        let expected_bytes = (expected_dims * std::mem::size_of::<f32>()) as i64;
-        let rev = match source_rev_sql(corpus) {
-            Some(col) => col,
-            None => "NULL",
-        };
-        let sql = format!(
-            "INSERT INTO vectors (corpus, row_id, model_id, dims, vector, source_rev, embedded_at) \
-             SELECT ?, s.{id_col}, ?, ?, s.embedding, {rev}, ? \
-             FROM {table} s \
-             LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
-             WHERE s.embedding IS NOT NULL AND length(s.embedding) = ? \
-             AND v.row_id IS NULL {extra}"
-        );
-        let copied = sqlx::query(&sql)
-            .bind(corpus.as_str())
-            .bind(model_id)
-            .bind(expected_dims as i64)
-            .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
-            .bind(corpus.as_str())
-            .bind(expected_bytes)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if copied > 0 {
-            tracing::info!(
-                corpus = corpus.as_str(),
-                copied,
-                "adopted existing vectors into the index"
-            );
-        }
-        Ok(copied)
     }
 
     async fn prune_orphans(&self) -> Result<u64> {
@@ -896,7 +850,6 @@ mod tests {
 mod write_through_tests {
     use super::tests_support::*;
     use super::*;
-    use pond_core::context::vector_index::VectorIndex as _;
     use pond_core::user_data::domain::memory::MemoryFragment;
     use pond_core::user_data::ports::memory_repository::MemoryRepository;
     use std::sync::Arc;
@@ -908,7 +861,7 @@ mod write_through_tests {
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
         let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), Some("nomic-embed-text-v1.5".into()));
+            .with_vector_index(index.clone(), stamp("nomic-embed-text-v1.5", 2));
 
         let mut frag =
             MemoryFragment::from_chat("m1".into(), None, None, "the spare key is out back".into());
@@ -936,7 +889,7 @@ mod write_through_tests {
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
         let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), Some("nomic-embed-text-v1.5".into()));
+            .with_vector_index(index.clone(), stamp("nomic-embed-text-v1.5", 2));
 
         // Vacuity control: a sibling with a vector proves indexing works.
         let mut ok = MemoryFragment::from_chat("kept".into(), None, None, "harmless".into());
@@ -1062,6 +1015,168 @@ mod write_through_tests {
         );
     }
 
+    fn memory(id: &str, vector: Vec<f32>) -> MemoryFragment {
+        let mut frag = MemoryFragment::from_chat(id.into(), None, None, format!("fact {id}"));
+        frag.embedding = Some(vector);
+        frag
+    }
+
+    /// Two models of one width are two spaces: search scores only the current model's vectors.
+    #[tokio::test]
+    async fn a_same_width_vector_from_another_model_is_never_compared() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let under = |model: &str| {
+            crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+                .with_vector_index(index.clone(), stamp(model, 2))
+        };
+        let (minilm, bge_small) = (under("minilm"), under("bge-small"));
+        minilm.add(memory("old", vec![1.0, 0.0])).await.unwrap();
+        bge_small.add(memory("new", vec![1.0, 0.0])).await.unwrap();
+
+        let ids = |hits: Vec<MemoryFragment>| hits.into_iter().map(|f| f.id).collect::<Vec<_>>();
+        let scope = ProfileScope::Household;
+        assert_eq!(
+            ids(bge_small
+                .search_similar(&[1.0, 0.0], &scope, 10)
+                .await
+                .unwrap()),
+            vec!["new"],
+            "a vector stamped by another model of the same width was scored"
+        );
+        assert_eq!(
+            ids(minilm
+                .search_similar(&[1.0, 0.0], &scope, 10)
+                .await
+                .unwrap()),
+            vec!["old"]
+        );
+    }
+
+    /// Before the slot re-embeds, a switched pond answers by recency instead of across spaces,
+    /// and hands back no old vector a caller could score the query against.
+    #[tokio::test]
+    async fn with_no_vector_from_the_current_model_search_falls_back_to_recency() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let before = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+            .with_vector_index(index.clone(), stamp("minilm", 2));
+        before.add(memory("near", vec![1.0, 0.0])).await.unwrap();
+        before.add(memory("far", vec![0.0, 1.0])).await.unwrap();
+
+        let after = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+            .with_vector_index(index.clone(), stamp("bge-small", 2));
+        let similar = after
+            .search_similar(&[1.0, 0.0], &ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let recent = after
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let ids = |hits: &[MemoryFragment]| hits.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&similar), ids(&recent));
+        assert_eq!(similar.len(), 2);
+        assert!(similar.iter().all(|f| f.embedding.is_none()), "{similar:?}");
+    }
+
+    #[tokio::test]
+    async fn a_vector_of_another_width_is_not_stamped_as_the_current_model() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+            .with_vector_index(index.clone(), stamp("m", 3));
+
+        repo.add(memory("m1", vec![1.0, 0.0])).await.unwrap();
+        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
+    }
+
+    /// Chosen but not loaded: no model can be named, so the write leaves the index to the sweep.
+    #[tokio::test]
+    async fn a_vector_stored_while_the_model_loads_is_not_stamped() {
+        use pond_core::models::domain::embedding_models::{EmbedderChoice, ALL_MINILM_L6_V2};
+        use pond_core::models::services::active_embedder::ActiveEmbedder;
+
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        let embedder = Arc::new(ActiveEmbedder::off());
+        embedder
+            .choose(EmbedderChoice::Model(&ALL_MINILM_L6_V2))
+            .await;
+        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
+            .with_vector_index(index.clone(), Some(embedder));
+
+        repo.add(memory("m1", vec![0.5; 384])).await.unwrap();
+        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
+    }
+
+    /// A stored vector the index does not vouch for may be another model's at the same width, so
+    /// it is offered for re-embedding, never stamped as the current model's.
+    #[tokio::test]
+    async fn a_stored_vector_with_no_index_row_is_re_embedded_not_adopted() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        add_memory_with_vector(&db.system, "indexed", &[0.5f32; 8]).await;
+        add_memory_with_vector(&db.system, "unindexed", &[0.25f32; 8]).await;
+        index_whole(&index, "indexed", &[0.5; 8]).await;
+
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "m", 10)
+                .await
+                .unwrap(),
+            vec!["unindexed".to_string()]
+        );
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "another", 10)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "under another model both are stale"
+        );
+    }
+
+    /// A chunked row is one row of work, however many of its passages are stale.
+    #[tokio::test]
+    async fn a_chunked_row_is_offered_once() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+        add_memory_with_vector(&db.system, "m1", &[1.0]).await;
+        for chunk_ix in 0..3 {
+            index
+                .upsert(&VectorEntry {
+                    chunk_ix,
+                    chunk_span: Some((chunk_ix * 10, 10)),
+                    ..VectorEntry::whole(Corpus::Memory, "m1".into(), "old".into(), vec![1.0], None)
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            index
+                .needs_embedding(Corpus::Memory, "new", 10)
+                .await
+                .unwrap(),
+            vec!["m1".to_string()]
+        );
+        assert_eq!(
+            index
+                .needs_embedding_with_text(Corpus::Memory, "new", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
     /// Deleting a memory removes its vector, so the common case needs no sweep.
     #[tokio::test]
     async fn deleting_a_memory_drops_its_vector() {
@@ -1069,7 +1184,7 @@ mod write_through_tests {
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
         let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), Some("m".into()));
+            .with_vector_index(index.clone(), stamp("m", 2));
 
         let mut frag = MemoryFragment::from_chat("m1".into(), None, None, "x".into());
         frag.embedding = Some(vec![1.0, 0.0]);
@@ -1088,7 +1203,7 @@ mod write_through_tests {
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
         let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), Some("m".into()));
+            .with_vector_index(index.clone(), stamp("m", 2));
         let mut frag = MemoryFragment::from_chat("w1".into(), None, None, "the old words".into());
         frag.embedding = Some(vec![1.0, 0.0]);
         repo.add(frag).await.unwrap();
@@ -1165,10 +1280,8 @@ mod write_through_tests {
 
         add_memory_with_vector(&db.system, "live", &[1.0, 0.0]).await;
         add_memory_with_vector(&db.system, "archived", &[1.0, 0.0]).await;
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "live", &[1.0, 0.0]).await;
+        index_whole(&index, "archived", &[1.0, 0.0]).await;
         sqlx::query("UPDATE memory_fragments SET lifecycle = 'archived' WHERE id = 'archived'")
             .execute(&db.system)
             .await
@@ -1265,10 +1378,8 @@ mod write_through_tests {
         .await
         .unwrap();
         add_memory_with_vector(&db.system, "gone", &[1.0, 0.0]).await;
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "m1", &[1.0, 0.0]).await;
+        index_whole(&index, "gone", &[1.0, 0.0]).await;
 
         // A summary, which resolves from a different column entirely.
         add_session(
@@ -1350,7 +1461,7 @@ mod write_through_tests {
                 db.system.clone(),
                 redactor.clone(),
             )
-            .with_vector_index(index.clone(), Some("m".into())),
+            .with_vector_index(index.clone(), stamp("m", 2)),
         );
 
         let source = pond_core::context::domain::ContextSource::from_parts(SourceParts {
@@ -1448,7 +1559,7 @@ mod write_through_tests {
                 db.system.clone(),
                 redactor.clone(),
             )
-            .with_vector_index(index.clone(), Some("m".into())),
+            .with_vector_index(index.clone(), stamp("m", 2)),
         );
         let source = pond_core::context::domain::ContextSource::from_parts(SourceParts {
             id: "src-mail".into(),
@@ -1571,10 +1682,9 @@ mod write_through_tests {
             .execute(&db.system)
             .await
             .unwrap();
-        index
-            .backfill_from_source(Corpus::Memory, "m", 2)
-            .await
-            .unwrap();
+        index_whole(&index, "jerry-own", &[1.0, 0.0]).await;
+        index_whole(&index, "sam-own", &[1.0, 0.0]).await;
+        index_whole(&index, "shared", &[1.0, 0.0]).await;
 
         let ids = |hits: Vec<VectorHit>| {
             let mut v: Vec<String> = hits.into_iter().map(|h| h.row_id).collect();
@@ -1599,67 +1709,6 @@ mod write_through_tests {
             .await
             .unwrap();
         assert!(guest.is_empty(), "a guest reached the household's index");
-    }
-
-    /// Memory sweeps only pick `embedding IS NULL` rows, so embedded ones must be adopted.
-    #[tokio::test]
-    async fn an_already_embedded_memory_is_adopted_when_the_index_is_rebuilt() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        // A store that is fully embedded, and an index that knows nothing.
-        add_memory_with_vector(&db.system, "m1", &vec![0.5f32; 8]).await;
-        add_memory_with_vector(&db.system, "m2", &vec![0.25f32; 8]).await;
-        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
-
-        let copied = index
-            .backfill_from_source(Corpus::Memory, "m", 8)
-            .await
-            .unwrap();
-        assert_eq!(copied, 2, "existing vectors were not adopted");
-        let got = index.get(Corpus::Memory, "m1").await.unwrap().unwrap();
-        assert_eq!(
-            got.vector,
-            vec![0.5f32; 8],
-            "the adopted vector is not the stored one"
-        );
-        assert_eq!(got.model_id, "m");
-
-        // Idempotent: a second pass must not duplicate or re-copy.
-        assert_eq!(
-            index
-                .backfill_from_source(Corpus::Memory, "m", 8)
-                .await
-                .unwrap(),
-            0,
-            "adoption ran twice over the same rows"
-        );
-    }
-
-    #[tokio::test]
-    async fn adoption_refuses_a_vector_of_the_wrong_width() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_memory_with_vector(&db.system, "current", &vec![0.5f32; 8]).await;
-        add_memory_with_vector(&db.system, "legacy", &vec![0.5f32; 4]).await;
-
-        let copied = index
-            .backfill_from_source(Corpus::Memory, "m", 8)
-            .await
-            .unwrap();
-        assert_eq!(copied, 1);
-        assert!(index
-            .get(Corpus::Memory, "current")
-            .await
-            .unwrap()
-            .is_some());
-        assert!(
-            index.get(Corpus::Memory, "legacy").await.unwrap().is_none(),
-            "a 4-wide vector was adopted as if this model had produced it"
-        );
     }
 
     #[tokio::test]
@@ -1772,8 +1821,28 @@ mod write_through_tests {
 }
 
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
+    use pond_core::models::ports::embedding::EmbeddingProvider;
     use sqlx::{Pool, Sqlite};
+    use std::sync::Arc;
+
+    /// Names the model a repository stamps on the vectors it stores.
+    pub fn stamp(model_id: &str, dims: usize) -> Option<Arc<dyn EmbeddingProvider>> {
+        struct Stamp(String, usize);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Stamp {
+            async fn embed(&self, _: &str) -> anyhow::Result<Vec<f32>> {
+                Ok(vec![0.0; self.1])
+            }
+            fn dimensions(&self) -> usize {
+                self.1
+            }
+            fn model_id(&self) -> String {
+                self.0.clone()
+            }
+        }
+        Some(Arc::new(Stamp(model_id.to_string(), dims)))
+    }
 
     /// Creates the session attributed to a member; unattributed summaries are never retrievable.
     pub async fn add_session(pool: &Pool<Sqlite>, id: &str, summary: Option<&str>, updated: &str) {
@@ -1798,6 +1867,25 @@ mod tests_support {
             .bind(id)
             .bind(id)
             .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Indexes a memory's whole-text vector under model `m`, as its repository would.
+    pub async fn index_whole(
+        index: &Arc<dyn pond_core::context::vector_index::VectorIndex>,
+        id: &str,
+        v: &[f32],
+    ) {
+        use pond_core::context::vector_index::{Corpus, VectorEntry};
+        index
+            .upsert(&VectorEntry::whole(
+                Corpus::Memory,
+                id.into(),
+                "m".into(),
+                v.to_vec(),
+                None,
+            ))
             .await
             .unwrap();
     }

@@ -210,6 +210,9 @@
 .mdl-role__none { color: var(--color-warning-fg); }
 .mdl-role__built { color: var(--color-text-secondary); }
 
+/* A Memory model chosen but not running says so under its name, in its row's own words. */
+.mdl-role__state { display: inline-flex; margin-top: var(--space-1); }
+
 .mdl-role__change { margin-top: var(--space-2); }
 
 /* ── Model cards ────────────────────────────────────────────────────────── */
@@ -255,6 +258,10 @@
 .mdl-group__rows {
   display: flex;
   flex-direction: column;
+}
+
+.mdl-group__body {
+  padding: var(--space-3) var(--space-4) var(--space-4);
 }
 
 /* An engine's own stretch of a group: what it is, in one sentence, then its rows. */

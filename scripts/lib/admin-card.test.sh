@@ -6,8 +6,9 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/admin-card-test.XXXXXX")" && pwd)"
-trap 'rm -rf "$SCRATCH"' EXIT
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/admin-card-test.XXXXXX")" || exit 1
+[ -n "$SCRATCH" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] || exit 1
+trap '[ -n "${SCRATCH:-}" ] && [ "$SCRATCH" != "$PWD" ] && [ -d "$SCRATCH" ] && rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
 PASSED=0; FAILED=0
@@ -165,11 +166,11 @@ test_doctor_asks_as_the_service_account_and_never_for_a_password() {
   echo present > "$FAKE_STATE"
   local out
   out="$(admin_card_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$ADMIN_CARD_LEVEL")"
-  contains "$out" "admin card: present"
-  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data"
+  contains "$out" "admin card: present" || return 1
+  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data" || return 1
   out="$(SUDO_LOCKED=1 admin_card_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$ADMIN_CARD_LEVEL")"
-  contains "$out" "kept by agamemnon"
-  contains "$out" "level=info"
+  contains "$out" "kept by agamemnon" || return 1
+  contains "$out" "level=info" || return 1
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do

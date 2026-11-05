@@ -102,6 +102,14 @@ fn titled(summary: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Whether the summary is already the whole report: a last step that compiled the sections into
+/// its Result, though told not to, wrote them once, and appending them would say it all twice.
+pub fn holds_its_sections(summary: &str, sections: &[(String, String)]) -> bool {
+    let words = |text: &str| text.split_whitespace().count();
+    let drafted: usize = sections.iter().map(|(_, body)| words(body)).sum();
+    drafted > 0 && words(summary) * 5 >= drafted * 4
+}
+
 /// The whole report in Markdown: title, summary, sections, then the sources they link to. The
 /// title is the one the summary gives itself, else the goal's first line.
 pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]) -> String {
@@ -114,7 +122,8 @@ pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]
         out.push_str(summary);
         out.push_str("\n\n");
     }
-    for (title, body) in sections {
+    let compiled = holds_its_sections(summary, sections);
+    for (title, body) in sections.iter().filter(|_| !compiled) {
         let body = body.trim();
         if body.is_empty() {
             continue;
@@ -844,5 +853,26 @@ mod tests {
         let long = fold(&"x".repeat(200));
         assert!(long.split("\r\n").all(|l| l.len() <= 75));
         assert_eq!(long.replace("\r\n ", ""), "x".repeat(200));
+    }
+
+    #[test]
+    fn a_result_that_already_holds_its_sections_is_not_followed_by_them_again() {
+        let section = "The camera saw Jerry at 16:10 and an unknown person at 15:55. ".repeat(10);
+        let sections = vec![("Events".to_string(), section.clone())];
+        let compiled = format!("# Vision report\n\n{section}");
+        let report = assemble("vision events", Some(&compiled), &sections);
+        assert_eq!(
+            report.matches("unknown person at 15:55").count(),
+            10,
+            "{report}"
+        );
+        assert!(!report.contains("## Events"));
+
+        let brief = "# Vision report\n\nTwo people were seen today.";
+        let report = assemble("vision events", Some(brief), &sections);
+        assert!(
+            report.contains("## Events"),
+            "a short summary keeps its sections"
+        );
     }
 }

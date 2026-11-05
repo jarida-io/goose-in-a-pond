@@ -109,6 +109,16 @@ impl StepBindings {
 }
 
 impl StepBindings {
+    /// What the bound run has saved so far, in order; empty once the run has ended.
+    pub fn written_by(&self, root_session_id: &str) -> Vec<String> {
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(root_session_id)
+            .map(|entry| entry.written.clone())
+            .unwrap_or_default()
+    }
+
     /// Records an artifact the bound run saved; ignored once the run has ended.
     pub fn note_artifact(&self, root_session_id: &str, artifact_id: &str) {
         if let Some(entry) = self
@@ -229,7 +239,11 @@ mod tests {
         let bindings = Arc::new(StepBindings::new());
         let children = Arc::new(ChildSessionRegistry::new());
         let lease = bindings.bind("sched-long-task-1", binding());
-        let child = children.bind("child-engine-1", "sched-long-task-1");
+        let child = children.bind(
+            "child-engine-1",
+            "sched-long-task-1",
+            ProfileScope::Household,
+        );
 
         assert_eq!(
             bindings.binding_for_helper("child-engine-1", &children),

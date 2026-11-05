@@ -6,6 +6,8 @@ mod asset_root;
 mod audio_devices;
 mod composite_model_catalog_provider;
 mod conversation_extractor;
+mod embedder_factory;
+mod embedding_slot_runner;
 mod filesystem_model_storage;
 mod http_model_downloader;
 mod inference_lane_runner;
@@ -18,13 +20,18 @@ mod model_download;
 mod node_path;
 mod onnx_gpu;
 mod ports;
+mod room_memory;
+mod room_voice;
 mod schedule_executors;
+mod speech_model;
 mod spoken_code;
 mod system_deps;
 mod three_stage_consolidator;
 mod tracing_setup;
 mod voice_lock;
+mod voice_match;
 mod voice_models;
+mod voice_rig;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -34,7 +41,7 @@ use pond_adapters_llamafile::LlamafileProvider;
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
 use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
-use pond_adapters_whisper::{WhisperKeywordDetector, WhisperRsInput};
+use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
@@ -269,6 +276,10 @@ enum Commands {
         /// Force a fresh code even if one is still active
         #[arg(long)]
         refresh: bool,
+        /// Issue a fresh code whose device becomes this household member's (a profile id from
+        /// `GET /api/v1/profiles`). Pairing an already-paired phone again with it links that phone.
+        #[arg(long, value_name = "PROFILE_ID")]
+        member: Option<String>,
     },
 
     /// Show this pond's printed setup code, its claim state, and a QR to put on its card.
@@ -673,7 +684,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             whisper_url,
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
-        Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::Pairing { refresh, member }) => run_pairing(refresh, member).await,
         Some(Commands::AdminCard {
             rotate,
             json,
@@ -1101,12 +1112,6 @@ impl LlamafileManagerImpl {
     }
 }
 
-/// First index pass waits for boot to settle, so backfill never slows the first turn.
-const INDEX_MAINTENANCE_DELAY_SECS: u64 = 60;
-
-/// How often a pass is considered after that; the lane decides whether one runs.
-const INDEX_MAINTENANCE_POLL_SECS: u64 = 15 * 60;
-
 /// How often extraction considers a pass; the idle gate decides whether one runs.
 const MEMORY_EXTRACTION_POLL_SECS: u64 = 60;
 
@@ -1251,7 +1256,7 @@ async fn run_server(
         pond_core::models::domain::device_budget::allow_gemma_vision();
     }
 
-    // Serve never opens the mic (only `/transcribe`), but `WhisperRsInput::new` needs a handle.
+    // Room voice listens through it; with the room off, only `/transcribe` needs the handle.
     let (mic_handle, _mic_owner_join) = pond_audio::spawn(
         Box::new(pond_audio::CpalCapture::new()),
         pond_audio::CAPTURE_RATE_HZ,
@@ -1259,11 +1264,16 @@ async fn run_server(
         settings.mic_enabled,
     );
 
-    // Choose the speaker before Kokoro opens one. The mic is only tested on request, or by the
-    // voice session, which owns it.
-    {
+    // Choose the speaker before Kokoro opens one. With room voice on, serve owns the mic and
+    // tests it now; otherwise only on request, or by a voice session, which then owns it.
+    let serve_audio = {
+        let role = if settings.voice_room_enabled {
+            pond_adapters_audio_devices::Role::Room
+        } else {
+            pond_adapters_audio_devices::Role::Serve
+        };
         let supervisor = audio_devices::start(
-            pond_adapters_audio_devices::Role::Serve,
+            role,
             &data_dir,
             Some(mic_handle.clone()),
             Arc::new(SqliteSettingsRepository::new(db.system.clone())),
@@ -1274,12 +1284,13 @@ async fn run_server(
             None => println!("  ⚠  Speaker: still being tested; using the system default"),
         }
         let control = Arc::new(pond_adapters_audio_devices::PondAudioControl::new(
-            supervisor,
+            supervisor.clone(),
             data_dir.clone(),
         ));
         pond_api::audio_devices::install(control.clone());
         pond_mcp_server::init_audio_control(control);
-    }
+        supervisor
+    };
 
     // What did not start, told to the household once the notification pipeline exists.
     let mut startup_problems = pond_core::mcp::domain::system_notice::StartupProblems::default();
@@ -1292,6 +1303,10 @@ async fn run_server(
     )
     .await;
 
+    let whisper_catalog =
+        voice_models::whisper_catalog(&SqliteModelRepository::new(db.system.clone())).await;
+    // A chosen model still to fetch: another on disk stands in, and the switch fetches it later.
+    let mut fetch_after_start: Option<String> = None;
     let whisper_model_path: Option<std::path::PathBuf> = match voice_models.whisper.as_ref() {
         None => {
             if settings.active_whisper_model.is_empty() {
@@ -1308,24 +1323,38 @@ async fn run_server(
             }
             None
         }
+        Some(w) if w.path.exists() => Some(w.path.clone()),
         Some(w) => {
-            if !w.path.exists() {
-                println!("  📥 STT model not found — downloading...");
-                match w.download.as_ref() {
-                    Some(dl) => {
-                        if let Some(parent) = w.path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
+            match voice_models::standby_whisper(&w.path, &whisper_catalog, &data_dir.join("models"))
+            {
+                Some(standby) => {
+                    println!(
+                        "  STT: {} is not on disk yet; {} transcribes while it downloads",
+                        settings.active_whisper_model,
+                        standby.display()
+                    );
+                    fetch_after_start = Some(settings.active_whisper_model.clone());
+                    Some(standby)
+                }
+                // Nothing on disk to stand in, as on a first run: fetch it now.
+                None => {
+                    println!("  📥 STT model not found — downloading...");
+                    match w.download.as_ref() {
+                        Some(dl) => {
+                            if let Some(parent) = w.path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Err(e) =
+                                model_download::download_file(&dl.url, &w.path, dl.size_mb).await
+                            {
+                                println!("  ⚠  STT model download failed: {}", e);
+                            }
                         }
-                        if let Err(e) =
-                            model_download::download_file(&dl.url, &w.path, dl.size_mb).await
-                        {
-                            println!("  ⚠  STT model download failed: {}", e);
-                        }
+                        None => println!("  ⚠  STT model has no catalog download URL"),
                     }
-                    None => println!("  ⚠  STT model has no catalog download URL"),
+                    Some(w.path.clone())
                 }
             }
-            Some(w.path.clone())
         }
     };
 
@@ -1337,23 +1366,25 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
+    // One model for `/transcribe` and the room.
+    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
+        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                tracing::warn!(
+                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                );
+                startup_problems.speech_recognition =
+                    Some(format!("the speech model did not load ({e})"));
+                None
+            }
+        }
+    });
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
-        whisper_model_path.as_ref().and_then(|p| {
-            match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-                Ok(w) => {
-                    let w = Arc::new(w);
-                    Some(Arc::new(move |wav_bytes: Vec<u8>| {
-                        w.transcribe_wav_bytes(&wav_bytes)
-                    }) as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>)
-                }
-                Err(e) => {
-                    tracing::warn!("in-process whisper init failed, transcribe route will proxy to external: {e}");
-                    startup_problems.speech_recognition =
-                        Some(format!("the speech model did not load ({e})"));
-                    None
-                }
-            }
+        serve_whisper.clone().map(|w| {
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+                as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
     // Unconditional: Kokoro phonemizes through espeak-ng too.
@@ -1376,6 +1407,21 @@ async fn run_server(
     let download_tracker: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<String, pond_api::DownloadEntry>>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // The ASR role now takes effect at once: fetched if need be, swapped in once it loads.
+    if let Some(whisper) = &serve_whisper {
+        let switch = Arc::new(speech_model::ServeSpeechModel::new(
+            whisper.clone(),
+            &data_dir,
+            Arc::new(SqliteModelRepository::new(db.system.clone())),
+            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            download_tracker.clone(),
+        ));
+        pond_api::speech_model::install(switch.clone());
+        if let Some(model) = fetch_after_start.take() {
+            pond_api::speech_model::switch_soon(&model);
+        }
+    }
 
     // ── Kokoro: the TTS engine ──
     // Adopt the host's tier, then resolve a usable one, before fetching: an unusable tier must
@@ -1565,140 +1611,31 @@ async fn run_server(
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
-    // ── Embedding provider (gguf / fastembed / none) ─────────────────────────
-    // Before the memory/context repos (they need its model id) and the agent (semantic recall).
-    // "gguf" suits the Jetson (fastembed's ORT won't init there); it loads lazily on first embed.
+    // ── Embedder (the Memory-role model) ─────────────────────────────────────
+    // Chosen before the memory/context repos and the agent, which read its model as they work;
+    // loaded in the background once AppState exists, so a missing GGUF can be fetched.
+    let embedder = Arc::new(pond_core::models::services::active_embedder::ActiveEmbedder::off());
+    embedder
+        .choose(pond_core::models::domain::embedding_models::EmbedderChoice::resolve(&settings))
+        .await;
+    let embedder_factory = Arc::new(embedder_factory::ServerEmbedderFactory::new(
+        data_dir.join("models").join("embedding"),
+    ));
+    // Always wired: whether semantic search is on is the embedder's `available()`, which a
+    // settings save can change without a restart.
     let embedding_provider: Option<
         Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync>,
-    > = {
-        use pond_core::models::ports::embedding::EmbeddingProvider as _;
-        match settings.embedding_provider.as_str() {
-            "none" => {
-                tracing::info!("embedding provider: disabled (embedding_provider = \"none\")");
-                None
-            }
-            #[cfg(feature = "local-inference")]
-            "gguf" => {
-                let embedding_dir = data_dir.join("models").join("embedding");
-                // Shared with fastembed: a stale name or typo means the gguf default, never None.
-                let spec =
-                    pond_inference::EmbeddingModelSpec::resolve(&settings.active_embedding_model)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(
-                                "'{}' is not a GGUF embedding model ({e}); using the default",
-                                settings.active_embedding_model
-                            );
-                            pond_inference::EmbeddingModelSpec::nomic_embed_text_v1_5()
-                        });
-                let dest = embedding_dir.join(&spec.filename);
-                if !dest.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&embedding_dir) {
-                        tracing::warn!("could not create embedding model dir: {e}");
-                    }
-                    tracing::info!(
-                        model_id = %spec.model_id,
-                        size_mb = spec.size_hint_mb,
-                        "fetching GGUF embedding model in the background (one-time, egress-gated)"
-                    );
-                    // Not awaited: ~146 MB would keep the port unbound; the provider loads lazily.
-                    // Egress-gated in `pond_hf_cache`; HF URLs bypass `download_file`'s own gate.
-                    let url = spec.download_url.clone();
-                    let size_hint = spec.size_hint_mb;
-                    let model_id = spec.model_id.clone();
-                    let dest_bg = dest.clone();
-                    tokio::spawn(async move {
-                        use pond_core::models::ports::model_downloader::ModelDownloader as _;
-                        let downloader = crate::http_model_downloader::HttpModelDownloader::new();
-                        match downloader.download(&url, &dest_bg, size_hint).await {
-                            Ok(()) => tracing::info!(
-                                model_id = %model_id,
-                                "GGUF embedding model downloaded; it loads on the next embed"
-                            ),
-                            Err(e) => tracing::warn!(
-                                model_id = %model_id,
-                                "GGUF embedding model download failed: {e:#} -- retrieval \
-                                 falls back to keyword until it succeeds"
-                            ),
-                        }
-                    });
-                }
-                let provider = pond_inference::GgufEmbeddingProvider::new(spec, &embedding_dir);
-                tracing::info!(
-                    model_id = provider.model_id(),
-                    dims = provider.dimensions(),
-                    "GGUF embedding provider ready (loads lazily on first embed)"
-                );
-                Some(Arc::new(provider)
-                    as Arc<
-                        dyn pond_core::models::ports::embedding::EmbeddingProvider + Send + Sync,
-                    >)
-            }
-            #[cfg(not(feature = "local-inference"))]
-            "gguf" => {
-                tracing::warn!(
-                    "embedding_provider = \"gguf\" needs the local-inference feature; \
-                     embeddings disabled"
-                );
-                None
-            }
-            _ => {
-                let emb_model = if settings.active_embedding_model.is_empty() {
-                    "all-MiniLM-L6-v2"
-                } else {
-                    &settings.active_embedding_model
-                };
-                let cache_dir = data_dir.join("models").join("embedding");
-                let emb_model_owned = emb_model.to_string();
-                let emb_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(
-                            &emb_model_owned,
-                            Some(cache_dir),
-                        )
-                    }),
-                )
-                .await;
-                let init_result = match emb_result {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => Err(anyhow::anyhow!("embedding spawn_blocking failed: {e}")),
-                    Err(_) => Err(anyhow::anyhow!(
-                        "embedding provider init timed out after 30 s — ONNX Runtime may be \
-                         version-incompatible (need ORT 1.24.2)"
-                    )),
-                };
-                match init_result {
-                    Ok(provider) => {
-                        tracing::info!(
-                            model = provider.model_name(),
-                            dims = provider.dimensions(),
-                            "embedding provider ready"
-                        );
-                        Some(Arc::new(provider)
-                            as Arc<
-                                dyn pond_core::models::ports::embedding::EmbeddingProvider
-                                    + Send
-                                    + Sync,
-                            >)
-                    }
-                    Err(e) => {
-                        tracing::warn!("embedding provider failed to init: {e:#}");
-                        None
-                    }
-                }
-            }
-        }
-    };
+    > = Some(embedder.clone());
 
-    // Shared personal-context index; the model id below is `None` when embeddings are off.
+    // Shared personal-context index; writes are stamped with the embedder's model when it is ready.
     let vector_index: Arc<dyn pond_core::context::vector_index::VectorIndex> = Arc::new(
         pond_infra::sqlite_vector_index::SqliteVectorIndex::new(db.vectors.clone()),
     );
-    // A member's first turn must not queue behind the pond indexing itself.
-    let index_maintenance_cancel = tokio_util::sync::CancellationToken::new();
-    // Held here so the reindex route can trigger a refill; `Some` once the sweep spawns.
-    let mut index_reindex_handle: Option<Arc<tokio::sync::Notify>> = None;
-    let vector_model_id = embedding_provider.as_ref().map(|p| p.model_id());
+    // The embedding slot's bells: the Reindex route, and writers of rows that need a vector.
+    let embedding_reindex = Arc::new(tokio::sync::Notify::new());
+    let embedding_arrived = Arc::new(tokio::sync::Notify::new());
+    let vector_stamp: Option<Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>> =
+        Some(embedder.clone());
 
     // Chokepoint 1: this one construction redacts every memory write, whoever the writer.
     let memory_repo: Arc<
@@ -1708,7 +1645,7 @@ async fn run_server(
             // Inside the redactor, which drops a secret's vector: the index must mirror the store.
             Arc::new(
                 SqliteMemoryRepository::new(db.system.clone())
-                    .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+                    .with_vector_index(vector_index.clone(), vector_stamp.clone()),
             ),
             redactor.clone(),
         ),
@@ -2115,7 +2052,7 @@ async fn run_server(
                     "idle after user activity — starting memory consolidation"
                 );
 
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = slot.cancellation_token();
                 *inact_cancel.write().await = Some(cancel.clone());
 
                 // Routes cancel directly; the DB poll lets an out-of-process voice turn abort.
@@ -2200,6 +2137,7 @@ async fn run_server(
         let sum_lane = inference_lane.clone();
         let idle_secs = settings.summary_idle_secs.max(30) as u64;
         let sum_wake = inference_lane.claim(LaneJob::SummaryRefresh);
+        let sum_arrived = embedding_arrived.clone();
 
         // Baselines for the "never on startup" guard; captured before the server binds.
         let started_at_instant = std::time::Instant::now();
@@ -2274,8 +2212,8 @@ async fn run_server(
                         tracing::debug!("summary refresh: stopping at {MAX_PER_PASS} this pass");
                         break;
                     }
-                    // Abort on activity: the serial engine must never make a user turn wait.
-                    let cancel = tokio_util::sync::CancellationToken::new();
+                    // Abort on activity or lane preemption: the serial engine must never make a user turn wait.
+                    let cancel = slot.cancellation_token();
                     let watcher_activity = sum_activity.clone();
                     let watcher_cancel = cancel.clone();
                     let baseline = idle_for;
@@ -2318,6 +2256,9 @@ async fn run_server(
                 // An attempt spends the interval budget whether or not it summarised anything.
                 // A guard, not a flag, so the `continue`s above release the slot too.
                 drop(slot);
+                if refreshed > 0 {
+                    sum_arrived.notify_one();
+                }
             }
         });
         tracing::info!(
@@ -2415,8 +2356,8 @@ async fn run_server(
                     }
                 };
 
-                // One token per pass: resumed activity ends the whole sweep.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // One token per pass: lane preemption or resumed activity ends the whole sweep.
+                let cancel = slot.cancellation_token();
 
                 let watcher_activity = title_activity.clone();
                 let watcher_storage = title_storage.clone();
@@ -2480,7 +2421,7 @@ async fn run_server(
                                 target: "giap::trace",
                                 kind = "session_retitled",
                                 session_id = %session.id,
-                                title = %title,
+                                title_chars = title.chars().count(),
                             );
                         }
                         Ok(RetitleOutcome::Cancelled) => {
@@ -2665,176 +2606,9 @@ async fn run_server(
         Arc<dyn pond_core::mcp::ports::mcp_knowledge::McpKnowledgePort + Send + Sync>,
     > = None;
 
-    // ── Embedding backfill ───────────────────────────────────────────────────
-    // `search_similar` skips unembedded rows; batched with pauses as it competes with inference.
-    if let Some(provider) = embedding_provider.clone() {
-        let backfill_repo = memory_repo.clone();
-        tokio::spawn(async move {
-            use pond_core::user_data::services::memory_relevance as relevance;
-            relevance::run_backfill(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-            // Then re-embed rows from another model: search excludes them and the backfill can't
-            // see them. Second, because a row with no vector at all is the worse miss.
-            relevance::run_dimension_repair(
-                backfill_repo.as_ref(),
-                provider.as_ref(),
-                relevance::BACKFILL_BATCH_SIZE,
-                relevance::BACKFILL_BATCH_PAUSE_MS,
-            )
-            .await;
-        });
-    }
-
-    // ── Personal-context index maintenance ───────────────────────────────────
-    // `index_reindex_handle` is set only inside this block, so it can't disagree with the sweep.
-    if let (Some(provider), Some(_)) = (embedding_provider.clone(), vector_model_id.clone()) {
-        use pond_core::user_data::services::inference_lane::LaneJob;
-
-        let index = vector_index.clone();
-        let storage = session_storage.clone();
-        // Backfill runs once at startup; this repairs rows left unembedded after it.
-        let sweep_memories = memory_repo.clone();
-        let cancel = index_maintenance_cancel.clone();
-        let sweep_lane = inference_lane.clone();
-        let reindex = inference_lane.claim(LaneJob::IndexMaintenance);
-        // The Reindex button is a person, so it rings the HAND bell.
-        index_reindex_handle = Some(reindex.hand_bell());
-        let sweep_activity = last_user_activity.clone();
-        let sweep_storage = session_storage.clone();
-
-        let started_at = std::time::Instant::now();
-        let started_at_utc = chrono::Utc::now();
-
-        tokio::spawn(async move {
-            use pond_core::context::index_maintenance::{plan_sweep, run_index_maintenance};
-            // Consolidation's idle threshold, so the two definitions of "idle" can't drift.
-            use pond_core::user_data::services::consolidation_schedule as sched;
-
-            let poll = std::time::Duration::from_secs(INDEX_MAINTENANCE_POLL_SECS);
-            let chore_idle = std::time::Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS);
-            // Whether a pass has COMPLETED since this process started.
-            let mut indexed_since_boot = false;
-
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(
-                    INDEX_MAINTENANCE_DELAY_SECS,
-                )) => {}
-            }
-
-            loop {
-                let woke = tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(poll) => crate::inference_lane_runner::Tick::Poll,
-                    rang = reindex.rang() => rang,
-                };
-                let asked = woke.waives();
-
-                let db_activity = newest_session_activity(sweep_storage.as_ref()).await;
-                let in_process_at = *sweep_activity.read().await;
-                let now = chrono::Utc::now();
-                let saw_activity_since_start = sched::saw_activity_since_start(
-                    started_at,
-                    in_process_at,
-                    started_at_utc,
-                    db_activity,
-                );
-                let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
-
-                // A requested pass skips the idle wait and the floor (a person is waiting on it);
-                // the lane's single slot still serialises jobs.
-                let (floor, idle_threshold) = if asked {
-                    (std::time::Duration::ZERO, std::time::Duration::ZERO)
-                } else {
-                    (poll, chore_idle)
-                };
-
-                let first_post_boot = !indexed_since_boot;
-                let tick = plan_sweep(asked, indexed_since_boot);
-
-                let Some(_slot) = sweep_lane
-                    .acquire(
-                        LaneJob::IndexMaintenance,
-                        // No toggle of its own: an unmaintained index silently goes stale.
-                        true,
-                        // `floor` and `idle_threshold` are zeroed above when `asked`; the
-                        // exemption comes from `plan_sweep`, not the lane's hand waiver.
-                        crate::inference_lane_runner::Cadence::new(
-                            floor,
-                            idle_threshold,
-                            tick.exempt_from_activity_gate,
-                        ),
-                        // A request or the first post-boot pass is exempt, or a quiet pond
-                        // would refuse forever.
-                        woke.waives(),
-                        saw_activity_since_start,
-                        idle_for,
-                    )
-                    .await
-                else {
-                    continue;
-                };
-
-                // Interruptible per pass; a child token, so cancelling it spares the sweep task.
-                let pass = cancel.child_token();
-                // Cancel only on activity newer than this pass's admission, not merely recent:
-                // otherwise the turn before a Reindex press kills the pass it asked for.
-                let baseline = *sweep_activity.read().await;
-                let watcher = tokio::spawn({
-                    let pass = pass.clone();
-                    let activity = sweep_activity.clone();
-                    async move {
-                        // In-process only: set at turn start, while the DB timestamp lags.
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            if *activity.read().await > baseline {
-                                pass.cancel();
-                                return;
-                            }
-                        }
-                    }
-                });
-
-                let report = run_index_maintenance(
-                    &index,
-                    storage.as_ref(),
-                    sweep_memories.as_ref(),
-                    provider.as_ref(),
-                    &pass,
-                    tick.budget,
-                )
-                .await;
-                watcher.abort();
-
-                // Only a completed pass spends the exemption: an interrupted one left the backlog.
-                if !pass.is_cancelled() {
-                    indexed_since_boot = true;
-                }
-
-                if asked || first_post_boot {
-                    tracing::info!(
-                        requested = asked,
-                        interrupted = pass.is_cancelled(),
-                        adopted = report.adopted,
-                        summaries = report.summaries_indexed,
-                        context = report.context_indexed,
-                        memories = report.memories_indexed,
-                        still_missing = report.still_missing,
-                        "personal-context index pass finished"
-                    );
-                }
-            }
-        });
-    }
-
     // ── Batch memory extraction ──────────────────────────────────────────────
-    // The only writer of extracted memories. Without an embedder there's no cosine dedup, so it
-    // reads nothing and says so via `blocked_on`.
+    // The only writer of extracted memories. Without a loaded embedder there's no cosine dedup,
+    // so it reads nothing and says so via `blocked_on`.
     let extraction_status = Arc::new(tokio::sync::RwLock::new(
         pond_core::user_data::services::memory_extraction::ExtractionEngineStatus {
             mode: pond_core::user_data::services::memory_extraction::ExtractionMode::parse(
@@ -2849,7 +2623,8 @@ async fn run_server(
     // once it exists further down.
     let (proposal_notice_tx, proposal_notice_rx) =
         tokio::sync::mpsc::channel::<pond_core::user_data::domain::proposal::Proposal>(64);
-    if let Some(provider) = embedding_provider.clone() {
+    {
+        use pond_core::models::ports::embedding::EmbeddingProvider as _;
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
         use pond_core::user_data::services::memory_extraction::{
@@ -2874,9 +2649,10 @@ async fn run_server(
         );
         let promotion_notices = proposal_notice_tx;
 
+        let extraction_embedder = embedder.clone();
         let service = Arc::new(
             BatchExtractionService::new()
-                .with_embedding_provider(provider)
+                .with_embedding_provider(embedder.clone())
                 .with_reminder_repository(reminder_repo),
         );
         let extraction_storage = session_storage.clone();
@@ -2965,11 +2741,15 @@ async fn run_server(
                     )
                     .await
                 else {
+                    // Otherwise an off or loading embedder looks like nothing left to extract.
+                    if !extraction_embedder.available() {
+                        status.write().await.blocked_on = Some("no_embedder".to_string());
+                    }
                     continue;
                 };
 
-                // Checked before each window: activity costs at most one window's inference.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // Preempted immediately by the lane or on activity: activity costs at most one window's inference.
+                let cancel = slot.cancellation_token();
                 let watcher_cancel = cancel.clone();
                 let watcher_activity = extraction_activity.clone();
                 let baseline = in_process_at;
@@ -2990,15 +2770,22 @@ async fn run_server(
                     }
                 });
 
-                let report = service
-                    .run_pass(
+                let report = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::info!("batch-extraction: pass preempted by user activity");
+                        pond_core::user_data::services::memory_extraction::PassReport {
+                            blocked_on: Some("preempted".to_string()),
+                            ..Default::default()
+                        }
+                    }
+                    r = service.run_pass(
                         extraction_storage.as_ref(),
                         extraction_repo.as_ref(),
                         &extractor,
                         &config,
                         &cancel,
-                    )
-                    .await;
+                    ) => r,
+                };
                 watcher.abort();
 
                 status.write().await.record(config.mode, &report);
@@ -3098,17 +2885,9 @@ async fn run_server(
         });
         tracing::info!(
             "batch memory extraction active (mode={}) — reads one window per pass after {} min \
-             of household quiet",
+             of household quiet, once an embedding model is loaded",
             settings.memory_extraction_mode,
             settings.memory_extraction_idle_secs / 60,
-        );
-    } else {
-        // In the status too: otherwise a missing embedder looks like nothing left to extract.
-        extraction_status.write().await.blocked_on = Some("no_embedder".to_string());
-        tracing::info!(
-            "batch memory extraction inactive — no embedding provider, so nothing could be \
-             deduplicated and the pond would store a restatement of everything it already \
-             knows. NOTHING else extracts memories now, so this pond is not learning."
         );
     }
 
@@ -3127,6 +2906,39 @@ async fn run_server(
     // Created before the Matter runtime, which publishes sensor updates onto it.
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
+
+    // Vision presence tracker: holds background inference chores while a person is in view.
+    {
+        let last_person_seen = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let probe = last_person_seen.clone();
+        inference_lane.watch_presence(move || {
+            probe
+                .lock()
+                .ok()
+                .and_then(|t| *t)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90))
+        });
+
+        let mut events = event_bus.subscribe();
+        let lane = inference_lane.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use pond_core::shared::ports::event_bus::BusEvent;
+            while let Some(event) = events.next().await {
+                let is_person = match event {
+                    BusEvent::Camera(ref c) => c.event_type == "person",
+                    BusEvent::Presence(_) => true,
+                    _ => false,
+                };
+                if is_person {
+                    if let Ok(mut seen) = last_person_seen.lock() {
+                        *seen = Some(std::time::Instant::now());
+                    }
+                    lane.preempt();
+                }
+            }
+        });
+    }
 
     // `device_control` is a facade over Matter (when on and reachable) or the logging stub,
     // swapped at runtime behind one long-lived `Arc`.
@@ -3169,6 +2981,12 @@ async fn run_server(
     let (matter_runtime, device_control): (MatterRuntimeHandle, DeviceControl) = (
         None,
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+    );
+
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
     );
 
     // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
@@ -3318,6 +3136,7 @@ async fn run_server(
             prompt_template_repo.clone(),
             prompt_extra_repo.clone(),
             device_control.clone(),
+            last_action.clone(),
             Some(session_storage.clone()),
             Some(model_repo.clone()),
             false, // voice_mode — server mode, not voice
@@ -3368,6 +3187,7 @@ async fn run_server(
             security_policy.clone(),
         ),
     ));
+    init_interview_tools(&db.system);
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
@@ -3613,7 +3433,29 @@ async fn run_server(
     > = Some(Arc::new(SqliteOperationalLog::new(db.logs.clone())));
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
-    let _file_guard = drain_handle.drain_into(operational_log.clone());
+    let household_names = tracing_setup::HouseholdNames::default();
+    let _file_guard = drain_handle.drain_into(
+        operational_log.clone(),
+        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+    );
+    // A new or renamed member is hidden from the Logs viewer within a minute.
+    {
+        let profiles = profile_repo.clone();
+        tokio::spawn(async move {
+            let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                every_minute.tick().await;
+                match profiles.list().await {
+                    Ok(members) => {
+                        household_names.set(members.iter().map(|m| m.display_name.as_str()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not read members' names to hide from the logs")
+                    }
+                }
+            }
+        });
+    }
 
     let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
         match SqliteTelemetry::new(db.logs.clone()).await {
@@ -3714,6 +3556,13 @@ async fn run_server(
         pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(db.system.clone()),
     );
 
+    // The household's record of durable notices, which the dashboard lists after a reload.
+    let notification_history: Arc<
+        dyn pond_core::mcp::ports::notification_history::NotificationHistory,
+    > = Arc::new(
+        pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(db.system.clone()),
+    );
+
     let push_relay = push_relay(&data_dir, push_token_repo.clone());
     // Required: without it `send_to_profile` silently answers `AttributionUnavailable`.
     let device_attribution: Arc<
@@ -3735,7 +3584,8 @@ async fn run_server(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
             ),
-        )),
+        ))
+        .with_history(notification_history.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -3825,6 +3675,14 @@ async fn run_server(
         settings_repo.clone(),
         scheduler.clone(),
     );
+    // Rehydration opened these before phones could be told; ask now, in the background.
+    if let Some(scheduler) = scheduler.clone() {
+        let sender = notification_sender.clone();
+        tokio::spawn(async move {
+            pond_server::system_notices::announce_missed_runs(scheduler.as_ref(), sender.as_ref())
+                .await;
+        });
+    }
     {
         let event_log = event_log.clone();
         let mut events = event_bus.subscribe();
@@ -3898,6 +3756,7 @@ async fn run_server(
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
         // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
+        pond_core::shared::services::long_task_open::install_runner_bell(bells.nudge_bell());
         if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
             // Agents a schedule or a household event activates run as one-step long tasks.
             let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
@@ -4028,15 +3887,20 @@ async fn run_server(
                     .unwrap_or_default();
                 subjects.push(settings.user_name.clone());
 
-                let outcome = compose_suggestions(
-                    gen_memories.as_ref(),
-                    gen_queue.as_ref(),
-                    gen_provider.clone(),
-                    &subjects,
-                    MEMORY_SCAN,
-                    now,
-                )
-                .await;
+                let outcome = tokio::select! {
+                    _ = slot.cancelled() => {
+                        tracing::info!("[suggestions] pass preempted by user activity");
+                        continue;
+                    }
+                    res = compose_suggestions(
+                        gen_memories.as_ref(),
+                        gen_queue.as_ref(),
+                        gen_provider.clone(),
+                        &subjects,
+                        MEMORY_SCAN,
+                        now,
+                    ) => res,
+                };
 
                 // Logged even when nothing was composed: silent, a no-op looks like a bail.
                 match outcome {
@@ -4078,6 +3942,7 @@ async fn run_server(
     // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
     // `account_syncer` is hoisted so the "check now" route and the timer share one syncer.
     let mut account_syncer: Option<Arc<dyn pond_core::context::ports::AccountSync>> = None;
+    let slot_context: Arc<dyn pond_core::context::ports::ContextRepository>;
     {
         let context_repo: Arc<dyn pond_core::context::ports::ContextRepository> = Arc::new(
             pond_infra::sqlite_context::SqliteContextRepository::new(
@@ -4085,15 +3950,16 @@ async fn run_server(
                 redactor.clone(),
             )
             // Mirroring is safe: a ContextItem can only be constructed redacted.
-            .with_vector_index(vector_index.clone(), vector_model_id.clone()),
+            .with_vector_index(vector_index.clone(), vector_stamp.clone()),
         );
+        slot_context = context_repo.clone();
         let pipeline = Arc::new(
             pond_core::context::ingest::IngestPipeline::new(context_repo.clone(), redactor.clone())
                 .with_embedder(embedding_provider.clone()),
         );
 
-        // Installed unconditionally: the toggle gates registration. No embedder, no unified
-        // retrieval: `recall` then answers nothing rather than degrading to context-only.
+        // Installed unconditionally: the toggle gates registration. With no model loaded,
+        // `recall` answers nothing rather than degrading to context-only.
         let unified_retrieval = embedding_provider.clone().map(|emb| {
             Arc::new(
                 pond_core::context::retrieval_service::PersonalContextRetrieval::new(
@@ -4364,7 +4230,79 @@ async fn run_server(
         ))
     };
 
+    // Shared with room voice, whose turns hold lane jobs back as a phone's do.
+    let runs = Arc::new(pond_api::runs::RunSupervisor::default());
+    // Voice Match: its speaker model is fetched by default, in the background.
+    let voice_prints: Arc<dyn pond_core::user_data::ports::voice_print::VoicePrintRepository> =
+        Arc::new(
+            pond_infra::sqlite_voice_recognition::SqliteVoiceRecognition::new(db.system.clone()),
+        );
+    let voice_match = voice_match::ServeVoiceMatch::new(&data_dir);
+    {
+        use pond_core::models::ports::voice_match::VoiceMatchEngine as _;
+        voice_match.fetch_model();
+    }
+    let room_voice = {
+        let enabled = settings_repo
+            .get()
+            .await
+            .map(|s| s.voice_room_enabled)
+            .unwrap_or(settings.voice_room_enabled);
+        let current = settings_repo
+            .get()
+            .await
+            .unwrap_or_else(|_| settings.clone());
+        let phrase = pond_voice::text::normalize_transcript(&current.voice_wake_word);
+        let calibrated = voice_prints
+            .wake_takes(&phrase)
+            .await
+            .map(|takes| {
+                pond_core::user_data::services::voice_match::wake_verdict(&takes)
+                    .cnn_hears_household
+            })
+            .unwrap_or(false);
+        let (detector, reason) = voice_rig::expected_wake(&current, calibrated);
+        println!(
+            "  Room voice: {}",
+            if enabled {
+                "on; it listens once a microphone and speaker pair works"
+            } else {
+                "off (voice_room_enabled)"
+            }
+        );
+        room_voice::RoomVoice::start(
+            room_voice::RoomDeps {
+                agent: agent.clone(),
+                storage: session_storage.clone(),
+                settings: settings_repo.clone(),
+                telemetry: telemetry.clone(),
+                data_dir: data_dir.clone(),
+                mic: mic_handle.clone(),
+                whisper: serve_whisper.clone(),
+                output: tts.clone(),
+                audio: Arc::new(serve_audio.clone()),
+                runs: runs.clone(),
+                voice_prints: Some(voice_prints.clone()),
+                voice_match: Some(voice_match.clone()),
+                profiles: Some(profile_repo.clone()),
+                prompt_extras: Some(prompt_extra_repo.clone()),
+            },
+            enabled,
+            pond_core::models::domain::room_voice::RoomWake {
+                phrase: current.voice_wake_word.clone(),
+                detector,
+                reason,
+            },
+        )
+    };
+
+    let voice_match_engine: Arc<dyn pond_core::models::ports::voice_match::VoiceMatchEngine> =
+        voice_match.clone();
     let state = Arc::new(AppState {
+        room_voice: Some(
+            room_voice.clone() as Arc<dyn pond_core::models::ports::room_voice::RoomVoiceControl>
+        ),
+        voice_match: Some(voice_match_engine),
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
         suggestion_queue: Arc::new(
@@ -4388,11 +4326,10 @@ async fn run_server(
         device_registry,
         room_registry,
         memory_repo,
-        embedding_provider,
-        // Same handle the repos write through and the sweep repairs; never construct a second one.
+        embedder: embedder.clone(),
+        // Same handle the repos write through and the slot repairs; never construct a second one.
         vector_index: Some(vector_index.clone()),
-        // Some only if the sweep spawned, or the route would report `refilling: true` forever.
-        index_reindex: index_reindex_handle,
+        index_reindex: Some(embedding_reindex.clone()),
         lane: Some(inference_lane.clone()),
         account_sync: account_syncer.clone(),
         sensor_storage,
@@ -4434,7 +4371,7 @@ async fn run_server(
         event_log: Some(event_log.clone()),
         push_token_repo: Some(push_token_repo.clone()),
         face_recognition,
-        runs: Arc::new(pond_api::runs::RunSupervisor::default()),
+        runs: runs.clone(),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         // Own, larger pool so long-lived phone streams never starve interactive chat SSE.
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
@@ -4448,6 +4385,7 @@ async fn run_server(
         schedule_result_tx: schedule_result_tx.clone(),
         notification_tx: notification_tx.clone(),
         notification_queue: Some(notification_queue.clone()),
+        notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
         telemetry,
         context_monitor: Arc::new(
@@ -4472,8 +4410,10 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: Some(pond_admin),
     });
+    state.device_events.clone().follow(event_bus.clone());
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
@@ -4652,10 +4592,25 @@ async fn run_server(
 
     // Load the model and prefill the static prompt prefix at boot, so turn 1 reuses it.
     let prewarm = pond_api::spawn_prefix_prewarm(state.clone(), false);
-    if let Some(plan) = onnx_gpu_plan {
+    // TensorRT engines and a GPU embedder loading beside the language model's own GPU load risk
+    // an NvMap OOM, so both wait for the prewarm.
+    let (prewarm_done, prewarmed) = tokio::sync::watch::channel(false);
+    {
+        let state = state.clone();
         tokio::spawn(async move {
-            // TensorRT engines loading beside the language model's own GPU load risk an NvMap OOM.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), prewarm).await;
+            // The typed shape first, then the Voice agent's: a spoken turn renders its own preamble.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                let _ = prewarm.await;
+                pond_api::compile_voice_prefill(state).await;
+            })
+            .await;
+            let _ = prewarm_done.send(true);
+        });
+    }
+    if let Some(plan) = onnx_gpu_plan {
+        let mut prewarmed = prewarmed.clone();
+        tokio::spawn(async move {
+            let _ = prewarmed.wait_for(|done| *done).await;
             pond_onnx_accel::enable_gpu(plan);
         });
     }
@@ -4667,6 +4622,10 @@ async fn run_server(
             use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
             runs.turn_in_flight()
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
+        let lane = inference_lane.clone();
+        state.runs.set_preempt_hook(move || {
+            lane.preempt();
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -4685,6 +4644,34 @@ async fn run_server(
                 tracing::info!("restore: started {n} download(s) for role-assigned models");
             }
         });
+    }
+
+    // Loads the embedder and keeps every vector current, in counter-phase. After AppState,
+    // through which the factory fetches a missing GGUF; its loads give way to the lane's work.
+    embedder_factory.attach(&state, &inference_lane);
+    {
+        let warmup = state.warmup.clone();
+        tokio::spawn(embedding_slot_runner::run(
+            embedding_slot_runner::SlotDeps {
+                embedder: embedder.clone(),
+                factory: embedder_factory.clone(),
+                lane: inference_lane.clone(),
+                index: vector_index.clone(),
+                memories: state.memory_repo.clone(),
+                sessions: state.session_storage.clone(),
+                context: Some(slot_context),
+                activity: last_user_activity.clone(),
+                reindex: embedding_reindex,
+                arrived: embedding_arrived,
+                chat_model_warming: Box::new(move || {
+                    !*prewarmed.borrow()
+                        || matches!(
+                            warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
+                            pond_core::models::ports::agent::WarmupPhase::Warming
+                        )
+                }),
+            },
+        ));
     }
 
     // One station for the setup channel and the connections routes, so a join over Bluetooth and
@@ -4931,6 +4918,9 @@ async fn run_server(
         matter.shutdown().await;
     }
 
+    // Before the model goes: a room turn must not start while it is released.
+    room_voice.shutdown().await;
+
     // While logging still runs, so the release is on record. `async_main` repeats it for the
     // other entry points; a second call finds nothing loaded.
     pond_adapters_goose::release_local_models(std::time::Duration::from_secs(20)).await;
@@ -5073,59 +5063,6 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Returns the Silero VAD, or `None` (energy gate) on any failure: a worse VAD, never a deaf pond.
-/// Diagnostics use stderr: `out!` is a no-op under `--json-events`, the desktop's only mode.
-async fn build_speech_detector(
-    vad_backend: &str,
-    data_dir: &std::path::Path,
-) -> Option<Box<dyn pond_voice::dsp::SpeechDetector + Send>> {
-    if vad_backend.eq_ignore_ascii_case("rms") {
-        // The escape hatch, for a board whose ONNX Runtime is broken.
-        return None;
-    }
-    if !vad_backend.eq_ignore_ascii_case("silero") {
-        // A hand-edited DB can land here: `apply_key` skips the API's `VAD_BACKENDS` validation.
-        eprintln!("  Listen   unknown vad_backend \"{vad_backend}\" — using the energy gate.");
-        return None;
-    }
-
-    // Fetched before `ready`, unlike Kokoro: it's 2 MB and `chat --voice` must work with no server.
-    let path = model_download::ensure_silero_model(data_dir).await?;
-
-    // Bounded: with no dylib, ort's `load-dynamic` init hangs forever instead of failing.
-    const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-    let loading = tokio::time::timeout(
-        LOAD_TIMEOUT,
-        tokio::task::spawn_blocking(move || pond_adapters_silero::SileroDetector::new(&path)),
-    )
-    .await;
-
-    match loading {
-        Ok(Ok(Ok(detector))) => {
-            tracing::info!("silero VAD active");
-            Some(Box::new(detector) as Box<dyn pond_voice::dsp::SpeechDetector + Send>)
-        }
-        Ok(Ok(Err(e))) => {
-            eprintln!("  Listen   silero VAD failed to load: {e}");
-            eprintln!("           Using the energy gate.");
-            None
-        }
-        Ok(Err(e)) => {
-            eprintln!("  Listen   silero VAD load panicked: {e}");
-            None
-        }
-        Err(_) => {
-            eprintln!(
-                "  Listen   silero VAD load timed out after {}s — the ONNX Runtime is \
-                 probably missing or version-incompatible.",
-                LOAD_TIMEOUT.as_secs()
-            );
-            eprintln!("           Using the energy gate.");
-            None
-        }
-    }
-}
-
 /// Background wake-ups for phones: FCM v1 when a service-account key exists (data-only pings,
 /// no content via Google), else the logging stub.
 fn push_relay(
@@ -5223,6 +5160,11 @@ async fn run_chat(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
@@ -5254,6 +5196,7 @@ async fn run_chat(
             None,
         ),
     ));
+    init_interview_tools(&db.system);
 
     let settings_repo_chat = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_chat.get().await.unwrap_or_default();
@@ -5286,6 +5229,11 @@ async fn run_chat(
         )
         .with_device_attribution(Arc::new(
             pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(db.system.clone()),
+        ))
+        .with_history(Arc::new(
+            pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(
+                db.system.clone(),
+            ),
         )),
     ));
     // Which members connected Uber, for book_ride. The serve process owns the store; this one
@@ -5602,6 +5550,7 @@ async fn run_chat(
             template_repo,
             extras_repo,
             Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+            last_action,
             Some(trim_storage), // powers the trimmer's summary splice
             Some(chat_model_repo.clone()),
             voice_mode,
@@ -5826,18 +5775,38 @@ async fn run_chat(
         None
     };
 
-    // Set on the shared backend, so both voice input and the wake-word detector use it.
-    if let Some(backend) = &whisper_backend {
-        if let Some(detector) = build_speech_detector(&settings.vad_backend, &data_dir).await {
-            backend.set_speech_detector(detector);
-        }
-    }
+    // The ear where Silero is available, the Whisper detector and energy gates otherwise.
+    let listening = match &whisper_backend {
+        Some(backend) => Some(
+            voice_rig::build_listening(voice_rig::ListeningOptions {
+                settings: &settings,
+                data_dir: &data_dir,
+                mic: &mic_handle,
+                whisper: backend.clone(),
+                wake_word,
+                no_wake_word,
+                audio_level: audio_level_sink.clone(),
+                // Voice Match runs in serve's room; this terminal loop recognises nobody.
+                speaker: None,
+                cnn_hears_household: false,
+                whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
+                    voice_rig::household_prompt(
+                        wake_word.unwrap_or(settings.voice_wake_word.as_str()),
+                        Some(&SqliteProfileRepository::new(db.system.clone())),
+                    )
+                    .await,
+                ))),
+            })
+            .await,
+        ),
+        None => None,
+    };
 
     // Under --json-events stdin is the shell's command channel; typed turns share it.
     let control = json_events.then(VoiceControl::new);
     let mut typed_lines = None;
-    let voice: Arc<dyn VoiceInput> = match &whisper_backend {
-        Some(backend) => {
+    match &listening {
+        Some(listening) => {
             out!(
                 "  Listen   {}",
                 voice_models
@@ -5847,20 +5816,22 @@ async fn run_chat(
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "whisper".to_string())
             );
-            backend.clone() as Arc<dyn VoiceInput>
+            chat_service = listening.apply(chat_service);
         }
         None => {
             out!("  Listen   typed input (no speech model)");
-            if control.is_some() {
+            let voice: Arc<dyn VoiceInput> = if control.is_some() {
                 let (tx, typed) = TypedLineInput::channel();
                 typed_lines = Some(tx);
                 Arc::new(typed)
             } else {
                 Arc::new(StdinInput::new())
-            }
+            };
+            chat_service = chat_service
+                .with_voice_input(voice)
+                .with_wake_word_detector(Arc::new(InstantActivation));
         }
-    };
-    chat_service = chat_service.with_voice_input(voice);
+    }
     if let Some(control) = &control {
         chat_service = chat_service.with_control(control.clone());
         let control = control.clone();
@@ -5871,53 +5842,19 @@ async fn run_chat(
             .spawn(move || pump_stdin(std::io::stdin().lock(), &control, typed_lines))?;
     }
 
-    // ── Wire wake word detector ──
-    if no_wake_word || whisper_backend.is_none() {
-        chat_service = chat_service.with_wake_word_detector(Arc::new(InstantActivation));
-    } else {
-        let backend = whisper_backend.clone().expect("checked above");
-        let trigger = wake_word.unwrap_or(settings.voice_wake_word.as_str());
-        let transcriptions = settings.voice_wake_word_transcriptions.clone();
-
-        if transcriptions.is_empty() {
-            out!("  Wake     \"{}\"", trigger);
+    if let Some(listening) = listening.as_ref().filter(|_| !no_wake_word) {
+        if listening.calibrated == 0 {
+            out!("  Wake     \"{}\"", listening.wake_word);
         } else {
             out!(
                 "  Wake     \"{}\" ({} calibrated variants)",
-                trigger,
-                transcriptions.len()
+                listening.wake_word,
+                listening.calibrated
             );
         }
-        use pond_adapters_whisper::{KeywordDetectorConfig, WhisperBackend};
-        let kws_config = KeywordDetectorConfig {
-            energy_threshold: settings.voice_kws_energy_threshold,
-            post_trigger_silence_ms: settings.voice_kws_post_trigger_silence_ms,
-            cooldown_ms: settings.voice_kws_cooldown_ms,
-            ..KeywordDetectorConfig::default()
-        };
-
-        let mut detector_builder = WhisperKeywordDetector::new(
-            backend.clone() as Arc<dyn WhisperBackend>,
-            trigger,
-            mic_handle.clone(),
-        )
-        .with_transcriptions(transcriptions)
-        .with_config(kws_config);
-        if let Some(sink) = &audio_level_sink {
-            detector_builder = detector_builder.with_audio_level_sink(sink.clone());
-        }
-        let detector = Arc::new(detector_builder);
-        // The command clip contains the wake word; strip exactly the triggers the detector used.
-        backend.set_wake_words(detector.triggers());
-        chat_service = chat_service.with_wake_word_detector(detector);
-    };
-
-    // ── Wire barge-in energy ──
-    // Required for barge-in: the default `NoEnergy` is inert. Only with speech input, because
-    // it opens the mic while the reply plays and hands what it hears to the next capture.
-    if whisper_backend.is_some() {
-        chat_service =
-            chat_service.with_speech_energy(Arc::new(pond_audio::MicEnergy::new(&mic_handle)));
+    }
+    if let Some(listening) = &listening {
+        out!("  Ear      {}", listening.describe());
     }
 
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake
@@ -6749,6 +6686,16 @@ async fn run_quiet_compaction(
                     }
                     false
                 }
+                _ = slot.cancelled() => {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "quiet_compaction_preempted",
+                        session_id = %session_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "quiet compaction preempted by user activity"
+                    );
+                    true
+                }
                 // No cooldown: the conversation is still due, and a longer quiet tries again.
                 () = someone_back => {
                     tracing::info!(
@@ -6986,7 +6933,7 @@ async fn run_proactive_reviewer(
         );
 
         // The lease revokes on drop, so an ended review can no longer delegate.
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = slot.cancellation_token();
         let lease = authorities.publish(
             &session_id,
             review::review_authority(&audience, &session_id),
@@ -7074,11 +7021,7 @@ async fn run_proactive_reviewer(
             let report = sender
                 .send_to_profile(
                     audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(
-                        proposal.id(),
-                        proposal.summary(),
-                        proposal.rationale(),
-                    ),
+                    pond_server::system_notices::proposal_notification(proposal),
                 )
                 .await;
             tracing::info!(
@@ -7132,8 +7075,9 @@ async fn run_long_task_runner(
     use pond_core::user_data::services::inference_lane::LaneJob;
 
     const POLL_SECS: u64 = 30;
-    // Short, unlike the chores': a member asked for this work and is waiting for it.
-    const QUIET_SECS: u64 = 30;
+    // Short, unlike the chores': a member asked for this work and is waiting for it. A step the
+    // household then interrupts is rerun without spending a try, so a short wait costs little.
+    const QUIET_SECS: u64 = 10;
     // No spacing between runs: the loop asks again at once only after a run that did something,
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
@@ -7173,10 +7117,17 @@ async fn run_long_task_runner(
     );
 
     let mut progressed = false;
+    let mut next_poll: Option<u64> = None;
     loop {
-        // A run that moved a task on is followed at once: the next step is ready now.
-        let poll = if progressed { 0 } else { POLL_SECS };
+        // A run that moved a task on is followed at once: the next step is ready now. A task held
+        // back only by the quiet gate is looked at again when the quiet is due, not a poll later.
+        let poll = if progressed {
+            0
+        } else {
+            next_poll.unwrap_or(POLL_SECS)
+        };
         progressed = false;
+        next_poll = None;
         let tick = crate::inference_lane_runner::wait_for_tick(
             std::time::Duration::from_secs(poll),
             &wake,
@@ -7216,6 +7167,7 @@ async fn run_long_task_runner(
             // A task started before a restart keeps going with nobody speaking first.
             true,
         );
+        let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
         let Some(slot) = lane
             .acquire(
                 LaneJob::LongTaskStep,
@@ -7229,10 +7181,13 @@ async fn run_long_task_runner(
                     started_at_utc,
                     db_activity,
                 ),
-                sched::combined_idle_for(in_process_at, db_activity, now),
+                idle_for,
             )
             .await
         else {
+            if candidate.is_some() && settings.long_tasks_enabled {
+                next_poll = Some(quiet_due_in(idle_for, QUIET_SECS, POLL_SECS));
+            }
             continue;
         };
         let helpers = LongTaskHelpers {
@@ -7240,6 +7195,7 @@ async fn run_long_task_runner(
             authorities: authorities.clone(),
             storage: storage.clone(),
             last_user_activity: last_user_activity.clone(),
+            tasks: tasks.clone(),
         };
         if compile_due {
             use pond_core::shared::services::agent_prefill;
@@ -7328,10 +7284,12 @@ struct LongTaskHelpers {
     authorities: Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
     storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
     last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
+    tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
 }
 
 impl LongTaskHelpers {
-    /// One helper life for `task`, bound to `work` so its tools reach only this task.
+    /// One helper life for `task`, bound to `work` so its tools reach only this task. With
+    /// `reply_draft`, a reply holding work is saved when the helper saved nothing.
     async fn run(
         &self,
         task: &pond_core::shared::domain::long_task::LongTask,
@@ -7339,21 +7297,15 @@ impl LongTaskHelpers {
         work: pond_core::shared::services::step_bindings::StepWork,
         brief: String,
         may_retry: bool,
+        reply_draft: Option<pond_core::shared::services::long_task_runner::ReplyDraft>,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
         use pond_core::shared::services::step_bindings::{process_step_bindings, StepBinding};
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = runner::long_task_session_id(task.id(), &run_id);
-        let authority = DelegationAuthority::root(
-            &session_id,
-            task.scope().clone(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        );
+        let authority = runner::long_task_authority(&session_id, task.scope().clone());
         let spec = authority
             .delegate(
                 role,
@@ -7364,8 +7316,10 @@ impl LongTaskHelpers {
                     background: false,
                 },
             )
-            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied());
 
+        let reports = work != pond_core::shared::services::step_bindings::StepWork::Plan;
         let binding = process_step_bindings().bind(
             &session_id,
             StepBinding {
@@ -7374,6 +7328,16 @@ impl LongTaskHelpers {
                 work,
             },
         );
+        // The planner's hand-back is its plan, so only a step's helpers are asked to report.
+        let spec = if reports {
+            let watch = binding.report_watch();
+            spec.nudging(pond_core::shared::domain::orchestration::ReportNudge {
+                text: runner::REPORT_NUDGE.to_string(),
+                reported: std::sync::Arc::new(move || watch.is_reported()),
+            })
+        } else {
+            spec
+        };
         let cancel = tokio_util::sync::CancellationToken::new();
         let lease = self
             .authorities
@@ -7423,8 +7387,26 @@ impl LongTaskHelpers {
         watcher.abort();
         drop(lease);
         let reported = binding.take_report();
-        let written = binding.take_written();
-        Ok(runner::settle_run(reported, &written, &run?, may_retry))
+        let mut written = binding.take_written();
+        let mut run = run?;
+        if reported.is_none() && written.is_empty() {
+            if let Some(draft) =
+                reply_draft.and_then(|d| runner::reply_as_draft(task, &d, &run, chrono::Utc::now()))
+            {
+                self.tasks.insert_artifact(&draft).await?;
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "long_task_reply_saved",
+                    task_id = %task.id(),
+                    title_chars = draft.title().chars().count(),
+                    chars = draft.body().len(),
+                    "a helper's work was in its reply; the runner saved it"
+                );
+                written.push(draft.id().to_string());
+                run.result = Some(draft.summary().to_string());
+            }
+        }
+        Ok(runner::settle_run(reported, &written, &run, may_retry))
     }
 }
 
@@ -7438,7 +7420,7 @@ impl LongTaskHelpers {
         retention: std::time::Duration,
         rebuild: bool,
     ) -> anyhow::Result<()> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
 
         let session_id = format!(
@@ -7446,13 +7428,9 @@ impl LongTaskHelpers {
             runner::LONG_TASK_SESSION_PREFIX,
             uuid::Uuid::new_v4()
         );
-        let authority = DelegationAuthority::root(
+        let authority = runner::long_task_authority(
             &session_id,
             pond_core::user_data::domain::profile::ProfileScope::household(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
         );
         let spec = authority
             .delegate(
@@ -7465,6 +7443,7 @@ impl LongTaskHelpers {
                 },
             )
             .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied())
             .compiling_prefill(format!("role:{}", role.name()))
             .retaining_helpers_for(retention);
         let spec = if rebuild { spec.rebuilding() } else { spec };
@@ -7535,6 +7514,15 @@ fn roles_fingerprint(roles: &[pond_core::shared::domain::orchestration::AgentRol
     hasher.finish()
 }
 
+/// Seconds until a waiting task's quiet is due, at least `RECHECK_SECS`: a turn in flight reads as no
+/// quiet at all, and the turn's end is not announced to the runner.
+fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) -> u64 {
+    const RECHECK_SECS: u64 = 3;
+    quiet_secs
+        .saturating_sub(idle_for.as_secs())
+        .clamp(RECHECK_SECS, poll_secs)
+}
+
 /// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
 #[allow(clippy::too_many_arguments)]
 async fn advance_long_task(
@@ -7554,6 +7542,8 @@ async fn advance_long_task(
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
     use pond_core::shared::services::step_bindings::StepWork;
 
+    // The goal is the person's words, so a page it links stays readable however long the task runs.
+    pond_core::mcp::services::page_addresses::global().note_words(task.goal());
     let steps = tasks.list_steps(task.id()).await?;
     let artifacts = tasks.list_artifacts(task.id()).await?;
     let now = chrono::Utc::now();
@@ -7578,12 +7568,30 @@ async fn advance_long_task(
             Ok(true)
         }
         NextRun::Finish => {
+            let mut artifacts = artifacts;
+            if let Some(result) = runner::summary_as_result(task, &steps, &artifacts, now) {
+                tasks.insert_artifact(&result).await?;
+                artifacts.push(result.summary_view());
+            }
             tasks
                 .set_task_state(task.id(), LongTaskState::Completed, now)
                 .await?;
             fruitless.remove(task.id());
-            let body = runner::result_artifact(&artifacts)
-                .map(|a| a.summary.clone())
+            // A short answer is the notification itself; anything longer is a line about it.
+            let short = match runner::answer_artifact(task, &artifacts) {
+                Some(result)
+                    if task.answer()
+                        == pond_core::shared::domain::long_task::AnswerShape::Short =>
+                {
+                    tasks
+                        .get_artifact(task.id(), &result.id)
+                        .await?
+                        .map(|artifact| runner::notification_text(artifact.body()))
+                }
+                _ => None,
+            };
+            let body = short
+                .or_else(|| runner::answer_artifact(task, &artifacts).map(|a| a.summary.clone()))
                 .or_else(|| {
                     steps
                         .iter()
@@ -7632,7 +7640,7 @@ async fn advance_long_task(
                 now,
             );
             let end = helpers
-                .run(task, planner, StepWork::Plan, brief, false)
+                .run(task, planner, StepWork::Plan, brief, false, None)
                 .await?;
             if end == RunEnd::Preempted {
                 return Ok(true);
@@ -7699,14 +7707,26 @@ async fn advance_long_task(
                 }
             }
             let mut brief = runner::worker_brief(task, &step, &artifacts, &bodies, now);
+            brief.push_str(runner::last_step_line(&steps, &step).unwrap_or_default());
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
             let role = role
                 .clone()
                 .with_max_turns(runner::turns_for(role.max_turns(), &step));
             let may_retry = step.attempts() < runner::MAX_STEP_ATTEMPTS;
+            let reply_draft = runner::ReplyDraft {
+                key: key.clone(),
+                last: runner::last_step_line(&steps, &step).is_some(),
+            };
             let outcome = match helpers
-                .run(task, &role, StepWork::Do(key.clone()), brief, may_retry)
+                .run(
+                    task,
+                    &role,
+                    StepWork::Do(key.clone()),
+                    brief,
+                    may_retry,
+                    Some(reply_draft),
+                )
                 .await
             {
                 Ok(RunEnd::Reported(outcome)) => outcome,
@@ -7725,10 +7745,24 @@ async fn advance_long_task(
             let verdict =
                 if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
                     let saved = tasks.list_artifacts(task.id()).await?;
-                    let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
+                    let context = match runner::brief_artifact(&saved) {
+                        Some(found) => tasks
+                            .get_artifact(task.id(), &found.id)
+                            .await?
+                            .map(|artifact| artifact.body().to_string()),
+                        None => None,
+                    };
+                    let brief = runner::verifier_brief(
+                        task,
+                        &step,
+                        &outcome,
+                        &saved,
+                        context.as_deref(),
+                        chrono::Utc::now(),
+                    );
                     Some(
                         helpers
-                            .run(task, verifier, StepWork::Check(key), brief, false)
+                            .run(task, verifier, StepWork::Check(key), brief, false, None)
                             .await?,
                     )
                 } else {
@@ -7802,18 +7836,15 @@ async fn notify_long_task_owner(
     let report = sender
         .send_to_profile(
             owner,
-            pond_server::system_notices::long_task_notification(
-                task.id(),
-                task.goal(),
-                finished,
-                body,
-            ),
+            pond_server::system_notices::long_task_notification(task, finished, body),
         )
         .await;
     tracing::info!(
+        kind = "long_task_notice_sent",
         task = %task.id(),
         member = %owner,
         finished,
+        opens_conversation = task.origin_session_id().is_some(),
         queued = report.queued.len(),
         failed = report.failed.len(),
         "long task ended; its owner was told"
@@ -8385,7 +8416,7 @@ async fn run_calibrate(
     // Own mic owner: calibration never runs alongside the wake-word detector. The pinned mic,
     // so the variants are learned through the microphone voice will hear them on.
     let capture = match settings.audio_input_device.trim() {
-        "" => pond_audio::CpalCapture::new(),
+        "" | "auto" => pond_audio::CpalCapture::new(),
         pinned => pond_audio::CpalCapture::with_device(pinned),
     };
     let (mic_handle, _mic_owner_join) =
@@ -9482,6 +9513,9 @@ async fn build_goose_backend(
     device_control: Arc<
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
+    last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    >,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
@@ -9610,6 +9644,7 @@ async fn build_goose_backend(
         device_registry.clone(),
         skill_repo.clone(),
         device_control,
+        last_action,
         tool_caller.clone(),
     ) {
         Ok(ext_names) => {
@@ -9651,6 +9686,8 @@ async fn build_goose_backend(
             };
             // Read per turn, so mesh_rebuild filling it later needs no adapter rebuild.
             let adapter = adapter.with_mesh_provider(mesh_provider);
+            // A spoken turn reads the household's Voice agent edit from it.
+            let adapter = adapter.with_recipe_repo(recipe_repo.clone());
             if voice_mode {
                 adapter.set_voice_mode(true);
             }
@@ -10187,6 +10224,12 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let db = Database::init(&data_dir).await?;
     litert_runtime::ensure_library_dir(&data_dir);
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
+
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
@@ -10241,6 +10284,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
             None,
         ),
     ));
+    init_interview_tools(&db.system);
     // Used only when chat_provider = "llamafile"; other providers route themselves.
     let llamafile_url = format!("http://127.0.0.1:{}", ports::llamafile_port());
 
@@ -10283,6 +10327,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10305,6 +10350,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                interview: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10328,6 +10374,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10378,6 +10425,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     warmup: false,
                     suggestion_context: None,
                     deep_research_task: None,
+                    interview: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -10401,6 +10449,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
@@ -10869,7 +10918,7 @@ async fn run_setup_code(request: pond_server::setup_code::SetupCodeRequest) -> R
     pond_server::setup_code::run(&store, &request, &mut out, &mut err).await
 }
 
-async fn run_pairing(refresh: bool) -> Result<()> {
+async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
     let data_dir = default_data_dir();
     let port = runtime_api_port(&data_dir);
     let credential = pond_server::host_credential::read(&data_dir)?;
@@ -10886,8 +10935,14 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         .default_headers(headers)
         .build()?;
 
-    // GET returns the current unconsumed code; POST mints a fresh one.
-    let resp = if refresh {
+    // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
+    let resp = if let Some(member) = &member {
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "profile_id": member }))
+            .send()
+            .await
+    } else if refresh {
         client.post(&base).send().await
     } else {
         client.get(&base).send().await
@@ -10900,9 +10955,10 @@ async fn run_pairing(refresh: bool) -> Result<()> {
     })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "server returned {} for pairing-code request",
-            resp.status()
+            "server returned {status} for pairing-code request: {detail}"
         ));
     }
 
@@ -10912,12 +10968,15 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         expires_at: Option<String>,
         /// Where the phone connects and which key it pins.
         pairing: serde_json::Value,
+        /// The member a device pairing with this code becomes; `None` is nobody.
+        #[serde(default)]
+        profile_id: Option<String>,
     }
     let body: CodeResp = resp.json().await?;
 
     // A GET can return {"code": null} when no live code exists — mint one via POST.
-    let (code, expires_at, info) = match (body.code, body.expires_at) {
-        (Some(c), Some(e)) => (c, e, body.pairing),
+    let (code, expires_at, info, owner) = match (body.code, body.expires_at) {
+        (Some(c), Some(e)) => (c, e, body.pairing, body.profile_id),
         _ => {
             let minted: CodeResp = client
                 .post(&base)
@@ -10932,6 +10991,7 @@ async fn run_pairing(refresh: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("server did not return a pairing code"))?,
                 minted.expires_at.unwrap_or_default(),
                 minted.pairing,
+                minted.profile_id,
             )
         }
     };
@@ -10954,6 +11014,13 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         info["tailnet_address"].as_str(),
     );
     println!("Pairing code: {code} (expires: {expires_at})");
+    match &owner {
+        Some(id) => println!("A device pairing with it becomes household member {id}'s."),
+        None => println!(
+            "A device pairing with it belongs to nobody, so with two or more members it is a \
+             guest. `--member <PROFILE_ID>` issues one for a member."
+        ),
+    }
     println!("Pond public-key fingerprint: {pin}");
     print_pairing_qr(&pair_url);
     println!("\n  URL: {pair_url}\n");
@@ -10962,6 +11029,23 @@ async fn run_pairing(refresh: bool) -> Result<()> {
 
 // ── Unit tests ─────────────────────────────────────────────────────────────────
 
+/// The setup interview's tools act through this; every binary path that registers them needs it.
+fn init_interview_tools(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    pond_mcp_server::init_interview_deps(Arc::new(
+        pond_core::user_data::services::profile_interview::InterviewService::new(
+            Arc::new(
+                pond_infra::sqlite_profile_interview::SqliteProfileInterviewRepository::new(
+                    pool.clone(),
+                ),
+            ),
+            Arc::new(
+                pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository::new(pool.clone()),
+            ),
+            Arc::new(SqliteSessionStorage::new(pool.clone())),
+            Arc::new(SqliteProfileRepository::new(pool.clone())),
+        ),
+    ));
+}
 #[cfg(test)]
 mod tests {
     /// A blocking thread that never finishes must not keep the process from exiting.

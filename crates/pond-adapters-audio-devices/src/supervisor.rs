@@ -35,13 +35,17 @@ pub enum Role {
     /// The server: never opens the microphone unless the household asks for a test and no
     /// voice session holds it.
     Serve,
+    /// The server running room voice: owns the microphone and tests it as a voice session
+    /// does, except while a `chat --voice` session runs, which then holds it.
+    Room,
 }
 
 impl Role {
+    /// Room is serve's file and source: a voice session defers to it as to any server.
     fn name(self) -> &'static str {
         match self {
             Self::Voice => "voice",
-            Self::Serve => "serve",
+            Self::Serve | Self::Room => "serve",
         }
     }
 }
@@ -250,13 +254,22 @@ impl AudioSupervisor {
 }
 
 impl Inner {
+    /// Whether this process holds the microphone, and so tests and watches it.
+    fn owns_mic(&self) -> bool {
+        match self.role {
+            Role::Voice => true,
+            Role::Serve => false,
+            Role::Room => live_voice(&self.data_dir).is_none(),
+        }
+    }
+
     fn input_choice(&self, prefs: &AudioPrefs, mode: ProbeMode, exclude: &[String]) -> AudioChoice {
         let pinned = prefs.input_pin.as_deref();
         if !prefs.mic_enabled {
             return AudioChoice::mic_off(pinned);
         }
         // Serve opens the microphone only when the household asks for a test.
-        if self.role == Role::Serve && mode == ProbeMode::Lazy {
+        if !self.owns_mic() && mode == ProbeMode::Lazy {
             let quick = self.selector.prober().quick_list(AudioDirection::Input);
             let quick = if quick.is_empty() {
                 self.selector
@@ -571,7 +584,7 @@ impl Inner {
             }
 
             let may_retry = last_failure_pass.is_none_or(|t| t.elapsed() >= FAILURE_BACKOFF);
-            if let (Role::Voice, Some(mic)) = (self.role, &self.mic) {
+            if let (true, Some(mic)) = (self.owns_mic(), &self.mic) {
                 let state = mic.state();
                 let failed = matches!(state, MicState::Failed(_));
                 let written = mic.shared().written();
@@ -903,6 +916,57 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&"Built-in mic".to_string()));
+        sup.stop();
+    }
+
+    #[test]
+    fn serve_running_the_room_tests_its_microphone_at_startup() {
+        let _g = ROUTE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine();
+        let sup = start(&m, Role::Room, dir.path(), prefs(None, true, false));
+        let status = sup.wait_ready(Duration::from_secs(5)).unwrap();
+        assert_eq!(status.input.basis, ChoiceBasis::SystemDefault);
+        assert!(m
+            .probes
+            .lock()
+            .unwrap()
+            .contains(&"Built-in mic".to_string()));
+        assert_eq!(
+            status.source, "serve",
+            "a voice session defers to it as to serve"
+        );
+        assert!(read_json::<StatusFile>(&status_path(dir.path(), Role::Serve)).is_some());
+        sup.stop();
+    }
+
+    #[test]
+    fn the_room_leaves_the_microphone_to_a_live_voice_session() {
+        let _g = ROUTE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine();
+        let voice = StatusFile {
+            status: AudioDeviceStatus {
+                input: AudioChoice::mic_off(None),
+                output: AudioChoice::not_tested(AudioDirection::Output, Vec::new(), None, false),
+                updated_at_ms: 1,
+                source: "voice".into(),
+                pid: 1,
+                raised: Vec::new(),
+                sound_server: None,
+            },
+            answered: None,
+        };
+        write_json(&status_path(dir.path(), Role::Voice), &voice);
+        let sup = start(&m, Role::Room, dir.path(), prefs(None, true, true));
+        let status = sup.wait_ready(Duration::from_secs(5)).unwrap();
+        assert_eq!(status.input.basis, ChoiceBasis::NotTested);
+        assert!(!m
+            .probes
+            .lock()
+            .unwrap()
+            .contains(&"Built-in mic".to_string()));
+        assert!(m.sound_tests.lock().unwrap().is_empty());
         sup.stop();
     }
 

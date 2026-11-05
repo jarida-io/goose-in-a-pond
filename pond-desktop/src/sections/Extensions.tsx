@@ -34,6 +34,7 @@ import { useConfirm, ErrorBanner } from "../components/shared";
 import { PlayerSignIn } from "./PlayerSignIn";
 import { splitAdvanced } from "./signInView";
 import { secretStatusOf, type SecretStatus } from "./secretStatus";
+import { BuiltInSearchNote } from "../connections/BuiltInSearchNote";
 import type { Extension, AddExtensionRequest, MarketplaceExtension, SecretRequirement, AgentTool } from "../api/types";
 
 // ── Secret Config Modal ───────────────────────────────────────
@@ -654,11 +655,14 @@ export function ExtensionCard({
   onConfigureSecrets,
   hasSecrets,
   secretStatus,
+  redundant,
   disabled,
 }: {
   ext: Extension;
   onToggle: (name: string, enabled: boolean) => void;
   onDelete: (name: string) => void;
+  /** The built-in web search already does this extension's job; offer to remove it. */
+  redundant?: boolean;
   onConfigureSecrets?: (name: string) => void;
   hasSecrets?: boolean;
   secretStatus?: SecretStatus;
@@ -731,6 +735,21 @@ export function ExtensionCard({
             <div className="ext-card__note-line">
               <span className="ext-card__note-title">{t("extensions.noTools")}</span>
               {ext.status_reason || t("extensions.noToolsGeneric")}
+            </div>
+          )}
+          {redundant && (
+            <div className="ext-card__note-line">
+              <span className="ext-card__note-title">{t("extensions.redundant")}</span>
+              {t("extensions.redundantReason")}{" "}
+              <button
+                type="button"
+                className="ext-inline-link"
+                onClick={() => onDelete(ext.name)}
+                disabled={disabled}
+                aria-label={t("extensions.removeNamed", { name: ext.name })}
+              >
+                {t("extensions.remove")}
+              </button>
             </div>
           )}
         </div>
@@ -1007,6 +1026,8 @@ function MarketplaceCard({
   const [justInstalled, setJustInstalled] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [showSecretModal, setShowSecretModal] = useState(false);
+  const { t } = useTranslation();
+  const builtIn = ext.built_in_state;
 
   const needsSecrets = ext.required_secrets && ext.required_secrets.length > 0;
 
@@ -1064,7 +1085,9 @@ function MarketplaceCard({
             </div>
           </div>
           <div className="mkt-card__action">
-            {installed ? (
+            {builtIn ? (
+              <span className="mkt-card__builtin-badge">{t("extensions.builtIn")}</span>
+            ) : installed ? (
               <span className="mkt-card__installed-badge">
                 <Check size={11} strokeWidth={2.5} />
                 Installed
@@ -1087,6 +1110,7 @@ function MarketplaceCard({
           </div>
         </div>
         <p className="mkt-card__desc">{ext.description}</p>
+        {builtIn && <BuiltInSearchNote state={builtIn} className="ext-card__note-line" />}
         {installError && (
           <div className="ext-card__error-line" title={installError}>
             {installError}
@@ -1559,6 +1583,7 @@ export function Extensions() {
                     const hasSecrets = (mktEntry?.required_secrets?.length ?? 0) > 0;
                     return (
                       <ExtensionCard
+                        redundant={mktEntry?.built_in_state === "on"}
                         key={ext.name}
                         ext={ext}
                         onToggle={handleToggle}

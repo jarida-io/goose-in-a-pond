@@ -137,7 +137,7 @@ const PROSODY_PUNCT: &[char] = &[
 /// (The docstring this replaces claimed espeak returned one string per
 /// sentence and that the streaming path could rely on it as a sentence split.
 /// It returns one element regardless of input. Nothing downstream depended on
-/// the claim — `split_sentences` in `pond-voice` had already done the real
+/// the claim — `ReplySplitter` in `pond-voice` had already done the real
 /// split — but it is worth naming, because it is the reason nobody looked
 /// here.)
 ///
@@ -243,8 +243,14 @@ pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
     let mut out = Vec::new();
 
     let normalized = pond_voice::text::strip_markdown_for_speech(text);
+    let unmarked;
     let target = if normalized.trim().is_empty() {
-        text
+        // Markup alone is silence; anything else the strip emptied is still said as written.
+        unmarked = pond_voice::text::strip_markup_for_speech(text);
+        if unmarked.trim().is_empty() {
+            return Ok((out, 0));
+        }
+        unmarked.as_str()
     } else {
         &normalized
     };
@@ -264,6 +270,29 @@ pub fn chunk(text: &str, vocab: &Vocab) -> Result<(Vec<Chunk>, usize)> {
         });
     }
     Ok((out, dropped))
+}
+
+/// `chunk` as two shorter passes, cut at the space nearest its middle, or just after a clause
+/// mark in its middle half so the cut lands on a pause; `None` for a chunk with no inner space.
+pub fn halves(chunk: &Chunk) -> Option<(Chunk, Chunk)> {
+    let chars: Vec<char> = chunk.phonemes.chars().collect();
+    debug_assert_eq!(chars.len(), chunk.tokens.len());
+    let n = chars.len();
+    let spaces: Vec<usize> = (1..n.saturating_sub(1))
+        .filter(|&i| chars[i] == ' ')
+        .collect();
+    let middle = |i: &&usize| (**i as isize - n as isize / 2).unsigned_abs();
+    let at_mark = spaces
+        .iter()
+        .filter(|&&i| (n / 4..=3 * n / 4).contains(&i) && matches!(chars[i - 1], ',' | ';' | ':'))
+        .min_by_key(middle);
+    let cut = *at_mark.or_else(|| spaces.iter().min_by_key(middle))?;
+    let part = |range: std::ops::Range<usize>| Chunk {
+        text: chunk.text.clone(),
+        phonemes: chars[range.clone()].iter().collect(),
+        tokens: chunk.tokens[range].to_vec(),
+    };
+    Some((part(0..cut), part(cut + 1..n)))
 }
 
 /// Split at the last space before the limit. `encode` keeps `ids` and `phonemes` index-aligned.
@@ -477,6 +506,20 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "Hello, world!");
         assert_ne!(chunks[0].text, chunks[0].phonemes);
+    }
+
+    /// Once a written tool call is stripped nothing is left, and that must stay silent rather than
+    /// fall back to speaking the call as written.
+    #[test]
+    fn markup_alone_synthesises_nothing() {
+        let v = vocab_for(&[&phonemize("search web question").unwrap()]);
+        let (chunks, dropped) = chunk(
+            r#"<giap-knowledge__search_web question="what to pack for a day hike" />"#,
+            &v,
+        )
+        .unwrap();
+        assert!(chunks.is_empty(), "{chunks:?}");
+        assert_eq!(dropped, 0);
     }
 
     /// A vocab of exactly the symbols in `samples`, plus every `PROSODY_PUNCT` mark.

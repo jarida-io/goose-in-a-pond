@@ -11,6 +11,7 @@ import type {
   LastResponseMeta,
 } from "./reducer";
 import { filterThinking } from "../lib/thinkFilter";
+import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
 import { keptResultOf, type KeptResult } from "./keptResults";
 import { startedTaskId, startedTaskIdOfRow } from "../longtasks/longTaskWords";
@@ -19,6 +20,7 @@ import type {
   ChatEvent,
   ContextWarning,
   ImageAttachment,
+  ResearchAnswer,
   SessionMessage,
   TurnStats,
 } from "../api/types";
@@ -29,10 +31,9 @@ import type { PreparedImage } from "../lib/imageAttach";
 // Module-level counter -- shared across session loads and live sends.
 let _msgId = 0;
 
-export interface Message {
+export interface Message extends StepsCarrier {
   id: number;
   role: "user" | "agent";
-  text: string;
   streaming?: boolean;
   status?: string;
   cards?: ContextCardType[];
@@ -75,6 +76,7 @@ function friendlyToolStatus(rawName: string): string {
     get_user_profile: "Looking up your profile…",
     list_skills: "Checking my skills…",
     search_web: "Searching the web…",
+    read_web_page: "Reading the page…",
     task_start: "Getting that started…",
   };
   if (map[bare]) return map[bare];
@@ -393,6 +395,8 @@ export interface SendTurn {
   attachments?: PreparedImage[];
   /** The text is a research question: the pond starts deep research on it. Never queued. */
   deepResearch?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide. */
+  deepResearchAnswer?: ResearchAnswer;
 }
 
 /** `code` where the body has one, else its `reason`: deep research's refusals name theirs that way. */
@@ -526,7 +530,7 @@ async function consume(
       };
       state.bridge?.onContextCard(card);
       patchLastAgent((last) => ({
-        ...last,
+        ...foldToolCall(last, ev.working_notes),
         cards: [...(last.cards ?? []), card],
         status: friendlyToolStatus(ev.tool ?? ""),
       }));
@@ -724,6 +728,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
         // Resumable: the run outlives this window, which the reattach path depends on.
         true,
         turn.deepResearch ? true : undefined,
+        turn.deepResearch ? turn.deepResearchAnswer : undefined,
       ),
       ctx,
     );

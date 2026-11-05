@@ -134,6 +134,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            interview: None,
         }
     }
 

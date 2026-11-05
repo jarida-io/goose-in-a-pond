@@ -181,8 +181,8 @@ batched startup backfill (A1); the injection path embeds the turn's message and 
 keeping a stopword-filtered keyword search as the fallback (A2, `GooseAdapter`'s memory selection in
 `goose_agent.rs`); ranking blends similarity, importance and a 14-day recency half-life (A3); and
 dedup adds a semantic pass at a 0.92 cosine floor (A4, `memory_extraction.rs`). The personal-context
-index (`crates/pond-core/src/context/`) later took over background embedding and backfill
-(`index_maintenance.rs`).
+index (`crates/pond-core/src/context/`) later took over background embedding and backfill, now the
+embedding slot (`embedding_slot.rs`).
 
 
 - A1 Embed at write: pass the embedding provider into the extraction
@@ -274,7 +274,10 @@ index (`crates/pond-core/src/context/`) later took over background embedding and
   ones, so a widen lands on the next provider call of the same reply loop.
   Core set: `giap-memory` (cross-cutting), `giap-system` (holds
   `get_current_time`), `giap-toolkit` (the hatch). `giap-draft` was the fourth
-  until its group was deleted on 2026-09-10.
+  until its group was deleted on 2026-09-10. Since 2026-11-02 `giap-knowledge`
+  is core (web search always offered), and each later message is scored too
+  and may add groups, never remove one; the first-message-only rule above is
+  history.
   Escape hatch: `giap-toolkit`'s `list_tool_groups` + `enable_tool_group`, plus a
   `<tool-groups>` listing of dormant groups in `<system-context>` so the model
   usually skips the discovery round trip. This is NOT a keyword classifier and

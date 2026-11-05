@@ -618,6 +618,7 @@ fn with_id_prefix(task: LongTask, prefix: &str) -> Result<LongTask, LongTaskErro
         max_steps: task.budget().max_steps(),
         deadline: task.budget().deadline(),
         kind: task.kind(),
+        answer: task.answer(),
         created_at: task.created_at(),
         updated_at: task.updated_at(),
         finished_at: task.finished_at(),

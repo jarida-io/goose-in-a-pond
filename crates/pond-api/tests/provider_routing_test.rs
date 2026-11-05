@@ -200,6 +200,8 @@ async fn make_app_with_provider(
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -221,7 +223,7 @@ async fn make_app_with_provider(
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -258,6 +260,7 @@ async fn make_app_with_provider(
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -296,6 +299,7 @@ async fn make_app_with_provider(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     (
@@ -555,6 +559,8 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -576,7 +582,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -613,6 +619,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -651,6 +658,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
@@ -684,6 +692,8 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
@@ -705,7 +715,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         lane: None,
@@ -742,6 +752,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -780,6 +791,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));

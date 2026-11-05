@@ -4,6 +4,7 @@ pub mod context;
 pub mod device;
 pub mod device_control;
 pub mod dispatcher;
+pub mod interview;
 pub mod knowledge;
 pub mod long_task;
 pub mod memory;
@@ -17,6 +18,7 @@ pub mod toolkit;
 pub mod travel;
 pub mod vision;
 pub mod weather;
+pub mod web_page;
 pub mod web_search;
 pub mod wolfram;
 
@@ -40,6 +42,8 @@ pub use pond_core::shared::services::egress::{
 };
 
 pub fn set_last_user_message(msg: &str) {
+    // An address the person wrote is one `read_web_page` may fetch.
+    pond_core::mcp::services::page_addresses::global().note_words(msg);
     if let Ok(mut guard) = LAST_USER_MESSAGE.write() {
         *guard = msg.to_string();
     }
@@ -177,6 +181,7 @@ pub use weather::WeatherMcpServer;
 pub use audio::init_audio_control;
 pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
+pub use interview::{init_interview_deps, spawn_interview_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
 // Installed by pond-server once the Goose adapter exists, like the orchestrator's.
 pub use long_task::{

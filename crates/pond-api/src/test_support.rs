@@ -46,6 +46,8 @@ pub async fn app_state() -> TestState {
     ));
     let state = AppState {
         warmup: Default::default(),
+        room_voice: None,
+        voice_match: None,
         db,
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),
@@ -66,7 +68,7 @@ pub async fn app_state() -> TestState {
         room_registry: Arc::new(SqliteRoomRegistry::new(pool.clone())),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
-        embedding_provider: None,
+        embedder: Default::default(),
         vector_index: None,
         index_reindex: None,
         account_sync: None,
@@ -103,6 +105,7 @@ pub async fn app_state() -> TestState {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel::<Notification>(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(crate::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -144,6 +147,7 @@ pub async fn app_state() -> TestState {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     };
     TestState {

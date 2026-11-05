@@ -20,16 +20,19 @@ use pond_core::mcp::ports::notification::{
 use pond_core::mcp::services::system_notices::{
     disk_is_low, OutageGate, OutageNotice, SystemNotices,
 };
+use pond_core::shared::domain::long_task::LongTask;
 use pond_core::user_data::domain::proposal::Proposal;
 use pond_core::user_data::domain::schedule::{
-    RunStatus, ScheduleResultEvent, TaskKind, TriggerAction,
+    RunStatus, Schedule, ScheduleResultEvent, TaskKind, TriggerAction,
 };
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
+use pond_core::user_data::services::reminder_proposal::reminder_session_id;
 
 // Schedule and rule runs
 
-/// The phone notification for a finished schedule run, or `None` while it is still running.
+/// The phone notification for a finished schedule run, or `None` for one still running or one
+/// skipped, which a household member chose or nobody asked for.
 ///
 /// It names the schedule and the run in its `open` hint, so a tap opens the schedules screen.
 pub fn schedule_result_notification(ev: &ScheduleResultEvent) -> Option<Notification> {
@@ -41,7 +44,7 @@ pub fn schedule_result_notification(ev: &ScheduleResultEvent) -> Option<Notifica
                 .clone()
                 .unwrap_or_else(|| "Task failed".to_string()),
         ),
-        RunStatus::Running => return None,
+        RunStatus::Running | RunStatus::Skipped => return None,
     };
     let open = OpenScreen::Schedule {
         schedule_id: ev.schedule_id.clone(),
@@ -68,10 +71,16 @@ enum ResultSilence {
     RuleSpokeForItself,
 }
 
-/// Whether `kind` is a rule that tells the household itself.
+/// Whether `kind` is a rule or routine that tells the household itself.
 fn notifies_itself(kind: &TaskKind) -> bool {
-    matches!(kind, TaskKind::SensorTrigger(spec)
-        if spec.actions.iter().any(|a| matches!(a, TriggerAction::Notify { .. })))
+    let actions = match kind {
+        TaskKind::SensorTrigger(spec) => &spec.actions,
+        TaskKind::Routine { actions } => actions,
+        _ => return false,
+    };
+    actions
+        .iter()
+        .any(|a| matches!(a, TriggerAction::Notify { .. }))
 }
 
 async fn result_silence(
@@ -98,7 +107,7 @@ async fn result_silence(
 }
 
 /// Announce each finished schedule or rule run to the household's phones, unless the household
-/// switched that off or the run was a rule that already notified.
+/// switched that off or the run was a rule or routine that already notified.
 pub fn spawn_schedule_result_notices(
     mut results: tokio::sync::broadcast::Receiver<ScheduleResultEvent>,
     sender: Arc<dyn NotificationSender>,
@@ -156,28 +165,25 @@ pub fn spawn_schedule_result_notices(
 // Long tasks
 
 /// The owner's notice that a long task they started has ended. `info` for an answer, `alert`
-/// when it could not finish; a tap opens chat, where `task_status` gives the detail.
-pub fn long_task_notification(
-    task_id: &str,
-    goal: &str,
-    finished: bool,
-    body: String,
-) -> Notification {
+/// when it could not finish. A tap opens the conversation the task was started from, where the
+/// answer is reported and `task_status` gives the detail; chat alone when that conversation is
+/// gone.
+pub fn long_task_notification(task: &LongTask, finished: bool, body: String) -> Notification {
     let mut fields = serde_json::Map::new();
-    fields.insert("long_task_id".into(), task_id.into());
+    fields.insert("long_task_id".into(), task.id().into());
     let title = if finished {
         "Task done"
     } else {
         "Task stopped"
     };
     Notification {
-        id: format!("long-task-{task_id}"),
+        id: format!("long-task-{}", task.id()),
         target: String::new(),
         category: if finished { "info" } else { "alert" }.to_string(),
-        title: format!("{title}: {}", truncate_goal(goal)),
+        title: format!("{title}: {}", truncate_goal(task.goal())),
         body,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Chat.merged_into(fields)),
+        data: Some(OpenScreen::chat(task.origin_session_id()).merged_into(fields)),
     }
 }
 
@@ -189,23 +195,67 @@ fn truncate_goal(goal: &str) -> String {
     }
 }
 
+// Missed runs
+
+/// The household's question about a missed run, opening the schedule where it is answered.
+/// `action_required`, not `alert`: it waits for a decision and is not read aloud. The id is the
+/// schedule and the missed time, so asking again after a restart repeats the same notice.
+pub fn missed_run_notification(schedule: &Schedule) -> Option<Notification> {
+    let missed = schedule.missed_run?;
+    let local = pond_core::shared::services::chat::LocalTimeOfDay::in_zone(
+        &schedule.timezone,
+        missed.due_at,
+    );
+    let at = format!("{:02}:{:02}", local.minutes() / 60, local.minutes() % 60);
+    Some(Notification {
+        id: format!("missed-{}-{}", schedule.id, missed.due_at.timestamp()),
+        target: "broadcast".to_string(),
+        category: "action_required".to_string(),
+        title: schedule.label.clone(),
+        body: format!("{} didn't run at {at}. Run it now?", schedule.label),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data: Some(
+            OpenScreen::ScheduleDetail {
+                schedule_id: schedule.id.clone(),
+            }
+            .data(),
+        ),
+    })
+}
+
+/// Ask every paired phone about each missed run waiting for an answer, as the pond starts.
+pub async fn announce_missed_runs(scheduler: &dyn SchedulerPort, sender: &dyn NotificationSender) {
+    let tasks = match scheduler.list_tasks().await {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::warn!(kind = "missed_run_notice_failed", error = %e, "could not read schedules to ask about missed runs");
+            return;
+        }
+    };
+    for notification in tasks.iter().filter_map(missed_run_notification) {
+        if let Err(e) = sender.broadcast(notification).await {
+            tracing::warn!(kind = "missed_run_notice_failed", error = %e, "could not ask about a missed run");
+        }
+    }
+}
+
 // Proposals
 
 /// The member's notification for a proposal awaiting their decision. `action_required`, not
 /// `alert`: the speech gate voices only `alert`, and suggestions shouldn't be read aloud. A tap
-/// opens chat.
-pub fn proposal_notification(proposal_id: &str, summary: String, rationale: &str) -> Notification {
+/// opens chat, at the conversation a reminder was heard in when the proposal came from one.
+pub fn proposal_notification(proposal: &Proposal) -> Notification {
     let mut fields = serde_json::Map::new();
-    fields.insert("proposal_id".into(), proposal_id.into());
-    fields.insert("rationale".into(), rationale.into());
+    fields.insert("proposal_id".into(), proposal.id().into());
+    fields.insert("rationale".into(), proposal.rationale().into());
     Notification {
-        id: format!("proposal-{proposal_id}"),
+        id: format!("proposal-{}", proposal.id()),
         target: String::new(),
         category: "action_required".to_string(),
         title: "A suggestion".to_string(),
-        body: summary,
+        body: proposal.summary(),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Chat.merged_into(fields)),
+        data: Some(OpenScreen::chat(reminder_session_id(proposal)).merged_into(fields)),
     }
 }
 
@@ -213,10 +263,7 @@ pub fn proposal_notification(proposal_id: &str, summary: String, rationale: &str
 pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal) -> MemberDelivery {
     let member = proposal.audience().profile_id();
     let delivery = notifier
-        .notify_member(
-            member,
-            proposal_notification(proposal.id(), proposal.summary(), proposal.rationale()),
-        )
+        .notify_member(member, proposal_notification(proposal))
         .await;
     match &delivery {
         MemberDelivery::Reached(devices) => tracing::info!(
@@ -224,6 +271,7 @@ pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal)
             proposal = %proposal.id(),
             member = %member,
             devices = devices.len(),
+            opens_conversation = reminder_session_id(proposal).is_some(),
             "proposal announced to its member"
         ),
         MemberDelivery::NoPhone => tracing::info!(
@@ -475,6 +523,8 @@ mod tests {
     use super::*;
     use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
     use pond_core::mcp::mocks::mock_notification_sender::{Delivery, MockNotificationSender};
+    use pond_core::shared::domain::long_task::LongTaskBudget;
+    use pond_core::user_data::domain::profile::ProfileScope;
     use pond_core::user_data::domain::proposal::{BusEventRef, ProposalAudience};
     use pond_core::user_data::domain::schedule::{
         SensorTriggerSpec, TriggerCondition, TriggerSource, TriggerSourceKind,
@@ -518,19 +568,91 @@ mod tests {
     #[test]
     fn a_running_schedule_sends_no_notification() {
         assert!(schedule_result_notification(&finished("s-1", RunStatus::Running)).is_none());
+        assert!(schedule_result_notification(&finished("s-1", RunStatus::Skipped)).is_none());
     }
 
     #[test]
-    fn a_proposal_notification_keeps_its_fields_and_opens_chat() {
-        let n = proposal_notification("p-1", "Water the plants?".into(), "It is dry");
+    fn a_reminder_proposal_keeps_its_fields_and_opens_its_conversation() {
+        let n = proposal_notification(&proposal_for("jerry"));
         assert_eq!(n.id, "proposal-p-1");
         assert_eq!(n.category, "action_required");
-        assert_eq!(n.body, "Water the plants?");
         assert_eq!(
             n.data,
-            Some(
-                serde_json::json!({"proposal_id": "p-1", "rationale": "It is dry", "open": "chat"})
+            Some(serde_json::json!({
+                "proposal_id": "p-1",
+                "rationale": "Jerry mentioned the dentist",
+                "open": "chat",
+                "session_id": "sess-1",
+            }))
+        );
+    }
+
+    #[test]
+    fn a_proposal_from_a_sensor_opens_chat_without_a_conversation() {
+        let proposal = Proposal::expiring_after(
+            "p-2",
+            BusEventRef::new(
+                "sensor",
+                Some("plant-1".into()),
+                Some("moisture".into()),
+                chrono::Utc::now(),
             )
+            .unwrap(),
+            "The soil is dry",
+            TaskKind::AgentPrompt {
+                prompt: "Water the plants".into(),
+            },
+            ProposalAudience::for_member("jerry").unwrap(),
+            0.9,
+            chrono::Utc::now(),
+            chrono::Duration::hours(12),
+        )
+        .unwrap();
+        let data = proposal_notification(&proposal).data.unwrap();
+        assert_eq!(data["open"], "chat");
+        assert!(
+            data.get("session_id").is_none(),
+            "a sensor's proposal has no conversation behind it, and must not name the sensor"
+        );
+    }
+
+    fn long_task(origin: Option<&str>) -> LongTask {
+        LongTask::start(
+            ProfileScope::Owner("jerry".into()),
+            None,
+            "How do embassies work?",
+            origin.map(str::to_string),
+            LongTaskBudget::new(4, None).unwrap(),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_finished_long_task_opens_the_conversation_it_was_started_from() {
+        let task = long_task(Some("sess-embassies"));
+        let n = long_task_notification(&task, true, "Here is what I found.".into());
+        assert_eq!(n.id, format!("long-task-{}", task.id()));
+        assert_eq!(n.title, "Task done: How do embassies work?");
+        assert_eq!(n.category, "info");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({
+                "long_task_id": task.id(),
+                "open": "chat",
+                "session_id": "sess-embassies",
+            }))
+        );
+    }
+
+    #[test]
+    fn a_long_task_whose_conversation_is_gone_opens_chat() {
+        let task = long_task(None);
+        let n = long_task_notification(&task, false, "It ran out of steps.".into());
+        assert_eq!(n.category, "alert");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({"long_task_id": task.id(), "open": "chat"}))
         );
     }
 
@@ -548,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rule_with_a_notify_action_speaks_for_itself() {
+    fn only_a_rule_or_routine_with_a_notify_action_speaks_for_itself() {
         assert!(notifies_itself(&rule(vec![TriggerAction::Notify {
             title: "Someone at the door".into(),
             body: "front camera".into(),
@@ -559,6 +681,12 @@ mod tests {
         }])));
         assert!(!notifies_itself(&TaskKind::AgentPrompt {
             prompt: "water the plants".into()
+        }));
+        assert!(notifies_itself(&TaskKind::Routine {
+            actions: vec![TriggerAction::Notify {
+                title: "Lights off".into(),
+                body: "kitchen".into(),
+            }]
         }));
     }
 
@@ -620,6 +748,8 @@ mod tests {
 
     fn task(id: &str, kind: TaskKind) -> OneTask {
         OneTask(pond_core::user_data::domain::schedule::Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: id.into(),
             label: "door rule".into(),
             cron: String::new(),
@@ -632,6 +762,42 @@ mod tests {
             next_run: None,
             created_at: chrono::Utc::now(),
         })
+    }
+
+    #[tokio::test]
+    async fn a_missed_run_is_asked_about_on_every_phone_at_its_local_time() {
+        let mut missed = task(
+            "morning",
+            TaskKind::AgentPrompt {
+                prompt: "good morning".into(),
+            },
+        );
+        missed.0.label = "Morning routine".into();
+        missed.0.timezone = "Africa/Nairobi".into();
+        missed.0.missed_run = Some(pond_core::user_data::domain::schedule::MissedRun {
+            due_at: "2026-10-29T03:30:00Z".parse().unwrap(),
+        });
+        let sender = MockNotificationSender::new();
+
+        announce_missed_runs(&missed, &sender).await;
+
+        let sent = sender.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(sent[0].0, Delivery::Broadcast));
+        let n = &sent[0].1;
+        assert_eq!(n.category, "action_required");
+        assert_eq!(n.body, "Morning routine didn't run at 06:30. Run it now?");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({"open": "schedule", "schedule_id": "morning"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schedule_with_nothing_missed_asks_nothing() {
+        let sender = MockNotificationSender::new();
+        announce_missed_runs(&task("morning", rule(vec![])), &sender).await;
+        assert!(sender.sent().is_empty());
     }
 
     #[tokio::test]

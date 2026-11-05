@@ -12,6 +12,61 @@ pub fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
+// ── Edges ────────────────────────────────────────────────────────────────────
+
+/// Frame used to find where speech starts and ends: 10 ms, the analysis frame of the pause data.
+const EDGE_FRAME_SECS: f32 = 0.010;
+
+/// The span of `samples` holding speech, widened by `before` and `after` seconds; `None` when
+/// nothing is loud. A frame counts as speech within 40 dB of the loudest and above -50 dBFS, which
+/// finds Kokoro's ~0.3 s lead and ~0.5 s tail of near-silence on every forward pass. A frame that
+/// is not finite counts as loud: a broken pass must be caught by its caller, not trimmed away.
+pub fn speech_bounds(
+    samples: &[f32],
+    sample_rate: u32,
+    before: f32,
+    after: f32,
+) -> Option<std::ops::Range<usize>> {
+    let frame = ((sample_rate as f32 * EDGE_FRAME_SECS) as usize).max(1);
+    let levels: Vec<f32> = samples.chunks(frame).map(rms).collect();
+    let loudest = levels
+        .iter()
+        .copied()
+        .filter(|l| l.is_finite())
+        .fold(0.0_f32, f32::max);
+    let floor = (loudest * 0.01).max(10f32.powf(-50.0 / 20.0));
+    let loud = |l: &f32| !l.is_finite() || *l > floor;
+    let first = levels.iter().position(loud)?;
+    let last = levels.iter().rposition(loud)?;
+    let pad = |secs: f32| (secs.max(0.0) * sample_rate as f32) as usize;
+    let start = (first * frame).saturating_sub(pad(before));
+    let end = ((last + 1) * frame + pad(after)).min(samples.len());
+    (start < end).then_some(start..end)
+}
+
+/// Seconds of audio in a WAV, from its header; `None` for anything this cannot read.
+pub fn wav_duration_secs(bytes: &[u8]) -> Option<f32> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let (mut pos, mut byte_rate, mut data_len) = (12usize, None, None);
+    while pos + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        match &bytes[pos..pos + 4] {
+            b"fmt " if pos + 20 <= bytes.len() => {
+                byte_rate = Some(u32::from_le_bytes(
+                    bytes[pos + 16..pos + 20].try_into().ok()?,
+                ));
+            }
+            b"data" => data_len = Some(size.min(bytes.len().saturating_sub(pos + 8))),
+            _ => {}
+        }
+        pos = pos.saturating_add(8 + size + (size & 1));
+    }
+    let byte_rate = byte_rate.filter(|r| *r > 0)?;
+    Some(data_len? as f32 / byte_rate as f32)
+}
+
 // ── Rate conversion ──────────────────────────────────────────────────────────
 
 /// Linearly resample to 16 kHz, the rate whisper expects.
@@ -394,6 +449,57 @@ impl SpeculativeVad {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speech_bounds_cut_the_silence_around_a_word() {
+        let sr = 24_000;
+        let mut x = vec![0.0f32; sr / 2];
+        x.extend((0..sr / 4).map(|i| 0.3 * (i as f32 * 0.05).sin()));
+        x.extend(vec![0.0f32; sr / 2]);
+        let r = speech_bounds(&x, sr as u32, 0.03, 0.05).unwrap();
+        let (start, end) = (r.start as f32 / sr as f32, r.end as f32 / sr as f32);
+        assert!((start - 0.47).abs() < 0.011, "start {start}");
+        assert!((end - 0.80).abs() < 0.011, "end {end}");
+    }
+
+    #[test]
+    fn speech_bounds_find_nothing_in_silence_or_hiss() {
+        assert!(speech_bounds(&[0.0; 4800], 24_000, 0.03, 0.05).is_none());
+        assert!(speech_bounds(&[], 24_000, 0.03, 0.05).is_none());
+        let hiss = vec![1e-4f32; 4800];
+        assert!(
+            speech_bounds(&hiss, 24_000, 0.03, 0.05).is_none(),
+            "below -50 dBFS"
+        );
+    }
+
+    #[test]
+    fn non_finite_samples_are_never_taken_for_silence() {
+        let sr = 24_000;
+        let mut x = vec![0.0f32; sr];
+        x[sr / 2] = f32::NAN;
+        let r = speech_bounds(&x, sr as u32, 0.0, 0.0).expect("a NaN is not silence");
+        assert!(r.contains(&(sr / 2)), "{r:?}");
+        let all_nan = vec![f32::NAN; sr];
+        assert_eq!(speech_bounds(&all_nan, sr as u32, 0.0, 0.0), Some(0..sr));
+        let mut inf = vec![0.0f32; 480];
+        inf[0] = f32::INFINITY;
+        assert!(speech_bounds(&inf, sr as u32, 0.0, 0.0).is_some());
+    }
+
+    #[test]
+    fn speech_bounds_never_reach_past_the_buffer() {
+        let x = vec![0.5f32; 1000];
+        assert_eq!(speech_bounds(&x, 24_000, 1.0, 1.0), Some(0..1000));
+    }
+
+    #[test]
+    fn wav_duration_is_read_off_the_header() {
+        let wav = encode_wav_pcm16(&f32_to_pcm16(&vec![0.0; 36_000]), 24_000);
+        assert_eq!(wav_duration_secs(&wav), Some(1.5));
+        assert_eq!(wav_duration_secs(b"RIFF"), None);
+        assert_eq!(wav_duration_secs(&wav[..40]), None, "no data chunk yet");
+    }
+
     use super::*;
 
     // ── round trip ───────────────────────────────────────────────────────

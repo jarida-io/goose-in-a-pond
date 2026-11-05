@@ -7,8 +7,9 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use pond_core::shared::domain::long_task::{
-    Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskKind, LongTaskParts,
-    LongTaskState, PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused, ValidatedPlan,
+    AnswerShape, Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskKind,
+    LongTaskParts, LongTaskState, PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused,
+    ValidatedPlan,
 };
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::user_data::domain::profile::ProfileScope;
@@ -16,10 +17,10 @@ use sqlx::{Pool, Sqlite};
 
 /// Column order must match `TaskRow`.
 const TASK_COLUMNS: &str = "id, owner_profile_id, scope, goal, origin_session_id, state, \
-     max_steps, deadline, created_at, updated_at, finished_at, kind";
+     max_steps, deadline, created_at, updated_at, finished_at, kind, answer";
 
 /// `(id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline,
-/// created_at, updated_at, finished_at, kind)`.
+/// created_at, updated_at, finished_at, kind, answer)`.
 type TaskRow = (
     String,
     Option<String>,
@@ -32,6 +33,7 @@ type TaskRow = (
     String,
     String,
     Option<String>,
+    String,
     String,
 );
 
@@ -175,12 +177,15 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         updated_at,
         finished_at,
         kind,
+        answer,
     ) = row;
     let scope = scope_from_columns(&scope, owner_profile_id.as_deref())?;
     let state = LongTaskState::parse(&state)
         .with_context(|| format!("unreadable state on long task {id}: {state}"))?;
     let kind = LongTaskKind::parse(&kind)
         .with_context(|| format!("unreadable kind on long task {id}: {kind}"))?;
+    let answer = AnswerShape::parse(&answer)
+        .with_context(|| format!("unreadable answer on long task {id}: {answer}"))?;
     let parts = LongTaskParts {
         owner_profile_id,
         scope,
@@ -190,6 +195,7 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         max_steps: u32_column(max_steps, "max_steps")?,
         deadline: parse_opt_ts(deadline)?,
         kind,
+        answer,
         created_at: parse_ts(&created_at)?,
         updated_at: parse_ts(&updated_at)?,
         finished_at: parse_opt_ts(finished_at)?,
@@ -288,8 +294,8 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         sqlx::query(
             "INSERT INTO long_tasks \
              (id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline, \
-              created_at, updated_at, finished_at, kind) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, updated_at, finished_at, kind, answer) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(task.id())
         .bind(task.owner_profile_id())
@@ -303,6 +309,7 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         .bind(sql_ts(task.updated_at()))
         .bind(task.finished_at().map(sql_ts))
         .bind(task.kind().as_str())
+        .bind(task.answer().as_str())
         .execute(&self.pool)
         .await
         .with_context(|| format!("storing long task {}", task.id()))?;
@@ -363,6 +370,20 @@ impl LongTaskRepository for SqliteLongTaskRepository {
                 }
             })
             .collect())
+    }
+
+    async fn decide_task_answer(&self, id: &str, answer: AnswerShape) -> Result<bool> {
+        if answer == AnswerShape::Auto {
+            return Ok(false);
+        }
+        let result =
+            sqlx::query("UPDATE long_tasks SET answer = ? WHERE id = ? AND answer = 'auto'")
+                .bind(answer.as_str())
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .with_context(|| format!("recording long task {id}'s answer"))?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn set_task_state(
@@ -673,6 +694,52 @@ mod tests {
             vec!["giap-knowledge".to_string()]
         );
         assert!(step(&repo, &task, "write").await.agent().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_planner_decides_a_tasks_answer_only_when_nobody_chose() {
+        let (_tmp, pool, repo) = repo().await;
+        let auto = household_task(t(0));
+        repo.create_task(&auto).await.unwrap();
+        assert_eq!(
+            repo.get_task(auto.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Auto
+        );
+        assert!(!repo
+            .decide_task_answer(auto.id(), AnswerShape::Auto)
+            .await
+            .unwrap());
+        assert!(repo
+            .decide_task_answer(auto.id(), AnswerShape::Short)
+            .await
+            .unwrap());
+        assert!(!repo
+            .decide_task_answer(auto.id(), AnswerShape::Report)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_task(auto.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Short
+        );
+
+        let chosen = household_task(t(1)).with_answer(AnswerShape::Report);
+        repo.create_task(&chosen).await.unwrap();
+        assert!(!repo
+            .decide_task_answer(chosen.id(), AnswerShape::Short)
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.get_task(chosen.id()).await.unwrap().unwrap().answer(),
+            AnswerShape::Report
+        );
+        assert!(
+            sqlx::query("UPDATE long_tasks SET answer = 'essay' WHERE id = ?")
+                .bind(chosen.id())
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the column accepts only the shapes the domain knows"
+        );
     }
 
     #[tokio::test]

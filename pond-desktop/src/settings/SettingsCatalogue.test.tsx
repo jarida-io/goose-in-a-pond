@@ -56,6 +56,7 @@ vi.mock("../api/PondApiClient", () => ({
     listTimeZones: vi.fn(),
     detectLocation: vi.fn(),
     getAudioDevices: vi.fn().mockRejectedValue(new Error("not under test here")),
+    listProfiles: vi.fn(),
     testAudioDevices: vi.fn(),
     getConnections: vi.fn(),
     getSetupStatus: vi.fn(),
@@ -75,7 +76,13 @@ const mockApi = api as unknown as {
   getConnections: ReturnType<typeof vi.fn>;
   getSetupStatus: ReturnType<typeof vi.fn>;
   getSystemInfo: ReturnType<typeof vi.fn>;
+  listProfiles: ReturnType<typeof vi.fn>;
 };
+
+const MEMBERS = [
+  { id: "7491ea2c", display_name: "Emmanuel Charles Oyugi", avatar_emoji: "*" },
+  { id: "2c9c9225", display_name: "Jerry", avatar_emoji: "*" },
+];
 
 /** A re-titling reply with the boring fields filled in. */
 function retitleReply(over: Record<string, unknown> = {}) {
@@ -86,6 +93,7 @@ function retitleReply(over: Record<string, unknown> = {}) {
 async function renderPage(overrides: Record<string, unknown> = {}, models: unknown[] = MODELS) {
   mockApi.getSettings.mockResolvedValue(serverSettings(overrides));
   mockApi.listModels.mockResolvedValue(models);
+  mockApi.listProfiles.mockResolvedValue({ profiles: MEMBERS });
   mockApi.listTimeZones.mockResolvedValue({
     zones: [
       { zone: "Africa/Nairobi", offset: "+03:00", place: "Nairobi" },
@@ -332,7 +340,49 @@ describe("SettingsCatalogue", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
     // Mirrors of `model_role_assignments`: catalogued, not offered.
     expect(screen.queryByLabelText("Chat model")).toBeNull();
-    expect(screen.queryByLabelText("Embedding model")).toBeNull();
+    expect(screen.queryByLabelText("Memory model")).toBeNull();
+  });
+
+  describe("search by meaning", () => {
+    async function openModels(over: Record<string, unknown>) {
+      await renderPage(over);
+      fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
+      return screen.getByLabelText("Search memories by meaning") as HTMLInputElement;
+    }
+
+    it("is a switch, not a choice of engines, and says nothing false about the Orin", async () => {
+      const toggle = await openModels({ embedding_provider: "auto" });
+      expect(toggle.checked).toBe(true);
+      expect(screen.queryByRole("radiogroup", { name: /Embedding provider/ })).toBeNull();
+      const row = rowFor("Search memories by meaning");
+      expect(row.textContent).toContain("The model is chosen on the Models page.");
+      expect(row.textContent).not.toMatch(/Orin|initialise|FastEmbed|GGUF/);
+    });
+
+    // A pond that stored an engine name before the switch existed still searches by meaning.
+    it("reads the older engine names as on", async () => {
+      for (const stored of ["fastembed", "gguf", "auto"]) {
+        const toggle = await openModels({ embedding_provider: stored });
+        expect(toggle.checked, stored).toBe(true);
+        cleanup();
+      }
+      expect((await openModels({ embedding_provider: "none" })).checked).toBe(false);
+    });
+
+    it("stages \"none\" when switched off, and saves it as the pond reads it", async () => {
+      const toggle = await openModels({ embedding_provider: "fastembed" });
+      fireEvent.click(toggle);
+      expect(mockApi.updateSettings).not.toHaveBeenCalled();
+      fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "none" }));
+    });
+
+    it("stages \"auto\" when switched on, so the Memory model decides the engine", async () => {
+      const toggle = await openModels({ embedding_provider: "none" });
+      fireEvent.click(toggle);
+      fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
+    });
   });
 
   it("counts the inert settings per category in the rail", async () => {
@@ -381,6 +431,40 @@ describe("SettingsCatalogue", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
 
     await screen.findByText(/is not one of/);
+  });
+
+  it("offers the household profile as a pick of members by name, and saves the id", async () => {
+    await renderPage({ primary_profile_id: null });
+    const picker = (await waitFor(() => {
+      const el = screen.getByLabelText("Household profile");
+      if (el.tagName !== "SELECT") throw new Error("still a text box");
+      return el;
+    })) as HTMLSelectElement;
+    expect([...picker.options].map((o) => o.text)).toEqual([
+      "Not set",
+      "Emmanuel Charles Oyugi",
+      "Jerry",
+    ]);
+
+    fireEvent.change(picker, { target: { value: "7491ea2c" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+    await waitFor(() =>
+      expect(mockApi.updateSettings).toHaveBeenCalledWith({ primary_profile_id: "7491ea2c" }),
+    );
+  });
+
+  it("says a stored household profile names nobody rather than hiding it", async () => {
+    // What one pond held on 2026-10-28: a display name typed into the old text box.
+    await renderPage({ primary_profile_id: "Emmanuel Charles Oyugi" });
+    const picker = (await waitFor(() => {
+      const el = screen.getByLabelText("Household profile");
+      if (el.tagName !== "SELECT") throw new Error("still a text box");
+      return el;
+    })) as HTMLSelectElement;
+    expect(picker.value).toBe("Emmanuel Charles Oyugi");
+    expect([...picker.options].map((o) => o.text)).toContain(
+      "Emmanuel Charles Oyugi — not a household member",
+    );
   });
 
   it("fills pickers from the model registry", async () => {

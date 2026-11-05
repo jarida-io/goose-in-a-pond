@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Brain, Ear, MessageSquare, RefreshCw, Volume2, type LucideIcon } from "lucide-react";
+import { Brain, ChevronRight, Ear, MessageSquare, RefreshCw, Volume2, type LucideIcon } from "lucide-react";
 import { DetailShell } from "./DetailShell";
 import { Card } from "./controls";
 import { useModels } from "../../../hooks/useModels";
 import { useModelActions } from "../../../hooks/useModelActions";
-import { AddOnLine, EngineMark, FitCell, SourceChip, TransferView } from "../../../components/models/ModelMarks";
+import {
+  AddOnLine, EngineMark, FitCell, ServedMarks, SourceChip, TransferView, UseChips,
+} from "../../../components/models/ModelMarks";
 import { PickCard } from "../../../sections/models/PickCard";
+import { HolderBadge, MemoryModels } from "../../../components/models/MemoryModels";
+import { jobState } from "../../../sections/models/memoryEmbedder";
+import { useMemoryJob } from "../../../hooks/useMemoryJob";
 import { engineOf, groupByEngine } from "../../../lib/modelProvider";
 import {
-  ROLES, type RoleKey, addOnOf, askingPick, budgetReading, downloadedOnly, emptyJobText, fitReading,
-  groupByJob, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel, raisedPick,
-  recommendedPicks, roleHolder, rolesFor, sortModels, sourceChip, unavailableNote,
+  ROLES, type RoleKey, addOnOf, askingPick, budgetReading, emptyJobText, fitReading,
+  groupBySection, helpersOf, holderEntry, isInUse, measuredOf, modelFacts, modelFullName, modelLabel,
+  raisedPick, recommendedPicks, roleHolder, rolesFor, servedUses, sortModels, sourceChip,
+  unavailableNote, usesOf,
 } from "../../../sections/models/modelsView";
-import type { ModelEntry } from "../../../api/types";
+import type { HelperModel, ModelEntry, ModelUse } from "../../../api/types";
 
 const ROLE_ICON: Record<RoleKey, LucideIcon> = {
   chat: MessageSquare,
@@ -24,10 +30,14 @@ const ROLE_ICON: Record<RoleKey, LucideIcon> = {
 // ─── One installed model ─────────────────────────────────────
 
 function HubRow({
-  model, inUse, raised, actions, memory, transfer,
+  model, inUse, uses, helpers, raised, actions, memory, transfer,
 }: {
   model: ModelEntry;
   inUse: boolean;
+  /** The jobs this row is doing now, each shown as a chip. */
+  uses: ModelUse[];
+  /** The models in use that serve this row, such as its drafter. */
+  helpers: HelperModel[];
   raised: boolean;
   actions: ReturnType<typeof useModelActions>;
   memory: ReturnType<typeof useModels>["memory"];
@@ -38,6 +48,7 @@ function HubRow({
   const chip = sourceChip(model);
   const facts = modelFacts(model);
   const addOn = addOnOf(model);
+  const served = servedUses(helpers, addOn);
   const measured = measuredOf(model.recommended);
   const fit = fitReading(model, memory, { inUse });
   const role = rolesFor(model)[0];
@@ -48,6 +59,7 @@ function HubRow({
       <div className="hm-row__text">
         <span className="hm-row__name">
           <span className="hm-row__title">{title}</span>
+          <UseChips uses={uses} />
           {chip && <SourceChip chip={chip} />}
         </span>
         {facts.length > 0 && <span className="hm-row__facts">{facts.join(" · ")}</span>}
@@ -60,6 +72,7 @@ function HubRow({
             onAdd={addOn.kind === "add" ? () => void actions.addPictures(model) : undefined}
           />
         )}
+        <ServedMarks uses={served} />
       </div>
 
       {transfer ? (
@@ -98,6 +111,23 @@ function HubRow({
   );
 }
 
+/** The card that changes each job; listening and the voice share the Speech card. */
+const JOB_CARD: Record<RoleKey, string> = {
+  chat: "hm-card-conversation",
+  asr: "hm-card-speech",
+  tts: "hm-card-speech",
+  embedding: "hm-card-memory",
+};
+
+/** Takes the person to a card, gently unless they asked for no motion, and puts focus on it. */
+function openCard(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const calm = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.scrollIntoView?.({ behavior: calm ? "auto" : "smooth", block: "start" });
+  el.focus({ preventScroll: true });
+}
+
 function SkeletonRow() {
   return (
     <div className="hm-row hm-row--skeleton" aria-hidden="true">
@@ -129,14 +159,20 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
   useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current); }, []);
 
   const actions = useModelActions(data, say);
+  const job = useMemoryJob(data, actions, say);
 
-  const onDisk = useMemo(() => downloadedOnly(models), [models]);
-  const groups = useMemo(() => groupByJob(onDisk), [onDisk]);
+  const groups = useMemo(
+    () => groupBySection(models, roles?.helpers ?? [], roles),
+    [models, roles],
+  );
   const conversation = useMemo(
-    () => groups.find((g) => g.key === "chat")?.models ?? [],
+    () => groups.find((g) => g.key === "conversation")?.models ?? [],
     [groups],
   );
-  const listening = useMemo(() => groups.find((g) => g.key === "asr")?.models ?? [], [groups]);
+  const listening = useMemo(
+    () => groups.find((g) => g.key === "listening")?.models ?? [],
+    [groups],
+  );
   const picks = useMemo(() => recommendedPicks(models), [models]);
   // Picks already here are listed with the models on the device, which say why they are picks.
   const toGet = useMemo(() => picks.filter((m) => !m.downloaded), [picks]);
@@ -159,6 +195,8 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       key={m.id}
       model={m}
       inUse={isInUse(m, roles)}
+      uses={usesOf(m, roles)}
+      helpers={helpersOf(m, roles?.helpers ?? [])}
       raised={raisedInstalled?.id === m.id}
       actions={actions}
       memory={memory}
@@ -197,31 +235,58 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
       <div className="hm-tiles" role="list" aria-label="Which model does each job">
         {ROLES.map((role) => {
           const Icon = ROLE_ICON[role.key];
-          const entry = holderEntry(models, roles, role.key);
-          const name = roleHolder(roles, role.key);
+          const isMemory = role.key === "embedding";
+          const entry = isMemory ? job.holder?.entry ?? null : holderEntry(models, roles, role.key);
+          const name = isMemory ? job.holder?.name ?? null : roleHolder(roles, role.key);
           const engine = entry ? engineOf(entry) : null;
           const empty = emptyJobText(roles, role.key);
-          return (
-            <div key={role.key} className="hm-tile" role="listitem" data-empty={name || empty ? undefined : "true"}>
+          const state = isMemory && job.holder ? jobState(job.line, { checking: job.checking }) : null;
+          const shown = name ? (entry ? modelLabel(entry) : name) : empty ?? "Nothing chosen yet";
+          // Memory has a card only while the pond lists a model for it.
+          const card = isMemory && job.rows.length === 0 ? null : JOB_CARD[role.key];
+          const body = (
+            <>
               <span className="hm-tile__icon"><Icon size={18} aria-hidden="true" /></span>
+              {card && <ChevronRight size={16} className="hm-tile__go" aria-hidden="true" />}
               <span className="hm-tile__job">{role.label}</span>
-              <span className="hm-tile__holder">
-                {loading ? (
-                  <span className="hm-skel" />
-                ) : name ? (
-                  entry ? modelLabel(entry) : name
-                ) : (
-                  empty ?? "Nothing chosen yet"
-                )}
-              </span>
+              <span className="hm-tile__holder">{loading ? <span className="hm-skel" /> : shown}</span>
               {!loading && engine && (
                 <EngineMark engine={engine} label={engine.label} format={engine.file_format} />
+              )}
+              {!loading && state && (
+                <span className="hm-tile__state"><HolderBadge badge={state} /></span>
+              )}
+              {!loading && isMemory && job.holder?.builtIn && (
+                <span className="hm-tile__note">Built-in default</span>
+              )}
+            </>
+          );
+          const vacant = name || empty ? undefined : "true";
+          return (
+            <div key={role.key} className="hm-tiles__cell" role="listitem">
+              {card ? (
+                <button
+                  type="button"
+                  className="hm-tile"
+                  data-empty={vacant}
+                  onClick={() => openCard(card)}
+                  aria-label={[
+                    `${role.label}: ${loading ? "loading" : shown}`,
+                    !loading && state ? state.label : null,
+                    !loading && isMemory && job.holder?.builtIn ? "built-in default" : null,
+                  ].filter(Boolean).join(", ") + ". Change"}
+                >
+                  {body}
+                </button>
+              ) : (
+                <div className="hm-tile" data-empty={vacant}>{body}</div>
               )}
             </div>
           );
         })}
       </div>
 
+      {/* After the jobs, GIAP's picks, as on the full Models page. */}
       {toGet.length > 0 && (
         <Card title="Recommended for this pond">
           <div className="hm-picks">
@@ -249,7 +314,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         </Card>
       )}
 
-      <Card title="Conversation">
+      <Card title="Conversation" id={JOB_CARD.chat}>
         {loading ? (
           <>
             <SkeletonRow />
@@ -273,7 +338,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
         )}
       </Card>
 
-      <Card title="Speech">
+      <Card title="Speech" id={JOB_CARD.asr}>
         {loading ? (
           <SkeletonRow />
         ) : (
@@ -303,6 +368,28 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
           </>
         )}
       </Card>
+
+      {job.rows.length > 0 && (
+        <Card title="Memory" id={JOB_CARD.embedding}>
+          <MemoryModels
+            models={models}
+            roles={roles}
+            transferFor={transferFor}
+            line={job.line}
+            checking={job.checking}
+            retrying={job.retrying}
+            busy={actions.busy}
+            off={job.off}
+            offline={job.offline}
+            room={memory?.embedder_room_mb ?? null}
+            onTurnOn={() => void job.turnOn()}
+            onUse={(m) => void job.useModel(m)}
+            onControl={(m, transfer, action) => void actions.control(m, transfer, action)}
+            onRetry={() => void job.retry()}
+            fold
+          />
+        </Card>
+      )}
     </DetailShell>
   );
 }

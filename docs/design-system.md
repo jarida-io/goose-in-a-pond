@@ -34,15 +34,21 @@ All tokens are CSS custom properties on `:root`. HeroUI's stylesheet is imported
 
 ### Brand Colors
 
+Light values. The accent rows follow the household's accent, which `hub/state/themeStore.ts` sets
+at runtime from `@jarida/ink`; the hex shown is Purple, the default. Dark values are in
+`:root[data-theme="dark"]`, and [`DESIGN.md` §2](../DESIGN.md#2-the-material) measures both schemes.
+
 | Token | Value | Usage |
 |---|---|---|
-| `--color-accent` | `#8C4BFF` | Jarida Purple — primary CTA, active states |
-| `--color-accent-hover` | `#7636E6` | Hover on accent elements |
-| `--color-accent-soft` | `rgba(140,75,255,0.11)` | Selected backgrounds |
+| `--color-accent` | `#7C3AED` | The accent — primary CTA, active states. Not the mark's `#8C4BFF` |
+| `--color-accent-hover` | `#6D28D9` | Hover on accent elements |
+| `--color-accent-soft` | `rgba(124,58,237,0.11)` | Selected backgrounds |
+| `--border-ink` | `#7C3AED` | The ink line and hard offset shadow; follows the accent |
+| `--bg-brand-soft` | `#F5F3FF` | Quiet fill |
 | `--color-text` | `#171616` | Jarida Charcoal — all body text |
-| `--color-text-secondary` | `rgba(23,22,22,0.55)` | Hints, labels |
-| `--color-text-tertiary` | `rgba(23,22,22,0.38)` | Placeholders, disabled |
-| `--color-bg` | `#FFF9F9` | Main window background |
+| `--color-text-secondary` | `#566178` | Slate — hints, labels |
+| `--color-text-tertiary` | `#566178` | Placeholders, disabled |
+| `--color-bg` | `#FAF3E1` | Jarida Warm White — main window background |
 | `--color-surface` | `#ffffff` | Cards, inputs, dropdowns |
 
 ### Semantic Colors
@@ -187,6 +193,24 @@ restate fit, labels or engine names anywhere else.
 Elevation is state. One pick is raised (the model in use, else the first suggestion), and one
 `.mm-btn--ask` is raised while no conversation model is chosen. Everything else is flat.
 
+### The Memory job (`components/models/MemoryModels.tsx`, `styles/memory-models.css`)
+
+The Memory job picks among embedding models, so it is a flat list of rows on a hairline, not a set of
+picks. The pond's recommendation (EmbeddingGemma 2) leads it with its reason, its size and, where
+measured, its numbers. What the pond says while the choice takes hold is decided in
+`sections/models/memoryEmbedder.ts` and read from `GET /context/index/health` by
+`hooks/useEmbedderHealth.ts`; do not restate it anywhere else.
+
+| Part | What it says |
+|---|---|
+| `<MemoryModels>` | One row per model: name, Recommended chip, reason, size or where its file is, and one button. A press that starts a download reads `Download and use` with the size in its accessible name, and rests as `Needs a connection to download` while `network_mode` is offline; otherwise it reads `Use`. The row of the model Memory is set to says `In use` only while the embedder runs it, else `Loading`, `Chosen, not loaded` or `Chosen, not downloaded`, and `Checking` until the pond's first answer arrives. `<HolderBadge>` carries the same word to the classic Jobs card and the hub's Memory tile whenever it is not `In use`. A download shows the same `<TransferView>`. `fold` keeps the recommendation and the model in use, the rest behind a button |
+| `<EmbedderStatus>` | One sentence: searching by keyword while the model loads or downloads, `Reading memories again: 40 of 95 items` (items, because the total adds up memories, connected items and summaries), off, or a failed load in plain words with a retry; out of memory says so and names all-MiniLM-L6-v2 (23 MB) as the lighter choice. The pond's own reason waits behind `Details`. Silent where the pond cannot say |
+
+The status box wears a hairline, never the ink edge, and a settled model drops the box and keeps the
+sentence. Retrying a failed load chooses the same model again; it never clears the index. Re-reading
+has one name in every surface: `Read memories again` for the action, `Reading memories again` for the
+status. While search by meaning is off nothing is fetched or read, so `Use` only sets the model.
+
 ---
 
 ## HeroUI Components
@@ -199,7 +223,7 @@ All variant overrides are defined in `sections.css` (unlayered, loads last) to r
 
 | `variant` prop | Appearance | Use for |
 |---|---|---|
-| `"primary"` | Jarida Purple fill | Primary CTA (Add, Save, Confirm) |
+| `"primary"` | Accent fill (`--color-accent`) | Primary CTA (Add, Save, Confirm) |
 | `"secondary"` | Grey fill, grey border | Secondary actions (Refresh, Cancel) |
 | `"danger-soft"` | Red soft fill, red border | Destructive (Delete) |
 | `"outline"` | Transparent, grey border | Tertiary / toolbar buttons |
@@ -276,3 +300,28 @@ A small set of utilities is defined in `base.css` and re-used across sections:
 | `.select-text` | enables text selection |
 | `.animate-fade-in` | fade + slide up entrance |
 | `.animate-spin` | continuous rotation |
+
+### State styling rules
+
+Four rules, each written after a control shipped unreadable or overlapping (2026-10-28):
+
+- **`::after` belongs to the touch layer.** `styles/touch.css` gives every dense control
+  (`.ext-tab-bar__tab`, `.ch-chip`, `.view-toggle__btn`, ...) an invisible 44px `::after` as its hit
+  area, and it loads last. Any other `::after` on the same element (a selected-tab underline, a
+  badge) inherits that box's height and position and paints over the label. Draw such marks with
+  `::before` or a `box-shadow`. `styles/touch.test.ts` fails the build on a new collision.
+- **An accent is not a text colour.** Accents are picked to read as fills and edges: as text, Coral
+  measures 2.53:1 on the light ground and Purple 3.28:1 on the dark background. Selected and hovered
+  labels stay `--color-text`; the accent goes on the underline (`--border-ink`, floored at 3:1 by
+  `hub/state/themeStore.ts`) or a tint behind the label. Text on an accent fill uses
+  `--color-text-on-accent`, never a literal `#fff`.
+- **Disabled is drawn, not faded.** `base.css` fades every disabled button to 0.38 opacity, which
+  takes an icon-only control under 3:1 and makes it read as missing. Icon buttons that must stay
+  legible while disabled set `opacity: 1` and draw the state instead: a dashed edge and
+  `--color-text-secondary` for both edge and glyph (6.22:1 light, 5.43:1 dark on `--color-surface`).
+- **Chrome sits in flow, never in a reserved lane.** Home's arrange toolbar
+  (`hub/views/widgets/widget-frame.css`) used to be absolutely positioned into padding reserved by
+  card size. Width does not follow size: a medium card squeezed to about 300px wrapped the toolbar
+  to a second row and its remove button covered the card. Toolbars and controls that can wrap take
+  their room in flow, and a card is never allowed below its content height (no `min-height: 0` on a
+  card whose overflow stays visible). `tests/e2e/dashboard-arrange.spec.ts` measures it.

@@ -12,6 +12,7 @@ impl StreamingWakeWordDetector for InstantActivation {
     async fn wait_for_activation_with_audio(&self) -> Result<WakeWordActivation> {
         Ok(WakeWordActivation {
             captured_audio: None,
+            ..Default::default()
         })
     }
 

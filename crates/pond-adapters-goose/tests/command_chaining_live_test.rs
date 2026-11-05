@@ -151,6 +151,8 @@ impl RecordingScheduler {
 impl SchedulerPort for RecordingScheduler {
     async fn create_task(&self, req: CreateScheduleRequest) -> Result<Schedule> {
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: req.id,
             label: req.label,
             cron: req.cron,
@@ -222,6 +224,9 @@ fn recorders() -> &'static Recorders {
             Arc::new(OneLightRegistry),
             Arc::new(pond_core::user_data::mocks::mock_skill::MockSkillRepository::default()),
             device_control.clone(),
+            Arc::new(
+                pond_core::user_data::mocks::mock_last_action::MockLastActionRepository::default(),
+            ),
             None,
         )
         .expect("register giap extensions for the chaining harness");
@@ -274,6 +279,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         warmup: false,
         suggestion_context: None,
         deep_research_task: None,
+        interview: None,
     };
 
     let started = Instant::now();

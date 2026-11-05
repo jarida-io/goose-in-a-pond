@@ -30,5 +30,14 @@ export const RESEARCH_WAITS = "Starts once this answer ends.";
 
 export const LEAVE_RESEARCH = "Leave deep research";
 
+/** The choice beside the chip: how much the pond writes. Its default leaves it to the question. */
+export const RESEARCH_ANSWER_LABEL = "How much to write";
+
+export const RESEARCH_ANSWERS = [
+  { value: "auto", label: "Pond decides", hint: "Short for a quick question, a report for a big one." },
+  { value: "short", label: "Short answer", hint: "A few sentences, here in the chat." },
+  { value: "report", label: "Full report", hint: "Sections with sources, to read and export." },
+] as const;
+
 /** Clause for a refused research turn's message; the question is already back in the box. */
 export const RESEARCH_REFUSED_CLAUSE = " Your question is back in the box. You can still send it as an ordinary message.";

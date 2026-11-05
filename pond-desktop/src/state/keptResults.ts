@@ -10,6 +10,17 @@ export interface KeptResult {
 
 const SOURCES = /\bSources:\s*(.+?)\.?\s*$/s;
 
+/** A page read's stub ends with the address to read again. */
+const PAGE = /read_web_page:\s*(https?:\/\/\S+)\s*$/;
+
+function hostOf(address: string): string | null {
+  try {
+    return new URL(address).host.replace(/^www\./, "") || null;
+  } catch {
+    return null;
+  }
+}
+
 // The row is stored as JSON inside `content`, so the marker is read from there first.
 function readRow(content: string): Record<string, unknown> | null {
   try {
@@ -39,6 +50,12 @@ export function keptResultOf(m: SessionMessage): KeptResult | null {
 /** One quiet sentence for a reloaded conversation, in place of a card there is nothing to fill. */
 export function keptLine(kept: KeptResult): string {
   const label = kept.tool ? friendlyToolName(kept.tool) : "Tool";
+  const page = PAGE.exec(kept.stub)?.[1];
+  if (page) {
+    const host = hostOf(page);
+    const base = `${label}: its text isn't kept after the turn.`;
+    return host ? `${base} Page: ${host}.` : base;
+  }
   const sources = SOURCES.exec(kept.stub)?.[1]?.trim().slice(0, 200);
   const base = `${label}: results aren't kept after the turn.`;
   return sources ? `${base} Sources: ${sources}.` : base;

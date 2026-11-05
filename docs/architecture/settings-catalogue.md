@@ -67,7 +67,7 @@ gives it a control, and the server-side rule if any.
 | Key | Default | Notes |
 |---|---|---|
 | `user_name` | `"Friend"` |  |
-| `primary_profile_id` | `null` |  |
+| `primary_profile_id` | `null` | rule: a member's id or empty (picker of members, never free text) |
 | `home_name` | `""` | app only: the server never reads it |
 | `timezone` | `"UTC"` | rule: IANA zone, canonicalised |
 | `weather_location_name` | `""` |  |
@@ -121,7 +121,7 @@ gives it a control, and the server-side rule if any.
 | `context_window_override` | `0` |  |
 | `agent_backend` | `"goose"` | rule: only `goose`; `pond` is refused as quarantined |
 | `picture_support_download_enabled` | `false` |  |
-| `embedding_provider` | `"fastembed"` | rule: one of `fastembed`, `gguf`, `none` |
+| `embedding_provider` | `"fastembed"` | rule: one of `auto`, `fastembed`, `gguf`, `none` |
 | `active_embedding_model` | `""` | mirror of `model_role_assignments`; the catalogue links to Models |
 
 ### Memory (`memory`, Household, 17)

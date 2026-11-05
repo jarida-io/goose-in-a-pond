@@ -157,6 +157,53 @@ ssh nano 'grep -iE "migrat|corrupt|sqlite" ~/.local/share/goose-in-a-pond/logs/p
 disposable. A genuinely damaged system database is a restore, not a repair, and it is the one thing
 on the board worth backing up.
 
+## 9. Remote access after a power cut
+
+A phone on Wi-Fi at home reaches the pond over the LAN, so a pond that works at home but not
+from mobile data has lost only remote access: its tailnet node is short of `Running`. Two
+things after a power cut keep it there, and the log now tells them apart.
+
+**No internet.** The router can come back with its Wi-Fi up and its internet link not, for many
+minutes. The board joins the Wi-Fi at once, so everything on the LAN works, but the node cannot
+reach its coordinator. On 2026-10-31 this lasted about 45 minutes: NetworkManager stayed at
+`CONNECTED_SITE` and every DNS query to the router's resolvers timed out, until the access point
+dropped for 50 seconds and came back with the internet. The clock synchronised seconds later and
+the node was `Running` 24 seconds after that. Nothing on the pond needs fixing for this.
+
+```bash
+ssh nano 'nmcli -t -f STATE general'     # "connected (site only)" is the LAN without the internet
+```
+
+**The clock.** The board has no working real-time clock. At boot `systemd-timesyncd` restores
+the last time it recorded, behind by however long the board was off, and the clock stays there
+until a time server answers. A clock behind a certificate's start date fails TLS to the
+coordinator; a few hours behind is harmless today (its certificates start weeks earlier), a
+board that was off longer than the time since the last renewal is not. The stock configuration
+asks only the public NTP pool, through NVIDIA's `nv-fallback-ntp.conf`:
+
+```bash
+ssh nano 'timedatectl show -p NTPSynchronized --value; timedatectl show-timesync -p SystemNTPServers -p FallbackNTPServers'
+ssh -t nano 'cd goose-in-a-pond && bash scripts/giap.sh --dry-run time-sync'   # what it would write
+ssh -t nano 'cd goose-in-a-pond && bash scripts/giap.sh time-sync'             # write it (sudo)
+```
+
+`giap.sh time-sync` writes `/etc/systemd/timesyncd.conf.d/50-giap-ntp.conf` with
+`NTP=time.cloudflare.com time.google.com 0.pool.ntp.org 1.pool.ntp.org` and restarts
+`systemd-timesyncd`; `time-sync remove` undoes it. The pool goes in `NTP=` because timesyncd
+ignores `FallbackNTP=` once any `NTP=` server is set. `giap.sh doctor` warns when the clock is not
+synchronised or timesyncd has only the pool to ask, and `giap.sh update` offers the change once.
+
+**What the log says.** Two minutes short of `Running` gives one
+`kind=remote_access_not_running` WARN naming the node's own reason and `clock_synchronized`;
+the recovery gives `kind=remote_access_running_again` with how long it was down. A DNS or
+connect timeout in `reason` is the first case, a certificate date error with
+`clock_synchronized=no` the second. The node retries on its own within 45 seconds of the cause
+clearing; it needs no restart. See [remote access](../remote-access.md#when-the-node-is-not-running).
+
+```bash
+ssh nano 'grep -E "remote_access_(not_running|running_again)|network_helper_output" ~/.local/share/goose-in-a-pond/logs/pond.log.$(date -u +%F)'
+```
+
 ## The short version
 
 ```bash

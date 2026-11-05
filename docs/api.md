@@ -159,7 +159,7 @@ The route summary's "Also" column names these.
   companion routes (4 KiB).
 - **Streams**: chat-like SSE routes share `sse_semaphore`; a full semaphore answers
   `503 {"error":"Too many concurrent streams"}` before the stream opens. `/notifications/stream`
-  has its own semaphore. A resumable chat turn also needs a detached-run slot:
+  and `/devices/events` share their own semaphore. A resumable chat turn also needs a detached-run slot:
   `503 {"error":"Too many agent runs in flight ...","kind":"run_cap"}`.
 - **CORS** (`cors_layer`): origins `app://giap` (the packaged desktop renderer), the Vite dev server
   at `http://localhost:1420` and `http://127.0.0.1:1420` in debug builds, the origin in
@@ -279,6 +279,10 @@ The route summary's "Also" column names these.
 | POST | /voice/calibrate | wizard | | Add a wake-phrase calibration sample |
 | DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration |
 | POST | /transcribe | token +onb | | Transcribe multipart audio |
+| GET | /voice/room | token +onb | | Room voice: switched on, able to listen or why not, its state, wake detector and last speaker |
+| PUT | /voice/room | token +onb | `{enabled}` | Switch room voice on or off now, saved as `voice_room_enabled` |
+| GET | /voice/room/events | token +onb | `?levels=1` | SSE: each `data:` is one NDJSON line of the room's loop (`state`, `wake`, `interrupt`, ...); `audio_level` only with `levels=1` |
+| POST | /voice/room/interrupt | token +onb | | End the room's turn in flight (204) |
 | GET | /audio/devices | token +onb | | Which microphone and speaker are in use, and why |
 | POST | /audio/devices/test | token +onb | | Re-test the audio devices, optionally with a chime |
 
@@ -318,6 +322,12 @@ The route summary's "Also" column names these.
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
 | DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
+| PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
+| DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
+| GET | /profiles/{id}/interview | token +onb | member | Where the member's setup interview stands |
+| POST | /profiles/{id}/interview | token +onb | member | Start the setup interview, or take it up again |
+| POST | /profiles/{id}/interview/approve | token +onb | member | Save the interview's drafted notes |
 | GET | /sessions/{session_id}/user | token +onb | | Who a session belongs to, and on what evidence |
 | PUT | /sessions/{session_id}/user | token +onb | policy | Identify the session as a member |
 | DELETE | /sessions/{session_id}/user | token +onb | | Release the binding |
@@ -333,12 +343,15 @@ The route summary's "Also" column names these.
 | GET | /notifications/stream | token | own device | Notifications for one device (SSE) |
 | GET | /notifications/pending | token | paired device | The caller's unacknowledged notifications |
 | POST | /notifications/{id}/ack | token | paired device | Mark one of the caller's notifications delivered |
+| GET | /notifications/history | token | paired device | The household notices the caller may read, with its read state |
+| POST | /notifications/history/read | token | paired device | Mark history notices read for the caller |
 | GET | /devices | token +onb | | All registered devices |
 | POST | /devices | token +onb | | Register a device |
 | PUT | /devices/{id} | token +onb | own row or cred | Rename, set hostname or room |
 | DELETE | /devices/{id} | token +onb | | Unregister; revokes remote access first |
 | POST | /devices/{id}/heartbeat | token +onb | | Refresh `last_seen` |
 | POST | /devices/{id}/offline | token +onb | | Mark a device off |
+| GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
 
@@ -660,8 +673,9 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 
 `verify` takes `PakeVerifyRequest {challenge_id, share, confirm, device_name?}` and answers
 `HandshakeResponse`: `accepted`, `session_token`, `refresh_token`, `expires_at`, `hostname`,
-`server_version`, `capabilities`, `rejection_reason`, and `server_proof` (T_server in hex), which
-the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
+`server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
+routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
+which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
 same code in both `rejection_reason` and `error`.
 
 | Route | Status | `error` | Meaning |
@@ -716,8 +730,16 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
 `{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member. `pairing` is the
-pairing material: `hostname`, `lan_address`, `tailnet_address`, `https_port`, `tls_spki_sha256`.
+member. With no body, a household with exactly one member binds to that member, and any other
+household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
+`tailnet_address`, `https_port`, `tls_spki_sha256`.
+
+The binding is the only way a device becomes a member's after the pond has members: nothing
+re-attributes a device later, and `PUT /devices/{id}` does not take a member. A phone already paired
+to nobody is linked by pairing it again with a code issued for its member; the app keeps its install
+id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
+whose the device will be and issues the code for that choice, and `pond-server pairing --member
+<PROFILE_ID>` does the same from a shell on the pond.
 
 ### `POST /handshake/spoken-code`
 
@@ -743,7 +765,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed"}`; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
@@ -824,6 +846,8 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "fields": [{"field", "message"}]}` from `settings_validation::validate_patch` |
 | 422 | `agent_backend: "pond"`: the pond agent is quarantined |
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
+| 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
+| 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
 
 ## Chat and runs
 
@@ -844,7 +868,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `status` | `content` | Progress ("Compacting context...", "Model starting...") |
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
-| `tool_call` | `tool, id, input` | A tool call |
+| `tool_call` | `tool, id, input, working_notes?` | A tool call. `working_notes`, when present, is exactly the `text` streamed since the previous `tool_call` (or the turn's start): the model at work ("let me check the weather"), not the answer. Move it out of the answer into the turn's steps. The answer is the text after the last call, and it alone is persisted |
 | `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
@@ -952,6 +976,16 @@ of `ModelStatusEntry` (`crates/pond-api/src/lib.rs`): `id`, `category`, `name`, 
 `image_support_bytes`, `available` and `unavailable_reason` (for example `litert_library_missing`).
 All three `tts_*` categories are listed under `tts`.
 
+Each row also carries `roles`, the jobs it is doing now, and `section`, where both clients list it
+(`conversation`, `listening`, `speaking`, `memory`, `pictures`, `other`). Both come from
+`pond_core::models::domain::model_use`: settings decide who holds a job (`chat_provider` and
+`chat_model`, `tool_model`, `active_whisper_model`, `voice_tts_voice` then `active_tts_model`,
+and the embedder `EmbedderChoice` resolves), and `model_role_assignments` fills only a job whose
+setting is empty. A setting naming no row leaves the job unheld. `active` is still the
+assignment-table flag. A row doing a job is shown even when `downloaded` is false: a built-in
+memory model has no file of its own. Role names: `chat`, `tool`, `asr`, `tts`, `embedding`, and,
+for helpers, `pictures`, `drafter`, `camera`, `faces`.
+
 | Route | Request | Response |
 |---|---|---|
 | `GET /models/download/progress` | | `{downloads: [...]}`; finished entries are evicted after 5 minutes, paused ones stay |
@@ -965,7 +999,7 @@ All three `tts_*` categories are listed under `tts`.
 | `GET /models/capabilities` | | `ModelCapabilities {thinking, vision, audio_input, context_window_tokens, structured_output, tool_calling}`; see [architecture/model_capabilities.md](architecture/model_capabilities.md) |
 | `GET /models/vision-status` | | `{state, model, size_bytes, message}`; a pure read, polled |
 | `GET /models/memory-status` | | `{total_mb, available_for_llm_mb, budget_mb, loaded_model, reclaimable_mb}` |
-| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, router_name}` |
+| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, holders: {chat, tool, asr, tts, embedding}, helpers: [{id, title, uses, section, serves}], router_name}`. `holders` names the row holding each job, as the rows' `roles` do. `helpers` lists models in use that are no row of their own: the conversation model's picture encoder (once installed) and MTP drafter (on disk, on a budgeted device), the camera detector (once loaded) and face recognition (once ready). Both clients show a helper whose `serves` names a listed row as part of that row ("Pictures included", "Faster answers"), never as a model of its own; only the camera detector and face recognition are listed alone, under the `pictures` section, which both clients title "Camera and faces" |
 | `POST /models/registry/refresh` | | `{status}`; the refresh runs in the background |
 | `POST /models/scan` | | `{found, entries}` |
 | `POST /models/cleanup` | | `{reclaimed_bytes, removed}` |
@@ -991,9 +1025,44 @@ A profile is a household member: `Profile {id, display_name, avatar_emoji, prefe
 | `GET /profiles/{id}` | | the profile, or `404` |
 | `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
 
-Deleting a member removes their memories, face embeddings and Uber sign-in, and releases their
-sessions (the conversation stays, unattributed). Household-scoped memories are untouched. If the
-member was `primary_profile_id`, it is cleared first.
+Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
+interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
+memories are untouched. If the member was `primary_profile_id`, it is cleared first.
+
+### A member's notes and setup interview
+
+`member` routes answer only the member's own device: a token whose device is attributed to `{id}`,
+or, in a household of one member, a caller attributed to nobody. Anyone else gets `403`, and an
+unknown member `404`.
+
+A member's notes are prompt extras owned by that member: their turns carry them, in the turn's
+`<system-context>`, and nobody else's do. The household's notes and the speaker's share the limits
+of `/agent/extras`, so a write on either side that would take a member's turns past them is
+`400` with the same `code`.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /profiles/{id}/notes` | | `{notes: [{key, instruction, active, sort_order}], limits: {max_notes, max_total_chars, used_chars}}`; `used_chars` counts the household's active notes and the member's |
+| `PUT /profiles/{id}/notes/{key}` | `{instruction, active?, sort_order?}` | `{key, status: "ok"}`; `400` with `code` as for `/agent/extras` |
+| `DELETE /profiles/{id}/notes/{key}` | | `{key, status: "deleted"}` |
+| `GET /profiles/{id}/interview` | | The interview (below), or `{profile_id, status: "not_started"}` |
+| `POST /profiles/{id}/interview` | | The interview. A fresh one opens a chat session with the pond's first question already in it; an open or stopped one is taken up in its session, with a welcome back when no question is waiting; a finished one starts a new round in a new session |
+| `POST /profiles/{id}/interview/approve` | | `{saved: [key]}`; `409` with `code: "no_draft"` when no draft waits |
+
+The interview is `{profile_id, status, session_id, topics: [{id, label, status}], draft: [{key,
+topic, instruction}]}`. `status` is `in_progress`, `awaiting_approval`, `done` or `stopped`, and a
+topic's is `pending`, `answered` or `skipped`. The answers themselves are never returned, and are
+forgotten when the interview ends.
+
+The member answers in `POST /chat/stream` on `session_id`. While the interview is open and the
+member is the speaker, that turn carries the interview's state and is offered only the
+`giap-interview` tools: record an answer, skip a topic, stop, draft notes, save them. The answer or
+skip that settles the last topic drafts the notes in that turn, so `status` becomes
+`awaiting_approval` without the model asking. A save from
+the conversation is refused until the member has replied after the draft was shown; the approve
+route is the tap on their own phone. Notes from the interview use one key per topic (`me_address`,
+`me_identity`, `me_language`, `me_household`, `me_routine`, `me_food`, `me_access`, `me_style`,
+`me_avoid`, `me_other`), so a second interview replaces them and leaves other notes alone.
 
 Session identity records who a session belongs to and on what evidence. `identification_source`
 is `paired_device`, `explicit`, `face` or `unknown`, strongest first; a weaker source never takes
@@ -1023,14 +1092,25 @@ itself must keep calling the heartbeat.
 | `DELETE /devices/{id}` | | `204`; `409` with `hub_id` for an endpoint bridged by a Matter hub; `502` if the device could not leave the Matter fabric; `503 revocation_unavailable` |
 | `POST /devices/{id}/heartbeat`, `/offline` | | `{status}` |
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
+| `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+
+**`GET /devices/events`** follows device state as devices report it, so a phone need not read
+every device again to see a change. Each `device_state` event's data is
+`{seq, device_id, key, value, changed_at}`: `value` is a boolean for `power` and the device's own
+words otherwise (`"40%"`). A change is sent when the device reports it, so it confirms a command
+rather than echoing it. Without `after_seq` the stream starts from now. With it, the stream first
+sends what followed that `seq`, or a `resync` event (data `{}`) when the Pond no longer keeps that
+far back (512 changes) or the number is from before a restart; the phone then reads every device
+once and carries on from the next `seq`. Numbers start from the boot time in microseconds, so they
+never repeat across restarts. Devices added or removed are not sent yet.
 
 `PUT /devices/{id}` on a paired client's own row (`device_type` `gotg`, `desktop` or `cli`) is
 that device's or the host's to change; a shared row (a Matter device, a sensor, another pond) is
 any authenticated caller's (`pond_core::user_data::services::device_edit`).
 
 How a notice reaches a phone, what the Pond notifies about, and how often, is in
-[architecture/notifications.md](architecture/notifications.md). The three routes below take a paired
+[architecture/notifications.md](architecture/notifications.md). The five routes below take a paired
 device's token in every onboarding state, never answer a tokenless caller, and act only on the
 caller's own device, named by its token.
 
@@ -1047,6 +1127,7 @@ for any other device the stream marks what it sends delivered. Each SSE `data` i
 | `action` | `open_url`, `ride_offer`, `ride_update` | travel; see [architecture/rides-and-maps.md](architecture/rides-and-maps.md) |
 | `open` | `schedule` (with `schedule_id`, `run_id`), `devices`, `chat`, `models`, `extensions`, `remote_access` | schedule runs, pairing outcomes, Matter, proposals, system notices |
 | `kind` | a system notice's catalogue name, e.g. `model_downloaded`; `pond_warmup` for the live-only warm-up status | system notices, warm-up |
+| `transient` | `true` | every live-only status (`publish_live`, the warm-up): never queued, never in the history; a notification centre leaves it out |
 
 `open` is written only through `OpenScreen` (`crates/pond-core/src/mcp/ports/notification.rs`) and
 names the screen a tap opens.
@@ -1062,6 +1143,24 @@ read, `503` when no queue is wired.
 copy of a household notice is `"{notification_id}:{device_id}"`. `404` when no notification by that
 id is the caller's (another device's answers the same, so the route cannot probe someone else's
 queue), `500 notification_ack_failed`, `503` when no queue is wired.
+
+**`GET /notifications/history?limit=N`** (2026-10-28) is the household's record of durable notices,
+which the dashboard's notification centre reads on start and on every reconnect of its stream. It
+answers `{device_id, notifications: [{id, category, title, body, timestamp, data, read}]}`, newest
+first. `device_id` is the caller's own device, from its token: the id its stream must name, and the
+suffix its own queued copies carry. Each notice appears once, under its household id, never a
+per-device copy's `"{id}:{device_id}"`. Only what the caller may read is listed: a household notice
+unless the caller's device caused it (`broadcast_except`), and a member's notice (a proposal, a
+ride link) only to the devices it was queued for. Live-only status is never listed. `read` is the
+caller's own read state. `limit` defaults to 100 and is held to 1..200. `403` when the request did
+not come from a paired device (a loopback caller under `POND_DEV_ALLOW_LOOPBACK` names no device,
+so it is refused rather than shown an unscoped list), `500 notification_history_failed`, `503`
+when no history is wired.
+
+**`POST /notifications/history/read`** with `{ids: [string]}` marks those notices read for the
+caller's device only and answers `{marked: n}`, the count newly marked. An id the caller may not
+read, or that does not exist, is skipped and not counted, so the answer never says which ids
+exist. At most 500 ids per request (`400` beyond); `403`, `500` and `503` as above.
 
 ## Sensors, camera and rules
 
@@ -1084,7 +1183,16 @@ queue), `500 notification_ack_failed`, `503` when no queue is wired.
 `CameraEvent` is `{id, camera_id, event_type, confidence, snapshot_path, snapshot_url, metadata,
 acknowledged, created_at}`. `snapshot_url` is `/api/v1/camera/events/{id}/snapshot`, or null when
 the event has no snapshot. `metadata` is an object or null; pond vision events carry
-`{changed_fraction, source, face_detected, face_unknown, identified_profile?, face_confidence?}`.
+`{changed_fraction?, source, face_detected, face_unknown, track_id?, identified_profile?,
+identified_name?, face_confidence?, face_bbox?, face_landmarks?}`. With the YOLOX detector the pond
+follows people instead of sampling motion: it looks five times a second while anyone is in view or
+for 5 s after any change of 2% of the picture (or `vision_motion_threshold`, if lower), and each
+person seen on two looks running becomes a track. A track raises one
+`person` event when it starts and one more when its face is first recognised (faces are tried once
+a second, five times at most); both carry its `track_id`, and `changed_fraction` only when the
+frame also moved. A person unseen for 3 s is gone, so coming back is a new track. While anyone is
+followed no other motion event is raised; otherwise motion is named by the same look (`pet`,
+`package`, else `motion`) under the cooldown.
 
 With `cameras_enabled` off, the snapshot, stream, event-snapshot and SSE routes and
 `POST /faces/register-from-camera` answer `403 {"error", "reason": "cameras_disabled"}`, read from
@@ -1144,27 +1252,31 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 ## Schedules
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
-start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at}`;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
+start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
 |---|---|---|
 | `GET /schedules` | | `[Schedule]` |
-| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?}` | `201` with the task |
+| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?, ask_if_missed?}` | `201` with the task |
 | `GET /schedules/upcoming` | `?limit=` | active tasks by next fire |
-| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?}` | the task |
+| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, kind?, fire_at?, once?, ask_if_missed?}`; `kind` wins over `prompt` | the task |
 | `DELETE /schedules/{id}` | | `{deleted}` |
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
-| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms}]` |
+| `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
+| `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
+| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
 | `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
-`sensor_trigger` kind is validated as `/rules` validates it.
+`sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
+`agent_prompt` action, is `400`, on create and on update.
 
 ## Memory, reminders, suggestions and proposals
 
@@ -1255,7 +1367,7 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | Route | Request | Response |
 |---|---|---|
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
-| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}` | the tool's result |
+| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept, nor one with `success: false` (a device that refused the command), so its resend runs again. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
@@ -1404,7 +1516,7 @@ bearer-token middleware applies, with its own 20-a-minute limit and a 4 KiB body
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt}` for a paired device; `403` otherwise |
+| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt, enableFrom}` for a paired device; `403` otherwise. While off, `enableFrom` lists where it can be turned on (`["dashboard"]`); `null` while on |
 | `POST /api/v1/remote-access/enrollment` | `{authUrl, nodeKey, machineKey}` (unknown fields refused) | the enrollment; `409` while a revocation is pending |
 | `POST /api/v1/remote-access/recovery` | | `{id}` for the host to approve |
 | `GET/POST/DELETE /api/v1/remote-access/recovery/{id}` | | poll, execute (after approval) or cancel |

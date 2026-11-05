@@ -128,6 +128,7 @@ fn running_task() -> LongTask {
         max_steps: 12,
         deadline: None,
         kind: Default::default(),
+        answer: Default::default(),
         created_at: t(0),
         updated_at: t(0),
         finished_at: None,

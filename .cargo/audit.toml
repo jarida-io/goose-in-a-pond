@@ -14,14 +14,22 @@ ignore = [
     # GIAP crypto is HMAC-SHA256 and sha256 hashes. Remove when rsa ships a fixed version.
     "RUSTSEC-2023-0071",
 
-    # zip 8.6.0: three extraction-to-disk defects, all patched only in zip 9.0.0 (a new major)
+    # crypto-bigint 0.5.5: timing variability in operations meant to be constant-time. Fixed
+    # only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's
+    # optional `lightning` feature, off by default) via breez-sdk-spark's k256/elliptic-curve
+    # 0.13; breez-sdk-spark 0.27.2, its latest release, still locks 0.5.5. Remove when it moves
+    # to elliptic-curve 0.14. Review by 2027-01-31 (same date as osv-scanner.toml).
+    "RUSTSEC-2026-0387",
+
+    # zip 8.6.0: four extraction-to-disk defects, all patched only in zip 9.0.0 (a new major)
     #   RUSTSEC-2026-0367  SUID/SGID bits preserved by extract()
     #   RUSTSEC-2026-0368  extract() creates symlinks whose targets leave the destination
     #   RUSTSEC-2026-0369  extract()/ZipStreamReader::extract() chmod through symlinks
+    #   RUSTSEC-2026-0429  extract() aborts the process on a symlink entry with a large size
     # Not fixable from this lockfile: candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet
     # 3.1.1 (each the latest release, all reached through goose) require zip ^8.6.0, and zip 8
     # has no patched release. Moving pond-server alone to zip 9 would add a second major and
-    # leave 8.6.0 in the graph. Not reachable: all three advisories live in extract(), and
+    # leave 8.6.0 in the graph. Not reachable: all four advisories live in extract(), and
     # nothing in the build calls it. pond-server's buffalo_l download reads entries with
     # by_index() and writes each to a fixed path chosen by file name (model_download.rs);
     # candle-core, docx-rs and umya-spreadsheet only read archives in memory. Remove when those
@@ -29,4 +37,5 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
 ]

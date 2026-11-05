@@ -143,6 +143,45 @@ impl LongTaskKind {
     }
 }
 
+/// How long a task's answer should be. The person chooses it, or the planner reads it from the ask.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerShape {
+    /// Nobody chose yet: the planner decides from the ask and records it.
+    #[default]
+    Auto,
+    /// The answer itself, in a few sentences, shown whole in the conversation.
+    Short,
+    /// A report in sections, opened on its own.
+    Report,
+}
+
+impl AnswerShape {
+    pub const ALL: [AnswerShape; 3] = [AnswerShape::Auto, AnswerShape::Short, AnswerShape::Report];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnswerShape::Auto => "auto",
+            AnswerShape::Short => "short",
+            AnswerShape::Report => "report",
+        }
+    }
+
+    /// Exact stored spelling only; an unknown value is `None`, never a default shape.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|shape| shape.as_str() == raw)
+    }
+
+    /// What a model or a client sent: the stored spellings, any case, with blank as no choice.
+    pub fn read(raw: &str) -> Option<Self> {
+        let raw = raw.trim().to_ascii_lowercase();
+        if raw.is_empty() {
+            return Some(AnswerShape::Auto);
+        }
+        Self::parse(&raw)
+    }
+}
+
 /// Where one step of a plan is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +316,7 @@ pub struct LongTask {
     state: LongTaskState,
     budget: LongTaskBudget,
     kind: LongTaskKind,
+    answer: AnswerShape,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -294,6 +334,7 @@ pub struct LongTaskParts {
     pub max_steps: u32,
     pub deadline: Option<DateTime<Utc>>,
     pub kind: LongTaskKind,
+    pub answer: AnswerShape,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -328,6 +369,7 @@ impl LongTask {
             state: LongTaskState::Planning,
             budget,
             kind: LongTaskKind::General,
+            answer: AnswerShape::Auto,
             created_at: at,
             updated_at: at,
             finished_at: None,
@@ -337,6 +379,21 @@ impl LongTask {
     pub fn with_kind(mut self, kind: LongTaskKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    pub fn with_answer(mut self, answer: AnswerShape) -> Self {
+        self.answer = answer;
+        self
+    }
+
+    /// The planner's reading of the ask, kept only while nobody has chosen: a member's choice
+    /// stands. `false` when it changed nothing.
+    pub fn decide_answer(&mut self, answer: AnswerShape) -> bool {
+        if self.answer != AnswerShape::Auto || answer == AnswerShape::Auto {
+            return false;
+        }
+        self.answer = answer;
+        true
     }
 
     /// Rebuild a stored task through the same checks; a row that fails them is an error.
@@ -351,6 +408,7 @@ impl LongTask {
             max_steps,
             deadline,
             kind,
+            answer,
             created_at,
             updated_at,
             finished_at,
@@ -383,6 +441,7 @@ impl LongTask {
                 deadline,
             },
             kind,
+            answer,
             created_at,
             updated_at,
             finished_at,
@@ -411,6 +470,10 @@ impl LongTask {
 
     pub fn kind(&self) -> LongTaskKind {
         self.kind
+    }
+
+    pub fn answer(&self) -> AnswerShape {
+        self.answer
     }
 
     pub fn state(&self) -> LongTaskState {
@@ -539,6 +602,18 @@ impl StepKey {
         }
     }
 
+    /// A plan's key, taken as its suggestion when only the spelling is wrong: `step_1` is `step-1`,
+    /// and the plan's `depends_on` is matched the same way.
+    pub fn lenient(raw: &str) -> Result<Self, PlanError> {
+        StepKey::parse(raw).or_else(|refused| match &refused {
+            PlanError::InvalidKey {
+                suggestion: Some(near),
+                ..
+            } => StepKey::parse(near).map_err(|_| refused.clone()),
+            _ => Err(refused),
+        })
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -580,9 +655,9 @@ fn suggest_key(raw: &str) -> Option<String> {
 }
 
 /// One step as the planner's `plan_write` call supplies it. It carries no authority: the role's
-/// tools and scope come from the role and the task, never from here.
+/// tools and scope come from the role and the task, never from here. Fields it does not know are
+/// ignored, because refusing a plan over an extra `title` cost the planner a whole turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StepDraft {
     #[serde(alias = "id", alias = "step_key")]
     pub key: String,
@@ -612,6 +687,166 @@ pub struct StepDraft {
     pub depends_on: Vec<String>,
     #[serde(default, alias = "acceptance_check", alias = "check")]
     pub acceptance: Option<String>,
+}
+
+/// Every name [`StepDraft`] reads, aliases included, so a caller can say which fields it ignored.
+pub const STEP_DRAFT_FIELDS: &[&str] = &[
+    "key",
+    "id",
+    "step_key",
+    "role",
+    "agent",
+    "new_agent",
+    "custom_agent",
+    "instructions",
+    "task",
+    "instruction",
+    "inputs",
+    "input",
+    "artifacts",
+    "depends_on",
+    "dependencies",
+    "depends",
+    "after",
+    "acceptance",
+    "acceptance_check",
+    "check",
+];
+
+/// Where a step with no `key` takes one from, in order, before falling back to its place.
+const KEY_FALLBACKS: &[&str] = &["name", "title", "step", "step_name", "step_id", "label"];
+
+/// Read the `position`th step (from 1) of a `plan_write` call. A field spelt like one a step reads,
+/// such as `dependsOn`, is read as that field, since dropping a misspelt `depends_on` would cost
+/// the step its inputs. A step with no key takes one from its name, else `step-<position>`: a key
+/// is only a handle, and refusing the plan for it cost the planner a turn. Returns the draft and
+/// the fields it ignored.
+pub fn read_step_draft(
+    value: serde_json::Value,
+    position: usize,
+) -> Result<ReadStep, serde_json::Error> {
+    let squash = |name: &str| -> String {
+        name.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let mut ignored = Vec::new();
+    let mut names = Vec::new();
+    let value = match value {
+        serde_json::Value::Object(fields) => {
+            // Exact names first, so a field spelt right wins over a near spelling of it.
+            let mut read = serde_json::Map::with_capacity(fields.len());
+            let mut near = Vec::new();
+            for (name, field) in fields {
+                if STEP_DRAFT_FIELDS.contains(&name.as_str()) {
+                    read.insert(name, field);
+                } else {
+                    near.push((name, field));
+                }
+            }
+            // A planner writes `new_agent: "Forager Gosling: ..."` meaning a role, or an object with
+            // no name; only a readable agent makes one, so anything else is dropped, not refused.
+            if read.get("new_agent").is_some_and(|agent| {
+                !agent.is_null() && serde_json::from_value::<StepAgent>(agent.clone()).is_err()
+            }) {
+                read.remove("new_agent");
+                ignored.push("new_agent".to_string());
+            }
+            let mut unread = Vec::new();
+            for (name, field) in near {
+                match STEP_DRAFT_FIELDS
+                    .iter()
+                    .find(|known| squash(known) == squash(&name))
+                {
+                    Some(known) if !read.contains_key(*known) => {
+                        read.insert((*known).to_string(), field);
+                    }
+                    _ => unread.push((name, field)),
+                }
+            }
+            for (name, field) in &unread {
+                if KEY_FALLBACKS
+                    .iter()
+                    .any(|fallback| squash(fallback) == squash(name))
+                {
+                    match field {
+                        serde_json::Value::String(text) => names.push(text.trim().to_string()),
+                        serde_json::Value::Number(n) => names.push(format!("step-{n}")),
+                        _ => {}
+                    }
+                }
+            }
+            let keyed = ["key", "id", "step_key"]
+                .iter()
+                .any(|name| read.get(*name).is_some_and(|value| !value.is_null()));
+            if !keyed {
+                let named = KEY_FALLBACKS.iter().find_map(|fallback| {
+                    let at = unread
+                        .iter()
+                        .position(|(name, _)| squash(name) == squash(fallback))?;
+                    let key = match &unread[at].1 {
+                        serde_json::Value::String(text) if !text.trim().is_empty() => text.clone(),
+                        serde_json::Value::Number(n) => format!("step-{n}"),
+                        _ => return None,
+                    };
+                    unread.remove(at);
+                    Some(key)
+                });
+                let key = named.unwrap_or_else(|| format!("step-{position}"));
+                read.insert("key".to_string(), serde_json::Value::String(key));
+            }
+            // A name or title is how other steps' waits may name this one, so it is not ignored.
+            ignored.extend(
+                unread
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .filter(|name| !KEY_FALLBACKS.iter().any(|f| squash(f) == squash(name))),
+            );
+            serde_json::Value::Object(read)
+        }
+        other => other,
+    };
+    Ok(ReadStep {
+        draft: serde_json::from_value(value)?,
+        ignored,
+        names,
+    })
+}
+
+/// One step of a `plan_write` call as read: the draft, the fields it ignored, and the names it
+/// went by besides its key, which another step's wait may use.
+#[derive(Debug, Clone)]
+pub struct ReadStep {
+    pub draft: StepDraft,
+    pub ignored: Vec<String>,
+    pub names: Vec<String>,
+}
+
+/// Point waits that name a step by its name or title at that step's key: the planner often waits
+/// for "Gather camera events" while keying the step `step-1`.
+pub fn match_waits_by_name(steps: &mut [ReadStep]) {
+    let slug = |raw: &str| suggest_key(raw).unwrap_or_else(|| raw.trim().to_ascii_lowercase());
+    let keys: Vec<String> = steps.iter().map(|step| slug(&step.draft.key)).collect();
+    let named: Vec<(String, String)> = steps
+        .iter()
+        .flat_map(|step| {
+            step.names
+                .iter()
+                .map(|name| (slug(name), step.draft.key.clone()))
+        })
+        .collect();
+    for step in steps.iter_mut() {
+        for wait in &mut step.draft.depends_on {
+            let wanted = slug(wait);
+            if keys.contains(&wanted) {
+                continue;
+            }
+            if let Some((_, key)) = named.iter().find(|(name, _)| *name == wanted) {
+                *wait = key.clone();
+            }
+        }
+    }
 }
 
 /// An agent a plan makes for one step because no saved role fits. The runner builds it from these
@@ -895,6 +1130,14 @@ pub struct ValidatedPlan {
     task_id: String,
     steps: Vec<PlanStep>,
     kept: Vec<StepKey>,
+    relaxed: Vec<RelaxedWait>,
+}
+
+/// A wait for a step the plan does not have, kept as a wait for every step before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaxedWait {
+    pub step: String,
+    pub missing: String,
 }
 
 impl ValidatedPlan {
@@ -910,6 +1153,11 @@ impl ValidatedPlan {
     /// Steps Completed or Running when checked; new steps may wait for them, so they must stay so.
     pub fn kept_keys(&self) -> &[StepKey] {
         &self.kept
+    }
+
+    /// Waits for steps the plan does not have, each now a wait for every step before it.
+    pub fn relaxed_waits(&self) -> &[RelaxedWait] {
+        &self.relaxed
     }
 
     /// Whether the plan still fits the stored `(key, state)` pairs; a store calls this inside
@@ -1007,7 +1255,7 @@ pub fn validate_plan(
         .collect();
     let mut keys: Vec<StepKey> = Vec::with_capacity(drafts.len());
     for draft in &drafts {
-        let key = StepKey::parse(&draft.key)?;
+        let key = StepKey::lenient(&draft.key)?;
         if let Some(&state) = kept_states.get(key.as_str()) {
             return Err(PlanError::RewritesSettledStep {
                 key: key.into(),
@@ -1031,6 +1279,7 @@ pub fn validate_plan(
 
     let first_ordinal = kept.last().map_or(1, |step| step.ordinal.saturating_add(1));
     let mut steps = Vec::with_capacity(drafts.len());
+    let mut relaxed = Vec::new();
     for (offset, (draft, key)) in drafts.into_iter().zip(keys.iter()).enumerate() {
         let agent = draft.new_agent.and_then(StepAgent::cleaned);
         let made_role = agent
@@ -1054,11 +1303,23 @@ pub fn validate_plan(
             if raw.is_empty() {
                 continue;
             }
-            let Some(&dep) = known.get(raw) else {
-                return Err(PlanError::UnknownDependency {
+            let near = suggest_key(raw);
+            let Some(&dep) = known
+                .get(raw)
+                .or_else(|| near.as_deref().and_then(|near| known.get(near)))
+            else {
+                // Refusing the plan over one wait cost the planner its turns: this step waits for
+                // every one before it instead, which keeps the order and hands it all their work.
+                for earlier in &keys[..offset] {
+                    if !depends_on.contains(earlier) {
+                        depends_on.push(earlier.clone());
+                    }
+                }
+                relaxed.push(RelaxedWait {
                     step: key.to_string(),
                     missing: raw.to_string(),
                 });
+                continue;
             };
             if !depends_on.contains(dep) {
                 depends_on.push(dep.clone());
@@ -1090,6 +1351,7 @@ pub fn validate_plan(
         task_id: task.id.clone(),
         steps,
         kept: kept.iter().map(|step| step.key.clone()).collect(),
+        relaxed,
     })
 }
 
@@ -1183,6 +1445,7 @@ pub fn validate_appended_step(
             .filter(|step| step.state.survives_replan())
             .map(|step| step.key.clone())
             .collect(),
+        relaxed: Vec::new(),
     })
 }
 
@@ -1499,6 +1762,11 @@ impl StepOutcome {
 
     pub fn with_asks(mut self, asks: HandBackAsks) -> Self {
         self.asks = asks;
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Vec<String>) -> Self {
+        self.artifacts = clean_ids(artifacts);
         self
     }
 
@@ -2324,6 +2592,43 @@ mod task_tests {
     }
 
     #[test]
+    fn the_planner_decides_the_answer_only_when_the_member_did_not() {
+        let task = || {
+            LongTask::start(
+                ProfileScope::Household,
+                None,
+                "how warm is it",
+                None,
+                LongTaskBudget::new(3, None).unwrap(),
+                t(0),
+            )
+            .unwrap()
+        };
+        let mut auto = task();
+        assert_eq!(auto.answer(), AnswerShape::Auto);
+        assert!(!auto.decide_answer(AnswerShape::Auto));
+        assert!(auto.decide_answer(AnswerShape::Short));
+        assert!(!auto.decide_answer(AnswerShape::Report), "decided once");
+        assert_eq!(auto.answer(), AnswerShape::Short);
+
+        let mut chosen = task().with_answer(AnswerShape::Report);
+        assert!(
+            !chosen.decide_answer(AnswerShape::Short),
+            "the member's choice stands"
+        );
+        assert_eq!(chosen.answer(), AnswerShape::Report);
+
+        assert_eq!(AnswerShape::read(" Short "), Some(AnswerShape::Short));
+        assert_eq!(AnswerShape::read(""), Some(AnswerShape::Auto));
+        assert_eq!(AnswerShape::read("essay"), None);
+        assert_eq!(
+            AnswerShape::parse("Short"),
+            None,
+            "only the stored spelling"
+        );
+    }
+
+    #[test]
     fn the_deadline_passes_at_its_instant() {
         let budget = LongTaskBudget::new(3, Some(t(100))).unwrap();
         assert!(!budget.deadline_passed(t(99)));
@@ -2344,6 +2649,7 @@ mod task_tests {
             max_steps,
             deadline: None,
             kind: LongTaskKind::Research,
+            answer: AnswerShape::Auto,
             created_at: t(0),
             updated_at: t(5),
             finished_at: None,
@@ -2436,6 +2742,36 @@ mod key_tests {
     }
 
     #[test]
+    fn a_plan_takes_a_misspelt_key_as_its_suggestion_but_never_an_unusable_one() {
+        assert_eq!(StepKey::lenient("step_1").unwrap().as_str(), "step-1");
+        assert_eq!(
+            StepKey::lenient("Find Flights").unwrap().as_str(),
+            "find-flights"
+        );
+        assert_eq!(StepKey::lenient("ok").unwrap().as_str(), "ok");
+        assert!(matches!(
+            StepKey::lenient("!!!"),
+            Err(PlanError::InvalidKey {
+                suggestion: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn every_field_a_step_writes_is_one_it_reads() {
+        let written = serde_json::to_value(StepDraft::default()).unwrap();
+        for name in written.as_object().unwrap().keys() {
+            assert!(
+                STEP_DRAFT_FIELDS.contains(&name.as_str()),
+                "{name} is not listed"
+            );
+        }
+        let extra = serde_json::json!({"key": "a", "role": "r", "instructions": "x", "title": "t"});
+        assert_eq!(serde_json::from_value::<StepDraft>(extra).unwrap().key, "a");
+    }
+
+    #[test]
     fn the_refusal_names_the_key_to_use() {
         let message = StepKey::parse("Find Flights").unwrap_err().to_string();
         assert!(message.contains("`Find Flights`"), "{message}");
@@ -2497,18 +2833,109 @@ mod draft_tests {
     }
 
     #[test]
-    fn an_unknown_field_is_an_error_rather_than_a_dropped_dependency() {
-        let parsed = serde_json::from_str::<StepDraft>(
-            r#"{"key": "b", "role": "r", "instructions": "go", "dependson": ["a"]}"#,
+    fn a_misspelt_field_is_read_as_the_one_it_means_and_an_unknown_one_is_named() {
+        for spelt in ["dependson", "dependsOn", "Depends-On"] {
+            let ReadStep { draft, ignored, .. } = read_step_draft(
+                serde_json::json!({
+                    "key": "b", "role": "r", "instructions": "go", spelt: ["a"]
+                }),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                draft.depends_on,
+                vec!["a".to_string()],
+                "{spelt} was dropped"
+            );
+            assert!(ignored.is_empty(), "{spelt}: {ignored:?}");
+        }
+        let ReadStep { draft, ignored, .. } = read_step_draft(
+            serde_json::json!({
+                "key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"],
+                "depends_on": ["a"], "dependsOn": ["c"]
+            }),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            draft.depends_on,
+            vec!["a".to_string()],
+            "the exact name wins"
+        );
+        let mut ignored = ignored;
+        ignored.sort();
+        assert_eq!(ignored, vec!["dependsOn".to_string(), "tools".to_string()]);
+        assert!(read_step_draft(serde_json::json!({"key": "b", "role": "r"}), 1).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_new_agent_is_dropped_and_the_step_kept() {
+        for agent in [
+            serde_json::json!("Forager Gosling: search the web"),
+            serde_json::json!({"instructions": "search", "tools": ["giap-knowledge"]}),
+        ] {
+            let step = read_step_draft(
+                serde_json::json!({"key": "a", "role": "r", "instructions": "go", "new_agent": agent}),
+                1,
+            )
+            .unwrap();
+            assert!(step.draft.new_agent.is_none());
+            assert_eq!(step.ignored, vec!["new_agent".to_string()]);
+        }
+    }
+
+    #[test]
+    fn a_step_with_no_key_takes_one_from_its_name_or_its_place() {
+        let read = |value: serde_json::Value| {
+            let step = read_step_draft(value, 3).unwrap();
+            (step.draft, step.ignored)
+        };
+        let (named, ignored) =
+            read(serde_json::json!({"name": "Gather Events", "role": "r", "instructions": "go"}));
+        assert_eq!(
+            named.key, "Gather Events",
+            "validate_plan slugs it to gather-events"
         );
         assert!(
-            parsed.is_err(),
-            "a misspelt wait would silently reorder the plan"
+            ignored.is_empty(),
+            "the name was used, not ignored: {ignored:?}"
         );
-        let parsed = serde_json::from_str::<StepDraft>(
-            r#"{"key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"]}"#,
+        let (numbered, _) = read(serde_json::json!({"step": 2, "role": "r", "instructions": "go"}));
+        assert_eq!(numbered.key, "step-2");
+        let (placed, _) = read(serde_json::json!({"role": "r", "instructions": "go"}));
+        assert_eq!(placed.key, "step-3");
+        let (kept, ignored) =
+            read(serde_json::json!({"key": "a", "name": "A", "role": "r", "instructions": "go"}));
+        assert_eq!(kept.key, "a");
+        assert!(ignored.is_empty(), "a name is kept for waits: {ignored:?}");
+    }
+
+    #[test]
+    fn a_wait_may_name_a_step_by_its_name() {
+        let mut steps = vec![
+            read_step_draft(
+                serde_json::json!({"step": 1, "name": "Gather camera events", "role": "r",
+                                   "instructions": "go"}),
+                1,
+            )
+            .unwrap(),
+            read_step_draft(
+                serde_json::json!({"step": 2, "role": "r", "instructions": "write",
+                                   "depends_on": ["gather-camera-events", "step-1"]}),
+                2,
+            )
+            .unwrap(),
+        ];
+        assert_eq!(steps[0].draft.key, "Gather camera events");
+        match_waits_by_name(&mut steps);
+        assert_eq!(
+            steps[1].draft.depends_on,
+            vec![
+                "gather-camera-events".to_string(),
+                "Gather camera events".to_string()
+            ],
+            "`step: 1` names the step `step-1` too"
         );
-        assert!(parsed.is_err());
     }
 }
 
@@ -2615,21 +3042,33 @@ mod plan_tests {
     }
 
     #[test]
-    fn a_step_may_wait_only_for_a_step_that_will_exist() {
+    fn a_wait_for_a_step_the_plan_lacks_becomes_a_wait_for_every_step_before_it() {
         let task = task(6);
+        let plan = validate_plan(
+            &task,
+            vec![draft("a", &[]), draft("b", &[]), draft("c", &["gather"])],
+            &[],
+        )
+        .unwrap();
+        let waits: Vec<&str> = plan.steps()[2]
+            .depends_on()
+            .iter()
+            .map(StepKey::as_str)
+            .collect();
+        assert_eq!(waits, vec!["a", "b"]);
         assert_eq!(
-            validate_plan(&task, vec![draft("b", &["a"])], &[]).unwrap_err(),
-            PlanError::UnknownDependency {
-                step: "b".into(),
-                missing: "a".into()
-            }
+            plan.relaxed_waits(),
+            &[RelaxedWait {
+                step: "c".into(),
+                missing: "gather".into()
+            }]
         );
-        // An open step left out of the new plan is deleted, so waiting for it is refused too.
+        // The first step has nothing before it, so its wait is dropped. So is a wait for an open
+        // step left out of the new plan, which is deleted.
         let history = [existing(&task, "a", 1, StepState::Pending, &[])];
-        assert!(matches!(
-            validate_plan(&task, vec![draft("b", &["a"])], &history),
-            Err(PlanError::UnknownDependency { .. })
-        ));
+        let plan = validate_plan(&task, vec![draft("b", &["a"])], &history).unwrap();
+        assert!(plan.steps()[0].depends_on().is_empty());
+        assert_eq!(plan.relaxed_waits().len(), 1);
         // Control: the same wait is fine once `a` is in the plan or finished.
         assert!(validate_plan(&task, vec![draft("a", &[]), draft("b", &["a"])], &[]).is_ok());
         let done = [existing(&task, "a", 1, StepState::Completed, &[])];
