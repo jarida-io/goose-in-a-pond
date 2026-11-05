@@ -6,14 +6,21 @@
 //! paired phone gets its own copy, id [`per_device_notification_id`], queued and relayed exactly
 //! as a targeted `send()`. The notification stream skips the live broadcast copy for a device
 //! that has its own queued copy, so a connected phone sees the notice once, under one id.
+//!
+//! With [`BroadcastNotificationSender::with_history`], every durable notice (a broadcast, a
+//! member's notice, a targeted send) is also recorded once, under its household id, in the
+//! household's [`NotificationHistory`], which the dashboard lists after a reload. A live-only
+//! status (`publish_live`) is never recorded, and is marked [`TRANSIENT_KEY`] on the stream.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_core::mcp::domain::notification_history::HistoryAudience;
 use pond_core::mcp::ports::notification::{
     per_device_notification_id, MemberDelivery, MemberNotifier, Notification, NotificationSender,
 };
+use pond_core::mcp::ports::notification_history::NotificationHistory;
 use pond_core::mcp::ports::notification_queue::NotificationQueueRepository;
 use pond_core::mcp::ports::notification_recipients::NotificationRecipients;
 use pond_core::mcp::ports::notification_relay::NotificationRelay;
@@ -25,6 +32,11 @@ use tokio::sync::broadcast;
 /// Sentinel `target` for "every connected device". Keep it the domain constant: the targeted
 /// path refuses this string, and a drifted copy would silently disable the refusal.
 pub const BROADCAST_TARGET: &str = RESERVED_BROADCAST_TARGET;
+
+/// The `data` key `publish_live` sets to `true`: the notice is a transient status for the screens
+/// connected now, never queued and never in the history, so a notification centre does not list
+/// it. Producers never set it themselves.
+pub const TRANSIENT_KEY: &str = "transient";
 
 /// Payload caps enforced here for every producer; truncation is by char so it can't split UTF-8.
 const MAX_TITLE_CHARS: usize = 200;
@@ -92,6 +104,8 @@ pub struct BroadcastNotificationSender {
     attribution: Option<Arc<dyn DeviceAttribution>>,
     /// The paired phones a broadcast is made durable for; `None` keeps broadcasts live-only.
     recipients: Option<Arc<dyn NotificationRecipients>>,
+    /// The household's record of durable notices; `None` records nothing.
+    history: Option<Arc<dyn NotificationHistory>>,
 }
 
 impl BroadcastNotificationSender {
@@ -106,7 +120,14 @@ impl BroadcastNotificationSender {
             relay,
             attribution: None,
             recipients: None,
+            history: None,
         }
+    }
+
+    /// Record every durable notice in the household's history, once, under its household id.
+    pub fn with_history(mut self, history: Arc<dyn NotificationHistory>) -> Self {
+        self.history = Some(history);
+        self
     }
 
     /// Make every `broadcast()` durable for the phones `recipients` names: one queued, relayed
@@ -145,6 +166,14 @@ impl BroadcastNotificationSender {
             profile_id,
             attribution.devices_for_profile(profile_id).await,
         );
+        let notification = clamp(notification);
+        if !plan.devices().is_empty() {
+            self.record_history(
+                &notification,
+                HistoryAudience::Devices(plan.devices().to_vec()),
+            )
+            .await;
+        }
 
         let mut queued = Vec::new();
         let mut failed = Vec::new();
@@ -152,7 +181,7 @@ impl BroadcastNotificationSender {
             let mut per_device = notification.clone();
             per_device.id = per_device_notification_id(&notification.id, device_id);
             per_device.target = device_id.clone();
-            match self.send(per_device).await {
+            match self.deliver(per_device).await {
                 Ok(()) => queued.push(device_id.clone()),
                 Err(e) => failed.push((device_id.clone(), e.to_string())),
             }
@@ -203,7 +232,7 @@ impl BroadcastNotificationSender {
             let mut copy = notification.clone();
             copy.id = per_device_notification_id(&notification.id, device_id);
             copy.target = device_id.clone();
-            match self.send(copy).await {
+            match self.deliver(copy).await {
                 Ok(()) => queued += 1,
                 Err(e) => tracing::warn!(
                     kind = "notification_fanout_device_failed",
@@ -224,12 +253,33 @@ impl BroadcastNotificationSender {
             "household notice queued for paired phones"
         );
     }
-}
 
-#[async_trait]
-impl NotificationSender for BroadcastNotificationSender {
-    async fn send(&self, notification: Notification) -> Result<()> {
-        let notification = clamp(notification);
+    /// Record a durable notice in the history. Best-effort, like the push relay: the notice still
+    /// goes out when the record fails, and only a reloaded dashboard misses it.
+    async fn record_history(&self, notification: &Notification, audience: HistoryAudience) {
+        let Some(history) = self.history.as_ref() else {
+            return;
+        };
+        match history.record(notification, &audience).await {
+            Ok(()) => tracing::debug!(
+                kind = "notification_history_recorded",
+                notification_id = %notification.id,
+                household = matches!(audience, HistoryAudience::Household { .. }),
+                "notice recorded in the household's history"
+            ),
+            Err(e) => tracing::warn!(
+                kind = "notification_history_record_failed",
+                notification_id = %notification.id,
+                error = %e,
+                "could not record a notice in the household's history; it is delivered, but a \
+                 reloaded dashboard will not list it"
+            ),
+        }
+    }
+
+    /// Queue, relay and publish one already-clamped copy for its target, or publish a broadcast
+    /// copy live. Never records history: the callers record the notice once, not per copy.
+    async fn deliver(&self, notification: Notification) -> Result<()> {
         let targeted = notification.target != BROADCAST_TARGET;
         if targeted {
             // Persist for offline delivery before fanning out live.
@@ -251,11 +301,42 @@ impl NotificationSender for BroadcastNotificationSender {
         let _ = self.tx.send(notification);
         Ok(())
     }
+}
+
+/// `data` with [`TRANSIENT_KEY`] set. A non-object payload is kept as it is: there is no key to
+/// add, and no producer sends one.
+fn mark_transient(data: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match data {
+        None => Some(serde_json::json!({ TRANSIENT_KEY: true })),
+        Some(serde_json::Value::Object(mut fields)) => {
+            fields.insert(TRANSIENT_KEY.into(), true.into());
+            Some(serde_json::Value::Object(fields))
+        }
+        Some(other) => Some(other),
+    }
+}
+
+#[async_trait]
+impl NotificationSender for BroadcastNotificationSender {
+    async fn send(&self, notification: Notification) -> Result<()> {
+        let notification = clamp(notification);
+        let targeted = notification.target != BROADCAST_TARGET;
+        let recorded = notification.clone();
+        self.deliver(notification).await?;
+        // A copy with the sentinel target is published live only, like `publish_live`.
+        if targeted {
+            let device = recorded.target.clone();
+            self.record_history(&recorded, HistoryAudience::Devices(vec![device]))
+                .await;
+        }
+        Ok(())
+    }
 
     async fn publish_live(&self, notification: Notification) -> Result<()> {
         let mut notification = clamp(notification);
         notification.target = BROADCAST_TARGET.to_string();
-        // No queue, no relay: only the screens subscribed right now. None is normal.
+        notification.data = mark_transient(notification.data.take());
+        // No queue, no relay, no history: only the screens subscribed right now. None is normal.
         let _ = self.tx.send(notification);
         Ok(())
     }
@@ -263,6 +344,13 @@ impl NotificationSender for BroadcastNotificationSender {
     async fn broadcast(&self, notification: Notification) -> Result<()> {
         let mut notification = clamp(notification);
         notification.target = BROADCAST_TARGET.to_string();
+        self.record_history(
+            &notification,
+            HistoryAudience::Household {
+                except_device: None,
+            },
+        )
+        .await;
         // Durable copies first: the stream checks for them when the live copy arrives.
         self.fan_out_to_phones(&notification, None).await;
         // No subscribers is normal (no screen connected) -- ignore the error.
@@ -281,7 +369,14 @@ impl NotificationSender for BroadcastNotificationSender {
         }
         let mut notification = clamp(notification);
         notification.target = BROADCAST_TARGET.to_string();
-        // Per-device copies only: `send()` publishes each live under its own target.
+        self.record_history(
+            &notification,
+            HistoryAudience::Household {
+                except_device: Some(except_device.to_string()),
+            },
+        )
+        .await;
+        // Per-device copies only: `deliver()` publishes each live under its own target.
         self.fan_out_to_phones(&notification, Some(except_device))
             .await;
         Ok(())
@@ -814,5 +909,156 @@ mod tests {
             "broadcast not queued"
         );
         assert_eq!(rx.recv().await.unwrap().target, BROADCAST_TARGET);
+    }
+
+    fn household_sender(
+        history: Arc<pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory>,
+    ) -> (
+        BroadcastNotificationSender,
+        Arc<StubQueue>,
+        broadcast::Receiver<Notification>,
+    ) {
+        use pond_core::mcp::mocks::mock_notification_recipients::MockNotificationRecipients;
+        let (tx, rx) = broadcast::channel(16);
+        let queue = Arc::new(StubQueue::default());
+        let sender = BroadcastNotificationSender::new(tx, queue.clone(), None)
+            .with_household_recipients(Arc::new(MockNotificationRecipients::with_phones(&[
+                "phone-a", "phone-b",
+            ])))
+            .with_device_attribution(ScriptedAttribution::returning(&["phone-liz", "watch-liz"]))
+            .with_history(history);
+        (sender, queue, rx)
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_is_recorded_once_under_its_household_id() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (sender, queue, _rx) = household_sender(history.clone());
+
+        sender.broadcast(notif("ignored")).await.unwrap();
+
+        assert_eq!(queue.enqueued.lock().unwrap().len(), 2, "each phone's copy");
+        let recorded = history.recorded();
+        assert_eq!(recorded.len(), 1, "one record, not one per phone copy");
+        assert_eq!(recorded[0].0.id, "n1");
+        assert_eq!(
+            recorded[0].1,
+            HistoryAudience::Household {
+                except_device: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notice_about_a_device_s_own_action_is_recorded_without_that_device() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (sender, _queue, _rx) = household_sender(history.clone());
+
+        sender
+            .broadcast_except(notif("ignored"), "phone-a")
+            .await
+            .unwrap();
+
+        let recorded = history.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].1,
+            HistoryAudience::Household {
+                except_device: Some("phone-a".into())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_s_notice_is_recorded_for_that_member_s_devices_only() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (sender, _queue, _rx) = household_sender(history.clone());
+
+        sender.send_to_profile("liz", notif("unused")).await;
+
+        let recorded = history.recorded();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one record for the member, not one per device"
+        );
+        assert_eq!(recorded[0].0.id, "n1", "under the notice's own id");
+        assert_eq!(
+            recorded[0].1,
+            HistoryAudience::Devices(vec!["phone-liz".into(), "watch-liz".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_notice_that_reaches_nobody_is_not_recorded() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (tx, _rx) = broadcast::channel(8);
+        let sender = BroadcastNotificationSender::new(tx, Arc::new(StubQueue::default()), None)
+            .with_device_attribution(ScriptedAttribution::returning(&[]))
+            .with_history(history.clone());
+
+        sender.send_to_profile("liz", notif("unused")).await;
+
+        assert!(history.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_targeted_send_is_recorded_for_its_device() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (sender, _queue, _rx) = household_sender(history.clone());
+
+        sender.send(notif("phone-a")).await.unwrap();
+
+        let recorded = history.recorded();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0].1,
+            HistoryAudience::Devices(vec!["phone-a".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_status_is_never_recorded_and_says_it_is_transient() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let history = Arc::new(MockNotificationHistory::new());
+        let (sender, _queue, mut rx) = household_sender(history.clone());
+
+        let mut status = notif("ignored");
+        status.data = Some(serde_json::json!({"kind": "pond_warmup"}));
+        sender.publish_live(status).await.unwrap();
+        sender.publish_live(notif("ignored")).await.unwrap();
+
+        assert!(history.recorded().is_empty());
+        let published = drain(&mut rx);
+        assert_eq!(
+            published[0].data,
+            Some(serde_json::json!({"kind": "pond_warmup", TRANSIENT_KEY: true}))
+        );
+        assert_eq!(
+            published[1].data,
+            Some(serde_json::json!({ TRANSIENT_KEY: true })),
+            "a status with no payload gets one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_write_still_delivers_the_notice() {
+        use pond_core::mcp::mocks::mock_notification_history::MockNotificationHistory;
+        let (sender, queue, mut rx) =
+            household_sender(Arc::new(MockNotificationHistory::failing()));
+
+        sender.broadcast(notif("ignored")).await.unwrap();
+
+        assert_eq!(queue.enqueued.lock().unwrap().len(), 2);
+        assert_eq!(
+            drain(&mut rx).len(),
+            3,
+            "both phone copies and the live copy"
+        );
     }
 }

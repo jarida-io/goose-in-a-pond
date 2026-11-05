@@ -3,6 +3,7 @@ pub mod extension_marketplace;
 pub mod mcp_knowledge;
 pub mod mcp_server;
 pub mod notification;
+pub mod notification_history;
 pub mod notification_queue;
 pub mod notification_recipients;
 pub mod notification_relay;
