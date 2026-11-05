@@ -15,13 +15,20 @@ use pond_core::security::ports::event_log::{
     EventLog, OperationalLogEntry, OperationalLogRepository,
 };
 
+/// Entries a slow live viewer may fall behind by before it skips ahead.
+const LIVE_BACKLOG: usize = 256;
+
 pub struct SqliteOperationalLog {
     pool: Pool<Sqlite>,
+    live: tokio::sync::broadcast::Sender<OperationalLogEntry>,
 }
 
 impl SqliteOperationalLog {
     pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            live: tokio::sync::broadcast::channel(LIVE_BACKLOG).0,
+        }
     }
 }
 
@@ -73,14 +80,30 @@ impl OperationalLogRepository for SqliteOperationalLog {
         message: &str,
         metadata: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("INSERT INTO event_log (level, source, message, metadata) VALUES (?, ?, ?, ?)")
-            .bind(level)
-            .bind(source)
-            .bind(message)
-            .bind(metadata)
-            .execute(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "INSERT INTO event_log (level, source, message, metadata) VALUES (?, ?, ?, ?) \
+             RETURNING id, timestamp",
+        )
+        .bind(level)
+        .bind(source)
+        .bind(message)
+        .bind(metadata)
+        .fetch_one(&self.pool)
+        .await?;
+        // Sent as stored, so a live viewer and `list` show the same row; nobody listening is fine.
+        let _ = self.live.send(OperationalLogEntry {
+            id: row.get("id"),
+            timestamp: row.get("timestamp"),
+            level: level.to_string(),
+            source: source.to_string(),
+            message: message.to_string(),
+            metadata: metadata.map(str::to_string),
+        });
         Ok(())
+    }
+
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<OperationalLogEntry>> {
+        Some(self.live.subscribe())
     }
 }
 
@@ -301,6 +324,31 @@ mod event_log_tests {
         let log = SqliteEventLog::new(db.logs.clone());
         std::mem::forget(tmp); // keep the sqlite file alive for the test
         log
+    }
+
+    #[tokio::test]
+    async fn a_live_viewer_gets_each_log_line_as_it_is_stored() {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        let log = SqliteOperationalLog::new(db.logs.clone());
+        let mut live = log.subscribe().expect("the SQLite store streams");
+
+        log.insert(
+            "WARN",
+            "pond_api::routes",
+            "pairing rejected",
+            Some("{\"named\":true}"),
+        )
+        .await
+        .unwrap();
+
+        let sent = live.try_recv().expect("the line was sent");
+        let stored = log.list(1, None).await.unwrap().remove(0);
+        // The same row both ways, id and timestamp included.
+        assert_eq!(sent.id, stored.id);
+        assert_eq!(sent.timestamp, stored.timestamp);
+        assert_eq!(sent.message, "pairing rejected");
+        assert_eq!(sent.metadata.as_deref(), Some("{\"named\":true}"));
     }
 
     #[tokio::test]

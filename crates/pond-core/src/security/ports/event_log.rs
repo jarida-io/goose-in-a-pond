@@ -31,6 +31,11 @@ pub trait OperationalLogRepository: Send + Sync {
         message: &str,
         metadata: Option<&str>,
     ) -> Result<()>;
+
+    /// Entries as they are stored, for a live viewer; `None` when this store cannot stream.
+    fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<OperationalLogEntry>> {
+        None
+    }
 }
 
 /// Driven Port: the unified, append-only event log, the authoritative record of what the
