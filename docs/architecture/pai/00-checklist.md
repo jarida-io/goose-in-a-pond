@@ -4336,3 +4336,29 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **PAI-2.** A wrong key is a wrong guess against the shared throttle. Keys are never logged; issue
   and revoke are `admin.key_*` audit events. A guest's phone can neither enroll nor forget.
 - **Not verified on the Orin yet.** Needs a deploy and a phone with biometrics.
+
+**2026-11-06 — a turn keeps the memory closest to the message, however old (PAI-3; not a PAI
+milestone completion).**
+
+- **The defect.** On the nano (EmbeddingGemma 2), "Which phone do I use?" was answered "I don't
+  know". The answer was the owner's 17-day-old identity memory, 44th of 49 on importance and
+  recency. The five slots went to memories written the day before. On EmbeddingGemma 2's
+  256-dimension scale an answer scores a median 0.79 and a non-answer 0.61, so `0.5 * similarity`
+  cannot make up `0.3 * importance + 0.2 * recency`. `recall_memories` returned the memory first.
+  This was found on the context-space P1 stack and is the same on main.
+- **What is built** (branch `fix/memory-recall-floor`):
+  - `SimilarityFloors.closest_memory`: MiniLM 0.55, EmbeddingGemma 2 0.77, read off P0's vectors
+    by `fixtures/embedding-floors/closest.py`;
+  - `memory_relevance::select_for_turn`: the blend's `max_memory_fragments`, led by the closest
+    memory when it clears the floor, so the token budget keeps it;
+  - `topical_memories` returns the floor of the model that embedded the message, and the memory
+    reachability corpus selects the same way.
+  - On P0's sets, recall@5 of an answer 17 days old among memories a day old goes from 0.00 to 0.49
+    on EmbeddingGemma 2. Where the store holds no answer, the seat fires for 16% of questions,
+    mostly on the question's subject.
+- **PAI-3.** Same fragment count and budget: the seat displaces the blend's fifth, never adds one.
+- **Invariant 1.** The block rides the user message; the system prefix is untouched.
+- **PAI-1.** The seat chooses among the turn's scoped candidates only.
+- **NOT VERIFIED on the Orin.** Unit tests and the corpus lock only. Still to show: whether the
+  iPhone memory clears 0.77, and whether E4B then answers. That needs a nano run with the live pond
+  stopped.
