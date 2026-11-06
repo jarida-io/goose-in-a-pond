@@ -7,14 +7,15 @@ use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::AgentRequest;
 use pond_core::shared::domain::turn_failure::TurnFailure;
-use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::domain::schedule::{
     routine_rejection, ActionsFailed, TaskKind, TriggerAction,
 };
 use pond_core::user_data::ports::device_control::DeviceControlPort;
+use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::settings::SettingsRepository;
+use pond_core::user_data::services::identity_resolution;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, Semaphore};
 
@@ -32,6 +33,8 @@ pub struct AgentScheduleExecutor {
     /// Speaks a finished `AgentPrompt` response, gated by `speakable_now`; `None` without TTS.
     audio_bus: Option<AudioBus>,
     settings_repo: Option<Arc<dyn SettingsRepository>>,
+    /// Counted each run: a schedule has no owner, so its scope is a turn nobody identifies.
+    profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
 }
 
 impl AgentScheduleExecutor {
@@ -51,7 +54,13 @@ impl AgentScheduleExecutor {
             semaphore: Semaphore::new(max_concurrent.max(1) as usize),
             audio_bus: voice_output.map(AudioBus::new),
             settings_repo,
+            profiles: None,
         }
+    }
+
+    pub fn with_profiles(mut self, profiles: Arc<dyn ProfileRepository + Send + Sync>) -> Self {
+        self.profiles = Some(profiles);
+        self
     }
 
     /// Checks quiet hours and `unprompted_speech_enabled` only; not `speak_unprompted`'s
@@ -108,8 +117,9 @@ impl AgentScheduleExecutor {
             images: vec![],
             voice_mode: should_speak,
             canvas_mode: false,
-            // Schedules have no owner, so a reminder is household context.
-            profile_scope: ProfileScope::Household,
+            // Schedules have no owner: on a pond of two members a run must not read either's memories.
+            profile_scope: identity_resolution::scope_without_evidence(self.profiles.as_deref())
+                .await,
             // Nobody is in the room for a scheduled task.
             profile_context: None,
             tool_group_allowlist: None,

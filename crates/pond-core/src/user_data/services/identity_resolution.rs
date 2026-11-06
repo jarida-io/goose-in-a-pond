@@ -7,6 +7,7 @@
 
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::session::{IdentificationSource, SessionIdentity};
+use crate::user_data::ports::profile::ProfileRepository;
 
 /// Who is speaking, gathered per turn; no `Default`, as every field is an authorisation input.
 pub struct ResolutionInputs<'a> {
@@ -63,6 +64,24 @@ pub fn resolve(inputs: &ResolutionInputs<'_>) -> ResolvedIdentity {
         },
         source: IdentificationSource::Unknown,
     }
+}
+
+/// The scope of a turn nothing identifies, such as a voice nobody recognises or a schedule, which
+/// has no owner: [`resolve`] with no evidence. Members that cannot be counted count as several,
+/// since every unknown here narrows.
+pub async fn scope_without_evidence(
+    profiles: Option<&(dyn ProfileRepository + Send + Sync)>,
+) -> ProfileScope {
+    let members = match profiles {
+        Some(profiles) => profiles.list().await.map_or(2, |list| list.len()),
+        None => 2,
+    };
+    resolve(&ResolutionInputs {
+        paired_device_profile: None,
+        session: &SessionIdentity::unknown(),
+        household_has_multiple_members: members > 1,
+    })
+    .scope
 }
 
 #[cfg(test)]
