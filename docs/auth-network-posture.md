@@ -175,7 +175,9 @@ anything on the server.
 ### Administration (My Pond)
 
 `/api/v1/admin/*` needs more than a token. The caller must be a member's device, and that device
-must have unlocked My Pond with the admin card in the last 15 minutes. The unlock is held in memory
+must have unlocked My Pond in the last 15 minutes, with the admin card or with the key the Pond
+issued that device. A phone keeps its key behind its own biometrics; the phone that claimed the
+Pond gets one when owner setup completes, and rotating the card revokes them all. The unlock is held in memory
 per device, so a restart or a rotated card locks every phone. The card itself is checked against a
 verifier in `<data_dir>/setup/admin.json`. Wrong cards are slowed as the setup code is, across
 every client. Design, recovery and the wire contract are in the

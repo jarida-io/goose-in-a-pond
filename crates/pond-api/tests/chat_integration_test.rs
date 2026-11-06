@@ -147,6 +147,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -184,6 +185,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     (
@@ -589,6 +591,7 @@ async fn make_app_with_agent(
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         api_port: 4000,
         weather_provider: None,
@@ -606,6 +609,7 @@ async fn make_app_with_agent(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
     (

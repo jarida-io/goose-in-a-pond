@@ -259,7 +259,7 @@ describe("IndexCoveragePanel: the embedder", () => {
     renderPanel();
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
     expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
     fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
     expect(within(alert).getByText(/on the Gpu: out of memory/)).toBeTruthy();

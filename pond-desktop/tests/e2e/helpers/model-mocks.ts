@@ -143,7 +143,7 @@ export const miniLmRow = (over: Record<string, unknown> = {}) =>
     "all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2 \u2014 fast, lightweight sentence embeddings. 23 MB, 384 dimensions. Best for domain classification and semantic search.",
-    { size_mb: 23, acquire: "external", ...over },
+    { size_mb: 23, ram_estimate_mb: 50, acquire: "external", ...over },
   );
 
 export const nomicRow = (over: Record<string, unknown> = {}) =>
@@ -151,7 +151,7 @@ export const nomicRow = (over: Record<string, unknown> = {}) =>
     "nomic-embed-text-v1.5",
     "Nomic Embed Text v1.5",
     "Nomic Embed Text v1.5 \u2014 8-bit GGUF run by llama.cpp. 768 dimensions, tuned for search.",
-    { size_mb: 139, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
+    { size_mb: 139, ram_estimate_mb: 173, filename: "nomic-embed-text-v1.5.Q8_0.gguf", ...over },
   );
 
 export const eg2Row = (over: Record<string, unknown> = {}) =>
@@ -161,6 +161,7 @@ export const eg2Row = (over: Record<string, unknown> = {}) =>
     "EmbeddingGemma 2 \u2014 8-bit GGUF run by llama.cpp. Over 100 languages, so a fact said in Swahili is found by a question in English. 256 dimensions.",
     {
       size_mb: 295,
+      ram_estimate_mb: 368,
       filename: "embeddinggemma-2-Q8_0.gguf",
       recommended: { rank: "primary", reason: EG2_REASON },
       ...over,
@@ -223,6 +224,12 @@ export function typicalModels(over: Record<string, unknown[]> = {}) {
 
 /** The Orin's reading: 4.2 GB fits, 4.2 GB with its picture support does not. */
 export const ORIN_MEMORY = { total_mb: 7620, available_for_llm_mb: 5820, loaded_model: null, reclaimable_mb: 0 };
+
+/** The Orin serving E4B with the default Memory model: room for the small models, not EmbeddingGemma 2. */
+export const ORIN_SERVING_MEMORY = {
+  total_mb: 7620, available_for_llm_mb: 450, budget_mb: 5820, loaded_model: null, reclaimable_mb: 4965,
+  embedder_room_mb: 200,
+};
 
 /** A desktop with room to spare: the primary pick fits with its picture support. */
 export const ROOMY_MEMORY = { total_mb: 16384, available_for_llm_mb: 12288, loaded_model: null, reclaimable_mb: 0 };

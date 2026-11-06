@@ -8,6 +8,7 @@ use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::last_action::LastActionRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
@@ -37,6 +38,7 @@ pub fn register_giap_extensions(
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
     device_control: Arc<dyn DeviceControlPort + Send + Sync>,
+    last_action: Arc<dyn LastActionRepository + Send + Sync>,
     tool_caller: Option<Arc<dyn ToolCaller>>,
 ) -> Result<Vec<String>> {
     // `GIAP_NO_TOOLS`: spawn no servers. Only a saving; the provider shim is what guarantees no
@@ -81,7 +83,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_weather_enabled {
-        pond_mcp_server::init_weather_deps(weather);
+        pond_mcp_server::init_weather_deps(weather, settings_repo.clone());
         register_builtin_extension("giap-weather", pond_mcp_server::spawn_weather_server);
         registered.push("giap-weather".into());
     }
@@ -107,7 +109,7 @@ pub fn register_giap_extensions(
         registered.push("giap-device".into());
 
         // The registry resolves natural references ("the light") to device ids.
-        pond_mcp_server::init_device_control_deps(device_control, device_registry);
+        pond_mcp_server::init_device_control_deps(device_control, device_registry, last_action);
         register_builtin_extension(
             "giap-device-control",
             pond_mcp_server::spawn_device_control_server,

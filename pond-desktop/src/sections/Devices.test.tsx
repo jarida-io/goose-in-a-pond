@@ -281,3 +281,23 @@ describe("Devices section — Configure modal", () => {
     expect(screen.getByText("3h ago")).toBeTruthy();
   });
 });
+
+describe("Devices section — the dashboard and the desktop app", () => {
+  it("says whether each is open, in a neutral chip, and leaves a phone's wording alone", async () => {
+    const quiet = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    mocked(api.listDevices).mockResolvedValue([
+      { id: "web", name: "Pond dashboard", device_type: "desktop", is_online: false, last_seen: quiet },
+      { id: "app", name: "Pond Desktop", device_type: "desktop", is_online: true, last_seen: quiet },
+      { id: "phone", name: "Jerry's phone", device_type: "gotg", is_online: false, last_seen: quiet },
+    ]);
+
+    render(<Devices />);
+
+    const notOpen = await screen.findByText("Not open");
+    expect(notOpen.className).toBe("device-card__chip");
+    expect(screen.getByText("Open").className).toBe("device-card__chip");
+    // Only the phone reads as offline; neither client does.
+    expect(screen.getAllByText("offline")).toHaveLength(1);
+    expect(screen.queryByText("online")).toBeNull();
+  });
+});

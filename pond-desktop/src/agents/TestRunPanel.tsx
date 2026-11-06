@@ -1,6 +1,7 @@
 import { Loader2, Play, Square } from "lucide-react";
 import { Field, FormSection } from "./AgentField";
 import { formatSeconds } from "./agentWords";
+import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
 import type { useTestRun } from "./useTestRun";
 
 interface Props {
@@ -58,6 +59,7 @@ export function TestRunPanel({ name, dirty, prompt, onPrompt, test }: Props) {
             {state.status === "failed" ? "The test run ended with an error." : null}
           </p>
           {state.tools.length > 0 ? <p className="ag-run__tools">Used: {state.tools.join(", ")}</p> : null}
+          {state.steps.length > 0 ? <StepsDisclosure steps={state.steps} /> : null}
           {state.error ? <p className="ag-errors__item">{state.error}</p> : null}
           {state.text !== "" ? <p className="ag-run__text">{state.text}</p> : running ? <p className="ag-hint">Waiting for the first words.</p> : null}
         </div>

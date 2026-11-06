@@ -205,6 +205,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         api_port: 4000,
         weather_provider: None,
@@ -222,6 +223,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
     });
 

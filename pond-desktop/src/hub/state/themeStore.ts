@@ -8,6 +8,7 @@ import {
   ACCENTS,
   createTheme,
   cssVariables,
+  grounds,
   ratio,
   readable,
   type AccentName,
@@ -38,6 +39,14 @@ export interface ThemeState {
  * #8C4BFF: collapsing the two either dulls the logo or fails text contrast.
  */
 export const ACCENT_PALETTES = ACCENTS;
+
+/** design-tokens.css's `--color-bg`, which ships in place of ink's because `applyToDOM` strips ink's. */
+export const SHIPPED_BG = { light: "#FAF3E1", dark: "#131119" } as const;
+
+/** Every ground an ink edge lands on, as shipped: ink's panels and the stylesheet's page. */
+export function shippedGrounds(ink: InkTheme): string[] {
+  return grounds({ ...ink.color, bg: SHIPPED_BG[ink.scheme] });
+}
 
 // ─── localStorage keys ────────────────────────────────────────────────────────
 
@@ -105,17 +114,16 @@ function applyToDOM(theme: ThemeChoice, accent: AccentName, density: DensityChoi
   // the whole app's shadows track Appearance → Accent instead of only the elements that
   // read --color-accent directly.
   //
-  // Floored at AA's nonText ratio (3:1, a border/shadow's own floor, not body text's 4.5:1):
-  // an accent picked for how it reads as a fill isn't guaranteed to read as a thin edge
-  // against --color-bg, especially in dark scheme (plan §8 flagged the old fixed #5D23C2
-  // measuring under 3:1 on #131119 -- the risk moved with the accent, it didn't go away).
-  // readable() is a no-op whenever the raw accent already clears the floor.
-  const edgeColor = readable(ink.color.accent, ink.color.bg, "nonText");
+  // Floored at a UI boundary's 3:1 on every ground, not just the page: dark Purple clears the
+  // page and fails the panel, and readable() returns the accent untouched when it clears.
+  const edgeGrounds = shippedGrounds(ink);
+  const edgeColor = readable(ink.color.accent, edgeGrounds, "nonText");
   if (edgeColor !== ink.color.accent) {
     // A silent accent substitution is a hard debug later.
+    const worst = Math.min(...edgeGrounds.map((g) => ratio(ink.color.accent, g)));
     console.warn(
-      `[theme] ${accent} only clears ${ratio(ink.color.accent, ink.color.bg).toFixed(2)}:1 on ` +
-        `--color-bg in ${resolved} mode; lightened --border-ink/--shadow-ink to ${edgeColor} for 3:1.`,
+      `[theme] ${accent} only clears ${worst.toFixed(2)}:1 on its ${resolved} grounds; ` +
+        `moved --border-ink/--shadow-ink to ${edgeColor} for 3:1.`,
     );
   }
   root.style.setProperty("--border-ink", edgeColor);

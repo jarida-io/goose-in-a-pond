@@ -1,10 +1,14 @@
-import type {
-  HfModelFile,
-  ModelActiveRoles,
-  ModelCompanion,
-  ModelEntry,
-  ModelMemoryStatus,
-  ModelRecommendation,
+import {
+  MODEL_SECTIONS,
+  type HelperModel,
+  type HfModelFile,
+  type ModelActiveRoles,
+  type ModelCompanion,
+  type ModelEntry,
+  type ModelMemoryStatus,
+  type ModelRecommendation,
+  type ModelSection,
+  type ModelUse,
 } from "../../api/types";
 import { DEFAULT_HEADROOM_MB, modelResidencyMb, usableBudgetMb } from "../../api/modelFit";
 import { engineOf, providerOf } from "../../lib/modelProvider";
@@ -432,12 +436,100 @@ export function holderEntry(
   return models.find((m) => rolesFor(m).includes(key) && holds(roles, key, m)) ?? null;
 }
 
-// ─── Grouping ──────────────────────────────────────────────────────────────
+// ─── Sections ──────────────────────────────────────────────────────────────
 
-export interface JobGroup {
-  key: RoleKey;
+const USES: readonly ModelUse[] = [
+  "chat", "tool", "asr", "tts", "embedding", "pictures", "drafter", "camera", "faces",
+];
+
+/** The jobs a row is doing. The pond says so on each row, read from its settings; an older pond
+ *  does not, and there the row does the jobs whose holder it is. A job this page has no words for
+ *  is left off rather than shown raw. */
+export function usesOf(
+  m: Pick<ModelEntry, "roles" | "name" | "category" | "provider" | "recommended_role" | "kind">,
+  roles: ModelActiveRoles | null,
+): ModelUse[] {
+  if (Array.isArray(m.roles)) return m.roles.filter((u) => USES.includes(u));
+  return rolesFor(m).filter((key) => holds(roles, key, m));
+}
+
+/** The words for a job, as a badge reads it. */
+export function jobLabel(use: ModelUse): string {
+  return i18n.t(`models.use.${use}`);
+}
+
+/** What a model working beside a row adds to it, as the row reads: "Faster answers". */
+export function includedLabel(use: ModelUse): string {
+  return use === "pictures" || use === "drafter" ? i18n.t(`models.included.${use}`) : jobLabel(use);
+}
+
+/** What a model working beside the rows does, in a sentence. */
+export function helperAbout(use: ModelUse): string {
+  return i18n.t(`models.helperAbout.${use}`, { defaultValue: jobLabel(use) });
+}
+
+/** The models working beside `m` that the pond says serve it, such as its picture encoder or its
+ *  drafter. They are part of the model, not models of their own. */
+export function helpersOf(m: Pick<ModelEntry, "id">, helpers: HelperModel[]): HelperModel[] {
+  return helpers.filter((h) => h.serves === m.id);
+}
+
+/** The jobs `m`'s helpers add that its row does not already say. Picture support the row reads as
+ *  "Pictures included" from its own add-on is not said twice. */
+export function servedUses(helpers: HelperModel[], addOn: AddOn): ModelUse[] {
+  const uses = helpers.flatMap((h) => h.uses).filter((u) => USES.includes(u));
+  return [...new Set(uses)].filter((u) => !(u === "pictures" && addOn.kind === "included"));
+}
+
+const SECTION_OF_ROLE: Record<RoleKey, ModelSection> = {
+  chat: "conversation",
+  asr: "listening",
+  tts: "speaking",
+  embedding: "memory",
+};
+
+/** The section a job's models are listed under. */
+export function sectionOfRole(key: RoleKey): ModelSection {
+  return SECTION_OF_ROLE[key];
+}
+
+/** The section a row is listed under: the pond's word, else (an older pond) its first job's. */
+export function sectionOf(
+  m: Pick<ModelEntry, "section" | "provider" | "recommended_role" | "kind">,
+): ModelSection {
+  if (m.section && MODEL_SECTIONS.includes(m.section)) return m.section;
+  const first = rolesFor(m)[0];
+  return first ? SECTION_OF_ROLE[first] : "other";
+}
+
+export interface SectionGroup {
+  key: ModelSection;
   label: string;
   models: ModelEntry[];
+  /** Models in use that serve no listed row, such as the camera's detector. A helper that serves a
+   *  listed row (picture support, a drafter) goes with that row instead; see `helpersOf`. */
+  helpers: HelperModel[];
+}
+
+/** What is on this device, by section in `MODEL_SECTIONS` order: every downloaded row, every row
+ *  doing a job even when the pond fetched its weights itself (a built-in memory model has no
+ *  file), and the models in use that serve none of those rows. Rows doing a job come first. Empty
+ *  sections are dropped. */
+export function groupBySection(
+  models: ModelEntry[],
+  helpers: HelperModel[],
+  roles: ModelActiveRoles | null,
+): SectionGroup[] {
+  const working = (m: ModelEntry) => (usesOf(m, roles).length > 0 ? 0 : 1);
+  const shown = models.filter((m) => m.downloaded || working(m) === 0);
+  const listed = new Set(shown.map((m) => m.id));
+  const alone = helpers.filter((h) => !h.serves || !listed.has(h.serves));
+  return MODEL_SECTIONS.map((key) => ({
+    key,
+    label: i18n.t(`models.section.${key}`),
+    models: shown.filter((m) => sectionOf(m) === key).sort((a, b) => working(a) - working(b)),
+    helpers: alone.filter((h) => (MODEL_SECTIONS.includes(h.section) ? h.section : "other") === key),
+  })).filter((g) => g.models.length > 0 || g.helpers.length > 0);
 }
 
 /** Recommended picks first, best first, then by title. */
@@ -446,15 +538,6 @@ export function sortModels(models: ModelEntry[]): ModelEntry[] {
     const rank = (m: ModelEntry) => (m.recommended ? RANK_ORDER[m.recommended.rank] : 9);
     return rank(a) - rank(b) || modelLabel(a).localeCompare(modelLabel(b));
   });
-}
-
-/** Models grouped by job, in `ROLES` order and wording; empty groups dropped. */
-export function groupByJob(models: ModelEntry[]): JobGroup[] {
-  return ROLES.map((role) => ({
-    key: role.key,
-    label: role.label,
-    models: models.filter((m) => rolesFor(m).includes(role.key)),
-  })).filter((g) => g.models.length > 0);
 }
 
 /** Why this pond cannot run `m`, in the household's words; null when it can. The pond refuses to

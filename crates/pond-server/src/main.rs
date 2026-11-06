@@ -311,7 +311,8 @@ enum Commands {
     /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
     /// can print again.
     AdminCard {
-        /// Replace the card in force; every phone unlocked with the old card locks
+        /// Replace the card in force; every phone unlocked with the old card locks, and every
+        /// phone's own key is revoked
         #[arg(long)]
         rotate: bool,
 
@@ -2994,6 +2995,12 @@ async fn run_server(
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
     );
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
+
     // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
     // (the log only records changes). Anywhere before serving is early enough.
     pond_mcp_server::init_sensor_deps(
@@ -3141,6 +3148,7 @@ async fn run_server(
             prompt_template_repo.clone(),
             prompt_extra_repo.clone(),
             device_control.clone(),
+            last_action.clone(),
             Some(session_storage.clone()),
             Some(model_repo.clone()),
             false, // voice_mode — server mode, not voice
@@ -3560,6 +3568,13 @@ async fn run_server(
         pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(db.system.clone()),
     );
 
+    // The household's record of durable notices, which the dashboard lists after a reload.
+    let notification_history: Arc<
+        dyn pond_core::mcp::ports::notification_history::NotificationHistory,
+    > = Arc::new(
+        pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(db.system.clone()),
+    );
+
     let push_relay = push_relay(&data_dir, push_token_repo.clone());
     // Required: without it `send_to_profile` silently answers `AttributionUnavailable`.
     let device_attribution: Arc<
@@ -3581,7 +3596,8 @@ async fn run_server(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
             ),
-        )),
+        ))
+        .with_history(notification_history.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -4217,7 +4233,12 @@ async fn run_server(
         ));
         Arc::new(pond_api::pond_admin::PondAdmin::new(
             pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
-            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+            pond_core::security::services::admin_elevation::AdminElevation::new(
+                cards,
+                Arc::new(pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(
+                    db.system.clone(),
+                )),
+            ),
         ))
     };
 
@@ -4376,6 +4397,7 @@ async fn run_server(
         schedule_result_tx: schedule_result_tx.clone(),
         notification_tx: notification_tx.clone(),
         notification_queue: Some(notification_queue.clone()),
+        notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
         telemetry,
         context_monitor: Arc::new(
@@ -4400,8 +4422,10 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: Some(pond_admin),
     });
+    state.device_events.clone().follow(event_bus.clone());
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
@@ -4633,8 +4657,8 @@ async fn run_server(
     }
 
     // Loads the embedder and keeps every vector current, in counter-phase. After AppState,
-    // through which the factory fetches a missing GGUF.
-    embedder_factory.attach(&state);
+    // through which the factory fetches a missing GGUF; its loads give way to the lane's work.
+    embedder_factory.attach(&state, &inference_lane);
     {
         let warmup = state.warmup.clone();
         tokio::spawn(embedding_slot_runner::run(
@@ -5146,6 +5170,11 @@ async fn run_chat(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
@@ -5210,6 +5239,11 @@ async fn run_chat(
         )
         .with_device_attribution(Arc::new(
             pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(db.system.clone()),
+        ))
+        .with_history(Arc::new(
+            pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(
+                db.system.clone(),
+            ),
         )),
     ));
     // Which members connected Uber, for book_ride. The serve process owns the store; this one
@@ -5526,6 +5560,7 @@ async fn run_chat(
             template_repo,
             extras_repo,
             Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+            last_action,
             Some(trim_storage), // powers the trimmer's summary splice
             Some(chat_model_repo.clone()),
             voice_mode,
@@ -6966,11 +7001,7 @@ async fn run_proactive_reviewer(
             let report = sender
                 .send_to_profile(
                     audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(
-                        proposal.id(),
-                        proposal.summary(),
-                        proposal.rationale(),
-                    ),
+                    pond_server::system_notices::proposal_notification(proposal),
                 )
                 .await;
             tracing::info!(
@@ -7786,18 +7817,15 @@ async fn notify_long_task_owner(
     let report = sender
         .send_to_profile(
             owner,
-            pond_server::system_notices::long_task_notification(
-                task.id(),
-                task.goal(),
-                finished,
-                body,
-            ),
+            pond_server::system_notices::long_task_notification(task, finished, body),
         )
         .await;
     tracing::info!(
+        kind = "long_task_notice_sent",
         task = %task.id(),
         member = %owner,
         finished,
+        opens_conversation = task.origin_session_id().is_some(),
         queued = report.queued.len(),
         failed = report.failed.len(),
         "long task ended; its owner was told"
@@ -9466,6 +9494,9 @@ async fn build_goose_backend(
     device_control: Arc<
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
+    last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    >,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
@@ -9594,6 +9625,7 @@ async fn build_goose_backend(
         device_registry.clone(),
         skill_repo.clone(),
         device_control,
+        last_action,
         tool_caller.clone(),
     ) {
         Ok(ext_names) => {
@@ -10173,6 +10205,12 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let db = Database::init(&data_dir).await?;
     litert_runtime::ensure_library_dir(&data_dir);
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
+
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
@@ -10270,6 +10308,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10316,6 +10355,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10390,6 +10430,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
@@ -10815,12 +10856,31 @@ async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     }
     let password = store.issue(rotate)?;
     let card_id = store.current().await?.unwrap_or_default();
+    // A new card is the recovery: every phone's own key goes with the old one.
+    let keys_revoked = if rotate {
+        use pond_core::security::ports::admin_card::AdminDeviceKeys as _;
+        let db = pond_infra::db::Database::init(&default_data_dir()).await?;
+        pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(db.system.clone())
+            .revoke_all()
+            .await?
+    } else {
+        0
+    };
     if json {
         println!(
             "{}",
-            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+            serde_json::json!({
+                "password": password.grouped(),
+                "card_id": card_id,
+                "keys_revoked": keys_revoked,
+            })
         );
         return Ok(());
+    }
+    if keys_revoked > 0 {
+        println!(
+            "Revoked {keys_revoked} phone key(s): each phone unlocks with this card once more."
+        );
     }
     println!(
         "Admin card for this Pond (administrator: {})\n\n    {}\n\n\

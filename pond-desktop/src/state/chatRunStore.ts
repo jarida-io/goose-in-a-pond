@@ -11,6 +11,7 @@ import type {
   LastResponseMeta,
 } from "./reducer";
 import { filterThinking } from "../lib/thinkFilter";
+import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
 import { keptResultOf, type KeptResult } from "./keptResults";
 import { startedTaskId, startedTaskIdOfRow } from "../longtasks/longTaskWords";
@@ -30,10 +31,9 @@ import type { PreparedImage } from "../lib/imageAttach";
 // Module-level counter -- shared across session loads and live sends.
 let _msgId = 0;
 
-export interface Message {
+export interface Message extends StepsCarrier {
   id: number;
   role: "user" | "agent";
-  text: string;
   streaming?: boolean;
   status?: string;
   cards?: ContextCardType[];
@@ -530,7 +530,7 @@ async function consume(
       };
       state.bridge?.onContextCard(card);
       patchLastAgent((last) => ({
-        ...last,
+        ...foldToolCall(last, ev.working_notes),
         cards: [...(last.cards ?? []), card],
         status: friendlyToolStatus(ev.tool ?? ""),
       }));

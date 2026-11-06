@@ -465,6 +465,31 @@ export interface ScheduleRunNotification {
   recipe: string | null;
 }
 
+/**
+ * One household notice from the Pond (`GET /notifications/history`, or live from
+ * `/notifications/stream`), always under its household id: a device's own queued copy carries
+ * `"{id}:{device}"`, which `historyId` maps back.
+ */
+export interface HouseholdNotice {
+  id: string;
+  /** `info`, `alert` or `action_required`; anything else renders as `info`. */
+  category: string;
+  title: string;
+  body: string;
+  /** RFC 3339, as the Pond stamped it. */
+  timestamp: string;
+  /** The payload: `open` names the screen a tap opens; `kind` names a system notice. */
+  data: Record<string, unknown> | null;
+  /** Whether this device marked it read. */
+  read: boolean;
+}
+
+/** `GET /notifications/history`: the caller's own device id and what it may read, newest first. */
+export interface NotificationHistoryResponse {
+  device_id: string;
+  notifications: HouseholdNotice[];
+}
+
 /** Context passed when navigating to Canvas to view a schedule debrief. */
 export interface DebriefContext {
   type: "debrief";
@@ -812,6 +837,32 @@ export interface ModelEntry {
   available?: boolean;
   /** Why `available` is false. */
   unavailable_reason?: ModelUnavailableReason;
+  /** The jobs the pond says this row is doing now, read from its settings. Absent on older ponds. */
+  roles?: ModelUse[];
+  /** The section the pond lists this row under. Absent on older ponds. */
+  section?: ModelSection;
+}
+
+/** A job a model on the pond is doing: the first five held by a catalogue row, the rest by a model
+ *  that works beside one (`pictures`, `drafter`) or by a camera model with no row. */
+export type ModelUse =
+  | "chat" | "tool" | "asr" | "tts" | "embedding" | "pictures" | "drafter" | "camera" | "faces";
+
+/** The sections the Models page lists, in this order. */
+export const MODEL_SECTIONS = [
+  "conversation", "listening", "speaking", "memory", "pictures", "other",
+] as const;
+export type ModelSection = (typeof MODEL_SECTIONS)[number];
+
+/** A model the pond has in use that is not a catalogue row: `helpers` of `GET /models/active-roles`. */
+export interface HelperModel {
+  id: string;
+  /** Null when the pond has no name for it but the job's. */
+  title: string | null;
+  uses: ModelUse[];
+  section: ModelSection;
+  /** The catalogue row it works for, as `{category}/{name}`. */
+  serves: string | null;
 }
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
@@ -852,6 +903,9 @@ export interface ModelMemoryStatus {
   /** The most this pond lets the models take: a desktop's memory less what it keeps for itself, or
    *  a budgeted device's own figure. `available_for_llm_mb` is what is left of it now. */
   budget_mb?: number;
+  /** The room a Memory model has beside the conversation model, counting what the one in use gives
+   *  back on a switch; null where the pond read nothing, absent from an older server. */
+  embedder_room_mb?: number | null;
 }
 
 export interface ModelCapabilities {
@@ -1224,6 +1278,8 @@ export interface ChatEvent {
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
   result?: unknown;         // for "tool_call" events
+  /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
+  working_notes?: string;
   error?: string;           // for "error" events
   /** Optional MCP-APP UI rendering hint from backend */
   ui?: {
@@ -1356,6 +1412,8 @@ export interface ModelActiveRoles {
   asr:        ModelRoleAssignment | null;
   tts:        ModelRoleAssignment | null;
   embedding:  ModelRoleAssignment | null;
+  /** Models in use beside the catalogue rows. Absent on older ponds. */
+  helpers?:   HelperModel[];
 }
 
 // ── Sessions ──────────────────────────────────────────────────
@@ -1563,6 +1621,12 @@ export interface SecretRequirement {
   host_only?: boolean;
 }
 
+/**
+ * The built-in web search as `GET /api/v1/marketplace` reports it: `on` with Knowledge on and a
+ * Brave key stored, `needs_key` with no key, `knowledge_off` with the Knowledge extension off.
+ */
+export type BuiltInSearchState = "on" | "needs_key" | "knowledge_off";
+
 export interface MarketplaceExtension {
   id: string;
   name: string;
@@ -1575,6 +1639,10 @@ export interface MarketplaceExtension {
   author: string;
   tools: string[];
   featured: boolean;
+  /** A capability the Pond ships itself that already does this extension's job. */
+  built_in?: "web_search" | null;
+  /** That capability's state on this Pond; present only with `built_in`. */
+  built_in_state?: BuiltInSearchState;
   required_secrets: SecretRequirement[];
 }
 

@@ -61,6 +61,7 @@ import {
   type RetitleResult,
   type Schedule,
   type ScheduleRun,
+  type NotificationHistoryResponse,
   type SecretRequirement,
   type SessionMessage,
   type SessionMessageToolCall,
@@ -162,6 +163,16 @@ function readReport(answer: unknown, id: string): LongTaskReport | null {
     sources: Array.isArray(r.sources) ? r.sources.filter(isSource) : [],
     calendar_events: typeof r.calendar_events === "number" ? r.calendar_events : 0,
   };
+}
+
+/** A refusal body's text and code: its sentence where it has one beside the code (the onboarding
+ *  guard's `{error: "onboarding_required", message}`), else its `error`. */
+function refusalOf(body: unknown, fallback: string): { msg: string; code?: string } {
+  const b = (body ?? {}) as { error?: unknown; message?: unknown; code?: unknown };
+  const error = typeof b.error === "string" ? b.error : undefined;
+  const message = typeof b.message === "string" ? b.message : undefined;
+  const code = typeof b.code === "string" ? b.code : undefined;
+  return { msg: message ?? error ?? fallback, code: code ?? (message !== undefined ? error : undefined) };
 }
 
 export class PondApiClient {
@@ -318,8 +329,10 @@ export class PondApiClient {
     }
   }
 
-  /** How this client introduces itself when it pairs, and so how the devices list names it. */
-  private deviceName = "Pond Desktop";
+  /** How this client introduces itself when it pairs, and so how the devices list names it.
+   *  The browser dashboard and the desktop app share `client_type: "desktop"`, so only the
+   *  name tells them apart. */
+  private deviceName = isDesktopShell() ? "Pond Desktop" : "Pond dashboard";
 
   setDeviceName(name: string): void {
     this.deviceName = name;
@@ -420,9 +433,7 @@ export class PondApiClient {
         let body: unknown;
         try {
           body = await res.json();
-          const b = body as { error?: string; code?: string };
-          msg = b.error ?? msg;
-          code = b.code;
+          ({ msg, code } = refusalOf(body, msg));
         } catch {
           /* ignore */
         }
@@ -569,7 +580,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -1440,6 +1451,8 @@ export class PondApiClient {
             recommended:
               (item.recommended as ModelEntry["recommended"] | null | undefined) ?? undefined,
             companions: (item.companions as ModelEntry["companions"] | undefined) ?? [],
+            roles: item.roles as ModelEntry["roles"],
+            section: item.section as ModelEntry["section"],
           });
         }
       }
@@ -1994,9 +2007,7 @@ export class PondApiClient {
       let body: unknown;
       try {
         body = await res.json();
-        const b = body as { error?: string; code?: string };
-        msg = b.error ?? msg;
-        code = b.code;
+        ({ msg, code } = refusalOf(body, msg));
       } catch {
         /* ignore */
       }
@@ -2457,7 +2468,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -2487,7 +2498,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -2530,16 +2541,17 @@ export class PondApiClient {
   // ── Music player bridge ───────────────────────────────────
 
   /**
-   * The player page's command stream. Long-lived by design, so unlike `streamSse` it has no
-   * timeout: it ends when the server closes it or `signal` aborts. `EventSource` cannot carry the
-   * Authorization header the server requires, hence fetch.
+   * A long-lived server-sent event stream on `path`. No timeout: it ends when the server closes
+   * it or `signal` aborts. `EventSource` cannot carry the Authorization header the server
+   * requires, hence fetch; a refused token re-pairs once, as every other request does.
    */
-  async *streamPlayerEvents(
-    service: string,
+  private async *streamEvents(
+    path: string,
     signal: AbortSignal,
+    what: string,
   ): AsyncGenerator<SseFrame> {
     await this.ensureTokenFresh();
-    const url = `${this.base}/api/v1/player/events?service=${encodeURIComponent(service)}`;
+    const url = `${this.base}${path}`;
     const open = (token: string | null) =>
       fetch(url, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -2553,12 +2565,45 @@ export class PondApiClient {
       if (fresh) res = await open(fresh);
     }
     if (!res.ok || !res.body) {
-      throw new ApiError(
-        res.status,
-        res.statusText || "The player stream did not open",
-      );
+      throw new ApiError(res.status, res.statusText || `The ${what} did not open`);
     }
     yield* parseSse(res.body, signal);
+  }
+
+  /** The player page's command stream. */
+  streamPlayerEvents(service: string, signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents(
+      `/api/v1/player/events?service=${encodeURIComponent(service)}`,
+      signal,
+      "player stream",
+    );
+  }
+
+  /** Schedule and rule runs as they start and finish (`ScheduleResultEvent` JSON per frame). */
+  streamScheduleEvents(signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents("/api/v1/schedules/events", signal, "schedule stream");
+  }
+
+  /**
+   * This device's notices as the Pond raises them (`Notification` JSON per frame). `deviceId`
+   * must be this client's own device, as `notificationHistory` names it.
+   */
+  streamNotifications(deviceId: string, signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents(
+      `/api/v1/notifications/stream?device_id=${encodeURIComponent(deviceId)}`,
+      signal,
+      "notification stream",
+    );
+  }
+
+  /** The household's notices this device may read, newest first, with its own read state. */
+  notificationHistory(limit = 100): Promise<NotificationHistoryResponse> {
+    return this.get(`/api/v1/notifications/history?limit=${limit}`);
+  }
+
+  /** Mark these history notices read for this device only. */
+  markNotificationsRead(ids: string[]): Promise<{ marked: number }> {
+    return this.post("/api/v1/notifications/history/read", { ids });
   }
 
   playerReply(reply: PlayerReply): Promise<unknown> {

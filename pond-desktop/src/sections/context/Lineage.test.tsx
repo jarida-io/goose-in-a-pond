@@ -206,7 +206,7 @@ describe("Lineage: the embedder", () => {
   it("names the model as the household reads it, not its stamp and dimensions", () => {
     render(<Lineage memories={[]} health={indexWith({})} />);
     expect(screen.getByText(/^Read by/).textContent).toBe(
-      "Read by EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+      "Read by EmbeddingGemma 2. Anything not read yet is still found by word, just less well.",
     );
     expect(screen.queryByText(/dimensions|embeddinggemma-2-256/)).toBeNull();
   });
@@ -215,7 +215,7 @@ describe("Lineage: the embedder", () => {
     render(<Lineage memories={[]} health={indexWith({ state: "failed", reason: "bad magic number" }, { matching: 0 })} />);
     expect(screen.queryByText(/^Read by/)).toBeNull();
     expect(screen.getByText(/^Chosen:/).textContent).toBe(
-      "Chosen: EmbeddingGemma 2. Anything not indexed is still found by word, just less well.",
+      "Chosen: EmbeddingGemma 2. Anything not read yet is still found by word, just less well.",
     );
   });
 
@@ -235,7 +235,7 @@ describe("Lineage: the embedder", () => {
       />,
     );
     const alert = screen.getByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
     expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
     // The pond's own words wait behind Details.
     expect(screen.queryByText("out of memory")).toBeNull();

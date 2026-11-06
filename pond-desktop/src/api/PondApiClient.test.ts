@@ -594,6 +594,22 @@ describe("ApiError", () => {
     await expect(client().health()).rejects.toMatchObject({ status: 502 });
   });
 
+  it("shows a refusal's sentence, not its code, and keeps the code to branch on", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: "onboarding_required", message: "Complete onboarding before using this feature" }),
+        { status: 403, statusText: "Forbidden", headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    try {
+      await client().getPrompt("missing");
+      expect.fail("should have thrown");
+    } catch (e) {
+      expect((e as ApiError).message).toBe("Complete onboarding before using this feature");
+      expect((e as ApiError).code).toBe("onboarding_required");
+    }
+  });
+
   it("captures a structured {error, code} body's code, for a caller to branch on", async () => {
     fetchMock.mockResolvedValueOnce(errJson(409, "Picture support is not ready yet.", "vision_not_ready"));
     try {
@@ -1370,6 +1386,51 @@ describe("per-instance client id", () => {
     const second = mockPairing();
     await client().pair();
     expect(second()).toBe(id1);
+  });
+});
+
+// The dashboard and the app pair with the same client_type, so the name is what tells them apart.
+describe("device name at pairing", () => {
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+
+  function mockPairing(): () => { device_name?: string; client_type?: string } {
+    const sent: { device_name?: string; client_type?: string } = {};
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("/handshake/pairing-code"))
+        return okJson({ code: "123456", expires_at: future });
+      if (url.includes("/handshake/init")) {
+        sent.client_type = JSON.parse(String(init?.body)).client_type;
+        return okJson({ challenge: "ch", challenge_id: "cid" });
+      }
+      if (url.includes("/handshake/verify")) {
+        sent.device_name = JSON.parse(String(init?.body)).device_name;
+        return okJson({ accepted: true, session_token: "t", refresh_token: "r", expires_at: future });
+      }
+      return okJson({});
+    });
+    return () => sent;
+  }
+
+  afterEach(() => {
+    delete window.giap;
+    localStorage.clear();
+  });
+
+  it("names itself the Pond dashboard in a plain browser", async () => {
+    const sent = mockPairing();
+    await client().pair();
+    expect(sent()).toEqual({ client_type: "desktop", device_name: "Pond dashboard" });
+  });
+
+  it("names itself Pond Desktop inside the desktop app", async () => {
+    window.giap = {
+      serverUrl: "http://localhost:4000",
+      invoke: vi.fn().mockResolvedValue(null),
+      listen: () => () => {},
+    } as unknown as NonNullable<Window["giap"]>;
+    const sent = mockPairing();
+    await client().pair();
+    expect(sent()).toEqual({ client_type: "desktop", device_name: "Pond Desktop" });
   });
 });
 

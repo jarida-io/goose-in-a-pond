@@ -11,7 +11,7 @@ use pond_core::mcp::ports::notification::NotificationSender;
 use pond_core::shared::ports::event_bus::EventBus;
 use pond_core::user_data::ports::device_commissioning::DeviceCommissioningPort;
 use pond_core::user_data::ports::device_control::{
-    DeviceControlOutcome, DeviceControlPort, DeviceDescription, DeviceState,
+    DeviceControlOutcome, DeviceControlPort, DeviceDescription, DeviceState, DeviceStatePatch,
 };
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
 use pond_core::user_data::ports::matter_runtime::{
@@ -466,6 +466,13 @@ impl DeviceControlPort for SwitchableDeviceControl {
 
     async fn state(&self, device_id: &str) -> Result<DeviceState> {
         self.backend_for(device_id).await?.state(device_id).await
+    }
+
+    async fn state_patch(&self, device_id: &str) -> Result<DeviceStatePatch> {
+        self.backend_for(device_id)
+            .await?
+            .state_patch(device_id)
+            .await
     }
 
     async fn set_power(&self, device_id: &str, on: bool) -> Result<DeviceControlOutcome> {

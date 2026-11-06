@@ -43,15 +43,6 @@ pub fn has_answer_tag(s: &str) -> bool {
     s.contains(ANSWER_OPEN) || s.contains(ANSWER_CLOSE)
 }
 
-/// The reply inside an `<answer>` wrapper, for text that is not streamed; `None` when unwrapped.
-pub fn unwrap_answer(text: &str) -> Option<&str> {
-    let inner = text
-        .trim()
-        .strip_prefix(ANSWER_OPEN)?
-        .strip_suffix(ANSWER_CLOSE)?;
-    (!inner.contains(ANSWER_OPEN) && !inner.contains(ANSWER_CLOSE)).then(|| inner.trim())
-}
-
 /// Strip reasoning blocks, orphaned preambles, and standalone sentinels from non-streaming text.
 pub fn strip_reasoning(text: &str) -> String {
     let mut s = text.to_string();
@@ -342,12 +333,6 @@ mod tests {
             "It is 21 degrees."
         );
         assert_eq!(run(&["<ans", "wer>Hi.</an", "swer>"]), "Hi.");
-        assert_eq!(unwrap_answer(" <answer> Hi. </answer>\n"), Some("Hi."));
-        assert_eq!(unwrap_answer("Hi."), None);
-        assert_eq!(
-            unwrap_answer("<answer>a</answer> and <answer>b</answer>"),
-            None
-        );
     }
     // ── Holdback behaviour ─────────────────────────────────────────────────
     // A fixed-size holdback would make text trail generation and freeze mid-word on slowdowns.

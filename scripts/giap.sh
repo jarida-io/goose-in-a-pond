@@ -25,6 +25,7 @@
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
+#   bash scripts/giap.sh time-sync [remove|status]  # Linux: named time servers before the NTP pool, so the clock is right soon after a boot (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
@@ -80,6 +81,8 @@ source "$HERE/lib/setup-code.sh"
 source "$HERE/lib/admin-card.sh"
 # shellcheck source=lib/connect-setup.sh
 source "$HERE/lib/connect-setup.sh"
+# shellcheck source=lib/time-sync.sh
+source "$HERE/lib/time-sync.sh"
 # The agamemnon_* functions: the pond's own locked account.
 # shellcheck source=lib/install-systemd.sh
 source "$HERE/lib/install-systemd.sh"
@@ -923,6 +926,14 @@ doctor() {
     DOC_WARN=$((DOC_WARN + CONNECT_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + CONNECT_DOCTOR_UNK))
   fi
 
+  # The clock. A Jetson has no working real-time clock, so after a power cut it runs on the last
+  # time it recorded until a time server answers; TLS, certificates and schedules all read it.
+  # A warning, not a failure: a pond that booted without internet is not broken.
+  if [ "$D_OS" = "linux" ]; then
+    timesync_doctor
+    DOC_WARN=$((DOC_WARN + TIMESYNC_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + TIMESYNC_DOCTOR_UNK))
+  fi
+
   # Remote reach. A Pond with no tailnet is not broken — remote access is simply
   # a capability it does not have — so absent is a note, not a failure. What is
   # worth flagging is a daemon that is installed and NOT up, because the operator
@@ -1300,6 +1311,22 @@ action_wifi_grant() { # $1 = "" | remove | status
     remove)   connect_grant_remove ;;
     status)   connect_doctor "$user" ;;
     *)        bad "unknown wifi-grant action: $1 (grant, remove or status)"; return 2 ;;
+  esac
+}
+
+# `giap.sh time-sync [remove|status]`, and menu item 19: the time servers systemd-timesyncd asks.
+# Asking for it is the consent; sudo asks for the password, and --dry-run prints the change.
+action_time_sync() { # $1 = "" | remove | status
+  head1 "Time servers for the clock"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: macOS keeps its own time"
+    return 0
+  fi
+  case "${1:-}" in
+    ""|set) timesync_install ;;
+    remove) timesync_remove ;;
+    status) timesync_doctor ;;
+    *)      bad "unknown time-sync action: $1 (set, remove or status)"; return 2 ;;
   esac
 }
 
@@ -2257,6 +2284,10 @@ action_update() {
       fi
     fi
   fi
+  if [ "$D_OS" = "linux" ] && timesync_uses_timesyncd && [ "$(timesync_dropin_state)" != present ]; then
+    info "after a power cut this pond's clock waits on the public NTP pool; named time servers answer sooner (sudo)"
+    if confirm "Set them now?"; then timesync_install; fi
+  fi
 
   detect_all
   doctor
@@ -2415,7 +2446,7 @@ show_menu() {
   say "  13) Build both (UI then server)"
   say "  15) LiteRT-LM library — status and building (.litertlm models)"
   [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
-  say "  19) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
+  say "  30) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
   say "  28) Context window (n_ctx) — status and sizing (8k, 16k, 32k, 48k, 64k, auto)"
   [ "$D_OS" = "linux" ] && say "  29) Swap memory — status and setup (~6 GB target)"
   say ""
@@ -2426,6 +2457,7 @@ show_menu() {
   say "  25) Run the server in the foreground"
   [ "$D_OS" = "linux" ] && say "  26) Run as locked service account ($AGAMEMNON), or move back"
   [ "$D_OS" = "linux" ] && say "  16) Wi-Fi BLE setup grant (NetworkManager polkit rule)"
+  [ "$D_OS" = "linux" ] && say "  19) Clock after a power cut — named time servers for timesyncd (sudo)"
   say "  27) Admin card — view status, seal or rotate (My Pond)"
   say ""
   say "  ${C_B}Desktop client${C_RST}"
@@ -2462,9 +2494,10 @@ menu_loop() {
       16) action_wifi_grant; pause ;;
       17) action_update; pause ;;
       18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
-      19) action_kv_menu; pause ;;
+      19) action_time_sync; pause ;;
       28) action_ctx_menu; pause ;;
       29) [ "$D_OS" = "linux" ] && action_swap status; pause ;;
+      30) action_kv_menu; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -2495,8 +2528,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant`, `admin-card`, `service-account` (a subcommand) and `console` (a host)
-# take more.
+# `onnxruntime`, `wifi-grant`, `time-sync`, `admin-card`, `service-account` (a subcommand) and
+# `console` (a host) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2521,7 +2554,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert|kv|swap) ;;
-  ctx|context|n_ctx|models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  ctx|context|n_ctx|models|wifi-grant|time-sync|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -2554,6 +2587,7 @@ case "$CMD" in
   ctx|context|n_ctx) action_ctx "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
+  time-sync) action_time_sync "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
   swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;

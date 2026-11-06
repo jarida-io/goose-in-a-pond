@@ -245,7 +245,8 @@ export function voice(name = "af_heart", over: Partial<ModelEntry> = {}): ModelE
 export const EG2_ORIN = {
   device: "orin" as const,
   summary:
-    "Searches memory in 18 ms on the GPU or 41 ms on the CPU. Puts the right Swahili or mixed-language fact in its top five 73% of the time, against 39% for the default",
+    "Searches memory in 18 ms on the graphics processor (GPU) or 41 ms on the main processor (CPU). Puts the right " +
+    "Swahili or mixed-language fact in its top five 73% of the time, against 39% for all-MiniLM-L6-v2, the default",
   measured_on: "2026-10-31",
 };
 
@@ -313,6 +314,17 @@ export const ORIN_MEMORY: ModelMemoryStatus = {
   available_for_llm_mb: 5820,
   loaded_model: null,
   reclaimable_mb: 0,
+};
+
+/** The live nano at the re-score: E4B and a Memory model running. 309 MB available leaves a Memory
+ *  model 147 MB of room once EmbeddingGemma 2's 138 MB comes back. */
+export const ORIN_MEMORY_SERVING: ModelMemoryStatus = {
+  total_mb: 7620,
+  available_for_llm_mb: 309,
+  budget_mb: 5820,
+  loaded_model: null,
+  reclaimable_mb: 4965,
+  embedder_room_mb: 147,
 };
 
 /** A desktop with room to spare: the primary pick fits with its picture support. */

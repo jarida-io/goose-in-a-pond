@@ -224,6 +224,9 @@ fn recorders() -> &'static Recorders {
             Arc::new(OneLightRegistry),
             Arc::new(pond_core::user_data::mocks::mock_skill::MockSkillRepository::default()),
             device_control.clone(),
+            Arc::new(
+                pond_core::user_data::mocks::mock_last_action::MockLastActionRepository::default(),
+            ),
             None,
         )
         .expect("register giap extensions for the chaining harness");

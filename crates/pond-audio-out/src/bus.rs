@@ -1,12 +1,9 @@
-//! Unified audio bus for streaming and batch speech output.
+//! Unified audio bus for speech output.
 
 use anyhow::Result;
-use futures::stream::BoxStream;
-use futures::StreamExt;
 use pond_core::models::ports::voice_output::VoiceOutput;
-use pond_core::models::services::voice::speech_pipeline::{SpeechPipeline, SENTENCE_HOLD};
-use pond_core::shared::domain::agent::AgentStreamEvent;
-use pond_voice::text::{split_text, ReplySplitter};
+use pond_core::models::services::voice::speech_pipeline::SpeechPipeline;
+use pond_voice::text::split_text;
 use std::sync::Arc;
 
 /// Unified audio bus coordinating speech synthesis and hardware playback.
@@ -72,84 +69,6 @@ impl AudioBus {
         }
 
         Ok(())
-    }
-
-    /// Stream LLM tokens directly into pipelined clause synthesis and playback.
-    ///
-    /// When `wait_for_playback` is false, returns `Ok(full_text)` as soon as token generation
-    /// completes, while speech playback finishes in the background.
-    pub async fn speak_stream(
-        &self,
-        mut stream: BoxStream<'static, Result<AgentStreamEvent>>,
-        wait_for_playback: bool,
-    ) -> Result<String> {
-        self.voice.begin_utterance();
-        let mut pipeline = self.pipeline();
-
-        let mut full_text = String::new();
-        let mut splitter = ReplySplitter::new();
-        let mut thought_filter = pond_core::models::services::thought_filter::ThoughtFilter::new();
-
-        loop {
-            let event = if splitter.pending().trim().is_empty() {
-                stream.next().await
-            } else {
-                match tokio::time::timeout(SENTENCE_HOLD, stream.next()).await {
-                    Ok(event) => event,
-                    Err(_) => {
-                        for unit in splitter.pause(pipeline.pace()) {
-                            pipeline.say(unit).await;
-                        }
-                        continue;
-                    }
-                }
-            };
-            let Some(event_result) = event else {
-                break;
-            };
-            let units = match event_result? {
-                AgentStreamEvent::Text { content } => {
-                    let visible = thought_filter.push(&content);
-                    if visible.is_empty() {
-                        Vec::new()
-                    } else {
-                        full_text.push_str(&visible);
-                        splitter.push(&visible, pipeline.pace())
-                    }
-                }
-                AgentStreamEvent::ToolCall { .. } => splitter.pause(pipeline.pace()),
-                AgentStreamEvent::Done { .. } => {
-                    let tail = thought_filter.flush();
-                    if !tail.is_empty() {
-                        full_text.push_str(&tail);
-                        splitter.push(&tail, pipeline.pace())
-                    } else {
-                        Vec::new()
-                    }
-                }
-                AgentStreamEvent::Error { content } => {
-                    return Err(anyhow::anyhow!("agent stream error: {content}"));
-                }
-                _ => Vec::new(),
-            };
-            for unit in units {
-                if !pipeline.say(unit).await {
-                    break;
-                }
-            }
-        }
-
-        for unit in splitter.finish() {
-            pipeline.say(unit).await;
-        }
-
-        if wait_for_playback {
-            pipeline.finish().await;
-        } else {
-            tokio::spawn(async move { pipeline.finish().await });
-        }
-
-        Ok(full_text)
     }
 }
 
@@ -238,42 +157,5 @@ mod tests {
             said.contains("Your timer is done") && said.contains("The tea is ready"),
             "{said}"
         );
-    }
-
-    #[tokio::test]
-    async fn speak_stream_pipelines_tokens_incrementally() {
-        let voice = Arc::new(MockVoice {
-            synthesized: Arc::new(AtomicUsize::new(0)),
-            played: Arc::new(AtomicUsize::new(0)),
-            spoken: Arc::new(AtomicUsize::new(0)),
-            utterance_active: Arc::new(AtomicBool::new(false)),
-        });
-
-        let bus = AudioBus::new(voice.clone());
-        let tokens = vec![
-            Ok(AgentStreamEvent::Text {
-                content: "Hello there Jerry, ".to_string(),
-            }),
-            Ok(AgentStreamEvent::Text {
-                content: "the weather today is sunny. ".to_string(),
-            }),
-            Ok(AgentStreamEvent::Text {
-                content: "Have a great day.".to_string(),
-            }),
-            Ok(AgentStreamEvent::Done {
-                session_id: "s1".to_string(),
-                model_role: "task".to_string(),
-                usage: None,
-                stats: None,
-            }),
-        ];
-        let stream = futures::stream::iter(tokens).boxed();
-
-        let result = bus.speak_stream(stream, true).await.unwrap();
-        assert_eq!(
-            result,
-            "Hello there Jerry, the weather today is sunny. Have a great day."
-        );
-        assert!(voice.synthesized.load(Ordering::SeqCst) >= 2);
     }
 }

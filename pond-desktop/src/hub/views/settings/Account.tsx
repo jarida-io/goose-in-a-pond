@@ -181,6 +181,7 @@ export function AccountDetail({ go }: AccountDetailProps) {
   const [signingOut, setSigningOut] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showFlash(text: string, ok = true) {
@@ -203,6 +204,10 @@ export function AccountDetail({ go }: AccountDetailProps) {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    api.getSystemInfo().then((info) => setVersion(info.version), () => {});
   }, []);
 
   useEffect(() => {
@@ -339,8 +344,7 @@ export function AccountDetail({ go }: AccountDetailProps) {
       <Card title="About">
         <Row
           label="Goose In A Pond"
-          sub="Version 2.0 · on-device build"
-          control={<span className="set-row__badge">Up to date</span>}
+          sub={version ? `Version ${version}` : undefined}
         />
         <Row
           label="Help &amp; feedback"

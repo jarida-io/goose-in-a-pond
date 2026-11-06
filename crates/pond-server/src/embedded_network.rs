@@ -32,10 +32,13 @@ use tokio::{
     sync::Mutex,
 };
 
+mod diagnostics;
 mod recovery;
 mod revocation;
 
 const PEER_HEADER: &str = "x-pond-embedded-peer";
+/// Most health lines kept from one status report; the helper sends at most four.
+const MAX_HEALTH_LINES: usize = 8;
 const MACHINE_HEADER: &str = "x-pond-embedded-machine";
 
 /// Hosted coordinator for a household that names none. Applied on enable, never on read: an
@@ -80,7 +83,7 @@ pub struct Config {
 }
 
 /// Private, loopback-only state. Enrollment URLs must never be logged.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     /// Backend state, localized by the caller.
@@ -96,6 +99,13 @@ pub struct Status {
     /// Public machine identity available before coordinator authorization.
     #[serde(default)]
     pub machine_key: String,
+    /// The node's own account of what keeps it from running, such as the last error from the
+    /// control server. Redacted and bounded by the helper, and again on arrival.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health: Vec<String>,
+    /// Whether this host's clock is synchronised to a time source, where the helper can tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_synchronized: Option<bool>,
 }
 
 struct Process {
@@ -124,6 +134,8 @@ pub struct Runtime {
     /// When each device's sighting was last written, to throttle presence writes.
     sightings_written: std::sync::Mutex<BTreeMap<String, std::time::Instant>>,
     recovery: recovery::Queue,
+    /// How long the node has been short of `Running`, for the log; see [`diagnostics`].
+    down: std::sync::Mutex<diagnostics::DownWatch>,
     /// Address published by system information and pairing QR producers.
     pub address: EmbeddedAddress,
     /// Wake certificate renewal as soon as the node obtains an address.
@@ -179,10 +191,7 @@ impl Runtime {
                 helper,
                 status: RwLock::new(Status {
                     state: "Stopped".into(),
-                    addresses: vec![],
-                    auth_url: None,
-                    node_key: String::new(),
-                    machine_key: String::new(),
+                    ..Status::default()
                 }),
                 process: Mutex::new(None),
                 generation: AtomicU64::new(0),
@@ -190,6 +199,7 @@ impl Runtime {
                 device_locks: std::sync::Mutex::new(BTreeMap::new()),
                 sightings_written: std::sync::Mutex::new(BTreeMap::new()),
                 recovery: recovery::Queue::default(),
+                down: std::sync::Mutex::default(),
                 address: EmbeddedAddress::default(),
                 changed: tokio::sync::Notify::new(),
             }),
@@ -238,6 +248,14 @@ impl Runtime {
             if status.state == "Running" {
                 self.record_registered();
             }
+        }
+        let outage = self
+            .down
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .observe(&status.state, std::time::Instant::now());
+        if let Some(event) = outage {
+            diagnostics::log_outage(event, &status);
         }
         let address = status
             .addresses
@@ -880,12 +898,18 @@ impl Runtime {
             .arg(self.port.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .context("start embedded network helper")?;
         let input = child.stdin.take().context("embedded stdin unavailable")?;
         let output = child.stdout.take().context("embedded status unavailable")?;
+        diagnostics::forward_helper_stderr(
+            child
+                .stderr
+                .take()
+                .context("embedded diagnostics unavailable")?,
+        );
         self.persist(&config)?;
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *process = Some(Process {
@@ -894,10 +918,7 @@ impl Runtime {
         });
         self.publish(Status {
             state: "Starting".into(),
-            addresses: vec![],
-            auth_url: None,
-            node_key: String::new(),
-            machine_key: String::new(),
+            ..Status::default()
         });
         let runtime = self.clone();
         tokio::spawn(async move {
@@ -927,6 +948,12 @@ impl Runtime {
                 status
                     .addresses
                     .retain(|s| s.parse::<std::net::IpAddr>().is_ok_and(is_tailnet));
+                status.health = std::mem::take(&mut status.health)
+                    .into_iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .take(MAX_HEALTH_LINES)
+                    .map(|line| helper_complaint(line.as_bytes()))
+                    .collect();
                 status.auth_url = status.auth_url.filter(|s| {
                     url::Url::parse(s).is_ok_and(|u| {
                         u.scheme() == "https" && u.username().is_empty() && u.password().is_none()
@@ -942,10 +969,7 @@ impl Runtime {
                 tracing::error!("embedded networking helper stopped unexpectedly");
                 runtime.publish(Status {
                     state: "Unavailable".into(),
-                    addresses: vec![],
-                    auth_url: None,
-                    node_key: String::new(),
-                    machine_key: String::new(),
+                    ..Status::default()
                 });
             }
         });
@@ -975,10 +999,7 @@ impl Runtime {
         }
         self.publish(Status {
             state: "Stopped".into(),
-            addresses: vec![],
-            auth_url: None,
-            node_key: String::new(),
-            machine_key: String::new(),
+            ..Status::default()
         });
         Ok(())
     }
@@ -1692,6 +1713,9 @@ async fn remote_configuration(
         "controlUrl": config.control_url,
         "state": runtime.status.read().unwrap_or_else(|p| p.into_inner()).state,
         "lapsesAt": lapses_at,
+        // Where the household can turn it on, as codes the app words: a phone away from home
+        // cannot ask once it is off.
+        "enableFrom": (!config.enabled).then_some(["dashboard"]),
     })))
 }
 async fn register_phone(
@@ -2554,9 +2578,7 @@ mod tests {
         runtime.publish(Status {
             state: "Running".into(),
             addresses: vec!["100.64.0.2".into()],
-            auth_url: None,
-            node_key: String::new(),
-            machine_key: String::new(),
+            ..Status::default()
         });
         // The LAN certificate's names, or a tailnet certificate written before the address.
         runtime.publish_ready(&["pond.local".into()]);
@@ -2570,6 +2592,73 @@ mod tests {
             runtime.address.0.read().unwrap().as_deref(),
             Some("100.64.0.2")
         );
+    }
+
+    /// What the node says about itself reaches the Pond's log, so it is bounded and redacted on
+    /// arrival whatever the helper sent, and the clock reading comes through as sent.
+    #[tokio::test]
+    async fn the_nodes_reason_arrives_redacted_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("pondnet");
+        std::fs::write(
+            &script,
+            "#!/bin/sh
+             echo 'embedded networking: a diagnostic line' >&2
+             cat \"$(dirname \"$0\")/status.json\"
+             cat > /dev/null
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut health = vec![
+            "You are logged out. https://coord.example/register/abcdef0123456789 next".to_string(),
+            "x".repeat(2000),
+            "   ".to_string(),
+        ];
+        health.extend((0..10).map(|i| format!("problem {i}")));
+        let line = serde_json::json!({
+            "state": "NoState",
+            "addresses": [],
+            "machineKey": "",
+            "health": health,
+            "clockSynchronized": false,
+        });
+        std::fs::write(dir.path().join("status.json"), format!("{line}\n")).unwrap();
+
+        let data = tempfile::tempdir().unwrap();
+        let (runtime, _listener) = Runtime::with_helper(data.path(), 4443, script).unwrap();
+        runtime
+            .start(Config {
+                enabled: true,
+                control_url: "https://coord.example".into(),
+                enrollment_url: "https://enroll.example".into(),
+            })
+            .await
+            .unwrap();
+        let mut arrived = None;
+        for _ in 0..100 {
+            let status = runtime.status.read().unwrap().clone();
+            if status.state == "NoState" {
+                arrived = Some(status);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        runtime.shutdown().await.unwrap();
+        let status = arrived.expect("the helper's status never arrived");
+        assert_eq!(status.clock_synchronized, Some(false));
+        assert_eq!(status.health.len(), MAX_HEALTH_LINES, "{:?}", status.health);
+        assert!(status.health[0].contains("<redacted enrolment URL>"));
+        for line in &status.health {
+            assert!(!line.contains("/register/") && !line.contains("abcdef0123456789"));
+            // `helper_complaint` keeps the last 401 characters behind an ellipsis.
+            assert!(
+                line.chars().count() <= 404,
+                "unbounded: {} chars",
+                line.len()
+            );
+            assert!(!line.trim().is_empty());
+        }
     }
 
     /// A stand-in helper: records each call, and answers an action from `<action>.out` and
@@ -3269,6 +3358,7 @@ mod tests {
             auth_url: Some("https://coord.example/register/abcdefghijklmnop".into()),
             node_key: format!("nodekey:{}", "b".repeat(64)),
             machine_key: format!("mkey:{}", "a".repeat(64)),
+            ..Status::default()
         });
         for reason in [
             "device_certificate_invalid",
@@ -3310,6 +3400,7 @@ mod tests {
             auth_url: Some("https://coord.example/register/abcdefghijklmnop".into()),
             node_key: format!("nodekey:{}", "b".repeat(64)),
             machine_key: format!("mkey:{}", "a".repeat(64)),
+            ..Status::default()
         });
         let router = management_with_credential(runtime);
         let register = |body: &str| {
@@ -3469,10 +3560,7 @@ mod tests {
         };
         let state = |state: &str| Status {
             state: state.into(),
-            addresses: vec![],
-            auth_url: None,
-            node_key: String::new(),
-            machine_key: String::new(),
+            ..Status::default()
         };
         assert_eq!(ask(runtime.clone()).await, false);
 

@@ -10,14 +10,23 @@ use pond_api::AppState;
 use pond_core::models::domain::embedding_models::{EmbeddingEngine, EmbeddingModel};
 use pond_core::models::ports::embedding::{EmbedderFactory, EmbeddingProvider};
 
+use crate::inference_lane_runner::InferenceLane;
+
 /// ONNX Runtime can hang rather than fail when its version does not match.
 const FASTEMBED_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often a load held off by the household's work looks again; a choice, not a measurement.
+#[cfg(feature = "local-inference")]
+const HELD_OFF_RECHECK: Duration = Duration::from_secs(1);
 
 pub struct ServerEmbedderFactory {
     /// `<data_dir>/models/embedding`: fastembed's cache and the GGUF downloads.
     dir: PathBuf,
     /// Set once `AppState` exists, so a missing GGUF is fetched by the models pipeline.
     state: OnceLock<Weak<AppState>>,
+    /// The lane whose turns, compactions and long-task steps a GPU load gives way to.
+    #[cfg_attr(not(feature = "local-inference"), allow(dead_code))]
+    lane: OnceLock<Arc<InferenceLane>>,
 }
 
 impl ServerEmbedderFactory {
@@ -25,11 +34,52 @@ impl ServerEmbedderFactory {
         Self {
             dir,
             state: OnceLock::new(),
+            lane: OnceLock::new(),
         }
     }
 
-    pub fn attach(&self, state: &Arc<AppState>) {
+    pub fn attach(&self, state: &Arc<AppState>, lane: &Arc<InferenceLane>) {
         let _ = self.state.set(Arc::downgrade(state));
+        let _ = self.lane.set(lane.clone());
+    }
+
+    /// The GPU gate's setup side for one load, taken only while no turn, compaction or long-task
+    /// step needs the lane, since a decode that starts during the load waits for it. Logged when
+    /// it waited.
+    #[cfg(feature = "local-inference")]
+    async fn setup_for_load(&self) -> pond_core::models::domain::gpu_gate::SetupGuard {
+        let asked = std::time::Instant::now();
+        let guard = loop {
+            if !self.lane_free().await {
+                tokio::time::sleep(HELD_OFF_RECHECK).await;
+                continue;
+            }
+            let guard = pond_core::models::domain::gpu_gate::gpu_gate()
+                .setup()
+                .await;
+            // Draining the gate can take a minute, and household work may have come due meanwhile.
+            if self.lane_free().await {
+                break guard;
+            }
+        };
+        let waited = asked.elapsed();
+        if waited >= Duration::from_millis(10) {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "embedder_load_waited",
+                waited_ms = waited.as_millis() as u64,
+                "the embedder's load waited for the household's work and every generation to finish"
+            );
+        }
+        guard
+    }
+
+    #[cfg(feature = "local-inference")]
+    async fn lane_free(&self) -> bool {
+        match self.lane.get() {
+            Some(lane) => lane.embedding_may_run().await,
+            None => true,
+        }
     }
 
     async fn fastembed(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
@@ -67,23 +117,45 @@ impl ServerEmbedderFactory {
             ));
         }
         let spec = EmbeddingModelSpec::resolve(model.name)?;
-        self.warmed(spec, file.filename).await
+        let provider = {
+            let _setup = self.setup_for_load().await;
+            self.loaded(spec, file.filename).await?
+        };
+        Self::warmed(provider, file.filename).await
     }
 
-    /// The provider loads on its first embed; doing that here keeps the load out of a turn.
+    /// Loads the model; the caller holds the GPU gate's setup side around it.
     #[cfg(feature = "local-inference")]
-    async fn warmed(
+    async fn loaded(
         &self,
         spec: pond_inference::EmbeddingModelSpec,
         filename: &str,
-    ) -> Result<Arc<dyn EmbeddingProvider>> {
+    ) -> Result<pond_inference::GgufEmbeddingProvider> {
         use anyhow::Context as _;
 
         let provider = pond_inference::GgufEmbeddingProvider::new(spec, &self.dir);
         provider
-            .embed("warm up")
+            .load()
             .await
             .with_context(|| format!("loading {filename} on the {:?}", provider.placement()))?;
+        Ok(provider)
+    }
+
+    /// One embed after the gate reopens, since a decode waits while it is shut: a placement that
+    /// loads but cannot decode fails here, before the embedder is ready.
+    #[cfg(feature = "local-inference")]
+    async fn warmed(
+        provider: pond_inference::GgufEmbeddingProvider,
+        filename: &str,
+    ) -> Result<Arc<dyn EmbeddingProvider>> {
+        use anyhow::Context as _;
+
+        provider.embed("warm up").await.with_context(|| {
+            format!(
+                "embedding with {filename} on the {:?}",
+                provider.placement()
+            )
+        })?;
         tracing::info!(
             model_id = provider.model_id(),
             placement = ?provider.placement(),

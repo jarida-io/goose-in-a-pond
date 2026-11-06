@@ -13,6 +13,7 @@ pub mod face_embedding_extractor;
 pub mod face_recognition;
 pub mod lane_control;
 pub mod lane_run_log;
+pub mod last_action;
 pub mod matter_runtime;
 pub mod memory_consolidator;
 pub mod memory_repository;

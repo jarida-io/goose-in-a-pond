@@ -125,8 +125,8 @@ export function observedFor(node: NodeSnapshot, verb: Verb): DeviceStatePatch {
 }
 
 /** Valve `currentState`: shut or open; the third value, Transitioning, must not read as settled. */
-const VALVE_CLOSED = 0;
-const VALVE_OPEN = 1;
+export const VALVE_CLOSED = 0;
+export const VALVE_OPEN = 1;
 
 // ── Unit conversions ─────────────────────────────────────────────────────────
 

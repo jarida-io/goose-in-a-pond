@@ -250,6 +250,9 @@ func TestARefusedCoordinatorCredentialDegradesTheService(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/v1/node":
 			io.WriteString(w, `{"nodes":[]}`)
+		case r.Method == "GET" && r.URL.Path == "/api/v1/policy":
+			// Headscale fails the read while it holds no policy, before the first write.
+			http.Error(w, `{"message":"loading ACL from database"}`, http.StatusInternalServerError)
 		case r.Method == "PUT" && r.URL.Path == "/api/v1/policy":
 			io.WriteString(w, `{}`)
 		default:

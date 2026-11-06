@@ -1,6 +1,7 @@
 import { Clock, Play, Pause, CheckCircle, XCircle, Loader } from "lucide-react";
 import { Chip } from "@heroui/react";
 import { registerMcpCard, type McpCardProps } from "../registry";
+import { markdownToPlainText } from "../../lib/markdownBlocks";
 
 interface Schedule {
   id: string;
@@ -23,6 +24,12 @@ function formatDuration(ms?: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
   return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+}
+
+/** A run's result as one short line of plain text, so markup the model wrote does not show as asterisks. */
+function preview(result: string): string {
+  const text = markdownToPlainText(result);
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
 function formatRunTime(dateStr: string): string {
@@ -139,7 +146,7 @@ export function ScheduleListCard({ data, variant }: McpCardProps) {
                       <span className="ui-schedule__name">{formatRunTime(r.started_at)}</span>
                       {r.result && (
                         <span className="ui-schedule__cron">
-                          {r.result.slice(0, 60)}{r.result.length > 60 ? "…" : ""}
+                          {preview(r.result)}
                         </span>
                       )}
                     </div>

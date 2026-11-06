@@ -79,7 +79,7 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
       // The route only clears; the deferred idle sweep refills, so don't claim it is done.
       setNote(
         r.cleared === 0
-          ? "Nothing was indexed, so there was nothing to read again."
+          ? "Nothing had been read yet, so there was nothing to read again."
           : "The pond is reading memories again in the background, and this page fills back in as it goes.",
       );
       onRebuilt?.();
@@ -192,13 +192,13 @@ export function Lineage({ memories, health, onRebuilt, onRetry, retrying, downlo
         {health?.embedder?.state === "off" ? null : !health || !health.indexed ? (
           <p className="lin__empty">
             {health?.reason ??
-              "Nothing is indexed for meaning yet, so searches fall back to matching words."}
+              "Nothing has been read for meaning yet, so searches fall back to matching words."}
           </p>
         ) : (
           <>
             <p className="lin__vectorsIntro">
               {reading ? "Read by " : "Chosen: "}
-              <strong>{embedderTitle(health.model_id)}</strong>. Anything not indexed is still
+              <strong>{embedderTitle(health.model_id)}</strong>. Anything not read yet is still
               found by word, just less well.
             </p>
             <ul className="lin__corpora">

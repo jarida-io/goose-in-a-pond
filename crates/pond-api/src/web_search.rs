@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
 use pond_core::mcp::domain::web_search::{
-    local_town, WebSearchStatus, BRAVE_API_BASE, BRAVE_TIMEOUT, BRAVE_TOKEN_HEADER,
-    BRAVE_WEB_SEARCH_PATH, WEB_SEARCH_PROVIDER,
+    local_town, BuiltInSearchState, WebSearchStatus, BRAVE_API_BASE, BRAVE_TIMEOUT,
+    BRAVE_TOKEN_HEADER, BRAVE_WEB_SEARCH_PATH, WEB_SEARCH_PROVIDER,
 };
 use pond_core::mcp::services::web_search_status::{self, WebSearchStatusBoard};
 use pond_core::shared::services::egress;
@@ -68,6 +68,30 @@ fn no_store() -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         "Secret storage not available",
     )
+}
+
+/// The built-in search's state, read from the Knowledge switch and the secret store as a turn
+/// reads them. An unreadable store counts as no key, as it does for the turn; unreadable settings
+/// count as the defaults, as they do for the capability check.
+pub async fn built_in_state(state: &AppState) -> BuiltInSearchState {
+    let knowledge_enabled = match state.settings_repo.get().await {
+        Ok(settings) => settings.ext_knowledge_enabled,
+        Err(e) => {
+            tracing::warn!(error = %e, "web search: settings unreadable; reading the defaults");
+            pond_core::user_data::domain::settings::Settings::default().ext_knowledge_enabled
+        }
+    };
+    let stored = match &state.secret_repo {
+        Some(repo) => match repo.get(BRAVE_SEARCH_API_KEY).await {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(error = %e, "web search: the secret store could not be read; treating the key as unset");
+                None
+            }
+        },
+        None => None,
+    };
+    BuiltInSearchState::of(knowledge_enabled, stored.as_deref())
 }
 
 /// `GET /api/v1/web-search`: `{provider, configured, status, local_results: {enabled, town}}`.

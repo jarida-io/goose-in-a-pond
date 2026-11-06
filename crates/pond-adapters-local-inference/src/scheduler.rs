@@ -73,6 +73,7 @@ fn host_status(reading: HostMemory, loaded_model: Option<String>) -> MemoryStatu
         available_for_llm_mb: reading.available_mb.min(budget_mb),
         budget_mb,
         loaded_model,
+        available_mb: Some(reading.available_mb),
     }
 }
 
@@ -152,7 +153,8 @@ impl ModelScheduler for ResourceAwareModelScheduler {
 
         let total = total_ram_mb();
         let budget = llm_budget_mb();
-        let (total_mb, available_for_llm_mb) = match Self::read_free_ram_mb() {
+        let available_mb = Self::read_free_ram_mb();
+        let (total_mb, available_for_llm_mb) = match available_mb {
             Some(free_mb) => (total, free_mb.min(budget)),
             None => {
                 // Fallback: estimate based on whether a model is loaded.
@@ -170,6 +172,7 @@ impl ModelScheduler for ResourceAwareModelScheduler {
             available_for_llm_mb,
             budget_mb: budget,
             loaded_model,
+            available_mb,
         }
     }
 }
@@ -231,6 +234,11 @@ mod tests {
         let status = desktop(16_384, 15_000);
         assert_eq!(status.budget_mb, 12_288);
         assert_eq!(status.available_for_llm_mb, 12_288);
+        assert_eq!(
+            status.available_mb,
+            Some(15_000),
+            "the Memory model's reading is the host's, outside the LLM budget"
+        );
     }
 
     #[test]
