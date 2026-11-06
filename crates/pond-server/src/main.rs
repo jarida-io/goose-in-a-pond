@@ -2797,10 +2797,8 @@ async fn run_server(
                     ) => r,
                 };
                 watcher.abort();
-                extraction_embedder.unload().await;
-                if report.memories_written > 0 {
-                    extraction_arrived.notify_one();
-                }
+                // The slot decides whether a model this pass loaded may stay.
+                extraction_arrived.notify_one();
 
                 status.write().await.record(config.mode, &report);
 
@@ -4619,6 +4617,7 @@ async fn run_server(
             let _ = prewarm_done.send(true);
         });
     }
+    let embedding_turn_started = Arc::new(tokio::sync::Notify::new());
     // Every lane job: a turn in flight is not quiet, however long it has been answering.
     {
         let runs = state.runs.clone();
@@ -4629,13 +4628,10 @@ async fn run_server(
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
         });
         let lane = inference_lane.clone();
-        let preempt_embedder = embedder.clone();
+        let turn_started = embedding_turn_started.clone();
         state.runs.set_preempt_hook(move || {
             lane.preempt();
-            let embedder = preempt_embedder.clone();
-            tokio::spawn(async move {
-                embedder.unload().await;
-            });
+            turn_started.notify_one();
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -4661,6 +4657,7 @@ async fn run_server(
     embedder_factory.attach(&state, &inference_lane);
     {
         let warmup = state.warmup.clone();
+        let scheduler = state.model_scheduler.clone();
         tokio::spawn(embedding_slot_runner::run(
             embedding_slot_runner::SlotDeps {
                 embedder: embedder.clone(),
@@ -4673,12 +4670,18 @@ async fn run_server(
                 activity: last_user_activity.clone(),
                 reindex: embedding_reindex,
                 arrived: embedding_arrived,
+                turn_started: embedding_turn_started,
                 chat_model_warming: Box::new(move || {
                     !*prewarmed.borrow()
                         || matches!(
                             warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
                             pond_core::models::ports::agent::WarmupPhase::Warming
                         )
+                }),
+                available_mb: Box::new(move || {
+                    scheduler
+                        .as_ref()
+                        .and_then(|s| s.memory_status().available_mb)
                 }),
             },
         ));
