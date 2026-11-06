@@ -18,6 +18,8 @@
 # Re-reviewed 2026-11-02 against main bf38019c: follow-redirects and joi were
 # bumped rather than ignored; block-buffer's entry went when OSV narrowed it to
 # 0.11 and later; minimatch was added.
+# Re-reviewed 2026-11-05 against main 782c2342: pin-utils was added; no
+# release of async-imap drops it.
 
 # ── Unmaintained-crate notices ───────────────────────────────────────────────
 #
@@ -45,6 +47,11 @@ reason = "derivative is unmaintained. Transitive, no fixed version exists."
 id = "RUSTSEC-2024-0436"
 ignoreUntil = 2027-03-31
 reason = "paste is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0441"
+ignoreUntil = 2027-03-31
+reason = "pin-utils is unmaintained (archived 2026-10-01). Transitive, no fixed version exists. Arrives through async-imap (pond-adapters-imap), whose latest release, 0.12.0, still requires it. goose/Cargo.lock also has it through aws-smithy-http 0.63; 0.64 drops it, but moving goose's AWS SDK is a change in the Goose repository."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0370"
