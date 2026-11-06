@@ -344,9 +344,12 @@ impl InferenceLane {
         saw_activity_since_start: bool,
         idle_for: Duration,
     ) -> Option<LaneSlot<'_>> {
-        // A turn in flight or person present in view suppresses quiet; a hand-asked
-        // tick still waives the quiet period, as it always has.
-        let idle_for = if self.turn_running() || self.person_present() {
+        // A turn in flight suppresses quiet for every job; a person in view suppresses only
+        // unasked background chores, never a long task or compaction the member is waiting on.
+        let idle_for = if self.turn_running()
+            || (!matches!(job, LaneJob::LongTaskStep | LaneJob::Compaction)
+                && self.person_present())
+        {
             Duration::ZERO
         } else {
             idle_for
@@ -1629,6 +1632,20 @@ mod tests {
             )
             .await
             .is_none());
+
+        assert!(
+            lane.acquire(
+                LaneJob::LongTaskStep,
+                true,
+                Cadence::new(Duration::ZERO, Duration::from_secs(2), true),
+                false,
+                true,
+                LONG_IDLE
+            )
+            .await
+            .is_some(),
+            "a member waiting in view of the camera does not hold back their own long task"
+        );
 
         present.store(false, Ordering::Relaxed);
         assert!(lane

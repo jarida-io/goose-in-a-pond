@@ -19431,12 +19431,19 @@ async fn resolve_turn_identity(
                 .claim_session_identity(session_id, &proposed)
                 .await
             {
-                tracing::warn!(
-                    error = %e,
-                    session_id,
-                    "could not record which household member this turn's device belongs to; \
-                     batch extraction will read this conversation as unattributed"
-                );
+                if matches!(e, SessionStorageError::SessionNotFound(_)) {
+                    tracing::debug!(
+                        session_id,
+                        "session does not exist in storage; skipping identity claim"
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        session_id,
+                        "could not record which household member this turn's device belongs to; \
+                         batch extraction will read this conversation as unattributed"
+                    );
+                }
             }
         }
         DeviceRung::NoDevice | DeviceRung::Unattributed => {}

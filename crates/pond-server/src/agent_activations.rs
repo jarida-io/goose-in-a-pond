@@ -215,6 +215,28 @@ async fn queue(
             }
         }
     }
+    let goal_prefix = format!("{}:", firing.agent);
+    if let Ok(open_tasks) = deps
+        .tasks
+        .list_tasks(
+            pond_core::shared::ports::long_task::LongTaskOwnerFilter::Everyone,
+            false,
+        )
+        .await
+    {
+        if let Some(existing) = open_tasks
+            .iter()
+            .find(|t| activations::is_activation_task(t) && t.goal().starts_with(&goal_prefix))
+        {
+            book.note_task(&firing.key, existing.id());
+            tracing::debug!(
+                agent = %firing.agent,
+                task = %existing.id(),
+                "agent activation skipped: an open run from an earlier start has not finished"
+            );
+            return;
+        }
+    }
 
     let member = match &firing.reason {
         FiringReason::Event(matched) => matched.member.clone(),

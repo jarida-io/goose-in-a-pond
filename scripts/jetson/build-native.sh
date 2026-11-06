@@ -48,7 +48,8 @@ sudo apt-get install -y \
   libssl-dev \
   libasound2-dev \
   libdbus-1-dev \
-  libsqlite3-dev
+  libsqlite3-dev \
+  lld
 
 # ── 2b. Build the web UI (embedded into the single-executable server) ────────
 # pond-server embeds pond-desktop/dist at compile time (crates/pond-api/build.rs

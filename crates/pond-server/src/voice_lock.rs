@@ -76,16 +76,12 @@ impl VoiceLock {
 }
 
 impl VoiceLock {
-    /// Whether no voice session holds the lock now: tried and let go at once, file left alone.
+    /// Whether no voice session holds the lock now: tried and let go at once, without creating the file.
     pub fn is_free() -> bool {
-        let Ok(file) = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path())
-        else {
-            return false;
+        let file = match OpenOptions::new().read(true).write(true).open(lock_path()) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => return false,
         };
         if file.try_lock_exclusive().is_err() {
             return false;
@@ -97,9 +93,9 @@ impl VoiceLock {
 
 impl Drop for VoiceLock {
     fn drop(&mut self) {
-        // Best effort: the kernel releases the lock at exit anyway; unlinking is just tidiness.
-        let _ = FileExt::unlock(&self.file);
+        // Unlink before unlocking so a concurrent acquire cannot lock an inode that is then unlinked.
         let _ = std::fs::remove_file(&self.path);
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
