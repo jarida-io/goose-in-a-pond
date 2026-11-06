@@ -988,10 +988,20 @@ mod tests {
             vec!["m-new", "m-shared"],
             "her own active memory and the household's"
         );
-        assert_eq!(ids(repo.search_recent(&baraka, 10).await.unwrap()), vec!["m-shared"]);
-        assert!(repo.search_recent(&ProfileScope::Guest, 10).await.unwrap().is_empty());
         assert_eq!(
-            repo.search_recent(&ProfileScope::Household, 10).await.unwrap().len(),
+            ids(repo.search_recent(&baraka, 10).await.unwrap()),
+            vec!["m-shared"]
+        );
+        assert!(repo
+            .search_recent(&ProfileScope::Guest, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repo.search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
             2,
             "the household reads every active memory, as before"
         );
@@ -1001,12 +1011,14 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        sqlx::query("INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)")
-            .bind(&item)
-            .bind(timestamp::now())
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)",
+        )
+        .bind(&item)
+        .bind(timestamp::now())
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             ids(repo.search_recent(&baraka, 10).await.unwrap()),
             vec!["m-new", "m-shared"],
@@ -1026,6 +1038,74 @@ mod tests {
             .map(|q| q.id)
             .collect();
         assert_eq!(offered, vec!["q-house"], "her suggestion stays hers");
+    }
+
+    #[tokio::test]
+    async fn the_headers_take_the_owners_and_archives_of_the_consolidation_repair() {
+        let (_dir, pool) = pond().await;
+        run(&pool, "INSERT INTO profiles (id, display_name) VALUES ('amina', 'Amina'), ('baraka', 'Baraka')").await;
+        // As consolidation left them: m-hers merged Amina's fact with a household one, m-both
+        // merged Amina's with Baraka's, and neither result has an owner.
+        run(
+            &pool,
+            "INSERT INTO memory_fragments (id, profile_id, content, lifecycle, superseded_by, created_at) VALUES \
+             ('a1', 'amina', 'Amina walks at six', 'merged', 'm-hers', '2026-11-01 20:00:00'), \
+             ('h1', NULL, 'The park opens at six', 'merged', 'm-hers', '2026-11-01 20:00:00'), \
+             ('m-hers', NULL, 'Amina walks when the park opens', 'active', NULL, '2026-11-01 21:00:00'), \
+             ('a2', 'amina', 'Amina takes the 7:10 bus', 'merged', 'm-both', '2026-11-01 20:00:00'), \
+             ('b1', 'baraka', 'Baraka drives to work', 'merged', 'm-both', '2026-11-01 20:00:00'), \
+             ('m-both', NULL, 'One takes the bus, one drives', 'active', NULL, '2026-11-01 21:00:00')",
+        )
+        .await;
+        run(
+            &pool,
+            "INSERT INTO memory_events (event_kind, memory_id) VALUES ('consolidated', 'm-hers'), ('consolidated', 'm-both')",
+        )
+        .await;
+
+        // The order a pond upgrading from before both migrations takes: 0081, then the backfill.
+        sqlx::raw_sql(include_str!(
+            "../migrations/system/0081_consolidation_owners.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        reconcile(&pool, Mode::Missing).await.unwrap();
+
+        let hers = header(&pool, "memory_fragments", "m-hers").await.unwrap();
+        assert_eq!(
+            (
+                hers.owner_profile_id.as_deref(),
+                hers.audience.as_str(),
+                hers.state.as_str()
+            ),
+            (Some("amina"), "private", "active")
+        );
+        let both = header(&pool, "memory_fragments", "m-both").await.unwrap();
+        assert_eq!(
+            (both.audience.as_str(), both.state.as_str()),
+            ("household", "archived"),
+            "the index serves only active headers, so nobody recalls it"
+        );
+
+        let repo = SqliteMemoryRepository::new(pool.clone());
+        let amina = ProfileScope::Owner("amina".into());
+        let baraka = ProfileScope::Owner("baraka".into());
+        let recent =
+            |rows: Vec<MemoryFragment>| -> Vec<String> { rows.into_iter().map(|m| m.id).collect() };
+        assert_eq!(
+            recent(repo.search_recent(&amina, 10).await.unwrap()),
+            vec!["m-hers"]
+        );
+        assert!(repo.search_recent(&baraka, 10).await.unwrap().is_empty());
+        assert!(
+            repo.get_in_scope("m-hers", &baraka)
+                .await
+                .unwrap()
+                .is_none(),
+            "another member's memory reads as missing, the routes' 404"
+        );
+        assert!(repo.get_in_scope("m-hers", &amina).await.unwrap().is_some());
     }
 
     #[tokio::test]
