@@ -212,6 +212,14 @@ Each table's writer syncs its row's header in the same transaction, and
 database migrates it; `serve` then checks every header against its row in the background and
 warns if it had to repair one. Both passes change nothing when run again.
 
+**Scope is read from the header.** The index's search and every scoped read of memories,
+context items and suggestions apply one rule in SQL (`sqlite_items::scope_sql`, one bind): a
+member sees what they own, what the household's audience covers and what `item_shares` gives
+them; `ProfileScope::Household` reads everything, as it did; a guest reads nothing. For every
+existing row this is the rule each table applied to its own owner column. A row with no header
+is visible to the household alone. Context sources keep their own owner column: they are not
+items.
+
 A guard test fails the build when a kind names no detail table or no lifecycle:
 `Kind::detail_table` and `Kind::lifecycle` are exhaustive matches, and
 `every_item_kind_has_a_detail_table.rs` checks against the migrated schema that each table exists,

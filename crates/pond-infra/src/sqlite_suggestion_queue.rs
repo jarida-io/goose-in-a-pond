@@ -51,15 +51,9 @@ fn parse_ts(raw: &str) -> Result<DateTime<Utc>> {
 }
 
 /// Same shape as `sqlite_memory::scope_sql`; `Guest` is refused by the predicate itself.
-fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
-    match scope {
-        ProfileScope::Owner(id) => (
-            "AND (q.profile_id = ? OR q.profile_id IS NULL)",
-            Some(id.as_str()),
-        ),
-        ProfileScope::Household => ("", None),
-        ProfileScope::Guest => ("AND 1 = 0", None),
-    }
+/// Judged by the suggestion's item header: a household one is everyone's, a member's theirs.
+fn scope_sql(scope: &ProfileScope) -> (String, Option<&str>) {
+    sqlite_items::row_scope_sql(scope, "q.item_id")
 }
 
 fn row_to_suggestion(row: QueueRow) -> Result<QueuedSuggestion> {

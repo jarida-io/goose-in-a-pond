@@ -208,6 +208,11 @@ fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     }
 }
 
+/// [`scope_sql`] for `context_items`, judged on each item's header rather than its owner column.
+fn item_scope_sql(scope: &ProfileScope) -> (String, Option<&str>) {
+    sqlite_items::row_scope_sql(scope, "context_items.item_id")
+}
+
 // ── Row mapping ─────────────────────────────────────────────────────────────
 
 fn row_to_source(row: SourceRow) -> Result<ContextSource> {
@@ -438,7 +443,7 @@ impl ContextRepository for SqliteContextRepository {
         if scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let (filter, bind) = scope_sql(scope);
+        let (filter, bind) = item_scope_sql(scope);
         let query = format!(
             "SELECT {ITEM_COLUMNS} FROM context_items WHERE 1 = 1 {filter} \
              ORDER BY occurred_at DESC LIMIT ?"
@@ -460,7 +465,7 @@ impl ContextRepository for SqliteContextRepository {
         if keywords.is_empty() || scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let (filter, bind) = scope_sql(scope);
+        let (filter, bind) = item_scope_sql(scope);
         let clauses: Vec<&str> = keywords
             .iter()
             .map(|_| "(title LIKE ? OR body LIKE ?)")
@@ -501,7 +506,7 @@ impl ContextRepository for SqliteContextRepository {
         let hits = index
             .search(query_embedding, &model_id, scope, &CONTEXT, limit)
             .await?;
-        let (filter, bind) = scope_sql(scope);
+        let (filter, bind) = item_scope_sql(scope);
         let query = format!("SELECT {ITEM_COLUMNS} FROM context_items WHERE item_id = ? {filter}");
         let mut scored = Vec::with_capacity(hits.len());
         for hit in hits {
@@ -565,7 +570,7 @@ impl ContextRepository for SqliteContextRepository {
         if scope.excludes_everything() {
             return Ok(0);
         }
-        let (filter, bind) = scope_sql(scope);
+        let (filter, bind) = item_scope_sql(scope);
         // Half-open [from, to), so an event at midnight counts on one day only.
         let query = format!(
             "SELECT COUNT(*) FROM context_items \

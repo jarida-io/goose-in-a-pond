@@ -24,20 +24,37 @@ fn redactor() -> &'static RuleRedactor {
     REDACTOR.get_or_init(RuleRedactor::new)
 }
 
-/// What `scope` may read of `items` aliased `i`, as an `AND` clause and its binds: a member
-/// sees their own, the household's and what is shared with them, the household everything,
-/// a guest nothing. `schema` is `sys.` on the index's connections, which attach this database.
-pub fn scope_sql(scope: &ProfileScope, schema: &str) -> (String, Vec<String>) {
+/// What `scope` may read of `items` aliased `i`, as an `AND` clause and the one id it binds: a
+/// member sees their own, the household's and what is shared with them; the household reads
+/// everything, a guest nothing. `schema` is `sys.` on the index's connections, which attach
+/// this database. One bind, so it drops in where a table's own owner filter was.
+pub fn scope_sql<'s>(scope: &'s ProfileScope, schema: &str) -> (String, Option<&'s str>) {
     match scope {
         ProfileScope::Owner(id) => (
             format!(
-                "AND (i.owner_profile_id = ? OR i.audience = 'household' OR EXISTS \
-                 (SELECT 1 FROM {schema}item_shares s WHERE s.item_id = i.id AND s.profile_id = ?))"
+                "AND EXISTS (SELECT 1 FROM (SELECT ? AS id) me WHERE i.owner_profile_id = me.id \
+                 OR i.audience = 'household' OR EXISTS (SELECT 1 FROM {schema}item_shares s \
+                 WHERE s.item_id = i.id AND s.profile_id = me.id))"
             ),
-            vec![id.clone(), id.clone()],
+            Some(id.as_str()),
         ),
-        ProfileScope::Household => (String::new(), vec![]),
-        ProfileScope::Guest => ("AND 1 = 0".to_string(), vec![]),
+        ProfileScope::Household => (String::new(), None),
+        ProfileScope::Guest => ("AND 1 = 0".to_string(), None),
+    }
+}
+
+/// [`scope_sql`] for a detail table's rows, judged on their headers: `item_id` names the
+/// row's column (`q.item_id`). A row with no header is visible to the household alone.
+pub fn row_scope_sql<'s>(scope: &'s ProfileScope, item_id: &str) -> (String, Option<&'s str>) {
+    match scope {
+        ProfileScope::Household | ProfileScope::Guest => scope_sql(scope, ""),
+        ProfileScope::Owner(_) => {
+            let (header, bind) = scope_sql(scope, "");
+            (
+                format!("AND EXISTS (SELECT 1 FROM items i WHERE i.id = {item_id} {header})"),
+                bind,
+            )
+        }
     }
 }
 
@@ -951,6 +968,144 @@ mod tests {
         assert!(header(&pool, "memory_fragments", "m-shared")
             .await
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn every_scoped_read_is_judged_on_the_header() {
+        let (_dir, pool) = pond().await;
+        legacy_rows(&pool).await;
+        reconcile(&pool, Mode::Missing).await.unwrap();
+        let repo = SqliteMemoryRepository::new(pool.clone());
+        let ids = |rows: Vec<MemoryFragment>| {
+            let mut ids: Vec<String> = rows.into_iter().map(|m| m.id).collect();
+            ids.sort();
+            ids
+        };
+        let amina = ProfileScope::Owner("amina".into());
+        let baraka = ProfileScope::Owner("baraka".into());
+        assert_eq!(
+            ids(repo.search_recent(&amina, 10).await.unwrap()),
+            vec!["m-new", "m-shared"],
+            "her own active memory and the household's"
+        );
+        assert_eq!(
+            ids(repo.search_recent(&baraka, 10).await.unwrap()),
+            vec!["m-shared"]
+        );
+        assert!(repo
+            .search_recent(&ProfileScope::Guest, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repo.search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "the household reads every active memory, as before"
+        );
+
+        let item: String =
+            sqlx::query_scalar("SELECT item_id FROM memory_fragments WHERE id = 'm-new'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)",
+        )
+        .bind(&item)
+        .bind(timestamp::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            ids(repo.search_recent(&baraka, 10).await.unwrap()),
+            vec!["m-new", "m-shared"],
+            "a memory shared with him is his to read"
+        );
+        assert!(
+            repo.get_in_scope("m-new", &baraka).await.unwrap().is_some(),
+            "and to find by id"
+        );
+
+        let queue = SqliteSuggestionQueue::new(pool.clone());
+        let offered: Vec<String> = queue
+            .offerable(&baraka, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(offered, vec!["q-house"], "her suggestion stays hers");
+    }
+
+    #[tokio::test]
+    async fn the_headers_take_the_owners_and_archives_of_the_consolidation_repair() {
+        let (_dir, pool) = pond().await;
+        run(&pool, "INSERT INTO profiles (id, display_name) VALUES ('amina', 'Amina'), ('baraka', 'Baraka')").await;
+        // As consolidation left them: m-hers merged Amina's fact with a household one, m-both
+        // merged Amina's with Baraka's, and neither result has an owner.
+        run(
+            &pool,
+            "INSERT INTO memory_fragments (id, profile_id, content, lifecycle, superseded_by, created_at) VALUES \
+             ('a1', 'amina', 'Amina walks at six', 'merged', 'm-hers', '2026-11-01 20:00:00'), \
+             ('h1', NULL, 'The park opens at six', 'merged', 'm-hers', '2026-11-01 20:00:00'), \
+             ('m-hers', NULL, 'Amina walks when the park opens', 'active', NULL, '2026-11-01 21:00:00'), \
+             ('a2', 'amina', 'Amina takes the 7:10 bus', 'merged', 'm-both', '2026-11-01 20:00:00'), \
+             ('b1', 'baraka', 'Baraka drives to work', 'merged', 'm-both', '2026-11-01 20:00:00'), \
+             ('m-both', NULL, 'One takes the bus, one drives', 'active', NULL, '2026-11-01 21:00:00')",
+        )
+        .await;
+        run(
+            &pool,
+            "INSERT INTO memory_events (event_kind, memory_id) VALUES ('consolidated', 'm-hers'), ('consolidated', 'm-both')",
+        )
+        .await;
+
+        // The order a pond upgrading from before both migrations takes: 0081, then the backfill.
+        sqlx::raw_sql(include_str!(
+            "../migrations/system/0081_consolidation_owners.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        reconcile(&pool, Mode::Missing).await.unwrap();
+
+        let hers = header(&pool, "memory_fragments", "m-hers").await.unwrap();
+        assert_eq!(
+            (
+                hers.owner_profile_id.as_deref(),
+                hers.audience.as_str(),
+                hers.state.as_str()
+            ),
+            (Some("amina"), "private", "active")
+        );
+        let both = header(&pool, "memory_fragments", "m-both").await.unwrap();
+        assert_eq!(
+            (both.audience.as_str(), both.state.as_str()),
+            ("household", "archived"),
+            "the index serves only active headers, so nobody recalls it"
+        );
+
+        let repo = SqliteMemoryRepository::new(pool.clone());
+        let amina = ProfileScope::Owner("amina".into());
+        let baraka = ProfileScope::Owner("baraka".into());
+        let recent =
+            |rows: Vec<MemoryFragment>| -> Vec<String> { rows.into_iter().map(|m| m.id).collect() };
+        assert_eq!(
+            recent(repo.search_recent(&amina, 10).await.unwrap()),
+            vec!["m-hers"]
+        );
+        assert!(repo.search_recent(&baraka, 10).await.unwrap().is_empty());
+        assert!(
+            repo.get_in_scope("m-hers", &baraka)
+                .await
+                .unwrap()
+                .is_none(),
+            "another member's memory reads as missing, the routes' 404"
+        );
+        assert!(repo.get_in_scope("m-hers", &amina).await.unwrap().is_some());
     }
 
     #[tokio::test]
