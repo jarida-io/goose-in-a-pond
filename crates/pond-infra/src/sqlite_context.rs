@@ -22,6 +22,8 @@ use pond_core::security::ports::redactor::Redactor;
 use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::{Pool, Sqlite};
 
+use crate::sqlite_items;
+
 /// Shared by every source query so all stay in step with `SourceRow`.
 const SOURCE_COLUMNS: &str =
     "id, kind, provider, profile_id, scopes, cursor, last_sync, status, secret_ref, created_at";
@@ -407,6 +409,7 @@ impl ContextRepository for SqliteContextRepository {
     }
 
     async fn save_item(&self, item: &ContextItem) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO context_items \
              (id, source_id, external_id, profile_id, source_kind, item_kind, occurred_at, \
@@ -435,8 +438,18 @@ impl ContextRepository for SqliteContextRepository {
         .bind(json_list(item.participants()))
         .bind(sensitivity_str(item.sensitivity()))
         .bind(item.embedding().map(vec_to_blob))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        // A re-sync keeps the row first stored under this (source, external id), whatever its id.
+        let row_id: String = sqlx::query_scalar(
+            "SELECT id FROM context_items WHERE source_id = ? AND external_id = ?",
+        )
+        .bind(item.source_id())
+        .bind(item.external_id())
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlite_items::sync_context_item(&mut tx, &row_id).await?;
+        tx.commit().await?;
         // Write-through after the row is durable; `ContextItem` vectors are of redacted text.
         self.mirror(item).await;
         Ok(())

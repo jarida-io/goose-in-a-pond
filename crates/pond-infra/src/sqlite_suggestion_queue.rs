@@ -14,6 +14,8 @@ use pond_core::user_data::ports::suggestion_queue::{
 use pond_core::user_data::services::suggestion_generation::GeneratedSuggestion;
 use sqlx::{Pool, Sqlite};
 
+use crate::sqlite_items;
+
 /// Shared by every row read, so no query drifts from `QueueRow`'s field order.
 const QUEUE_COLUMNS: &str = "q.id, q.profile_id, q.prompt, q.reason, q.source_memory_id, \
      q.created_at";
@@ -79,6 +81,7 @@ impl SuggestionQueueRepository for SqliteSuggestionQueue {
         for s in suggestions {
             // The pond mints the id: a model can't be trusted to keep keys unique.
             let id = uuid::Uuid::new_v4().to_string();
+            let mut tx = self.pool.begin().await?;
             let result = sqlx::query(
                 "INSERT INTO suggestion_queue \
                  (id, profile_id, prompt, reason, source_memory_id, answered_by, created_at, state) \
@@ -91,9 +94,11 @@ impl SuggestionQueueRepository for SqliteSuggestionQueue {
             .bind(&s.reason)
             .bind(&s.source_memory_id)
             .bind(sql_ts(Utc::now()))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("queue a composed suggestion")?;
+            sqlite_items::sync_suggestion(&mut tx, &id).await?;
+            tx.commit().await?;
             stored += result.rows_affected() as usize;
         }
         Ok(stored)
@@ -121,13 +126,16 @@ impl SuggestionQueueRepository for SqliteSuggestionQueue {
 
     async fn settle(&self, id: &str, outcome: Settled) -> Result<bool> {
         // `state = 'queued'` makes a second tap report `false` rather than a second success.
+        let mut tx = self.pool.begin().await?;
         let result =
             sqlx::query("UPDATE suggestion_queue SET state = ? WHERE id = ? AND state = 'queued'")
                 .bind(outcome.as_str())
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .context("settle a suggestion")?;
+        sqlite_items::sync_suggestion(&mut tx, id).await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
