@@ -247,6 +247,7 @@ async fn make_app(installed: Arc<Installed>) -> (axum::Router, tempfile::TempDir
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     (

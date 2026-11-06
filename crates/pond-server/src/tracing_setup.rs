@@ -10,6 +10,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
+use pond_core::security::domain::developer_mode::DebugSwitch;
 use pond_core::security::domain::redaction::RedactionLevel;
 use pond_core::security::ports::event_log::OperationalLogRepository;
 use pond_core::security::ports::redactor::Redactor;
@@ -121,16 +122,21 @@ fn replace_word(text: &str, word: &str) -> String {
 pub struct LogScrubber {
     redactor: Option<Arc<dyn Redactor>>,
     names: HouseholdNames,
-    show_household_content: bool,
+    /// On only on a test Pond whose developer turned debug on; read for every entry.
+    debug: DebugSwitch,
 }
 
 impl LogScrubber {
-    /// Every Pond's setting: only a developer on a test Pond has a reason to see content.
-    pub fn household(redactor: Arc<dyn Redactor>, names: HouseholdNames) -> Self {
+    /// Every Pond's setting: content shows only while a test Pond's `debug` switch is on.
+    pub fn household(
+        redactor: Arc<dyn Redactor>,
+        names: HouseholdNames,
+        debug: DebugSwitch,
+    ) -> Self {
         Self {
             redactor: Some(redactor),
             names,
-            show_household_content: false,
+            debug,
         }
     }
 
@@ -139,7 +145,8 @@ impl LogScrubber {
         message: &str,
         fields: &mut serde_json::Map<String, serde_json::Value>,
     ) -> String {
-        if !self.show_household_content {
+        let show_household_content = self.debug.is_on();
+        if !show_household_content {
             for (name, value) in fields.iter_mut() {
                 if !HOUSEHOLD_CONTENT_FIELDS.contains(&name.as_str())
                     && !DEVELOPER_ONLY_FIELDS.contains(&name.as_str())
@@ -151,7 +158,7 @@ impl LogScrubber {
                 }
             }
         }
-        let message = if self.show_household_content {
+        let message = if show_household_content {
             message.to_string()
         } else {
             for (name, value) in fields.iter_mut() {
@@ -405,10 +412,47 @@ mod tests {
         value.as_object().cloned().expect("an object")
     }
 
+    fn on() -> DebugSwitch {
+        let debug = DebugSwitch::default();
+        debug.set(true);
+        debug
+    }
+
+    #[test]
+    fn the_debug_switch_shows_content_only_while_it_is_on() {
+        let debug = DebugSwitch::default();
+        let scrubber = LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            names(&["Amina"]),
+            debug.clone(),
+        );
+        let reply = || fields(json!({ "reply": "Amina, it is 21 degrees." }));
+
+        let mut hidden = reply();
+        assert_eq!(
+            scrubber.scrub("Amina asked", &mut hidden),
+            "[redacted:name] asked"
+        );
+        assert_eq!(hidden["reply"], "[redacted:household 24 chars]");
+
+        debug.set(true);
+        let mut shown = reply();
+        assert_eq!(scrubber.scrub("Amina asked", &mut shown), "Amina asked");
+        assert_eq!(shown["reply"], "Amina, it is 21 degrees.");
+
+        debug.set(false);
+        let mut hidden_again = reply();
+        scrubber.scrub("", &mut hidden_again);
+        assert_eq!(hidden_again["reply"], "[redacted:household 24 chars]");
+    }
+
     #[test]
     fn household_content_is_kept_as_its_length_only() {
-        let scrubber =
-            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        let scrubber = LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            HouseholdNames::default(),
+            DebugSwitch::default(),
+        );
         let mut f = fields(json!({
             "text": "remind Grace to take her tablets",
             "session_id": "6f1c2e9a-3b4d-4c5e-9f0a-1b2c3d4e5f60",
@@ -425,8 +469,11 @@ mod tests {
 
     #[test]
     fn personal_data_is_redacted_from_the_message_and_every_field() {
-        let scrubber =
-            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        let scrubber = LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            HouseholdNames::default(),
+            DebugSwitch::default(),
+        );
         let mut f = fields(json!({ "error": "no account for amina@example.com" }));
 
         let message = scrubber.scrub("sign-in failed for amina@example.com", &mut f);
@@ -437,8 +484,11 @@ mod tests {
 
     #[test]
     fn a_generated_id_is_kept_even_where_it_looks_like_a_key_or_a_phone_number() {
-        let scrubber =
-            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        let scrubber = LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            HouseholdNames::default(),
+            DebugSwitch::default(),
+        );
         // A tool call's id and a session's, as a Pond logged them and the redactor took them.
         let ids = json!({
             "tool_id": "k4EaZ7ZbU8YZAGuHOaXhOhueinXyb0FQ",
@@ -457,7 +507,7 @@ mod tests {
         let scrubber = LogScrubber {
             redactor: None,
             names: HouseholdNames::default(),
-            show_household_content: true,
+            debug: on(),
         };
         let mut f = fields(json!({ "reply": "It is 21 degrees outside." }));
         scrubber.scrub("", &mut f);
@@ -475,6 +525,7 @@ mod tests {
         let scrubber = LogScrubber::household(
             Arc::new(RuleRedactor::new()),
             names(&["Grace Wanjiku", "Amina"]),
+            DebugSwitch::default(),
         );
         let mut f = fields(json!({ "error": "no contact called Amina", "device_id": "dev-7" }));
 
@@ -513,7 +564,7 @@ mod tests {
         let scrubber = LogScrubber {
             redactor: None,
             names: names(&["Amina"]),
-            show_household_content: true,
+            debug: on(),
         };
         let mut f = fields(json!({}));
         assert_eq!(scrubber.scrub("Amina paired", &mut f), "Amina paired");
@@ -524,15 +575,19 @@ mod tests {
         let error = json!({ "tool_error": "No reminder named 'Grace's tablets'" });
 
         let mut household = fields(error.clone());
-        LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default())
-            .scrub("", &mut household);
+        LogScrubber::household(
+            Arc::new(RuleRedactor::new()),
+            HouseholdNames::default(),
+            DebugSwitch::default(),
+        )
+        .scrub("", &mut household);
         assert_eq!(household["tool_error"], "[redacted:household 35 chars]");
 
         let mut developer = fields(error);
         LogScrubber {
             redactor: None,
             names: HouseholdNames::default(),
-            show_household_content: true,
+            debug: on(),
         }
         .scrub("", &mut developer);
         assert_eq!(

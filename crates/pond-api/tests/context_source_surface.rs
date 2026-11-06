@@ -225,6 +225,7 @@ async fn make_app_inner(with_secrets: bool) -> Harness {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     Harness {

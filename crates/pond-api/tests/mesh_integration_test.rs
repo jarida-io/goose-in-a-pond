@@ -154,6 +154,7 @@ async fn make_app_with_mesh_provider_and_capabilities(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     (
@@ -282,6 +283,7 @@ async fn make_app_with_settlement_deps() -> (
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     (

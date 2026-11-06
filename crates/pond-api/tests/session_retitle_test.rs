@@ -221,6 +221,7 @@ async fn build_app(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));

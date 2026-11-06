@@ -253,6 +253,7 @@ async fn app_with(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     (
         // As the dashboard listener wires it, so host recovery can present the credential.

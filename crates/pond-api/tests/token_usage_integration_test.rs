@@ -275,6 +275,7 @@ async fn make_app() -> (axum::Router, Arc<SqliteSessionStorage>, tempfile::TempD
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     (

@@ -50,6 +50,7 @@ interactive menu.
 | `onnxruntime build` | Jetson: build ONNX Runtime from source as onnxruntime.ai documents it, in the background (hours, logged to `~/.giap/onnxruntime/build.log`, resumable), install it under `<data_dir>/lib/onnxruntime-gpu/`, remove the 2.5 GB build tree (the wheel stays in `~/.giap/onnxruntime/dist/`), then build the TensorRT engines. Stops the pond while the build needs its memory and starts it again afterwards. With the install current for the device's CUDA and TensorRT, it only checks the engines |
 | `models pairings` | Regenerate the vision pairing table from Hugging Face |
 | `wifi-grant [remove\|status]` | Linux: install, remove or report the polkit grant that lets the pond's user join Wi-Fi from the BLE setup channel (uses sudo) |
+| `test-pond [on\|off\|status]` | Mark this pond as a Jarida test Pond, whose debug switch a paired phone may turn on to show household content in the logs, or a home Pond again; run as the pond's own account. See [`pond-server test-pond`](#test-pond) |
 | `admin-card [show\|rotate]` | My Pond's admin card: make it as the pond's user, seal a recovery copy (the TPM on a Jetson, a root-only file without one, the Keychain on macOS) and, on a Jetson, let the pond's user switch power modes and restart (uses sudo). `show` prints the sealed card again; `rotate` replaces it and locks every phone. See [pond administrator](architecture/pond-administrator.md) |
 | `service-account [undo\|status]` | Linux: run the pond as its own locked system account, `agamemnon` (no password, shell `/usr/sbin/nologin`). Stops the pond, makes the account, moves the data directory to `/var/lib/goose-in-a-pond` (a link stays at the old path), writes a system unit with `User=agamemnon`, points the power rule and the Wi-Fi grant at it, and starts it (uses sudo). `undo` puts back the account, unit and data directory it came from; `status` is the doctor line. See [pond administrator](architecture/pond-administrator.md#the-service-account) |
 | `provision --host HOST --key FILE [...]` | Operator machine: save a pond's printed setup card and give it a device certificate over SSH. Must be the first argument; runs `scripts/provision-device.sh` |
@@ -127,6 +128,7 @@ directory plus `goose-in-a-pond` (`~/Library/Application Support/goose-in-a-pond
 | [`pairing`](#pairing) | Show or refresh the device pairing code |
 | [`setup-code`](#setup-code) | Show the printed setup code and its claim state |
 | [`admin-card`](#admin-card) | Make or replace the admin card that unlocks My Pond |
+| [`test-pond`](#test-pond) | Mark this pond as a Jarida test Pond, or a home Pond again |
 | [`dashboard`](#dashboard) | Print a sign-in link for the web dashboard |
 
 `ble-helper` is hidden: the server runs it as its own child for the BLE setup channel on macOS.
@@ -393,6 +395,19 @@ the next unlock. Use `bash scripts/giap.sh admin-card`, which also seals a recov
 | `--json` | Print `{"password","card_id","keys_revoked"}` instead of the card text |
 | `--rotate` | Replace the card in force; every phone unlocked with the old one locks, and every phone's own key is revoked |
 | `--status` | Print only `present` or `missing`; never makes a card. Conflicts with the other flags |
+
+### test-pond
+
+```bash
+pond-server test-pond [on|off|status]
+```
+
+Marks this pond as a Jarida test Pond (`<data_dir>/setup/test-pond`), or removes the mark;
+`status`, the default, changes nothing. On a test Pond a paired phone may turn on developer mode's
+debug switch, which makes the logs show what the household said and the members' names
+([`/developer/debug`](api.md#activity-logs-and-telemetry)). A running server sees the change
+without a restart. Run it as the account that owns the data directory; `bash scripts/giap.sh
+test-pond` does that for you.
 
 ### dashboard
 

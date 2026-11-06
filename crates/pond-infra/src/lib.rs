@@ -5,6 +5,7 @@ pub mod fcm_push_relay;
 pub mod file_admin_card;
 pub mod file_secret_repository;
 pub mod file_setup_code_store;
+pub mod file_test_pond;
 pub mod hf_cleanup;
 pub mod host_pond_admin;
 pub mod logging_device_control;

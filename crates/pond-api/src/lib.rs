@@ -4,6 +4,7 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub mod connections;
+pub mod developer;
 pub mod device_events;
 pub mod download_failure;
 pub mod host_guard;
@@ -327,6 +328,8 @@ pub struct AppState {
     pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
+    /// Developer mode: the host's test Pond mark and the logs' debug switch. The default is a home Pond.
+    pub developer: Arc<crate::developer::DeveloperMode>,
 }
 
 impl AppState {
