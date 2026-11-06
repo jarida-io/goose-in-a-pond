@@ -4373,8 +4373,11 @@ and one lifecycle sweep.**
   - full server on :4100: startup migrated a fresh copy (480 headers, 248 links), a second start
     changed nothing, the slot re-embedded 60 summaries on the GPU (109 of 109 current), and E4B's
     `recall_memories` found the stored memory through the index and answered from it, twice.
-  - **Turn recall NOT VERIFIED:** on the same store and questions it answered as the live build
-    did, neither using an injected memory, and nothing records which memories a turn was given.
+  - turn recall: a memory saved just before the question reached the turn and E4B answered from
+    it; the live build did not, one try each. An older memory that `recall_memories` finds is not
+    among the five a turn is given, on either build: on importance and recency it ranks 44th of
+    the owner's 49, so its similarity would have to beat the fifth's by 0.23. That is the turn's
+    ranking (`memory_relevance::relevance_score`), which P1 does not change.
 - **Not done:** context retention and the seven-day home-event expiry are written and tested but
   off: with the 7-day sensitive cap they would delete mail and calendar items older than a week
   (decision 12). Facts are not yet deleted when their last evidence goes (decision 13). The
