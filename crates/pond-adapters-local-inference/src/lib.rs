@@ -521,7 +521,10 @@ impl LocalInferenceLlmAdapter {
         }
         if let Ok(kv) = std::env::var("POND_KV_TYPE") {
             let kv = kv.trim();
-            if !kv.is_empty() && !kv.eq_ignore_ascii_case("auto") && !kv.eq_ignore_ascii_case("default") {
+            if !kv.is_empty()
+                && !kv.eq_ignore_ascii_case("auto")
+                && !kv.eq_ignore_ascii_case("default")
+            {
                 if let Some((k, v)) = kv.split_once(',') {
                     return Some((k.trim().to_string(), v.trim().to_string()));
                 }
