@@ -48,7 +48,8 @@ sudo apt-get install -y \
   libssl-dev \
   libasound2-dev \
   libdbus-1-dev \
-  libsqlite3-dev
+  libsqlite3-dev \
+  lld
 
 # ── 2b. Build the web UI (embedded into the single-executable server) ────────
 # pond-server embeds pond-desktop/dist at compile time (crates/pond-api/build.rs
@@ -76,7 +77,19 @@ if [ "$CUDA" = true ]; then
   SERVER_FEATURES="--features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
 fi
 
+RUST_FLAGS="${RUSTFLAGS:-}"
+if command -v ld.lld >/dev/null 2>&1; then
+  RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C link-arg=-fuse-ld=lld"
+fi
+RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C codegen-units=8"
+
+SCCACHE_ENV=""
+if command -v sccache >/dev/null 2>&1; then
+  SCCACHE_ENV="RUSTC_WRAPPER=sccache "
+fi
+
 PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+${RUST_FLAGS:+RUSTFLAGS="$RUST_FLAGS" }$SCCACHE_ENV \
 SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
 cargo build -p pond-server --bin pond-server $SERVER_FEATURES --release
 

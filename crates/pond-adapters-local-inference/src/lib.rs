@@ -290,15 +290,25 @@ impl LocalInferenceLlmAdapter {
             );
         }
 
+        let (type_k, type_v) = match Self::kv_override_from_env() {
+            Some((k, v)) => (Some(k), Some(v)),
+            None => (None, None),
+        };
+        let context_size = std::env::var("POND_CONTEXT_SIZE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
+
         let settings = ModelSettings {
             // Full offload: unified memory needs no CPU/GPU split.
             n_gpu_layers: Some(99),
-            // Goose's `estimate_max_context_for_memory()` sizes it from free RAM.
-            context_size: None,
+            // Goose's `estimate_max_context_for_memory()` sizes it from free RAM unless overridden.
+            context_size,
             // Batch 512 is optimal for Metal prefill throughput.
             n_batch: Some(512),
             // Flash attention reduces KV-cache memory by ~40%.
             flash_attention: Some(true),
+            type_k,
+            type_v,
             // Unified memory — mlock is unnecessary and can cause issues.
             use_mlock: false,
             // From the model's own chat template; see `tool_and_thinking_for`.
@@ -403,7 +413,10 @@ impl LocalInferenceLlmAdapter {
         });
         let sizing =
             pond_core::models::domain::device_budget::device_window(gguf.as_deref(), model_id);
-        let context_size = sizing.window;
+        let context_size = std::env::var("POND_CONTEXT_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(sizing.window);
         tracing::info!(
             model = model_id,
             model_mb = sizing.model_bytes / (1024 * 1024),
@@ -441,6 +454,10 @@ impl LocalInferenceLlmAdapter {
         let has_vision = sizing.encoder_bytes > 0 || has_mmproj;
         let n_ubatch = if has_vision { 512 } else { 256 };
 
+        let (type_k, type_v) = Self::kv_override_from_env()
+            .unwrap_or_else(|| ("q8_0".to_string(), "q8_0".to_string()));
+        let kv_policy = KvCachePolicy::Fixed;
+
         let jetson_settings = ModelSettings {
             // Full offload: unified memory, one 8 GB pool for CPU and GPU.
             n_gpu_layers: Some(99),
@@ -452,20 +469,9 @@ impl LocalInferenceLlmAdapter {
             n_threads: Some(4),
             // Halves KV memory on Ampere, and llama.cpp requires it for a quantised `type_v`.
             flash_attention: Some(true),
-            // f16 KV. With the windowed cache only 4 of E4B's 24 KV layers grow with the context,
-            // so f16 costs 286 MiB at 16K against q8_0's 152 (and the full-size cache's 476), and
-            // decodes faster at depth: quantised KV sends flash attention down a kernel that
-            // re-reads K/V per query head. llama-bench on the Orin, E4B QAT, depth 0/4096/8192:
-            // f16 19.5/18.4/18.1 tok/s, q8_0 18.7/17.4/16.7; E2B f16 38.1/38.1/37.0, q8_0
-            // 36.9/35.1/33.3.
-            type_k: Some("f16".to_string()),
-            type_v: Some("f16".to_string()),
-            // Unless memory is tight: goose fits the window to the memory free after the load,
-            // and when f16 would leave it under 8,192 tokens and q8_0 a wider one it takes q8_0
-            // (kind="kv_cache_type_chosen"): a ~3,300-token preamble needs about as much again
-            // for a turn, and a 5-8% slower decode is the cheaper failure. On 2026-11-02 E4B, its
-            // 945 MB encoder reserved, had 1,037 MB free, which holds 12,288 tokens in f16.
-            kv_cache_policy: KvCachePolicy::Q8WhenTight,
+            type_k: Some(type_k.clone()),
+            type_v: Some(type_v.clone()),
+            kv_cache_policy: kv_policy,
             // Prefill on the Orin (llama-bench, E4B/E2B QAT, depth 0 and 4,096): 256 is 1-6% faster
             // than 128 and 512 is slower than both. The compute buffer no longer scales with it:
             // the engine reserves logits for one output, not for every ubatch token.
@@ -490,6 +496,8 @@ impl LocalInferenceLlmAdapter {
                 } else {
                     tracing::info!(
                         rows = ?applied,
+                        type_k = %type_k,
+                        type_v = %type_v,
                         "Applied Jetson Orin Nano CUDA settings"
                     );
                 }
@@ -501,6 +509,29 @@ impl LocalInferenceLlmAdapter {
                 );
             }
         }
+    }
+
+    fn kv_override_from_env() -> Option<(String, String)> {
+        if let (Ok(k), Ok(v)) = (std::env::var("POND_TYPE_K"), std::env::var("POND_TYPE_V")) {
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() && !v.is_empty() {
+                return Some((k.to_string(), v.to_string()));
+            }
+        }
+        if let Ok(kv) = std::env::var("POND_KV_TYPE") {
+            let kv = kv.trim();
+            if !kv.is_empty()
+                && !kv.eq_ignore_ascii_case("auto")
+                && !kv.eq_ignore_ascii_case("default")
+            {
+                if let Some((k, v)) = kv.split_once(',') {
+                    return Some((k.trim().to_string(), v.trim().to_string()));
+                }
+                return Some((kv.to_string(), kv.to_string()));
+            }
+        }
+        None
     }
 
     /// Stamps `settings` on every row resolving to `model_id`'s GGUF: those ids share one slot.
@@ -551,61 +582,8 @@ impl LocalInferenceLlmAdapter {
     }
 }
 
-/// Strip reasoning preambles: everything up to Gemma 4's last `<channel|>`, else `<thought>`
-/// or `<think>` blocks (Qwen3, DeepSeek-R1, QwQ).
 fn strip_thinking_tokens(text: &str) -> String {
-    const CHANNEL_CLOSE: &str = "<channel|>";
-    if let Some(pos) = text.rfind(CHANNEL_CLOSE) {
-        return text[pos + CHANNEL_CLOSE.len()..].trim().to_string();
-    }
-
-    if text.contains("<thought>") {
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        loop {
-            if let Some(start) = rest.find("<thought>") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</thought>") {
-                    rest = &rest[start + end + "</thought>".len()..];
-                } else {
-                    break; // unclosed — discard tail
-                }
-            } else {
-                out.push_str(rest);
-                break;
-            }
-        }
-        let trimmed = out.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-        return String::new();
-    }
-
-    if text.contains("<think>") {
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
-        loop {
-            if let Some(start) = rest.find("<think>") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</think>") {
-                    rest = &rest[start + end + "</think>".len()..];
-                } else {
-                    // Unclosed <think> — discard the rest
-                    break;
-                }
-            } else {
-                out.push_str(rest);
-                break;
-            }
-        }
-        let trimmed = out.trim().to_string();
-        if !trimmed.is_empty() {
-            return trimmed;
-        }
-    }
-
-    text.to_string()
+    pond_core::models::services::thought_filter::strip_reasoning(text)
 }
 
 #[async_trait]

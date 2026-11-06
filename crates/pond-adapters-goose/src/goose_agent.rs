@@ -5096,7 +5096,11 @@ impl GooseAdapter {
         // stock subagent. Static prefix only: the suffix is date/time/profile lines.
         let partition = build_prompt_partition(&settings, None, &prompt_state, &template_content);
 
-        let goose_sid = self.resolve_goose_session(parent_session_id).await;
+        let goose_sid = if parent_session_id.starts_with("sched-") {
+            parent_session_id.to_string()
+        } else {
+            self.resolve_goose_session(parent_session_id).await
+        };
         let mut parent_tools: std::collections::BTreeMap<
             String,
             std::collections::BTreeSet<String>,

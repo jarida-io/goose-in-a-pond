@@ -186,7 +186,7 @@ build_jetson_native() {
   sudo apt-get update -qq
   sudo apt-get install -y -qq \
     build-essential pkg-config cmake \
-    libssl-dev libasound2-dev libdbus-1-dev libsqlite3-dev
+    libssl-dev libasound2-dev libdbus-1-dev libsqlite3-dev lld
 
   local features=""
   if [ "$CUDA" = true ]; then

@@ -2513,7 +2513,7 @@ mod tests {
                 &meta,
                 params(serde_json::json!({"steps": [
                     {"key": "a", "role": "r", "instructions": "x"},
-                    {"key": "b", "role": "r", "instructions": 5},
+                    {"key": "b", "role": 5, "instructions": "y"},
                     {"key": "c", "role": "r"},
                 ]})),
             )

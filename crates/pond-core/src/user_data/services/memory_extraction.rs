@@ -620,6 +620,11 @@ impl BatchExtractionService {
             && self.health.is_stale()
     }
 
+    /// Whether the embedder's failure budget still allows another pass once it is loaded on demand.
+    pub fn health_is_usable(&self) -> bool {
+        self.health.is_stale()
+    }
+
     /// Run one pass: up to `sessions_per_pass` windows, one per conversation.
     pub async fn run_pass(
         &self,

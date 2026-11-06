@@ -583,6 +583,13 @@ pub fn embedder_room_mb(available_mb: u64, in_use_returns_mb: u64) -> u64 {
     (available_mb + in_use_returns_mb).saturating_sub(EMBEDDER_MARGIN_MB)
 }
 
+/// Whether the Memory model may stay loaded between passes: a loaded one while MemAvailable keeps
+/// [`EMBEDDER_MARGIN_MB`], an unloaded one when it also covers `estimate_mb`. No reading never refuses.
+pub fn embedder_may_stay(available_mb: Option<u64>, loaded: bool, estimate_mb: u64) -> bool {
+    let needed = EMBEDDER_MARGIN_MB + if loaded { 0 } else { estimate_mb };
+    available_mb.is_none_or(|a| a >= needed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1211,6 +1218,26 @@ mod tests {
             ALL_MINILM_L6_V2.ram_estimate_mb()
         );
         assert_eq!(embedder_room_mb(EMBEDDER_MARGIN_MB - 1, 0), 0);
+    }
+
+    #[test]
+    fn the_memory_model_stays_while_the_margin_holds_and_loads_only_with_room_for_itself() {
+        let est = 50;
+        assert!(
+            embedder_may_stay(None, false, est),
+            "no reading never refuses"
+        );
+        assert!(embedder_may_stay(Some(EMBEDDER_MARGIN_MB), true, est));
+        assert!(!embedder_may_stay(Some(EMBEDDER_MARGIN_MB - 1), true, est));
+        assert!(embedder_may_stay(
+            Some(EMBEDDER_MARGIN_MB + est),
+            false,
+            est
+        ));
+        assert!(
+            !embedder_may_stay(Some(EMBEDDER_MARGIN_MB + est - 1), false, est),
+            "what an unload gives back does not at once buy the room to load again"
+        );
     }
 
     /// A model the room fits leaves the margin on whichever placement the pond then picks.

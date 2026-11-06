@@ -93,6 +93,7 @@ struct View {
 
 struct Inner {
     deps: RoomDeps,
+    stopping: std::sync::atomic::AtomicBool,
     enabled: watch::Sender<bool>,
     events: broadcast::Sender<RoomEvent>,
     view: Mutex<View>,
@@ -130,6 +131,7 @@ impl RoomVoice {
     pub fn start(deps: RoomDeps, enabled: bool, wake: RoomWake) -> Arc<RoomVoice> {
         let inner = Arc::new(Inner {
             deps,
+            stopping: std::sync::atomic::AtomicBool::new(false),
             enabled: watch::channel(enabled).0,
             events: broadcast::channel(EVENT_BACKLOG).0,
             view: Mutex::new(View {
@@ -157,6 +159,9 @@ impl RoomVoice {
 
     /// Stop the loop and wait for it, before serve releases the model.
     pub async fn shutdown(&self) {
+        self.inner
+            .stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.inner.enabled.send_replace(false);
         let task = lock(&self.task).take();
         if let Some(task) = task {
@@ -452,13 +457,9 @@ impl Inner {
         {
             return Err(RoomUnavailable::ModelsMissing);
         }
-        let held = if take_lock {
-            Some(VoiceLock::acquire().map_err(|_| RoomUnavailable::VoiceRunningElsewhere)?)
-        } else if VoiceLock::is_free() {
-            None
-        } else {
+        if !VoiceLock::is_free() {
             return Err(RoomUnavailable::VoiceRunningElsewhere);
-        };
+        }
         let pair = self
             .deps
             .audio
@@ -467,6 +468,11 @@ impl Inner {
         if !pair {
             return Err(RoomUnavailable::NoMicSpeakerPair);
         }
+        let held = if take_lock {
+            Some(VoiceLock::acquire().map_err(|_| RoomUnavailable::VoiceRunningElsewhere)?)
+        } else {
+            None
+        };
         Ok(held)
     }
 
@@ -523,6 +529,9 @@ async fn supervise(inner: Arc<Inner>) {
     // switched on, rather than wait for a device to change.
     let mut tested = false;
     loop {
+        if inner.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         let on = *enabled.borrow_and_update();
         tested &= on;
         let settings = inner.deps.settings.get().await.unwrap_or_default();
@@ -612,6 +621,9 @@ async fn supervise(inner: Arc<Inner>) {
             }
         }
         drop(lock_held);
+        if inner.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         said = None;
     }
 }

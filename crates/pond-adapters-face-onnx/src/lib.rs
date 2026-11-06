@@ -306,13 +306,12 @@ pub use pond_core::models::domain::acceleration::{
     FACE_EMBEDDER as EMBEDDER_NAME,
 };
 
-/// What the GPU warm-up feeds the embedder: one aligned crop.
 pub fn embedder_spec(model: EmbeddingModel) -> ModelSpec {
     let side = model.input_size() as i64;
     ModelSpec {
         name: EMBEDDER_NAME,
         input_shape: vec![1, 3, side, side],
-        gpu: true,
+        gpu: false,
     }
 }
 

@@ -45,7 +45,14 @@ _cc_mac() {
   vm_stat 2>/dev/null | awk -v total="${total:-0}" '
     /page size of/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) ps = $i }
     /^Pages active/ { a = $NF } /^Pages wired down/ { w = $NF } /occupied by compressor/ { c = $NF }
-    END { printf "mem_total_kb=%d\nmem_used_kb=%d\n", total / 1024, (a + w + c) * ps / 1024 }'
+    /^Pages free/ { f = $NF } /^Pages speculative/ { spec = $NF } /^Pages inactive/ { inact = $NF }
+    END {
+      used_kb = (a + w + c) * ps / 1024
+      free_kb = (f + inact) * ps / 1024
+      cached_kb = (spec + inact) * ps / 1024
+      printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_free_kb=%d\nmem_avail_kb=%d\nmem_cached_kb=%d\n",
+        total / 1024, used_kb, free_kb, free_kb, cached_kb
+    }'
   sysctl -n vm.swapusage 2>/dev/null | awk '{
     for (i = 1; i <= NF; i++) { if ($i == "total") t = $(i + 2); if ($i == "used") u = $(i + 2) }
     printf "swap_total_kb=%d\nswap_used_kb=%d\n", t * 1024, u * 1024 }'
@@ -70,8 +77,21 @@ _cc_linux() {
   fi
   awk '/^cpu/ { tot = 0; for (i = 2; i <= NF; i++) tot += $i
     k = ($1 == "cpu") ? "cpu_raw" : "core_raw_" substr($1, 4); printf "%s=%d %d\n", k, tot, $5 + $6 }' /proc/stat
-  awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } /^SwapTotal:/ { st = $2 } /^SwapFree:/ { sf = $2 }
-    END { printf "mem_total_kb=%d\nmem_used_kb=%d\nswap_total_kb=%d\nswap_used_kb=%d\n", t, t - a, st, st - sf }' /proc/meminfo
+  awk '/^MemTotal:/ { t = $2 } /^MemFree:/ { f = $2 } /^MemAvailable:/ { a = $2 }
+       /^Buffers:/ { b = $2 } /^Cached:/ { c = $2 } /^Slab:/ { sl = $2 }
+       /^SwapTotal:/ { st = $2 } /^SwapFree:/ { sf = $2 }
+    END {
+      if (a == 0) a = f + b + c
+      printf "mem_total_kb=%d\nmem_used_kb=%d\nmem_free_kb=%d\nmem_avail_kb=%d\nmem_cached_kb=%d\nmem_slab_kb=%d\nswap_total_kb=%d\nswap_used_kb=%d\n",
+        t, t - a, f, a, c + b, sl, st, st - sf }' /proc/meminfo
+  if [ -r /proc/swaps ]; then
+    awk 'NR > 1 {
+      if ($1 ~ /^\/dev\/zram/) { zt += $3; zu += $4 }
+      else { ft += $3; fu += $4 }
+    } END {
+      printf "swap_zram_total_kb=%d\nswap_zram_used_kb=%d\nswap_file_total_kb=%d\nswap_file_used_kb=%d\n", zt, zu, ft, fu
+    }' /proc/swaps
+  fi
   awk '{ printf "uptime_s=%d\n", $1 }' /proc/uptime
   for f in /sys/devices/platform/bus@0/*.gpu/load /sys/devices/platform/*.gpu/load /sys/devices/platform/gpu.0/load; do
     [ -r "$f" ] && { echo "gpu_pct=$(( $(cat "$f" 2>/dev/null || echo 0) / 10 ))"; break; }
@@ -129,9 +149,52 @@ _cc_pond() {
   log="$(pond_log_today "$d")"
   echo "log_path=$log"
   [ "$full" = 1 ] || return 0
+  local cur_model=""
   if command -v sqlite3 >/dev/null 2>&1 && [ -f "$d/pond_system.db" ]; then
     sqlite3 "$d/pond_system.db" "SELECT key || '=' || value FROM settings WHERE key IN ('chat_model','chat_provider','thinking_mode');" 2>/dev/null
+    cur_model="$(sqlite3 "$d/pond_system.db" "SELECT value FROM settings WHERE key = 'chat_model';" 2>/dev/null)"
+    local sess_stats=""
+    sess_stats="$(sqlite3 "$d/pond_system.db" "
+      SELECT
+        coalesce((SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1), ''),
+        coalesce((SELECT count(*) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+        coalesce((SELECT sum(length(content)) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+        coalesce((SELECT count(*) FROM memory_fragments WHERE lifecycle = 'active'), 0),
+        coalesce((SELECT count(*) FROM user_skills WHERE active = 1), 0),
+        coalesce((SELECT count(*) FROM mcp_servers WHERE enabled = 1), 0);
+    " 2>/dev/null)"
+    if [ -n "$sess_stats" ]; then
+      awk -F'|' '{
+        if ($1 != "") printf "ctx_session_id=%s\n", $1
+        printf "ctx_session_msgs=%d\nctx_session_chars=%d\nctx_memories_cnt=%d\nctx_skills_cnt=%d\nctx_mcp_cnt=%d\n",
+          $2, $3, $4, $5, $6
+      }' <<< "$sess_stats"
+    fi
   fi
+  ps -eo rss,args 2>/dev/null | awk '
+    /matter-server/ && !/awk/ { mat += $1 }
+    /pondnet/ && !/awk/ { pnet += $1 }
+    /music\/src\/server/ && !/awk/ { mus += $1 }
+    /(pond-desktop|electron)/ && !/awk/ { dsk += $1 }
+    /gst-launch/ && !/awk/ { cam += $1 }
+    END {
+      if (mat > 0) printf "rss_matter_kb=%d\n", mat
+      if (pnet > 0) printf "rss_pondnet_kb=%d\n", pnet
+      if (mus > 0) printf "rss_music_kb=%d\n", mus
+      if (dsk > 0) printf "rss_desktop_kb=%d\n", dsk
+      if (cam > 0) printf "rss_camera_kb=%d\n", cam
+    }'
+  local model_mb=""
+  if [ -f "$log" ]; then
+    model_mb="$(grep -aE 'model_mb=[0-9]+' "$log" 2>/dev/null | tail -1 | sed -n 's/.*model_mb=\([0-9]*\).*/\1/p' | tr -d '\000\r\n')"
+  fi
+  if [ -z "$model_mb" ] && [ -n "$cur_model" ]; then
+    local mf="$d/models/gguf/${cur_model}.gguf"
+    if [ -r "$mf" ]; then
+      model_mb="$(ls -lLn "$mf" 2>/dev/null | awk '{print int($5 / 1048576)}')"
+    fi
+  fi
+  [ -n "$model_mb" ] && [ "$model_mb" -gt 0 ] && echo "model_mb=$model_mb"
   pond_engine_state "$log" "$os"
   echo "engine=$POND_ENGINE"; echo "engine_failed=$POND_ENGINE_FAILED"
   pond_mtp_state "$log"
@@ -139,6 +202,51 @@ _cc_pond() {
   echo "mtp_logged=$POND_MTP_LOGGED"; echo "mtp_failed=$POND_MTP_FAILED"
   pond_kv_state "$log"
   echo "kv_saved=$POND_KV_SAVED"; echo "kv_loaded=$POND_KV_LOADED"; echo "kv_not_written=$POND_KV_NOT_WRITTEN"
+  local kv_t="" ctx_cfg=""
+  if [ -r "$d/kv.env" ]; then
+    kv_t="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$d/kv.env" 2>/dev/null | tail -1)"
+    ctx_cfg="$(sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$d/kv.env" 2>/dev/null | tail -1)"
+  fi
+  [ -n "$kv_t" ] && echo "kv_type=$kv_t"
+  [ -n "$ctx_cfg" ] && echo "ctx_configured=$ctx_cfg"
+  if [ -f "$log" ]; then
+    local ctx_line last_inf
+    ctx_line="$(grep -a 'kind="context_sized"' "$log" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    last_inf="$(grep -aE 'kind="(inference|turn_end)"' "$log" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    awk -v cl="$ctx_line" -v il="$last_inf" -v cfg="$ctx_cfg" '
+      function f(s, k,   r) {
+        if (match(s, " " k "=\"[^\"]+\"")) return substr(s, RSTART + length(k) + 3, RLENGTH - length(k) - 4)
+        if (match(s, " " k "=[^ ]+")) return substr(s, RSTART + length(k) + 2, RLENGTH - length(k) - 2)
+        return ""
+      }
+      BEGIN {
+        nctx = f(cl, "n_ctx") + 0
+        req  = f(cl, "requested") + 0
+        rsn  = f(cl, "reason")
+        kib  = f(cl, "kv_kib_per_token") + 0
+        slmb = f(cl, "sliding_kv_mb") + 0
+        swa  = f(cl, "n_swa") + 0; if (swa <= 0) swa = 512
+        bud  = f(cl, "kv_budget_mb") + 0
+        lim  = f(il, "context_limit_tokens") + 0
+        if (nctx <= 0) nctx = (lim > 0 ? lim : cfg + 0)
+        pt   = f(il, "prompt_tokens") + 0
+        ct   = f(il, "completion_tokens") + 0
+        if (ct <= 0) ct = f(il, "output_tokens") + 0
+        used = pt + ct
+        if (nctx > 0) printf "ctx_max=%d\n", nctx
+        if (req > 0)  printf "ctx_req=%d\n", req
+        if (rsn != "") printf "ctx_reason=%s\n", rsn
+        printf "ctx_used=%d\n", used
+        if (nctx > 0) printf "ctx_pct=%d\n", int(100 * used / nctx + 0.5)
+        if (kib > 0) {
+          alloc_mb = int(slmb + (nctx * kib) / 1024 + 0.5)
+          swa_frac = (used >= swa ? 1.0 : (used > 0 ? used / swa : 0.0))
+          used_mb  = (used > 0 ? int(slmb * swa_frac + (used * kib) / 1024 + 0.5) : 0)
+          printf "kv_kib_tok=%d\nkv_sliding_mb=%d\nkv_alloc_mb=%d\nkv_used_mb=%d\n", kib, slmb, alloc_mb, used_mb
+        }
+        if (bud > 0) printf "kv_budget_mb=%d\n", bud
+      }'
+  fi
   # The last turns as `turn=<time> <ttft ms> <decode tok/s> <prompt> <completion> <draft rate>`.
   [ -f "$log" ] && grep -a 'kind="turn_end"' "$log" 2>/dev/null | tail -60 | awk '
     function f(k,   m) { if (match($0, " " k "=[^ ]+")) return substr($0, RSTART + length(k) + 2, RLENGTH - length(k) - 2); return "-" }

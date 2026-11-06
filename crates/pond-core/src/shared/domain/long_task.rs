@@ -667,7 +667,14 @@ pub struct StepDraft {
     /// A new agent for this step, when no saved role fits.
     #[serde(default, alias = "custom_agent")]
     pub new_agent: Option<StepAgent>,
-    #[serde(alias = "task", alias = "instruction")]
+    #[serde(
+        alias = "task",
+        alias = "instruction",
+        alias = "description",
+        alias = "prompt",
+        alias = "action",
+        deserialize_with = "string_or_lines"
+    )]
     pub instructions: String,
     /// Artifact ids the step starts from; it is shown their summaries, never their bodies.
     #[serde(
@@ -685,7 +692,12 @@ pub struct StepDraft {
         deserialize_with = "one_or_many"
     )]
     pub depends_on: Vec<String>,
-    #[serde(default, alias = "acceptance_check", alias = "check")]
+    #[serde(
+        default,
+        alias = "acceptance_check",
+        alias = "check",
+        deserialize_with = "optional_string_or_lines"
+    )]
     pub acceptance: Option<String>,
 }
 
@@ -701,6 +713,9 @@ pub const STEP_DRAFT_FIELDS: &[&str] = &[
     "instructions",
     "task",
     "instruction",
+    "description",
+    "prompt",
+    "action",
     "inputs",
     "input",
     "artifacts",
@@ -777,6 +792,15 @@ pub fn read_step_draft(
                     }
                 }
             }
+            for key_field in ["key", "id", "step_key"] {
+                if let Some(serde_json::Value::Number(n)) = read.get(key_field).cloned() {
+                    names.push(n.to_string());
+                    read.insert(
+                        key_field.to_string(),
+                        serde_json::Value::String(format!("step-{n}")),
+                    );
+                }
+            }
             let keyed = ["key", "id", "step_key"]
                 .iter()
                 .any(|name| read.get(*name).is_some_and(|value| !value.is_null()));
@@ -823,12 +847,12 @@ pub struct ReadStep {
     pub names: Vec<String>,
 }
 
-/// Point waits that name a step by its name or title at that step's key: the planner often waits
-/// for "Gather camera events" while keying the step `step-1`.
+/// Point waits that name a step by its name, title or 1-based place at that step's key: the
+/// planner often waits for "Gather camera events" or `1` while keying the step differently.
 pub fn match_waits_by_name(steps: &mut [ReadStep]) {
     let slug = |raw: &str| suggest_key(raw).unwrap_or_else(|| raw.trim().to_ascii_lowercase());
     let keys: Vec<String> = steps.iter().map(|step| slug(&step.draft.key)).collect();
-    let named: Vec<(String, String)> = steps
+    let mut named: Vec<(String, String)> = steps
         .iter()
         .flat_map(|step| {
             step.names
@@ -836,6 +860,15 @@ pub fn match_waits_by_name(steps: &mut [ReadStep]) {
                 .map(|name| (slug(name), step.draft.key.clone()))
         })
         .collect();
+    for (idx, step) in steps.iter().enumerate() {
+        let place = idx + 1;
+        for alias in [place.to_string(), format!("step-{place}")] {
+            let wanted = slug(&alias);
+            if !keys.contains(&wanted) && !named.iter().any(|(n, _)| *n == wanted) {
+                named.push((wanted, step.draft.key.clone()));
+            }
+        }
+    }
     for step in steps.iter_mut() {
         for wait in &mut step.draft.depends_on {
             let wanted = slug(wait);
@@ -854,6 +887,13 @@ pub fn match_waits_by_name(steps: &mut [ReadStep]) {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepAgent {
     pub name: String,
+    #[serde(
+        alias = "task",
+        alias = "instruction",
+        alias = "description",
+        alias = "prompt",
+        deserialize_with = "string_or_lines"
+    )]
     pub instructions: String,
     #[serde(default, alias = "tool_groups", deserialize_with = "one_or_many")]
     pub tools: Vec<String>,
@@ -878,19 +918,102 @@ impl StepAgent {
     }
 }
 
-/// A small model writes `"a, b"` or `"a"` where a list belongs; keys and ids never hold commas.
-fn one_or_many<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum OneOrMany {
-        One(String),
-        Many(Vec<String>),
+fn string_or_lines<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(optional_string_or_lines(deserializer)?.unwrap_or_default())
+}
+
+fn optional_string_or_lines<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let mut parts = Vec::new();
+    collect_line_parts(&value, &mut parts);
+    if parts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parts.join("\n")))
     }
-    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
-        None => Vec::new(),
-        Some(OneOrMany::One(text)) => text.split(',').map(str::to_string).collect(),
-        Some(OneOrMany::Many(items)) => items,
-    })
+}
+
+fn collect_line_parts(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => {}
+        serde_json::Value::Number(n) => out.push(n.to_string()),
+        serde_json::Value::String(text) => {
+            if !text.trim().is_empty() {
+                out.push(text.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_line_parts(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for val in map.values() {
+                collect_line_parts(val, out);
+            }
+        }
+    }
+}
+
+/// A small model writes `"a, b"`, `"a"`, `[1, 2]` or `[{"id": "a"}]` where a string list belongs.
+fn one_or_many<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    collect_one_or_many(&value, &mut out);
+    Ok(out)
+}
+
+fn collect_one_or_many(value: &serde_json::Value, out: &mut Vec<String>) {
+    const HANDLE_FIELDS: &[&str] = &[
+        "id",
+        "key",
+        "step",
+        "step_key",
+        "step_id",
+        "artifact",
+        "artifact_id",
+        "name",
+        "tool",
+        "group",
+    ];
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => {}
+        serde_json::Value::Number(n) => out.push(n.to_string()),
+        serde_json::Value::String(text) => {
+            out.extend(text.split(',').map(str::to_string));
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_one_or_many(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let mut matched_handle = false;
+            for &field in HANDLE_FIELDS {
+                if let Some(v) = map.get(field) {
+                    matched_handle = true;
+                    collect_one_or_many(v, out);
+                }
+            }
+            if !matched_handle {
+                for (k, v) in map {
+                    match v {
+                        serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+                            collect_one_or_many(v, out);
+                        }
+                        serde_json::Value::Bool(true) => out.push(k.clone()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One step of a plan. Only [`validate_plan`] makes a new one and only its methods move it.
@@ -2935,6 +3058,59 @@ mod draft_tests {
                 "Gather camera events".to_string()
             ],
             "`step: 1` names the step `step-1` too"
+        );
+    }
+
+    #[test]
+    fn a_draft_reads_numeric_and_object_lists_in_inputs_and_depends_on() {
+        let mut steps = vec![
+            read_step_draft(
+                serde_json::json!({
+                    "id": 1,
+                    "name": "Check prices",
+                    "role": "long-task-worker",
+                    "instructions": ["Find Swift prices", "Record fuel use"],
+                    "inputs": false,
+                    "depends_on": []
+                }),
+                1,
+            )
+            .unwrap(),
+            read_step_draft(
+                serde_json::json!({
+                    "key": "compare",
+                    "new_agent": {
+                        "name": "Financial Analyst",
+                        "instructions": "Model ownership cost",
+                        "tools": [{"tool": "giap-knowledge"}, {"giap-memory": true}]
+                    },
+                    "instructions": "Compare against budget",
+                    "inputs": [{"id": "art-1"}, {"artifact_id": "art-2"}],
+                    "depends_on": [1, {"step": "step-1"}]
+                }),
+                2,
+            )
+            .unwrap(),
+        ];
+        match_waits_by_name(&mut steps);
+        assert_eq!(steps[0].draft.key, "step-1");
+        assert_eq!(
+            steps[0].draft.instructions,
+            "Find Swift prices\nRecord fuel use"
+        );
+        assert!(steps[0].draft.inputs.is_empty());
+        assert_eq!(
+            steps[1].draft.inputs,
+            vec!["art-1".to_string(), "art-2".to_string()]
+        );
+        assert_eq!(
+            steps[1].draft.depends_on,
+            vec!["step-1".to_string(), "step-1".to_string()]
+        );
+        let agent = steps[1].draft.new_agent.as_ref().unwrap();
+        assert_eq!(
+            agent.tools,
+            vec!["giap-knowledge".to_string(), "giap-memory".to_string()]
         );
     }
 }

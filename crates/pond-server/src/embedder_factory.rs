@@ -104,8 +104,7 @@ impl ServerEmbedderFactory {
 
     #[cfg(feature = "local-inference")]
     async fn gguf(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
-        use pond_core::models::domain::device_budget::embedder_on_gpu;
-        use pond_inference::{EmbeddingModelSpec, Placement};
+        use pond_inference::EmbeddingModelSpec;
 
         let file = model
             .gguf()
@@ -118,37 +117,6 @@ impl ServerEmbedderFactory {
             ));
         }
         let spec = EmbeddingModelSpec::resolve(model.name)?;
-        // Read and loaded with no generation running: a chore making its context beside them would
-        // leave the reading stale and stack the two allocations.
-        let on_gpu = {
-            let _setup = self.setup_for_load().await;
-            let available = mem_available_mb();
-            if embedder_on_gpu(
-                pond_adapters_local_inference::CUDA_ENABLED,
-                model.model_id,
-                available,
-            ) {
-                let gpu = spec.clone().with_placement(Placement::Gpu);
-                Some((available, self.loaded(gpu, file.filename).await))
-            } else {
-                None
-            }
-        };
-        if let Some((available, gpu)) = on_gpu {
-            let warmed = match gpu {
-                Ok(provider) => Self::warmed(provider, file.filename).await,
-                Err(e) => Err(e),
-            };
-            match warmed {
-                Ok(provider) => return Ok(provider),
-                // NvMap can refuse a load that MemAvailable said would fit; the CPU still serves.
-                Err(e) => tracing::warn!(
-                    model = model.name,
-                    available_mb = ?available,
-                    "the embedder did not load on the GPU, so it runs on the CPU: {e:#}"
-                ),
-            }
-        }
         let provider = {
             let _setup = self.setup_for_load().await;
             self.loaded(spec, file.filename).await?
@@ -219,20 +187,6 @@ impl ServerEmbedderFactory {
             pond_api::model_acquisition::restore_model(state, &id).await;
         });
     }
-}
-
-/// `MemAvailable` in MB; `None` off Linux or when unreadable.
-#[cfg(feature = "local-inference")]
-fn mem_available_mb() -> Option<u64> {
-    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: u64 = info
-        .lines()
-        .find_map(|l| l.strip_prefix("MemAvailable:"))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    Some(kb / 1024)
 }
 
 #[async_trait]

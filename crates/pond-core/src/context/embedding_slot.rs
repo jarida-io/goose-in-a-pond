@@ -233,6 +233,65 @@ impl EmbeddingSlot {
         self.tidy_owed = true;
     }
 
+    /// Checks whether any corpus has rows needing a vector from the chosen model before loading
+    /// the embedder into memory; tidies orphans while the index is already current.
+    pub async fn has_pending_work(
+        &mut self,
+        stores: &SlotStores<'_>,
+        embedder: &ActiveEmbedder,
+    ) -> bool {
+        let model_id = embedder.model_id();
+        if model_id.is_empty() {
+            return false;
+        }
+        let generation = embedder.generation();
+        if self.generation != Some(generation) {
+            if self.generation.is_some() {
+                self.sizer = BatchSizer::new(BATCH_BUDGET);
+            }
+            self.generation = Some(generation);
+            self.passed_over.clear();
+            self.tidy_owed = true;
+        }
+        for corpus in ORDER {
+            if corpus == Corpus::Context && stores.context.is_none() {
+                continue;
+            }
+            loop {
+                let passed_over = self
+                    .passed_over
+                    .iter()
+                    .filter(|(c, _)| *c == corpus)
+                    .count();
+                let limit = ROWS_PER_READ + passed_over;
+                let Ok(rows) = read_corpus(stores, &model_id, corpus, limit).await else {
+                    return false;
+                };
+                let read = rows.len();
+                let before = self.passed_over.len();
+                for work in rows {
+                    let key = work.key();
+                    if self.passed_over.contains(&key) {
+                        continue;
+                    }
+                    if work.spans.is_empty() {
+                        self.passed_over.insert(key);
+                        continue;
+                    }
+                    return true;
+                }
+                if read < limit || self.passed_over.len() == before {
+                    break;
+                }
+            }
+        }
+        if self.tidy_owed {
+            self.tidy_owed = false;
+            tidy(stores.index, &model_id).await;
+        }
+        false
+    }
+
     /// Embeds what the current model lacks, memory first, until the backlog is empty or
     /// `control` says stop. Every vector is made and stored under one lease, so it carries the
     /// model that made it.
@@ -290,6 +349,41 @@ impl EmbeddingSlot {
             report.orphans_pruned = tidy(stores.index, &model_id).await;
         }
         report.ended(PassEnd::Drained)
+    }
+}
+
+async fn read_corpus(
+    stores: &SlotStores<'_>,
+    model_id: &str,
+    corpus: Corpus,
+    limit: usize,
+) -> Result<Vec<Work>> {
+    let index = stores.index;
+    match corpus {
+        Corpus::Summary => {
+            let ids = index.needs_embedding(corpus, model_id, limit).await?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in dedupe(ids) {
+                let (summary, rev) = stores
+                    .sessions
+                    .get_rolling_summary_with_revision(&id)
+                    .await
+                    .map_err(|e| anyhow!("{e}"))?;
+                out.push(Work::new(corpus, id, summary.unwrap_or_default(), rev));
+            }
+            Ok(out)
+        }
+        _ => {
+            let rows = index
+                .needs_embedding_with_text(corpus, model_id, limit)
+                .await?;
+            let mut seen = HashSet::with_capacity(rows.len());
+            Ok(rows
+                .into_iter()
+                .filter(|(id, _)| seen.insert(id.clone()))
+                .map(|(id, text)| Work::new(corpus, id, text, None))
+                .collect())
+        }
     }
 }
 
@@ -372,35 +466,7 @@ impl Pass<'_, '_> {
     }
 
     async fn read(&self, corpus: Corpus, limit: usize) -> Result<Vec<Work>> {
-        let index = self.stores.index;
-        match corpus {
-            Corpus::Summary => {
-                let ids = index.needs_embedding(corpus, self.model_id, limit).await?;
-                let mut out = Vec::with_capacity(ids.len());
-                for id in dedupe(ids) {
-                    // Read together, or a racing rewrite stamps a newer revision than the text.
-                    let (summary, rev) = self
-                        .stores
-                        .sessions
-                        .get_rolling_summary_with_revision(&id)
-                        .await
-                        .map_err(|e| anyhow!("{e}"))?;
-                    out.push(Work::new(corpus, id, summary.unwrap_or_default(), rev));
-                }
-                Ok(out)
-            }
-            _ => {
-                let rows = index
-                    .needs_embedding_with_text(corpus, self.model_id, limit)
-                    .await?;
-                let mut seen = HashSet::with_capacity(rows.len());
-                Ok(rows
-                    .into_iter()
-                    .filter(|(id, _)| seen.insert(id.clone()))
-                    .map(|(id, text)| Work::new(corpus, id, text, None))
-                    .collect())
-            }
-        }
+        read_corpus(self.stores, self.model_id, corpus, limit).await
     }
 
     fn pass_over(&mut self, key: (Corpus, String)) {

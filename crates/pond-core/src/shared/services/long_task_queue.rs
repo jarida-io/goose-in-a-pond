@@ -9,13 +9,15 @@ const GOAL_CHARS: usize = 80;
 /// finishes the task at the front before it starts the next, so the first answer comes as soon as
 /// one slot can give it, and a member can see where a task stands and stop what they no longer need.
 pub fn run_order(tasks: &[LongTask]) -> Vec<&LongTask> {
+    use crate::shared::services::agent_activations::is_activation_task;
     let mut open: Vec<&LongTask> = tasks
         .iter()
         .filter(|t| matches!(t.state(), LongTaskState::Planning | LongTaskState::Running))
         .collect();
     open.sort_by(|a, b| {
-        a.created_at()
-            .cmp(&b.created_at())
+        is_activation_task(a)
+            .cmp(&is_activation_task(b))
+            .then_with(|| a.created_at().cmp(&b.created_at()))
             .then_with(|| a.id().cmp(b.id()))
     });
     open
@@ -171,6 +173,30 @@ mod tests {
         let all = [third.clone(), done, second.clone(), first.clone()];
         let order: Vec<&str> = run_order(&all).iter().map(|t| t.id()).collect();
         assert_eq!(order, vec![first.id(), second.id(), third.id()]);
+
+        let activation = LongTask::from_parts(crate::shared::domain::long_task::LongTaskParts {
+            id: "agent-welcome".to_string(),
+            owner_profile_id: None,
+            scope: ProfileScope::Household,
+            goal: "welcome-back: Welcome them home".to_string(),
+            origin_session_id: None,
+            state: LongTaskState::Running,
+            max_steps: 1,
+            deadline: None,
+            kind: first.kind(),
+            answer: first.answer(),
+            created_at: at(-10),
+            updated_at: at(-10),
+            finished_at: None,
+        })
+        .unwrap();
+        let with_activation = [activation.clone(), first.clone()];
+        let order: Vec<&str> = run_order(&with_activation).iter().map(|t| t.id()).collect();
+        assert_eq!(
+            order,
+            vec![first.id(), activation.id()],
+            "a member's task runs ahead of a background activation"
+        );
     }
 
     #[test]

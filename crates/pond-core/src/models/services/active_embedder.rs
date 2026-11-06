@@ -252,6 +252,27 @@ impl ActiveEmbedder {
         Some(EmbedLease { provider })
     }
 
+    /// Drops the loaded model after every lease finishes, keeping the choice and generation so the
+    /// next background pass can reload it on demand without resetting batch sizing.
+    pub async fn unload(&self) -> bool {
+        let mut inner = self.inner.write().await;
+        let was_loaded = inner.take().is_some();
+        let mut status = self.status();
+        if let Some(model) = status.chosen_model() {
+            if matches!(status.state, EmbedderState::Ready { .. }) {
+                status.state = EmbedderState::Chosen {
+                    model_id: model.model_id.to_string(),
+                };
+            }
+        }
+        if was_loaded {
+            if let Some(model_id) = status.state.model_id() {
+                tracing::info!(model_id, "embedding model unloaded");
+            }
+        }
+        was_loaded
+    }
+
     fn not_ready(&self) -> anyhow::Error {
         anyhow!("no embedding model is ready ({})", self.state())
     }
@@ -693,5 +714,26 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(50), embedder.load_requested())
             .await
             .expect("choose rings the loader");
+    }
+
+    #[tokio::test]
+    async fn unload_drops_the_provider_and_keeps_the_choice() {
+        let factory = CountingFactory::default();
+        let embedder = ready(MINILM, &factory).await;
+        let gen_before = embedder.generation();
+        assert_eq!(factory.live.load(Ordering::SeqCst), 1);
+
+        assert!(embedder.unload().await);
+        assert_eq!(factory.live.load(Ordering::SeqCst), 0);
+        assert_eq!(embedder.generation(), gen_before);
+        assert_eq!(embedder.model_id(), "all-MiniLM-L6-v2");
+        assert_eq!(embedder.dimensions(), 384);
+        assert!(!embedder.available());
+        assert_eq!(
+            embedder.state(),
+            EmbedderState::Chosen {
+                model_id: "all-MiniLM-L6-v2".into(),
+            }
+        );
     }
 }
