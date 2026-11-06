@@ -583,6 +583,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/status", get(crate::pond_admin::status))
         .route("/admin/unlock", post(crate::pond_admin::unlock))
         .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/enroll", post(crate::pond_admin::enroll))
+        .route("/admin/key", delete(crate::pond_admin::forget_key))
         .route("/admin/overview", get(crate::pond_admin::overview))
         .route(
             "/admin/files",
@@ -1537,6 +1539,7 @@ async fn start_onboarding(
 /// Marks onboarding complete (public), lifting the onboarding guard on protected routes.
 async fn complete_onboarding(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // A half-set-up assistant must not lift the guard: it would land in a broken dashboard.
     let settings = state.settings_repo.get().await.map_err(|e| {
@@ -1569,6 +1572,8 @@ async fn complete_onboarding(
         ));
     }
 
+    // Only the call that completes setup may hand out the first key; an unreadable state is "done".
+    let completing = !state.onboarding_repo.is_complete().await.unwrap_or(true);
     state
         .onboarding_repo
         .save_step(OnboardingStep::Completed)
@@ -1580,10 +1585,17 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({
+    let mut body = json!({
         "status": "completed",
         "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
-    })))
+    });
+    if completing {
+        if let Some(key) = crate::pond_admin::first_activation_key(&state, principal.as_ref()).await
+        {
+            body["admin_key"] = json!(key);
+        }
+    }
+    Ok(Json(body))
 }
 
 /// The owner's setup interview, offered once setup completes: where it stands and how to start it.
