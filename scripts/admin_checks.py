@@ -102,12 +102,20 @@ def run():
     assert (data / "setup" / "admin.json").exists() and (data / "pond_system.db").exists()
     print("PASS  a file goes, while an escape, the card and the live database are refused")
 
+    key = call("POST", "/admin/enroll", token=phone)["key"]
+    assert call("GET", "/admin/status", token=phone)["key"] is True
+    call("POST", "/admin/lock", token=phone, expected=204)
+    assert call("POST", "/admin/unlock", {"key": key}, token=phone)["unlocked"] is True
+    print("PASS  an unlocked phone enrolls its own key and opens My Pond with it")
+
     password = card("--rotate")
     error("GET", "/admin/overview", 403, "admin_locked", token=phone)
+    error("POST", "/admin/unlock", 403, "admin_key_rejected", {"key": key}, phone)
+    assert call("GET", "/admin/status", token=phone)["key"] is False
     call("POST", "/admin/unlock", {"password": password}, token=phone)
     call("POST", "/admin/lock", token=phone, expected=204)
     error("GET", "/admin/overview", 403, "admin_locked", token=phone)
-    print("PASS  rotating the card locks the phone, and locking ends a fresh unlock")
+    print("PASS  rotating the card locks the phone and revokes its key, and locking ends a fresh unlock")
 
     for token in (phone, nobody):
         call("POST", "/handshake/revoke", token=token)

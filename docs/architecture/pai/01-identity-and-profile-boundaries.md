@@ -901,6 +901,65 @@ not been run on hardware.
 
 ---
 
+## 4f. Consolidation, the memory routes and unidentified turns follow the owner (2026-11-05)
+
+A survey of every store that holds what the pond knows, made before the context space's item store,
+found four paths that 4d had not reached.
+
+### What the pond did
+
+- **Consolidation**, on by default and daily, read every member's memories as one `Household` batch
+  and wrote each merge and split with no owner (`MemoryFragment::from_extraction`). A member's facts
+  became the whole household's, and two members' facts could be merged into one row. On the nano,
+  16 of the 17 rows it had written came from the one member's memories.
+- **`/memories`.** `GET` read at `Household`, `POST` saved every memory as the household's, and
+  `PUT` and `DELETE` changed any memory by id.
+- **`GET /sessions`** listed every conversation's title and first answer, `DELETE /sessions/{id}`
+  deleted any, and `POST /chat`, `/chat/stream` and `/agent/chat/stream` added a turn to any,
+  replaying it to the model.
+- **Unidentified turns.** Room voice and the desktop's voice child never set the loop's scope, so a
+  voice Voice Match did not recognise ran at `Household`, which filters nothing. Scheduled tasks
+  ran at `Household` too, and can answer aloud.
+
+### What changed
+
+- `select_owner_batches` gives each owner a batch of their own, the household's shared memories
+  among them. `apply_actions` refuses a merge across owners and any action naming a memory outside
+  its batch, and what it writes keeps its sources' owner.
+- Migration `0081` traces every ownerless row consolidation wrote back to its original memories,
+  through later merges and through split pieces, which link only their first piece. One member's
+  facts, alone or with the household's, become that member's. A row holding two members' facts is
+  archived, so neither reads the other's half. Nothing is deleted.
+- The memory and session routes resolve the caller as 4d's session reads do. Another member's row
+  or conversation reads as missing. A device paired to nobody on a pond of two members saves no
+  memory, and a memory is saved as the caller's own unless the request sets `shared`.
+- `identity_resolution::scope_without_evidence` is the rule for a turn nothing identifies, as 3.8
+  states it: the household on a pond of one member, else a guest, with members counted each turn.
+  Room voice and the voice child ask it for every unrecognised voice; scheduled tasks ask it for
+  every run.
+
+### Tests
+
+| Where | Asserts |
+|---|---|
+| `memory_consolidation.rs` | no batch holds two owners' memories; a merge and a split keep their sources' owner; a merge across members, and a prune, recategorisation or merge naming a memory outside the batch, are refused |
+| `sqlite_memory.rs` | `0081` gives a member's merges back to her through a later merge, follows a split to every piece, archives a merge of two members' facts, and leaves memories it did not write |
+| `pond-api` `member_memory_and_session_scope.rs` | through the router: a member's phone lists her memories and the household's only, cannot change or delete another's, saves as her own unless shared; a phone paired to nobody saves nothing and sees nothing; another member's conversation is neither listed, deleted nor continued on any of the three chat routes |
+| `chat.rs` | a voice nobody recognises is a guest on a pond of two, the household on a pond of one, a guest when members cannot be counted; such a voice turn runs at that scope, not the loop's |
+
+On a copy of the nano's store, made and deleted on the nano, `0081` gave 16 of 17 consolidated rows
+back to their member and left the one household-only merge shared; active ownerless memories fell
+from 13 to 4.
+
+### Still open
+
+- A conversation with no owner is readable by any device, a guest's included (`readable_by`). Telling
+  a guest's own conversation from one a deleted member left needs a session's device recorded.
+- Schedules have no owner. Until they do, a schedule on a pond of two members runs without personal
+  memories.
+- A member's `forget`, and a long task's step, which holds the whole `giap-memory` group, can delete
+  a household memory. Whether any member may is a decision, not a bug.
+
 ## 5. Invariants
 
 1. Profile context stays in `<system-context>` on the user message. Never the system prefix.
