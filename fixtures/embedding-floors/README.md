@@ -92,5 +92,11 @@ one answer per fact. "Nothing in the store" puts each set's questions to the oth
 households share subjects (rent, school fees, a plumber), so some of those firings are answers too.
 The seat displaces the blend's fifth memory and never adds a sixth. An unmeasured model gets no seat.
 
-**What this does not show.** These are P0's vectors (Orin, GPU, Q8_0), not the pond's live store. The
-iPhone memory's own cosine is not measured. Nor is the answer E4B gives with that memory present.
+**On the nano's store.** The same day, on two copies of the live store, the live build left the
+iPhone memory out and E4B said it did not know, twice. With the seat, that memory scored 0.795
+against the question, took the seat, and E4B answered "You use an iPhone.", twice. Two questions with
+no answer in the store ("Which car do I drive?", a favourite football team) found nothing closer than
+0.61 and 0.62, so no seat was given and E4B said it did not know.
+
+**What this does not show.** The table is P0's vectors (Orin, GPU, Q8_0); the live store gave one
+answered question and two unanswered ones, not a rate.

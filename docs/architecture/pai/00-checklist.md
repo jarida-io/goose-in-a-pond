@@ -4359,6 +4359,8 @@ milestone completion).**
 - **PAI-3.** Same fragment count and budget: the seat displaces the blend's fifth, never adds one.
 - **Invariant 1.** The block rides the user message; the system prefix is untouched.
 - **PAI-1.** The seat chooses among the turn's scoped candidates only.
-- **NOT VERIFIED on the Orin.** Unit tests and the corpus lock only. Still to show: whether the
-  iPhone memory clears 0.77, and whether E4B then answers. That needs a nano run with the live pond
-  stopped.
+- **VERIFIED on the Orin 2026-11-06**, on two copies of the live store taken from one backup, the
+  question asked twice on each. The live build (`c5c03221`) kept five memories without the iPhone one, and E4B
+  said it had no record. The same commit with this change gave that memory 0.795 against the
+  message; it took the seat, and E4B answered "You use an iPhone.". Two questions with no answer in
+  the store found nothing above 0.62, took no seat, and E4B said it did not know.
