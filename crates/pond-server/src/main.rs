@@ -325,6 +325,18 @@ enum Commands {
         status: bool,
     },
 
+    /// Mark this pond as a Jarida test Pond, or as a home Pond again.
+    ///
+    /// On a test Pond a paired phone may turn on developer mode's debug switch, which lets the
+    /// logs show what the household said and the members' names. Only this host sets the mark;
+    /// the running server sees it without a restart. Run it as the account that owns the pond's
+    /// data: `bash scripts/giap.sh test-pond` does.
+    TestPond {
+        /// on, off, or status
+        #[arg(value_enum, default_value_t = TestPondAction::Status)]
+        action: TestPondAction,
+    },
+
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
     #[command(hide = true)]
     BleHelper,
@@ -690,6 +702,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             json,
             status,
         }) => run_admin_card(rotate, json, status).await,
+        Some(Commands::TestPond { action }) => run_test_pond(action),
         Some(Commands::SetupCode {
             json,
             card,
@@ -3434,17 +3447,29 @@ async fn run_server(
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
     let household_names = tracing_setup::HouseholdNames::default();
+    let debug_switch = pond_core::security::domain::developer_mode::DebugSwitch::default();
+    let developer = Arc::new(pond_api::developer::DeveloperMode::new(
+        Arc::new(pond_infra::file_test_pond::FileTestPondMark::new(&data_dir)),
+        debug_switch.clone(),
+    ));
     let _file_guard = drain_handle.drain_into(
         operational_log.clone(),
-        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+        tracing_setup::LogScrubber::household(
+            redactor.clone(),
+            household_names.clone(),
+            debug_switch,
+        ),
     );
-    // A new or renamed member is hidden from the Logs viewer within a minute.
+    // A new or renamed member is hidden from the Logs viewer within a minute, and so is content
+    // once the host takes the test Pond mark away.
     {
         let profiles = profile_repo.clone();
+        let developer = developer.clone();
         tokio::spawn(async move {
             let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 every_minute.tick().await;
+                developer.current().await;
                 match profiles.list().await {
                     Ok(members) => {
                         household_names.set(members.iter().map(|m| m.display_name.as_str()))
@@ -4412,6 +4437,7 @@ async fn run_server(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: Some(pond_admin),
+        developer: developer.clone(),
     });
     state.device_events.clone().follow(event_bus.clone());
 
@@ -10865,6 +10891,30 @@ fn run_dashboard() -> Result<()> {
 
 /// Works on the data directory directly, so it answers whether or not the server is running;
 /// a running server reads the new card on the next unlock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum TestPondAction {
+    On,
+    Off,
+    Status,
+}
+
+fn run_test_pond(action: TestPondAction) -> Result<()> {
+    let mark = pond_infra::file_test_pond::FileTestPondMark::new(default_data_dir());
+    match action {
+        TestPondAction::On => mark.set(true)?,
+        TestPondAction::Off => mark.set(false)?,
+        TestPondAction::Status => {}
+    }
+    if mark.is_marked()? {
+        println!(
+            "This is a test Pond: a paired phone may turn on debug, which shows household content in the logs."
+        );
+    } else {
+        println!("This is a home Pond: debug stays off and the logs hide household content.");
+    }
+    Ok(())
+}
+
 async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     use pond_core::security::ports::admin_card::AdminCardStore as _;
     let store = pond_infra::file_admin_card::FileAdminCardStore::new(default_data_dir());

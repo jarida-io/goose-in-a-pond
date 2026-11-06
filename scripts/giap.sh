@@ -24,6 +24,7 @@
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
 #   bash scripts/giap.sh time-sync [remove|status]  # Linux: named time servers before the NTP pool, so the clock is right soon after a boot (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
+#   bash scripts/giap.sh test-pond [on|off|status]  # mark this pond as a Jarida test Pond, whose debug switch shows household content in the logs, or a home Pond again
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
@@ -1687,6 +1688,32 @@ action_admin_card() {
   admin_card_run "${1:-}" "$bin" "$data" "$user"
 }
 
+# `giap.sh test-pond [on|off|status]`: whether a paired phone may turn on developer mode's debug
+# switch, which shows household content in the logs. Only a Jarida test Pond should say on.
+action_test_pond() { # $1 = "" | on | off | status
+  head1 "Test Pond (developer mode)"
+  local sub="${1:-status}" user bin
+  case "$sub" in
+    on|off|status) ;;
+    *) bad "test-pond takes on, off or status, not: $sub"; return 2 ;;
+  esac
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    bad "no pond-server binary yet; build it first (bash scripts/giap.sh build)"; return 1
+  fi
+  if [ "$sub" = on ]; then
+    confirm "Mark this pond as a test Pond? A paired phone may then make its logs show what the household says." || return 1
+  fi
+  if [ "$DRY_RUN" = true ] && [ "$sub" != status ]; then info "dry run: nothing changed"; return 0; fi
+  # The mark lives in the data directory, so it is written as the account that owns it.
+  if [ "$user" = "$(id -un)" ]; then
+    POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  else
+    sudo -u "$user" env POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  fi
+}
+
 # `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
 # (docs/architecture/pond-administrator.md). A new install offers it; an existing pond moves here.
 action_service_account() { # $1 = "" | undo | status
@@ -1873,8 +1900,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant`, `time-sync`, `admin-card`, `service-account` (a subcommand) and
-# `console` (a host) take more.
+# `onnxruntime`, `wifi-grant`, `time-sync`, `admin-card`, `test-pond`, `service-account` (a
+# subcommand) and `console` (a host) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1899,7 +1926,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models|wifi-grant|time-sync|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant|time-sync|onnxruntime|console|admin-card|test-pond|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1932,6 +1959,7 @@ case "$CMD" in
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   time-sync) action_time_sync "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
+  test-pond) action_test_pond "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac
