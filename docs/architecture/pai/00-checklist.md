@@ -4355,11 +4355,15 @@ and one lifecycle sweep.**
 - **PAI-3.** No prompt change. Turn recall, `giap-memory` search and `recall` read the same
   index; only the vectors on rows are no longer read.
 - **Invariant 1, PAI-4 to PAI-8.** Untouched.
-- **Verified on the Orin, store only** (2026-11-06, a copy of the nano's live store; the live
-  pond untouched): 474 headers from 86 memories, 64 summaries and 153 suggestions, 242 links, in
-  154 ms; a second run changed nothing; memory search and recall read the index and a guest got
-  nothing. **NOT VERIFIED** with the full server on the Orin: turn recall, `giap-memory` through
-  E4B and the slot's re-embedding of 60 summaries wait for a stop of the nano's pond.
+- **Verified on the Orin** (2026-11-06, the branch built on the nano and run on copies of its
+  live store, with the live pond stopped and restarted untouched at migration 77):
+  - store gate: 474 headers, 242 links, 154 ms; a second run changed nothing; memory search and
+    recall read the index; a guest got nothing;
+  - full server on :4100: startup migrated a fresh copy (480 headers, 248 links), a second start
+    changed nothing, the slot re-embedded 60 summaries on the GPU (109 of 109 current), and E4B's
+    `recall_memories` found the stored memory through the index and answered from it, twice.
+  - **Turn recall NOT VERIFIED:** on the same store and questions it answered as the live build
+    did, neither using an injected memory, and nothing records which memories a turn was given.
 - **Not done:** context retention and the seven-day home-event expiry are written and tested but
   off: with the 7-day sensitive cap they would delete mail and calendar items older than a week
   (decision 12). Facts are not yet deleted when their last evidence goes (decision 13). The
