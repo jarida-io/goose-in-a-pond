@@ -84,6 +84,11 @@ async fn register(state: &pond_api::AppState, name: &str) -> String {
 
 /// A member's phone and an unattributed tablet; an admin card unless `with_card` is false.
 async fn pond(with_card: bool) -> Pond {
+    pond_with(with_card, false).await
+}
+
+/// `owner_setup`: the member's phone claimed this pond and owner setup is about to complete on it.
+async fn pond_with(with_card: bool, owner_setup: bool) -> Pond {
     let built = pond_api::test_support::app_state().await;
     let mut state = built.state;
     let dir = built.dir;
@@ -111,6 +116,28 @@ async fn pond(with_card: bool) -> Pond {
         .set_device_profile(&phone, Some(&member))
         .await
         .unwrap();
+    if owner_setup {
+        use pond_core::network::mocks::mock_setup_code_store::MockSetupCodeStore;
+        use pond_core::network::services::setup_claim::SetupClaimService;
+        use pond_core::user_data::ports::settings::SettingsRepository as _;
+        let store = Arc::new(MockSetupCodeStore::unclaimed());
+        let mut record = MockSetupCodeStore::fixed_record();
+        record.claimed_at = Some(chrono::Utc::now());
+        record.claimed_by = Some(phone.clone());
+        store.set_record(Some(record));
+        state.setup_claims = Some(Arc::new(SetupClaimService::new(store)));
+        let settings = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
+            state.db.system.clone(),
+        ));
+        let mut set = settings.get().await.unwrap();
+        set.user_name = "Jerry".into();
+        set.assistant_name = "Goose".into();
+        set.timezone = "Africa/Nairobi".into();
+        set.chat_model = "mock".into();
+        set.primary_profile_id = Some(member.clone());
+        settings.update(&set).await.unwrap();
+        state.settings_repo = settings;
+    }
     state.handshake = Arc::new(Devices(HashMap::from([
         (MEMBER.to_string(), phone),
         (GUEST.to_string(), tablet),
@@ -135,7 +162,12 @@ async fn pond(with_card: bool) -> Pond {
     let tasks = Arc::new(SqliteLongTaskRepository::new(state.db.system.clone()));
     state.pond_admin = Some(Arc::new(PondAdmin::new(
         PondAdminService::new(host, tasks.clone()),
-        AdminElevation::new(cards),
+        AdminElevation::new(
+            cards,
+            Arc::new(pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(
+                state.db.system.clone(),
+            )),
+        ),
     )));
     Pond {
         router: build_router(
@@ -711,5 +743,205 @@ async fn tasks_hide_another_members_words_and_only_finished_ones_go() {
     assert_eq!(
         (status, body["error"].as_str()),
         (StatusCode::NOT_FOUND, Some("not_found"))
+    );
+}
+
+#[tokio::test]
+async fn an_unlocked_phone_enrolls_and_opens_with_its_own_key_until_it_forgets_it() {
+    let pond = pond(true).await;
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/enroll",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("admin_locked"))
+    );
+    unlock(&pond).await;
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/enroll",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let key = body["key"].as_str().unwrap().to_string();
+    assert_eq!(key.len(), 43);
+    let (_, status_body, _) = send(
+        &pond,
+        Method::GET,
+        "/api/v1/admin/status",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status_body["key"], true);
+
+    send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/lock",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/unlock",
+        Some(MEMBER),
+        Some(json!({ "key": key })),
+    )
+    .await;
+    assert_eq!(
+        (status, body["unlocked"].as_bool()),
+        (StatusCode::OK, Some(true))
+    );
+    let (status, _, _) = send(
+        &pond,
+        Method::GET,
+        "/api/v1/admin/overview",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send(
+        &pond,
+        Method::DELETE,
+        "/api/v1/admin/key",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body, _) = send(
+        &pond,
+        Method::GET,
+        "/api/v1/admin/overview",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("admin_locked"))
+    );
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/unlock",
+        Some(MEMBER),
+        Some(json!({ "key": key })),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("admin_key_rejected"))
+    );
+    let (_, status_body, _) = send(
+        &pond,
+        Method::GET,
+        "/api/v1/admin/status",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status_body["key"], false);
+}
+
+#[tokio::test]
+async fn a_guest_phone_neither_enrolls_nor_forgets() {
+    let pond = pond(true).await;
+    for (method, uri) in [
+        (Method::POST, "/api/v1/admin/enroll"),
+        (Method::DELETE, "/api/v1/admin/key"),
+    ] {
+        let (status, body, _) = send(&pond, method.clone(), uri, Some(GUEST), None).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::FORBIDDEN, Some("admin_members_only")),
+            "{method} {uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_phone_that_claimed_the_pond_gets_its_key_when_owner_setup_completes() {
+    let pond = pond_with(false, true).await;
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/onboard/complete",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let key = body["admin_key"]
+        .as_str()
+        .expect("the claimant's key")
+        .to_string();
+
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/admin/unlock",
+        Some(MEMBER),
+        Some(json!({ "key": key })),
+    )
+    .await;
+    assert_eq!(
+        (status, body["unlocked"].as_bool()),
+        (StatusCode::OK, Some(true)),
+        "the first activation user opens My Pond without a card ever being made"
+    );
+
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/onboard/complete",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("admin_key").is_none(),
+        "only the call that completes setup hands out a key: {body}"
+    );
+}
+
+#[tokio::test]
+async fn completing_setup_from_another_device_earns_it_no_key() {
+    let pond = pond_with(false, true).await;
+    let (status, body, _) = send(
+        &pond,
+        Method::POST,
+        "/api/v1/onboard/complete",
+        Some(GUEST),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("admin_key").is_none(), "{body}");
+    let (_, status_body, _) = send(
+        &pond,
+        Method::GET,
+        "/api/v1/admin/status",
+        Some(MEMBER),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status_body["key"], false,
+        "nor did the claimant get one behind its back"
     );
 }

@@ -4326,3 +4326,13 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **NOT VERIFIED on the Orin.** Unit and route tests only; E4B's answer to "who am I" with the line
   present has not been run on hardware.
 
+**2026-10-29, landed 2026-11-06 — PAI-1 and PAI-2: each phone's own My Pond key.**
+
+- **What landed.** The Pond issues a member's phone its own key (32 random bytes, stored as a
+  SHA-256 bound to the device, cascading with it). The phone keeps it behind Face ID or fingerprint
+  and unlocks with `POST /admin/unlock {key}`. The phone that claimed the Pond gets its key
+  in the `/onboard/complete` answer, only on the call that completes setup. Others enroll after one
+  unlock with the card. Rotating the card revokes every key.
+- **PAI-2.** A wrong key is a wrong guess against the shared throttle. Keys are never logged; issue
+  and revoke are `admin.key_*` audit events. A guest's phone can neither enroll nor forget.
+- **Not verified on the Orin yet.** Needs a deploy and a phone with biometrics.
