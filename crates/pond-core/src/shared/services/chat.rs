@@ -389,6 +389,8 @@ pub struct ChatService {
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
     waker: Arc<std::sync::Mutex<Option<VoiceSpeaker>>>,
+    /// An unrecognised speaker's scope, in place of `profile_scope`, when the loop knows how.
+    unrecognised_scope: Option<UnrecognisedScope>,
 }
 
 /// A member's context for a turn they spoke, as the routes build it for a typed one.
@@ -397,6 +399,28 @@ pub type SpeakerContext = Arc<
         + Send
         + Sync,
 >;
+
+/// The scope of a turn no voice was recognised for, asked each turn, since members come and go
+/// while a room runs.
+pub type UnrecognisedScope =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, ProfileScope> + Send + Sync>;
+
+/// A shared microphone's rule for a voice it does not recognise:
+/// [`scope_without_evidence`](crate::user_data::services::identity_resolution::scope_without_evidence),
+/// asked each turn.
+pub fn unrecognised_voice_scope(
+    profiles: Option<Arc<dyn crate::user_data::ports::profile::ProfileRepository + Send + Sync>>,
+) -> UnrecognisedScope {
+    Arc::new(move || {
+        let profiles = profiles.clone();
+        Box::pin(async move {
+            crate::user_data::services::identity_resolution::scope_without_evidence(
+                profiles.as_deref(),
+            )
+            .await
+        })
+    })
+}
 
 /// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
 pub type StateObserver = Arc<dyn Fn(WorkflowState) + Send + Sync>;
@@ -498,6 +522,7 @@ impl ChatService {
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
+            unrecognised_scope: None,
         }
     }
 
@@ -755,14 +780,28 @@ impl ChatService {
         self.emit_event(WorkflowEvent::Ready { session_id: fresh });
     }
 
+    /// A shared microphone's rule for a voice it does not recognise: asked each turn, in place
+    /// of the loop's fixed scope.
+    pub fn with_unrecognised_scope(mut self, scope: UnrecognisedScope) -> Self {
+        self.unrecognised_scope = Some(scope);
+        self
+    }
+
+    async fn unrecognised_turn_scope(&self) -> ProfileScope {
+        match &self.unrecognised_scope {
+            Some(scope) => scope().await,
+            None => self.profile_scope.clone(),
+        }
+    }
+
     /// The turn's scope and context: the recognised speaker's, else the loop's own.
     async fn turn_speaker(&self) -> (ProfileScope, Option<crate::prompts::ProfileContext>) {
         let Some(context) = &self.voice_identity else {
-            return (self.profile_scope.clone(), None);
+            return (self.unrecognised_turn_scope().await, None);
         };
         let who = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(who) = who else {
-            return (self.profile_scope.clone(), None);
+            return (self.unrecognised_turn_scope().await, None);
         };
         let identity = crate::user_data::domain::session::SessionIdentity {
             profile_id: Some(who.profile_id.clone()),
@@ -5626,5 +5665,64 @@ mod tests {
             UnpromptedSpeech::Spoken
         );
         assert_eq!(*output.spoken.lock().unwrap(), vec![allowed.text.clone()]);
+    }
+
+    async fn members(
+        count: usize,
+    ) -> Arc<dyn crate::user_data::ports::profile::ProfileRepository + Send + Sync> {
+        use crate::user_data::ports::profile::ProfileRepository as _;
+        let profiles =
+            Arc::new(crate::user_data::mocks::mock_profile::MockProfileRepository::new());
+        for i in 0..count {
+            profiles
+                .create(crate::user_data::domain::profile::CreateProfileRequest {
+                    display_name: format!("member {i}"),
+                    avatar_emoji: "duck".into(),
+                })
+                .await
+                .unwrap();
+        }
+        profiles
+    }
+
+    #[tokio::test]
+    async fn a_voice_nobody_recognises_is_a_guest_once_two_members_live_here() {
+        assert_eq!(
+            unrecognised_voice_scope(Some(members(1).await))().await,
+            ProfileScope::Household,
+            "a pond of one: refusing would forget its only member"
+        );
+        assert_eq!(
+            unrecognised_voice_scope(Some(members(2).await))().await,
+            ProfileScope::Guest
+        );
+        assert_eq!(
+            unrecognised_voice_scope(None)().await,
+            ProfileScope::Guest,
+            "members that cannot be counted narrow"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_voice_turn_runs_at_the_rooms_rule_not_the_loops_scope() {
+        let agent = Arc::new(MockAgent::new());
+        let svc = ChatService::new(
+            agent.clone(),
+            "room".into(),
+            Arc::new(InMemorySessionStorage::new()),
+        )
+        .with_voice_input(Arc::new(ScriptedListenInput::new([
+            "what does amina like?",
+        ])))
+        .with_voice_output(Arc::new(CapturingSpeak::default()))
+        .with_unrecognised_scope(unrecognised_voice_scope(Some(members(2).await)));
+
+        run_bounded(&svc).await.unwrap();
+
+        assert_eq!(
+            agent.last_request().unwrap().profile_scope,
+            ProfileScope::Guest,
+            "the loop's own scope is Household, which reads every member's memories"
+        );
     }
 }
