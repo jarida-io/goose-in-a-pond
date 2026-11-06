@@ -2455,6 +2455,7 @@ mod batch_tests {
         // Above every cosine, so a model on this scale calls even an identical vector fresh.
         let own_scale = Some(SimilarityFloors {
             tool_relevance: 0.5,
+            closest_memory: 0.5,
             dedup: Some(DedupBands {
                 reinforce: 1.01,
                 relate: 1.01,
