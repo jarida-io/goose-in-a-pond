@@ -233,6 +233,17 @@ impl ContextRepository for MockContextRepository {
             .count() as u64)
     }
 
+    /// Holds no links, so nothing is cited: every item of `kind` before `before` goes.
+    async fn purge_uncited(&self, kind: crate::items::Kind, before: DateTime<Utc>) -> Result<u64> {
+        let mut items = self.items.lock().unwrap();
+        let count = items.len();
+        items.retain(|item| {
+            let mapped = crate::items::from_detail::context_kind(item.source_kind(), item.kind());
+            mapped != Some(kind) || item.occurred_at() >= before
+        });
+        Ok((count - items.len()) as u64)
+    }
+
     async fn purge_expired(&self, retention: &ContextRetention, now: DateTime<Utc>) -> Result<u64> {
         let mut items = self.items.lock().unwrap();
         let before = items.len();

@@ -1156,22 +1156,6 @@ fn report_acceleration() {
     }
 }
 
-/// `Database::init` wrote the missing headers; this full pass repairs any a writer left stale,
-/// and a repair is a warning because every writer should have kept its header current.
-fn spawn_item_header_check(system: sqlx::Pool<sqlx::Sqlite>) {
-    tokio::spawn(async move {
-        match pond_infra::sqlite_items::reconcile(&system, pond_infra::sqlite_items::Mode::All)
-            .await
-        {
-            Ok(report) if report.changed() => {
-                tracing::warn!(?report, "item headers repaired at startup")
-            }
-            Ok(_) => tracing::info!("item headers match their rows"),
-            Err(e) => tracing::error!("item header check failed: {e:#}"),
-        }
-    });
-}
-
 async fn run_server(
     static_dir: std::path::PathBuf,
     open: bool,
@@ -1196,7 +1180,6 @@ async fn run_server(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
-    spawn_item_header_check(db.system.clone());
 
     // Idempotent (one stat() once migrated); per-file errors are logged, never fatal.
     match pond_server::hf_cache_migration::migrate_flat_files_to_blobs(&data_dir).await {
@@ -1855,39 +1838,65 @@ async fn run_server(
         });
     }
 
-    if settings.memory_cleanup_enabled {
-        let cleanup_repo = memory_repo.clone();
-        let cleanup_interval_secs = settings.memory_cleanup_interval_hours as u64 * 3600;
-        let prune_threshold = settings.memory_prune_threshold;
-        let archive_threshold = settings.memory_archive_threshold;
-        let base_half_life = settings.memory_decay_base_half_life_days;
-        let decay_beta = settings.memory_decay_beta;
+    // One sweep enforces every kind's lifecycle, then repairs any header a writer left stale.
+    {
+        let sweep_memories = memory_repo.clone();
+        let sweep_context: Arc<dyn pond_core::context::ports::ContextRepository> =
+            Arc::new(pond_infra::sqlite_context::SqliteContextRepository::new(
+                db.system.clone(),
+                redactor.clone(),
+            ));
+        let system = db.system.clone();
+        let every = std::time::Duration::from_secs(
+            u64::from(settings.memory_cleanup_interval_hours.max(1)) * 3600,
+        );
+        let decay =
+            settings
+                .memory_cleanup_enabled
+                .then_some(pond_core::items::sweep::DecayDials {
+                    prune_threshold: settings.memory_prune_threshold,
+                    archive_threshold: settings.memory_archive_threshold,
+                    base_half_life_days: settings.memory_decay_base_half_life_days,
+                    decay_beta: settings.memory_decay_beta,
+                });
         tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(cleanup_interval_secs));
+            let policy = pond_core::items::sweep::SweepPolicy {
+                decay,
+                // Off: with today's 7-day sensitive cap it would delete a week-old mail
+                // (context-space.md, decision 12).
+                retention: None,
+            };
+            let mut interval = tokio::time::interval(every);
             loop {
                 interval.tick().await;
-                match pond_core::user_data::services::memory_cleanup::run_cleanup(
-                    cleanup_repo.as_ref(),
-                    prune_threshold,
-                    archive_threshold,
-                    base_half_life,
-                    decay_beta,
+                match pond_core::items::sweep::sweep(
+                    sweep_memories.as_ref(),
+                    sweep_context.as_ref(),
+                    &policy,
+                    chrono::Utc::now(),
                 )
                 .await
                 {
-                    Ok((scanned, archived, pruned)) => {
-                        if archived > 0 || pruned > 0 {
-                            tracing::info!(
-                                "memory cleanup: scanned={scanned}, archived={archived}, pruned={pruned}"
-                            );
-                        }
+                    Ok(report) if report.changed() => {
+                        tracing::info!(?report, "lifecycle sweep")
                     }
-                    Err(e) => tracing::warn!("memory cleanup failed: {e}"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("lifecycle sweep failed: {e:#}"),
+                }
+                match pond_infra::sqlite_items::reconcile(
+                    &system,
+                    pond_infra::sqlite_items::Mode::All,
+                )
+                .await
+                {
+                    Ok(report) if report.changed() => {
+                        tracing::warn!(?report, "lifecycle sweep repaired item headers")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("item header check failed: {e:#}"),
                 }
             }
         });
-        tracing::info!("memory cleanup enabled — runs every 6 hours");
     }
 
     // ── Memory consolidation (inactivity-based) ──────────────────────────

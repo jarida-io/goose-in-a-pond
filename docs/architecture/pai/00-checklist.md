@@ -4336,3 +4336,51 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **PAI-2.** A wrong key is a wrong guess against the shared throttle. Keys are never logged; issue
   and revoke are `admin.key_*` audit events. A guest's phone can neither enroll nor forget.
 - **Not verified on the Orin yet.** Needs a deploy and a phone with biometrics.
+
+**2026-11-05 — the context space, P1 (data model): the item header, links, the item-keyed index
+and one lifecycle sweep.**
+
+- **What is built** (stacked PRs, `feat/p1-*`; the LUKS2 volume, sealed keys and per-blob keys
+  are a separate track):
+  - `items`, `item_links`, `item_shares` and an `item_id` on every detail table (migration
+    0082); thirteen kinds, each with its detail table and lifecycle declared once in
+    `pond_core::items`, as exhaustive matches; `every_item_kind_has_a_detail_table.rs` checks
+    the migrated schema against them;
+  - a header for every memory, attributed conversation, context item and suggestion, written by
+    each table's writer in the same transaction, backfilled by `Database::init` and checked by
+    `serve` in the background; `sqlite_items.rs` is the only writer (a guard test scans the
+    crates);
+  - the index keyed by item (vectors migration 0003), the slot walking items and writing only
+    the index, memory and context search scoring only through it, and `Corpus` gone;
+  - every scoped read of memories, context items and suggestions judged on the header, with
+    `item_shares`;
+  - one lifecycle sweep in place of the memory cleanup timer.
+- **PAI-1.** A NULL owner means something different in each table, so each maps by its own rule
+  (context-space 4.1): a shared memory is the household's, a conversation with no known speaker
+  gets no header, a suggestion whose member left gets none. A private item needs an owner
+  (`CHECK`). Scope is unchanged for every existing row: a member sees their own and the
+  household's, `Household` everything, a guest nothing.
+- **PAI-2.** Header text passes the rule redactor at `Secrets`; a conversation's header holds its
+  redacted summary while the session keeps the raw one it replays. Summary vectors made from raw
+  text were dropped at the move and re-embedded from the header.
+- **PAI-3.** No prompt change. Turn recall, `giap-memory` search and `recall` read the same
+  index; only the vectors on rows are no longer read.
+- **Invariant 1, PAI-4 to PAI-8.** Untouched.
+- **Verified on the Orin** (2026-11-06, the branch built on the nano and run on copies of its
+  live store, with the live pond stopped and restarted untouched at migration 77):
+  - store gate: 474 headers, 242 links, 154 ms; a second run changed nothing; memory search and
+    recall read the index; a guest got nothing;
+  - full server on :4100: startup migrated a fresh copy (480 headers, 248 links), a second start
+    changed nothing, the slot re-embedded 60 summaries on the GPU (109 of 109 current), and E4B's
+    `recall_memories` found the stored memory through the index and answered from it, twice.
+  - turn recall: a memory saved just before the question reached the turn and E4B answered from
+    it; the live build did not, one try each. An older memory that `recall_memories` finds is not
+    among the five a turn is given, on either build: on importance and recency it ranks 44th of
+    the owner's 49, so its similarity would have to beat the fifth's by 0.23. That is the turn's
+    ranking (`memory_relevance::relevance_score`), which P1 does not change.
+- **Not done:** context retention and the seven-day home-event expiry are written and tested but
+  off: with the 7-day sensitive cap they would delete mail and calendar items older than a week
+  (decision 12). Facts are not yet deleted when their last evidence goes (decision 13). The
+  unwired code section 3 lists (`memory_graph.rs`, `memory_edges`, two unread settings,
+  `AppState.mcp_memory`, `session_messages.embedding`) is not deleted yet, and the vectors on
+  memory and context rows, no longer read, go with the old columns a release later.

@@ -505,6 +505,13 @@ mod tests {
         ) -> anyhow::Result<u64> {
             Ok(0)
         }
+        async fn purge_uncited(
+            &self,
+            _kind: pond_core::items::Kind,
+            _before: DateTime<Utc>,
+        ) -> anyhow::Result<u64> {
+            Ok(0)
+        }
     }
 
     struct StubAuthority {
