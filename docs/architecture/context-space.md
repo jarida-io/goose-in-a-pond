@@ -234,10 +234,23 @@ Approved actions do not cascade. An accepted reminder is the member's commitment
 
 ### 4.3 The index
 
-`pond_vectors.db` keeps its shape: `(item_id, model_id, modality, dims, vector)`, with no text.
+`pond_vectors.db` keeps its shape, keyed by item since P1: `(item_id, chunk_ix, model_id, modality,
+dims, vector, source_rev)`, with no text. A long ingested item has one vector per passage, and a
+passage is a byte span into the item's embedded text. That text is the header's context line,
+title and body, one per line, except a conversation's, which is its summary alone
+(`Kind::embedded_fields`).
 
-- **Staleness.** An item without a vector for the current `model_id` needs one, so changing the
-  model refills the index in idle time.
+- **Staleness.** An active item with text needs a vector when it has none for the current
+  `model_id`, or when its vector's `source_rev` is not the header's `updated_at`. Changing the
+  model refills the index in idle time, and a rewritten summary is embedded again.
+- **One store of vectors.** Retrieval, memory search and context search all score through the
+  index (`VectorIndex::search`, with the kinds each wants), filtered by the header's scope and
+  state in the same query. The vectors still written on `memory_fragments` and `context_items`
+  rows are no longer read, and go with the old columns a release later. A guard test
+  (`index_chokepoints_are_wired.rs`) fails if either store scores vectors itself again.
+- **The move.** The migration carried memory and context vectors across as current, since their
+  text was redacted before it was stored. Summary vectors were dropped: they were made from the
+  raw summary, and the slot embeds the redacted header instead.
 - **Vectors are personal data.** Inversion attacks such as Vec2Text reconstruct short inputs from
   their embeddings. Vectors sit on the encrypted volume, and retrieval joins them to live,
   scope-filtered items.
@@ -376,10 +389,12 @@ leave recall on keywords all day.
   token and packs each batch to that bound, starting at one item. The slot checks the lane, and
   whether anyone has started a turn since the pass began, between batches; whether the bound holds
   under the slot is not yet measured on the Orin.
-- **Order and writes.** Memory first, then summaries, then context items. Memory is written through
-  `MemoryRepository::update_embedding`, which writes the row and the index; each vector is made
-  and stored under one lease of the embedder, so it carries the model that made it. Nothing is
-  adopted: a stored vector the index does not vouch for may be another model's of the same width.
+- **Order and writes.** It walks the items the index holds (`vector_index::INDEXED`): facts and
+  traits first, then conversations, then ingested items. Every vector goes to the index alone,
+  stamped with the header revision read beside its text, and each is made and stored under one
+  lease of the embedder, so it carries the model that made it. Nothing is adopted: a stored vector
+  the index does not vouch for may be another model's of the same width. Before each pass the
+  runner writes the header of any row stored around its store, since the slot only sees headers.
   Once the backlog is empty the slot prunes orphans and logs the index's health.
 - **Encoders.** The vision encoder loads only when free RAM covers its measured budget, and it
   unloads when serving starts.

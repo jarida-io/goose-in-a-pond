@@ -1,20 +1,25 @@
-//! SQLite-backed [`VectorIndex`] over `pond_vectors.db`.
+//! SQLite-backed [`VectorIndex`] over `pond_vectors.db`, keyed by item.
 //!
-//! Each connection ATTACHes the system DB as `sys`, so reads JOIN live rows. Only this file is
-//! written (cross-database transactions aren't atomic under WAL), hence orphans are expected.
+//! Each connection ATTACHes the system DB as `sys`, so reads JOIN live headers. Only this file
+//! is written (cross-database transactions aren't atomic under WAL), hence orphans are expected.
 //! Similarity is brute-force cosine on purpose: sub-millisecond at household scale.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use pond_core::context::vector_index::{
-    Corpus, CorpusHealth, IndexHealth, ResolvedHit, VectorEntry, VectorHit, VectorIndex,
+    IndexHealth, KindHealth, ResolvedHit, Stale, VectorEntry, VectorHit, VectorIndex, INDEXED,
 };
+use pond_core::items::{embedded_text, Kind};
 use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, Pool, Sqlite};
 use std::path::Path;
 use std::str::FromStr;
+
+use crate::sqlite_items;
 
 pub struct SqliteVectorIndex {
     pool: Pool<Sqlite>,
@@ -44,72 +49,62 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     Some(dot / (na * nb))
 }
 
-/// A corpus's `sys.<table>` and id column, in one exhaustive match so none can be missed.
-fn source_table(corpus: Corpus) -> (&'static str, &'static str) {
-    match corpus {
-        Corpus::Memory => ("sys.memory_fragments", "id"),
-        Corpus::Context => ("sys.context_items", "id"),
-        Corpus::Summary => ("sys.sessions", "id"),
+/// `i.kind IN (...)`; the names come from [`Kind::as_str`], never from a caller's text.
+fn kinds_sql(kinds: &[Kind]) -> String {
+    if kinds.is_empty() {
+        return "1 = 0".to_string();
+    }
+    let names: Vec<String> = kinds.iter().map(|k| format!("'{}'", k.as_str())).collect();
+    format!("i.kind IN ({})", names.join(", "))
+}
+
+/// An item retrieval can return: active, and with text in a field its kind is embedded from.
+/// Every query shares it, so none can reach an archived fact or an empty conversation.
+fn live_sql() -> String {
+    let cases: Vec<String> = INDEXED
+        .iter()
+        .map(|kind| {
+            let any: Vec<String> = kind
+                .embedded_fields()
+                .iter()
+                .map(|f| format!("i.{} <> ''", f.column()))
+                .collect();
+            format!("WHEN '{}' THEN ({})", kind.as_str(), any.join(" OR "))
+        })
+        .collect();
+    format!(
+        "i.state = 'active' AND (CASE i.kind {} ELSE 0 END)",
+        cases.join(" ")
+    )
+}
+
+/// The slot's order: an item's position in [`INDEXED`].
+fn order_sql() -> String {
+    let cases: Vec<String> = INDEXED
+        .iter()
+        .enumerate()
+        .map(|(n, k)| format!("WHEN '{}' THEN {n}", k.as_str()))
+        .collect();
+    format!("CASE i.kind {} ELSE {} END", cases.join(" "), INDEXED.len())
+}
+
+/// Ties go to what was said, then what was observed, then a lossy summary.
+fn rank(kind: Kind) -> u8 {
+    match kind {
+        Kind::Fact | Kind::Trait | Kind::Entity => 0,
+        Kind::Conversation => 2,
+        _ => 1,
     }
 }
 
-/// Live-row SQL filter, shared by every query so none can skip it. For summaries a NULL
-/// `profile_id` means "unknown owner" (unlike memory's "shared"), so those are never live.
-fn liveness_sql(corpus: Corpus) -> &'static str {
-    match corpus {
-        Corpus::Memory => "AND (s.lifecycle IS NULL OR s.lifecycle = 'active')",
-        Corpus::Context => "",
-        Corpus::Summary => {
-            "AND s.rolling_summary IS NOT NULL AND s.rolling_summary != '' \
-             AND s.profile_id IS NOT NULL"
-        }
-    }
-}
-
-/// Scope as SQL in the `WHERE`: post-filtering would let hidden rows take top-K slots.
-fn scope_sql(corpus: Corpus, scope: &ProfileScope) -> (String, Option<String>) {
-    match (corpus, scope) {
-        (_, ProfileScope::Guest) => ("AND 1 = 0".into(), None),
-        (_, ProfileScope::Household) => (String::new(), None),
-        (Corpus::Memory, ProfileScope::Owner(id)) => (
-            // Like `sqlite_memory::scope_sql`: unattributed memories are shared household context.
-            "AND (s.profile_id = ? OR s.profile_id IS NULL)".into(),
-            Some(id.clone()),
-        ),
-        (Corpus::Context, ProfileScope::Owner(id)) => {
-            // `profile_id` is NOT NULL here; an `IS NULL` limb would only add a hiding place.
-            ("AND s.profile_id = ?".into(), Some(id.clone()))
-        }
-        // No `IS NULL` limb, unlike Memory: an unattributed session is a guest's, not shared.
-        (Corpus::Summary, ProfileScope::Owner(id)) => {
-            ("AND s.profile_id = ?".into(), Some(id.clone()))
-        }
-    }
-}
-
-/// Live text via the JOIN: the index stores no text, so an orphan can't leak deleted words.
-/// Context must match `ContextItem::embedding_text`.
-fn text_sql(corpus: Corpus) -> &'static str {
-    match corpus {
-        Corpus::Memory => "s.content",
-        Corpus::Context => {
-            "CASE WHEN s.title = '' THEN s.body \
-                            WHEN s.body = '' THEN s.title \
-                            ELSE s.title || char(10) || s.body END"
-        }
-        Corpus::Summary => "s.rolling_summary",
-    }
-}
-
-/// The freshness column a corpus compares against, if it has one.
-fn source_rev_sql(corpus: Corpus) -> Option<&'static str> {
-    match corpus {
-        // Rewritten in place, so a present vector can describe an older summary.
-        Corpus::Summary => Some("s.rolling_summary_updated_at"),
-        // Stable once extracted: consolidation adds a new row rather than editing.
-        Corpus::Memory => None,
-        // A context item is re-synced by external_id, which rewrites the row.
-        Corpus::Context => Some("s.ingested_at"),
+/// The passage a vector was made from: a byte span into the embedded text, or all of it.
+fn passage(text: String, start: Option<i64>, len: Option<i64>) -> String {
+    match (start, len) {
+        (Some(s), Some(l)) if s >= 0 && l >= 0 => text
+            .get(s as usize..(s + l) as usize)
+            .map(str::to_string)
+            .unwrap_or(text),
+        _ => text,
     }
 }
 
@@ -144,6 +139,66 @@ impl SqliteVectorIndex {
             .with_context(|| format!("opening {}", vectors_path.display()))?;
         Ok(pool)
     }
+
+    /// Every matching vector's item, kind and score, one per item (its best passage).
+    async fn scored(
+        &self,
+        query: &[f32],
+        model_id: &str,
+        scope: &ProfileScope,
+        kinds: &[Kind],
+    ) -> Result<Vec<(String, Kind, f32, String)>> {
+        let (scope_pred, binds) = sqlite_items::scope_sql(scope, "sys.");
+        // The JOIN doubles as the existence check: orphans never match.
+        let sql = format!(
+            "SELECT v.item_id, i.kind, v.vector, v.chunk_start, v.chunk_len, \
+                    i.context, i.title, i.body \
+             FROM vectors v JOIN sys.items i ON i.id = v.item_id \
+             WHERE v.model_id = ? AND {} AND {} {scope_pred}",
+            kinds_sql(kinds),
+            live_sql()
+        );
+        type Row = (
+            String,
+            String,
+            Vec<u8>,
+            Option<i64>,
+            Option<i64>,
+            String,
+            String,
+            String,
+        );
+        let mut q = sqlx::query_as::<_, Row>(&sql).bind(model_id);
+        for b in binds {
+            q = q.bind(b);
+        }
+        let mut best: HashMap<String, (String, Kind, f32, String)> = HashMap::new();
+        for (item_id, kind, blob, start, len, context, title, body) in
+            q.fetch_all(&self.pool).await?
+        {
+            let Some(kind) = Kind::parse(&kind) else {
+                continue;
+            };
+            // Wrong width is not a bad match but no match: skip it.
+            let Some(score) = cosine(query, &blob_to_vec(&blob)) else {
+                continue;
+            };
+            if best.get(&item_id).is_some_and(|b| b.2 >= score) {
+                continue;
+            }
+            let text = passage(embedded_text(kind, &context, &title, &body), start, len);
+            best.insert(item_id.clone(), (item_id, kind, score, text));
+        }
+        let mut scored: Vec<_> = best.into_values().collect();
+        // Score, then kind order (memory wins ties), then id, so equal scores never reorder.
+        scored.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| rank(a.1).cmp(&rank(b.1)))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Ok(scored)
+    }
 }
 
 #[async_trait]
@@ -151,16 +206,15 @@ impl VectorIndex for SqliteVectorIndex {
     async fn upsert(&self, entry: &VectorEntry) -> Result<()> {
         sqlx::query(
             "INSERT INTO vectors \
-               (corpus, row_id, chunk_ix, chunk_start, chunk_len, \
-                model_id, dims, vector, source_rev, embedded_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(corpus, row_id, chunk_ix) DO UPDATE SET \
+               (item_id, chunk_ix, chunk_start, chunk_len, model_id, dims, vector, \
+                source_rev, embedded_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(item_id, chunk_ix) DO UPDATE SET \
                chunk_start = excluded.chunk_start, chunk_len = excluded.chunk_len, \
                model_id = excluded.model_id, dims = excluded.dims, vector = excluded.vector, \
                source_rev = excluded.source_rev, embedded_at = excluded.embedded_at",
         )
-        .bind(entry.corpus.as_str())
-        .bind(&entry.row_id)
+        .bind(&entry.item_id)
         .bind(entry.chunk_ix)
         .bind(entry.chunk_span.map(|(start, _)| start))
         .bind(entry.chunk_span.map(|(_, len)| len))
@@ -168,42 +222,34 @@ impl VectorIndex for SqliteVectorIndex {
         .bind(entry.vector.len() as i64)
         .bind(vec_to_blob(&entry.vector))
         .bind(&entry.source_rev)
-        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn remove(&self, corpus: Corpus, row_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM vectors WHERE corpus = ? AND row_id = ?")
-            .bind(corpus.as_str())
-            .bind(row_id)
+    async fn remove(&self, item_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM vectors WHERE item_id = ?")
+            .bind(item_id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    async fn get(&self, corpus: Corpus, row_id: &str) -> Result<Option<VectorEntry>> {
+    async fn get(&self, item_id: &str) -> Result<Option<VectorEntry>> {
         let row: Option<(String, Vec<u8>, Option<String>, Option<i64>, Option<i64>)> =
             sqlx::query_as(
-                // Chunk 0: `get` only answers "is this row indexed?".
                 "SELECT model_id, vector, source_rev, chunk_start, chunk_len FROM vectors \
-             WHERE corpus = ? AND row_id = ? AND chunk_ix = 0",
+                 WHERE item_id = ? AND chunk_ix = 0",
             )
-            .bind(corpus.as_str())
-            .bind(row_id)
+            .bind(item_id)
             .fetch_optional(&self.pool)
             .await?;
-
         Ok(
             row.map(|(model_id, blob, source_rev, start, len)| VectorEntry {
-                corpus,
-                row_id: row_id.to_string(),
+                item_id: item_id.to_string(),
                 chunk_ix: 0,
-                chunk_span: match (start, len) {
-                    (Some(s), Some(l)) => Some((s, l)),
-                    _ => None,
-                },
+                chunk_span: start.zip(len),
                 model_id,
                 vector: blob_to_vec(&blob),
                 source_rev,
@@ -216,51 +262,22 @@ impl VectorIndex for SqliteVectorIndex {
         query: &[f32],
         model_id: &str,
         scope: &ProfileScope,
+        kinds: &[Kind],
         limit: usize,
     ) -> Result<Vec<VectorHit>> {
         if query.is_empty() || limit == 0 || scope.excludes_everything() {
             return Ok(vec![]);
         }
-
-        let mut scored: Vec<VectorHit> = Vec::new();
-        for corpus in Corpus::ALL {
-            let (table, id_col) = source_table(corpus);
-            let (scope_pred, bind) = scope_sql(corpus, scope);
-            let live = liveness_sql(corpus);
-            // The JOIN doubles as the existence check: orphans never match.
-            let sql = format!(
-                "SELECT v.row_id, v.vector FROM vectors v \
-                 JOIN {table} s ON s.{id_col} = v.row_id \
-                 WHERE v.corpus = ? AND v.model_id = ? {scope_pred} {live}"
-            );
-            let mut q = sqlx::query_as::<_, (String, Vec<u8>)>(&sql)
-                .bind(corpus.as_str())
-                .bind(model_id);
-            if let Some(b) = bind {
-                q = q.bind(b);
-            }
-            let rows = q.fetch_all(&self.pool).await?;
-            for (row_id, blob) in rows {
-                // Wrong width is not a bad match but no match: skip it.
-                if let Some(score) = cosine(query, &blob_to_vec(&blob)) {
-                    scored.push(VectorHit {
-                        corpus,
-                        row_id,
-                        score,
-                    });
-                }
-            }
-        }
-
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                // Stable tie-break so equal scores never reorder between runs.
-                .then_with(|| a.row_id.cmp(&b.row_id))
-        });
+        let mut scored = self.scored(query, model_id, scope, kinds).await?;
         scored.truncate(limit);
-        Ok(scored)
+        Ok(scored
+            .into_iter()
+            .map(|(item_id, kind, score, _)| VectorHit {
+                item_id,
+                kind,
+                score,
+            })
+            .collect())
     }
 
     async fn search_resolved(
@@ -268,195 +285,114 @@ impl VectorIndex for SqliteVectorIndex {
         query: &[f32],
         model_id: &str,
         scope: &ProfileScope,
+        kinds: &[Kind],
         limit: usize,
     ) -> Result<Vec<ResolvedHit>> {
         if query.is_empty() || limit == 0 || scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let mut scored: Vec<ResolvedHit> = Vec::new();
-        for corpus in Corpus::ALL {
-            let (table, id_col) = source_table(corpus);
-            let (scope_pred, bind) = scope_sql(corpus, scope);
-            let live = liveness_sql(corpus);
-            let text = text_sql(corpus);
-            // Spans are byte offsets, but `substr` on TEXT counts characters (and is 1-indexed),
-            // so slice the BLOB at +1 and cast back. A NULL span is a whole-text vector.
-            let sql = format!(
-                "SELECT v.row_id, v.vector, \
-                        CASE WHEN v.chunk_start IS NULL OR v.chunk_len IS NULL THEN {text} \
-                             ELSE CAST(substr(CAST({text} AS BLOB), \
-                                              v.chunk_start + 1, v.chunk_len) AS TEXT) END \
-                 FROM vectors v \
-                 JOIN {table} s ON s.{id_col} = v.row_id \
-                 WHERE v.corpus = ? AND v.model_id = ? {scope_pred} {live}"
-            );
-            let mut q = sqlx::query_as::<_, (String, Vec<u8>, String)>(&sql)
-                .bind(corpus.as_str())
-                .bind(model_id);
-            if let Some(b) = bind {
-                q = q.bind(b);
-            }
-            // Keep only each row's best chunk, so one long document can't flood the top-K.
-            let mut best: std::collections::HashMap<String, ResolvedHit> =
-                std::collections::HashMap::new();
-            for (row_id, blob, text) in q.fetch_all(&self.pool).await? {
-                let Some(score) = cosine(query, &blob_to_vec(&blob)) else {
-                    continue;
-                };
-                match best.get(&row_id) {
-                    Some(existing) if existing.score >= score => {}
-                    _ => {
-                        best.insert(
-                            row_id.clone(),
-                            ResolvedHit {
-                                corpus,
-                                row_id,
-                                score,
-                                text,
-                            },
-                        );
-                    }
-                }
-            }
-            scored.extend(best.into_values());
-        }
-        // Score, then corpus order (the "memory wins ties" policy), then id for a stable order.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.corpus.cmp(&b.corpus))
-                .then_with(|| a.row_id.cmp(&b.row_id))
-        });
+        let mut scored = self.scored(query, model_id, scope, kinds).await?;
         scored.truncate(limit);
-        Ok(scored)
+        Ok(scored
+            .into_iter()
+            .map(|(item_id, kind, score, text)| ResolvedHit {
+                item_id,
+                kind,
+                score,
+                text,
+            })
+            .collect())
     }
 
     async fn needs_embedding(
         &self,
-        corpus: Corpus,
+        kinds: &[Kind],
         model_id: &str,
         limit: usize,
-    ) -> Result<Vec<String>> {
-        let (table, id_col) = source_table(corpus);
-        let rev = source_rev_sql(corpus);
-
-        // LEFT JOIN from the source finds never-embedded and stale rows in one query. The
-        // `source_rev IS NOT NULL` guard stops an unstamped vector being re-embedded every sweep.
-        let staleness = match rev {
-            Some(col) => format!("OR (v.source_rev IS NOT NULL AND v.source_rev IS NOT {col})"),
-            None => String::new(),
-        };
-        let extra = liveness_sql(corpus);
-        // DISTINCT: a chunked row matches once per stale passage.
+    ) -> Result<Vec<Stale>> {
+        // Chunk 0 stands for the item: every passage is written under one revision.
         let sql = format!(
-            "SELECT DISTINCT s.{id_col} FROM {table} s \
-             LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
-             WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
-             LIMIT ?"
+            "SELECT i.id, i.kind, i.context, i.title, i.body, i.updated_at \
+             FROM sys.items i LEFT JOIN vectors v ON v.item_id = i.id AND v.chunk_ix = 0 \
+             WHERE {} AND {} \
+               AND (v.item_id IS NULL OR v.model_id <> ? OR v.source_rev IS NOT i.updated_at) \
+             ORDER BY {}, i.id LIMIT ?",
+            kinds_sql(kinds),
+            live_sql(),
+            order_sql()
         );
-        let rows: Vec<(String,)> = sqlx::query_as(&sql)
-            .bind(corpus.as_str())
+        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(&sql)
             .bind(model_id)
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.into_iter().map(|(id,)| id).collect())
-    }
-
-    async fn needs_embedding_with_text(
-        &self,
-        corpus: Corpus,
-        model_id: &str,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        let (table, id_col) = source_table(corpus);
-        let rev = source_rev_sql(corpus);
-        let staleness = match rev {
-            Some(col) => format!("OR (v.source_rev IS NOT NULL AND v.source_rev IS NOT {col})"),
-            None => String::new(),
-        };
-        let extra = liveness_sql(corpus);
-        let text = text_sql(corpus);
-        let sql = format!(
-            "SELECT DISTINCT s.{id_col}, {text} FROM {table} s \
-             LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
-             WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
-             LIMIT ?"
-        );
-        let rows: Vec<(String, String)> = sqlx::query_as(&sql)
-            .bind(corpus.as_str())
-            .bind(model_id)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows)
+        Ok(rows
+            .into_iter()
+            .filter_map(|(item_id, kind, context, title, body, rev)| {
+                let kind = Kind::parse(&kind)?;
+                Some(Stale {
+                    item_id,
+                    kind,
+                    text: embedded_text(kind, &context, &title, &body),
+                    rev,
+                })
+            })
+            .collect())
     }
 
     async fn prune_orphans(&self) -> Result<u64> {
-        let mut removed = 0u64;
-        for corpus in Corpus::ALL {
-            let (table, id_col) = source_table(corpus);
-            let sql = format!(
-                "DELETE FROM vectors WHERE corpus = ? AND row_id NOT IN \
-                 (SELECT s.{id_col} FROM {table} s)"
-            );
-            let result = sqlx::query(&sql)
-                .bind(corpus.as_str())
+        let removed =
+            sqlx::query("DELETE FROM vectors WHERE item_id NOT IN (SELECT id FROM sys.items)")
                 .execute(&self.pool)
-                .await?;
-            removed += result.rows_affected();
-        }
+                .await?
+                .rows_affected();
         if removed > 0 {
             tracing::info!(removed, "pruned vector index orphans");
         }
         Ok(removed)
     }
 
-    /// Counted per corpus from the source side: coverage of what retrieval can reach, not of the
-    /// file, so orphans and archived rows are excluded.
+    /// Counted per kind from the header side: coverage of what retrieval can reach, not of the
+    /// file, so orphans and archived items are excluded.
     async fn health(&self, model_id: &str) -> Result<IndexHealth> {
+        let sql = format!(
+            "SELECT i.kind, COUNT(*), \
+                    COALESCE(SUM(CASE WHEN v.model_id = ? THEN 1 ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN v.item_id IS NULL THEN 1 ELSE 0 END), 0) \
+             FROM sys.items i LEFT JOIN vectors v ON v.item_id = i.id AND v.chunk_ix = 0 \
+             WHERE {} GROUP BY i.kind",
+            live_sql()
+        );
+        let live: Vec<(String, i64, i64, i64)> = sqlx::query_as(&sql)
+            .bind(model_id)
+            .fetch_all(&self.pool)
+            .await?;
+        let all: Vec<(String, i64)> =
+            sqlx::query_as("SELECT kind, COUNT(*) FROM sys.items GROUP BY kind")
+                .fetch_all(&self.pool)
+                .await?;
+
         let mut totals = IndexHealth::default();
-        let mut per_corpus = Vec::with_capacity(Corpus::ALL.len());
-
-        for corpus in Corpus::ALL {
-            let (table, id_col) = source_table(corpus);
-            let live = liveness_sql(corpus);
-            // Corpus filter in the JOIN, not the WHERE, or un-indexed rows drop out of the count.
-            // `?` order puts `model_id` (in the SELECT) first. DISTINCT: one row owns many vectors.
-            let sql = format!(
-                "SELECT COUNT(DISTINCT s.{id_col}), \
-                 COUNT(DISTINCT CASE WHEN v.model_id = ? THEN s.{id_col} END), \
-                 COUNT(DISTINCT CASE WHEN v.row_id IS NULL THEN s.{id_col} END) \
-                 FROM {table} s \
-                 LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
-                 WHERE 1 = 1 {live}"
-            );
-            let (rows, indexed, missing): (i64, i64, i64) = sqlx::query_as(&sql)
-                .bind(model_id)
-                .bind(corpus.as_str())
-                .fetch_one(&self.pool)
-                .await?;
-
-            // Unfiltered table count, so a reader can tell "corpus empty" from "corpus excluded".
-            let (source,): (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {table} s"))
-                .fetch_one(&self.pool)
-                .await?;
-
-            let rows = rows.max(0) as u64;
-            let source_rows = source.max(0) as u64;
-            let indexed_rows = indexed.max(0) as u64;
-            let missing_rows = missing.max(0) as u64;
+        for kind in INDEXED {
+            let (rows, indexed_rows, missing_rows) = live
+                .iter()
+                .find(|(k, ..)| k == kind.as_str())
+                .map(|(_, r, i, m)| (*r as u64, *i as u64, *m as u64))
+                .unwrap_or((0, 0, 0));
+            let source_rows = all
+                .iter()
+                .find(|(k, _)| k == kind.as_str())
+                .map(|(_, n)| *n as u64)
+                .unwrap_or(0);
             // Subtracted, not counted, so the three buckets always sum to `rows`.
             let mismatched = rows
                 .saturating_sub(indexed_rows)
                 .saturating_sub(missing_rows);
-
             totals.matching += indexed_rows;
             totals.mismatched += mismatched;
             totals.missing += missing_rows;
-            per_corpus.push(CorpusHealth {
-                corpus,
+            totals.per_kind.push(KindHealth {
+                kind,
                 rows,
                 source_rows,
                 indexed_rows,
@@ -464,483 +400,360 @@ impl VectorIndex for SqliteVectorIndex {
                 mismatched,
             });
         }
-
-        totals.per_corpus = per_corpus;
         Ok(totals)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::add_session;
+    use super::tests_support::*;
     use super::*;
+    use crate::sqlite_memory::SqliteMemoryRepository;
+    use pond_core::context::vector_index::MEMORY;
+    use pond_core::user_data::domain::memory::{MemoryFragment, MemoryLifecycle};
+    use pond_core::user_data::ports::memory_repository::MemoryRepository;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
-    /// A pond with the real system schema plus a vector index attached to it.
-    async fn wire() -> (TempDir, SqliteVectorIndex) {
+    struct Pond {
+        _tmp: TempDir,
+        system: Pool<Sqlite>,
+        index: Arc<dyn VectorIndex>,
+    }
+
+    async fn pond() -> Pond {
         let tmp = TempDir::new().unwrap();
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index = SqliteVectorIndex::new(db.vectors.clone());
-        (tmp, index)
+        Pond {
+            _tmp: tmp,
+            index: Arc::new(SqliteVectorIndex::new(db.vectors.clone())),
+            system: db.system,
+        }
     }
 
-    /// Fixtures must create the member first: `profile_id` is an enforced foreign key.
-    async fn add_profile(pool: &Pool<Sqlite>, id: &str) {
-        sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
-            .bind(id)
-            .bind(id)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
+    impl Pond {
+        fn memories(&self, model: &str, dims: usize) -> SqliteMemoryRepository {
+            SqliteMemoryRepository::new(self.system.clone())
+                .with_vector_index(self.index.clone(), stamp(model, dims))
+        }
 
-    async fn add_memory(pool: &Pool<Sqlite>, id: &str, profile: Option<&str>) {
-        sqlx::query(
-            "INSERT INTO memory_fragments (id, profile_id, content, source, tags, created_at, \
-             access_count, lifecycle) VALUES (?, ?, 'x', 'chat', '[]', datetime('now'), 0, 'active')",
-        )
-        .bind(id)
-        .bind(profile)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    fn entry(id: &str, v: Vec<f32>) -> VectorEntry {
-        VectorEntry {
-            corpus: Corpus::Memory,
-            row_id: id.to_string(),
-            chunk_ix: 0,
-            chunk_span: None,
-            model_id: "nomic-embed-text-v1.5".into(),
-            vector: v,
-            source_rev: None,
+        async fn search(&self, q: &[f32], model: &str, scope: &ProfileScope) -> Vec<String> {
+            self.index
+                .search(q, model, scope, &INDEXED, 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|h| h.item_id)
+                .collect()
         }
     }
 
     #[tokio::test]
-    async fn a_vector_roundtrips() {
-        let (_tmp, index) = wire().await;
-        let e = entry("m1", vec![0.1, 0.2, 0.3]);
-        index.upsert(&e).await.unwrap();
-
-        let got = index.get(Corpus::Memory, "m1").await.unwrap().unwrap();
-        assert_eq!(got, e, "what came back is not what went in");
-        assert!(index.get(Corpus::Memory, "nope").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn re_embedding_replaces_rather_than_appends() {
-        let (_tmp, index) = wire().await;
-        index.upsert(&entry("m1", vec![1.0, 0.0])).await.unwrap();
-        index.upsert(&entry("m1", vec![0.0, 1.0])).await.unwrap();
-
-        let got = index.get(Corpus::Memory, "m1").await.unwrap().unwrap();
-        assert_eq!(got.vector, vec![0.0, 1.0], "the old vector survived");
+    async fn a_vector_roundtrips_and_re_embedding_replaces_it() {
+        let p = pond().await;
+        let m1 = add_memory(&p.system, "m1", None, "the spare key").await;
+        p.index
+            .upsert(&VectorEntry::whole(
+                m1.clone(),
+                "m".into(),
+                vec![1.0, 0.0],
+                None,
+            ))
+            .await
+            .unwrap();
+        p.index
+            .upsert(&VectorEntry::whole(
+                m1.clone(),
+                "m".into(),
+                vec![0.0, 1.0],
+                None,
+            ))
+            .await
+            .unwrap();
+        let got = p.index.get(&m1).await.unwrap().unwrap();
+        assert_eq!(got.vector, vec![0.0, 1.0]);
+        assert!(p.index.get("nope").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn deleting_the_index_file_rebuilds_it_empty_and_usable() {
         let tmp = TempDir::new().unwrap();
-        {
+        let m1 = {
             let db = crate::db::Database::init(tmp.path()).await.unwrap();
             let index = SqliteVectorIndex::new(db.vectors.clone());
-            add_memory(&db.system, "m1", None).await;
-            index.upsert(&entry("m1", vec![1.0, 0.0])).await.unwrap();
-            assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_some());
-        }
-
+            let m1 = add_memory(&db.system, "m1", None, "x").await;
+            index
+                .upsert(&VectorEntry::whole(m1.clone(), "m".into(), vec![1.0], None))
+                .await
+                .unwrap();
+            m1
+        };
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(tmp.path().join(format!("pond_vectors.db{suffix}")));
         }
-        assert!(!tmp.path().join("pond_vectors.db").exists());
-
-        // Reopening recreates it, and the source row is still there to re-embed.
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
         let index = SqliteVectorIndex::new(db.vectors.clone());
-        assert!(
-            index.get(Corpus::Memory, "m1").await.unwrap().is_none(),
-            "the index came back populated, so it was not actually rebuilt"
-        );
-        let todo = index
-            .needs_embedding(Corpus::Memory, "nomic-embed-text-v1.5", 10)
-            .await
-            .unwrap();
+        assert!(index.get(&m1).await.unwrap().is_none());
+        let stale = index.needs_embedding(&INDEXED, "m", 10).await.unwrap();
         assert_eq!(
-            todo,
-            vec!["m1".to_string()],
-            "a rebuilt index must report the source row as needing embedding"
+            stale.len(),
+            1,
+            "the memory is found again by the staleness join"
         );
     }
 
     #[tokio::test]
-    async fn search_joins_against_live_rows_and_an_orphan_matches_nothing() {
-        let (_tmp, index) = wire().await;
-
-        // 'ghost' has a vector but no source row: an orphan.
-        index.upsert(&entry("ghost", vec![1.0, 0.0])).await.unwrap();
-        let hits = index
-            .search(
-                &[1.0, 0.0],
-                "nomic-embed-text-v1.5",
-                &ProfileScope::Household,
-                10,
-            )
-            .await
-            .unwrap();
-        assert!(
-            hits.is_empty(),
-            "an orphan matched; the JOIN is not filtering by existence"
-        );
-
-        // And it is prunable.
-        assert_eq!(index.prune_orphans().await.unwrap(), 1);
-        assert!(index.get(Corpus::Memory, "ghost").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_vector_from_another_model_is_never_returned() {
-        let (tmp, index) = wire().await;
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        add_memory(&db.system, "m1", None).await;
-
-        let mut stale = entry("m1", vec![1.0, 0.0]);
-        stale.model_id = "all-MiniLM-L6-v2".into();
-        index.upsert(&stale).await.unwrap();
-
-        let hits = index
-            .search(
-                &[1.0, 0.0],
-                "nomic-embed-text-v1.5",
-                &ProfileScope::Household,
-                10,
-            )
-            .await
-            .unwrap();
-        assert!(hits.is_empty(), "a foreign-model vector was scored");
-
-        // And the sweep must offer it for re-embedding rather than leaving it.
-        let todo = index
-            .needs_embedding(Corpus::Memory, "nomic-embed-text-v1.5", 10)
-            .await
-            .unwrap();
-        assert_eq!(todo, vec!["m1".to_string()]);
-
-        let health = index.health("nomic-embed-text-v1.5").await.unwrap();
-        assert_eq!(health.matching, 0);
-        assert_eq!(health.mismatched, 1);
-    }
-
-    /// The per-corpus row for `corpus`, failing loudly if it is absent.
-    fn corpus_health(health: &IndexHealth, corpus: Corpus) -> &CorpusHealth {
-        health
-            .per_corpus
-            .iter()
-            .find(|c| c.corpus == corpus)
-            .unwrap_or_else(|| panic!("{corpus:?} is missing from the health surface entirely"))
-    }
-
-    #[tokio::test]
-    async fn a_corpus_with_qualifying_rows_and_no_vectors_reports_zero_coverage() {
-        let (tmp, index) = wire().await;
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        add_memory(&db.system, "m1", None).await;
-        add_memory(&db.system, "m2", None).await;
-
-        let health = index.health("nomic-embed-text-v1.5").await.unwrap();
-        let memory = corpus_health(&health, Corpus::Memory);
-        assert_eq!(
-            memory.rows, 2,
-            "the qualifying source rows were not counted, so coverage has no denominator"
-        );
-        assert_eq!(
-            memory.indexed_rows, 0,
-            "nothing was ever embedded, yet the corpus claims coverage"
-        );
-        assert_eq!(memory.missing_rows, 2);
-        assert_eq!(memory.mismatched, 0);
-    }
-
-    /// Mismatched is kept apart from `missing_rows` too: one needs a re-embed, the other an embed.
-    #[tokio::test]
-    async fn a_vector_from_another_model_counts_as_mismatched_not_indexed() {
-        let (tmp, index) = wire().await;
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        add_memory(&db.system, "mine", None).await;
-        add_memory(&db.system, "theirs", None).await;
-
-        index.upsert(&entry("mine", vec![1.0, 0.0])).await.unwrap();
-        let mut foreign = entry("theirs", vec![1.0, 0.0]);
-        foreign.model_id = "all-MiniLM-L6-v2".into();
-        index.upsert(&foreign).await.unwrap();
-
-        let health = index.health("nomic-embed-text-v1.5").await.unwrap();
-        let memory = corpus_health(&health, Corpus::Memory);
-        assert_eq!(memory.rows, 2);
-        assert_eq!(
-            memory.indexed_rows, 1,
-            "a foreign-model vector was counted as coverage"
-        );
-        assert_eq!(memory.mismatched, 1);
-        assert_eq!(
-            memory.missing_rows, 0,
-            "a row that HAS a vector was reported as never embedded"
-        );
-    }
-
-    /// The orphan and archived memory are indexed but unreachable, so neither may count.
-    #[tokio::test]
-    async fn the_per_corpus_numbers_sum_to_the_global_totals() {
-        let (tmp, index) = wire().await;
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-
-        // Memory: one indexed, one from another model, one bare.
-        add_memory(&db.system, "indexed", None).await;
-        add_memory(&db.system, "foreign", None).await;
-        add_memory(&db.system, "bare", None).await;
-        index
-            .upsert(&entry("indexed", vec![1.0, 0.0]))
-            .await
-            .unwrap();
-        let mut foreign = entry("foreign", vec![1.0, 0.0]);
-        foreign.model_id = "all-MiniLM-L6-v2".into();
-        index.upsert(&foreign).await.unwrap();
-
-        // An archived memory that IS indexed, and an orphan with no source row.
-        add_memory(&db.system, "archived", None).await;
-        index
-            .upsert(&entry("archived", vec![1.0, 0.0]))
-            .await
-            .unwrap();
-        sqlx::query("UPDATE memory_fragments SET lifecycle = 'archived' WHERE id = 'archived'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-        index.upsert(&entry("ghost", vec![1.0, 0.0])).await.unwrap();
-
-        // A summary that qualifies, and one refused because its session is unattributed.
-        add_session(
-            &db.system,
-            "owned",
-            Some("we discussed the garden"),
-            "2026-08-13 10:00:00",
+    async fn an_orphan_matches_nothing_and_is_pruned() {
+        let p = pond().await;
+        let live = add_memory(&p.system, "live", None, "x").await;
+        index_whole(&p.index, &live, &[1.0, 0.0]).await;
+        index_whole(
+            &p.index,
+            "0190d8d5-0000-7000-8000-000000000000",
+            &[1.0, 0.0],
         )
         .await;
-        add_session(
-            &db.system,
-            "guest",
-            Some("a guest chatted"),
-            "2026-08-13 10:00:00",
-        )
-        .await;
-        sqlx::query("UPDATE sessions SET profile_id = NULL WHERE id = 'guest'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-
-        let health = index.health("nomic-embed-text-v1.5").await.unwrap();
         assert_eq!(
-            health.per_corpus.len(),
-            Corpus::ALL.len(),
-            "a corpus vanished from the health surface"
+            p.search(&[1.0, 0.0], "m", &ProfileScope::Household).await,
+            vec![live.clone()]
         );
-
-        let sum = |f: fn(&CorpusHealth) -> u64| health.per_corpus.iter().map(f).sum::<u64>();
-        assert_eq!(
-            health.matching,
-            sum(|c| c.indexed_rows),
-            "the matching total is not the sum of the per-corpus coverage"
-        );
-        assert_eq!(health.mismatched, sum(|c| c.mismatched));
-        assert_eq!(health.missing, sum(|c| c.missing_rows));
-
-        // Each corpus's parts sum to its own qualifying row count.
-        for c in &health.per_corpus {
-            assert_eq!(
-                c.rows,
-                c.indexed_rows + c.missing_rows + c.mismatched,
-                "{:?} does not add up: {c:?}",
-                c.corpus
-            );
-        }
-
-        // Pinned values, so the sums above cannot be satisfied by three zeros.
-        let memory = corpus_health(&health, Corpus::Memory);
-        assert_eq!(
-            (
-                memory.rows,
-                memory.indexed_rows,
-                memory.mismatched,
-                memory.missing_rows
-            ),
-            (3, 1, 1, 1),
-            "the archived memory or the orphan leaked into the memory corpus"
-        );
-        let summary = corpus_health(&health, Corpus::Summary);
-        assert_eq!(
-            summary.rows, 1,
-            "the unattributed session was counted as indexable"
-        );
-        assert_eq!(summary.missing_rows, 1);
-    }
-
-    /// Pinned directly: `search` returns early for a guest, so behavioural tests never reach it.
-    #[test]
-    fn the_scope_predicate_refuses_a_guest_for_every_corpus() {
-        for corpus in Corpus::ALL {
-            let (pred, bind) = scope_sql(corpus, &ProfileScope::Guest);
-            assert_eq!(
-                pred, "AND 1 = 0",
-                "{corpus:?} does not refuse a guest in SQL"
-            );
-            assert!(bind.is_none());
-        }
-        // Household is unrestricted, and an owner is restricted with a bind.
-        assert_eq!(scope_sql(Corpus::Memory, &ProfileScope::Household).0, "");
-        let (pred, bind) = scope_sql(Corpus::Memory, &ProfileScope::Owner("jerry".into()));
-        assert!(pred.contains("profile_id = ?"), "got: {pred}");
-        assert_eq!(bind.as_deref(), Some("jerry"));
+        assert_eq!(p.index.prune_orphans().await.unwrap(), 1);
+        assert!(p.index.get(&live).await.unwrap().is_some());
     }
 
     #[tokio::test]
-    async fn a_guest_sees_nothing_and_an_owner_sees_only_their_own() {
-        let (tmp, index) = wire().await;
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        add_profile(&db.system, "jerry").await;
-        add_profile(&db.system, "sam").await;
-        add_memory(&db.system, "mine", Some("jerry")).await;
-        add_memory(&db.system, "theirs", Some("sam")).await;
-        add_memory(&db.system, "shared", None).await;
-        for id in ["mine", "theirs", "shared"] {
-            index.upsert(&entry(id, vec![1.0, 0.0])).await.unwrap();
-        }
-
-        let guest = index
-            .search(
-                &[1.0, 0.0],
-                "nomic-embed-text-v1.5",
-                &ProfileScope::Guest,
-                10,
-            )
-            .await
-            .unwrap();
-        assert!(guest.is_empty(), "a guest reached the household's index");
-
-        let owner = index
-            .search(
-                &[1.0, 0.0],
-                "nomic-embed-text-v1.5",
-                &ProfileScope::Owner("jerry".into()),
-                10,
-            )
-            .await
-            .unwrap();
-        let ids: Vec<&str> = owner.iter().map(|h| h.row_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["mine", "shared"],
-            "an owner must see their own rows and unattributed household ones, \
-             and never another member's"
-        );
-    }
-}
-
-/// Write-through tests, kept here because they assert the index after a normal store write.
-#[cfg(test)]
-mod write_through_tests {
-    use super::tests_support::*;
-    use super::*;
-    use pond_core::user_data::domain::memory::MemoryFragment;
-    use pond_core::user_data::ports::memory_repository::MemoryRepository;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn a_stored_memory_is_immediately_searchable() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("nomic-embed-text-v1.5", 2));
-
-        let mut frag =
-            MemoryFragment::from_chat("m1".into(), None, None, "the spare key is out back".into());
-        frag.embedding = Some(vec![1.0, 0.0]);
-        repo.add(frag).await.unwrap();
-
-        let hits = index
-            .search(
-                &[1.0, 0.0],
-                "nomic-embed-text-v1.5",
-                &ProfileScope::Household,
-                10,
-            )
-            .await
-            .unwrap();
-        assert_eq!(hits.len(), 1, "a stored memory was not searchable");
-        assert_eq!(hits[0].row_id, "m1");
-        assert_eq!(hits[0].corpus, Corpus::Memory);
-    }
-
-    /// Write-through must mirror the stored row, below the redactor that drops secret vectors.
-    #[tokio::test]
-    async fn a_fragment_whose_vector_was_dropped_contributes_nothing_to_the_index() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("nomic-embed-text-v1.5", 2));
-
-        // Vacuity control: a sibling with a vector proves indexing works.
-        let mut ok = MemoryFragment::from_chat("kept".into(), None, None, "harmless".into());
-        ok.embedding = Some(vec![1.0, 0.0]);
-        repo.add(ok).await.unwrap();
-
-        // And the one the redactor stripped: same path, no vector.
-        let stripped =
-            MemoryFragment::from_chat("secret".into(), None, None, "[redacted:api-key]".into());
-        assert!(stripped.embedding.is_none());
-        repo.add(stripped).await.unwrap();
-
-        assert!(
-            index.get(Corpus::Memory, "kept").await.unwrap().is_some(),
-            "the write-through is not live, so this test proves nothing"
-        );
-        assert!(
-            index.get(Corpus::Memory, "secret").await.unwrap().is_none(),
-            "a fragment the redactor stripped still reached the index"
-        );
-    }
-
-    #[tokio::test]
-    async fn one_row_contributes_one_hit_however_many_chunks_it_owns() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        // `long` owns four chunks, one closest to the query; `short` owns one, slightly further.
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone());
-        for (id, content) in [("long", "a long one"), ("short", "a short one")] {
-            repo.add(MemoryFragment::from_chat(
-                id.into(),
+    async fn a_vector_from_another_model_is_never_returned_and_is_stale() {
+        let p = pond().await;
+        let m1 = add_memory(&p.system, "m1", None, "x").await;
+        p.index
+            .upsert(&VectorEntry::whole(
+                m1.clone(),
+                "old".into(),
+                vec![1.0, 0.0],
                 None,
-                None,
-                content.into(),
             ))
             .await
             .unwrap();
-        }
+        assert!(p
+            .search(&[1.0, 0.0], "new", &ProfileScope::Household)
+            .await
+            .is_empty());
+        let stale = p.index.needs_embedding(&INDEXED, "new", 10).await.unwrap();
+        assert_eq!(
+            stale.iter().map(|s| s.item_id.clone()).collect::<Vec<_>>(),
+            vec![m1]
+        );
+    }
 
-        for (ix, v) in [[0.9f32, 0.1], [0.95, 0.05], [1.0, 0.0], [0.8, 0.2]]
-            .into_iter()
+    #[tokio::test]
+    async fn a_vector_older_than_its_header_is_stale_and_a_current_one_is_not() {
+        let p = pond().await;
+        let m1 = add_memory(&p.system, "m1", None, "x").await;
+        let rev = rev_of(&p.system, &m1).await;
+        p.index
+            .upsert(&VectorEntry::whole(
+                m1.clone(),
+                "m".into(),
+                vec![1.0],
+                Some(rev),
+            ))
+            .await
+            .unwrap();
+        assert!(p
+            .index
+            .needs_embedding(&INDEXED, "m", 10)
+            .await
+            .unwrap()
+            .is_empty());
+        sqlx::query(
+            "UPDATE items SET body = 'y', updated_at = '2099-01-01T00:00:00.000Z' WHERE id = ?",
+        )
+        .bind(&m1)
+        .execute(&p.system)
+        .await
+        .unwrap();
+        let stale = p.index.needs_embedding(&INDEXED, "m", 10).await.unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            (stale[0].text.as_str(), stale[0].rev.as_str()),
+            ("y", "2099-01-01T00:00:00.000Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_backlog_is_memory_first_and_a_chunked_item_is_offered_once() {
+        let p = pond().await;
+        add_session(&p.system, "s1", Some("We planned the vents"), "2026-11-01").await;
+        sync_all(&p.system).await;
+        let m1 = add_memory(&p.system, "m1", None, "x").await;
+        for chunk_ix in 0..3 {
+            p.index
+                .upsert(&VectorEntry {
+                    chunk_ix,
+                    chunk_span: Some((0, 1)),
+                    ..VectorEntry::whole(m1.clone(), "old".into(), vec![1.0], None)
+                })
+                .await
+                .unwrap();
+        }
+        let stale = p.index.needs_embedding(&INDEXED, "new", 10).await.unwrap();
+        let kinds: Vec<Kind> = stale.iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, vec![Kind::Fact, Kind::Conversation]);
+        assert_eq!(stale[1].text, "We planned the vents");
+    }
+
+    #[tokio::test]
+    async fn every_indexed_kind_reports_health_and_the_buckets_sum() {
+        let p = pond().await;
+        let indexed = add_memory(&p.system, "a", None, "x").await;
+        let other = add_memory(&p.system, "b", None, "y").await;
+        add_memory(&p.system, "c", None, "z").await;
+        add_memory(&p.system, "d", None, "w").await;
+        sqlx::query("UPDATE memory_fragments SET lifecycle = 'archived' WHERE id = 'd'")
+            .execute(&p.system)
+            .await
+            .unwrap();
+        sync_all(&p.system).await;
+        index_whole(&p.index, &indexed, &[1.0]).await;
+        p.index
+            .upsert(&VectorEntry::whole(other, "old".into(), vec![1.0], None))
+            .await
+            .unwrap();
+
+        let h = p.index.health("m").await.unwrap();
+        assert_eq!(
+            h.per_kind.iter().map(|k| k.kind).collect::<Vec<_>>(),
+            INDEXED.to_vec()
+        );
+        let fact = h.per_kind.iter().find(|k| k.kind == Kind::Fact).unwrap();
+        assert_eq!(
+            (
+                fact.rows,
+                fact.source_rows,
+                fact.indexed_rows,
+                fact.missing_rows,
+                fact.mismatched
+            ),
+            (3, 4, 1, 1, 1),
+            "the archived memory is a header but not a row retrieval can reach"
+        );
+        let sum = |f: fn(&KindHealth) -> u64| h.per_kind.iter().map(f).sum::<u64>();
+        assert_eq!(sum(|k| k.indexed_rows), h.matching);
+        assert_eq!(sum(|k| k.missing_rows), h.missing);
+        assert_eq!(sum(|k| k.mismatched), h.mismatched);
+    }
+
+    #[tokio::test]
+    async fn a_guest_sees_nothing_and_members_see_their_own_and_the_households() {
+        let p = pond().await;
+        add_profile(&p.system, "amina").await;
+        add_profile(&p.system, "baraka").await;
+        let hers = add_memory(&p.system, "hers", Some("amina"), "a").await;
+        let his = add_memory(&p.system, "his", Some("baraka"), "b").await;
+        let ours = add_memory(&p.system, "ours", None, "c").await;
+        for id in [&hers, &his, &ours] {
+            index_whole(&p.index, id, &[1.0, 0.0]).await;
+        }
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        assert!(p
+            .search(&[1.0, 0.0], "m", &ProfileScope::Guest)
+            .await
+            .is_empty());
+        assert_eq!(
+            sorted(
+                p.search(&[1.0, 0.0], "m", &ProfileScope::Owner("amina".into()))
+                    .await
+            ),
+            sorted(vec![hers.clone(), ours.clone()])
+        );
+        assert_eq!(
+            sorted(
+                p.search(&[1.0, 0.0], "m", &ProfileScope::Owner("baraka".into()))
+                    .await
+            ),
+            sorted(vec![his.clone(), ours.clone()])
+        );
+        assert_eq!(
+            p.search(&[1.0, 0.0], "m", &ProfileScope::Household)
+                .await
+                .len(),
+            3
+        );
+
+        sqlx::query(
+            "INSERT INTO item_shares (item_id, profile_id, created_at) VALUES (?, 'baraka', ?)",
+        )
+        .bind(&hers)
+        .bind(pond_core::items::timestamp::now())
+        .execute(&p.system)
+        .await
+        .unwrap();
+        assert!(
+            p.search(&[1.0, 0.0], "m", &ProfileScope::Owner("baraka".into()))
+                .await
+                .contains(&hers),
+            "an item shared with a member is theirs to find"
+        );
+        let (pred, _) = sqlite_items::scope_sql(&ProfileScope::Guest, "sys.");
+        assert_eq!(pred, "AND 1 = 0");
+    }
+
+    #[tokio::test]
+    async fn an_archived_memory_and_an_unattributed_conversation_are_never_found() {
+        let p = pond().await;
+        let gone = add_memory(&p.system, "gone", None, "x").await;
+        index_whole(&p.index, &gone, &[1.0, 0.0]).await;
+        let repo = p.memories("m", 2);
+        repo.update_lifecycle("gone", MemoryLifecycle::Archived)
+            .await
+            .unwrap();
+        assert!(p
+            .search(&[1.0, 0.0], "m", &ProfileScope::Household)
+            .await
+            .is_empty());
+
+        sqlx::query(
+            "INSERT INTO sessions (id, created_at, updated_at, rolling_summary) \
+             VALUES ('nobody', datetime('now'), datetime('now'), 'A guest asked about the wifi')",
+        )
+        .execute(&p.system)
+        .await
+        .unwrap();
+        sync_all(&p.system).await;
+        assert!(
+            p.index
+                .needs_embedding(&INDEXED, "m", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an unattributed conversation has no header, so nothing to embed"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_search_returns_the_best_passage_of_the_redacted_header() {
+        let p = pond().await;
+        add_session(
+            &p.system,
+            "s1",
+            Some("We agreed on Tuesday. Key sk-abcdefghijklmnopqrstuvwxyz123456."),
+            "2026-11-01",
+        )
+        .await;
+        sync_all(&p.system).await;
+        let s1 = item_of(&p.system, "sessions", "s1").await;
+        for (ix, (span, v)) in [((0, 20), [1.0, 0.0]), ((21, 10), [0.0, 1.0])]
+            .iter()
             .enumerate()
         {
-            index
+            p.index
                 .upsert(&VectorEntry {
-                    corpus: Corpus::Memory,
-                    row_id: "long".into(),
+                    item_id: s1.clone(),
                     chunk_ix: ix as i64,
-                    chunk_span: Some((0, 4)),
+                    chunk_span: Some(*span),
                     model_id: "m".into(),
                     vector: v.to_vec(),
                     source_rev: None,
@@ -948,883 +761,185 @@ mod write_through_tests {
                 .await
                 .unwrap();
         }
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Memory,
-                row_id: "short".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "m".into(),
-                vector: vec![0.85, 0.15],
-                source_rev: None,
-            })
+        let hits = p
+            .index
+            .search_resolved(
+                &[1.0, 0.0],
+                "m",
+                &ProfileScope::Owner("owner".into()),
+                &INDEXED,
+                10,
+            )
             .await
             .unwrap();
-
-        let hits = index
-            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
+        assert_eq!(
+            hits.len(),
+            1,
+            "one item is one hit, however many passages it has"
+        );
+        assert_eq!(hits[0].kind, Kind::Conversation);
+        assert_eq!(hits[0].text, "We agreed on Tuesday");
+        let whole = p
+            .index
+            .search_resolved(&[0.0, 1.0], "m", &ProfileScope::Household, &INDEXED, 10)
             .await
             .unwrap();
-
-        let long_hits = hits.iter().filter(|h| h.row_id == "long").count();
-        assert_eq!(
-            long_hits, 1,
-            "a four-chunk row took {long_hits} slots: {hits:#?}"
-        );
-        // And it is the BEST chunk that represents it, not the first stored.
-        let long = hits.iter().find(|h| h.row_id == "long").unwrap();
-        assert!(
-            (long.score - 1.0).abs() < 1e-6,
-            "the row was represented by a weaker chunk: {}",
-            long.score
-        );
-        assert!(hits.iter().any(|h| h.row_id == "short"), "{hits:#?}");
+        assert!(!whole[0].text.contains("sk-abc"), "{}", whole[0].text);
     }
 
-    /// A process with no embedder (the `pond memories add` CLI) must leave the index alone.
     #[tokio::test]
-    async fn an_unattributable_vector_is_left_alone_rather_than_removed() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        // The server already indexed this row.
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Memory,
-                row_id: "m1".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "nomic-embed-text-v1.5".into(),
-                vector: vec![1.0, 0.0],
-                source_rev: None,
-            })
-            .await
-            .unwrap();
-
-        // A second process stores the row with a vector it cannot name a model for.
-        let no_model = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), None);
-        let mut frag = MemoryFragment::from_chat("m1".into(), None, None, "kept".into());
-        frag.embedding = Some(vec![1.0, 0.0]);
-        no_model.add(frag).await.unwrap();
-
-        assert!(
-            index.get(Corpus::Memory, "m1").await.unwrap().is_some(),
-            "a write with no embedder stripped an entry the server had written"
-        );
-    }
-
-    fn memory(id: &str, vector: Vec<f32>) -> MemoryFragment {
-        let mut frag = MemoryFragment::from_chat(id.into(), None, None, format!("fact {id}"));
-        frag.embedding = Some(vector);
-        frag
-    }
-
-    /// Two models of one width are two spaces: search scores only the current model's vectors.
-    #[tokio::test]
-    async fn a_same_width_vector_from_another_model_is_never_compared() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let under = |model: &str| {
-            crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-                .with_vector_index(index.clone(), stamp(model, 2))
-        };
-        let (minilm, bge_small) = (under("minilm"), under("bge-small"));
-        minilm.add(memory("old", vec![1.0, 0.0])).await.unwrap();
-        bge_small.add(memory("new", vec![1.0, 0.0])).await.unwrap();
-
-        let ids = |hits: Vec<MemoryFragment>| hits.into_iter().map(|f| f.id).collect::<Vec<_>>();
-        let scope = ProfileScope::Household;
+    async fn a_passage_is_sliced_by_byte_and_a_bad_span_reads_the_whole_text() {
         assert_eq!(
-            ids(bge_small
-                .search_similar(&[1.0, 0.0], &scope, 10)
-                .await
-                .unwrap()),
-            vec!["new"],
-            "a vector stamped by another model of the same width was scored"
+            passage("Mzee é Tuesday".into(), Some(8), Some(7)),
+            "Tuesday"
         );
         assert_eq!(
-            ids(minilm
-                .search_similar(&[1.0, 0.0], &scope, 10)
-                .await
-                .unwrap()),
-            vec!["old"]
+            passage("é".into(), Some(1), Some(1)),
+            "é",
+            "not a char boundary"
         );
-    }
-
-    /// Before the slot re-embeds, a switched pond answers by recency instead of across spaces,
-    /// and hands back no old vector a caller could score the query against.
-    #[tokio::test]
-    async fn with_no_vector_from_the_current_model_search_falls_back_to_recency() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let before = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("minilm", 2));
-        before.add(memory("near", vec![1.0, 0.0])).await.unwrap();
-        before.add(memory("far", vec![0.0, 1.0])).await.unwrap();
-
-        let after = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("bge-small", 2));
-        let similar = after
-            .search_similar(&[1.0, 0.0], &ProfileScope::Household, 10)
-            .await
-            .unwrap();
-        let recent = after
-            .search_recent(&ProfileScope::Household, 10)
-            .await
-            .unwrap();
-        let ids = |hits: &[MemoryFragment]| hits.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&similar), ids(&recent));
-        assert_eq!(similar.len(), 2);
-        assert!(similar.iter().all(|f| f.embedding.is_none()), "{similar:?}");
+        assert_eq!(passage("abc".into(), Some(2), Some(9)), "abc");
+        assert_eq!(passage("abc".into(), None, None), "abc");
     }
 
     #[tokio::test]
-    async fn a_vector_of_another_width_is_not_stamped_as_the_current_model() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("m", 3));
-
-        repo.add(memory("m1", vec![1.0, 0.0])).await.unwrap();
-        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
-    }
-
-    /// Chosen but not loaded: no model can be named, so the write leaves the index to the sweep.
-    #[tokio::test]
-    async fn a_vector_stored_while_the_model_loads_is_not_stamped() {
-        use pond_core::models::domain::embedding_models::{EmbedderChoice, ALL_MINILM_L6_V2};
-        use pond_core::models::services::active_embedder::ActiveEmbedder;
-
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let embedder = Arc::new(ActiveEmbedder::off());
-        embedder
-            .choose(EmbedderChoice::Model(&ALL_MINILM_L6_V2))
-            .await;
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), Some(embedder));
-
-        repo.add(memory("m1", vec![0.5; 384])).await.unwrap();
-        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
-    }
-
-    /// A stored vector the index does not vouch for may be another model's at the same width, so
-    /// it is offered for re-embedding, never stamped as the current model's.
-    #[tokio::test]
-    async fn a_stored_vector_with_no_index_row_is_re_embedded_not_adopted() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        add_memory_with_vector(&db.system, "indexed", &[0.5f32; 8]).await;
-        add_memory_with_vector(&db.system, "unindexed", &[0.25f32; 8]).await;
-        index_whole(&index, "indexed", &[0.5; 8]).await;
-
-        assert_eq!(
-            index
-                .needs_embedding(Corpus::Memory, "m", 10)
-                .await
-                .unwrap(),
-            vec!["unindexed".to_string()]
-        );
-        assert_eq!(
-            index
-                .needs_embedding(Corpus::Memory, "another", 10)
-                .await
-                .unwrap()
-                .len(),
-            2,
-            "under another model both are stale"
-        );
-    }
-
-    /// A chunked row is one row of work, however many of its passages are stale.
-    #[tokio::test]
-    async fn a_chunked_row_is_offered_once() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        add_memory_with_vector(&db.system, "m1", &[1.0]).await;
-        for chunk_ix in 0..3 {
-            index
-                .upsert(&VectorEntry {
-                    chunk_ix,
-                    chunk_span: Some((chunk_ix * 10, 10)),
-                    ..VectorEntry::whole(Corpus::Memory, "m1".into(), "old".into(), vec![1.0], None)
-                })
-                .await
-                .unwrap();
-        }
-        assert_eq!(
-            index
-                .needs_embedding(Corpus::Memory, "new", 10)
-                .await
-                .unwrap(),
-            vec!["m1".to_string()]
-        );
-        assert_eq!(
-            index
-                .needs_embedding_with_text(Corpus::Memory, "new", 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    /// Deleting a memory removes its vector, so the common case needs no sweep.
-    #[tokio::test]
-    async fn deleting_a_memory_drops_its_vector() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("m", 2));
-
-        let mut frag = MemoryFragment::from_chat("m1".into(), None, None, "x".into());
+    async fn a_stored_memory_is_immediately_searchable_and_deleting_it_drops_its_vector() {
+        let p = pond().await;
+        let repo = p.memories("m", 2);
+        let mut frag = MemoryFragment::from_chat("m1".into(), None, None, "the spare key".into());
         frag.embedding = Some(vec![1.0, 0.0]);
         repo.add(frag).await.unwrap();
-        repo.delete("m1").await.unwrap();
+        let m1 = item_of(&p.system, "memory_fragments", "m1").await;
+        assert_eq!(
+            p.search(&[1.0, 0.0], "m", &ProfileScope::Household).await,
+            vec![m1.clone()]
+        );
+        assert!(p
+            .index
+            .needs_embedding(&INDEXED, "m", 10)
+            .await
+            .unwrap()
+            .is_empty());
 
-        assert!(index.get(Corpus::Memory, "m1").await.unwrap().is_none());
+        let found = repo
+            .search_similar(&[1.0, 0.0], &ProfileScope::Household, 5)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].embedding.as_deref(), Some(&[1.0, 0.0][..]));
+
+        repo.delete("m1").await.unwrap();
+        assert!(p.index.get(&m1).await.unwrap().is_none());
     }
 
-    async fn reworded_store(
-        tmp: &TempDir,
-    ) -> (
-        crate::sqlite_memory::SqliteMemoryRepository,
-        Arc<dyn VectorIndex>,
-    ) {
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        let repo = crate::sqlite_memory::SqliteMemoryRepository::new(db.system.clone())
-            .with_vector_index(index.clone(), stamp("m", 2));
+    #[tokio::test]
+    async fn rewording_a_memory_replaces_its_vector_or_leaves_it_to_the_slot() {
+        let p = pond().await;
+        let repo = p.memories("m", 2);
         let mut frag = MemoryFragment::from_chat("w1".into(), None, None, "the old words".into());
         frag.embedding = Some(vec![1.0, 0.0]);
         repo.add(frag).await.unwrap();
-        (repo, index)
-    }
-
-    #[tokio::test]
-    async fn rewording_a_memory_replaces_its_vector_in_the_row_and_the_index() {
-        let tmp = TempDir::new().unwrap();
-        let (repo, index) = reworded_store(&tmp).await;
+        let w1 = item_of(&p.system, "memory_fragments", "w1").await;
 
         repo.update_content("w1", "the new words", Some(&[0.0, 1.0]))
             .await
             .unwrap();
-
-        let row = repo
-            .search_recent(&ProfileScope::Household, 1)
-            .await
-            .unwrap()
-            .remove(0);
-        assert_eq!(row.content, "the new words");
-        assert_eq!(row.embedding.as_deref(), Some(&[0.0, 1.0][..]));
-        let entry = index.get(Corpus::Memory, "w1").await.unwrap();
         assert_eq!(
-            entry.map(|e| e.vector),
-            Some(vec![0.0, 1.0]),
-            "the index still scores the old words"
+            p.index.get(&w1).await.unwrap().unwrap().vector,
+            vec![0.0, 1.0]
         );
-    }
-
-    #[tokio::test]
-    async fn rewording_without_a_vector_leaves_the_row_for_the_sweep_and_drops_the_old_entry() {
-        let tmp = TempDir::new().unwrap();
-        let (repo, index) = reworded_store(&tmp).await;
-
-        repo.update_content("w1", "the new words", None)
-            .await
-            .unwrap();
-
-        let unembedded: Vec<String> = repo
-            .search_unembedded(10)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|f| f.id)
-            .collect();
-        assert_eq!(unembedded, vec!["w1"], "the sweep cannot see the row");
-        assert!(
-            index.get(Corpus::Memory, "w1").await.unwrap().is_none(),
-            "the old words' vector would keep scoring for the new ones"
-        );
-    }
-
-    #[tokio::test]
-    async fn rewording_a_missing_memory_indexes_nothing() {
-        let tmp = TempDir::new().unwrap();
-        let (repo, index) = reworded_store(&tmp).await;
-
-        repo.update_content("gone", "words", Some(&[0.0, 1.0]))
-            .await
-            .unwrap();
-
-        assert!(
-            index.get(Corpus::Memory, "gone").await.unwrap().is_none(),
-            "an edit to no row left an orphan in the index"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_archived_memory_is_not_returned_by_search() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_memory_with_vector(&db.system, "live", &[1.0, 0.0]).await;
-        add_memory_with_vector(&db.system, "archived", &[1.0, 0.0]).await;
-        index_whole(&index, "live", &[1.0, 0.0]).await;
-        index_whole(&index, "archived", &[1.0, 0.0]).await;
-        sqlx::query("UPDATE memory_fragments SET lifecycle = 'archived' WHERE id = 'archived'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-
-        let hits = index
-            .search(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
-            .await
-            .unwrap();
-        let ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["live"],
-            "an archived memory came back from the index"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unattributed_session_summary_is_never_surfaced() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_profile(&db.system, "jerry").await;
-        add_session(
-            &db.system,
-            "owned",
-            Some("jerry chat"),
-            "2026-08-13 10:00:00",
-        )
-        .await;
-        add_session(
-            &db.system,
-            "guest",
-            Some("guest chat"),
-            "2026-08-13 10:00:00",
-        )
-        .await;
-        sqlx::query("UPDATE sessions SET profile_id = 'jerry' WHERE id = 'owned'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-        // The guest case: nobody was identified in this session.
-        sqlx::query("UPDATE sessions SET profile_id = NULL WHERE id = 'guest'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-
-        for id in ["owned", "guest"] {
-            index
-                .upsert(&VectorEntry {
-                    corpus: Corpus::Summary,
-                    row_id: id.into(),
-                    chunk_ix: 0,
-                    chunk_span: None,
-                    model_id: "m".into(),
-                    vector: vec![1.0, 0.0],
-                    source_rev: Some("2026-08-13 10:00:00".into()),
-                })
-                .await
-                .unwrap();
-        }
-
-        let hits = index
-            .search(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
-            .await
-            .unwrap();
-        let ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["owned"],
-            "an unattributed (guest) session summary reached a household read"
-        );
-
-        // Nor offered for embedding: no point paying inference for a row retrieval refuses.
-        let todo = index
-            .needs_embedding(Corpus::Summary, "other", 10)
-            .await
-            .unwrap();
-        assert_eq!(todo, vec!["owned".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn resolved_search_returns_live_text_and_obeys_the_same_rules() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_memory_with_vector(&db.system, "m1", &[1.0, 0.0]).await;
-        sqlx::query(
-            "UPDATE memory_fragments SET content = 'the bill is eighty pounds' WHERE id='m1'",
-        )
-        .execute(&db.system)
-        .await
-        .unwrap();
-        add_memory_with_vector(&db.system, "gone", &[1.0, 0.0]).await;
-        index_whole(&index, "m1", &[1.0, 0.0]).await;
-        index_whole(&index, "gone", &[1.0, 0.0]).await;
-
-        // A summary, which resolves from a different column entirely.
-        add_session(
-            &db.system,
-            "s1",
-            Some("we discussed the garden"),
-            "2026-08-13 10:00:00",
-        )
-        .await;
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Summary,
-                row_id: "s1".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "m".into(),
-                vector: vec![1.0, 0.0],
-                source_rev: Some("2026-08-13 10:00:00".into()),
-            })
-            .await
-            .unwrap();
-
-        // Archive one: it must vanish from the resolved search too.
-        sqlx::query("UPDATE memory_fragments SET lifecycle='archived' WHERE id='gone'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-
-        let hits = index
-            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
-            .await
-            .unwrap();
-        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-        assert!(
-            texts.contains(&"the bill is eighty pounds"),
-            "memory text was not resolved: {texts:?}"
-        );
-        assert!(
-            texts.contains(&"we discussed the garden"),
-            "summary text was not resolved: {texts:?}"
-        );
-        assert!(
-            !hits.iter().any(|h| h.row_id == "gone"),
-            "an archived memory came back from the resolved search"
-        );
-
-        // Equal scores: memory first, via the `Corpus` declaration order.
-        assert_eq!(
-            hits[0].corpus,
-            Corpus::Memory,
-            "a summary outranked a memory on a tie"
-        );
-
-        // And a guest still gets nothing through this path.
-        assert!(index
-            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Guest, 10)
+        assert!(p
+            .index
+            .needs_embedding(&INDEXED, "m", 10)
             .await
             .unwrap()
             .is_empty());
-    }
 
-    /// Bus events reach the index through the existing ingest write-through, not a subscriber.
-    #[tokio::test]
-    async fn an_ingested_item_reaches_the_index_and_disconnecting_removes_it() {
-        use pond_core::context::domain::{SourceKind, SourceParts, SourceStatus};
-        use pond_core::context::ingest::{IngestPipeline, RawItem};
-        use pond_core::context::ports::ContextRepository;
-        use pond_core::security::domain::redaction::RedactionKind;
-        use pond_core::security::mocks::mock_redactor::MockRedactor;
-
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        add_profile(&db.system, "jerry").await;
-
-        let redactor = Arc::new(MockRedactor::replacing("nothing", RedactionKind::ApiKey));
-        let repo = Arc::new(
-            crate::sqlite_context::SqliteContextRepository::new(
-                db.system.clone(),
-                redactor.clone(),
-            )
-            .with_vector_index(index.clone(), stamp("m", 2)),
-        );
-
-        let source = pond_core::context::domain::ContextSource::from_parts(SourceParts {
-            id: "src-sensor".into(),
-            kind: SourceKind::Sensor,
-            provider: "pond".into(),
-            profile_id: "jerry".into(),
-            scopes: vec![],
-            cursor: None,
-            last_sync: None,
-            status: SourceStatus::Connected,
-            secret_ref: None,
-            created_at: chrono::Utc::now(),
-        })
-        .expect("valid source");
-        repo.upsert_source(&source).await.unwrap();
-
-        // Any vector will do; the point is that it reaches the index.
-        struct E;
-        #[async_trait]
-        impl pond_core::models::ports::embedding::EmbeddingProvider for E {
-            async fn embed(&self, _t: &str) -> Result<Vec<f32>> {
-                Ok(vec![1.0, 0.0])
-            }
-            fn dimensions(&self) -> usize {
-                2
-            }
-            fn model_id(&self) -> String {
-                "m".into()
-            }
-        }
-        let pipeline = IngestPipeline::new(repo.clone(), redactor).with_embedder(Some(
-            Arc::new(E) as Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>
-        ));
-
-        pipeline
-            .ingest(
-                &source,
-                RawItem {
-                    external_id: "evt-1".into(),
-                    kind: pond_core::context::domain::ItemKind::Event,
-                    occurred_at: chrono::Utc::now(),
-                    title: "back door".into(),
-                    body: "the back door opened".into(),
-                    participants: vec![],
-                },
-                chrono::Utc::now(),
-            )
-            .await
-            .expect("ingest");
-
-        let hits = index
-            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
+        repo.update_content("w1", "newer words", None)
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1, "an ingested event never reached the index");
-        assert_eq!(hits[0].corpus, Corpus::Context);
-        assert!(
-            hits[0].text.contains("the back door opened"),
-            "resolved text was wrong: {}",
-            hits[0].text
-        );
+        assert!(p.index.get(&w1).await.unwrap().is_none());
+        let stale = p.index.needs_embedding(&INDEXED, "m", 10).await.unwrap();
+        assert_eq!(stale[0].text, "newer words");
 
-        // Disconnecting is a deletion promise: vectors go now, not at the next sweep.
-        repo.disconnect_source("src-sensor", &ProfileScope::Household)
+        repo.update_content("missing", "x", Some(&[1.0, 0.0]))
             .await
             .unwrap();
-        assert!(
-            index
-                .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a disconnected source left its vectors behind"
-        );
+        assert_eq!(p.index.health("m").await.unwrap().matching, 0);
     }
 
     #[tokio::test]
-    async fn a_passage_is_sliced_by_byte_not_by_character() {
-        use pond_core::context::chunking::{chunk, DEFAULT_CHUNK_BYTES, DEFAULT_OVERLAP_BYTES};
-        use pond_core::context::domain::{SourceKind, SourceParts, SourceStatus};
-        use pond_core::context::ingest::{IngestPipeline, RawItem};
-        use pond_core::context::ports::ContextRepository;
-        use pond_core::security::domain::redaction::RedactionKind;
-        use pond_core::security::mocks::mock_redactor::MockRedactor;
-
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-        add_profile(&db.system, "jerry").await;
-
-        let redactor = Arc::new(MockRedactor::replacing("nothing", RedactionKind::ApiKey));
-        let repo = Arc::new(
-            crate::sqlite_context::SqliteContextRepository::new(
-                db.system.clone(),
-                redactor.clone(),
-            )
-            .with_vector_index(index.clone(), stamp("m", 2)),
-        );
-        let source = pond_core::context::domain::ContextSource::from_parts(SourceParts {
-            id: "src-mail".into(),
-            kind: SourceKind::Sensor,
-            provider: "pond".into(),
-            profile_id: "jerry".into(),
-            scopes: vec![],
-            cursor: None,
-            last_sync: None,
-            status: SourceStatus::Connected,
-            secret_ref: None,
-            created_at: chrono::Utc::now(),
-        })
-        .expect("valid source");
-        repo.upsert_source(&source).await.unwrap();
-
-        struct E;
-        #[async_trait]
-        impl pond_core::models::ports::embedding::EmbeddingProvider for E {
-            async fn embed(&self, _t: &str) -> Result<Vec<f32>> {
-                Ok(vec![1.0, 0.0])
-            }
-            fn dimensions(&self) -> usize {
-                2
-            }
-            fn model_id(&self) -> String {
-                "m".into()
-            }
-        }
-        let pipeline = IngestPipeline::new(repo.clone(), redactor).with_embedder(Some(
-            Arc::new(E) as Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>
-        ));
-
-        // Multi-byte characters first, so every later span drifts under character indexing.
-        let title = "Notice";
-        let body = format!(
-            "© 2026 — “quoted” café ©\n{}",
-            "the invoice is attached and the rent is due on Friday. ".repeat(30)
-        );
-        pipeline
-            .ingest(
-                &source,
-                RawItem {
-                    external_id: "msg-1".into(),
-                    kind: pond_core::context::domain::ItemKind::Message,
-                    occurred_at: chrono::Utc::now(),
-                    title: title.into(),
-                    body: body.clone(),
-                    participants: vec![],
-                },
-                chrono::Utc::now(),
-            )
-            .await
-            .expect("ingest");
-
-        // The text the index resolves against, mirroring `text_sql`.
-        let text = format!("{title}\n{body}");
-        let spans = chunk(&text, DEFAULT_CHUNK_BYTES, DEFAULT_OVERLAP_BYTES);
-        assert!(spans.len() > 1, "test needs a body worth chunking");
-
-        let row_id = index
-            .needs_embedding(Corpus::Context, "m", 10)
-            .await
-            .unwrap()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| format!("{}:{}", source.id(), "msg-1"));
-
-        index.remove(Corpus::Context, &row_id).await.unwrap();
-        // The LAST chunk wins: chunk 0 starts at offset 0, where the bug can't show.
-        let last = spans.len() - 1;
-        for (ix, span) in spans.iter().enumerate() {
-            index
-                .upsert(&VectorEntry {
-                    corpus: Corpus::Context,
-                    row_id: row_id.clone(),
-                    chunk_ix: ix as i64,
-                    chunk_span: Some((span.start as i64, span.len as i64)),
-                    model_id: "m".into(),
-                    vector: if ix == last {
-                        vec![1.0, 0.0]
-                    } else {
-                        vec![0.0, 1.0]
-                    },
-                    source_rev: None,
-                })
-                .await
-                .unwrap();
-        }
-
-        let hits = index
-            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 50)
+    async fn memory_search_never_compares_another_models_vector() {
+        let p = pond().await;
+        let m1 = add_memory(&p.system, "m1", None, "x").await;
+        p.index
+            .upsert(&VectorEntry::whole(
+                m1,
+                "other".into(),
+                vec![1.0, 0.0],
+                None,
+            ))
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1, "one row, rolled up from its best chunk");
-
-        let expected = spans[last].slice(&text).expect("span is on a boundary");
-        assert_eq!(
-            hits[0].text, expected,
-            "the resolved passage is not the bytes the chunk described"
-        );
+        let repo = p.memories("m", 2);
+        let found = repo
+            .search_similar(&[1.0, 0.0], &ProfileScope::Household, 5)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "it falls back to recency");
+        assert!(found[0].embedding.is_none(), "with no vector to band by");
     }
 
     #[tokio::test]
-    async fn three_way_isolation_two_members_and_a_guest() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+    async fn a_vector_of_another_width_or_from_a_loading_model_is_not_stamped() {
+        let p = pond().await;
+        let repo = p.memories("m", 3);
+        let mut frag = MemoryFragment::from_chat("m1".into(), None, None, "x".into());
+        frag.embedding = Some(vec![1.0, 0.0]);
+        repo.add(frag).await.unwrap();
+        let m1 = item_of(&p.system, "memory_fragments", "m1").await;
+        assert!(p.index.get(&m1).await.unwrap().is_none());
 
-        add_profile(&db.system, "jerry").await;
-        add_profile(&db.system, "sam").await;
-        add_memory_with_vector(&db.system, "jerry-own", &[1.0, 0.0]).await;
-        add_memory_with_vector(&db.system, "sam-own", &[1.0, 0.0]).await;
-        add_memory_with_vector(&db.system, "shared", &[1.0, 0.0]).await;
-        sqlx::query("UPDATE memory_fragments SET profile_id='jerry' WHERE id='jerry-own'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE memory_fragments SET profile_id='sam' WHERE id='sam-own'")
-            .execute(&db.system)
-            .await
-            .unwrap();
-        index_whole(&index, "jerry-own", &[1.0, 0.0]).await;
-        index_whole(&index, "sam-own", &[1.0, 0.0]).await;
-        index_whole(&index, "shared", &[1.0, 0.0]).await;
-
-        let ids = |hits: Vec<VectorHit>| {
-            let mut v: Vec<String> = hits.into_iter().map(|h| h.row_id).collect();
-            v.sort();
-            v
-        };
-
-        let jerry = ids(index
-            .search(&[1.0, 0.0], "m", &ProfileScope::Owner("jerry".into()), 10)
-            .await
-            .unwrap());
-        assert_eq!(jerry, vec!["jerry-own", "shared"], "jerry's view is wrong");
-
-        let sam = ids(index
-            .search(&[1.0, 0.0], "m", &ProfileScope::Owner("sam".into()), 10)
-            .await
-            .unwrap());
-        assert_eq!(sam, vec!["sam-own", "shared"], "sam's view is wrong");
-
-        let guest = index
-            .search(&[1.0, 0.0], "m", &ProfileScope::Guest, 10)
-            .await
-            .unwrap();
-        assert!(guest.is_empty(), "a guest reached the household's index");
+        let loading =
+            SqliteMemoryRepository::new(p.system.clone()).with_vector_index(p.index.clone(), None);
+        let mut frag = MemoryFragment::from_chat("m2".into(), None, None, "y".into());
+        frag.embedding = Some(vec![1.0, 0.0, 0.0]);
+        loading.add(frag).await.unwrap();
+        let m2 = item_of(&p.system, "memory_fragments", "m2").await;
+        assert!(p.index.get(&m2).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    async fn a_vector_stored_without_a_revision_does_not_re_embed_forever() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_session(&db.system, "s1", Some("a summary"), "2026-08-13 10:00:00").await;
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Summary,
-                row_id: "s1".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "m".into(),
-                vector: vec![1.0, 0.0],
-                // No stamp -- what a writer that does not track revisions leaves.
-                source_rev: None,
-            })
-            .await
-            .unwrap();
-
-        let todo = index
-            .needs_embedding(Corpus::Summary, "m", 10)
-            .await
-            .unwrap();
-        assert!(
-            todo.is_empty(),
-            "an un-stamped vector was reported stale, so the sweep would re-embed \
-             it on every pass and never converge"
-        );
-    }
-
-    /// Detected by the sweep alone: `source_rev` stops matching `rolling_summary_updated_at`.
-    #[tokio::test]
-    async fn a_resummarised_session_is_reported_stale_and_its_vector_changes() {
-        let tmp = TempDir::new().unwrap();
-        let db = crate::db::Database::init(tmp.path()).await.unwrap();
-        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
-
-        add_session(
-            &db.system,
-            "s1",
-            Some("first summary"),
-            "2026-08-13 10:00:00",
-        )
-        .await;
-
-        // Not yet indexed -> the sweep offers it.
-        let todo = index
-            .needs_embedding(Corpus::Summary, "m", 10)
-            .await
-            .unwrap();
-        assert_eq!(todo, vec!["s1".to_string()]);
-
-        // Index it at the revision the sweep would have read.
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Summary,
-                row_id: "s1".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "m".into(),
-                vector: vec![1.0, 0.0],
-                source_rev: Some("2026-08-13 10:00:00".into()),
-            })
-            .await
-            .unwrap();
-
-        // Now current: the sweep must not offer it again.
-        let todo = index
-            .needs_embedding(Corpus::Summary, "m", 10)
-            .await
-            .unwrap();
-        assert!(todo.is_empty(), "an up-to-date summary was reported stale");
-
-        // Re-summarise: the column is rewritten in place with a new stamp.
-        set_summary(&db.system, "s1", "a better summary", "2026-08-13 11:00:00").await;
-        let todo = index
-            .needs_embedding(Corpus::Summary, "m", 10)
+    async fn memory_search_reads_only_memory_kinds() {
+        let p = pond().await;
+        let m1 = add_memory(&p.system, "m1", None, "x").await;
+        add_session(&p.system, "s1", Some("a summary"), "2026-11-01").await;
+        sync_all(&p.system).await;
+        let s1 = item_of(&p.system, "sessions", "s1").await;
+        index_whole(&p.index, &m1, &[1.0, 0.0]).await;
+        index_whole(&p.index, &s1, &[1.0, 0.0]).await;
+        let hits = p
+            .index
+            .search(&[1.0, 0.0], "m", &ProfileScope::Household, &MEMORY, 10)
             .await
             .unwrap();
         assert_eq!(
-            todo,
-            vec!["s1".to_string()],
-            "a re-summarised session was not reported stale, so its vector would never change"
+            hits.iter().map(|h| h.item_id.clone()).collect::<Vec<_>>(),
+            vec![m1]
         );
-
-        // And re-indexing REPLACES rather than appends.
-        index
-            .upsert(&VectorEntry {
-                corpus: Corpus::Summary,
-                row_id: "s1".into(),
-                chunk_ix: 0,
-                chunk_span: None,
-                model_id: "m".into(),
-                vector: vec![0.0, 1.0],
-                source_rev: Some("2026-08-13 11:00:00".into()),
-            })
-            .await
-            .unwrap();
-        let got = index.get(Corpus::Summary, "s1").await.unwrap().unwrap();
-        assert_eq!(
-            got.vector,
-            vec![0.0, 1.0],
-            "the old summary vector survived"
-        );
+        let all = p.search(&[1.0, 0.0], "m", &ProfileScope::Household).await;
+        assert_eq!(all.len(), 2);
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests_support {
+    use pond_core::context::vector_index::{VectorEntry, VectorIndex};
     use pond_core::models::ports::embedding::EmbeddingProvider;
     use sqlx::{Pool, Sqlite};
     use std::sync::Arc;
+
+    use crate::sqlite_items::{self, Mode};
 
     /// Names the model a repository stamps on the vectors it stores.
     pub fn stamp(model_id: &str, dims: usize) -> Option<Arc<dyn EmbeddingProvider>> {
@@ -1842,6 +957,27 @@ pub(crate) mod tests_support {
             }
         }
         Some(Arc::new(Stamp(model_id.to_string(), dims)))
+    }
+
+    pub async fn sync_all(pool: &Pool<Sqlite>) {
+        sqlite_items::reconcile(pool, Mode::All).await.unwrap();
+    }
+
+    /// The item id of a detail row.
+    pub async fn item_of(pool: &Pool<Sqlite>, table: &str, key: &str) -> String {
+        sqlite_items::header_of(pool, table, key)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{table} {key} has no header"))
+            .0
+    }
+
+    pub async fn rev_of(pool: &Pool<Sqlite>, item_id: &str) -> String {
+        sqlx::query_scalar("SELECT updated_at FROM items WHERE id = ?")
+            .bind(item_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     /// Creates the session attributed to a member; unattributed summaries are never retrievable.
@@ -1871,36 +1007,38 @@ pub(crate) mod tests_support {
             .unwrap();
     }
 
-    /// Indexes a memory's whole-text vector under model `m`, as its repository would.
-    pub async fn index_whole(
-        index: &Arc<dyn pond_core::context::vector_index::VectorIndex>,
+    /// A memory row with its header, as an older pond's backfill would leave it.
+    pub async fn add_memory(
+        pool: &Pool<Sqlite>,
         id: &str,
-        v: &[f32],
-    ) {
-        use pond_core::context::vector_index::{Corpus, VectorEntry};
+        owner: Option<&str>,
+        content: &str,
+    ) -> String {
+        sqlx::query(
+            "INSERT INTO memory_fragments (id, profile_id, content, source, tags, created_at, \
+             access_count, lifecycle) VALUES (?, ?, ?, 'chat', '[]', datetime('now'), 0, 'active')",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(content)
+        .execute(pool)
+        .await
+        .unwrap();
+        sync_all(pool).await;
+        item_of(pool, "memory_fragments", id).await
+    }
+
+    /// Indexes an item's whole-text vector under model `m`, current for its header.
+    pub async fn index_whole(index: &Arc<dyn VectorIndex>, item_id: &str, v: &[f32]) {
         index
             .upsert(&VectorEntry::whole(
-                Corpus::Memory,
-                id.into(),
+                item_id.into(),
                 "m".into(),
                 v.to_vec(),
                 None,
             ))
             .await
             .unwrap();
-    }
-
-    pub async fn add_memory_with_vector(pool: &Pool<Sqlite>, id: &str, v: &[f32]) {
-        let blob: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
-        sqlx::query(
-            "INSERT INTO memory_fragments (id, content, embedding, source, tags, created_at, \
-             access_count, lifecycle) VALUES (?, 'x', ?, 'chat', '[]', datetime('now'), 0, 'active')",
-        )
-        .bind(id)
-        .bind(blob)
-        .execute(pool)
-        .await
-        .unwrap();
     }
 
     pub async fn set_summary(pool: &Pool<Sqlite>, id: &str, summary: &str, updated: &str) {

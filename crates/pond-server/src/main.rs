@@ -3962,7 +3962,6 @@ async fn run_server(
     // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
     // `account_syncer` is hoisted so the "check now" route and the timer share one syncer.
     let mut account_syncer: Option<Arc<dyn pond_core::context::ports::AccountSync>> = None;
-    let slot_context: Arc<dyn pond_core::context::ports::ContextRepository>;
     {
         let context_repo: Arc<dyn pond_core::context::ports::ContextRepository> = Arc::new(
             pond_infra::sqlite_context::SqliteContextRepository::new(
@@ -3972,7 +3971,6 @@ async fn run_server(
             // Mirroring is safe: a ContextItem can only be constructed redacted.
             .with_vector_index(vector_index.clone(), vector_stamp.clone()),
         );
-        slot_context = context_repo.clone();
         let pipeline = Arc::new(
             pond_core::context::ingest::IngestPipeline::new(context_repo.clone(), redactor.clone())
                 .with_embedder(embedding_provider.clone()),
@@ -4677,9 +4675,7 @@ async fn run_server(
                 factory: embedder_factory.clone(),
                 lane: inference_lane.clone(),
                 index: vector_index.clone(),
-                memories: state.memory_repo.clone(),
-                sessions: state.session_storage.clone(),
-                context: Some(slot_context),
+                system: state.db.system.clone(),
                 activity: last_user_activity.clone(),
                 reindex: embedding_reindex,
                 arrived: embedding_arrived,

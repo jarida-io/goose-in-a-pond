@@ -4,7 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use pond_api::{build_router, AppState};
 use pond_core::context::embedding_slot::{EmbeddingSlot, SlotControl, SlotStores};
-use pond_core::context::vector_index::{Corpus, VectorIndex};
+use pond_core::context::vector_index::{VectorIndex, INDEXED};
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::memory::{
@@ -223,8 +223,19 @@ struct SemanticApp {
     router: axum::Router,
     repo: Arc<dyn MemoryRepository + Send + Sync>,
     index: Arc<dyn VectorIndex>,
-    sessions: SqliteSessionStorage,
+    system: sqlx::Pool<sqlx::Sqlite>,
     _tmp: tempfile::TempDir,
+}
+
+impl SemanticApp {
+    /// The index keys a memory by its item header, not its own row id.
+    async fn item(&self, memory_id: &str) -> String {
+        pond_infra::sqlite_items::header_of(&self.system, "memory_fragments", memory_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("memory {memory_id} has no header"))
+            .0
+    }
 }
 
 async fn make_app_with_semantic_memory(
@@ -242,13 +253,13 @@ async fn make_app_with_semantic_memory(
         ),
         Arc::new(RuleRedactor::new()),
     ));
-    let sessions = SqliteSessionStorage::new(db.system.clone());
+    let system = db.system.clone();
     let router = router_over(db, repo.clone(), Some(embedder), Some(index.clone())).await;
     SemanticApp {
         router,
         repo,
         index,
-        sessions,
+        system,
         _tmp: tmp,
     }
 }
@@ -961,12 +972,13 @@ async fn a_memory_saved_through_the_route_is_returned_by_semantic_search() {
 
     let resolved = app
         .index
-        .search_resolved(&query, "words-test", &ProfileScope::Household, 3)
+        .search_resolved(&query, "words-test", &ProfileScope::Household, &INDEXED, 3)
         .await
         .unwrap();
+    let project_item = app.item(&project).await;
     assert_eq!(
-        resolved.first().map(|h| h.row_id.as_str()),
-        Some(project.as_str()),
+        resolved.first().map(|h| h.item_id.as_str()),
+        Some(project_item.as_str()),
         "the shared index does not hold the memory: {resolved:?}"
     );
 
@@ -1006,7 +1018,7 @@ async fn rewording_a_memory_through_the_route_re_embeds_it() {
         Some(&expected),
         "the row's vector is not the new words'"
     );
-    let entry = app.index.get(Corpus::Memory, &id).await.unwrap();
+    let entry = app.index.get(&app.item(&id).await).await.unwrap();
     assert_eq!(
         entry.map(|e| e.vector),
         Some(expected),
@@ -1039,7 +1051,7 @@ async fn re_tiering_a_memory_through_the_route_keeps_its_vector() {
         Some(&expected),
         "a tier change dropped the row's vector"
     );
-    let entry = app.index.get(Corpus::Memory, &id).await.unwrap();
+    let entry = app.index.get(&app.item(&id).await).await.unwrap();
     assert_eq!(
         entry.map(|e| e.vector),
         Some(expected),
@@ -1065,7 +1077,7 @@ async fn a_credential_never_reaches_a_vector_through_either_memory_route() {
     );
     assert!(
         app.index
-            .get(Corpus::Memory, &saved)
+            .get(&app.item(&saved).await)
             .await
             .unwrap()
             .is_none(),
@@ -1075,7 +1087,7 @@ async fn a_credential_never_reaches_a_vector_through_either_memory_route() {
     let edited = post_memory(&app, "knowledge", "the spare key is under the mat").await;
     assert!(
         app.index
-            .get(Corpus::Memory, &edited)
+            .get(&app.item(&edited).await)
             .await
             .unwrap()
             .is_some(),
@@ -1099,7 +1111,7 @@ async fn a_credential_never_reaches_a_vector_through_either_memory_route() {
     );
     assert!(
         app.index
-            .get(Corpus::Memory, &edited)
+            .get(&app.item(&edited).await)
             .await
             .unwrap()
             .is_none(),
@@ -1146,9 +1158,6 @@ async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_the_slot_embeds_i
         .run_pass(
             &SlotStores {
                 index: app.index.as_ref(),
-                memories: app.repo.as_ref(),
-                sessions: &app.sessions,
-                context: None,
             },
             &embedder,
             &Idle,
@@ -1156,8 +1165,12 @@ async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_the_slot_embeds_i
         .await;
     assert_eq!(report.memories, 1);
     assert!(
-        app.repo.search_unembedded(10).await.unwrap().is_empty(),
-        "the row itself holds the vector, not just the index"
+        app.index
+            .needs_embedding(&INDEXED, "words-test", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the index holds a current vector for the memory"
     );
 
     let query = WordsEmbedder
@@ -1166,12 +1179,13 @@ async fn a_memory_saved_while_the_embedder_is_down_is_kept_and_the_slot_embeds_i
         .unwrap();
     let resolved = app
         .index
-        .search_resolved(&query, "words-test", &ProfileScope::Household, 1)
+        .search_resolved(&query, "words-test", &ProfileScope::Household, &INDEXED, 1)
         .await
         .unwrap();
+    let item = app.item(&id).await;
     assert_eq!(
-        resolved.first().map(|h| h.row_id.as_str()),
-        Some(id.as_str())
+        resolved.first().map(|h| h.item_id.as_str()),
+        Some(item.as_str())
     );
 }
 

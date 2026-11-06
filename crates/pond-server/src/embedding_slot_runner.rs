@@ -6,12 +6,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use pond_core::context::embedding_slot::{EmbeddingSlot, PassEnd, SlotControl, SlotStores};
-use pond_core::context::ports::ContextRepository;
 use pond_core::context::vector_index::VectorIndex;
 use pond_core::models::ports::embedding::EmbedderFactory;
 use pond_core::models::services::active_embedder::{ActiveEmbedder, EmbedderState};
-use pond_core::user_data::ports::memory_repository::MemoryRepository;
-use pond_core::user_data::ports::session_storage::SessionStorage;
 use tokio::sync::{Notify, RwLock};
 
 use crate::inference_lane_runner::InferenceLane;
@@ -27,9 +24,8 @@ pub struct SlotDeps {
     pub factory: Arc<dyn EmbedderFactory>,
     pub lane: Arc<InferenceLane>,
     pub index: Arc<dyn VectorIndex>,
-    pub memories: Arc<dyn MemoryRepository>,
-    pub sessions: Arc<dyn SessionStorage>,
-    pub context: Option<Arc<dyn ContextRepository>>,
+    /// The system database, whose rows written around their store get a header before a pass.
+    pub system: sqlx::Pool<sqlx::Sqlite>,
     /// Stamped when a person starts a turn.
     pub activity: Arc<RwLock<Instant>>,
     /// Rung by the Reindex route: rows that failed are tried again.
@@ -98,11 +94,17 @@ async fn look(deps: &SlotDeps, slot: &mut EmbeddingSlot, load_owed: &mut bool) -
             }
         }
 
+        // The index embeds headers; a row stored without one would otherwise wait for a restart.
+        if let Err(e) = pond_infra::sqlite_items::reconcile(
+            &deps.system,
+            pond_infra::sqlite_items::Mode::Missing,
+        )
+        .await
+        {
+            tracing::warn!("embedding slot: could not write missing item headers: {e:#}");
+        }
         let stores = SlotStores {
             index: deps.index.as_ref(),
-            memories: deps.memories.as_ref(),
-            sessions: deps.sessions.as_ref(),
-            context: deps.context.as_deref(),
         };
         let gate = Gate {
             lane: deps.lane.clone(),

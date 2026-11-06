@@ -278,6 +278,55 @@ impl fmt::Display for ItemId {
     }
 }
 
+/// A header field an item's vector is made from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Context,
+    Title,
+    Body,
+}
+
+impl Field {
+    pub fn column(self) -> &'static str {
+        match self {
+            Field::Context => "context",
+            Field::Title => "title",
+            Field::Body => "body",
+        }
+    }
+}
+
+impl Kind {
+    /// The fields embedded, in order. A conversation is its summary alone: a title such as
+    /// "Weather" is noise in recall, and an untitled summary still says what was discussed.
+    pub fn embedded_fields(self) -> &'static [Field] {
+        match self {
+            Kind::Conversation => &[Field::Body],
+            _ => &[Field::Context, Field::Title, Field::Body],
+        }
+    }
+
+    /// Long ingested text is embedded by passage; a memory or a summary is embedded whole.
+    pub fn chunked(self) -> bool {
+        self.detail_table() == "context_items"
+    }
+}
+
+/// The text an item is embedded from: its non-empty [`Kind::embedded_fields`], one per line.
+/// Passage spans are byte offsets into exactly this string.
+pub fn embedded_text(kind: Kind, context: &str, title: &str, body: &str) -> String {
+    kind.embedded_fields()
+        .iter()
+        .map(|f| match f {
+            Field::Context => context,
+            Field::Title => title,
+            Field::Body => body,
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `source_id` of items whose details live in one of the pond's own tables, paired with that
 /// row's key as `external_id`. The `pond:` prefix cannot collide with a context source's id.
 pub mod source {
@@ -409,6 +458,25 @@ mod tests {
             "a v4 id is not an item id"
         );
         assert!(ItemId::parse("pond:memory").is_none());
+    }
+
+    #[test]
+    fn an_item_is_embedded_from_its_fields_one_per_line() {
+        assert_eq!(
+            embedded_text(Kind::Mail, "", "Invoice", "Due Friday"),
+            "Invoice\nDue Friday"
+        );
+        assert_eq!(
+            embedded_text(Kind::Mail, "", "", "Due Friday"),
+            "Due Friday"
+        );
+        assert_eq!(embedded_text(Kind::Fact, "", "", "likes tea"), "likes tea");
+        assert_eq!(embedded_text(Kind::Conversation, "", "Tea", ""), "");
+        assert_eq!(
+            embedded_text(Kind::Conversation, "", "Tea", "Talked tea."),
+            "Talked tea."
+        );
+        assert!(Kind::Mail.chunked() && !Kind::Fact.chunked() && !Kind::Conversation.chunked());
     }
 
     #[test]

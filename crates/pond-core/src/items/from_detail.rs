@@ -156,7 +156,9 @@ pub fn context_kind(source: SourceKind, item: ContextItemKind) -> Option<Kind> {
             ContextItemKind::Event => Some(Kind::Event),
             _ => None,
         },
-        SourceKind::Voice | SourceKind::Files | SourceKind::Chat => None,
+        // A transcript the pond heard: something that happened, not a source of its own.
+        SourceKind::Voice => Some(Kind::Event),
+        SourceKind::Files | SourceKind::Chat => None,
     }
 }
 

@@ -1,28 +1,36 @@
-//! One retrieval over `memory`, `context` and `summary`, scoped in [`VectorIndex`]'s SQL.
-//! Each hit carries its corpus: a summary is lossy, not a said fact.
+//! One retrieval over every indexed kind, scoped in [`VectorIndex`]'s SQL.
+//! Each hit carries its kind: a summary is lossy, not a said fact.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::context::vector_index::{Corpus, ResolvedHit, VectorIndex};
+use crate::context::vector_index::{ResolvedHit, VectorIndex, INDEXED};
+use crate::items::Kind;
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::profile::ProfileScope;
 
-/// How a hit is introduced to the model and member: prose, not the enum's name.
-pub fn provenance(corpus: Corpus) -> &'static str {
-    match corpus {
-        Corpus::Memory => "you told me",
-        Corpus::Context => "observed by this pond",
-        Corpus::Summary => "from an earlier conversation",
+/// How a hit is introduced to the model and member: prose, not the kind's name.
+pub fn provenance(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Fact | Kind::Trait | Kind::Entity => "you told me",
+        Kind::Conversation | Kind::Message => "from an earlier conversation",
+        Kind::Mail
+        | Kind::Event
+        | Kind::Notification
+        | Kind::HomeEvent
+        | Kind::Media
+        | Kind::Visit => "observed by this pond",
+        Kind::Report => "from a finished task",
+        Kind::Suggestion => "suggested by this pond",
     }
 }
 
 /// A retrieval answer: the text, where it came from, and how well it matched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recollection {
-    pub corpus: Corpus,
-    pub row_id: String,
+    pub kind: Kind,
+    pub item_id: String,
     pub score: f32,
     pub text: String,
 }
@@ -30,7 +38,7 @@ pub struct Recollection {
 impl Recollection {
     /// The hit, introduced by its provenance.
     pub fn labelled(&self) -> String {
-        format!("({}) {}", provenance(self.corpus), self.text)
+        format!("({}) {}", provenance(self.kind), self.text)
     }
 }
 
@@ -78,15 +86,15 @@ impl PersonalContextRetrieval {
         // Scope is applied in SQL, not after: post-filtering lets invisible rows take top-K slots.
         let hits: Vec<ResolvedHit> = self
             .index
-            .search_resolved(&vector, &model_id, scope, limit)
+            .search_resolved(&vector, &model_id, scope, &INDEXED, limit)
             .await?;
 
         Ok(hits
             .into_iter()
             .filter(|h| !h.text.trim().is_empty())
             .map(|h| Recollection {
-                corpus: h.corpus,
-                row_id: h.row_id,
+                kind: h.kind,
+                item_id: h.item_id,
                 score: h.score,
                 text: h.text,
             })
@@ -97,33 +105,19 @@ impl PersonalContextRetrieval {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::vector_index::{CorpusHealth, IndexHealth, VectorEntry, VectorHit};
+    use crate::context::vector_index::{IndexHealth, Stale, VectorEntry, VectorHit};
     use async_trait::async_trait;
 
-    /// The tie-break is `Corpus`'s declaration order; reordering variants changes it.
     #[test]
-    fn memory_wins_ties_over_context_and_summary() {
-        assert!(Corpus::Memory < Corpus::Context);
-        assert!(Corpus::Context < Corpus::Summary);
-        let mut all = vec![Corpus::Summary, Corpus::Memory, Corpus::Context];
-        all.sort();
-        assert_eq!(
-            all,
-            vec![Corpus::Memory, Corpus::Context, Corpus::Summary],
-            "the tie-break order changed: a summary could now outrank a memory"
-        );
-    }
-
-    #[test]
-    fn every_corpus_states_its_provenance_in_words() {
-        for c in Corpus::ALL {
-            let p = provenance(c);
+    fn every_kind_states_its_provenance_in_words() {
+        for k in Kind::ALL {
+            let p = provenance(k);
             assert!(!p.is_empty());
-            assert_ne!(p, c.as_str());
+            assert_ne!(p, k.as_str());
         }
         let r = Recollection {
-            corpus: Corpus::Summary,
-            row_id: "s1".into(),
+            kind: Kind::Conversation,
+            item_id: "s1".into(),
             score: 0.9,
             text: "we agreed on Tuesday".into(),
         };
@@ -140,10 +134,10 @@ mod tests {
         async fn upsert(&self, _e: &VectorEntry) -> Result<()> {
             Ok(())
         }
-        async fn remove(&self, _c: Corpus, _r: &str) -> Result<()> {
+        async fn remove(&self, _i: &str) -> Result<()> {
             Ok(())
         }
-        async fn get(&self, _c: Corpus, _r: &str) -> Result<Option<VectorEntry>> {
+        async fn get(&self, _i: &str) -> Result<Option<VectorEntry>> {
             Ok(None)
         }
         async fn search(
@@ -151,6 +145,7 @@ mod tests {
             _q: &[f32],
             _m: &str,
             _s: &ProfileScope,
+            _k: &[Kind],
             _l: usize,
         ) -> Result<Vec<VectorHit>> {
             Ok(vec![])
@@ -160,6 +155,7 @@ mod tests {
             _q: &[f32],
             _m: &str,
             scope: &ProfileScope,
+            _k: &[Kind],
             _l: usize,
         ) -> Result<Vec<ResolvedHit>> {
             // Mirrors the real index refusing a guest in SQL.
@@ -168,36 +164,14 @@ mod tests {
             }
             Ok(self.0.clone())
         }
-        async fn needs_embedding(&self, _c: Corpus, _m: &str, _l: usize) -> Result<Vec<String>> {
-            Ok(vec![])
-        }
-        async fn needs_embedding_with_text(
-            &self,
-            _c: Corpus,
-            _m: &str,
-            _l: usize,
-        ) -> Result<Vec<(String, String)>> {
+        async fn needs_embedding(&self, _k: &[Kind], _m: &str, _l: usize) -> Result<Vec<Stale>> {
             Ok(vec![])
         }
         async fn prune_orphans(&self) -> Result<u64> {
             Ok(0)
         }
         async fn health(&self, _m: &str) -> Result<IndexHealth> {
-            // Empty, but one row per corpus: the port requires every corpus, so a dead one shows.
-            Ok(IndexHealth {
-                per_corpus: Corpus::ALL
-                    .into_iter()
-                    .map(|corpus| CorpusHealth {
-                        corpus,
-                        rows: 0,
-                        source_rows: 0,
-                        indexed_rows: 0,
-                        missing_rows: 0,
-                        mismatched: 0,
-                    })
-                    .collect(),
-                ..IndexHealth::default()
-            })
+            Ok(IndexHealth::default())
         }
     }
 
@@ -216,10 +190,10 @@ mod tests {
         }
     }
 
-    fn hit(corpus: Corpus, id: &str, score: f32, text: &str) -> ResolvedHit {
+    fn hit(kind: Kind, id: &str, score: f32, text: &str) -> ResolvedHit {
         ResolvedHit {
-            corpus,
-            row_id: id.into(),
+            kind,
+            item_id: id.into(),
             score,
             text: text.into(),
         }
@@ -231,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_guest_recalls_nothing() {
-        let svc = service(vec![hit(Corpus::Memory, "m1", 0.9, "secret")]);
+        let svc = service(vec![hit(Kind::Fact, "m1", 0.9, "secret")]);
         assert!(svc
             .recall("anything", &ProfileScope::Guest, 5)
             .await
@@ -240,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_query_asks_the_index_nothing() {
-        let svc = service(vec![hit(Corpus::Memory, "m1", 0.9, "x")]);
+        let svc = service(vec![hit(Kind::Fact, "m1", 0.9, "x")]);
         assert!(svc
             .recall("   ", &ProfileScope::Household, 5)
             .await
@@ -255,23 +229,23 @@ mod tests {
     #[tokio::test]
     async fn a_hit_with_no_live_text_is_dropped() {
         let svc = service(vec![
-            hit(Corpus::Memory, "m1", 0.9, "   "),
-            hit(Corpus::Memory, "m2", 0.8, "real"),
+            hit(Kind::Fact, "m1", 0.9, "   "),
+            hit(Kind::Fact, "m2", 0.8, "real"),
         ]);
         let got = svc.recall("q", &ProfileScope::Household, 5).await;
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].row_id, "m2");
+        assert_eq!(got[0].item_id, "m2");
     }
 
     #[tokio::test]
-    async fn results_carry_their_corpus_and_can_introduce_themselves() {
+    async fn results_carry_their_kind_and_can_introduce_themselves() {
         let svc = service(vec![
-            hit(Corpus::Memory, "m1", 0.9, "the bill is eighty pounds"),
-            hit(Corpus::Summary, "s1", 0.8, "we discussed the garden"),
+            hit(Kind::Fact, "m1", 0.9, "the bill is eighty pounds"),
+            hit(Kind::Conversation, "s1", 0.8, "we discussed the garden"),
         ]);
         let got = svc.recall("q", &ProfileScope::Household, 5).await;
-        assert_eq!(got[0].corpus, Corpus::Memory);
-        assert_eq!(got[1].corpus, Corpus::Summary);
+        assert_eq!(got[0].kind, Kind::Fact);
+        assert_eq!(got[1].kind, Kind::Conversation);
         assert!(got[0].labelled().starts_with("(you told me)"));
         assert!(got[1]
             .labelled()

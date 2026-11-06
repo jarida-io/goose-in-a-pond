@@ -19991,8 +19991,37 @@ async fn context_index_health(
         )
     })?;
 
-    // Summed per corpus like the other totals, so the overall fraction agrees with the rows.
-    let rows: u64 = health.per_corpus.iter().map(|c| c.rows).sum();
+    // Summed per group like the other totals, so the overall fraction agrees with the rows.
+    let rows: u64 = health.per_kind.iter().map(|k| k.rows).sum();
+    let corpora: Vec<Value> = INDEX_GROUPS
+        .iter()
+        .map(|group| {
+            let kinds = health
+                .per_kind
+                .iter()
+                .filter(|k| index_group(k.kind) == *group);
+            let (mut rows, mut source_rows, mut indexed_rows, mut missing_rows, mut mismatched) =
+                (0u64, 0u64, 0u64, 0u64, 0u64);
+            for k in kinds {
+                rows += k.rows;
+                source_rows += k.source_rows;
+                indexed_rows += k.indexed_rows;
+                missing_rows += k.missing_rows;
+                mismatched += k.mismatched;
+            }
+            json!({
+                "corpus": group,
+                "rows": rows,
+                "source_rows": source_rows,
+                "indexed_rows": indexed_rows,
+                "missing_rows": missing_rows,
+                "mismatched": mismatched,
+                "coverage": index_coverage(indexed_rows, rows),
+                // A predicate excludes every source row; no amount of embedding repairs that.
+                "structurally_excluded": rows == 0 && source_rows > 0,
+            })
+        })
+        .collect();
 
     Ok(Json(json!({
         "indexed": true,
@@ -20004,22 +20033,21 @@ async fn context_index_health(
         "mismatched": health.mismatched,
         "missing": health.missing,
         "coverage": index_coverage(health.matching, rows),
-        "corpora": health
-            .per_corpus
-            .iter()
-            .map(|c| json!({
-                "corpus": c.corpus.as_str(),
-                "rows": c.rows,
-                "source_rows": c.source_rows,
-                "indexed_rows": c.indexed_rows,
-                "missing_rows": c.missing_rows,
-                "mismatched": c.mismatched,
-                "coverage": index_coverage(c.indexed_rows, c.rows),
-                // A predicate excludes every source row; no amount of embedding repairs that.
-                "structurally_excluded": c.rows == 0 && c.source_rows > 0,
-            }))
-            .collect::<Vec<_>>(),
+        "corpora": corpora,
     })))
+}
+
+/// The groups both UIs show the index's coverage in, in the order they list them.
+const INDEX_GROUPS: [&str; 3] = ["memory", "context", "summary"];
+
+/// Which of [`INDEX_GROUPS`] an item kind is counted under.
+fn index_group(kind: pond_core::items::Kind) -> &'static str {
+    use pond_core::items::Kind;
+    match kind {
+        Kind::Fact | Kind::Trait | Kind::Entity => "memory",
+        Kind::Conversation | Kind::Message => "summary",
+        _ => "context",
+    }
 }
 
 /// `POST /api/v1/context/index/rebuild` -- empty the index so the embedding slot refills it.
@@ -20027,8 +20055,6 @@ async fn context_index_health(
 async fn rebuild_context_index(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    use pond_core::context::vector_index::Corpus;
-
     if state.vector_index.is_none() {
         return Ok(Json(json!({
             "indexed": false,
@@ -20050,11 +20076,14 @@ async fn rebuild_context_index(
     let mut tx = state.db.vectors.begin().await.map_err(db_error)?;
 
     // Count before the delete, in the same transaction, so a concurrent sweep can't skew it.
-    let counted: Vec<(String, i64)> =
-        sqlx::query_as("SELECT corpus, COUNT(*) FROM vectors GROUP BY corpus")
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(db_error)?;
+    // Orphans have no kind; they count towards `cleared` only.
+    let counted: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT i.kind, COUNT(*) FROM vectors v LEFT JOIN sys.items i ON i.id = v.item_id \
+         GROUP BY i.kind",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db_error)?;
     let cleared = sqlx::query("DELETE FROM vectors")
         .execute(&mut *tx)
         .await
@@ -20062,16 +20091,18 @@ async fn rebuild_context_index(
         .rows_affected();
     tx.commit().await.map_err(db_error)?;
 
-    // List every corpus even at zero; the total is the DELETE's, so rows of retired corpora count.
-    let corpora: Vec<Value> = Corpus::ALL
+    // List every group even at zero; the total is the DELETE's, so orphans count.
+    let corpora: Vec<Value> = INDEX_GROUPS
         .iter()
-        .map(|corpus| {
-            let n = counted
+        .map(|group| {
+            let n: u64 = counted
                 .iter()
-                .find(|(name, _)| name == corpus.as_str())
-                .map(|(_, n)| (*n).max(0) as u64)
-                .unwrap_or(0);
-            json!({"corpus": corpus.as_str(), "cleared": n})
+                .filter_map(|(kind, n)| {
+                    let kind = pond_core::items::Kind::parse(kind.as_deref()?)?;
+                    (index_group(kind) == *group).then_some((*n).max(0) as u64)
+                })
+                .sum();
+            json!({"corpus": group, "cleared": n})
         })
         .collect();
 
