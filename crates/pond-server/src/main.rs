@@ -311,7 +311,8 @@ enum Commands {
     /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
     /// can print again.
     AdminCard {
-        /// Replace the card in force; every phone unlocked with the old card locks
+        /// Replace the card in force; every phone unlocked with the old card locks, and every
+        /// phone's own key is revoked
         #[arg(long)]
         rotate: bool,
 
@@ -3207,14 +3208,17 @@ async fn run_server(
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
-        let real_executor = Arc::new(AgentScheduleExecutor::new(
-            agent.clone(),
-            session_storage.clone(),
-            Some(device_control.clone()),
-            settings.schedule_max_concurrent,
-            tts.clone(),
-            Some(settings_repo.clone()),
-        ));
+        let real_executor = Arc::new(
+            AgentScheduleExecutor::new(
+                agent.clone(),
+                session_storage.clone(),
+                Some(device_control.clone()),
+                settings.schedule_max_concurrent,
+                tts.clone(),
+                Some(settings_repo.clone()),
+            )
+            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+        );
         deferred_executor
             .init(
                 real_executor
@@ -4237,7 +4241,12 @@ async fn run_server(
         ));
         Arc::new(pond_api::pond_admin::PondAdmin::new(
             pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
-            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+            pond_core::security::services::admin_elevation::AdminElevation::new(
+                cards,
+                Arc::new(pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(
+                    db.system.clone(),
+                )),
+            ),
         ))
     };
 
@@ -5632,6 +5641,14 @@ async fn run_chat(
     let mut chat_service = ChatService::new(agent, session_id.clone(), storage)
         .with_system_prompt(system_prompt)
         .with_thinking_tone(settings.voice_thinking_tone_enabled);
+    // A shared microphone: anyone in the room may speak, unlike a typed turn from the shell.
+    if voice_mode {
+        chat_service = chat_service.with_unrecognised_scope(
+            pond_core::shared::services::chat::unrecognised_voice_scope(Some(Arc::new(
+                SqliteProfileRepository::new(db.system.clone()),
+            ))),
+        );
+    }
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
     }
@@ -7888,24 +7905,55 @@ async fn run_consolidation_pipeline(
         }
     };
 
-    // Oldest-first: duplicates cluster in time, so a contiguous window catches both halves.
-    let selection = consolidation::select_batch(memories, batch_size);
+    // Oldest-first within each owner: duplicates cluster in time, so a contiguous window catches
+    // both halves, and no batch holds two members' memories.
+    let batches = consolidation::select_owner_batches(memories, batch_size);
+    let largest = batches.iter().map(|s| s.batch.len()).max().unwrap_or(0);
+    let runnable: Vec<_> = batches.into_iter().filter(|s| !s.below_minimum()).collect();
 
-    if selection.below_minimum() {
+    if runnable.is_empty() {
         tracing::debug!(
-            "consolidation: skipped — only {} eligible memories (need >= {})",
-            selection.batch.len(),
+            "consolidation: skipped — at most {largest} eligible memories for one owner (need >= {})",
             MIN_MEMORIES_TO_CONSOLIDATE
         );
         let _ = broadcast_tx.send(ConsolidationEvent::Error {
             message: format!(
                 "Need at least {} memories to consolidate, found {}",
-                MIN_MEMORIES_TO_CONSOLIDATE,
-                selection.batch.len()
+                MIN_MEMORIES_TO_CONSOLIDATE, largest
             ),
         });
         return;
     }
+
+    for selection in runnable {
+        if cancel.is_cancelled() {
+            return;
+        }
+        consolidate_one_batch(
+            repo.as_ref(),
+            provider.clone(),
+            &broadcast_tx,
+            cancel.clone(),
+            mode,
+            selection,
+        )
+        .await;
+    }
+}
+
+/// One owner's batch through the consolidator, then `apply_actions` and an audit row.
+async fn consolidate_one_batch(
+    repo: &(dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync),
+    provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    broadcast_tx: &tokio::sync::broadcast::Sender<
+        pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
+    >,
+    cancel: tokio_util::sync::CancellationToken,
+    mode: &str,
+    selection: pond_core::user_data::services::memory_consolidation::BatchSelection,
+) {
+    use pond_core::user_data::ports::memory_consolidator::ConsolidationEvent;
+    use pond_core::user_data::services::memory_consolidation as consolidation;
 
     if selection.deferred > 0 {
         tracing::info!(
@@ -7950,18 +7998,17 @@ async fn run_consolidation_pipeline(
                 .map(|e| e.proposal.action.clone())
                 .collect();
 
-            let outcome =
-                match consolidation::apply_actions(repo.as_ref(), &selection.batch, accepted).await
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::warn!("consolidation: applying actions failed: {e}");
-                        let _ = broadcast_tx.send(ConsolidationEvent::Error {
-                            message: e.to_string(),
-                        });
-                        return;
-                    }
-                };
+            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("consolidation: applying actions failed: {e}");
+                    let _ = broadcast_tx.send(ConsolidationEvent::Error {
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            };
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
@@ -10886,12 +10933,31 @@ async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     }
     let password = store.issue(rotate)?;
     let card_id = store.current().await?.unwrap_or_default();
+    // A new card is the recovery: every phone's own key goes with the old one.
+    let keys_revoked = if rotate {
+        use pond_core::security::ports::admin_card::AdminDeviceKeys as _;
+        let db = pond_infra::db::Database::init(&default_data_dir()).await?;
+        pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(db.system.clone())
+            .revoke_all()
+            .await?
+    } else {
+        0
+    };
     if json {
         println!(
             "{}",
-            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+            serde_json::json!({
+                "password": password.grouped(),
+                "card_id": card_id,
+                "keys_revoked": keys_revoked,
+            })
         );
         return Ok(());
+    }
+    if keys_revoked > 0 {
+        println!(
+            "Revoked {keys_revoked} phone key(s): each phone unlocks with this card once more."
+        );
     }
     println!(
         "Admin card for this Pond (administrator: {})\n\n    {}\n\n\

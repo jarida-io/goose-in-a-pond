@@ -1439,4 +1439,156 @@ mod tests {
         let (repo, _tmp) = repo_with_two_owners_and_a_shared_row().await;
         assert_eq!(repo.count_for_profile("nobody-at-all").await.unwrap(), 0);
     }
+
+    const MIGRATION_0081: &str = include_str!("../migrations/system/0081_consolidation_owners.sql");
+
+    /// A pond as consolidation left it: the rows it wrote carry no owner and a `consolidated` event.
+    async fn consolidated_pond(members: &[&str]) -> (Pool<Sqlite>, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        let pool = db.system.clone();
+        for member in members {
+            sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
+                .bind(member)
+                .bind(member)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        (pool, tmp)
+    }
+
+    async fn memory(
+        pool: &Pool<Sqlite>,
+        id: &str,
+        owner: Option<&str>,
+        lifecycle: &str,
+        superseded_by: Option<&str>,
+        created_at: &str,
+        written_by_consolidation: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO memory_fragments (id, profile_id, content, lifecycle, superseded_by, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(format!("fact {id}"))
+        .bind(lifecycle)
+        .bind(superseded_by)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        if written_by_consolidation {
+            sqlx::query(
+                "INSERT INTO memory_events (event_kind, memory_id) VALUES ('consolidated', ?)",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn owner_and_lifecycle(pool: &Pool<Sqlite>, id: &str) -> (Option<String>, String) {
+        sqlx::query_as("SELECT profile_id, lifecycle FROM memory_fragments WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    const T0: &str = "2026-11-01 20:00:00";
+    const T1: &str = "2026-11-01 21:00:00";
+
+    #[tokio::test]
+    async fn the_owner_repair_gives_a_members_merges_back_to_her() {
+        let (pool, _tmp) = consolidated_pond(&["amina", "baraka"]).await;
+        // Two of Amina's facts merged, then merged again with a household fact.
+        memory(&pool, "a1", Some("amina"), "merged", Some("m1"), T0, false).await;
+        memory(&pool, "a2", Some("amina"), "merged", Some("m1"), T0, false).await;
+        memory(&pool, "m1", None, "merged", Some("m2"), T0, true).await;
+        memory(&pool, "h1", None, "merged", Some("m2"), T0, false).await;
+        memory(&pool, "m2", None, "active", None, T1, true).await;
+        // A household-only merge stays shared.
+        memory(&pool, "h2", None, "merged", Some("m3"), T0, false).await;
+        memory(&pool, "h3", None, "merged", Some("m3"), T0, false).await;
+        memory(&pool, "m3", None, "active", None, T1, true).await;
+
+        sqlx::raw_sql(MIGRATION_0081).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            owner_and_lifecycle(&pool, "m1").await.0.as_deref(),
+            Some("amina")
+        );
+        assert_eq!(
+            owner_and_lifecycle(&pool, "m2").await,
+            (Some("amina".into()), "active".into()),
+            "her facts with a household one are hers: narrowing discloses nothing"
+        );
+        assert_eq!(
+            owner_and_lifecycle(&pool, "m3").await,
+            (None, "active".into())
+        );
+        assert_eq!(
+            owner_and_lifecycle(&pool, "h1").await.0,
+            None,
+            "sources keep their owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_repair_hides_a_merge_of_two_members_facts() {
+        let (pool, _tmp) = consolidated_pond(&["amina", "baraka"]).await;
+        memory(&pool, "a1", Some("amina"), "merged", Some("m1"), T0, false).await;
+        memory(&pool, "b1", Some("baraka"), "merged", Some("m1"), T0, false).await;
+        memory(&pool, "m1", None, "active", None, T1, true).await;
+
+        sqlx::raw_sql(MIGRATION_0081).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            owner_and_lifecycle(&pool, "m1").await,
+            (None, "archived".into()),
+            "neither member may read the other's half"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_repair_follows_a_split_to_every_piece() {
+        let (pool, _tmp) = consolidated_pond(&["amina", "baraka"]).await;
+        // A split links only its first piece; the second was written in the same second.
+        memory(&pool, "b1", Some("baraka"), "merged", Some("p1"), T0, false).await;
+        memory(&pool, "p1", None, "active", None, T1, true).await;
+        memory(&pool, "p2", None, "active", None, T1, true).await;
+
+        sqlx::raw_sql(MIGRATION_0081).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            owner_and_lifecycle(&pool, "p1").await.0.as_deref(),
+            Some("baraka")
+        );
+        assert_eq!(
+            owner_and_lifecycle(&pool, "p2").await.0.as_deref(),
+            Some("baraka")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_repair_leaves_memories_it_did_not_write() {
+        let (pool, _tmp) = consolidated_pond(&["amina", "baraka"]).await;
+        memory(&pool, "h1", None, "active", None, T0, false).await;
+        memory(&pool, "a1", Some("amina"), "active", None, T0, false).await;
+
+        sqlx::raw_sql(MIGRATION_0081).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            owner_and_lifecycle(&pool, "h1").await,
+            (None, "active".into())
+        );
+        assert_eq!(
+            owner_and_lifecycle(&pool, "a1").await.0.as_deref(),
+            Some("amina")
+        );
+    }
 }

@@ -20,7 +20,7 @@ use pond_core::models::ports::room_voice::RoomVoiceControl;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::security::ports::telemetry::TelemetryPort;
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowEvent, WorkflowState};
-use pond_core::shared::services::chat::{ChatService, WorkflowEventSink};
+use pond_core::shared::services::chat::{unrecognised_voice_scope, ChatService, WorkflowEventSink};
 use pond_core::shared::services::voice_control::{StopReason, VoiceControl};
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::prompt_extra::PromptExtraRepository;
@@ -706,7 +706,8 @@ async fn run_once(
     .with_stdout_diagnostics(false)
     .with_event_sink(sink)
     .with_session_on_first_turn()
-    .with_voice_identity(speaker_context(&inner.deps));
+    .with_voice_identity(speaker_context(&inner.deps))
+    .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()));
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }

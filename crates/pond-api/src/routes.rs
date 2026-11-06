@@ -583,6 +583,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/status", get(crate::pond_admin::status))
         .route("/admin/unlock", post(crate::pond_admin::unlock))
         .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/enroll", post(crate::pond_admin::enroll))
+        .route("/admin/key", delete(crate::pond_admin::forget_key))
         .route("/admin/overview", get(crate::pond_admin::overview))
         .route(
             "/admin/files",
@@ -1537,6 +1539,7 @@ async fn start_onboarding(
 /// Marks onboarding complete (public), lifting the onboarding guard on protected routes.
 async fn complete_onboarding(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // A half-set-up assistant must not lift the guard: it would land in a broken dashboard.
     let settings = state.settings_repo.get().await.map_err(|e| {
@@ -1569,6 +1572,8 @@ async fn complete_onboarding(
         ));
     }
 
+    // Only the call that completes setup may hand out the first key; an unreadable state is "done".
+    let completing = !state.onboarding_repo.is_complete().await.unwrap_or(true);
     state
         .onboarding_repo
         .save_step(OnboardingStep::Completed)
@@ -1580,10 +1585,17 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({
+    let mut body = json!({
         "status": "completed",
         "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
-    })))
+    });
+    if completing {
+        if let Some(key) = crate::pond_admin::first_activation_key(&state, principal.as_ref()).await
+        {
+            body["admin_key"] = json!(key);
+        }
+    }
+    Ok(Json(body))
 }
 
 /// The owner's setup interview, offered once setup completes: where it stands and how to start it.
@@ -1850,9 +1862,9 @@ async fn chat(
             Json(json!({"error": format!("Invalid request: {}", e)})),
         )
     })?;
-    refuse_without_a_model(&state).await?;
-
     let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    refuse_without_a_model(&state).await?;
     let storage = &state.session_storage;
 
     if storage.get_session(&session_id).await.is_err() {
@@ -2251,6 +2263,10 @@ async fn chat_stream(
             Json(json!({"error": e.to_string()})),
         )
     })?;
+
+    if let Some(session_id) = req.session_id.as_deref() {
+        refuse_another_members_session(&state, principal.as_ref(), session_id).await?;
+    }
 
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
     refuse_without_a_model(&state).await?;
@@ -3833,13 +3849,32 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
 /// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let sessions = state.session_storage.list_sessions().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to list sessions: {}", e)})),
-        )
-    })?;
+    use pond_core::user_data::domain::session::SessionIdentity;
+
+    let caller =
+        read_only_caller_scope(&state, principal.as_ref().map(|axum::Extension(p)| p), None).await;
+    // Another member's conversation is left out by the rule its messages are read by.
+    let sessions: Vec<_> = state
+        .session_storage
+        .list_sessions()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to list sessions: {}", e)})),
+            )
+        })?
+        .into_iter()
+        .filter(|s| {
+            SessionIdentity {
+                profile_id: s.profile_id.clone(),
+                ..SessionIdentity::unknown()
+            }
+            .readable_by(&caller)
+        })
+        .collect();
 
     let mut session_list: Vec<Value> = Vec::with_capacity(sessions.len());
     // The scheduler opens a `sched-` session per run for the engine; it holds no conversation,
@@ -4103,9 +4138,19 @@ async fn rename_session(
 /// Deletes a session and its messages; idempotent (a missing session also gets 204).
 async fn delete_session(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, as it does for its messages.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     // Must run before the row delete: that cascades away the engine pairing, orphaning the
     // engine-side session for good.
@@ -4194,6 +4239,33 @@ async fn set_message_feedback_handler(
 /// Whether the caller may read this conversation: their own member's, or nobody's.
 /// The caller is resolved from their device alone; resolving from the session asked for would
 /// make every unattributed caller that session's member.
+/// Refuses a turn on another member's conversation, which the turn would replay to the model. The
+/// session counts towards who calls, so a kiosk a face identified keeps its own conversation.
+async fn refuse_another_members_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let caller = read_only_caller_scope(
+        state,
+        principal.map(|axum::Extension(p)| p),
+        Some(session_id),
+    )
+    .await;
+    let readable = state
+        .session_storage
+        .get_session_identity(session_id)
+        .await
+        .is_ok_and(|identity| identity.readable_by(&caller));
+    if readable {
+        return Ok(());
+    }
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": format!("Session not found: {session_id}")})),
+    ))
+}
+
 async fn caller_may_read_session(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -12212,6 +12284,10 @@ async fn agent_chat_stream(
         .get("images")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    if let Err(resp) = refuse_another_members_session(&state, principal.as_ref(), &session_id).await
+    {
+        return resp.into_response();
+    }
     if let Err(resp) = refuse_without_a_model(&state).await {
         return resp.into_response();
     }
@@ -14895,12 +14971,43 @@ async fn delete_prompt_extra(
 
 // ── Memories ──────────────────────────────────────────────────────────────────
 
-async fn list_memories(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
-    match state
-        .memory_repo
-        .search_recent(&ProfileScope::Household, 50)
-        .await
-    {
+/// The memory routes' reach: a member's own and the household's, nothing for a guest.
+async fn memory_caller_scope(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> ProfileScope {
+    read_only_caller_scope(state, principal.map(|axum::Extension(p)| p), None).await
+}
+
+/// A memory the caller may change, or the response that refuses it; another member's reads as
+/// missing, so an id can't be probed.
+async fn memory_in_reach(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    id: &str,
+) -> Result<(), axum::response::Response> {
+    let scope = memory_caller_scope(state, principal).await;
+    match state.memory_repo.get_in_scope(id, &scope).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("memory not found: {id}")})),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+async fn list_memories(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> impl axum::response::IntoResponse {
+    let scope = memory_caller_scope(&state, principal.as_ref()).await;
+    match state.memory_repo.search_recent(&scope, 50).await {
         Ok(memories) => Json(json!(memories)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -14923,6 +15030,9 @@ struct SaveMemoryRequest {
     importance: Option<f32>,
     #[serde(default)]
     tier: Option<pond_core::user_data::domain::memory::MemoryTier>,
+    /// Shared with the whole household rather than kept as the caller's own.
+    #[serde(default)]
+    shared: bool,
 }
 fn default_source() -> String {
     "api".to_string()
@@ -14946,8 +15056,10 @@ async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
 }
 
 /// Embedded at write: semantic recall skips a row with no vector until the idle sweep fills it.
+/// The caller's own unless `shared` asks for the household; a guest saves nothing.
 async fn save_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<SaveMemoryRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let Json(req) = match body {
@@ -14959,6 +15071,15 @@ async fn save_memory(
             )
                 .into_response()
         }
+    };
+    let owner = match memory_caller_scope(&state, principal.as_ref()).await {
+        ProfileScope::Guest => return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this device belongs to no member, so it cannot save memories"})),
+        )
+            .into_response(),
+        ProfileScope::Owner(member) if !req.shared => Some(member),
+        ProfileScope::Owner(_) | ProfileScope::Household => None,
     };
     let decay_rate = req
         .tier
@@ -14979,7 +15100,7 @@ async fn save_memory(
 
     let fragment = MemoryFragment {
         id: Uuid::new_v4().to_string(),
-        profile_id: None,
+        profile_id: owner,
         session_id: None,
         content: req.content,
         embedding,
@@ -15018,6 +15139,7 @@ struct UpdateMemoryRequest {
 /// new words are re-embedded. A field left out is left as it is; a body with neither is refused.
 async fn update_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateMemoryRequest>,
 ) -> impl axum::response::IntoResponse {
@@ -15029,6 +15151,9 @@ async fn update_memory(
     }
     if content == Some("") {
         return bad_request("a memory cannot be blank -- delete it instead");
+    }
+    if let Err(refused) = memory_in_reach(&state, principal.as_ref(), &id).await {
+        return refused;
     }
 
     let mut result = Ok(());
@@ -15219,8 +15344,12 @@ async fn run_lane_job(
 
 async fn delete_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> impl axum::response::IntoResponse {
+    if let Err(refused) = memory_in_reach(&state, principal.as_ref(), &id).await {
+        return refused;
+    }
     match state.memory_repo.delete(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (

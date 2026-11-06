@@ -190,7 +190,7 @@ admin_card_run() {
   else
     warn "admin card made, but no recovery copy could be kept: write it down now"
   fi
-  [ "$sub" = rotate ] && note "every phone unlocked with the old card is locked again"
+  [ "$sub" = rotate ] && note "every phone unlocked with the old card is locked again, and every phone's own key is revoked"
   admin_card_print "$password"
   admin_card_power_dropin "$user"
   return 0
