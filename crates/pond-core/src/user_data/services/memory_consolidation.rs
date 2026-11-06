@@ -1,5 +1,6 @@
 //! Memory consolidation. [`select_batch`] keeps a run inside a 3B model's context, and
-//! [`apply_actions`] is the only write path, so both modes share its correction and kept guards.
+//! [`apply_actions`] is the only write path, so both modes share its correction, kept and owner
+//! guards.
 
 use crate::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
@@ -9,7 +10,7 @@ use crate::user_data::ports::memory_consolidator::{ConsolidationAction, MemoryCo
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::services::consolidation_schedule::MIN_MEMORIES_TO_CONSOLIDATE;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Single-pass label in `consolidation_runs`, matching the `memory_consolidation_mode` value.
 pub const MODE_SINGLE: &str = "single";
@@ -90,6 +91,25 @@ pub fn select_batch(memories: Vec<MemoryFragment>, batch_size: usize) -> BatchSe
     }
 }
 
+/// One batch per owner, the household's shared memories among them: a merge or split that
+/// crossed two members would hand one member's facts to the other.
+pub fn select_owner_batches(
+    memories: Vec<MemoryFragment>,
+    batch_size: usize,
+) -> Vec<BatchSelection> {
+    let mut by_owner: BTreeMap<Option<String>, Vec<MemoryFragment>> = BTreeMap::new();
+    for memory in memories {
+        by_owner
+            .entry(memory.profile_id.clone())
+            .or_default()
+            .push(memory);
+    }
+    by_owner
+        .into_values()
+        .map(|group| select_batch(group, batch_size))
+        .collect()
+}
+
 /// How many of each action a run actually applied.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ApplyOutcome {
@@ -97,7 +117,7 @@ pub struct ApplyOutcome {
     pub pruned: usize,
     pub split: usize,
     pub recategorized: usize,
-    /// Actions refused by a correction or kept-memory guard.
+    /// Actions refused by a correction, kept-memory or owner guard.
     pub blocked: usize,
 }
 
@@ -108,8 +128,26 @@ impl ApplyOutcome {
     }
 }
 
-/// Apply accepted consolidation actions. Pass the batch the model saw: the correction and kept
-/// guards look sources up there, and ids outside it apply unguarded.
+/// The one owner every id shares, all of them in the batch; `None` when any is outside it or two
+/// owners differ. The inner `None` is the household's shared memories.
+fn sole_owner<'a>(
+    ids: impl IntoIterator<Item = &'a String>,
+    memory_map: &HashMap<&str, &MemoryFragment>,
+) -> Option<Option<String>> {
+    let mut owner: Option<Option<String>> = None;
+    for id in ids {
+        let profile = &memory_map.get(id.as_str())?.profile_id;
+        match &owner {
+            None => owner = Some(profile.clone()),
+            Some(seen) if seen != profile => return None,
+            Some(_) => {}
+        }
+    }
+    owner
+}
+
+/// Apply accepted consolidation actions. Pass the batch the model saw: an action naming a memory
+/// outside it, or a merge across owners, is refused, and what is written keeps its sources' owner.
 pub async fn apply_actions(
     repo: &dyn MemoryRepository,
     batch: &[MemoryFragment],
@@ -128,6 +166,13 @@ pub async fn apply_actions(
                 segment,
                 importance,
             } => {
+                let Some(owner) = sole_owner(&source_ids, &memory_map) else {
+                    tracing::warn!(
+                        "[consolidation] blocked a merge across owners or outside the batch"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                };
                 // A correction source makes the merge a correction too, so it stays unprunable.
                 let any_correction = source_ids
                     .iter()
@@ -166,6 +211,7 @@ pub async fn apply_actions(
                     importance,
                     corrects,
                 );
+                new_frag.profile_id = owner;
                 if any_kept {
                     new_frag.keep();
                 }
@@ -185,14 +231,17 @@ pub async fn apply_actions(
                 outcome.merged += 1;
             }
             ConsolidationAction::Prune { id } => {
-                if let Some(mem) = memory_map.get(id.as_str()) {
-                    if mem.is_correction() || mem.is_kept() {
-                        tracing::warn!(
-                            "[consolidation] blocked prune of correction or kept memory {id}"
-                        );
-                        outcome.blocked += 1;
-                        continue;
-                    }
+                let Some(mem) = memory_map.get(id.as_str()) else {
+                    tracing::warn!("[consolidation] blocked prune of {id}, outside the batch");
+                    outcome.blocked += 1;
+                    continue;
+                };
+                if mem.is_correction() || mem.is_kept() {
+                    tracing::warn!(
+                        "[consolidation] blocked prune of correction or kept memory {id}"
+                    );
+                    outcome.blocked += 1;
+                    continue;
                 }
 
                 let _ = repo.update_lifecycle(&id, MemoryLifecycle::Archived).await;
@@ -206,6 +255,13 @@ pub async fn apply_actions(
                 new_segment,
                 new_importance,
             } => {
+                if !memory_map.contains_key(id.as_str()) {
+                    tracing::warn!(
+                        "[consolidation] blocked recategorising {id}, outside the batch"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                }
                 let _ = repo.update_segment(&id, new_segment, new_importance).await;
                 let _ = repo
                     .log_event(
@@ -221,11 +277,17 @@ pub async fn apply_actions(
                 source_id,
                 new_memories,
             } => {
+                let Some(source) = memory_map.get(source_id.as_str()) else {
+                    tracing::warn!(
+                        "[consolidation] blocked split of {source_id}, outside the batch"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                };
                 // Carry `corrects` to the first Correction entry so the fix survives the split.
-                let source = memory_map.get(source_id.as_str());
-                let source_corrects = source.and_then(|m| m.corrects.clone());
+                let source_corrects = source.corrects.clone();
                 // Every piece of a kept memory stays kept.
-                let source_kept = source.is_some_and(|m| m.is_kept());
+                let source_kept = source.is_kept();
 
                 let mut first_new_id = String::new();
                 let mut corrects_assigned = false;
@@ -249,6 +311,7 @@ pub async fn apply_actions(
                         entry.importance,
                         entry_corrects,
                     );
+                    new_frag.profile_id = source.profile_id.clone();
                     if source_kept {
                         new_frag.keep();
                     }
@@ -280,59 +343,61 @@ pub async fn apply_actions(
     Ok(outcome)
 }
 
-/// Run one single-pass consolidation and record an audit row; returns `(merged, pruned)`.
-/// The adversarial mode is in `pond-server`, which holds the cancel token and SSE sink.
+/// Run single-pass consolidation once per owner's batch, recording an audit row for each; returns
+/// `(merged, pruned)` summed. The adversarial mode is in `pond-server`, which holds the cancel
+/// token and SSE sink.
 pub async fn run_consolidation(
     consolidator: &dyn MemoryConsolidator,
     repo: &dyn MemoryRepository,
     batch_size: usize,
 ) -> Result<(usize, usize)> {
-    let started = std::time::Instant::now();
-    let selection = select_batch(
-        repo.search_scoreable(&ProfileScope::Household).await?,
-        batch_size,
-    );
+    let (mut merged, mut pruned) = (0, 0);
+    let memories = repo.search_scoreable(&ProfileScope::Household).await?;
+    for selection in select_owner_batches(memories, batch_size) {
+        if selection.below_minimum() {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        if selection.deferred > 0 {
+            tracing::info!(
+                mode = MODE_SINGLE,
+                considered = selection.considered,
+                batch = selection.batch.len(),
+                deferred = selection.deferred,
+                "[memory-consolidation] batch cap applied — remaining memories deferred to the next run"
+            );
+        }
 
-    if selection.below_minimum() {
-        return Ok((0, 0));
+        let actions = consolidator.consolidate(&selection.batch).await?;
+        let proposed = actions.len();
+        let outcome = apply_actions(repo, &selection.batch, actions).await?;
+
+        if outcome.changed() > 0 {
+            tracing::info!(
+                merged = outcome.merged,
+                pruned = outcome.pruned,
+                split = outcome.split,
+                recategorized = outcome.recategorized,
+                blocked = outcome.blocked,
+                "[memory-consolidation] single-pass complete"
+            );
+        }
+
+        let _ = repo
+            .log_consolidation_run(
+                MODE_SINGLE,
+                selection.batch.len(),
+                outcome.changed(),
+                proposed.saturating_sub(outcome.changed()),
+                started.elapsed().as_millis() as u64,
+                None,
+            )
+            .await;
+
+        merged += outcome.merged + outcome.recategorized;
+        pruned += outcome.pruned;
     }
-    if selection.deferred > 0 {
-        tracing::info!(
-            mode = MODE_SINGLE,
-            considered = selection.considered,
-            batch = selection.batch.len(),
-            deferred = selection.deferred,
-            "[memory-consolidation] batch cap applied — remaining memories deferred to the next run"
-        );
-    }
-
-    let actions = consolidator.consolidate(&selection.batch).await?;
-    let proposed = actions.len();
-    let outcome = apply_actions(repo, &selection.batch, actions).await?;
-
-    if outcome.changed() > 0 {
-        tracing::info!(
-            merged = outcome.merged,
-            pruned = outcome.pruned,
-            split = outcome.split,
-            recategorized = outcome.recategorized,
-            blocked = outcome.blocked,
-            "[memory-consolidation] single-pass complete"
-        );
-    }
-
-    let _ = repo
-        .log_consolidation_run(
-            MODE_SINGLE,
-            selection.batch.len(),
-            outcome.changed(),
-            proposed.saturating_sub(outcome.changed()),
-            started.elapsed().as_millis() as u64,
-            None,
-        )
-        .await;
-
-    Ok((outcome.merged + outcome.recategorized, outcome.pruned))
+    Ok((merged, pruned))
 }
 
 #[cfg(test)]
@@ -918,5 +983,139 @@ mod tests {
             "no LLM call for a store below the minimum"
         );
         assert!(repo.consolidation_runs().await.is_empty());
+    }
+
+    // ── owners ─────────────────────────────────────────────────────────────
+
+    fn owned(id: &str, owner: Option<&str>) -> MemoryFragment {
+        let mut f = frag(id, MemorySegment::Knowledge, 5);
+        f.profile_id = owner.map(str::to_string);
+        f
+    }
+
+    async fn written(repo: &MockMemoryRepository, content: &str) -> MemoryFragment {
+        repo.search_recent(&ProfileScope::Household, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.content == content)
+            .expect("written")
+    }
+
+    #[test]
+    fn no_batch_holds_two_owners_memories() {
+        let memories = vec![
+            owned("a1", Some("amina")),
+            owned("b1", Some("baraka")),
+            owned("h1", None),
+            owned("a2", Some("amina")),
+        ];
+        let batches = select_owner_batches(memories, 50);
+        assert_eq!(batches.len(), 3);
+        for selection in &batches {
+            let owners: std::collections::HashSet<_> =
+                selection.batch.iter().map(|m| &m.profile_id).collect();
+            assert_eq!(owners.len(), 1, "one owner per batch");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merge_keeps_its_sources_owner() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![owned("a1", Some("amina")), owned("a2", Some("amina"))];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Merge {
+                source_ids: vec!["a1".into(), "a2".into()],
+                merged_content: "amina takes her tea without sugar".into(),
+                segment: MemorySegment::Preference,
+                importance: 0.6,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.merged, 1);
+        let merged = written(&repo, "amina takes her tea without sugar").await;
+        assert_eq!(
+            merged.profile_id.as_deref(),
+            Some("amina"),
+            "a member's merged fact stays hers, not the household's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_across_two_members_is_refused() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![owned("a1", Some("amina")), owned("b1", Some("baraka"))];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Merge {
+                source_ids: vec!["a1".into(), "b1".into()],
+                merged_content: "both like tea".into(),
+                segment: MemorySegment::Preference,
+                importance: 0.6,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!((outcome.merged, outcome.blocked), (0, 1));
+        assert!(repo.superseded().await.is_empty(), "no source is retired");
+    }
+
+    #[tokio::test]
+    async fn a_split_keeps_its_sources_owner() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![owned("b1", Some("baraka"))];
+        apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Split {
+                source_id: "b1".into(),
+                new_memories: vec![SplitEntry {
+                    content: "baraka cycles to work".into(),
+                    segment: MemorySegment::Knowledge,
+                    importance: 0.5,
+                }],
+            }],
+        )
+        .await
+        .unwrap();
+        let piece = written(&repo, "baraka cycles to work").await;
+        assert_eq!(piece.profile_id.as_deref(), Some("baraka"));
+    }
+
+    #[tokio::test]
+    async fn an_action_outside_the_batch_is_refused() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![owned("a1", Some("amina"))];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![
+                ConsolidationAction::Prune { id: "b1".into() },
+                ConsolidationAction::Recategorize {
+                    id: "b1".into(),
+                    new_segment: MemorySegment::Identity,
+                    new_importance: 0.9,
+                },
+                ConsolidationAction::Merge {
+                    source_ids: vec!["a1".into(), "b1".into()],
+                    merged_content: "x".into(),
+                    segment: MemorySegment::Knowledge,
+                    importance: 0.5,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.changed(), 0);
+        assert_eq!(
+            outcome.blocked, 3,
+            "another member's memory is out of reach"
+        );
+        assert!(repo.lifecycle_updates().await.is_empty());
+        assert!(repo.segment_updates().await.is_empty());
     }
 }

@@ -218,7 +218,7 @@ The route summary's "Also" column names these.
 | GET | /onboard/status | open | | Onboarding progress |
 | POST | /onboard | wizard | | Start onboarding, or report where it is |
 | POST | /onboard/step/{name} | wizard | | Record reaching a step |
-| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device |
+| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device and gives it its My Pond key |
 | POST | /onboard/reset | reset | cred if tokenless | Back to `Welcome`; reopens the wizard routes |
 
 ### Connections and setup card
@@ -528,8 +528,10 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
-| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card or its own key; wrong ones are slowed |
 | POST | /admin/lock | token +onb | member | End this device's unlock |
+| POST | /admin/enroll | token +onb | unlocked | This device's own key, shown once, replacing any older one |
+| DELETE | /admin/key | token +onb | member | Revoke this device's key and lock it |
 | GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
 | GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
 | DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
@@ -763,7 +765,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; plus `admin_key`, the phone's own [My Pond key](architecture/pond-administrator.md#each-phones-own-key), when the caller is the device that claimed the pond and this call is the one that completed setup; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
