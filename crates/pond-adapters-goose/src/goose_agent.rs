@@ -2121,28 +2121,30 @@ impl GooseAdapter {
             .clone()
     }
 
-    /// Memories relevant to `message`, with cosine similarity when known. Never fails the turn.
+    /// Memories relevant to `message`, with cosine similarity when known, and the embedder's
+    /// `closest_memory` floor for those cosines. Never fails the turn.
     async fn topical_memories(
         &self,
         message: &str,
         scope: &ProfileScope,
         limit: usize,
-    ) -> Vec<(MemoryFragment, Option<f32>)> {
+    ) -> (Vec<(MemoryFragment, Option<f32>)>, Option<f32>) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
             match provider.embed_query(message).await {
                 Ok(query_vector) => {
+                    let closest_floor = provider.similarity_floors().map(|f| f.closest_memory);
                     match self
                         .memory_repo
                         .search_similar(&query_vector, scope, limit)
                         .await
                     {
                         Ok(hits) => {
-                            return hits
+                            let hits = hits
                                 .into_iter()
                                 .map(|fragment| {
                                     // No vector, or one from another model (other width): `None`,
@@ -2155,6 +2157,7 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
+                            return (hits, closest_floor);
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -2165,17 +2168,17 @@ impl GooseAdapter {
 
         let keywords = pond_core::user_data::services::memory_relevance::keyword_terms(message);
         if keywords.is_empty() {
-            return vec![];
+            return (vec![], None);
         }
         match self
             .memory_repo
             .search_by_content(&keywords, scope, limit)
             .await
         {
-            Ok(hits) => hits.into_iter().map(|m| (m, None)).collect(),
+            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None),
             Err(e) => {
                 tracing::warn!("memory: keyword search failed: {e}");
-                vec![]
+                (vec![], None)
             }
         }
     }
@@ -2896,10 +2899,11 @@ impl GooseAdapter {
                         self.topical_memories(&request.message, &turn_scope, limit)
                             .await
                     }
-                    None => vec![],
+                    None => (vec![], None),
                 }
             },
         );
+        let (relevant_memories, closest_floor) = relevant_memories;
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -3142,13 +3146,14 @@ impl GooseAdapter {
         let compaction_profile = &turn_profile;
 
         if !memory_candidates.is_empty() {
-            // Blended ranking, so a topical memory can displace the high-importance identity block.
-            pond_core::user_data::services::memory_relevance::rank_by_relevance(
-                &mut memory_candidates,
+            // Blended ranking, so a topical memory can displace the high-importance identity block,
+            // and the memory closest to the message keeps a seat however old it is.
+            memory_candidates = pond_core::user_data::services::memory_relevance::select_for_turn(
+                memory_candidates,
+                compaction_profile.max_memory_fragments,
+                closest_floor,
                 chrono::Utc::now(),
             );
-
-            memory_candidates.truncate(compaction_profile.max_memory_fragments);
 
             let token_budget =
                 memory_token_budget(compaction_profile.memory_token_budget, is_voice);
@@ -3176,6 +3181,8 @@ impl GooseAdapter {
                     fragments_injected = fresh.len(),
                     fragments_already_shown = rendered.len() - fresh.len(),
                     fragments_available = memory_candidates.len(),
+                    closest_floor = ?closest_floor,
+                    lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
                     tokens_used,
                     token_budget,
                     semantic = self
