@@ -1366,6 +1366,18 @@ async fn run_server(
     let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> = whisper_model_path
         .as_ref()
         .map(|p| serve_whisper::ServeWhisper::new(p.clone(), &data_dir, mic_handle.clone()));
+    // Loaded now, before the embedder and the chat model start their own CUDA work: whisper.cpp
+    // setting up CUDA beside them crashed the pond on the Jetson.
+    if settings.voice_room_enabled {
+        if let Some(whisper) = &serve_whisper {
+            if let Err(e) = whisper.wake() {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "the room's wake-only Whisper did not load at startup"
+                );
+            }
+        }
+    }
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         serve_whisper.clone().map(|w| {
