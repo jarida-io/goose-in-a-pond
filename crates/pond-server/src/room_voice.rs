@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use pond_adapters_audio_devices::AudioSupervisor;
 use pond_api::runs::{RunSupervisor, TurnInFlight};
 use pond_audio::MicHandle;
-use pond_core::models::domain::audio_device::{AudioDeviceStatus, ChoiceBasis};
+use pond_core::models::domain::audio_device::AudioDeviceStatus;
 use pond_core::models::domain::room_voice::{
     LastHeard, RoomEvent, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
@@ -570,12 +570,9 @@ async fn supervise(inner: Arc<Inner>) {
         });
 
         let mut ready = inner.ready(on).await;
-        let untested = inner
-            .deps
-            .audio
-            .status()
-            .is_some_and(|s| s.input.basis == ChoiceBasis::NotTested);
-        if on && !tested && untested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
+        // Once per switch-on, whatever the startup test found: on the nano it chose both devices
+        // without proving them a pair, and the room stayed silent until someone retested.
+        if on && !tested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
             tested = true;
             let audio = inner.deps.audio.clone();
             let _ = tokio::task::spawn_blocking(move || audio.retest()).await;
