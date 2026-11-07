@@ -63,6 +63,20 @@ pub struct AgentRequest {
     pub interview: Option<String>,
 }
 
+impl AgentRequest {
+    /// The words the turn is about: the message, or for a room turn the model hears, the room's
+    /// transcript of the recording.
+    pub fn message_or_heard(&self) -> &str {
+        if !self.message.is_empty() {
+            return &self.message;
+        }
+        self.audio
+            .iter()
+            .find_map(|clip| clip.heard_as.as_deref())
+            .unwrap_or("")
+    }
+}
+
 /// A research task started for this turn, and where it waits when others are ahead of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeepResearchTurn {

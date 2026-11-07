@@ -95,13 +95,13 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
-    /// The message is the room's transcript of a recording the model also hears.
+    /// The user's words are the attached recording, which the model hears.
     heard: bool,
 }
 
-/// For a room turn the model hears: the transcript is only the room's guess at the words.
-const HEARD_TURN_NOTE: &str = "The user spoke this turn. The text in <user-message> is an \
-automatic transcript of the attached recording and can be wrong; go by what you hear.";
+/// For a room turn the model hears, whose <user-message> is empty.
+const HEARD_TURN_NOTE: &str =
+    "The user spoke this turn: their words are the attached recording. Answer what you hear.";
 
 impl TurnEnvelope<'_> {
     fn render(&self) -> String {
@@ -2839,7 +2839,7 @@ impl GooseAdapter {
         }
 
         // Read by MCP tool handlers (ToolCaller params, outbound HTTP trace events).
-        pond_mcp_server::set_last_user_message(&request.message);
+        pond_mcp_server::set_last_user_message(request.message_or_heard());
         pond_mcp_server::set_current_session_id(&session_id);
 
         // Every turn so toggles apply at once. Must precede session hydration and ModelConfig:
@@ -2903,7 +2903,7 @@ impl GooseAdapter {
             async {
                 match candidate_limit {
                     Some(limit) => {
-                        self.topical_memories(&request.message, &turn_scope, limit)
+                        self.topical_memories(request.message_or_heard(), &turn_scope, limit)
                             .await
                     }
                     None => vec![],
@@ -3373,7 +3373,7 @@ impl GooseAdapter {
             let groups = self
                 .resolve_session_tool_groups(
                     &session_id,
-                    &request.message,
+                    request.message_or_heard(),
                     &memory_block_for_user_msg,
                     &skill_selection_signal,
                     &turn_scope,
@@ -3683,7 +3683,7 @@ impl GooseAdapter {
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
-            heard: request.audio.iter().any(|clip| clip.transcribed),
+            heard: request.audio.iter().any(|clip| clip.heard_as.is_some()),
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -3701,8 +3701,8 @@ impl GooseAdapter {
         let engine_sessions = self.session_manager.clone();
         // The goal that arms goose's completeness check: the RAW request, as `turn_text` carries
         // household memories. `None` turns the check off for this turn.
-        let completeness_goal =
-            (settings.goal_check_enabled && !request.warmup).then(|| request.message.clone());
+        let completeness_goal = (settings.goal_check_enabled && !request.warmup)
+            .then(|| request.message_or_heard().to_string());
         let last_prompt_tokens_map = self.last_prompt_tokens_handle();
         // Live handle for the tool-call guard inside the 'static stream closure.
         let guard_controls = session_controls.clone();
@@ -8122,11 +8122,11 @@ mod tests {
         assert_eq!(image_parts(&msg).len(), 1);
     }
 
-    /// A room turn's transcript is flagged as a guess only when the model also hears the recording.
+    /// A heard room turn carries no text of its own words; only it gets the note.
     #[test]
-    fn only_a_heard_turn_says_its_message_is_a_transcript() {
+    fn only_a_heard_turn_says_its_words_are_the_recording() {
         let heard = TurnEnvelope {
-            message: "what time is it",
+            message: "",
             heard: true,
             ..Default::default()
         }
@@ -8136,7 +8136,7 @@ mod tests {
             .map(|(_, rest)| rest)
             .unwrap();
         assert!(context.contains(HEARD_TURN_NOTE));
-        assert!(heard.starts_with("<user-message>\nwhat time is it\n</user-message>"));
+        assert!(heard.starts_with("<user-message>\n\n</user-message>"));
 
         let typed = TurnEnvelope {
             message: "what time is it",

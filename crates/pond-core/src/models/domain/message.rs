@@ -29,9 +29,10 @@ pub struct AudioAttachment {
     /// The file's name, when it was a file rather than a held-mic note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The turn's message is an automatic transcript of this recording, not words someone typed.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub transcribed: bool,
+    /// What the room's speech recogniser made of a recording the model hears. Never the turn's
+    /// words: it steers memory recall and tool choice, which need text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heard_as: Option<String>,
 }
 
 /// A PDF whose text the pond reads into the turn; the file itself is never stored.

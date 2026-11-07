@@ -796,10 +796,12 @@ impl ChatService {
         self
     }
 
-    /// The turn's recording, for a model that hears it; the transcript stays the message.
+    /// The turn's recording, for a model that hears it. The model goes by what it hears, so the
+    /// transcript rides along only as `heard_as`, for memory recall and tool choice.
     async fn heard_audio_for_turn(
         &self,
         wav: Option<Vec<u8>>,
+        transcript: &str,
     ) -> Vec<crate::models::domain::message::AudioAttachment> {
         use base64::Engine as _;
         let (Some(wav), Some(hearing)) = (wav, &self.model_hearing) else {
@@ -818,7 +820,7 @@ impl ChatService {
             data: base64::engine::general_purpose::STANDARD.encode(&wav),
             mime_type: "audio/wav".to_string(),
             name: None,
-            transcribed: true,
+            heard_as: Some(transcript.to_string()),
         }]
     }
 
@@ -1361,7 +1363,11 @@ impl ChatService {
         let (profile_scope, profile_context) = self.turn_speaker().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
-            message: message.clone(),
+            // A heard turn's words are the recording; Whisper's guess at them stays out of the turn.
+            message: match audio.is_empty() {
+                true => message.clone(),
+                false => String::new(),
+            },
             session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
@@ -2123,7 +2129,7 @@ impl ChatService {
                 let msg = input_for_task;
                 let fired_at = std::time::Instant::now();
                 tokio::spawn(async move {
-                    let audio = svc.heard_audio_for_turn(heard_audio).await;
+                    let audio = svc.heard_audio_for_turn(heard_audio, &msg).await;
                     svc.stream_response_heard(msg, audio, fired_at).await
                 })
             });
@@ -3639,12 +3645,10 @@ mod tests {
         let wav = b"RIFF\x24\x00\x00\x00WAVE".to_vec();
 
         let heard = voice_turn_request(true, &wav).await;
-        assert_eq!(
-            heard.message, "what time is it",
-            "the transcript stays the message"
-        );
+        assert_eq!(heard.message, "", "the model goes by the recording");
+        assert_eq!(heard.message_or_heard(), "what time is it");
         assert_eq!(heard.audio.len(), 1);
-        assert!(heard.audio[0].transcribed);
+        assert_eq!(heard.audio[0].heard_as.as_deref(), Some("what time is it"));
         assert_eq!(heard.audio[0].mime_type, "audio/wav");
         assert_eq!(
             base64::engine::general_purpose::STANDARD
