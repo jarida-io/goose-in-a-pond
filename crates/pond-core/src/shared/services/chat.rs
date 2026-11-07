@@ -820,7 +820,11 @@ impl ChatService {
             data: base64::engine::general_purpose::STANDARD.encode(&wav),
             mime_type: "audio/wav".to_string(),
             name: None,
-            heard_as: Some(transcript.to_string()),
+            // Words the transcriber could not make are no query for memory recall or tool choice.
+            heard_as: Some(match transcript {
+                crate::models::ports::voice_input::UNWORDED_SPEECH => String::new(),
+                words => words.to_string(),
+            }),
         }]
     }
 
@@ -2030,7 +2034,9 @@ impl ChatService {
                     continue;
                 }
                 Some(text) => {
-                    if let Some(spoken) = &last_spoken {
+                    // A turn opened by the wake word is a new request, however its words compare.
+                    let echo_of = last_spoken.as_ref().filter(|_| !first_turn);
+                    if let Some(spoken) = echo_of {
                         if pond_voice::text::is_echo_transcript(&text, spoken) {
                             tracing::info!(
                                 input = %text,
@@ -3637,6 +3643,28 @@ mod tests {
             .await
             .unwrap();
         agent.last_request().expect("the turn reached the agent")
+    }
+
+    /// The echo check guards a follow-up against the pond hearing itself; a turn the wake word
+    /// opened is someone asking, even when the words match the last reply.
+    #[tokio::test]
+    async fn a_wake_word_turn_is_never_dropped_as_an_echo_of_the_last_reply() {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("echo".to_string()).await.unwrap();
+        // The second listen is a follow-up that hears nothing, so the third waits for the wake.
+        let input = Arc::new(ScriptedListenInput::new(["hello", "", "Echo: hello"]));
+        ChatService::new(agent.clone(), "echo".to_string(), storage)
+            .with_voice_input(input)
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .run_loop()
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.last_request().unwrap().message,
+            "Echo: hello",
+            "the words of the last reply, asked after the wake word, still reach the model"
+        );
     }
 
     #[tokio::test]

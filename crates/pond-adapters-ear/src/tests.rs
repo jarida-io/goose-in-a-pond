@@ -340,6 +340,54 @@ async fn the_recording_behind_a_request_is_handed_over_once_and_never_for_silenc
 }
 
 #[tokio::test]
+async fn speech_the_transcriber_cannot_word_reaches_only_a_model_that_hears() {
+    for forward in [true, false] {
+        let (rig, ctl) = rig(WakeMode::HeyGoose, Says::new(&[""])).await;
+        rig.set_forward_unworded(forward);
+        let listening = tokio::spawn({
+            let rig = rig.clone();
+            async move { rig.listen().await }
+        });
+        ctl.until("the ear to listen", |l, _| l.listens.len() == 1)
+            .await;
+        let from = ctl.listens()[0];
+        ctl.until("a second of speech", |_, at| at >= from + S).await;
+        ctl.emit(utterance(from, ctl.at()));
+        let heard = bounded("the listen", listening).await.unwrap().unwrap();
+        match forward {
+            true => {
+                assert_eq!(heard.as_deref(), Some(UNWORDED_SPEECH));
+                assert!(
+                    rig.take_heard_audio().is_some(),
+                    "the recording goes with it"
+                );
+            }
+            false => {
+                assert_eq!(heard.as_deref(), Some(""), "taken for noise, as before");
+                assert!(rig.take_heard_audio().is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn a_quiet_recording_is_raised_for_the_model_and_silence_is_left_alone() {
+    let quiet: Vec<f32> = (0..1600).map(|i| 0.01 * ((i as f32) * 0.3).sin()).collect();
+    let (raised, peak, gain) = raised_for_the_model(quiet);
+    assert!((peak - 0.01).abs() < 1e-3);
+    assert!((gain - 31.6).abs() < 0.1, "capped at 30 dB, got {gain}");
+    assert!(raised.iter().all(|v| v.abs() <= 1.0));
+    let loud: Vec<f32> = vec![0.9, -0.9];
+    assert_eq!(
+        raised_for_the_model(loud.clone()),
+        (loud, 0.9, 1.0),
+        "never turned down"
+    );
+    let (silent, _, gain) = raised_for_the_model(vec![0.0; 100]);
+    assert_eq!((silent.len(), gain), (100, 1.0));
+}
+
+#[tokio::test]
 async fn only_an_enrolled_voice_over_the_reply_interrupts_it() {
     let (rig, ctl) = rig(WakeMode::HeyGoose, Says::new(&[])).await;
     let hook = rig.state_hook();

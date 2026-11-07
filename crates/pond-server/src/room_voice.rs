@@ -730,6 +730,7 @@ async fn run_once(
     let recognises = recognises && listening.ear.is_some();
     if let Some(ear) = &listening.ear {
         ear.set_household(voices);
+        ear.set_forward_unworded(whisper_wake_only);
         // A pause asked for while the room was starting still holds.
         if let Some((until, _)) = inner.paused_until() {
             ear.pause_until(Some(until));
