@@ -1,4 +1,5 @@
 pub mod context;
+pub mod items;
 pub mod mcp;
 pub mod mesh;
 pub mod models;
