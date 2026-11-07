@@ -83,6 +83,8 @@ source "$HERE/lib/admin-card.sh"
 source "$HERE/lib/connect-setup.sh"
 # shellcheck source=lib/time-sync.sh
 source "$HERE/lib/time-sync.sh"
+# shellcheck source=lib/release-build.sh
+source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
 # shellcheck source=lib/install-systemd.sh
 source "$HERE/lib/install-systemd.sh"
@@ -1181,13 +1183,9 @@ doctor_swap() {
 }
 
 # ── build actions ────────────────────────────────────────────────────────────
-cargo_bin() { command -v cargo >/dev/null 2>&1 && { echo cargo; return; }; echo "$HOME/.cargo/bin/cargo"; }
-
 server_features() {
-  # The one canonical feature string per platform. Three of the repo's older
-  # build paths omit at least one of these and none of the omissions error.
   if [ "$D_IS_JETSON" = true ] && [ "$D_CUDA_STATE" = "usable" ]; then
-    echo "pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
+    echo "$RELEASE_BUILD_CUDA_FEATURES"
   else
     echo ""
   fi
@@ -1196,11 +1194,8 @@ server_features() {
 write_build_stamp() {
   [ "$DRY_RUN" = true ] && return 0
   mkdir -p target/release 2>/dev/null
-  {
-    printf 'features=%s cuda_arch=%s rustflags=%s git=%s goose=%s ui=%s built=%s\n' \
-      "$(server_features)" "${CMAKE_CUDA_ARCHITECTURES:-unset}" "${RUSTFLAGS-inherited}" \
-      "$D_SHA" "${D_SUB_HEAD:-?}" "$D_UI_STATE" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } > target/release/.giap-build-stamp 2>/dev/null || true
+  release_build_stamp "$(server_features)" "$D_SHA" "${D_SUB_HEAD:-?}" "$D_UI_STATE" \
+    > target/release/.giap-build-stamp 2>/dev/null || true
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
@@ -1395,26 +1390,7 @@ action_build_server() {
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
-  local cb; cb="$(cargo_bin)"
-  local rust_flags="${RUSTFLAGS:-}"
-  if [ "$D_OS" = "linux" ] && command -v ld.lld >/dev/null 2>&1; then
-    rust_flags="${rust_flags:+$rust_flags }-C link-arg=-fuse-ld=lld"
-  fi
-  if [ "$D_IS_JETSON" = true ]; then
-    rust_flags="${rust_flags:+$rust_flags }-C codegen-units=8"
-  fi
-  local sccache_env=""
-  if command -v sccache >/dev/null 2>&1; then
-    sccache_env="RUSTC_WRAPPER=sccache "
-  fi
-  if [ -n "$feats" ]; then
-    export CMAKE_CUDA_ARCHITECTURES=87
-    export CUDA_COMPUTE_CAP=87
-    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH ${rust_flags:+RUSTFLAGS=\"$rust_flags\" }${sccache_env}SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
-      $cb build -p pond-server --bin pond-server --features $feats --release"
-  else
-    run_sh "${rust_flags:+RUSTFLAGS=\"$rust_flags\" }${sccache_env}SQLX_OFFLINE=true $cb build -p pond-server --bin pond-server --release"
-  fi
+  run_sh "$(release_build_cmd "$feats")"
   local rc=$?
   # The remote-access helper is Go; a host without Go still gets a working pond, just without it.
   if [ $rc -eq 0 ] && command -v go >/dev/null 2>&1; then
@@ -2249,11 +2225,13 @@ action_update() {
   fi
   if [ "$D_NODE_OK" = true ]; then ok "node $D_NODE"; else warn "no Node in range: the web UI cannot be rebuilt here"; fi
 
-  # The stamp names the commit the binary was built from, so an unchanged pond skips the long build.
+  # The stamp names the commit and flags the binary was built with, so an unchanged pond skips the long build.
   detect_ui; detect_binaries
-  local built_from rebuilt=false
-  built_from="$(printf '%s' "$D_STAMP" | sed -n 's/.* git=\([^ ]*\).*/\1/p')"
-  if [ -n "$built_from" ] && [ "$built_from" = "$D_SHA" ] && [ "$D_UI_STATE" = "built" ]; then
+  local built_from built_flags rebuilt=false
+  built_from="$(release_build_stamp_field "$D_STAMP" git)"
+  built_flags="$(release_build_stamp_field "$D_STAMP" rustflags)"
+  if [ -n "$built_from" ] && [ "$built_from" = "$D_SHA" ] && [ "$D_UI_STATE" = "built" ] \
+    && [ "$built_flags" = "$(release_build_stamp_rustflags)" ]; then
     ok "pond-server is already built from $D_SHA"
   else
     if [ "$D_NODE_OK" = true ]; then action_build_ui || return 1; fi

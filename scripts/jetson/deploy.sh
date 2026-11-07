@@ -24,8 +24,8 @@
 #   3. Dev machine: build the web UI (Vite needs Node >= 18, which the Jetson
 #      does not have) and rsync pond-desktop/dist to the Jetson — pond-server
 #      embeds it at compile time (crates/pond-api/build.rs).
-#   4. Jetson: release build with CUDA (sm_87; .cargo/config.toml's
-#      target-cpu=native is correct for an on-device build). It runs detached there, so a lost
+#   4. Jetson: release build with CUDA (sm_87), with the flags giap.sh builds with there
+#      (scripts/lib/release-build.sh). It runs detached there, so a lost
 #      connection cannot kill it; this side follows its log and reconnects. Run the deploy again
 #      after a drop and it follows the build still running, skipping steps 1-3 so nothing changes
 #      under it. Below 3 GB free the pond is stopped for the build; a deploy that ends before
@@ -57,6 +57,8 @@ REMOTE_REPO="goose-in-a-pond"
 
 # shellcheck source=../lib/jetson-remote.sh
 source "${REPO_ROOT}/scripts/lib/jetson-remote.sh"
+# shellcheck source=../lib/release-build.sh
+source "${REPO_ROOT}/scripts/lib/release-build.sh"
 echo "==> Finding ${HOST}"
 jetson_pin "$HOST"
 trap jetson_restore_pond EXIT
@@ -114,21 +116,18 @@ else
 
   echo "==> [4/5] Release build on the Jetson (CUDA sm_87) — this is the slow step"
   jetson_make_room_for_build "${RESTART}"
-  # CMAKE_CUDA_ARCHITECTURES=87 makes ggml emit a real sm_87 cubin; without it the
-  # build ships compute_80 PTX that the driver JIT-compiles at first model load.
-  # whisper/cuda moves ASR decode onto the GPU (research R7: ~20s of audio in
-  # ~1-2.6s instead of a multi-second all-6-core CPU burst).
-  # The stamp is giap.sh's: `giap.sh update` on the device skips a rebuild of the commit it names.
-  jetson_run_detached build "cd ~/${REMOTE_REPO} \
-    && PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true \
-       CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
-       cargo build -p pond-server \
-         --features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda \
-         --release \
-    && printf 'features=%s cuda_arch=87 rustflags=inherited git=%s goose=%s ui=built built=%s\\n' \
-         pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda \
-         \$(git rev-parse --short HEAD) \$(git -C goose rev-parse --short=9 HEAD) \
-         \$(date -u +%Y-%m-%dT%H:%M:%SZ) > target/release/.giap-build-stamp"
+  # The flags depend on the device (its linker, whether it is a Jetson), so the functions run there.
+  # They travel with the command, so a branch cut before scripts/lib/release-build.sh builds the same way.
+  # The stamp is giap.sh's: `giap.sh update` on the device skips a rebuild of the commit and flags it names.
+  jetson_run_detached build "$(declare -f release_build_is_jetson release_build_rustflags release_build_cmd \
+    release_build_stamp_rustflags release_build_stamp)
+features='${RELEASE_BUILD_CUDA_FEATURES}'
+cd ~/${REMOTE_REPO} || exit 1
+cmd=\"\$(release_build_cmd \"\$features\")\"
+printf '\$ %s\\n' \"\$cmd\"
+bash -c \"\$cmd\" || exit
+release_build_stamp \"\$features\" \"\$(git rev-parse --short HEAD)\" \"\$(git -C goose rev-parse --short=9 HEAD)\" built \\
+  > target/release/.giap-build-stamp"
 fi
 
 if [ "${RESTART}" -eq 0 ]; then
