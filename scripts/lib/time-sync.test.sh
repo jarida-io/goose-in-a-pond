@@ -7,7 +7,9 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/time-sync-test.XXXXXX")" && pwd)"
+# A failed mktemp must stop here: an empty SCRATCH would make the trap below remove the current directory.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/time-sync-test.XXXXXX")" && [ -d "$SCRATCH" ] || { echo "mktemp failed" >&2; exit 1; }
+SCRATCH="$(cd "$SCRATCH" && pwd)" || exit 1
 trap 'rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
