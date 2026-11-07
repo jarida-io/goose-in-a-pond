@@ -1,5 +1,5 @@
-//! Picture and voice-note support at the HTTP edge, driven through the real router.
-//! A refused image or voice-note turn (409/413/415) must save nothing; each is checked in the store.
+//! Pictures, recordings and documents at the HTTP edge, driven through the real router.
+//! A refused turn (409/413/415/422/400) must save nothing; each refusal is checked in the store.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1236,37 +1236,52 @@ async fn a_model_that_cannot_hear_refuses_with_409_and_saves_nothing() {
 }
 
 #[tokio::test]
-async fn a_voice_note_that_breaks_the_limits_is_refused_and_saves_nothing() {
+async fn a_recording_that_breaks_the_limits_is_refused_and_saves_nothing() {
     let cases = [
         (
             json!([{"data": b64(&wav(16_000, 500)), "mime_type": "audio/wav"},
                    {"data": b64(&wav(16_000, 500)), "mime_type": "audio/wav"}]),
             StatusCode::PAYLOAD_TOO_LARGE,
+            "audio_invalid",
         ),
         (
-            json!([{"data": b64(&wav(16_000, 500)), "mime_type": "audio/mpeg"}]),
+            json!([{"data": b64(&wav(16_000, 500)), "mime_type": "audio/webm"}]),
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "audio_invalid",
         ),
         (
             json!([{"data": b64(b"ID3\x04 an mp3 dressed as a wav"), "mime_type": "audio/wav"}]),
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "audio_invalid",
         ),
         (
-            json!([{"data": b64(&wav(8_000, 61_000)), "mime_type": "audio/wav"}]),
+            json!([{"data": b64(&fixture("tone.opus.ogg")), "mime_type": "audio/ogg"}]),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "audio_invalid",
+        ),
+        (
+            json!([{"data": b64(&wav(8_000, 181_000)), "mime_type": "audio/wav"}]),
             StatusCode::PAYLOAD_TOO_LARGE,
+            "audio_too_long",
+        ),
+        (
+            json!([{"data": "A".repeat(9 * 1024 * 1024 * 4 / 3), "mime_type": "audio/mp4"}]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "audio_too_large",
         ),
         (
             json!([{"data": "not base64 at all!", "mime_type": "audio/wav"}]),
             StatusCode::BAD_REQUEST,
+            "audio_invalid",
         ),
     ];
-    for (audio, want) in cases {
+    for (audio, want, code) in cases {
         let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
         let turn = json!({"session_id": "limits", "message": "", "audio": audio});
         let (status, body) =
             send_json(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
         assert_eq!(status, want, "{body}");
-        assert_eq!(body["code"], "audio_invalid", "{body}");
+        assert_eq!(body["code"], code, "{body}");
         assert_nothing_saved(&pond, "limits").await;
     }
 }
@@ -1420,5 +1435,216 @@ async fn a_text_turn_never_asks_whether_the_model_hears() {
         status,
         StatusCode::OK,
         "an unknown audio state must not block text"
+    );
+}
+
+// ── Audio files and documents ──────────────────────────────────────────────────
+
+fn fixture(name: &str) -> Vec<u8> {
+    let path = format!(
+        "{}/tests/fixtures/attachments/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+#[tokio::test]
+async fn an_m4a_reaches_the_engine_as_16k_mono_wav_and_is_saved_by_name() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let turn = json!({
+        "session_id": "m4a",
+        "message": "",
+        "audio": [{"data": b64(&fixture("tone.m4a")), "mime_type": "audio/x-m4a", "name": "tone.m4a"}],
+    });
+    let (status, _) = send(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.audio[0].mime_type, "audio/wav");
+    let wav = base64::engine::general_purpose::STANDARD
+        .decode(&sent.audio[0].data)
+        .unwrap();
+    let info = pond_core::models::domain::audio_input::check_wav(&wav).unwrap();
+    assert_eq!((info.sample_rate, info.channels), (16_000, 1));
+    assert!((1_950..=2_100).contains(&info.duration_ms), "{info:?}");
+
+    let saved = pond.sessions.get_messages("m4a").await.unwrap();
+    assert_eq!(saved[0].message.content, "[Audio: tone.m4a]");
+}
+
+#[tokio::test]
+async fn a_pdf_reaches_the_model_as_its_name_and_a_fence_and_is_saved_as_a_mark() {
+    let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
+    let turn = json!({
+        "session_id": "pdf",
+        "message": "where is the spare key?",
+        "documents": [{"data": b64(&fixture("text.pdf")), "mime_type": "application/pdf", "name": "/storage/Shed notes.pdf"}],
+    });
+    let (status, _) = send(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert!(
+        sent.message
+            .starts_with("where is the spare key?\n\nShed notes.pdf:\n```\n"),
+        "{}",
+        sent.message
+    );
+    assert!(sent.message.contains("blue flowerpot"), "{}", sent.message);
+    assert!(sent.message.ends_with("\n```"), "{}", sent.message);
+
+    let saved = pond.sessions.get_messages("pdf").await.unwrap();
+    assert_eq!(
+        saved[0].message.content,
+        "where is the spare key?\n[Document: Shed notes.pdf]"
+    );
+    assert!(
+        pond.sessions
+            .list_session_attachments("pdf")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the pond never keeps the file"
+    );
+}
+
+#[tokio::test]
+async fn document_refusals_carry_their_codes_and_save_nothing() {
+    let pdf = |data: String, name: &str| json!({"data": data, "mime_type": "application/pdf", "name": name});
+    let cases = [
+        (
+            json!([pdf(b64(&fixture("scan.pdf")), "scan.pdf")]),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "document_no_text",
+        ),
+        (
+            json!([pdf(b64(&fixture("encrypted.pdf")), "locked.pdf")]),
+            StatusCode::BAD_REQUEST,
+            "document_invalid",
+        ),
+        (
+            json!([pdf(b64(b"\x89PNG\r\n\x1a\n a photo"), "photo.pdf")]),
+            StatusCode::BAD_REQUEST,
+            "document_invalid",
+        ),
+        (
+            json!([{"data": b64(b"hello"), "mime_type": "text/plain", "name": "a.txt"}]),
+            StatusCode::BAD_REQUEST,
+            "document_invalid",
+        ),
+        (
+            json!([pdf("A".repeat(6 * 1024 * 1024 * 4 / 3), "big.pdf")]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "document_too_large",
+        ),
+        (
+            json!(vec![pdf(b64(&fixture("text.pdf")), "a.pdf"); 4]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "document_too_large",
+        ),
+    ];
+    for (documents, want, code) in cases {
+        let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
+        let turn = json!({"session_id": "docs", "message": "", "documents": documents});
+        let (status, body) =
+            send_json(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+        assert_eq!(status, want, "{body}");
+        assert_eq!(body["code"], code, "{body}");
+        assert!(!body["error"].as_str().unwrap().is_empty());
+        assert_nothing_saved(&pond, "docs").await;
+    }
+}
+
+#[tokio::test]
+async fn the_agent_route_reads_documents_and_the_plain_route_refuses_them() {
+    let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
+    let doc = json!([{"data": b64(&fixture("text.pdf")), "mime_type": "application/pdf", "name": "shed.pdf"}]);
+    let (status, _) = send(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/agent/chat/stream",
+            Some(json!({"session_id": "agent-doc", "message": "", "documents": doc})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(pond
+        .agent
+        .inner
+        .last_request()
+        .unwrap()
+        .message
+        .starts_with("shed.pdf:\n```"));
+
+    let (status, body) = send_json(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/agent/chat/stream",
+            Some(json!({"session_id": "agent-bad", "documents": "not a list"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "document_invalid");
+
+    let (status, body) = send_json(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/chat",
+            Some(json!({"session_id": "plain", "message": "", "documents": doc})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "document_wrong_route");
+}
+
+#[tokio::test]
+async fn capabilities_report_the_limits_the_routes_enforce() {
+    use pond_core::models::domain::{audio_input as audio, document_input as documents};
+    let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
+    let (_, body) = send_json(&pond, request("GET", "/api/v1/models/capabilities", None)).await;
+    let limits = &body["attachments"];
+    assert_eq!(
+        limits["audio"],
+        json!({
+            "formats": audio::SUPPORTED_AUDIO_MIME_TYPES,
+            "max_bytes": audio::MAX_AUDIO_BYTES,
+            "max_seconds": audio::MAX_AUDIO_MS / 1000,
+        })
+    );
+    for phone in [
+        "audio/wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/aac",
+        "audio/flac",
+        "audio/ogg",
+    ] {
+        assert!(
+            limits["audio"]["formats"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(phone)),
+            "{phone}"
+        );
+    }
+    assert_eq!(
+        limits["documents"],
+        json!({
+            "formats": ["application/pdf"],
+            "max_bytes": documents::MAX_DOCUMENT_BYTES,
+            "max_per_turn": documents::MAX_DOCUMENTS_PER_TURN,
+            "max_text_bytes": documents::MAX_DOCUMENT_TEXT_BYTES,
+        })
+    );
+    assert_eq!(
+        body["voice_notes"], "unsupported",
+        "unchanged by this field"
     );
 }

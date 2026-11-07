@@ -8,42 +8,60 @@ use super::image_limits::decoded_len;
 use super::message::AudioAttachment;
 use super::vision_encoder::EncoderState;
 
-/// One recording per turn: the phone sends a single held-mic note.
+/// One recording per turn: a held-mic note, or one file from the phone.
 pub const MAX_AUDIO_PER_TURN: usize = 1;
 
-/// A minute: 1,500 audio tokens on Gemma 4 (25 a second), well inside a 16k window.
-pub const MAX_AUDIO_MS: u64 = 60_000;
+/// Three minutes: 4,500 audio tokens on Gemma 4 (25 a second). The nano prefills a multimodal
+/// turn at about 560 tokens a second, so that adds about 8 s to a turn in its 64k window.
+pub const MAX_AUDIO_MS: u64 = 180_000;
 
-/// A minute of 16 kHz mono 16-bit PCM is 1,920,000 bytes; the rest is room for the header.
-pub const MAX_AUDIO_BYTES: usize = 2 * 1024 * 1024;
+/// The file as sent: three minutes of M4A, MP3 or Ogg at any common bitrate, or of 16 kHz mono
+/// WAV (5.8 MB). CD-quality WAV or FLAC fits about 45 s.
+pub const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
 
-/// What the engine's decoder (miniaudio) reads from memory and the route checks.
-pub const SUPPORTED_AUDIO_MIME_TYPES: &[&str] =
-    &["audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"];
+/// What the route accepts; the pond decodes every one to 16 kHz mono WAV before the engine sees it.
+pub const SUPPORTED_AUDIO_MIME_TYPES: &[&str] = &[
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+    "audio/vnd.wave",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/m4a",
+    "audio/aac",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/ogg",
+];
 
-/// The rates miniaudio resamples from; the encoder itself takes 16 kHz.
+/// The rates a WAV may have to pass straight through; the encoder itself takes 16 kHz.
 const SAMPLE_RATES: std::ops::RangeInclusive<u32> = 8_000..=48_000;
+
+/// What the engine is handed: the encoder's own rate, one channel, 16-bit PCM.
+pub const ENGINE_SAMPLE_RATE: u32 = 16_000;
 
 /// Audio projectors the vendored mtmd runs and the pond has heard answer end to end.
 pub const AUDIO_PROJECTORS: &[&str] = &["gemma4a"];
 
-/// What the user row stores in place of the recording, which the pond does not keep.
+/// What the user row stores in place of an unnamed recording, which the pond does not keep.
 pub const VOICE_NOTE_PLACEHOLDER: &str = "[Voice note]";
 
 /// What later turns see where an earlier turn's recording was: the engine heard it then.
 pub const HISTORY_VOICE_NOTE_PLACEHOLDER: &str =
     "[Voice note: heard when it was sent; the recording is no longer attached]";
 
-/// The text a user row is saved with: the typed message, with the voice note marked.
-pub fn persisted_text(message: &str, audio: &[AudioAttachment]) -> String {
-    if audio.is_empty() {
-        return message.to_string();
-    }
-    let typed = message.trim();
-    if typed.is_empty() {
-        VOICE_NOTE_PLACEHOLDER.to_string()
-    } else {
-        format!("{typed}\n{VOICE_NOTE_PLACEHOLDER}")
+/// The row's mark for one recording: its file name when the phone sent one.
+pub fn persisted_mark(clip: &AudioAttachment) -> String {
+    match clip
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(name) => format!("[Audio: {}]", super::document_input::display_name(name)),
+        None => VOICE_NOTE_PLACEHOLDER.to_string(),
     }
 }
 
@@ -56,17 +74,42 @@ pub fn encoder_hears(layout: &GgufLayout) -> bool {
             .is_some_and(|p| AUDIO_PROJECTORS.contains(&p))
 }
 
-/// Why a turn's voice note was rejected before it reached the model.
+/// What the household reads when a file does not decode, naming what does.
+pub const AUDIO_UNREADABLE_MESSAGE: &str = "The pond could not read this recording. Send it as \
+     M4A, MP3, AAC, FLAC, Ogg Vorbis or WAV.";
+
+/// Opus decodes nowhere on the pond yet, so it gets its own sentence.
+pub const AUDIO_OPUS_MESSAGE: &str = "This recording is Opus, which the pond cannot read yet. \
+     Send it as M4A, MP3, AAC, FLAC, Ogg Vorbis or WAV.";
+
+/// Why a turn's recording was rejected before it reached the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioLimitError {
-    TooManyClips { count: usize, max: usize },
-    UnsupportedMimeType { mime_type: String },
+    TooManyClips {
+        count: usize,
+        max: usize,
+    },
+    UnsupportedMimeType {
+        mime_type: String,
+    },
     Empty,
-    TooLarge { bytes: usize, max: usize },
+    TooLarge {
+        bytes: usize,
+        max: usize,
+    },
     NotBase64,
     NotAWav,
-    UnsupportedEncoding { detail: String },
-    TooLong { ms: u64, max_ms: u64 },
+    UnsupportedEncoding {
+        detail: String,
+    },
+    /// The bytes would not decode; the household sentence says what would.
+    Undecodable {
+        message: &'static str,
+    },
+    TooLong {
+        ms: u64,
+        max_ms: u64,
+    },
 }
 
 impl std::fmt::Display for AudioLimitError {
@@ -75,29 +118,30 @@ impl std::fmt::Display for AudioLimitError {
         match self {
             Self::TooManyClips { count, max } => write!(
                 f,
-                "too many voice notes in one message: {count} attached, at most {max} per turn"
+                "Too many recordings in one message: {count} attached, at most {max} per message."
             ),
             Self::UnsupportedMimeType { mime_type } => write!(
                 f,
-                "voice note has unsupported type \"{mime_type}\"; send a WAV ({})",
-                SUPPORTED_AUDIO_MIME_TYPES.join(", ")
+                "The pond cannot read \"{mime_type}\" recordings. Send it as M4A, MP3, AAC, \
+                 FLAC, Ogg Vorbis or WAV."
             ),
-            Self::Empty => write!(f, "voice note carries no data"),
+            Self::Empty => write!(f, "The recording carries no sound."),
             Self::TooLarge { bytes, max } => write!(
                 f,
-                "voice note is {:.1} MB, over the {:.1} MB limit",
+                "The recording is {:.1} MB, over the {:.0} MB limit.",
                 mb(*bytes),
                 mb(*max)
             ),
-            Self::NotBase64 => write!(f, "voice note data is not valid base64"),
-            Self::NotAWav => write!(f, "voice note is not a WAV file"),
+            Self::NotBase64 => write!(f, "The recording's data is not valid base64."),
+            Self::NotAWav => write!(f, "The recording is not a WAV file."),
             Self::UnsupportedEncoding { detail } => write!(
                 f,
-                "voice note must be 16-bit PCM WAV, mono or stereo, 8-48 kHz ({detail})"
+                "The WAV must be 16-bit PCM, mono or stereo, 8-48 kHz ({detail})."
             ),
+            Self::Undecodable { message } => f.write_str(message),
             Self::TooLong { ms, max_ms } => write!(
                 f,
-                "voice note is {:.1} s long, over the {} s limit",
+                "The recording is {:.0} s long, over the {} s limit. Trim it and send it again.",
                 *ms as f64 / 1000.0,
                 max_ms / 1000
             ),
@@ -116,12 +160,24 @@ impl AudioLimitError {
         )
     }
 
-    /// `true` for 415: the bytes are not a recording the engine can read.
+    /// `true` for 415: the bytes are not a recording the pond can read.
     pub fn is_unsupported_media(&self) -> bool {
         matches!(
             self,
-            Self::UnsupportedMimeType { .. } | Self::NotAWav | Self::UnsupportedEncoding { .. }
+            Self::UnsupportedMimeType { .. }
+                | Self::NotAWav
+                | Self::UnsupportedEncoding { .. }
+                | Self::Undecodable { .. }
         )
+    }
+
+    /// The API's `code` field.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TooLarge { .. } => "audio_too_large",
+            Self::TooLong { .. } => "audio_too_long",
+            _ => "audio_invalid",
+        }
     }
 }
 
@@ -314,6 +370,7 @@ mod tests {
         AudioAttachment {
             data: data.to_string(),
             mime_type: mime.to_string(),
+            name: None,
         }
     }
 
@@ -346,23 +403,24 @@ mod tests {
     }
 
     #[test]
-    fn a_minute_at_16k_mono_fits_both_limits() {
-        let bytes = wav(16_000, 1, 16, 32_000 * 60);
+    fn the_longest_note_at_16k_mono_fits_both_limits() {
+        let bytes = wav(16_000, 1, 16, 32_000 * (MAX_AUDIO_MS as usize / 1000));
         assert!(bytes.len() <= MAX_AUDIO_BYTES);
         assert_eq!(check_wav(&bytes).unwrap().duration_ms, MAX_AUDIO_MS);
     }
 
     #[test]
-    fn longer_than_a_minute_is_too_long_even_when_small() {
-        let err = check_wav(&wav(8_000, 1, 16, 16_000 * 61)).unwrap_err();
+    fn past_the_limit_is_too_long_even_when_small() {
+        let err = check_wav(&wav(8_000, 1, 16, 16_000 * 181)).unwrap_err();
         assert_eq!(
             err,
             AudioLimitError::TooLong {
-                ms: 61_000,
+                ms: 181_000,
                 max_ms: MAX_AUDIO_MS
             }
         );
         assert!(err.is_too_large());
+        assert_eq!(err.code(), "audio_too_long");
     }
 
     #[test]
@@ -424,7 +482,21 @@ mod tests {
             validate_turn_audio(&[clip("UklGRg==", "audio/wav"), clip("UklGRg==", "audio/wav")]),
             Err(AudioLimitError::TooManyClips { count: 2, max: 1 })
         ));
-        assert!(validate_turn_audio(&[clip("UklGRg==", "audio/mpeg")])
+        for phone in [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/x-m4a",
+            "audio/aac",
+            "audio/flac",
+            "audio/ogg",
+        ] {
+            assert_eq!(
+                validate_turn_audio(&[clip("UklGRg==", phone)]),
+                Ok(()),
+                "{phone}"
+            );
+        }
+        assert!(validate_turn_audio(&[clip("UklGRg==", "audio/webm")])
             .unwrap_err()
             .is_unsupported_media());
         assert_eq!(
@@ -432,9 +504,9 @@ mod tests {
             Err(AudioLimitError::Empty)
         );
         let big = "A".repeat((MAX_AUDIO_BYTES + 3) * 4 / 3);
-        assert!(validate_turn_audio(&[clip(&big, "audio/wav")])
-            .unwrap_err()
-            .is_too_large());
+        let err = validate_turn_audio(&[clip(&big, "audio/wav")]).unwrap_err();
+        assert!(err.is_too_large());
+        assert_eq!(err.code(), "audio_too_large");
     }
 
     #[test]
@@ -474,14 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn the_saved_row_marks_the_voice_note() {
-        let note = [clip("UklGRg==", "audio/wav")];
-        assert_eq!(persisted_text("", &note), VOICE_NOTE_PLACEHOLDER);
+    fn a_named_file_is_marked_by_name_and_a_note_as_a_voice_note() {
+        let mut named = clip("UklGRg==", "audio/mp4");
+        named.name = Some("../lecture 3.m4a".to_string());
+        assert_eq!(persisted_mark(&named), "[Audio: lecture 3.m4a]");
         assert_eq!(
-            persisted_text("  about this ", &note),
-            format!("about this\n{VOICE_NOTE_PLACEHOLDER}")
+            persisted_mark(&clip("UklGRg==", "audio/wav")),
+            VOICE_NOTE_PLACEHOLDER
         );
-        assert_eq!(persisted_text("plain", &[]), "plain");
     }
 
     #[test]
