@@ -269,6 +269,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         session_id: session_id.to_string(),
         model_role: "task".to_string(),
         images: Vec::new(),
+        audio: Vec::new(),
         // A VOICE request, so the loop runs under the tuned `voice_max_turns` cap.
         voice_mode: true,
         canvas_mode: false,

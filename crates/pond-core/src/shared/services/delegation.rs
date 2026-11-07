@@ -126,6 +126,7 @@ mod tests {
             session_id: session_id.to_string(),
             model_role: "chat".to_string(),
             images: vec![],
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: crate::user_data::domain::profile::ProfileScope::Household,

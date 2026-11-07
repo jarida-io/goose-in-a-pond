@@ -41,6 +41,12 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether `model` hears voice notes, as the state of the encoder that would hear them.
+    /// `None` means unknown, and a voice note is refused: no other path would carry it.
+    fn audio_input_state(&self, _provider: &str, _model: &str) -> Option<EncoderState> {
+        None
+    }
+
     /// Register a model whose files just arrived and settle its picture add-on: verify and
     /// attach what is on disk. Never downloads; must return at once and never fail the caller.
     fn prepare_model(&self, _model: &str) {}

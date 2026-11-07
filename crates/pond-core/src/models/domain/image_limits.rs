@@ -20,6 +20,10 @@ pub const MAX_CHAT_BODY_BYTES: usize =
 // The body ceiling must exceed every policy limit, or Axum rejects before the policy runs.
 const _: () = assert!(MAX_CHAT_BODY_BYTES > MAX_TOTAL_IMAGE_BYTES * 4 / 3);
 const _: () = assert!(MAX_CHAT_BODY_BYTES > (MAX_IMAGES_PER_TURN * MAX_IMAGE_BYTES) * 4 / 3);
+// A voice note rides beside a full set of pictures.
+const _: () = assert!(
+    MAX_CHAT_BODY_BYTES > (MAX_TOTAL_IMAGE_BYTES + super::audio_input::MAX_AUDIO_BYTES) * 4 / 3
+);
 // Axum's own default is 2 MiB, which is below a single legal image.
 const _: () = assert!(MAX_CHAT_BODY_BYTES > 2 * 1024 * 1024);
 

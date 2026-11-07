@@ -1810,10 +1810,15 @@ async fn reset_onboarding(
 #[derive(Deserialize)]
 struct ChatRequest {
     session_id: Option<String>,
+    /// Required, and may be empty when the turn carries a voice note.
     message: String,
     /// Optional image attachments for multimodal models (base64-encoded).
     #[serde(default)]
     images: Vec<pond_core::models::domain::message::ImageAttachment>,
+    /// One voice note the model hears as sound: a base64 WAV, refused with 409 unless
+    /// `GET /models/capabilities` reports `audio_input`.
+    #[serde(default)]
+    audio: Vec<pond_core::models::domain::message::AudioAttachment>,
     /// When true, disable thinking and use voice-friendly responses.
     #[serde(default)]
     voice_mode: bool,
@@ -1862,6 +1867,15 @@ async fn chat(
             Json(json!({"error": format!("Invalid request: {}", e)})),
         )
     })?;
+    if !req.audio.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Voice notes are sent through /api/v1/chat/stream",
+                "code": "audio_wrong_route",
+            })),
+        ));
+    }
     let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
     refuse_without_a_model(&state).await?;
@@ -2271,7 +2285,17 @@ async fn chat_stream(
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
     refuse_without_a_model(&state).await?;
     image_limit_response(&req.images)?;
+    audio_limit_response(&req.audio)?;
     req.deep_research_for = None;
+    if req.deep_research && !req.audio.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Deep research needs the question as text, not a voice note",
+                "code": "audio_deep_research",
+            })),
+        ));
+    }
     if req.deep_research {
         let member = long_task_caller(
             &state,
@@ -2289,6 +2313,7 @@ async fn chat_stream(
 
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
+    req.audio = prepare_turn_audio(&state, std::mem::take(&mut req.audio)).await?;
 
     if !req.resumable {
         // Ends with its last reader. Unregistered: it must not consume the detached-run cap.
@@ -2365,6 +2390,121 @@ fn image_limit_response(
             Err((status, Json(json!({"error": e.to_string()}))))
         }
     }
+}
+
+/// Maps a voice-note limit violation onto 413, 415 or 400.
+fn audio_limit_response(
+    audio: &[pond_core::models::domain::message::AudioAttachment],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    pond_core::models::domain::audio_input::validate_turn_audio(audio).map_err(audio_limit_status)
+}
+
+fn audio_limit_status(
+    e: pond_core::models::domain::audio_input::AudioLimitError,
+) -> (StatusCode, Json<Value>) {
+    let status = if e.is_too_large() {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else if e.is_unsupported_media() {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (
+        status,
+        Json(json!({"error": e.to_string(), "code": "audio_invalid"})),
+    )
+}
+
+/// Pre-stream voice-note checks for both chat handlers, before anything is saved: the model must
+/// hear it (409), then the bytes must be a WAV of at most a minute (400, 413, 415).
+async fn prepare_turn_audio(
+    state: &Arc<AppState>,
+    audio: Vec<pond_core::models::domain::message::AudioAttachment>,
+) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
+    use base64::Engine as _;
+    use pond_core::models::domain::audio_input::{check_wav, AudioLimitError};
+
+    if audio.is_empty() {
+        return Ok(audio);
+    }
+    audio_limit_response(&audio)?;
+    // Unreadable settings name no model, which reads as one that cannot hear.
+    let (provider, model) = match state.settings_repo.get().await {
+        Ok(s) => (s.chat_provider, s.chat_model),
+        Err(_) => (String::new(), String::new()),
+    };
+    let reported = read_audio_state(state, &provider, &model).await;
+    audio_refusal_response(reported.as_ref(), &provider, &model)?;
+
+    let mut checked = Vec::with_capacity(audio.len());
+    for clip in audio {
+        let data: String = clip
+            .data
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .map_err(|_| audio_limit_status(AudioLimitError::NotBase64))?;
+        let wav = check_wav(&bytes).map_err(audio_limit_status)?;
+        tracing::info!(
+            target: "giap::audio",
+            model = %model,
+            duration_ms = wav.duration_ms,
+            sample_rate = wav.sample_rate,
+            channels = wav.channels,
+            "accepted a voice note for the model to hear"
+        );
+        checked.push(pond_core::models::domain::message::AudioAttachment {
+            data,
+            mime_type: "audio/wav".to_string(),
+        });
+    }
+    Ok(checked)
+}
+
+/// The agent's voice-note state for `model`; a join failure reads as unknown, which refuses.
+/// Runs on the blocking pool, since the first read of an encoder opens its header.
+async fn read_audio_state(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+    let agent = state.agent.clone();
+    let (provider, model) = (provider.to_string(), model.to_string());
+    tokio::task::spawn_blocking(move || agent.audio_input_state(&provider, &model))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Ready passes; anything else is a 409 with the household copy, the code and the state.
+fn audio_refusal_response(
+    reported: Option<&pond_core::models::domain::vision_encoder::EncoderState>,
+    provider: &str,
+    model: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::models::domain::audio_input::audio_refusal_for;
+
+    let Some(refusal) = audio_refusal_for(reported) else {
+        return Ok(());
+    };
+    tracing::info!(
+        target: "giap::audio",
+        provider,
+        model,
+        code = refusal.code.as_str(),
+        state = reported.map(|s| s.kind()).unwrap_or("unknown"),
+        "refused a voice-note turn before anything was saved"
+    );
+    Err((
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": refusal.message,
+            "code": refusal.code.as_str(),
+            "state": reported,
+        })),
+    ))
 }
 
 /// A turn with no conversation model chosen is refused before anything is saved; nothing is
@@ -2970,7 +3110,10 @@ async fn drive_turn(
     // Images persist with the message so later turns still see them after a trim or restart.
     // The id is kept for the repair below: this row lands before inference starts.
     let user_message_id = match chat_service
-        .persist_user_message_with_images(&req.message, req.images.clone())
+        .persist_user_message_with_images(
+            &pond_core::models::domain::audio_input::persisted_text(&req.message, &req.audio),
+            req.images.clone(),
+        )
         .await
     {
         Ok(id) => id,
@@ -3094,6 +3237,7 @@ async fn drive_turn(
         session_id: session_id.clone(),
         model_role: model_role.to_string(),
         images: req.images.clone(),
+        audio: req.audio.clone(),
         voice_mode: req.voice_mode,
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
@@ -6601,9 +6745,19 @@ async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
 // ── Model registry handlers ───────────────────────────────────────────────────
 
 /// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
+/// `audio_input` and `voice_notes` are read live, so they turn ready once the encoder hears.
 async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let caps = state.agent.capabilities();
-    Json(serde_json::to_value(caps).unwrap_or_default())
+    use pond_core::models::domain::audio_input::voice_notes_status;
+
+    let mut caps = state.agent.capabilities();
+    let audio = match state.settings_repo.get().await {
+        Ok(s) => read_audio_state(&state, &s.chat_provider, &s.chat_model).await,
+        Err(_) => None,
+    };
+    caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
+    let mut body = serde_json::to_value(caps).unwrap_or_default();
+    body["voice_notes"] = json!(voice_notes_status(audio.as_ref()));
+    Json(body)
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
@@ -12284,6 +12438,21 @@ async fn agent_chat_stream(
         .get("images")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    // A malformed `audio` is refused instead: ignoring it would answer a turn with no question.
+    let audio: Vec<pond_core::models::domain::message::AudioAttachment> =
+        match body.get("audio").filter(|v| !v.is_null()) {
+            None => Vec::new(),
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(audio) => audio,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("audio: {e}"), "code": "audio_invalid"})),
+                    )
+                        .into_response();
+                }
+            },
+        };
     if let Err(resp) = refuse_another_members_session(&state, principal.as_ref(), &session_id).await
     {
         return resp.into_response();
@@ -12294,9 +12463,16 @@ async fn agent_chat_stream(
     if let Err(resp) = image_limit_response(&images) {
         return resp.into_response();
     }
+    if let Err(resp) = audio_limit_response(&audio) {
+        return resp.into_response();
+    }
     // Before `stream!`, which persists the user message, as in `/chat/stream`.
     let images = match prepare_turn_images(&state, images).await {
         Ok(images) => images,
+        Err(resp) => return resp.into_response(),
+    };
+    let audio = match prepare_turn_audio(&state, audio).await {
+        Ok(audio) => audio,
         Err(resp) => return resp.into_response(),
     };
 
@@ -12340,7 +12516,8 @@ async fn agent_chat_stream(
             chat_service = chat_service.with_event_log(event_log);
         }
 
-        if let Err(e) = chat_service.persist_user_message_with_images(&message, images.clone()).await {
+        let saved_text = pond_core::models::domain::audio_input::persisted_text(&message, &audio);
+        if let Err(e) = chat_service.persist_user_message_with_images(&saved_text, images.clone()).await {
             yield Ok(Event::default().data(json!({"error": format!("Failed to persist user message: {}", e)}).to_string()));
             return;
         }
@@ -12360,6 +12537,7 @@ async fn agent_chat_stream(
             session_id: session_id.clone(),
             model_role: "task".to_string(),
             images,
+            audio,
             voice_mode: false,
             canvas_mode: false,
             profile_scope: turn_scope.clone(),
@@ -17756,6 +17934,7 @@ async fn run_recipe(
         session_id: body.session_id,
         message: prompt,
         images: Vec::new(),
+        audio: Vec::new(),
         voice_mode: body.voice_mode,
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,

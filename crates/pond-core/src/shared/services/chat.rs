@@ -941,6 +941,7 @@ impl ChatService {
             session_id: self.session_id(),
             model_role: resolve_voice_role(&message),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             // From the builder: this serves both REST /chat and the voice loop.
@@ -1318,6 +1319,7 @@ impl ChatService {
             session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: true,
             canvas_mode: false,
             // The recognised speaker's, else the builder's (`Household` for voice).

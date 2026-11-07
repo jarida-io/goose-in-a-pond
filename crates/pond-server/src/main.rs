@@ -10366,6 +10366,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 session_id: session,
                 model_role,
                 images: Vec::new(),
+                audio: Vec::new(),
                 voice_mode: false,
                 canvas_mode: false,
                 // The CLI user already has shell access, so a narrower scope would be theatre.
@@ -10441,6 +10442,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     session_id: session.clone(),
                     model_role,
                     images: Vec::new(),
+                    audio: Vec::new(),
                     voice_mode: false,
                     canvas_mode: false,
                     // Same as the single-shot arm above.
