@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use pond_adapters_whisper::{wake_model, WhisperRsInput};
+use pond_adapters_whisper::{wake_model, TranscribeOpts, WhisperRsInput};
 use pond_audio::MicHandle;
 
 use crate::speech_model::SpeechEngine;
@@ -16,6 +16,10 @@ use crate::speech_model::SpeechEngine;
 /// How long a model nobody holds stays loaded after its last use.
 const IDLE: Duration = Duration::from_secs(120);
 const REAP_EVERY: Duration = Duration::from_secs(30);
+/// The full model (about 330 MB on the Jetson) loads only with this much available; below it, a
+/// transcription uses the wake-only copy instead. Loading it beside a room conversation, the
+/// encoder and Kokoro ran the 8 GB board out of memory.
+const FULL_NEEDS_AVAILABLE_MB: u64 = 700;
 
 struct Held {
     whisper: Arc<WhisperRsInput>,
@@ -68,17 +72,33 @@ impl ServeWhisper {
 
     /// The full model, loaded now if nothing has it. Blocking.
     pub fn full(&self) -> Result<Arc<WhisperRsInput>> {
-        self.hold(&self.full, self.full_path(), "full")
+        self.hold(&self.full, self.full_path(), "full", WhisperRsInput::new)
     }
 
     /// The room's wake-only copy of the full model, made and loaded now if need be. Blocking.
     pub fn wake(&self) -> Result<Arc<WhisperRsInput>> {
         let path = wake_model::ensure(&self.full_path(), &self.wake_dir)?;
-        self.hold(&self.wake, path, "wake")
+        self.hold(&self.wake, path, "wake", WhisperRsInput::new_wake)
     }
 
+    /// The full model when it is loaded or there is room for it, else the wake-only copy.
     pub fn transcribe_wav(&self, wav: &[u8]) -> Result<String> {
-        self.full()?.transcribe_wav_bytes(wav)
+        let loaded = lock(&self.full).is_some();
+        let available = available_mb();
+        if loaded || available.is_none_or(|mb| mb >= FULL_NEEDS_AVAILABLE_MB) {
+            return self.full()?.transcribe_wav_bytes(wav);
+        }
+        tracing::info!(
+            target: "giap::trace",
+            kind = "whisper_full_skipped",
+            available_mb = available,
+            needs_mb = FULL_NEEDS_AVAILABLE_MB,
+            "transcribing with the wake-only Whisper: too little memory for the full one"
+        );
+        let decoded = pond_voice::dsp::decode_wav(wav)?;
+        let pcm = pond_voice::dsp::resample_to_16k(&decoded.samples, decoded.sample_rate);
+        self.wake()?
+            .transcribe_pcm_with(&pcm, TranscribeOpts::wake_word(), None)
     }
 
     /// The states the loaded models hold, for the room's memory lines.
@@ -93,6 +113,7 @@ impl ServeWhisper {
         slot: &Mutex<Option<Held>>,
         path: PathBuf,
         which: &'static str,
+        load: fn(PathBuf, MicHandle) -> Result<WhisperRsInput>,
     ) -> Result<Arc<WhisperRsInput>> {
         let mut held = lock(slot);
         if let Some(h) = held.as_mut().filter(|h| h.path == path) {
@@ -100,7 +121,7 @@ impl ServeWhisper {
             return Ok(h.whisper.clone());
         }
         let started = Instant::now();
-        let whisper = Arc::new(WhisperRsInput::new(path.clone(), self.mic.clone())?);
+        let whisper = Arc::new(load(path.clone(), self.mic.clone())?);
         tracing::info!(
             target: "giap::trace",
             kind = "whisper_loaded",
@@ -166,4 +187,14 @@ impl SpeechEngine for ServeWhisper {
         );
         Ok(())
     }
+}
+
+/// `MemAvailable`, where the system reports it.
+fn available_mb() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map(|kb| kb / 1024)
 }
