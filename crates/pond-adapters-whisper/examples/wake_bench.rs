@@ -6,6 +6,8 @@
 //! wake_bench score DIR|WAV...              both detectors on recordings (a DIR from `record`)
 //! wake_bench listen [--minutes M] [--save WAV]   both detectors live on the microphone
 //!   [--model ggml.bin] [--silero silero_vad.onnx] [--names "Ann,Bo"] [--rung neon-f32]
+//!   [--greedy]   decode each opening greedily over the clip's own length, not beam-5 over 30 s
+//!   [--whisper-log]   print whisper.cpp's own account of its buffers
 //!
 //! Whisper defaults to base.en, the nano's, from the pond's data directory.
 
@@ -131,6 +133,7 @@ struct Opts {
     names: Vec<String>,
     device: Option<String>,
     rung: Option<pond_ear::Rung>,
+    greedy: bool,
     minutes: Option<f64>,
     save: Option<PathBuf>,
     rest: Vec<String>,
@@ -144,6 +147,7 @@ fn opts(args: &[String]) -> Result<Opts> {
         names: Vec::new(),
         device: None,
         rung: None,
+        greedy: false,
         minutes: None,
         save: None,
         rest: Vec::new(),
@@ -174,6 +178,8 @@ fn opts(args: &[String]) -> Result<Opts> {
                         .ok_or_else(|| anyhow!("no rung {name} on this CPU"))?,
                 );
             }
+            "--greedy" => o.greedy = true,
+            "--whisper-log" => {}
             "--minutes" => o.minutes = Some(v()?.parse()?),
             "--save" => o.save = Some(PathBuf::from(v()?)),
             _ if k.starts_with("--") => bail!("unknown option {k}"),
@@ -275,7 +281,7 @@ impl<'a> Pair<'a> {
         let started = Instant::now();
         let opening = self.bench.whisper.transcribe_pcm_with(
             &pcm[..scan],
-            TranscribeOpts::segment_scan(),
+            self.bench.scan,
             self.bench.prompt.as_deref(),
         )?;
         let whisper_ms = started.elapsed().as_millis();
@@ -319,6 +325,8 @@ struct Bench {
     prompt: Option<String>,
     silero: PathBuf,
     rung: Option<pond_ear::Rung>,
+    scan: TranscribeOpts,
+    model: String,
     load_ms: u128,
     whisper_mb: Option<f64>,
 }
@@ -343,6 +351,15 @@ impl Bench {
             prompt: pond_core::models::domain::speech_prompt::room_prompt("hey goose", &o.names),
             silero: o.silero.clone(),
             rung: o.rung,
+            scan: match o.greedy {
+                true => TranscribeOpts::wake_word(),
+                false => TranscribeOpts::segment_scan(),
+            },
+            model: o
+                .model
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             load_ms,
             whisper_mb,
         })
@@ -372,12 +389,18 @@ impl Bench {
         let mut ms = whisper_ms.to_vec();
         ms.sort_unstable();
         let median = ms.get(ms.len() / 2).copied().unwrap_or(0);
+        // The process footprint also holds Metal's own setup; `--whisper-log` gives Whisper's buffers.
         println!(
-            "\nCost on this computer, {audio_s:.0} s of audio, CNN on {}:\n  ear with the CNN: {:.1} MB, {:.2}% of one core (the CNN alone {:.2}%)\n  Whisper base.en: {} footprint, loaded in {} ms, {median} ms median per segment ({} segments)",
+            "\nCost on this computer, {audio_s:.0} s of audio, CNN on {}:\n  ear with the CNN: {:.1} MB, {:.2}% of one core (the CNN alone {:.2}%)\n  Whisper {} ({}): {} process footprint at load, loaded in {} ms, {median} ms median per segment ({} segments)",
             pair.cnn_rung(),
             bytes as f64 / 1e6,
             ns as f64 / 1e9 / audio_s.max(1e-9) * 100.0,
             wake_ns as f64 / 1e9 / audio_s.max(1e-9) * 100.0,
+            self.model,
+            match self.scan.beam_size {
+                Some(_) => "beam search over 30 s",
+                None => "greedy over the clip",
+            },
             self.whisper_mb
                 .map(|m| format!("+{m:.0} MB"))
                 .unwrap_or_else(|| "unmeasured".into()),
@@ -387,7 +410,25 @@ impl Bench {
     }
 }
 
+/// whisper.cpp reports each buffer it allocates through `log`; `--whisper-log` prints them.
+struct Stderr;
+
+impl log::Log for Stderr {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::Level::Info
+    }
+    fn log(&self, r: &log::Record) {
+        if self.enabled(r.metadata()) {
+            eprintln!("{}", r.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
 fn main() -> Result<()> {
+    if std::env::args().any(|a| a == "--whisper-log") {
+        let _ = log::set_logger(&Stderr).map(|()| log::set_max_level(log::LevelFilter::Info));
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         bail!(
