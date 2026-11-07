@@ -168,8 +168,9 @@ pub fn derive(src: &Path, dst: &Path, audio_ctx: i32, text_ctx: i32) -> Result<(
             "decoder.positional_embedding" => Some(text_ctx),
             _ => None,
         };
-        let quantize =
-            n_dims == 2 && !KEPT.contains(&name.as_str()) && ne[0] as usize % Q_BLOCK == 0;
+        let quantize = n_dims == 2
+            && !KEPT.contains(&name.as_str())
+            && (ne[0] as usize).is_multiple_of(Q_BLOCK);
         let out_type = if quantize { TYPE_Q5_1 } else { ttype };
         let rows = elements / ne[0].max(1) as usize;
         if let Some(keep) = keep_rows {
