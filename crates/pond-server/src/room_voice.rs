@@ -41,6 +41,8 @@ const BACKOFF_CEILING: Duration = Duration::from_secs(60);
 /// A loop that ended on its own (an exit phrase) starts again after this.
 const RESTART_AFTER_EXIT: Duration = Duration::from_secs(1);
 const EVENT_BACKLOG: usize = 256;
+/// How long a room start waits for tiny.en's first download; offline, the fetch fails at once.
+const TINY_FETCH_WAIT: Duration = Duration::from_secs(60);
 
 /// The microphone and speaker the room would use, as serve's audio supervisor knows them.
 pub trait RoomAudio: Send + Sync {
@@ -153,6 +155,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl RoomVoice {
     /// Start supervising the room; it listens once switched on and able to.
     pub fn start(deps: RoomDeps, enabled: bool, wake: RoomWake) -> Arc<RoomVoice> {
+        if let Some(whisper) = &deps.whisper {
+            whisper.set_hearing(Arc::new(ActiveModelHears {
+                agent: deps.agent.clone(),
+                settings: deps.settings.clone(),
+            }));
+        }
         let inner = Arc::new(Inner {
             deps,
             stopping: std::sync::atomic::AtomicBool::new(false),
@@ -668,8 +676,17 @@ async fn run_once(
         settings: inner.deps.settings.clone(),
     });
     // A model that hears takes the request as audio, so Whisper only spots the wake word and
-    // writes the rough transcript: the wake-only copy does that in a third of the memory.
+    // writes the rough transcript: a wake-only copy of tiny.en does that, leaving the encoder room.
     let hears = hearing.model_hears().await;
+    if hears
+        && tokio::time::timeout(TINY_FETCH_WAIT, speech.fetch_tiny())
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            "room voice: tiny.en is still downloading; starting on the full model's copy"
+        );
+    }
     let chosen = tokio::task::spawn_blocking(move || {
         if hears {
             match speech.wake() {

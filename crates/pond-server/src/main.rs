@@ -1363,9 +1363,20 @@ async fn run_server(
     };
 
     // One owner for `/transcribe`, enrolment and the room; nothing loads until one of them asks.
-    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> = whisper_model_path
-        .as_ref()
-        .map(|p| serve_whisper::ServeWhisper::new(p.clone(), &data_dir, mic_handle.clone()));
+    let tiny_whisper =
+        voice_models::resolve_whisper("tiny.en", &whisper_catalog, &data_dir.join("models"));
+    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> =
+        whisper_model_path.as_ref().map(|p| {
+            serve_whisper::ServeWhisper::new(
+                p.clone(),
+                tiny_whisper.clone(),
+                &data_dir,
+                mic_handle.clone(),
+            )
+        });
+    if let Some(whisper) = serve_whisper.clone() {
+        tokio::spawn(async move { whisper.fetch_tiny().await });
+    }
     // Loaded now, before the embedder and the chat model start their own CUDA work: whisper.cpp
     // setting up CUDA beside them crashed the pond on the Jetson.
     if settings.voice_room_enabled {
