@@ -2127,7 +2127,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -3464,7 +3464,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9170,7 +9170,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llama-cpp-2"
 version = "0.1.160"
-source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=ecd5e659bf84bd82ba864ef94835cde95f3c65bb#ecd5e659bf84bd82ba864ef94835cde95f3c65bb"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=339f4603cef6d22a199d458b364605d30e272845#339f4603cef6d22a199d458b364605d30e272845"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -9183,7 +9183,7 @@ dependencies = [
 [[package]]
 name = "llama-cpp-sys-2"
 version = "0.1.160"
-source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=ecd5e659bf84bd82ba864ef94835cde95f3c65bb#ecd5e659bf84bd82ba864ef94835cde95f3c65bb"
+source = "git+https://github.com/jarida-io/llama-cpp-rs-giap?rev=339f4603cef6d22a199d458b364605d30e272845#339f4603cef6d22a199d458b364605d30e272845"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
@@ -17857,7 +17857,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
