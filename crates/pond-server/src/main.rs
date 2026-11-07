@@ -23,6 +23,7 @@ mod ports;
 mod room_memory;
 mod room_voice;
 mod schedule_executors;
+mod serve_whisper;
 mod speech_model;
 mod spoken_code;
 mod system_deps;
@@ -1361,24 +1362,14 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
-    // One model for `/transcribe` and the room.
-    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
-        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
-                tracing::warn!(
-                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
-                );
-                startup_problems.speech_recognition =
-                    Some(format!("the speech model did not load ({e})"));
-                None
-            }
-        }
-    });
+    // One owner for `/transcribe`, enrolment and the room; nothing loads until one of them asks.
+    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> = whisper_model_path
+        .as_ref()
+        .map(|p| serve_whisper::ServeWhisper::new(p.clone(), &data_dir, mic_handle.clone()));
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         serve_whisper.clone().map(|w| {
-            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav(&wav_bytes))
                 as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
@@ -5807,6 +5798,7 @@ async fn run_chat(
                 data_dir: &data_dir,
                 mic: &mic_handle,
                 whisper: backend.clone(),
+                whisper_wake_only: false,
                 wake_word,
                 no_wake_word,
                 audio_level: audio_level_sink.clone(),
