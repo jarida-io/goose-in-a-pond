@@ -5,6 +5,7 @@ pub mod conversation_model;
 pub mod curated;
 pub mod device_budget;
 pub mod device_profile;
+pub mod document_input;
 pub mod drafter;
 pub mod embedding_models;
 pub mod engine;

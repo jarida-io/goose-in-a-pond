@@ -1815,10 +1815,16 @@ struct ChatRequest {
     /// Optional image attachments for multimodal models (base64-encoded).
     #[serde(default)]
     images: Vec<pond_core::models::domain::message::ImageAttachment>,
-    /// One voice note the model hears as sound: a base64 WAV, refused with 409 unless
-    /// `GET /models/capabilities` reports `audio_input`.
+    /// One recording the model hears as sound (WAV, M4A/AAC, MP3, FLAC or Ogg Vorbis), refused
+    /// with 409 unless `GET /models/capabilities` reports `voice_notes: "ready"`.
     #[serde(default)]
     audio: Vec<pond_core::models::domain::message::AudioAttachment>,
+    /// PDFs whose text the model reads after the typed message.
+    #[serde(default)]
+    documents: Vec<pond_core::models::domain::message::DocumentAttachment>,
+    /// `documents`' text, read by `prepare_turn_documents` before anything is saved.
+    #[serde(skip)]
+    document_texts: Vec<pond_core::models::domain::document_input::DocumentText>,
     /// When true, disable thinking and use voice-friendly responses.
     #[serde(default)]
     voice_mode: bool,
@@ -1873,6 +1879,15 @@ async fn chat(
             Json(json!({
                 "error": "Voice notes are sent through /api/v1/chat/stream",
                 "code": "audio_wrong_route",
+            })),
+        ));
+    }
+    if !req.documents.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Documents are sent through /api/v1/chat/stream",
+                "code": "document_wrong_route",
             })),
         ));
     }
@@ -2286,6 +2301,7 @@ async fn chat_stream(
     refuse_without_a_model(&state).await?;
     image_limit_response(&req.images)?;
     audio_limit_response(&req.audio)?;
+    document_limit_response(&req.documents)?;
     req.deep_research_for = None;
     if req.deep_research && !req.audio.is_empty() {
         return Err((
@@ -2314,6 +2330,7 @@ async fn chat_stream(
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
     req.audio = prepare_turn_audio(&state, std::mem::take(&mut req.audio)).await?;
+    req.document_texts = prepare_turn_documents(&req.documents).await?;
 
     if !req.resumable {
         // Ends with its last reader. Unregistered: it must not consume the detached-run cap.
@@ -2411,18 +2428,18 @@ fn audio_limit_status(
     };
     (
         status,
-        Json(json!({"error": e.to_string(), "code": "audio_invalid"})),
+        Json(json!({"error": e.to_string(), "code": e.code()})),
     )
 }
 
-/// Pre-stream voice-note checks for both chat handlers, before anything is saved: the model must
-/// hear it (409), then the bytes must be a WAV of at most a minute (400, 413, 415).
+/// Pre-stream recording checks for both chat handlers, before anything is saved: the model must
+/// hear it (409), then it must decode, within the time limit, to the engine's WAV (400, 413, 415).
 async fn prepare_turn_audio(
     state: &Arc<AppState>,
     audio: Vec<pond_core::models::domain::message::AudioAttachment>,
 ) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
     use base64::Engine as _;
-    use pond_core::models::domain::audio_input::{check_wav, AudioLimitError};
+    use pond_core::models::domain::audio_input::{AudioLimitError, MAX_AUDIO_MS};
 
     if audio.is_empty() {
         return Ok(audio);
@@ -2446,21 +2463,94 @@ async fn prepare_turn_audio(
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&data)
             .map_err(|_| audio_limit_status(AudioLimitError::NotBase64))?;
-        let wav = check_wav(&bytes).map_err(audio_limit_status)?;
+        let mime = clip.mime_type.clone();
+        let normalized = tokio::task::spawn_blocking(move || {
+            crate::audio_normalize::normalize(&bytes, &mime, MAX_AUDIO_MS)
+        })
+        .await
+        .map_err(|_| {
+            audio_limit_status(AudioLimitError::Undecodable {
+                message: pond_core::models::domain::audio_input::AUDIO_UNREADABLE_MESSAGE,
+            })
+        })?
+        .map_err(audio_limit_status)?;
         tracing::info!(
             target: "giap::audio",
             model = %model,
-            duration_ms = wav.duration_ms,
-            sample_rate = wav.sample_rate,
-            channels = wav.channels,
-            "accepted a voice note for the model to hear"
+            duration_ms = normalized.duration_ms,
+            source = %normalized.source,
+            "accepted a recording for the model to hear"
         );
         checked.push(pond_core::models::domain::message::AudioAttachment {
-            data,
+            data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
             mime_type: "audio/wav".to_string(),
+            name: clip.name,
         });
     }
     Ok(checked)
+}
+
+/// Maps a document refusal onto 413, 422 or 400, with the household sentence and the code.
+fn document_error_status(
+    e: pond_core::models::domain::document_input::DocumentError,
+) -> (StatusCode, Json<Value>) {
+    let status = match e.code() {
+        "document_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        "document_no_text" => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (
+        status,
+        Json(json!({"error": e.to_string(), "code": e.code()})),
+    )
+}
+
+fn document_limit_response(
+    documents: &[pond_core::models::domain::message::DocumentAttachment],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    pond_core::models::domain::document_input::validate_turn_documents(documents)
+        .map_err(document_error_status)
+}
+
+/// Reads every PDF's text before anything is saved, then fits it to the per-turn text budget.
+async fn prepare_turn_documents(
+    documents: &[pond_core::models::domain::message::DocumentAttachment],
+) -> Result<Vec<pond_core::models::domain::document_input::DocumentText>, (StatusCode, Json<Value>)>
+{
+    use base64::Engine as _;
+    use pond_core::models::domain::document_input::{display_name, fit_to_budget, DocumentError};
+
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    document_limit_response(documents)?;
+    let mut extracted = Vec::with_capacity(documents.len());
+    for doc in documents {
+        let name = display_name(&doc.name);
+        let data: String = doc
+            .data
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .map_err(|_| document_error_status(DocumentError::Unreadable { name: name.clone() }))?;
+        let for_extract = name.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            crate::document_extract::extract_text(&bytes, &for_extract)
+        })
+        .await
+        .map_err(|_| document_error_status(DocumentError::Unreadable { name: name.clone() }))?
+        .map_err(document_error_status)?;
+        tracing::info!(
+            target: "giap::documents",
+            name = %name,
+            text_bytes = text.len(),
+            "read a document's text for the model"
+        );
+        extracted.push((name, text));
+    }
+    Ok(fit_to_budget(extracted))
 }
 
 /// The agent's voice-note state for `model`; a join failure reads as unknown, which refuses.
@@ -3111,7 +3201,11 @@ async fn drive_turn(
     // The id is kept for the repair below: this row lands before inference starts.
     let user_message_id = match chat_service
         .persist_user_message_with_images(
-            &pond_core::models::domain::audio_input::persisted_text(&req.message, &req.audio),
+            &pond_core::models::domain::document_input::persisted_text(
+                &req.message,
+                &req.audio,
+                &req.documents,
+            ),
             req.images.clone(),
         )
         .await
@@ -3233,7 +3327,10 @@ async fn drive_turn(
     };
 
     let agent_req = AgentRequest {
-        message: req.message.clone(),
+        message: pond_core::models::domain::document_input::compose_for_model(
+            &req.message,
+            &req.document_texts,
+        ),
         session_id: session_id.clone(),
         model_role: model_role.to_string(),
         images: req.images.clone(),
@@ -6757,7 +6854,26 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
     caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
     let mut body = serde_json::to_value(caps).unwrap_or_default();
     body["voice_notes"] = json!(voice_notes_status(audio.as_ref()));
+    body["attachments"] = attachment_limits();
     Json(body)
+}
+
+/// The limits `/chat/stream` enforces, from the same constants, so a client can check first.
+fn attachment_limits() -> Value {
+    use pond_core::models::domain::{audio_input as audio, document_input as documents};
+    json!({
+        "audio": {
+            "formats": audio::SUPPORTED_AUDIO_MIME_TYPES,
+            "max_bytes": audio::MAX_AUDIO_BYTES,
+            "max_seconds": audio::MAX_AUDIO_MS / 1000,
+        },
+        "documents": {
+            "formats": documents::SUPPORTED_DOCUMENT_MIME_TYPES,
+            "max_bytes": documents::MAX_DOCUMENT_BYTES,
+            "max_per_turn": documents::MAX_DOCUMENTS_PER_TURN,
+            "max_text_bytes": documents::MAX_DOCUMENT_TEXT_BYTES,
+        },
+    })
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
@@ -12453,6 +12569,22 @@ async fn agent_chat_stream(
                 }
             },
         };
+    let documents: Vec<pond_core::models::domain::message::DocumentAttachment> = match body
+        .get("documents")
+        .filter(|v| !v.is_null())
+    {
+        None => Vec::new(),
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(documents) => documents,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("documents: {e}"), "code": "document_invalid"})),
+                )
+                    .into_response();
+            }
+        },
+    };
     if let Err(resp) = refuse_another_members_session(&state, principal.as_ref(), &session_id).await
     {
         return resp.into_response();
@@ -12466,6 +12598,9 @@ async fn agent_chat_stream(
     if let Err(resp) = audio_limit_response(&audio) {
         return resp.into_response();
     }
+    if let Err(resp) = document_limit_response(&documents) {
+        return resp.into_response();
+    }
     // Before `stream!`, which persists the user message, as in `/chat/stream`.
     let images = match prepare_turn_images(&state, images).await {
         Ok(images) => images,
@@ -12473,6 +12608,10 @@ async fn agent_chat_stream(
     };
     let audio = match prepare_turn_audio(&state, audio).await {
         Ok(audio) => audio,
+        Err(resp) => return resp.into_response(),
+    };
+    let document_texts = match prepare_turn_documents(&documents).await {
+        Ok(texts) => texts,
         Err(resp) => return resp.into_response(),
     };
 
@@ -12516,7 +12655,11 @@ async fn agent_chat_stream(
             chat_service = chat_service.with_event_log(event_log);
         }
 
-        let saved_text = pond_core::models::domain::audio_input::persisted_text(&message, &audio);
+        let saved_text = pond_core::models::domain::document_input::persisted_text(
+            &message,
+            &audio,
+            &documents,
+        );
         if let Err(e) = chat_service.persist_user_message_with_images(&saved_text, images.clone()).await {
             yield Ok(Event::default().data(json!({"error": format!("Failed to persist user message: {}", e)}).to_string()));
             return;
@@ -12533,7 +12676,10 @@ async fn agent_chat_stream(
         // Shared with `/chat/stream` so both routes fold engine events into a turn identically.
         let mut turn = TurnAccumulator::new(crate::thought_filter::ThoughtFilter::new());
         let request = AgentRequest {
-            message,
+            message: pond_core::models::domain::document_input::compose_for_model(
+                &message,
+                &document_texts,
+            ),
             session_id: session_id.clone(),
             model_role: "task".to_string(),
             images,
@@ -17935,6 +18081,8 @@ async fn run_recipe(
         message: prompt,
         images: Vec::new(),
         audio: Vec::new(),
+        documents: Vec::new(),
+        document_texts: Vec::new(),
         voice_mode: body.voice_mode,
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
