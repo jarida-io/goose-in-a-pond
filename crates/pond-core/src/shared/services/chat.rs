@@ -3,7 +3,7 @@ use crate::models::ports::agent::Agent;
 use crate::models::ports::interrupt::InterruptWatch;
 use crate::models::ports::provider::LlmProvider;
 use crate::models::ports::speech_energy::{MicHold, SpeechEnergy};
-use crate::models::ports::voice_input::{SpeculativeSignal, VoiceInput};
+use crate::models::ports::voice_input::{ModelHears, SpeculativeSignal, VoiceInput};
 use crate::models::ports::voice_output::VoiceOutput;
 use crate::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use crate::models::services::instant_activation::InstantActivation;
@@ -391,6 +391,8 @@ pub struct ChatService {
     waker: Arc<std::sync::Mutex<Option<VoiceSpeaker>>>,
     /// An unrecognised speaker's scope, in place of `profile_scope`, when the loop knows how.
     unrecognised_scope: Option<UnrecognisedScope>,
+    /// When the model hears, a voice turn carries its recording beside the transcript.
+    model_hearing: Option<Arc<dyn ModelHears>>,
 }
 
 /// A member's context for a turn they spoke, as the routes build it for a typed one.
@@ -523,6 +525,7 @@ impl ChatService {
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
             unrecognised_scope: None,
+            model_hearing: None,
         }
     }
 
@@ -785,6 +788,38 @@ impl ChatService {
     pub fn with_unrecognised_scope(mut self, scope: UnrecognisedScope) -> Self {
         self.unrecognised_scope = Some(scope);
         self
+    }
+
+    /// Let the model hear each voice turn's recording whenever `hearing` says it can.
+    pub fn with_model_hearing(mut self, hearing: Arc<dyn ModelHears>) -> Self {
+        self.model_hearing = Some(hearing);
+        self
+    }
+
+    /// The turn's recording, for a model that hears it; the transcript stays the message.
+    async fn heard_audio_for_turn(
+        &self,
+        wav: Option<Vec<u8>>,
+    ) -> Vec<crate::models::domain::message::AudioAttachment> {
+        use base64::Engine as _;
+        let (Some(wav), Some(hearing)) = (wav, &self.model_hearing) else {
+            return Vec::new();
+        };
+        if !hearing.model_hears().await {
+            return Vec::new();
+        }
+        tracing::info!(
+            target: "giap::trace",
+            kind = "voice_turn_heard",
+            seconds = wav.len().saturating_sub(44) as f64 / 32_000.0,
+            "the model hears this voice turn's recording"
+        );
+        vec![crate::models::domain::message::AudioAttachment {
+            data: base64::engine::general_purpose::STANDARD.encode(&wav),
+            mime_type: "audio/wav".to_string(),
+            name: None,
+            transcribed: true,
+        }]
     }
 
     async fn unrecognised_turn_scope(&self) -> ProfileScope {
@@ -1311,6 +1346,17 @@ impl ChatService {
         message: String,
         fired_at: std::time::Instant,
     ) -> Result<TurnOutcome> {
+        self.stream_response_heard(message, Vec::new(), fired_at)
+            .await
+    }
+
+    /// [`Self::stream_response_inner`] with the turn's recording for a model that hears it.
+    async fn stream_response_heard(
+        &self,
+        message: String,
+        audio: Vec<crate::models::domain::message::AudioAttachment>,
+        fired_at: std::time::Instant,
+    ) -> Result<TurnOutcome> {
         self.ensure_session().await;
         let (profile_scope, profile_context) = self.turn_speaker().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
@@ -1319,7 +1365,7 @@ impl ChatService {
             session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
-            audio: Vec::new(),
+            audio,
             voice_mode: true,
             canvas_mode: false,
             // The recognised speaker's, else the builder's (`Household` for voice).
@@ -2070,11 +2116,16 @@ impl ChatService {
             }
 
             let input_for_task = input.clone();
+            // Taken every turn, so a recording never rides a later turn than its own.
+            let heard_audio = self.voice_input.take_heard_audio();
             let chat_handle = reusable_speculative.unwrap_or_else(|| {
                 let svc = self.clone();
                 let msg = input_for_task;
                 let fired_at = std::time::Instant::now();
-                tokio::spawn(async move { svc.stream_response_inner(msg, fired_at).await })
+                tokio::spawn(async move {
+                    let audio = svc.heard_audio_for_turn(heard_audio).await;
+                    svc.stream_response_heard(msg, audio, fired_at).await
+                })
             });
 
             // ── InstantActivation race guard ─────────────────────────────────
@@ -3535,6 +3586,78 @@ mod tests {
         assert!(
             spoken.iter().any(|s| s.contains("what is the capital")),
             "the turn must complete and reach speak(); got: {spoken:?}"
+        );
+    }
+
+    /// Hears scripted lines and hands over one recording, as the ear does after a request.
+    struct HeardInput {
+        lines: ScriptedListenInput,
+        wav: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl VoiceInput for HeardInput {
+        async fn listen(&self) -> Result<Option<String>> {
+            self.lines.listen().await
+        }
+
+        fn take_heard_audio(&self) -> Option<Vec<u8>> {
+            self.wav.lock().unwrap().take()
+        }
+    }
+
+    struct Hears(bool);
+
+    #[async_trait::async_trait]
+    impl ModelHears for Hears {
+        async fn model_hears(&self) -> bool {
+            self.0
+        }
+    }
+
+    async fn voice_turn_request(hears: bool, wav: &[u8]) -> AgentRequest {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("heard".to_string()).await.unwrap();
+        let input = Arc::new(HeardInput {
+            lines: ScriptedListenInput::new(["what time is it"]),
+            wav: std::sync::Mutex::new(Some(wav.to_vec())),
+        });
+        ChatService::new(agent.clone(), "heard".to_string(), storage)
+            .with_voice_input(input)
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_model_hearing(Arc::new(Hears(hears)))
+            .run_loop()
+            .await
+            .unwrap();
+        agent.last_request().expect("the turn reached the agent")
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_carries_its_recording_only_to_a_model_that_hears() {
+        use base64::Engine as _;
+        let wav = b"RIFF\x24\x00\x00\x00WAVE".to_vec();
+
+        let heard = voice_turn_request(true, &wav).await;
+        assert_eq!(
+            heard.message, "what time is it",
+            "the transcript stays the message"
+        );
+        assert_eq!(heard.audio.len(), 1);
+        assert!(heard.audio[0].transcribed);
+        assert_eq!(heard.audio[0].mime_type, "audio/wav");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&heard.audio[0].data)
+                .unwrap(),
+            wav
+        );
+
+        let unheard = voice_turn_request(false, &wav).await;
+        assert_eq!(unheard.message, "what time is it");
+        assert!(
+            unheard.audio.is_empty(),
+            "a model that cannot hear gets the text alone"
         );
     }
 

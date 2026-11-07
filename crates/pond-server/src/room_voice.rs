@@ -17,6 +17,7 @@ use pond_core::models::domain::room_voice::{
 };
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::room_voice::RoomVoiceControl;
+use pond_core::models::ports::voice_input::ModelHears;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::security::ports::telemetry::TelemetryPort;
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowEvent, WorkflowState};
@@ -77,6 +78,30 @@ pub struct RoomDeps {
     pub voice_match: Option<Arc<crate::voice_match::ServeVoiceMatch>>,
     pub profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
     pub prompt_extras: Option<Arc<dyn PromptExtraRepository + Send + Sync>>,
+}
+
+/// The active chat model hears a recording once its encoder's audio tower is ready, as the
+/// capabilities route reports it.
+struct ActiveModelHears {
+    agent: Arc<dyn Agent>,
+    settings: Arc<dyn SettingsRepository + Send + Sync>,
+}
+
+#[async_trait]
+impl ModelHears for ActiveModelHears {
+    async fn model_hears(&self) -> bool {
+        let Ok(settings) = self.settings.get().await else {
+            return false;
+        };
+        let agent = self.agent.clone();
+        tokio::task::spawn_blocking(move || {
+            agent.audio_input_state(&settings.chat_provider, &settings.chat_model)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|state| state.is_ready())
+    }
 }
 
 /// The part of the status the loop moves.
@@ -719,7 +744,11 @@ async fn run_once(
     .with_event_sink(sink)
     .with_session_on_first_turn()
     .with_voice_identity(speaker_context(&inner.deps))
-    .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()));
+    .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()))
+    .with_model_hearing(Arc::new(ActiveModelHears {
+        agent: inner.deps.agent.clone(),
+        settings: inner.deps.settings.clone(),
+    }));
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }

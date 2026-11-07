@@ -362,6 +362,7 @@ mod tests {
             data: "x".into(),
             mime_type: "audio/wav".into(),
             name: None,
+            transcribed: false,
         }];
         assert_eq!(
             persisted_text("  read these ", &note, &docs),

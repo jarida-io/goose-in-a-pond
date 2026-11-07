@@ -33,4 +33,17 @@ pub trait VoiceInput: Send + Sync {
     /// Make the next `listen()` capture speech already under way since `onset` (a barge-in),
     /// from then rather than from now, and without waiting for speech to start again.
     fn prime_with_onset(&self, _onset: std::time::Instant) {}
+
+    /// The recording behind the last `listen()` that returned words, as 16 kHz mono WAV, handed
+    /// over once. `None` from an input that keeps no recording.
+    fn take_heard_audio(&self) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// Whether the active chat model hears a recording itself; asked as each voice turn starts, since
+/// the household can switch models or finish downloading the encoder while the room runs.
+#[async_trait]
+pub trait ModelHears: Send + Sync {
+    async fn model_hears(&self) -> bool;
 }
