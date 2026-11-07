@@ -53,6 +53,9 @@ impl Label {
     }
 }
 
+/// A clip's label, whether Whisper woke on it, and the CNN's best score in it.
+type Row = (Option<Label>, bool, f32);
+
 struct Trial {
     label: Label,
     say: &'static str,
@@ -560,7 +563,7 @@ fn clips(inputs: &[PathBuf]) -> Result<Vec<Clip>> {
 fn score(o: &Opts, inputs: &[PathBuf]) -> Result<()> {
     let bench = Bench::new(o)?;
     let clips = clips(inputs)?;
-    let mut rows: Vec<(Option<Label>, bool, f32)> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
     let mut last: Option<Pair> = None;
     let mut audio_s = 0.0;
     let mut whisper_ms = Vec::new();
@@ -617,7 +620,7 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-fn summary(rows: &[(Option<Label>, bool, f32)]) {
+fn summary(rows: &[Row]) {
     let count = |l: Label| rows.iter().filter(|r| r.0 == Some(l)).count();
     let (nw, nn, no) = (count(Wake), count(Near), count(Other));
     if nw + nn + no == 0 {
@@ -633,9 +636,8 @@ fn summary(rows: &[(Option<Label>, bool, f32)]) {
         }
         return;
     }
-    let hits = |l: Label, f: &dyn Fn(&(Option<Label>, bool, f32)) -> bool| {
-        rows.iter().filter(|r| r.0 == Some(l) && f(r)).count()
-    };
+    let hits =
+        |l: Label, f: &dyn Fn(&Row) -> bool| rows.iter().filter(|r| r.0 == Some(l) && f(r)).count();
     println!(
         "\n{:<14} {:>14} {:>16} {:>16}",
         "detector",
@@ -643,7 +645,7 @@ fn summary(rows: &[(Option<Label>, bool, f32)]) {
         format!("near woke /{nn}"),
         format!("other woke /{no}")
     );
-    let line = |name: String, f: &dyn Fn(&(Option<Label>, bool, f32)) -> bool| {
+    let line = |name: String, f: &dyn Fn(&Row) -> bool| {
         println!(
             "{:<14} {:>14} {:>16} {:>16}",
             name,
