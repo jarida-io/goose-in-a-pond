@@ -26,7 +26,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use pond_audio::MicHandle;
 use pond_core::models::ports::interrupt::{Interrupt, InterruptWatch};
-use pond_core::models::ports::voice_input::VoiceInput;
+use pond_core::models::ports::voice_input::{VoiceInput, UNWORDED_SPEECH};
 use pond_core::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowState};
 use pond_core::shared::services::chat::{SpokenObserver, StateObserver};
@@ -146,6 +146,8 @@ pub struct EarRig {
     spoken: Arc<Mutex<Spoken>>,
     /// The recording behind the words `listen` last returned, for a model that hears.
     heard_audio: Mutex<Option<Vec<f32>>>,
+    /// The model hears recordings, so speech the transcriber cannot word still reaches it.
+    forward_unworded: std::sync::atomic::AtomicBool,
 }
 
 impl EarRig {
@@ -239,6 +241,7 @@ impl EarRig {
             waker: Mutex::new(None),
             spoken,
             heard_audio: Mutex::new(None),
+            forward_unworded: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -307,6 +310,18 @@ impl EarRig {
         pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
     }
 
+    /// Let speech the transcriber cannot word reach a model that hears it, as [`UNWORDED_SPEECH`].
+    pub fn set_forward_unworded(&self, on: bool) {
+        self.forward_unworded
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn forwards_unworded(&self, pcm: &[f32]) -> bool {
+        self.forward_unworded
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && pcm.len() >= MIN_UNWORDED_SAMPLES
+    }
+
     /// `command`, with `pcm` kept as the recording it came from.
     fn kept(&self, command: String, pcm: Vec<f32>) -> Result<Option<String>> {
         *self.heard_audio.lock().unwrap_or_else(|e| e.into_inner()) = Some(pcm);
@@ -333,6 +348,27 @@ impl Drop for EarRig {
     fn drop(&mut self) {
         let _ = self.cmds.send(Cmd::Shutdown);
     }
+}
+
+/// Shorter speech than this, with no words in it, is taken for noise even when the model hears.
+const MIN_UNWORDED_SAMPLES: usize = reference::RATE as usize * 6 / 10;
+/// Where a recording's loudest sample is brought before the model hears it.
+const HEARD_PEAK: f32 = 0.7;
+/// At most 30 dB: more raises the room's noise floor as much as the voice.
+const MAX_HEARD_GAIN: f32 = 31.6;
+
+/// `pcm` brought up to [`HEARD_PEAK`], with its peak before and the gain given. The room's
+/// microphone can sit near -50 dBFS, and Whisper's path raises quiet audio while the model's did
+/// not, so the model heard near-silence where Whisper heard words.
+fn raised_for_the_model(mut pcm: Vec<f32>) -> (Vec<f32>, f32, f32) {
+    let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
+    if peak < 1e-4 {
+        return (pcm, peak, 1.0);
+    }
+    let gain = (HEARD_PEAK / peak).clamp(1.0, MAX_HEARD_GAIN);
+    pcm.iter_mut()
+        .for_each(|v| *v = (*v * gain).clamp(-1.0, 1.0));
+    (pcm, peak, gain)
 }
 
 /// The wake in `segment`, if its opening holds a trigger; the whole is transcribed only then.
@@ -472,6 +508,16 @@ impl VoiceInput for EarRig {
             };
             let cleaned = pond_voice::text::strip_whisper_artifacts(&raw);
             let command = self.command(&cleaned);
+            if command.is_empty()
+                && !pond_voice::text::heard_wake(&raw, &self.triggers)
+                && self.forwards_unworded(&pcm)
+            {
+                tracing::info!(
+                    raw = %raw,
+                    "ear: speech the transcriber could not word goes to the model as a recording"
+                );
+                return self.kept(UNWORDED_SPEECH.to_string(), pcm);
+            }
             if follow_up && command.is_empty() {
                 tracing::info!(
                     raw = %raw,
@@ -536,7 +582,15 @@ impl VoiceInput for EarRig {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()?;
-        Some(pond_ear::wav::encode_wav16(&pcm, reference::RATE))
+        let (raised, peak, gain) = raised_for_the_model(pcm);
+        tracing::info!(
+            target: "giap::trace",
+            kind = "heard_audio_level",
+            peak_dbfs = 20.0 * peak.max(1e-6).log10(),
+            gain_db = 20.0 * gain.log10(),
+            "the recording's level as the room heard it, and the gain it was given"
+        );
+        Some(pond_ear::wav::encode_wav16(&raised, reference::RATE))
     }
 }
 

@@ -187,6 +187,8 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    // Beam search on room audio: greedy decoding looped ("I think I think ...") or came back
+    // empty on a spoken "hey goose" at the nano.
     fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<String> {
         self.run(pcm, TranscribeOpts::accurate())
     }

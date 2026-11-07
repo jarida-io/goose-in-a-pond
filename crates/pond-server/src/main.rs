@@ -23,6 +23,7 @@ mod ports;
 mod room_memory;
 mod room_voice;
 mod schedule_executors;
+mod serve_whisper;
 mod speech_model;
 mod spoken_code;
 mod system_deps;
@@ -1361,24 +1362,26 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
-    // One model for `/transcribe` and the room.
-    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
-        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
+    // One owner for `/transcribe`, enrolment and the room; nothing loads until one of them asks.
+    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> = whisper_model_path
+        .as_ref()
+        .map(|p| serve_whisper::ServeWhisper::new(p.clone(), &data_dir, mic_handle.clone()));
+    // Loaded now, before the embedder and the chat model start their own CUDA work: whisper.cpp
+    // setting up CUDA beside them crashed the pond on the Jetson.
+    if settings.voice_room_enabled {
+        if let Some(whisper) = &serve_whisper {
+            if let Err(e) = whisper.wake() {
                 tracing::warn!(
-                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                    error = format!("{e:#}"),
+                    "the room's wake-only Whisper did not load at startup"
                 );
-                startup_problems.speech_recognition =
-                    Some(format!("the speech model did not load ({e})"));
-                None
             }
         }
-    });
+    }
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         serve_whisper.clone().map(|w| {
-            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav(&wav_bytes))
                 as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
@@ -3399,15 +3402,30 @@ async fn run_server(
                             env,
                             uri: srv.uri.clone(),
                         };
-                        match mgr.add_extension(req).await {
-                            Ok(_) => tracing::info!("auto-connected MCP server '{}'", srv.name),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to auto-connect MCP server '{}': {e}",
-                                    srv.name
-                                );
-                                startup_problems.extensions.push(srv.name.clone());
-                            }
+                        let connecting = {
+                            let (mgr, name) = (mgr.clone(), srv.name.clone());
+                            tokio::spawn(async move {
+                                let connected = mgr.add_extension(req).await;
+                                match &connected {
+                                    Ok(_) => tracing::info!("auto-connected MCP server '{name}'"),
+                                    Err(e) => tracing::warn!(
+                                        "failed to auto-connect MCP server '{name}': {e}"
+                                    ),
+                                }
+                                connected.is_ok()
+                            })
+                        };
+                        // An extension launched through npx or uvx fetches from the network and
+                        // hangs offline; past this wait it keeps connecting and serve goes on.
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+                            .await
+                        {
+                            Ok(Ok(true)) => {}
+                            Ok(_) => startup_problems.extensions.push(srv.name.clone()),
+                            Err(_) => tracing::warn!(
+                                extension = %srv.name,
+                                "still connecting after 10 s; startup goes on without waiting"
+                            ),
                         }
                     }
                 }

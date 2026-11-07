@@ -2485,7 +2485,7 @@ async fn prepare_turn_audio(
             data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
             mime_type: "audio/wav".to_string(),
             name: clip.name,
-            transcribed: false,
+            heard_as: None,
         });
     }
     Ok(checked)

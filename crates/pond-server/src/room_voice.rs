@@ -8,10 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pond_adapters_audio_devices::AudioSupervisor;
-use pond_adapters_whisper::WhisperRsInput;
 use pond_api::runs::{RunSupervisor, TurnInFlight};
 use pond_audio::MicHandle;
-use pond_core::models::domain::audio_device::{AudioDeviceStatus, ChoiceBasis};
+use pond_core::models::domain::audio_device::AudioDeviceStatus;
 use pond_core::models::domain::room_voice::{
     LastHeard, RoomEvent, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
@@ -68,7 +67,7 @@ pub struct RoomDeps {
     pub telemetry: Option<Arc<dyn TelemetryPort>>,
     pub data_dir: PathBuf,
     pub mic: MicHandle,
-    pub whisper: Option<Arc<WhisperRsInput>>,
+    pub whisper: Option<Arc<crate::serve_whisper::ServeWhisper>>,
     pub output: Option<Arc<dyn VoiceOutput>>,
     pub audio: Arc<dyn RoomAudio>,
     pub runs: Arc<RunSupervisor>,
@@ -571,12 +570,9 @@ async fn supervise(inner: Arc<Inner>) {
         });
 
         let mut ready = inner.ready(on).await;
-        let untested = inner
-            .deps
-            .audio
-            .status()
-            .is_some_and(|s| s.input.basis == ChoiceBasis::NotTested);
-        if on && !tested && untested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
+        // Once per switch-on, whatever the startup test found: on the nano it chose both devices
+        // without proving them a pair, and the room stayed silent until someone retested.
+        if on && !tested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
             tested = true;
             let audio = inner.deps.audio.clone();
             let _ = tokio::task::spawn_blocking(move || audio.retest()).await;
@@ -663,9 +659,34 @@ async fn run_once(
     settings: &pond_core::user_data::domain::settings::Settings,
     enabled: &mut watch::Receiver<bool>,
 ) -> Ran {
-    let (Some(whisper), Some(output)) = (inner.deps.whisper.clone(), inner.deps.output.clone())
+    let (Some(speech), Some(output)) = (inner.deps.whisper.clone(), inner.deps.output.clone())
     else {
         return Ran::Ended(Err(anyhow::anyhow!("no speech model or voice")));
+    };
+    let hearing = Arc::new(ActiveModelHears {
+        agent: inner.deps.agent.clone(),
+        settings: inner.deps.settings.clone(),
+    });
+    // A model that hears takes the request as audio, so Whisper only spots the wake word and
+    // writes the rough transcript: the wake-only copy does that in a third of the memory.
+    let hears = hearing.model_hears().await;
+    let chosen = tokio::task::spawn_blocking(move || {
+        if hears {
+            match speech.wake() {
+                Ok(whisper) => return Ok((whisper, true)),
+                Err(e) => tracing::warn!(
+                    error = format!("{e:#}"),
+                    "room voice: no wake-only Whisper; using the full model"
+                ),
+            }
+        }
+        speech.full().map(|whisper| (whisper, false))
+    })
+    .await;
+    let (whisper, whisper_wake_only) = match chosen {
+        Ok(Ok(chosen)) => chosen,
+        Ok(Err(e)) => return Ran::Ended(Err(e)),
+        Err(e) => return Ran::Ended(Err(anyhow::anyhow!("loading Whisper panicked: {e}"))),
     };
     // Its row is made at the first turn: a room switched on and off leaves no empty conversation.
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -705,6 +726,7 @@ async fn run_once(
     let recognises = recognises && listening.ear.is_some();
     if let Some(ear) = &listening.ear {
         ear.set_household(voices);
+        ear.set_forward_unworded(whisper_wake_only);
         // A pause asked for while the room was starting still holds.
         if let Some((until, _)) = inner.paused_until() {
             ear.pause_until(Some(until));
@@ -745,10 +767,7 @@ async fn run_once(
     .with_session_on_first_turn()
     .with_voice_identity(speaker_context(&inner.deps))
     .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()))
-    .with_model_hearing(Arc::new(ActiveModelHears {
-        agent: inner.deps.agent.clone(),
-        settings: inner.deps.settings.clone(),
-    }));
+    .with_model_hearing(hearing);
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }

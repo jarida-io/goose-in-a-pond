@@ -61,12 +61,11 @@ struct Engine {
 }
 
 impl Engine {
-    /// Wrap `context` and prepare the accurate profile's state now, at load, with one decode of
-    /// a second of silence. The wake-word state is made on its first use instead: only local
-    /// voice mode uses it, and an instance that serves the transcribe route never would.
+    /// Wrap `context` and prepare `prepare`'s state now, at load, with one decode of a second of
+    /// silence. The other profile's state is made on its first use, if it ever comes.
     ///
     /// A failure here is logged and leaves the state to be made on first use, as before.
-    fn new(context: WhisperContext) -> Self {
+    fn new(context: WhisperContext, prepare: TranscribeOpts) -> Self {
         let engine = Self {
             context: Arc::new(context),
             accurate: Mutex::new(None),
@@ -74,7 +73,7 @@ impl Engine {
             created: AtomicUsize::new(0),
         };
         let started = std::time::Instant::now();
-        match WhisperRsInput::transcribe_samples(&engine, vec![0.0; 16_000]) {
+        match WhisperRsInput::transcribe_samples_with(&engine, vec![0.0; 16_000], prepare) {
             Ok(_) => tracing::info!(
                 kind = "whisper_state_prepared",
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -137,6 +136,14 @@ impl WhisperRsInput {
 
     /// Load the ggml model at `model_path`. A whisper-rs panic during load becomes `Err`.
     pub fn new(model_path: PathBuf, mic: pond_audio::MicHandle) -> Result<Self> {
+        Self::prepared(model_path, mic, TranscribeOpts::accurate())
+    }
+
+    fn prepared(
+        model_path: PathBuf,
+        mic: pond_audio::MicHandle,
+        prepare: TranscribeOpts,
+    ) -> Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
                 "Whisper model file not found: {}",
@@ -149,7 +156,7 @@ impl WhisperRsInput {
             model_path.display()
         );
         Ok(Self {
-            engine: RwLock::new(Arc::new(Engine::new(context))),
+            engine: RwLock::new(Arc::new(Engine::new(context, prepare))),
             model_path: RwLock::new(model_path),
             duration_secs: DEFAULT_DURATION_SECS,
             silence_ms: DEFAULT_SILENCE_MS,
@@ -201,7 +208,7 @@ impl WhisperRsInput {
         }
         let new_engine = tokio::task::spawn_blocking({
             let p = new_model_path.clone();
-            move || load_context(&p).map(Engine::new)
+            move || load_context(&p).map(|c| Engine::new(c, TranscribeOpts::accurate()))
         })
         .await
         .map_err(|e| anyhow!("model load join error: {}", e))??;
@@ -318,7 +325,10 @@ impl WhisperRsInput {
         }
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let sample_count = samples.len();
-        let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(sample_count));
+        // whisper.cpp refuses an `audio_ctx` above the model's own, which the wake model lowers.
+        let audio_ctx = opts
+            .fit_audio_ctx
+            .then(|| audio_ctx_for(sample_count).min(engine.context.model_n_audio_ctx()));
 
         let (slot, profile) = engine.slot(&opts);
         // A panic mid-decode leaves the state in an unknown condition, so it is replaced.
@@ -1059,6 +1069,7 @@ mod decode_profiles {
         }
         Some(Arc::new(Engine::new(
             load_context(&path).expect("load model"),
+            TranscribeOpts::accurate(),
         )))
     }
 

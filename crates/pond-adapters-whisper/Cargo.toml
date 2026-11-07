@@ -33,17 +33,18 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 # In-process whisper.cpp bindings.
-whisper-rs = { version = "0.16", default-features = false, features = ["log_backend"] }
+whisper-rs = { version = "0.16", default-features = false, features = ["log_backend", "raw-api"] }
 
 # Auto-enable Metal acceleration on macOS targets so a plain
 # `cargo build -p pond-adapters-whisper` on a Mac gets GPU offload.
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.16", default-features = false, features = ["log_backend", "metal"] }
+whisper-rs = { version = "0.16", default-features = false, features = ["log_backend", "metal", "raw-api"] }
 
 [dev-dependencies]
 # No `wiremock`: it outlived the HTTP backend it was here to fake by two
 # releases, and nothing in `tests/` has started a mock server since.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
 # `examples/ear_bench.rs`: a recording through the room's front end, scored offline.
 pond-ear = { workspace = true }
 pond-adapters-ear = { path = "../pond-adapters-ear" }
