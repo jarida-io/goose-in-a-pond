@@ -11798,6 +11798,7 @@ dependencies = [
  "pond-voice",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "whisper-rs",

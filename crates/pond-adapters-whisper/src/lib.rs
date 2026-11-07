@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod in_process;
+pub mod wake_model;
 pub use in_process::{TranscribeOpts, WhisperRsInput};
 
 /// How long other audio stays paused while the words after a wake word are captured, renewed as

@@ -318,7 +318,10 @@ impl WhisperRsInput {
         }
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let sample_count = samples.len();
-        let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(sample_count));
+        // whisper.cpp refuses an `audio_ctx` above the model's own, which the wake model lowers.
+        let audio_ctx = opts
+            .fit_audio_ctx
+            .then(|| audio_ctx_for(sample_count).min(engine.context.model_n_audio_ctx()));
 
         let (slot, profile) = engine.slot(&opts);
         // A panic mid-decode leaves the state in an unknown condition, so it is replaced.

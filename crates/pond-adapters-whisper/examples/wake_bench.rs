@@ -5,6 +5,7 @@
 //! wake_bench record DIR [--device NAME]    say scripted trials into this computer's microphone
 //! wake_bench score DIR|WAV...              both detectors on recordings (a DIR from `record`)
 //! wake_bench listen [--minutes M] [--save WAV]   both detectors live on the microphone
+//! wake_bench derive IN.bin OUT.bin         the room's wake-only Whisper from a full model
 //!   [--model ggml.bin] [--silero silero_vad.onnx] [--names "Ann,Bo"] [--rung neon-f32]
 //!   [--greedy]   decode each opening greedily over the clip's own length, not beam-5 over 30 s
 //!   [--whisper-log]   print whisper.cpp's own account of its buffers
@@ -453,6 +454,18 @@ fn main() -> Result<()> {
             score(&o, &inputs)
         }
         "listen" => listen(&o),
+        "derive" => {
+            let [src, dst] = &o.rest[..] else {
+                bail!("derive needs IN.bin OUT.bin");
+            };
+            use pond_adapters_whisper::wake_model::{derive, WAKE_AUDIO_CTX, WAKE_TEXT_CTX};
+            derive(
+                Path::new(src),
+                Path::new(dst),
+                WAKE_AUDIO_CTX,
+                WAKE_TEXT_CTX,
+            )
+        }
         other => bail!("unknown command {other}"),
     }
 }
