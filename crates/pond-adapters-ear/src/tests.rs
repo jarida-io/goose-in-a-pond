@@ -351,7 +351,8 @@ async fn speech_the_transcriber_cannot_word_reaches_only_a_model_that_hears() {
         ctl.until("the ear to listen", |l, _| l.listens.len() == 1)
             .await;
         let from = ctl.listens()[0];
-        ctl.until("a second of speech", |_, at| at >= from + S).await;
+        ctl.until("a second of speech", |_, at| at >= from + S)
+            .await;
         ctl.emit(utterance(from, ctl.at()));
         let heard = bounded("the listen", listening).await.unwrap().unwrap();
         match forward {

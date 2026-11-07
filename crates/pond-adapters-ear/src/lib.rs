@@ -13,7 +13,9 @@ use echo::Spoken;
 pub use enrol::{TakeEar, TakeHeard, ENROL_MAX_SECONDS};
 pub use hearing::Hearing;
 /// What the operating system says this process holds.
-pub use pond_ear::ear::mem::{now as process_memory, Mem as ProcessMemory};
+pub use pond_ear::ear::mem::{
+    now as process_memory, release as release_process_memory, Mem as ProcessMemory,
+};
 pub use pond_ear::score::{Policy, Print};
 pub use pond_ear::{Household, ModelFile};
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use pond_adapters_ear::{process_memory, EarPart, ProcessMemory};
+use pond_adapters_ear::{process_memory, release_process_memory, EarPart, ProcessMemory};
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_voice::text::SpeechUnit;
 
@@ -21,12 +21,37 @@ pub fn now() -> Option<ProcessMemory> {
     process_memory()
 }
 
-/// Runs `f`, logging `part` if the process grew by [`GROWTH_LOGGED`] or more meanwhile.
+/// Runs `f`, logging `part` if the process grew by [`GROWTH_LOGGED`] or more meanwhile, then
+/// trims: whisper.cpp starts threads for each beam-search step, and glibc keeps what they free.
 pub fn measured<T>(part: &'static str, f: impl FnOnce() -> T) -> T {
     let before = now();
     let out = f();
     note_growth(part, before);
+    trim(part);
     out
+}
+
+/// Hands the heap's free pages back to the OS, which glibc otherwise keeps resident for reuse.
+fn trim(after: &'static str) {
+    let before = now();
+    let started = std::time::Instant::now();
+    release_process_memory();
+    let (Some(before), Some(trimmed)) = (before, now()) else {
+        return;
+    };
+    let returned = before.footprint.saturating_sub(trimmed.footprint);
+    if returned >= GROWTH_LOGGED {
+        tracing::info!(
+            kind = "room_voice_memory",
+            part = "trim",
+            after,
+            returned_mb = mb(returned),
+            trim_ms = started.elapsed().as_millis() as u64,
+            footprint_mb = mb(trimmed.footprint),
+            resident_mb = mb(trimmed.resident),
+            "room voice memory: freed heap handed back"
+        );
+    }
 }
 
 fn note_growth(part: &'static str, before: Option<ProcessMemory>) {
@@ -81,6 +106,7 @@ pub fn log_start(
 
 /// After each room turn: the process now, and how far it has grown since the room started.
 pub fn log_turn(started: Option<ProcessMemory>, whisper: Option<(Vec<&'static str>, usize)>) {
+    trim("turn");
     let Some(after) = now() else {
         return;
     };
