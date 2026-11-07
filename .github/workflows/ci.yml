@@ -547,6 +547,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/local-checks.test.sh
 
+  # The release build of pond-server (scripts/lib/release-build.sh): giap.sh, install.sh, build-native.sh
+  # and the Jetson deploy share its flags, which keep target-cpu=native, against fakes of the host.
+  release-build:
+    name: Release build flags - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/release-build.test.sh
+
   # Every shell script outside the goose/ submodule. Most of them run on the Jetson or a server and
   # no test can exercise them here, so this is the only check they get. A warning fails the job; a
   # note is printed and does not. The root .shellcheckrc makes it follow sourced files.

@@ -15,6 +15,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/release-build.sh
+source "$HERE/../lib/release-build.sh"
+
 CUDA=false
 
 for arg in "$@"; do
@@ -58,8 +62,10 @@ sudo apt-get install -y \
 # build.rs placeholder.
 echo ""
 echo "Building web UI (embedded into the server binary)..."
+UI_STATE="not-built"
 if command -v npm &>/dev/null; then
   ( cd pond-desktop && npm ci --no-audit --no-fund && npm run build )
+  UI_STATE="built"
   echo "  UI built — will be embedded into pond-server."
 else
   echo "  Node.js/npm not found — the server will build API-only (no embedded UI)."
@@ -74,24 +80,14 @@ echo "Building pond-server (single executable — API + embedded UI)..."
 SERVER_FEATURES=""
 if [ "$CUDA" = true ]; then
   echo "  CUDA enabled — using GPU acceleration (sm_87 / Ampere)"
-  SERVER_FEATURES="--features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
+  SERVER_FEATURES="$RELEASE_BUILD_CUDA_FEATURES"
 fi
 
-RUST_FLAGS="${RUSTFLAGS:-}"
-if command -v ld.lld >/dev/null 2>&1; then
-  RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C link-arg=-fuse-ld=lld"
-fi
-RUST_FLAGS="${RUST_FLAGS:+$RUST_FLAGS }-C codegen-units=8"
-
-SCCACHE_ENV=""
-if command -v sccache >/dev/null 2>&1; then
-  SCCACHE_ENV="RUSTC_WRAPPER=sccache "
-fi
-
-PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-${RUST_FLAGS:+RUSTFLAGS="$RUST_FLAGS" }$SCCACHE_ENV \
-SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
-cargo build -p pond-server --bin pond-server $SERVER_FEATURES --release
+BUILD_CMD="$(release_build_cmd "$SERVER_FEATURES")"
+echo "  \$ $BUILD_CMD"
+bash -c "$BUILD_CMD"
+release_build_stamp "$SERVER_FEATURES" "$(git rev-parse --short HEAD)" "$(git -C goose rev-parse --short=9 HEAD)" "$UI_STATE" \
+  > target/release/.giap-build-stamp
 
 echo ""
 echo "Server binary: $(pwd)/target/release/pond-server"
