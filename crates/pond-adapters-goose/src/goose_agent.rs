@@ -99,15 +99,19 @@ struct TurnEnvelope<'a> {
     heard: bool,
 }
 
-/// For a room turn the model hears, whose <user-message> is empty.
+/// A heard room turn's <user-message>: its words are the recording. Never empty, as an empty
+/// one fuses the newlines around it into one token and the turn misses the preamble snapshot.
 const HEARD_TURN_NOTE: &str =
-    "The user spoke this turn: their words are the attached recording. Answer what you hear.";
+    "[Spoken: the user's words are the attached recording. Answer what you hear.]";
 
 impl TurnEnvelope<'_> {
     fn render(&self) -> String {
         let mut msg = String::with_capacity(512 + self.message.len());
         msg.push_str("<user-message>\n");
-        msg.push_str(self.message);
+        match self.heard && self.message.is_empty() {
+            true => msg.push_str(HEARD_TURN_NOTE),
+            false => msg.push_str(self.message),
+        }
         msg.push_str("\n</user-message>\n");
         // Always emitted, since the answer contract is unconditional.
         msg.push_str("<system-context>\n");
@@ -120,10 +124,6 @@ impl TurnEnvelope<'_> {
         }
         if !self.dynamic_suffix.is_empty() {
             msg.push_str(self.dynamic_suffix);
-            msg.push('\n');
-        }
-        if self.heard {
-            msg.push_str(HEARD_TURN_NOTE);
             msg.push('\n');
         }
         if let Some(interview) = self.interview {
@@ -8131,12 +8131,10 @@ mod tests {
             ..Default::default()
         }
         .render();
-        let context = heard
-            .split_once("<system-context>")
-            .map(|(_, rest)| rest)
-            .unwrap();
-        assert!(context.contains(HEARD_TURN_NOTE));
-        assert!(heard.starts_with("<user-message>\n\n</user-message>"));
+        assert!(heard.starts_with(&format!(
+            "<user-message>\n{HEARD_TURN_NOTE}\n</user-message>"
+        )));
+        assert_eq!(heard.matches(HEARD_TURN_NOTE).count(), 1);
 
         let typed = TurnEnvelope {
             message: "what time is it",
