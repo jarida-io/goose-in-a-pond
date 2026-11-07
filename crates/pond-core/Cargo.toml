@@ -15,6 +15,7 @@ test-mocks = []
 # Leaf crate — voice text/DSP primitives. See crates/pond-voice.
 pond-voice = { path = "../pond-voice" }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

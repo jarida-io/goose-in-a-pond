@@ -144,6 +144,8 @@ pub struct EarRig {
     /// Who Voice Match heard wake the pond; a follow-up must be their voice too.
     waker: Mutex<Option<String>>,
     spoken: Arc<Mutex<Spoken>>,
+    /// The recording behind the words `listen` last returned, for a model that hears.
+    heard_audio: Mutex<Option<Vec<f32>>>,
 }
 
 impl EarRig {
@@ -236,6 +238,7 @@ impl EarRig {
             parts: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
             spoken,
+            heard_audio: Mutex::new(None),
         }))
     }
 
@@ -302,6 +305,12 @@ impl EarRig {
 
     fn command(&self, raw: &str) -> String {
         pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
+    }
+
+    /// `command`, with `pcm` kept as the recording it came from.
+    fn kept(&self, command: String, pcm: Vec<f32>) -> Result<Option<String>> {
+        *self.heard_audio.lock().unwrap_or_else(|e| e.into_inner()) = Some(pcm);
+        Ok(Some(command))
     }
 
     async fn transcribe(&self, pcm: Vec<f32>) -> Result<String> {
@@ -396,6 +405,7 @@ impl StreamingWakeWordDetector for EarRig {
 #[async_trait]
 impl VoiceInput for EarRig {
     async fn listen(&self) -> Result<Option<String>> {
+        *self.heard_audio.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let primed = self.primed.lock().unwrap_or_else(|e| e.into_inner()).take();
         // A follow-up with no wake of its own: an identified waker's must be in their voice.
         let follow_up = primed.is_none();
@@ -406,19 +416,19 @@ impl VoiceInput for EarRig {
             Some(Primed::Woke(woke)) => {
                 let raw = match woke.transcript {
                     Some(t) => t,
-                    None => self.transcribe(woke.pcm).await?,
+                    None => self.transcribe(woke.pcm.clone()).await?,
                 };
                 let command = self.command(&raw);
                 if !command.is_empty() {
-                    return Ok(Some(command));
+                    return self.kept(command, woke.pcm);
                 }
                 // The wake phrase alone: the request comes after it.
                 from = ListenFrom::At(woke.end);
             }
             Some(Primed::Audio(pcm)) => {
-                let command = self.command(&self.transcribe(pcm).await?);
+                let command = self.command(&self.transcribe(pcm.clone()).await?);
                 if !command.is_empty() {
-                    return Ok(Some(command));
+                    return self.kept(command, pcm);
                 }
             }
             Some(Primed::Onset(onset)) => from = ListenFrom::Since(onset),
@@ -458,7 +468,7 @@ impl VoiceInput for EarRig {
             }
             let raw = match transcript {
                 Some(t) => t,
-                None => self.transcribe(pcm).await?,
+                None => self.transcribe(pcm.clone()).await?,
             };
             let cleaned = pond_voice::text::strip_whisper_artifacts(&raw);
             let command = self.command(&cleaned);
@@ -479,7 +489,10 @@ impl VoiceInput for EarRig {
                 );
                 return Ok(Some(String::new()));
             }
-            if !command.is_empty() || !pond_voice::text::heard_wake(&raw, &self.triggers) {
+            if !command.is_empty() {
+                return self.kept(command, pcm);
+            }
+            if !pond_voice::text::heard_wake(&raw, &self.triggers) {
                 return Ok(Some(command));
             }
             from = ListenFrom::At(end);
@@ -515,6 +528,15 @@ impl VoiceInput for EarRig {
 
     fn prime_with_onset(&self, onset: Instant) {
         *self.primed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Primed::Onset(onset));
+    }
+
+    fn take_heard_audio(&self) -> Option<Vec<u8>> {
+        let pcm = self
+            .heard_audio
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        Some(pond_ear::wav::encode_wav16(&pcm, reference::RATE))
     }
 }
 

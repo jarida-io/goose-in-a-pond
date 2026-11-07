@@ -95,7 +95,13 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
+    /// The message is the room's transcript of a recording the model also hears.
+    heard: bool,
 }
+
+/// For a room turn the model hears: the transcript is only the room's guess at the words.
+const HEARD_TURN_NOTE: &str = "The user spoke this turn. The text in <user-message> is an \
+automatic transcript of the attached recording and can be wrong; go by what you hear.";
 
 impl TurnEnvelope<'_> {
     fn render(&self) -> String {
@@ -114,6 +120,10 @@ impl TurnEnvelope<'_> {
         }
         if !self.dynamic_suffix.is_empty() {
             msg.push_str(self.dynamic_suffix);
+            msg.push('\n');
+        }
+        if self.heard {
+            msg.push_str(HEARD_TURN_NOTE);
             msg.push('\n');
         }
         if let Some(interview) = self.interview {
@@ -3673,6 +3683,7 @@ impl GooseAdapter {
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
+            heard: request.audio.iter().any(|clip| clip.transcribed),
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -8109,6 +8120,30 @@ mod tests {
             Some(goose::conversation::message::MessageContent::Text(_))
         ));
         assert_eq!(image_parts(&msg).len(), 1);
+    }
+
+    /// A room turn's transcript is flagged as a guess only when the model also hears the recording.
+    #[test]
+    fn only_a_heard_turn_says_its_message_is_a_transcript() {
+        let heard = TurnEnvelope {
+            message: "what time is it",
+            heard: true,
+            ..Default::default()
+        }
+        .render();
+        let context = heard
+            .split_once("<system-context>")
+            .map(|(_, rest)| rest)
+            .unwrap();
+        assert!(context.contains(HEARD_TURN_NOTE));
+        assert!(heard.starts_with("<user-message>\nwhat time is it\n</user-message>"));
+
+        let typed = TurnEnvelope {
+            message: "what time is it",
+            ..Default::default()
+        }
+        .render();
+        assert!(!typed.contains(HEARD_TURN_NOTE));
     }
 
     // ── F3: the vision-capability prompt section ─────────────────────────

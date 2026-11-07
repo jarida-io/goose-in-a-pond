@@ -304,6 +304,42 @@ async fn a_follow_up_listens_from_now_and_ends_on_an_utterance_or_silence() {
 }
 
 #[tokio::test]
+async fn the_recording_behind_a_request_is_handed_over_once_and_never_for_silence() {
+    let says = Says::new(&["and tomorrow?"]);
+    let (rig, ctl) = rig(WakeMode::HeyGoose, says).await;
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the ear to listen", |l, _| l.listens.len() == 1)
+        .await;
+    let from = ctl.listens()[0];
+    let to = ctl.at();
+    ctl.emit(utterance(from, to));
+    let heard = bounded("the request", listening).await.unwrap().unwrap();
+    assert_eq!(heard.as_deref(), Some("and tomorrow?"));
+    let wav = rig.take_heard_audio().expect("the request's recording");
+    let decoded = pond_voice::dsp::decode_wav(&wav).unwrap();
+    assert_eq!(decoded.sample_rate, 16_000);
+    assert_eq!(decoded.samples.len(), to - from, "the utterance, as heard");
+    assert!(rig.take_heard_audio().is_none(), "handed over once");
+
+    let listening = tokio::spawn({
+        let rig = rig.clone();
+        async move { rig.listen().await }
+    });
+    ctl.until("the second listen", |l, _| l.listens.len() == 2)
+        .await;
+    ctl.emit(Event::Silence { t: 0.0 });
+    let heard = bounded("the silent listen", listening)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(heard.as_deref(), Some(""));
+    assert!(rig.take_heard_audio().is_none(), "nothing was said");
+}
+
+#[tokio::test]
 async fn only_an_enrolled_voice_over_the_reply_interrupts_it() {
     let (rig, ctl) = rig(WakeMode::HeyGoose, Says::new(&[])).await;
     let hook = rig.state_hook();

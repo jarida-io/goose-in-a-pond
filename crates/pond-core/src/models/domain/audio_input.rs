@@ -371,6 +371,7 @@ mod tests {
             data: data.to_string(),
             mime_type: mime.to_string(),
             name: None,
+            transcribed: false,
         }
     }
 
