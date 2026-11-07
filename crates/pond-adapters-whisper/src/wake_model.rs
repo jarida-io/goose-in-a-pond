@@ -326,7 +326,7 @@ mod tests {
             "encoder.conv1.weight",
             TYPE_F16,
             &[3, 1, 32],
-            &vec![0u8; 3 * 32 * 2],
+            &[0u8; 3 * 32 * 2],
         );
         m
     }
