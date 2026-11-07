@@ -26,6 +26,9 @@ pub struct AgentRequest {
     /// Optional image attachments for multimodal models.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::models::domain::message::ImageAttachment>,
+    /// A voice note the model hears as sound; only an adapter whose audio state is ready takes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<crate::models::domain::message::AudioAttachment>,
     /// From voice mode: the agent disables thinking and keeps replies short and unformatted.
     #[serde(default)]
     pub voice_mode: bool,
@@ -565,6 +568,7 @@ mod agent_request_scope_tests {
             session_id: "s1".to_string(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: scope,

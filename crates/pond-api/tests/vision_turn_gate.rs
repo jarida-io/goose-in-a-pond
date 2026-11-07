@@ -1,5 +1,5 @@
-//! Picture support at the HTTP edge, driven through the real router.
-//! A refused image turn (409/415) must save nothing; each refusal is checked in the store.
+//! Picture and voice-note support at the HTTP edge, driven through the real router.
+//! A refused image or voice-note turn (409/413/415) must save nothing; each is checked in the store.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,6 +41,8 @@ const E2B_ENCODER_BYTES: u64 = 986_833_728;
 struct VisionAgent {
     inner: MockAgent,
     table: Mutex<HashMap<String, EncoderState>>,
+    /// `audio_input_state` per model; absent = unknown.
+    hearing: Mutex<HashMap<String, EncoderState>>,
     asked: Mutex<Vec<(String, String)>>,
     prepared: Mutex<Vec<String>>,
     prewarms: AtomicUsize,
@@ -52,6 +54,7 @@ impl Default for VisionAgent {
         Self {
             inner: MockAgent::new(),
             table: Mutex::default(),
+            hearing: Mutex::default(),
             asked: Mutex::default(),
             prepared: Mutex::default(),
             prewarms: AtomicUsize::new(0),
@@ -68,6 +71,15 @@ impl VisionAgent {
     }
     fn set(&self, model: &str, state: EncoderState) {
         self.table.lock().unwrap().insert(model.to_string(), state);
+    }
+    fn hearing(model: &str, state: EncoderState) -> Arc<Self> {
+        let agent = Self::default();
+        agent
+            .hearing
+            .lock()
+            .unwrap()
+            .insert(model.to_string(), state);
+        Arc::new(agent)
     }
     fn prepared(&self) -> Vec<String> {
         self.prepared.lock().unwrap().clone()
@@ -97,6 +109,10 @@ impl Agent for VisionAgent {
             .unwrap()
             .push((provider.to_string(), model.to_string()));
         self.table.lock().unwrap().get(model).cloned()
+    }
+
+    fn audio_input_state(&self, _provider: &str, model: &str) -> Option<EncoderState> {
+        self.hearing.lock().unwrap().get(model).cloned()
     }
 
     fn prepare_model(&self, model: &str) {
@@ -1112,4 +1128,252 @@ async fn pictures_arrive_only_through_the_explicit_route() {
     assert_eq!(row["companions"][0]["kind"], "pictures");
     assert_eq!(row["companions"][0]["state"], "installed");
     assert_eq!(row["companions"][0]["size_bytes"], spec.size_bytes);
+}
+
+// ── Voice notes ────────────────────────────────────────────────────────────────
+
+/// A 16-bit PCM WAV of `ms` milliseconds of a 440 Hz tone.
+fn wav(sample_rate: u32, ms: u32) -> Vec<u8> {
+    let samples = sample_rate * ms / 1000;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + samples * 2).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(samples * 2).to_le_bytes());
+    for i in 0..samples {
+        let t = i as f32 / sample_rate as f32;
+        let v = ((t * 440.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn voice_turn(session_id: &str, data: &[u8], mime: &str) -> Value {
+    json!({
+        "session_id": session_id,
+        "message": "",
+        "audio": [{"data": b64(data), "mime_type": mime}],
+    })
+}
+
+const READY: EncoderState = EncoderState::Ready { bytes: Some(1) };
+
+#[tokio::test]
+async fn a_voice_note_with_no_message_reaches_the_engine_and_saves_a_marker() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let note = wav(16_000, 1_500);
+
+    let (status, _) = send(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/chat/stream",
+            Some(voice_turn("heard", &note, "audio/x-wav")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.message, "");
+    assert_eq!(sent.audio.len(), 1);
+    assert_eq!(sent.audio[0].mime_type, "audio/wav");
+    assert_eq!(
+        sent.audio[0].data,
+        b64(&note),
+        "the WAV reaches the engine as sent"
+    );
+
+    let saved = pond.sessions.get_messages("heard").await.unwrap();
+    assert_eq!(saved[0].message.content, "[Voice note]");
+    assert!(
+        pond.sessions
+            .list_session_attachments("heard")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the pond never keeps the recording"
+    );
+}
+
+#[tokio::test]
+async fn a_model_that_cannot_hear_refuses_with_409_and_saves_nothing() {
+    for (state, code) in [
+        (Some(EncoderState::NotDeclared), "audio_unsupported"),
+        (Some(EncoderState::NotOnThisDevice), "audio_unsupported"),
+        (Some(EncoderState::Verifying), "audio_not_ready"),
+        (Some(EncoderState::Absent), "audio_not_ready"),
+        // Unknown refuses: unlike a picture, no adapter backstop would carry the recording.
+        (None, "audio_unsupported"),
+    ] {
+        let agent = match state.clone() {
+            Some(s) => VisionAgent::hearing(E2B, s),
+            None => Arc::new(VisionAgent::default()),
+        };
+        let pond = pond(agent, "local", E2B).await;
+        let (status, body) = send_json(
+            &pond,
+            request(
+                "POST",
+                "/api/v1/chat/stream",
+                Some(voice_turn("refused", &wav(16_000, 500), "audio/wav")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{state:?}: {body}");
+        assert_eq!(body["code"], code, "{state:?}");
+        assert!(body["error"].as_str().unwrap().contains("voice notes"));
+        assert_nothing_saved(&pond, "refused").await;
+    }
+}
+
+#[tokio::test]
+async fn a_voice_note_that_breaks_the_limits_is_refused_and_saves_nothing() {
+    let cases = [
+        (
+            json!([{"data": b64(&wav(16_000, 500)), "mime_type": "audio/wav"},
+                   {"data": b64(&wav(16_000, 500)), "mime_type": "audio/wav"}]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            json!([{"data": b64(&wav(16_000, 500)), "mime_type": "audio/mpeg"}]),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            json!([{"data": b64(b"ID3\x04 an mp3 dressed as a wav"), "mime_type": "audio/wav"}]),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            json!([{"data": b64(&wav(8_000, 61_000)), "mime_type": "audio/wav"}]),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            json!([{"data": "not base64 at all!", "mime_type": "audio/wav"}]),
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (audio, want) in cases {
+        let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+        let turn = json!({"session_id": "limits", "message": "", "audio": audio});
+        let (status, body) =
+            send_json(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+        assert_eq!(status, want, "{body}");
+        assert_eq!(body["code"], "audio_invalid", "{body}");
+        assert_nothing_saved(&pond, "limits").await;
+    }
+}
+
+#[tokio::test]
+async fn a_typed_message_with_a_voice_note_keeps_both() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let mut turn = voice_turn("both", &wav(16_000, 500), "audio/wav");
+    turn["message"] = json!("what do you make of this?");
+    let (status, _) = send(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.message, "what do you make of this?");
+    let saved = pond.sessions.get_messages("both").await.unwrap();
+    assert_eq!(
+        saved[0].message.content,
+        "what do you make of this?\n[Voice note]"
+    );
+}
+
+#[tokio::test]
+async fn the_agent_route_carries_a_voice_note_and_refuses_a_malformed_one() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let (status, _) = send(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/agent/chat/stream",
+            Some(voice_turn("agent-heard", &wav(16_000, 500), "audio/wav")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pond.agent.inner.last_request().unwrap().audio.len(), 1);
+
+    let (status, body) = send_json(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/agent/chat/stream",
+            Some(json!({"session_id": "agent-bad", "audio": "a string, not a list"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "audio_invalid");
+}
+
+#[tokio::test]
+async fn deep_research_and_the_plain_chat_route_refuse_a_voice_note() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let mut turn = voice_turn("research", &wav(16_000, 500), "audio/wav");
+    turn["deep_research"] = json!(true);
+    let (status, body) = send_json(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "audio_deep_research");
+    assert_nothing_saved(&pond, "research").await;
+
+    let (status, body) = send_json(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/chat",
+            Some(voice_turn("plain", &wav(16_000, 500), "audio/wav")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "audio_wrong_route");
+}
+
+#[tokio::test]
+async fn capabilities_report_audio_input_only_when_the_model_hears() {
+    for (state, want) in [
+        (Some(READY), true),
+        (Some(EncoderState::NotDeclared), false),
+        (Some(EncoderState::Downloading { done: 1, total: 2 }), false),
+        (None, false),
+    ] {
+        let agent = match state.clone() {
+            Some(s) => VisionAgent::hearing(E2B, s),
+            None => Arc::new(VisionAgent::default()),
+        };
+        let pond = pond(agent, "local", E2B).await;
+        let (status, body) =
+            send_json(&pond, request("GET", "/api/v1/models/capabilities", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["audio_input"], json!(want), "{state:?}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_text_turn_never_asks_whether_the_model_hears() {
+    let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
+    let (status, _) = send(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/chat/stream",
+            Some(json!({"session_id": "typed", "message": "hello"})),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unknown audio state must not block text"
+    );
 }

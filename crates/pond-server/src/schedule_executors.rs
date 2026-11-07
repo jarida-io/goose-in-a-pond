@@ -115,6 +115,7 @@ impl AgentScheduleExecutor {
             session_id,
             model_role: "task".to_string(),
             images: vec![],
+            audio: Vec::new(),
             voice_mode: should_speak,
             canvas_mode: false,
             // Schedules have no owner: on a pond of two members a run must not read either's memories.

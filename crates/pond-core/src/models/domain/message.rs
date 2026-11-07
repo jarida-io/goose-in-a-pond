@@ -19,6 +19,15 @@ pub struct ImageAttachment {
     pub mime_type: String,
 }
 
+/// A voice note for a model that hears it; the pond passes it to the engine and never stores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioAttachment {
+    /// Base64-encoded WAV.
+    pub data: String,
+    /// MIME type, e.g. "audio/wav".
+    pub mime_type: String,
+}
+
 /// A tool call in an assistant message, replayed via `tool_calls` so the model sees its history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRecord {

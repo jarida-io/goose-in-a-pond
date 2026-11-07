@@ -1553,6 +1553,22 @@ impl GooseAdapter {
         }
     }
 
+    /// Pure body of `AgentPort::audio_input_state`. Only the in-process llama.cpp engine feeds a
+    /// recording to an encoder; every other provider would turn it into a note.
+    fn audio_state_for(
+        pictures: &crate::vision_encoder::PictureSupport,
+        data_dir: Option<&std::path::Path>,
+        provider: &str,
+        model: &str,
+    ) -> pond_core::models::domain::vision_encoder::EncoderState {
+        use pond_core::models::domain::vision_encoder::EncoderState;
+        match (provider, data_dir) {
+            ("local" | "gguf", Some(dd)) => pictures.audio_state(dd, model),
+            ("local" | "gguf", None) => EncoderState::Unknown,
+            _ => EncoderState::NotDeclared,
+        }
+    }
+
     /// Whether this turn's prompt carries `<vision>`. `voice` is the TURN's flag: a phone's spoken
     /// turn has no attachment either, and its prefix differs from a typed turn's anyway.
     fn vision_section_applies(
@@ -2534,10 +2550,11 @@ impl GooseAdapter {
         if source.is_empty() {
             return;
         }
+        let (source, unheard) = strip_history_audio(source);
 
         // Tool-part messages are never rewritten: providers reject re-keyed tool responses.
         let (had, keep, dropped) = plan_image_cap(&source);
-        if dropped == 0 && redacted == 0 {
+        if dropped == 0 && redacted == 0 && unheard == 0 {
             return;
         }
 
@@ -2574,6 +2591,15 @@ impl GooseAdapter {
                 goose_sid = %goose_sid,
                 dropped,
                 "capped historical images"
+            );
+        }
+        if unheard > 0 {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "voice_note_unattached",
+                goose_sid = %goose_sid,
+                unheard,
+                "earlier voice notes left as notes"
             );
         }
     }
@@ -2781,6 +2807,22 @@ impl GooseAdapter {
                     model,
                     code = refusal.code.as_str(),
                     "refused a turn carrying pictures"
+                );
+                anyhow::bail!("{}", refusal.message);
+            }
+        }
+        if !request.audio.is_empty() {
+            use pond_core::models::domain::audio_input::audio_refusal_for;
+            let provider = settings.chat_provider.as_str();
+            let model = settings.chat_model.as_str();
+            let state = self.audio_input_state(provider, model);
+            if let Some(refusal) = audio_refusal_for(state.as_ref()) {
+                tracing::info!(
+                    target: "giap::audio",
+                    provider,
+                    model,
+                    code = refusal.code.as_str(),
+                    "refused a turn carrying a voice note"
                 );
                 anyhow::bail!("{}", refusal.message);
             }
@@ -3636,8 +3678,9 @@ impl GooseAdapter {
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
         let turn_text = user_text.clone();
         let turn_images = request.images.clone();
-        // An image turn forfeits KV retention; noted before anything below reads the posture.
-        if !turn_images.is_empty() {
+        let turn_audio = request.audio.clone();
+        // A media turn forfeits KV retention; noted before anything below reads the posture.
+        if !turn_images.is_empty() || !turn_audio.is_empty() {
             self.note_prefix_invalidated(InvalidationReason::MultimodalTurn);
         }
         let turn_goose_sid = goose_sid.clone();
@@ -3815,8 +3858,10 @@ impl GooseAdapter {
                     // Echoed prompt blocks out, and a call written as text held back from the user.
                     let mut reply_filter =
                         pond_core::models::services::reply_filter::ReplyFilter::new();
-                    let attempt_msg =
-                        attach_images(Message::user().with_text(&attempt_text), &turn_images);
+                    let attempt_msg = attach_audio(
+                        attach_images(Message::user().with_text(&attempt_text), &turn_images),
+                        &turn_audio,
+                    );
                     // Arms Goose's completeness check; session-keyed, as streams run concurrently.
                     agent_clone
                         .set_session_goal(&turn_goose_sid, completeness_goal.clone())
@@ -4671,6 +4716,7 @@ impl AgentPort for GooseAdapter {
             session_id: format!("prewarm-{stamp}-{turn}"),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode,
             canvas_mode: false,
             // The static prefix is speaker-independent; one household warm-up serves everyone.
@@ -4787,6 +4833,24 @@ impl AgentPort for GooseAdapter {
         model: &str,
     ) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
         Self::vision_state_for(&self.pictures, self.data_dir.as_deref(), provider, model)
+    }
+
+    fn audio_input_state(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+        use pond_core::models::domain::vision_encoder::EncoderState;
+        // The voice loop's own process hears through Whisper, never through the chat model.
+        if self.voice_mode.load(std::sync::atomic::Ordering::Relaxed) {
+            return Some(EncoderState::NotDeclared);
+        }
+        Some(Self::audio_state_for(
+            &self.pictures,
+            self.data_dir.as_deref(),
+            provider,
+            model,
+        ))
     }
 
     /// Registers a model whose file just arrived, from the file its row names, then settles its
@@ -5415,6 +5479,46 @@ fn attach_images(
     images
         .iter()
         .fold(msg, |m, img| m.with_image(&img.data, &img.mime_type))
+}
+
+/// After the text, like images, so the system prefix stays byte-identical.
+fn attach_audio(
+    msg: Message,
+    audio: &[pond_core::models::domain::message::AudioAttachment],
+) -> Message {
+    audio
+        .iter()
+        .fold(msg, |m, clip| m.with_audio(&clip.data, &clip.mime_type))
+}
+
+/// Every recording in `source` becomes a note: heard on its own turn, never replayed, since each
+/// replay would load the encoder and re-run the audio tower for 25 tokens a second.
+fn strip_history_audio(source: Vec<Message>) -> (Vec<Message>, usize) {
+    use goose::conversation::message::MessageContent as C;
+    use pond_core::models::domain::audio_input::HISTORY_VOICE_NOTE_PLACEHOLDER;
+
+    let mut stripped = 0usize;
+    let messages = source
+        .into_iter()
+        .map(|mut m| {
+            if !m.content.iter().any(|c| matches!(c, C::Audio(_))) {
+                return m;
+            }
+            m.content = m
+                .content
+                .into_iter()
+                .map(|c| match c {
+                    C::Audio(_) => {
+                        stripped += 1;
+                        C::text(HISTORY_VOICE_NOTE_PLACEHOLDER)
+                    }
+                    other => other,
+                })
+                .collect();
+            m
+        })
+        .collect();
+    (messages, stripped)
 }
 
 pub(crate) fn image_part_count(msg: &Message) -> usize {
@@ -8172,6 +8276,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_the_in_process_engine_can_hear_a_voice_note() {
+        use pond_core::models::domain::vision_encoder::EncoderState;
+        let pictures = crate::vision_encoder::PictureSupport::with_rows(Arc::new(
+            crate::registry_rows::MemoryRows::default(),
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let state = |provider: &str, dd: Option<&std::path::Path>| {
+            GooseAdapter::audio_state_for(&pictures, dd, provider, "gemma-4-E2B-it-Q4_K_M")
+        };
+        for provider in ["ollama", "mesh", "mistralrs", "llamafile", "openai"] {
+            assert_eq!(
+                state(provider, Some(tmp.path())),
+                EncoderState::NotDeclared,
+                "{provider} would turn the recording into a note"
+            );
+        }
+        assert_eq!(state("local", None), EncoderState::Unknown);
+        assert!(
+            !state("gguf", Some(tmp.path())).is_ready(),
+            "no encoder on disk"
+        );
+    }
+
+    #[test]
+    fn earlier_voice_notes_become_notes_and_everything_else_stays() {
+        use goose::conversation::message::MessageContent as C;
+        use pond_core::models::domain::audio_input::HISTORY_VOICE_NOTE_PLACEHOLDER;
+
+        let source = vec![
+            Message::user().with_text("hi"),
+            Message::user()
+                .with_text("listen")
+                .with_audio("UklGRg==", "audio/wav"),
+            Message::assistant().with_text("You asked about the weather."),
+        ];
+        let (out, stripped) = strip_history_audio(source.clone());
+        assert_eq!(stripped, 1);
+        assert_eq!(out[0], source[0]);
+        assert_eq!(out[2], source[2]);
+        assert!(!out[1].content.iter().any(|c| matches!(c, C::Audio(_))));
+        assert_eq!(
+            out[1].as_concat_text(),
+            format!("listen\n{HISTORY_VOICE_NOTE_PLACEHOLDER}")
+        );
+
+        let (again, none) = strip_history_audio(out.clone());
+        assert_eq!(none, 0, "a second pass finds nothing to strip");
+        assert_eq!(again, out);
+    }
+
     /// The Jetson's E4B turns of 2026-10-27 read "Ran into this error: Execution error: null
     /// result from llama cpp." Once the shim has counted the turn out of GPU memory, the household
     /// reads what happened and what to do instead.
@@ -9381,6 +9536,7 @@ mod tests {
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: ProfileScope::Household,

@@ -711,6 +711,7 @@ mod tests {
                 session_id: "test-session".to_string(),
                 model_role: "chat".to_string(),
                 images: vec![],
+                audio: Vec::new(),
                 voice_mode: false,
                 canvas_mode: false,
                 // Descriptive only: this loop never reads the profile fields.
@@ -737,6 +738,7 @@ mod tests {
                 session_id: "test-session".to_string(),
                 model_role: "chat".to_string(),
                 images: vec![],
+                audio: Vec::new(),
                 voice_mode: false,
                 canvas_mode: false,
                 profile_scope: ProfileScope::Household,
@@ -820,6 +822,7 @@ mod tests {
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
             images: vec![],
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: ProfileScope::Household,
