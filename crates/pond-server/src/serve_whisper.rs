@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use pond_adapters_whisper::{wake_model, TranscribeOpts, WhisperRsInput};
+use pond_adapters_whisper::{wake_model, WhisperRsInput};
 use pond_audio::MicHandle;
 
 use crate::speech_model::SpeechEngine;
@@ -78,7 +78,7 @@ impl ServeWhisper {
     /// The room's wake-only copy of the full model, made and loaded now if need be. Blocking.
     pub fn wake(&self) -> Result<Arc<WhisperRsInput>> {
         let path = wake_model::ensure(&self.full_path(), &self.wake_dir)?;
-        self.hold(&self.wake, path, "wake", WhisperRsInput::new_wake)
+        self.hold(&self.wake, path, "wake", WhisperRsInput::new)
     }
 
     /// The full model when it is loaded or there is room for it, else the wake-only copy.
@@ -95,10 +95,7 @@ impl ServeWhisper {
             needs_mb = FULL_NEEDS_AVAILABLE_MB,
             "transcribing with the wake-only Whisper: too little memory for the full one"
         );
-        let decoded = pond_voice::dsp::decode_wav(wav)?;
-        let pcm = pond_voice::dsp::resample_to_16k(&decoded.samples, decoded.sample_rate);
-        self.wake()?
-            .transcribe_pcm_with(&pcm, TranscribeOpts::wake_word(), None)
+        self.wake()?.transcribe_wav_bytes(wav)
     }
 
     /// The states the loaded models hold, for the room's memory lines.

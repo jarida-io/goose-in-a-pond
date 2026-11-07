@@ -5825,7 +5825,6 @@ async fn run_chat(
                 data_dir: &data_dir,
                 mic: &mic_handle,
                 whisper: backend.clone(),
-                whisper_wake_only: false,
                 wake_word,
                 no_wake_word,
                 audio_level: audio_level_sink.clone(),

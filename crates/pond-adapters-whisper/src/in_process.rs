@@ -139,12 +139,6 @@ impl WhisperRsInput {
         Self::prepared(model_path, mic, TranscribeOpts::accurate())
     }
 
-    /// The room's wake-only model, which decodes greedily alone: its beam-search state would be
-    /// memory held for nothing.
-    pub fn new_wake(model_path: PathBuf, mic: pond_audio::MicHandle) -> Result<Self> {
-        Self::prepared(model_path, mic, TranscribeOpts::wake_word())
-    }
-
     fn prepared(
         model_path: PathBuf,
         mic: pond_audio::MicHandle,

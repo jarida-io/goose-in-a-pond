@@ -718,7 +718,6 @@ async fn run_once(
         data_dir: &inner.deps.data_dir,
         mic: &inner.deps.mic,
         whisper,
-        whisper_wake_only,
         wake_word: None,
         no_wake_word: false,
         audio_level: Some(levels),

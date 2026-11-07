@@ -34,8 +34,6 @@ pub struct ListeningOptions<'a> {
     pub mic: &'a MicHandle,
     /// Speech-to-text for either front end; the Whisper one also records through it.
     pub whisper: Arc<WhisperRsInput>,
-    /// `whisper` is the wake-only copy, which decodes greedily over each clip's own length.
-    pub whisper_wake_only: bool,
     /// In place of `settings.voice_wake_word`.
     pub wake_word: Option<&'a str>,
     /// Every turn listens at once, with no wake word.
@@ -173,7 +171,6 @@ impl Listening {
 struct WhisperTranscriber {
     whisper: Arc<WhisperRsInput>,
     prompt: Option<WhisperPrompt>,
-    wake_only: bool,
 }
 
 impl WhisperTranscriber {
@@ -190,18 +187,14 @@ impl WhisperTranscriber {
 }
 
 impl Transcriber for WhisperTranscriber {
+    // Beam search on room audio: greedy decoding looped ("I think I think ...") or came back
+    // empty on a spoken "hey goose" at the nano.
     fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<String> {
-        match self.wake_only {
-            true => self.run(pcm, TranscribeOpts::wake_word()),
-            false => self.run(pcm, TranscribeOpts::accurate()),
-        }
+        self.run(pcm, TranscribeOpts::accurate())
     }
 
     fn scan(&self, pcm: &[f32]) -> anyhow::Result<String> {
-        match self.wake_only {
-            true => self.run(pcm, TranscribeOpts::wake_word()),
-            false => self.run(pcm, TranscribeOpts::segment_scan()),
-        }
+        self.run(pcm, TranscribeOpts::segment_scan())
     }
 }
 
@@ -247,7 +240,6 @@ pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
     let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperTranscriber {
         whisper: opts.whisper.clone(),
         prompt: opts.whisper_prompt.clone(),
-        wake_only: opts.whisper_wake_only,
     });
     let mic = opts.mic.clone();
     // Loading converts Silero once and warms every ring: CPU work, off the runtime's workers.
