@@ -293,6 +293,19 @@ pub fn audio_refusal_for(state: Option<&EncoderState>) -> Option<AudioRefusal> {
     }
 }
 
+/// `voice_notes` on `GET /models/capabilities`, from the same verdict the 409s give, so a client
+/// can tell a pond that takes `audio` from an older one (which never sends the field).
+pub fn voice_notes_status(state: Option<&EncoderState>) -> &'static str {
+    match audio_refusal_for(state) {
+        None => "ready",
+        Some(AudioRefusal {
+            code: AudioRefusalCode::NotReady,
+            ..
+        }) => "not_ready",
+        Some(_) => "unsupported",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +454,23 @@ mod tests {
             let refusal = audio_refusal_for(state.as_ref()).unwrap();
             assert_eq!(refusal.code.as_str(), "audio_unsupported", "{state:?}");
         }
+    }
+
+    #[test]
+    fn voice_notes_status_names_the_refusal_a_turn_would_get() {
+        assert_eq!(
+            voice_notes_status(Some(&EncoderState::Ready { bytes: None })),
+            "ready"
+        );
+        assert_eq!(
+            voice_notes_status(Some(&EncoderState::Downloading { done: 1, total: 2 })),
+            "not_ready"
+        );
+        assert_eq!(
+            voice_notes_status(Some(&EncoderState::NotDeclared)),
+            "unsupported"
+        );
+        assert_eq!(voice_notes_status(None), "unsupported");
     }
 
     #[test]

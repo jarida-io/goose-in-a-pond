@@ -6745,16 +6745,19 @@ async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
 // ── Model registry handlers ───────────────────────────────────────────────────
 
 /// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
-/// `audio_input` is read live, so it turns true once the model's encoder is ready and hears.
+/// `audio_input` and `voice_notes` are read live, so they turn ready once the encoder hears.
 async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Value> {
+    use pond_core::models::domain::audio_input::voice_notes_status;
+
     let mut caps = state.agent.capabilities();
-    caps.audio_input = match state.settings_repo.get().await {
-        Ok(s) => read_audio_state(&state, &s.chat_provider, &s.chat_model)
-            .await
-            .is_some_and(|reported| reported.is_ready()),
-        Err(_) => false,
+    let audio = match state.settings_repo.get().await {
+        Ok(s) => read_audio_state(&state, &s.chat_provider, &s.chat_model).await,
+        Err(_) => None,
     };
-    Json(serde_json::to_value(caps).unwrap_or_default())
+    caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
+    let mut body = serde_json::to_value(caps).unwrap_or_default();
+    body["voice_notes"] = json!(voice_notes_status(audio.as_ref()));
+    Json(body)
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.

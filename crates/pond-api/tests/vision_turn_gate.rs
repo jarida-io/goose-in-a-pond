@@ -1341,11 +1341,17 @@ async fn deep_research_and_the_plain_chat_route_refuse_a_voice_note() {
 
 #[tokio::test]
 async fn capabilities_report_audio_input_only_when_the_model_hears() {
-    for (state, want) in [
-        (Some(READY), true),
-        (Some(EncoderState::NotDeclared), false),
-        (Some(EncoderState::Downloading { done: 1, total: 2 }), false),
-        (None, false),
+    for (state, want, voice_notes) in [
+        (Some(READY), true, "ready"),
+        (Some(EncoderState::NotDeclared), false, "unsupported"),
+        (Some(EncoderState::NotOnThisDevice), false, "unsupported"),
+        (
+            Some(EncoderState::Downloading { done: 1, total: 2 }),
+            false,
+            "not_ready",
+        ),
+        (Some(EncoderState::Verifying), false, "not_ready"),
+        (None, false, "unsupported"),
     ] {
         let agent = match state.clone() {
             Some(s) => VisionAgent::hearing(E2B, s),
@@ -1356,6 +1362,45 @@ async fn capabilities_report_audio_input_only_when_the_model_hears() {
             send_json(&pond, request("GET", "/api/v1/models/capabilities", None)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["audio_input"], json!(want), "{state:?}: {body}");
+        assert_eq!(body["voice_notes"], voice_notes, "{state:?}: {body}");
+    }
+}
+
+/// `voice_notes` says what a turn carrying a note would get, in the 409's own words.
+#[tokio::test]
+async fn voice_notes_agrees_with_what_a_voice_note_turn_gets() {
+    for (state, voice_notes, status, code) in [
+        (READY, "ready", StatusCode::OK, None),
+        (
+            EncoderState::Absent,
+            "not_ready",
+            StatusCode::CONFLICT,
+            Some("audio_not_ready"),
+        ),
+        (
+            EncoderState::NotDeclared,
+            "unsupported",
+            StatusCode::CONFLICT,
+            Some("audio_unsupported"),
+        ),
+    ] {
+        let pond = pond(VisionAgent::hearing(E2B, state.clone()), "local", E2B).await;
+        let (_, caps) = send_json(&pond, request("GET", "/api/v1/models/capabilities", None)).await;
+        assert_eq!(caps["voice_notes"], voice_notes, "{state:?}");
+
+        let (got, body) = send_json(
+            &pond,
+            request(
+                "POST",
+                "/api/v1/chat/stream",
+                Some(voice_turn("agree", &wav(16_000, 500), "audio/wav")),
+            ),
+        )
+        .await;
+        assert_eq!(got, status, "{state:?}");
+        if let Some(code) = code {
+            assert_eq!(body["code"], code, "{state:?}");
+        }
     }
 }
 
