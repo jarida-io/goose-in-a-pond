@@ -22,7 +22,7 @@ pub use pond_ear::{Household, ModelFile};
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -356,8 +356,11 @@ impl Drop for EarRig {
     }
 }
 
-/// Utterances one listen takes: the wake phrase alone and a noise blip each cost one.
-const LISTEN_ROUNDS: usize = 3;
+/// The wake phrase alone this many times over ends a listen: a second is the person repeating it.
+const WAKE_ALONE_ROUNDS: usize = 2;
+/// How long noise may keep a listen going: the reply's tail, still in the ring when the follow-up
+/// starts, arrives as several blips at once, and none of them is the person.
+const NOISE_PATIENCE: Duration = Duration::from_secs(8);
 /// Shorter speech than this, with no words in it, is taken for noise even when the model hears.
 const MIN_UNWORDED_SAMPLES: usize = reference::RATE as usize * 6 / 10;
 /// Where a recording's loudest sample is brought before the model hears it.
@@ -478,7 +481,9 @@ impl VoiceInput for EarRig {
             Some(Primed::Onset(onset)) => from = ListenFrom::Since(onset),
             None => {}
         }
-        for _ in 0..LISTEN_ROUNDS {
+        let listening_since = Instant::now();
+        let mut wake_alone = 0;
+        loop {
             let Heard::Utterance {
                 end,
                 pcm,
@@ -530,8 +535,16 @@ impl VoiceInput for EarRig {
                 if follow_up && wake {
                     return Ok(Some(String::new()));
                 }
-                // A blip often lands as the reply ends or the cue plays; the words come after it.
-                if !wake {
+                if wake {
+                    wake_alone += 1;
+                    if wake_alone >= WAKE_ALONE_ROUNDS {
+                        return Ok(Some(String::new()));
+                    }
+                } else {
+                    // A blip lands as the reply ends or the cue plays; the words come after it.
+                    if listening_since.elapsed() >= NOISE_PATIENCE {
+                        return Ok(Some(String::new()));
+                    }
                     tracing::info!(
                         raw = %raw,
                         "ear: only noise or filler hallucination heard, ignored; still listening"
@@ -552,7 +565,6 @@ impl VoiceInput for EarRig {
             }
             return self.kept(command, pcm);
         }
-        Ok(Some(String::new()))
     }
 
     fn prompt(&self) -> &str {

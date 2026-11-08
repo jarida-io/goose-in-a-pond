@@ -909,8 +909,15 @@ async fn the_real_ear_ends_a_quiet_follow_up_with_silence() {
 }
 
 #[tokio::test]
-async fn a_hallucinated_filler_follow_up_is_ignored_and_the_follow_up_after_it_heard() {
-    let says = Says::new(&["Goose, what's the weather?", "Thank you.", "and tomorrow?"]);
+/// On the nano the reply's tail reached the follow-up as three wordless blips 25 ms apart.
+async fn the_blips_a_reply_leaves_never_close_its_follow_up() {
+    let says = Says::new(&[
+        "Goose, what's the weather?",
+        "Thank you.",
+        "",
+        "Thank you.",
+        "and tomorrow?",
+    ]);
     let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
     let waiting = tokio::spawn({
         let rig = rig.clone();
@@ -927,12 +934,11 @@ async fn a_hallucinated_filler_follow_up_is_ignored_and_the_follow_up_after_it_h
         let rig = rig.clone();
         async move { rig.listen().await }
     });
-    ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
-        .await;
-    ctl.emit(utterance(ctl.at() - S, ctl.at()));
-    ctl.until("the listen after the filler", |l, _| l.listens.len() == 2)
-        .await;
-    ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    for blip in 1..=4 {
+        ctl.until("the next listen", |l, _| l.listens.len() == blip)
+            .await;
+        ctl.emit(utterance(ctl.at() - S / 10, ctl.at()));
+    }
     let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
     assert_eq!(heard.as_deref(), Some("and tomorrow?"));
 }
