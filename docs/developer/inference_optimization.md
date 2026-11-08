@@ -224,7 +224,9 @@ already cached.
 Background model work (quiet compaction, memory consolidation and extraction, titling, proactive
 review, summary refresh: `LaneJob` in `crates/pond-core/src/user_data/services/inference_lane.rs`)
 runs one job at a time through the inference lane (`crates/pond-server/src/inference_lane_runner.rs`),
-so background jobs never queue on each other for the one model slot. Embedding is not a lane job:
+so background jobs never queue on each other for the one model slot. Every model call, a turn's
+included, holds the inference bus ([inference-bus.md](inference-bus.md)): a person's turn comes
+first, and a long-task step pauses for it and resumes. Embedding is not a lane job:
 the embedding slot (`crates/pond-server/src/embedding_slot_runner.rs`) runs beside a chore and
 yields to turns, compaction and due long-task steps (`embedding_may_run`).
 

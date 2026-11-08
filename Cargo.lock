@@ -11916,6 +11916,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pond-bus"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pond-connect"
 version = "0.1.0"
 dependencies = [
@@ -11959,6 +11967,7 @@ dependencies = [
  "chrono-tz",
  "croner",
  "futures",
+ "pond-bus",
  "pond-voice",
  "regex",
  "serde",

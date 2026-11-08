@@ -1105,6 +1105,8 @@ export interface LongTask {
   result_artifact_id: string | null;
   /** Where an open task waits; `null` once it has ended, and absent from an older pond. */
   queue?: LongTaskQueuePlace | null;
+  /** A step is running but a person's turn has the model; it resumes after. Absent from an older pond. */
+  paused_for_turn?: boolean;
 }
 
 /** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */

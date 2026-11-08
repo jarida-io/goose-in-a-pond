@@ -44,6 +44,9 @@ use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
 use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
+use pond_core::models::domain::inference_bus::{
+    inference_bus, running_under, InferenceClaim, InferenceHeldFloor, InferenceHold,
+};
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::model_repository::ModelRepository;
@@ -4628,6 +4631,7 @@ async fn run_server(
         inference_lane.watch_turns(move || {
             use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
             runs.turn_in_flight()
+                || pond_core::models::domain::inference_bus::turn_has_the_model()
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
         });
         let lane = inference_lane.clone();
@@ -4635,6 +4639,22 @@ async fn run_server(
         state.runs.set_preempt_hook(move || {
             lane.preempt();
             turn_started.notify_one();
+        });
+        // A turn queueing on the bus (a wake, a typed message) stops the chore holding the lane at
+        // once. A long-task step is not cancelled: its helper gives the model up and waits.
+        let lane = inference_lane.clone();
+        let turn_started = embedding_turn_started.clone();
+        tokio::spawn(async move {
+            let mut seen = inference_bus().subscribe();
+            let mut had_turn = false;
+            while seen.changed().await.is_ok() {
+                let has_turn = seen.borrow().has(|c| c == InferenceClaim::Turn);
+                if has_turn && !had_turn {
+                    lane.preempt();
+                    turn_started.notify_one();
+                }
+                had_turn = has_turn;
+            }
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -7187,8 +7207,6 @@ async fn run_long_task_runner(
         let helpers = LongTaskHelpers {
             orchestrator: orchestrator.clone(),
             authorities: authorities.clone(),
-            storage: storage.clone(),
-            last_user_activity: last_user_activity.clone(),
             tasks: tasks.clone(),
         };
         if compile_due {
@@ -7277,8 +7295,6 @@ async fn run_long_task_runner(
 struct LongTaskHelpers {
     orchestrator: Arc<dyn pond_core::shared::ports::orchestrator::Orchestrator>,
     authorities: Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
-    storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
-    last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
 }
 
@@ -7338,19 +7354,12 @@ impl LongTaskHelpers {
             .authorities
             .publish(&session_id, authority, cancel.clone());
 
-        // A household turn stops the run: it holds the only GPU that turn needs. So does the run's
-        // own report: the model's turn after "stop here" is reasoning nothing reads.
+        // The run's own report stops it: the model's turn after "stop here" is reasoning nothing
+        // reads. A person's turn does not: the helper gives the model up and resumes after it.
         let watcher = {
-            let activity = self.last_user_activity.clone();
-            let storage = self.storage.clone();
             let cancel = cancel.clone();
             let reported = binding.report_watch();
             tokio::spawn(async move {
-                use pond_core::user_data::services::proactive_review::cancelled_by_activity;
-                let run_started = std::time::Instant::now();
-                let run_started_utc = chrono::Utc::now();
-                let mut tick: u32 = 0;
-                let mut db_seen = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if cancel.is_cancelled() {
@@ -7360,25 +7369,16 @@ impl LongTaskHelpers {
                         cancel.cancel();
                         break;
                     }
-                    tick = tick.wrapping_add(1);
-                    if tick % 4 == 0 {
-                        db_seen = newest_session_activity(storage.as_ref()).await;
-                    }
-                    if cancelled_by_activity(
-                        run_started,
-                        *activity.read().await,
-                        run_started_utc,
-                        db_seen,
-                    ) {
-                        tracing::info!("user activity resumed - stopping the long-task step");
-                        cancel.cancel();
-                        break;
-                    }
                 }
             })
         };
-
-        let run = self.orchestrator.spawn(spec).await;
+        let held = InferenceHeldFloor::new(inference_bus(), InferenceClaim::Task);
+        let give_way = tokio::spawn({
+            let held = held.clone();
+            async move { held.give_way().await }
+        });
+        let run = running_under(InferenceHold::Held(held), self.orchestrator.spawn(spec)).await;
+        give_way.abort();
         watcher.abort();
         drop(lease);
         let reported = binding.take_report();
