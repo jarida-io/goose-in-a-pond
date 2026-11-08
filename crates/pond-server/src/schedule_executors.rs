@@ -84,8 +84,47 @@ impl AgentScheduleExecutor {
     }
 
     /// Prompt the agent in an ephemeral session; the caller (`execute`) holds the semaphore.
+    ///
+    /// A run whose turn ended with no answer is run once more, in a fresh session. On the Jetson
+    /// the Daily Brief's first call now and then spent itself planning, and the same prompt
+    /// answered in full a few minutes later; failing the run left the household with no brief.
     async fn run_agent_prompt(&self, task_id: &str, prompt: &str) -> Result<String> {
-        let session_id = format!("sched-{}-{}", task_id, chrono::Utc::now().timestamp());
+        match self.prompt_once(task_id, prompt, 1).await {
+            Err(e) if Self::worth_retrying(&e) => {
+                tracing::warn!(
+                    kind = "schedule_retry",
+                    task_id = %task_id,
+                    error = %e,
+                    "[scheduler] task {task_id} ended without an answer; running it once more"
+                );
+                self.prompt_once(task_id, prompt, 2).await
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Whether a failed run is retried: only a turn that ended without an answer, which the same
+    /// prompt often answers on a second try. A model that could not start, or an engine fault,
+    /// would only fail again.
+    fn worth_retrying(error: &anyhow::Error) -> bool {
+        matches!(
+            error.downcast_ref::<TurnFailure>(),
+            Some(TurnFailure::NoReply | TurnFailure::NoReplyAfterTools)
+        )
+    }
+
+    /// One attempt at a run, in its own session; `attempt` counts from 1.
+    async fn prompt_once(&self, task_id: &str, prompt: &str, attempt: u32) -> Result<String> {
+        let session_id = format!(
+            "sched-{}-{}{}",
+            task_id,
+            chrono::Utc::now().timestamp(),
+            if attempt > 1 {
+                format!("-{attempt}")
+            } else {
+                String::new()
+            }
+        );
         let _ = self
             .session_storage
             .create_session(session_id.clone())
@@ -130,7 +169,9 @@ impl AgentScheduleExecutor {
             interview: None,
         };
 
-        tracing::info!("[scheduler] executing prompt for task {task_id} (speak={should_speak})");
+        tracing::info!(
+            "[scheduler] executing prompt for task {task_id} (speak={should_speak}, attempt={attempt})"
+        );
 
         // A run that speaks goes through `chat` too, and is spoken only once it has an answer.
         // Streaming the tokens into the speaker spoke goose's "Ran into this error: ..." prose
@@ -148,6 +189,7 @@ impl AgentScheduleExecutor {
                 tracing::warn!(
                     kind = "schedule_prompt_failed",
                     task_id = %task_id,
+                    attempt,
                     failure = ?failure,
                     error = %e,
                     "[scheduler] task {task_id} failed"

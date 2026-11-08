@@ -4581,8 +4581,12 @@ impl GooseAdapter {
                     if request.warmup {
                         break 'attempts;
                     }
-                    // The final reply is the last attempt: one that wrote nothing is not re-asked.
-                    if final_attempt || attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
+                    // A final reply that wrote nothing still leaves the steered re-engagements:
+                    // a guard-stopped turn already left above, so this one only reasoned. On the
+                    // Jetson the Daily Brief's planning round, then its final reply, both came
+                    // back empty, and ending there failed a run the same prompt answers on a
+                    // second try.
+                    if attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
                         tracing::warn!(
                             session_id = %session_id,
                             attempts = attempt + 1,
