@@ -11910,6 +11910,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "pond-core",
+ "pond-ear",
  "pond-voice",
  "rodio",
  "tokio",

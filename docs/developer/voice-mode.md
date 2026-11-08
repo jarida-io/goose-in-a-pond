@@ -92,7 +92,7 @@ Under `--json-events` the refusal is an `error` line and `exit: already_running`
 | Moment | What the user gets |
 |---|---|
 | Wake word heard | a two-note ping (C6 then E6, about 220 ms) |
-| Working | a soft chime (G4 + E5) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false` |
+| Working | a soft chime (G5 + E6) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false`. An octave lower, the wake word model took it for "hey goose" |
 | Answer ready | the tone stops and the reply is spoken as it streams: a short first clause, then whole sentences |
 | Tool calls | shown in the UI (`tool_call`/`tool_result`), never spoken; the tone keeps playing |
 

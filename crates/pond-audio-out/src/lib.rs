@@ -28,7 +28,8 @@ pub const TONE_OFF: u64 = 0;
 /// Applied before the tap, as every level here is, so the echo canceller's reference is what plays.
 const TONE_VOLUME: f32 = 0.10;
 
-/// One tone cycle: a soft major-sixth chime (E5 over G4), then mostly silence.
+/// One tone cycle: a soft major-sixth chime (E6 over G5), then mostly silence. An octave lower,
+/// the wake word model scored it 0.999 as "hey goose" and cut every turn it played in.
 fn working_tone_cycle() -> Vec<f32> {
     let chime_samples = (TONE_RATE as u64 * TONE_CHIME_MS / 1000) as usize;
     let cycle_samples = (TONE_RATE as u64 * TONE_CYCLE_MS / 1000) as usize;
@@ -43,8 +44,8 @@ fn working_tone_cycle() -> Vec<f32> {
         let decay = (-3.2 * progress).exp();
         let envelope = attack * decay;
 
-        let root = (2.0 * std::f32::consts::PI * 392.00 * t).sin(); // G4
-        let sixth = (2.0 * std::f32::consts::PI * 659.25 * t).sin(); // E5
+        let root = (2.0 * std::f32::consts::PI * 783.99 * t).sin(); // G5
+        let sixth = (2.0 * std::f32::consts::PI * 1318.51 * t).sin(); // E6
         out.push((root * 0.6 + sixth * 0.4) * envelope * 0.5);
     }
 
@@ -524,6 +525,40 @@ mod working_tone_tests {
         assert_eq!(ping[0], 0.0);
         assert!(ping.last().is_some_and(|v| v.abs() < 0.01));
         assert!(ping.iter().all(|v| v.abs() <= 0.6));
+    }
+
+    /// The ear listens for the wake word while these play, so none may sound like it.
+    #[test]
+    fn the_wake_word_model_never_takes_the_ponds_own_sounds_for_the_wake_word() {
+        use pond_ear::wake::{detector::Detector, hey_goose, HEY_GOOSE_THRESHOLD};
+        let most = |samples: &[f32], rate: u32| {
+            let mut pcm = Vec::new();
+            pond_ear::dsp::Resampler::new(rate, 16_000).process(samples, &mut pcm);
+            let mut wake = Detector::new(
+                hey_goose().unwrap(),
+                pond_ear::Rung::fastest(),
+                HEY_GOOSE_THRESHOLD,
+            )
+            .unwrap();
+            let quiet = vec![0f32; 16_000];
+            [&quiet[..], &pcm, &pcm, &pcm, &quiet]
+                .iter()
+                .flat_map(|part| wake.push(part).0)
+                .map(|score| score.p)
+                .fold(0f32, f32::max)
+        };
+        let sounds = [
+            ("thinking tone", working_tone_cycle(), TONE_RATE),
+            ("wake ping", wake_ping_samples(), PING_RATE),
+            ("startup chime", route::chime_samples(44_100), 44_100),
+        ];
+        for (name, samples, rate) in sounds {
+            for gain in [1.0, 0.1, 0.01] {
+                let scaled: Vec<f32> = samples.iter().map(|v| v * gain).collect();
+                let p = most(&scaled, rate);
+                assert!(p < 0.5, "{name} at gain {gain} scores {p} as the wake word");
+            }
+        }
     }
 
     /// Mostly silence, so a thirty-second answer is bearable to sit through.
