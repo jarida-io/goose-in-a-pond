@@ -18,6 +18,8 @@
 # Re-reviewed 2026-11-02 against main bf38019c: follow-redirects and joi were
 # bumped rather than ignored; block-buffer's entry went when OSV narrowed it to
 # 0.11 and later; minimatch was added.
+# Re-reviewed 2026-11-08: x/crypto was moved to the commit that fixes GO-2026-5932 and
+# klauspost/compress to 1.20.3 (GO-2026-6865) rather than ignored; pin-utils was added.
 
 # ── Unmaintained-crate notices ───────────────────────────────────────────────
 #
@@ -155,9 +157,7 @@ id = "RUSTSEC-2026-0387"
 ignoreUntil = 2027-01-31
 reason = "crypto-bigint 0.5.5: some operations meant to be constant-time branch on secret data. Fixed only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's optional `lightning` feature, off by default and absent from the shipped binary), via breez-sdk-spark's k256 and elliptic-curve 0.13; breez-sdk-spark 0.27.2, its latest release, still locks crypto-bigint 0.5.5. Also in goose/Cargo.lock through the same RustCrypto 0.13 stack. Remove when breez-sdk-spark moves to elliptic-curve 0.14."
 
-# ── Go: present in the module graph, not in the build ────────────────────────
-
 [[IgnoredVulns]]
-id = "GO-2026-5932"
+id = "RUSTSEC-2026-0441"
 ignoreUntil = 2027-03-31
-reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design; the advisory covers only the openpgp subpackages and has no fixed version because the guidance is to stop using it. native/pondnet does not: `go list -deps ./...` contains no openpgp package and `go mod why golang.org/x/crypto` reports 'main module does not need package golang.org/x/crypto'. govulncheck with the go.mod toolchain agrees -- 1 vulnerability in a required module, 0 called. The govulncheck step in embedded-go-audit is what proves this on every run."
+reason = "pin-utils 0.1.0 is unmaintained: its repository was archived on 2026-10-01. No vulnerable code and no patch to take. It arrives transitively through async-imap 0.11.3 (pond-adapters-imap) and aws-smithy-http 0.63.6, aws-smithy-runtime 1.11.3 and aws-smithy-types 1.5.0 (goose's Bedrock provider), whose latest releases still depend on it; also in goose/Cargo.lock through the same aws-smithy crates. Remove when they move to core::pin::pin! or pin-project-lite."
