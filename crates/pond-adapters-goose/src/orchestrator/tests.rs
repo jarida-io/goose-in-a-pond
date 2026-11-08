@@ -2079,57 +2079,38 @@ async fn siblings_of_one_delegating_turn_still_run_one_at_a_time() {
     drop(claim);
 }
 
-/// Vacuity control for the inheritance tests above.
+/// Vacuity control for the inheritance tests above: a turn's floor is its own conversation's.
 #[tokio::test]
-async fn a_child_of_another_session_waits_for_the_turn_that_holds_the_device() {
+async fn a_helper_of_another_session_waits_on_the_bus_for_the_turn_that_holds_it() {
+    use pond_core::models::domain::inference_bus::{hold_for_call, CallHold};
     let _serial = ONE_RUN_AT_A_TIME.lock().await;
-    let parent = "p4-waiting-parent";
-    let role = role("researcher", &["giap-weather"]);
-    let env = env_with(
+    let claim = claim_device_for_turn(
+        "p4-unrelated-conversation",
         "ollama",
-        parent_tools(&[("giap-weather", &["get_weather"])]),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("an on-device turn claims the device");
+    assert!(
+        process_device_ledger()
+            .inherited_hold("p4-waiting-parent")
+            .is_none(),
+        "only the claiming conversation's children inherit its floor"
     );
-    let runner = Arc::new(FakeRunner::new(env));
-    let (orchestrator, _turn, _token) = live_turn_for(parent, runner);
 
-    let other = CancellationToken::new();
-    let claim = claim_device_for_turn("p4-unrelated-conversation", "ollama", &other)
-        .await
-        .expect("an on-device turn claims the device");
-
-    let spec = spec_for_parent(&role, &["giap-weather"], parent);
-    let task_id = spec.id().to_string();
-    let spawned = {
-        let orchestrator = orchestrator.clone();
-        tokio::spawn(async move { orchestrator.spawn(spec).await })
-    };
-
+    let call = tokio::spawn(hold_for_call(None, InferenceClaim::Task));
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert_eq!(
-        orchestrator
-            .poll(&task_id)
-            .await
-            .unwrap()
-            .expect("the run is registered")
-            .status,
-        TaskStatus::Queued,
-        "a child ran while an UNRELATED conversation's turn held the device - inheritance is \
-         being granted to every session rather than to the child's own parent, which is \
-         invariant 3 with the parent half removed"
+    assert!(
+        !call.is_finished(),
+        "a helper's call took the model while an unrelated conversation's turn held it"
     );
 
     drop(claim);
-    let run = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+    let call = tokio::time::timeout(std::time::Duration::from_secs(5), call)
         .await
-        .expect("the child never ran after the device was released")
-        .unwrap()
-        .expect("the delegation runs");
-    assert_eq!(run.status, TaskStatus::Completed);
-    assert_eq!(
-        process_device_ledger().reserved_fraction(parent),
-        0.0,
-        "the queued-then-run child left its reservation behind"
-    );
+        .expect("the call never got the model after the turn ended")
+        .unwrap();
+    assert!(matches!(call, CallHold::Own(_)));
 }
 
 #[test]

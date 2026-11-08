@@ -105,12 +105,13 @@ export function aheadWords(ahead: readonly LongTaskAhead[]): string {
   return `Ahead of this one: ${parts.join(" and ")}.`;
 }
 
-export function taskWords(task: Pick<LongTask, "state" | "steps"> & Partial<Pick<LongTask, "queue">>): string {
+export function taskWords(task: Pick<LongTask, "state" | "steps"> & Partial<Pick<LongTask, "queue" | "paused_for_turn">>): string {
   if (isWaiting({ state: task.state, queue: task.queue })) return `Waiting its turn: ${placeWords(task.queue?.position ?? 1)}`;
   switch (task.state) {
     case "planning":
       return "Planning";
     case "running":
+      if (task.paused_for_turn) return "Paused for your conversation";
       return task.steps.length > 0 ? `Working: step ${currentStep(task.steps)} of ${task.steps.length}` : "Working";
     case "awaiting_approval":
       return "Waiting for your approval";

@@ -3790,6 +3790,8 @@ impl GooseAdapter {
                 &turn_provider,
                 &cancel_token,
             ).await;
+            // The turn's calls run under its floor; it is weak, so it lapses when the turn ends.
+            guard_controls.set_inference_hold(_device.as_ref().map(|d| d.inference_hold()));
 
             yield Ok(AgentStreamEvent::Status { content: "Agent working...".to_string() });
             let mut total_output_chars: usize = 0;

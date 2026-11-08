@@ -4,6 +4,8 @@ members = [
     # Leaf crate: voice text/DSP primitives, no framework deps. Kept a leaf by
     # choice now rather than by necessity -- see its Cargo.toml.
     "crates/pond-voice",
+    # Leaf crate: the bus every shared device is reached through (one queued claim, lanes, state).
+    "crates/pond-bus",
     # Single microphone owner (cpal). Depends on pond-voice.
     "crates/pond-audio",
     # Speaker-side counterpart: playback, output device, working tone (rodio).
@@ -241,6 +243,7 @@ libp2p = { version = "0.57", features = [
 ] }
 
 # Internal workspace crates
+pond-bus               = { path = "crates/pond-bus" }
 pond-core              = { path = "crates/pond-core" }
 pond-mesh-protocol      = { path = "crates/pond-mesh-protocol" }
 pond-adapters-mesh-libp2p = { path = "crates/pond-adapters-mesh-libp2p" }

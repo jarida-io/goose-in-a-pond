@@ -4909,15 +4909,19 @@ async fn retitle_session(
     let service = SessionTitleService::new(provider, state.session_storage.clone());
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let outcome = service
-        .retitle_now(&session_id, &cancel)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("{e}") })),
-            )
-        })?;
+    // A person asked for it, so it waits behind no task step or chore.
+    use pond_core::models::domain::inference_bus::{running_under, InferenceClaim, InferenceHold};
+    let outcome = running_under(
+        InferenceHold::Lane(InferenceClaim::Turn),
+        service.retitle_now(&session_id, &cancel),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e}") })),
+        )
+    })?;
 
     let body = match outcome {
         RetitleOutcome::Retitled { title, .. } => {
@@ -16884,6 +16888,11 @@ async fn long_task_view(
         "artifacts": artifacts,
         "result_artifact_id": result,
         "queue": queue,
+        // A step's helper gives the model up while a person's turn has it, and resumes after.
+        "paused_for_turn": steps.iter().any(|step| {
+            step.state() == pond_core::shared::domain::long_task::StepState::Running
+        })
+            && pond_core::models::domain::inference_bus::turn_has_the_model(),
     }))
 }
 

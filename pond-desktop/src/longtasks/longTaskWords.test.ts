@@ -113,6 +113,11 @@ describe("a task in plain words", () => {
     expect(taskWords(taskOf({ steps: [] }))).toBe("Working");
   });
 
+  it("says a running task is paused while a person's turn has the model", () => {
+    expect(taskWords(taskOf({ paused_for_turn: true }))).toBe("Paused for your conversation");
+    expect(taskWords(taskOf({ paused_for_turn: false }))).toBe("Working: step 2 of 4");
+  });
+
   it("moves on to the first step not finished when none is running", () => {
     const steps = [stepOf("a", { state: "completed" }), stepOf("b", { state: "pending" }), stepOf("c")];
     expect(currentStep(steps)).toBe(2);

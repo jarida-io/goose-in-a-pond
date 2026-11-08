@@ -83,17 +83,36 @@ impl LlmProvider for GooseProviderAdapter {
             .map(Self::to_goose_message)
             .collect();
 
+        use pond_core::models::domain::inference_bus::{
+            current_hold, hold_for_call, InferenceClaim,
+        };
+        use pond_core::models::services::context::model_class::{
+            provider_locality, ProviderLocality,
+        };
+        // A side call is the pond's own chore unless its caller runs under another hold.
+        let call = match provider_locality(self.provider.get_name()) {
+            ProviderLocality::Hosted => None,
+            _ => Some(hold_for_call(current_hold(), InferenceClaim::Chore).await),
+        };
         let lease = gpu_gate().lease().await;
-        let completed = self
-            .provider
-            .complete(
-                &self.model_config,
-                system_prompt,
-                &goose_messages,
-                &[], // no tools for direct completion
-            )
-            .await;
+        let completion = self.provider.complete(
+            &self.model_config,
+            system_prompt,
+            &goose_messages,
+            &[], // no tools for direct completion
+        );
+        let completed = match &call {
+            Some(call) => {
+                goose_providers::request_context::stopping_when(call.stop_when(), completion).await
+            }
+            None => completion.await,
+        };
         lease.finished();
+        if call.as_ref().is_some_and(|call| call.was_cut()) {
+            return Err(anyhow!(
+                "the model was wanted for a person's turn; this call stopped and can run later"
+            ));
+        }
         let (response, _usage) = completed.map_err(|e| anyhow!("Goose provider error: {}", e))?;
 
         Ok(Self::from_goose_message(&response))

@@ -12,6 +12,9 @@ use goose::providers::local_inference::load_error::ModelLoadError;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 use pond_core::models::domain::gpu_gate::{gpu_gate, ComputeLease};
+use pond_core::models::domain::inference_bus::{
+    current_hold, hold_for_call, CallHold, InferenceClaim, InferenceHold,
+};
 use rmcp::model::Tool;
 
 /// Found in Goose's default prompt and fallback; on the chat path it means GIAP's was lost.
@@ -43,6 +46,9 @@ pub struct SessionControls {
     /// rewrites the typed error into "Ran into this error" prose; the adapter compares this across
     /// a turn to replace that prose with a line the household can act on.
     gpu_memory_failures: AtomicU32,
+    /// What this session's engine calls run under on the inference bus: its turn's floor, or the
+    /// run it is a helper of. `None` makes each call claim the bus for itself.
+    inference_hold: Mutex<Option<InferenceHold>>,
 }
 
 // `pictures_readable` values. Zero, the default, is "no turn has said", which promotes.
@@ -50,6 +56,20 @@ const PICTURES_READABLE: u8 = 1;
 const PICTURES_UNREADABLE: u8 = 2;
 
 impl SessionControls {
+    pub fn set_inference_hold(&self, hold: Option<InferenceHold>) {
+        *self
+            .inference_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hold;
+    }
+
+    pub fn inference_hold(&self) -> Option<InferenceHold> {
+        self.inference_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn set_turn_appendix(&self, appendix: Option<String>) {
         *self.turn_appendix.lock().unwrap_or_else(|e| e.into_inner()) = appendix;
     }
@@ -544,24 +564,51 @@ fn enforce_tools(tools: &[Tool], allowed: &Option<HashSet<String>>) -> Option<Ve
     )
 }
 
-/// Keeps `lease` until the engine's stream closes, which happens when its decode thread returns.
-fn hold_until_closed(stream: MessageStream, lease: ComputeLease) -> MessageStream {
+/// Keeps `lease` and the call's hold on the inference bus until the engine's stream closes,
+/// which happens when its decode thread returns.
+fn hold_until_closed(
+    stream: MessageStream,
+    lease: ComputeLease,
+    call: Option<CallHold>,
+) -> MessageStream {
     use futures::StreamExt;
 
     Box::pin(futures::stream::unfold(
-        (stream, Some(lease)),
-        |(mut stream, mut lease)| async move {
+        (stream, Some(lease), call),
+        |(mut stream, mut lease, mut call)| async move {
             match stream.next().await {
-                Some(item) => Some((item, (stream, lease))),
+                Some(item) => Some((item, (stream, lease, call))),
                 None => {
                     if let Some(lease) = lease.take() {
                         lease.finished();
                     }
+                    drop(call.take());
                     None
                 }
             }
         },
     ))
+}
+
+/// The inference bus's hold for one call through the shim; `None` for a hosted provider, which
+/// has no one context to share. A call with no hold of its own is a helper's or a turn's.
+async fn hold_for_shim_call(
+    provider: &str,
+    session: Option<&Arc<SessionControls>>,
+) -> Option<CallHold> {
+    use pond_core::models::services::context::model_class::{provider_locality, ProviderLocality};
+    if provider_locality(provider) == ProviderLocality::Hosted {
+        return None;
+    }
+    let hold = session
+        .and_then(|s| s.inference_hold())
+        .or_else(current_hold);
+    let fallback = if goose_providers::request_context::is_helper() {
+        InferenceClaim::Task
+    } else {
+        InferenceClaim::Turn
+    };
+    Some(hold_for_call(hold, fallback).await)
 }
 
 /// Write the final payload as an OpenAI chat body into `$GIAP_CAPTURE_PAYLOAD`, via goose's own
@@ -919,21 +966,44 @@ impl Provider for GiapProviderShim {
             final_tools,
         );
 
-        let lease = gpu_gate().lease().await;
-        let result = match self
-            .inner
-            .stream(
-                model_config,
-                enforced_system.as_deref().unwrap_or(system),
-                final_messages,
-                final_tools,
-            )
-            .await
-        {
-            Ok(stream) => Ok(hold_until_closed(stream, lease)),
-            Err(e) => {
-                lease.finished();
-                Err(e)
+        let final_system = enforced_system.as_deref().unwrap_or(system);
+        let result = loop {
+            let call = hold_for_shim_call(self.inner.get_name(), session.as_ref()).await;
+            let lease = gpu_gate().lease().await;
+            let streamed =
+                self.inner
+                    .stream(model_config, final_system, final_messages, final_tools);
+            let streamed = match &call {
+                Some(call) => {
+                    goose_providers::request_context::stopping_when(call.stop_when(), streamed)
+                        .await
+                }
+                None => streamed.await,
+            };
+            match (streamed, call) {
+                // A call below a person's turn is read whole: nothing watches it token by token,
+                // and one cut for a turn is asked again once it holds the bus anew.
+                (Ok(stream), Some(call)) if call.can_be_cut() => {
+                    use futures::StreamExt;
+                    let items: Vec<_> = stream.collect().await;
+                    lease.finished();
+                    let finished = items.iter().any(|item| matches!(item, Ok((_, Some(_)))));
+                    if call.was_cut() && !finished {
+                        drop(call);
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "inference_call_resumed",
+                            "a call was cut for a turn; it runs again once the turn ends"
+                        );
+                        continue;
+                    }
+                    break Ok(Box::pin(futures::stream::iter(items)) as MessageStream);
+                }
+                (Ok(stream), call) => break Ok(hold_until_closed(stream, lease, call)),
+                (Err(e), _) => {
+                    lease.finished();
+                    break Err(e);
+                }
             }
         };
         if let Some(call) = egress {
@@ -2014,6 +2084,109 @@ mod tests {
             }
         })
         .await;
+    }
+
+    // ── A helper's call cut for a turn runs again after it ───────────────────
+
+    /// Fake engine that, on its first call, decodes until the bus asks it to stop and ends cut.
+    struct Cutting {
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Provider for Cutting {
+        fn get_name(&self) -> &str {
+            "local"
+        }
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            _: &[Message],
+            _: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            use goose::providers::base::{ProviderUsage, Usage};
+            let stop =
+                goose_providers::request_context::stop_when().expect("the door installs a stop");
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                while !stop() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                let partial = Message::assistant().with_text("half a rep");
+                return Ok(Box::pin(futures::stream::iter(vec![Ok((
+                    Some(partial),
+                    None,
+                ))])));
+            }
+            let whole = Message::assistant().with_text("the whole reply");
+            let usage = ProviderUsage::new("m".into(), Usage::default());
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok((Some(whole), None)),
+                Ok((None, Some(usage))),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_helpers_call_cut_for_a_turn_runs_again_after_it_and_goose_sees_one_whole_reply() {
+        use futures::StreamExt;
+        use pond_core::models::domain::inference_bus::{
+            inference_bus, running_under, InferenceHeldFloor,
+        };
+        let calls = Arc::new(AtomicU32::new(0));
+        let shim = GiapProviderShim::new(
+            Arc::new(Cutting {
+                calls: calls.clone(),
+            }),
+            Arc::new(ShimControls::default()),
+            None,
+        );
+        let step = InferenceHeldFloor::new(inference_bus(), InferenceClaim::Task);
+        let reply = tokio::spawn(running_under(InferenceHold::Held(step), async move {
+            let stream = shim
+                .stream(
+                    &ModelConfig::new("m"),
+                    "sys",
+                    &[Message::user().with_text("go")],
+                    &[],
+                )
+                .await
+                .expect("the call streams");
+            stream.collect::<Vec<_>>().await
+        }));
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let turn = inference_bus()
+            .claim(
+                InferenceClaim::Turn,
+                Some(std::time::Duration::from_secs(5)),
+                || true,
+            )
+            .await
+            .expect("the helper gives the model up for a turn");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !reply.is_finished(),
+            "the cut call waits for the turn to end"
+        );
+        drop(turn);
+
+        let items = tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .expect("the call ran again once the turn ended")
+            .unwrap();
+        let texts: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.as_ref().ok()?.0.as_ref().map(Message::as_concat_text))
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["the whole reply".to_string()],
+            "goose never sees the cut"
+        );
+        assert!(calls.load(Ordering::SeqCst) >= 2);
     }
 
     fn picture(text: &str) -> Message {

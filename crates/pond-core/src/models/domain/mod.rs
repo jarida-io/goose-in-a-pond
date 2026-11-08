@@ -12,6 +12,7 @@ pub mod engine;
 pub mod gguf;
 pub mod gpu_gate;
 pub mod image_limits;
+pub mod inference_bus;
 pub mod litert;
 pub mod message;
 pub mod mic_gate;
