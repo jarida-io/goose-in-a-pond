@@ -16,6 +16,12 @@ export const HP_PATHS = {
   // drops. The hand-drawn cloud it replaces bulged to y -0.6 and x 0.2, past the 24-unit viewBox,
   // so the SVG clipped its top and left on every rainy day; icons.test.ts holds the bounds.
   rain:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 18l-1 3M12 18l-1 3M16 18l-1 3",
+  // Lucide's cloud-snow, cloud-lightning and cloud-fog on the same cloud as `rain`, and its
+  // cloud-moon for a partly cloudy night: the Pond sent rain's cloud for snow and a storm.
+  snow:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 15h.01M8 19h.01M12 17h.01M12 21h.01M16 15h.01M16 19h.01",
+  storm:       "M6 16.3A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 .5 8.97M13 12l-3 5h4l-3 5",
+  fog:         "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M16 17H7M17 21H9",
+  cloudMoon:   "M10.19 8.5A6 6 0 0 1 16 4a1 1 0 0 0 6 6 6 6 0 0 1-3 5.2M13 16a3 3 0 1 1 0 6H7a5 5 0 1 1 4.9-6Z",
   music:       "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
   play:        "M6 4l14 8-14 8V4z",
   skipF:       "M5 4l10 8-10 8V4zM19 5v14",

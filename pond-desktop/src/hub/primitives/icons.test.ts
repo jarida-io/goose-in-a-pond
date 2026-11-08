@@ -111,8 +111,9 @@ function pathBounds(d: string): [number, number, number, number] {
 
 describe("weather icons", () => {
   // The keys the Pond's weather route can send (`weather_icon_key` in pond-api), bar `sun`,
-  // which is circles and lines drawn well inside the box.
-  it.each(["cloudSun", "cloud", "rain"] as const)(
+  // which is circles and lines drawn well inside the box, and the night's `cloudMoon` (the
+  // night's clear sky is `moon`, a single arc).
+  it.each(["cloudSun", "cloud", "rain", "snow", "storm", "fog", "cloudMoon", "moon"] as const)(
     "%s stays inside the 24-unit viewBox, stroke included",
     (key) => {
       const [minX, minY, maxX, maxY] = pathBounds(HP_PATHS[key]);

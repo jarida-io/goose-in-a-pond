@@ -6768,22 +6768,58 @@ async fn get_weather(
     })))
 }
 
-/// Maps a WMO description to one of the dashboard widget's icon keys.
+/// Maps a WMO description (`pond-adapters-weather`'s `wmo.rs`) to one of the dashboard widget's
+/// icon keys, so the icon shows the condition the text names.
+///
+/// Storm and snow come first: "Thunderstorm" is not rain to look at, and "Snow showers" carries
+/// "shower" too. Snow, a storm and fog showed the rain cloud or a plain cloud before
+/// (2026-11-08). The widget swaps `sun` and `cloudSun` for the moon after dark; the Pond does not
+/// know the dashboard's hour, so the key names the sky only.
 fn weather_icon_key(description: &str) -> &'static str {
     let d = description.to_lowercase();
-    if d.contains("rain")
-        || d.contains("drizzle")
-        || d.contains("shower")
-        || d.contains("snow")
-        || d.contains("thunder")
-    {
+    if d.contains("thunder") {
+        "storm"
+    } else if d.contains("snow") {
+        "snow"
+    } else if d.contains("rain") || d.contains("drizzle") || d.contains("shower") {
         "rain"
+    } else if d.contains("fog") {
+        "fog"
     } else if d.contains("clear sky") {
         "sun"
     } else if d.contains("clear") || d.contains("partly") {
         "cloudSun"
     } else {
         "cloud"
+    }
+}
+
+#[cfg(test)]
+mod weather_icon_tests {
+    use super::weather_icon_key;
+
+    #[test]
+    fn every_wmo_description_gets_the_icon_of_its_own_condition() {
+        for (description, icon) in [
+            ("Clear sky", "sun"),
+            ("Mainly clear", "cloudSun"),
+            ("Partly cloudy", "cloudSun"),
+            ("Overcast", "cloud"),
+            ("Fog", "fog"),
+            ("Light drizzle", "rain"),
+            ("Freezing drizzle", "rain"),
+            ("Moderate rain", "rain"),
+            ("Freezing rain", "rain"),
+            ("Violent showers", "rain"),
+            ("Slight snow", "snow"),
+            ("Snow grains", "snow"),
+            ("Snow showers", "snow"),
+            ("Thunderstorm", "storm"),
+            ("Thunderstorm with hail", "storm"),
+            ("Unknown", "cloud"),
+        ] {
+            assert_eq!(weather_icon_key(description), icon, "{description}");
+        }
     }
 }
 
