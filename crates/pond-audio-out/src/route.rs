@@ -270,7 +270,14 @@ pub fn play_samples_exactly(
     use rodio::Source;
     let samples = rodio::buffer::SamplesBuffer::new(1, rate, samples).amplify(volume);
     sink.append(crate::tap::tapped(samples));
-    sink.sleep_until_end();
+    let mut stall = crate::bus::Stall::new(&sink);
+    while !sink.empty() {
+        if stall.stuck(&sink) {
+            sink.stop();
+            anyhow::bail!("the speaker took no audio");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     Ok(())
 }
 

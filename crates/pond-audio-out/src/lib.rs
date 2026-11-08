@@ -293,7 +293,7 @@ fn compute_audio_envelope(wav: &[u8], window_ms: u64) -> Vec<f32> {
 
 /// No progress for this long while audio is queued means the device stopped taking it. Generous,
 /// because a Bluetooth speaker can take a second to wake.
-const STALL_AFTER: Duration = Duration::from_secs(3);
+pub(crate) const STALL_AFTER: Duration = Duration::from_secs(3);
 
 /// Interruptibly play a turn's WAV once the turn holds the bus; `audio_level_sink` gets one level
 /// per poll tick. Stops when the speaker reopens elsewhere (what was queued on the old stream would

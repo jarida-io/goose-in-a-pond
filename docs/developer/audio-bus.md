@@ -31,10 +31,20 @@ the next `begin_utterance` releases a stale one, and a claim that waits a minute
   this is true, and each hold waits once for that pause (`Floor::settle`) before its first sound.
 - `kind="audio_bus"` trace lines for every hold, yield and release.
 
+## The mic and speaker check
+
+The device supervisor's check (`Prober::hears`) spans both buses, so it takes them in one order:
+the speaker bus first, as a `Test` claim that waits out a reply, then the microphone owner's
+exclusive slot (`MicHandle::run_exclusive`). The check holds both for the whole test, and the
+microphone owner never waits on the speaker. A speaker probe takes the bus before it suspends a card.
+
 ## Rules
 
 - Never open an output stream or play a sound without a `Floor`. `route::play_samples_exactly` and
   `play_chime` take the floor as an argument; a device probe takes one before it suspends a card.
 - Never wait for the bus to be free and then play: claim it.
+- A sound whose device takes nothing for 3 s stops and gives the bus back, and a stall on the
+  routed speaker is reported to the device supervisor (`route::report_stall`).
+- Take the speaker bus before the microphone's exclusive slot, never the other way round.
 - A bus elsewhere in the pond follows the same pattern: one instance, one queued claim, published
   state.

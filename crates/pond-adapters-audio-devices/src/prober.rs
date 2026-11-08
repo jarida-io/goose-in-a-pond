@@ -20,6 +20,8 @@ use pond_audio_out::Claim;
 
 /// How long a device's chime waits for whatever the pond is playing.
 const CHIME_WAITS_FOR_BUS: Duration = Duration::from_secs(10);
+/// How long a mic and speaker check waits for the speaker: a reply runs to its end first.
+const CHECK_WAITS_FOR_SPEAKER: Duration = Duration::from_secs(120);
 
 /// cpal's only host on Linux is ALSA, whose listing opens every node.
 const ALSA: bool = cfg!(target_os = "linux");
@@ -145,13 +147,24 @@ impl AudioDeviceProber for CpalProber {
         if !mic_gate::mic_enabled() {
             return off();
         }
+        // One critical section over both buses: the speaker, queued for like any sound and waited
+        // for while a reply plays, then the microphone owner's slot, which so never waits on it.
+        let Some(floor) =
+            pond_audio_out::bus().claim(Claim::Test, Some(CHECK_WAITS_FOR_SPEAKER), || true)
+        else {
+            return PairOutcome::Failed {
+                reason: "the speaker stayed busy".to_string(),
+            };
+        };
+        floor.settle(Duration::from_millis(400));
+        let floor = std::sync::Arc::new(floor);
         let (speaker, mic) = (speaker.id.clone(), mic.id.clone());
         let cards = Self::cards();
         let Some(owner) = &self.mic else {
             let _suspended = ALSA.then(|| {
                 sound_server::suspend_for_devices(&SystemPactl, &cards, Some(&mic), Some(&speaker))
             });
-            return sound::through_mic(&speaker, &mic);
+            return sound::through_mic(&floor, &speaker, &mic);
         };
         // On the owner's thread, so nothing else opens a microphone during the test.
         owner
@@ -167,7 +180,7 @@ impl AudioDeviceProber for CpalProber {
                             Some(&speaker),
                         )
                     });
-                    sound::through_open_mic(&speaker, view.shared)
+                    sound::through_open_mic(&floor, &speaker, view.shared)
                 } else {
                     let _suspended = ALSA.then(|| {
                         sound_server::suspend_for_devices(
@@ -177,7 +190,7 @@ impl AudioDeviceProber for CpalProber {
                             Some(&speaker),
                         )
                     });
-                    sound::through_mic(&speaker, &mic)
+                    sound::through_mic(&floor, &speaker, &mic)
                 }
             })
             .unwrap_or_else(|| PairOutcome::Failed {

@@ -108,6 +108,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    /// These share the process's one bus, where one test's turn would preempt another's notice.
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Synthesises each unit as a WAV whose sample rate is its length, so a player can tell them
     /// apart.
     #[derive(Default)]
@@ -142,6 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_unit_is_synthesised_and_played_while_holding_the_bus() {
+        let _one = ONE_AT_A_TIME.lock().await;
         let voice = Arc::new(Synth::default());
         let played = Arc::new(Mutex::new(Vec::new()));
         let text =
@@ -156,6 +160,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_announcement_queues_behind_a_turn() {
+        let _one = ONE_AT_A_TIME.lock().await;
         let turn = tokio::task::spawn_blocking(|| bus().claim(Claim::Turn, None, || true))
             .await
             .unwrap()
@@ -180,6 +185,7 @@ mod tests {
     /// and says the second sentence again before the third.
     #[tokio::test]
     async fn a_cut_announcement_picks_up_at_the_sentence_it_was_cut_in() {
+        let _one = ONE_AT_A_TIME.lock().await;
         let played = Arc::new(Mutex::new(Vec::new()));
         let plays = Arc::new(AtomicUsize::new(0));
         let player: Player = Arc::new({
@@ -211,6 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn what_an_announcement_says_reaches_the_spoken_tap() {
+        let _one = ONE_AT_A_TIME.lock().await;
         // The only test that sets the spoken tap, so it needs no lock.
         let said = Arc::new(Mutex::new(Vec::<String>::new()));
         crate::set_spoken_tap(Some({

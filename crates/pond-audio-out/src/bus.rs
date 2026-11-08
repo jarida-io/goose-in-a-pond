@@ -366,14 +366,45 @@ impl Floor {
         let generation = speaker.generation();
         let sink = rodio::Sink::try_new(&speaker.handle())?;
         sink.append(tap::tapped(source));
+        let mut stall = Stall::new(&sink);
         while !sink.empty() {
             if !self.keep() || speaker.generation() != generation {
                 sink.stop();
                 break;
             }
+            if stall.stuck(&sink) {
+                sink.stop();
+                crate::route::report_stall(crate::route::output_device());
+                anyhow::bail!("the speaker stopped taking audio");
+            }
             std::thread::sleep(POLL);
         }
         Ok(())
+    }
+}
+
+/// Whether a sink has played nothing for [`crate::STALL_AFTER`]: a device that stopped taking
+/// audio would otherwise keep the bus for as long as it stays stuck.
+pub(crate) struct Stall {
+    position: Duration,
+    moved_at: Instant,
+}
+
+impl Stall {
+    pub(crate) fn new(sink: &rodio::Sink) -> Self {
+        Self {
+            position: sink.get_pos(),
+            moved_at: Instant::now(),
+        }
+    }
+
+    pub(crate) fn stuck(&mut self, sink: &rodio::Sink) -> bool {
+        let now = sink.get_pos();
+        if now != self.position {
+            self.position = now;
+            self.moved_at = Instant::now();
+        }
+        self.moved_at.elapsed() >= crate::STALL_AFTER
     }
 }
 
