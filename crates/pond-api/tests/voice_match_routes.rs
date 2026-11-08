@@ -428,3 +428,43 @@ async fn a_take_deafens_the_room_for_twenty_seconds() {
         .with_timezone(&chrono::Utc);
     assert!(until - chrono::Utc::now() <= chrono::Duration::seconds(20));
 }
+
+/// A take the dashboard's calibration heard wrongly is taken back on its own, not with the rest.
+#[tokio::test]
+async fn one_wake_variant_is_forgotten_without_the_others() {
+    use pond_core::user_data::ports::settings::SettingsRepository as _;
+    let pond = pond(true).await;
+    let mut settings = pond.settings.get().await.unwrap();
+    settings.voice_wake_word_transcriptions = vec!["goose".into(), "gus".into(), "juice".into()];
+    pond.settings.update(&settings).await.unwrap();
+
+    let (status, body) = call(
+        &pond,
+        Method::DELETE,
+        "/api/v1/voice/calibrate?variant=juice",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], "juice");
+    assert_eq!(body["all_variants"], json!(["goose", "gus"]));
+    assert_eq!(
+        pond.settings
+            .get()
+            .await
+            .unwrap()
+            .voice_wake_word_transcriptions,
+        vec!["goose".to_string(), "gus".to_string()]
+    );
+
+    let (status, body) = call(&pond, Method::DELETE, "/api/v1/voice/calibrate", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cleared"], true);
+    assert!(pond
+        .settings
+        .get()
+        .await
+        .unwrap()
+        .voice_wake_word_transcriptions
+        .is_empty());
+}

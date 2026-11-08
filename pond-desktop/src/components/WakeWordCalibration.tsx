@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke, isDesktopShell } from "../shell";
 import { recordFixedDuration, micErrorMessage, type FixedRecorder } from "../modes/voice/micRecorder";
 import { Button } from "@heroui/react";
-import { Mic, RotateCcw, Check, X } from "lucide-react";
+import { Mic, RotateCcw, Undo2, Check, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
 import { AudioWaves } from "./AudioWaves";
@@ -33,9 +33,17 @@ function sleep(ms: number): Promise<void> {
 
 // ── Component ──────────────────────────────────────────────────
 
+/** One accepted take: the variant it taught the Pond, or null when it heard one already known. */
+interface Take {
+  added: string | null;
+}
+
 export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
-  const [sampleCount, setSampleCount] = useState(0);
+  // Kept per take, so the last one can be taken back without starting over.
+  const [takes, setTakes] = useState<Take[]>([]);
+  const sampleCount = takes.length;
+  const [undoing, setUndoing] = useState(false);
   const [targetCount, setTargetCount] = useState(5);
   const [variants, setVariants] = useState<string[]>([]);
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
@@ -49,6 +57,16 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
 
   const abortedRef = useRef(false);
   const recorderRef = useRef<FixedRecorder | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Opened from Train, far down the page, it renders at the top: brought into view and focused,
+  // or it looked as if Train had done nothing.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    root.focus({ preventScroll: true });
+  }, []);
 
   // ── Cleanup on unmount ────────────────────────────────────────
   // Reset on mount: StrictMode's remount reuses the ref, so a stale `true` would block sampling.
@@ -134,9 +152,9 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
       }
 
       // Progress counts takes: hearing the phrase the same way every time is the good outcome.
-      const takes = sampleCount + 1;
-      setSampleCount(takes);
-      setPhase(takes >= result.target_count ? "complete" : "idle");
+      const count = sampleCount + 1;
+      setTakes((all) => [...all, { added: result.new_variant ? result.heard : null }]);
+      setPhase(count >= result.target_count ? "complete" : "idle");
     } catch (e) {
       if (abortedRef.current) return;
       if (e instanceof ApiError) {
@@ -160,12 +178,33 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
     setPhase("idle");
   }, []);
 
+  // ── Redo the last take ────────────────────────────────────────
+  // The Pond keeps only the ways it heard the phrase, so taking a take back forgets the variant
+  // it added, if it added one; a take that heard a known variant leaves the Pond as it was.
+  const redoLast = useCallback(async () => {
+    const last = takes[takes.length - 1];
+    if (!last || undoing) return;
+    setUndoing(true);
+    setErrorMsg(null);
+    try {
+      if (last.added !== null) setVariants(await api.removeWakeWordVariant(last.added));
+      setTakes((all) => all.slice(0, -1));
+      setLastTranscript(null);
+      setPhase("idle");
+    } catch (e) {
+      setErrorMsg(`Could not take that sample back: ${e instanceof Error ? e.message : String(e)}`);
+      setPhase("error");
+    } finally {
+      setUndoing(false);
+    }
+  }, [takes, undoing]);
+
   // ── Reset / Start Over ────────────────────────────────────────
   const handleReset = useCallback(async () => {
     try {
       await api.resetWakeWordCalibration();
     } catch { /* ignore */ }
-    setSampleCount(0);
+    setTakes([]);
     setVariants([]);
     setLastTranscript(null);
     setErrorMsg(null);
@@ -175,7 +214,13 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
   // ── Render ────────────────────────────────────────────────────
 
   return (
-    <div style={styles.root}>
+    <div
+      ref={rootRef}
+      style={styles.root}
+      tabIndex={-1}
+      role="region"
+      aria-label={`Calibrate the wake word "${phrase}"`}
+    >
       {/* Header + progress dots */}
       <div style={styles.header}>
         <p style={styles.title}>
@@ -295,13 +340,25 @@ export function WakeWordCalibration({ phrase, onComplete, onCancel }: Props) {
       <div style={styles.footer}>
         {phase !== "recording" && phase !== "countdown" && phase !== "submitting" && phase !== "review" && (
           <>
-            <Button
-              variant="outline"
-              onPress={handleReset}
-              isDisabled={sampleCount === 0 && phase !== "complete"}
-            >
-              <RotateCcw size={14} /> Start Over
-            </Button>
+            <div style={styles.footerLeft}>
+              <Button
+                variant="outline"
+                onPress={handleReset}
+                isDisabled={sampleCount === 0 && phase !== "complete"}
+              >
+                <RotateCcw size={14} /> Start Over
+              </Button>
+              {sampleCount > 0 && (
+                <Button
+                  variant="outline"
+                  onPress={() => void redoLast()}
+                  isDisabled={undoing}
+                  aria-label={`Redo sample ${sampleCount}`}
+                >
+                  <Undo2 size={14} /> Redo sample {sampleCount}
+                </Button>
+              )}
+            </div>
 
             <div style={styles.footerRight}>
               <Button variant="outline" onPress={onCancel}>
@@ -474,6 +531,10 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: "var(--space-2)",
     minHeight: "36px",
+  },
+  footerLeft: {
+    display: "flex",
+    gap: "var(--space-2)",
   },
   footerRight: {
     display: "flex",

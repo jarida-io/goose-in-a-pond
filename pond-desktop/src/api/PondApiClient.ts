@@ -2513,6 +2513,17 @@ export class PondApiClient {
     await this.del("/api/v1/voice/calibrate");
   }
 
+  /**
+   * Forget one way of hearing the wake phrase, the one a take just added, and keep the rest.
+   * Resolves to the variants left.
+   */
+  async removeWakeWordVariant(variant: string): Promise<string[]> {
+    const res = await this.del<{ all_variants?: string[] }>(
+      `/api/v1/voice/calibrate?variant=${encodeURIComponent(variant)}`,
+    );
+    return res?.all_variants ?? [];
+  }
+
   // ── OAuth PKCE ──────────────────────────────────────────────
 
   /**

@@ -10045,9 +10045,20 @@ async fn calibrate_wake_word(
     })))
 }
 
+/// `?variant=` on `DELETE /api/v1/voice/calibrate`: the one way of hearing the phrase to forget.
+#[derive(Debug, Deserialize)]
+struct CalibrationRemoval {
+    variant: Option<String>,
+}
+
 /// `DELETE /api/v1/voice/calibrate` — always safe: the detector falls back to the wake word.
+///
+/// With `?variant=gus` only that variant is forgotten, so a take that heard the phrase wrongly can
+/// be taken back without starting the calibration over; the response then lists what is left.
+/// Without it every variant is cleared.
 async fn reset_wake_word_calibration(
     State(state): State<Arc<AppState>>,
+    Query(removal): Query<CalibrationRemoval>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut settings = state.settings_repo.get().await.map_err(|e| {
         (
@@ -10056,7 +10067,16 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    settings.voice_wake_word_transcriptions.clear();
+    let variant = removal
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    match &variant {
+        Some(v) => settings.voice_wake_word_transcriptions.retain(|t| t != v),
+        None => settings.voice_wake_word_transcriptions.clear(),
+    }
 
     state.settings_repo.update(&settings).await.map_err(|e| {
         (
@@ -10065,9 +10085,24 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    Ok(Json(
-        json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
-    ))
+    tracing::info!(
+        kind = "wake_calibration_removed",
+        one_variant = variant.is_some(),
+        remaining = settings.voice_wake_word_transcriptions.len(),
+        "wake-word calibration: {}",
+        if variant.is_some() {
+            "one variant forgotten"
+        } else {
+            "cleared"
+        }
+    );
+    Ok(Json(match variant {
+        Some(v) => json!({
+            "removed": v,
+            "all_variants": settings.voice_wake_word_transcriptions,
+        }),
+        None => json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
+    }))
 }
 
 // ── Service connectivity test ─────────────────────────────────────────────────
