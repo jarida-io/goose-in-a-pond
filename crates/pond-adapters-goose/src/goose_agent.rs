@@ -95,14 +95,13 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
-    /// The user's words are the attached recording, which the model hears.
+    /// The user's words are in the attached audio, which the model hears.
     heard: bool,
 }
 
-/// A heard room turn's <user-message>: its words are the recording. Never empty, as an empty
-/// one fuses the newlines around it into one token and the turn misses the preamble snapshot.
-const HEARD_TURN_NOTE: &str =
-    "[Spoken: the user's words are the attached recording. Answer what you hear.]";
+/// A heard turn's <user-message>. No "recording": the model says it back. Never empty, or the
+/// newlines around it fuse into one token and the turn misses the preamble snapshot.
+const HEARD_TURN_NOTE: &str = "[Said aloud to you. Answer what you hear.]";
 
 impl TurnEnvelope<'_> {
     fn render(&self) -> String {
@@ -8153,9 +8152,11 @@ mod tests {
         assert_eq!(image_parts(&msg).len(), 1);
     }
 
-    /// A heard room turn carries no text of its own words; only it gets the note.
+    /// A heard room turn carries no text of its own words; only it gets the note, which never
+    /// calls the audio a recording.
     #[test]
-    fn only_a_heard_turn_says_its_words_are_the_recording() {
+    fn only_a_heard_turn_says_it_was_said_aloud() {
+        assert!(!HEARD_TURN_NOTE.to_lowercase().contains("record"));
         let heard = TurnEnvelope {
             message: "",
             heard: true,
