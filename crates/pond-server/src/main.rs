@@ -7597,7 +7597,17 @@ async fn advance_long_task(
         }
         NextRun::Finish => {
             let mut artifacts = artifacts;
-            if let Some(result) = runner::summary_as_result(task, &steps, &artifacts, now) {
+            // The last step's output becomes the Result when the model titled it otherwise.
+            let final_body = match runner::final_artifact(&steps, &artifacts) {
+                Some(output) if runner::result_artifact(&artifacts).is_none() => tasks
+                    .get_artifact(task.id(), &output.id)
+                    .await?
+                    .map(|artifact| artifact.body().to_string()),
+                _ => None,
+            };
+            if let Some(result) =
+                runner::result_to_save(task, &steps, &artifacts, final_body.as_deref(), now)
+            {
                 tasks.insert_artifact(&result).await?;
                 artifacts.push(result.summary_view());
             }
@@ -7606,7 +7616,7 @@ async fn advance_long_task(
                 .await?;
             fruitless.remove(task.id());
             // A short answer is the notification itself; anything longer is a line about it.
-            let short = match runner::answer_artifact(task, &artifacts) {
+            let short = match runner::answer_artifact(task, &steps, &artifacts) {
                 Some(result)
                     if task.answer()
                         == pond_core::shared::domain::long_task::AnswerShape::Short =>
@@ -7619,7 +7629,9 @@ async fn advance_long_task(
                 _ => None,
             };
             let body = short
-                .or_else(|| runner::answer_artifact(task, &artifacts).map(|a| a.summary.clone()))
+                .or_else(|| {
+                    runner::answer_artifact(task, &steps, &artifacts).map(|a| a.summary.clone())
+                })
                 .or_else(|| {
                     steps
                         .iter()

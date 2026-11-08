@@ -323,29 +323,65 @@ pub fn result_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary
         .or_else(|| artifacts.iter().rev().find(|a| names_result(&a.title)))
 }
 
-/// A task's answer: its Result, else, for a short answer, the newest thing a step saved. A short
-/// answer's helper titled it "Current Presence and Camera Status" though told to title it "Result",
-/// and the card then had nothing to show.
-pub fn answer_artifact<'a>(
-    task: &LongTask,
+/// What the plan's last finished step saved last: its output, whatever the model titled it.
+pub fn final_artifact<'a>(
+    steps: &[PlanStep],
     artifacts: &'a [ArtifactSummary],
 ) -> Option<&'a ArtifactSummary> {
-    result_artifact(artifacts).or_else(|| {
-        (task.answer() == AnswerShape::Short)
-            .then(|| artifacts.iter().rev().find(|a| a.step_key.is_some()))
-            .flatten()
-    })
+    let last = steps
+        .iter()
+        .filter(|step| step.state() == StepState::Completed)
+        .max_by_key(|step| step.ordinal())?;
+    artifacts
+        .iter()
+        .rev()
+        .find(|a| a.step_key.as_ref() == Some(last.key()))
 }
 
-/// The Result a finished short answer is missing: its last step's summary, when the step reported
-/// the answer in its summary and saved nothing, so the card still shows it.
-pub fn summary_as_result(
+/// A task's answer: its Result, else for a short answer the newest thing a step saved, else what
+/// its last step saved. The last step is told to title its output "Result" and does not always: a
+/// report's "finalize" step saved the whole biography under its own title, and the card had none.
+pub fn answer_artifact<'a>(
+    task: &LongTask,
+    steps: &[PlanStep],
+    artifacts: &'a [ArtifactSummary],
+) -> Option<&'a ArtifactSummary> {
+    result_artifact(artifacts)
+        .or_else(|| {
+            (task.answer() == AnswerShape::Short)
+                .then(|| artifacts.iter().rev().find(|a| a.step_key.is_some()))
+                .flatten()
+        })
+        .or_else(|| final_artifact(steps, artifacts))
+}
+
+/// The Result a finished task is missing, saved so every reader finds it by its title: a copy of
+/// what its last step saved (`final_body`, read by the caller), else that step's summary when it
+/// reported its work there and saved nothing.
+pub fn result_to_save(
     task: &LongTask,
     steps: &[PlanStep],
     artifacts: &[ArtifactSummary],
+    final_body: Option<&str>,
     now: DateTime<Utc>,
 ) -> Option<crate::shared::domain::long_task::Artifact> {
-    if task.answer() != AnswerShape::Short || answer_artifact(task, artifacts).is_some() {
+    use crate::shared::domain::long_task::{Artifact, ArtifactKind};
+    if result_artifact(artifacts).is_some() {
+        return None;
+    }
+    if let (Some(output), Some(body)) = (final_artifact(steps, artifacts), final_body) {
+        return Artifact::new(
+            task.id(),
+            output.step_key.clone(),
+            ArtifactKind::Draft,
+            RESULT_TITLE,
+            &output.summary,
+            body.to_string(),
+            now,
+        )
+        .ok();
+    }
+    if answer_artifact(task, steps, artifacts).is_some() {
         return None;
     }
     let last = steps
@@ -353,10 +389,10 @@ pub fn summary_as_result(
         .filter(|step| step.state() == StepState::Completed)
         .max_by_key(|step| step.ordinal())?;
     let summary = last.summary().map(str::trim).filter(|s| !s.is_empty())?;
-    crate::shared::domain::long_task::Artifact::new(
+    Artifact::new(
         task.id(),
         Some(last.key().clone()),
-        crate::shared::domain::long_task::ArtifactKind::Draft,
+        ArtifactKind::Draft,
         RESULT_TITLE,
         first_line(summary),
         summary.to_string(),
