@@ -4818,7 +4818,14 @@ async fn run_server(
     }
 
     tokio::task::spawn_blocking(|| {
-        if let Err(e) = pond_audio_out::route::play_chime(None) {
+        let Some(floor) = pond_audio_out::bus().claim(
+            pond_audio_out::Claim::Chime,
+            Some(std::time::Duration::from_secs(5)),
+            || true,
+        ) else {
+            return;
+        };
+        if let Err(e) = pond_audio_out::route::play_chime(&floor, None) {
             tracing::debug!(error = %e, "startup chime did not play");
         }
     });

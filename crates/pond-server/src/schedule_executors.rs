@@ -166,7 +166,7 @@ impl AgentScheduleExecutor {
         if should_speak {
             if let Some(announcer) = &self.announcer {
                 tracing::info!("[scheduler] task {task_id}: speaking response aloud");
-                if let Err(e) = announcer.speak_text(&response.text, true).await {
+                if let Err(e) = announcer.speak_text(&response.text).await {
                     tracing::warn!("[scheduler] task {task_id}: TTS failed: {e}");
                 }
             }

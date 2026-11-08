@@ -56,7 +56,7 @@ Release builds add features on top of the default: the macOS desktop sidecar is 
 |---|---|---|
 | `pond-voice` | Leaf crate of voice primitives: DSP, barge-in, text splitting, turn and control types | live |
 | `pond-audio` | The single microphone owner (cpal): one input device, many subscribers; `MicEnergy` for barge-in | live |
-| `pond-audio-out` | The single speaker owner: the audio bus (`bus()`) holds the one output stream, and a sound plays only while it holds the bus's `Floor`, a turn from its first sound to `end_utterance` | live |
+| `pond-audio-out` | The single speaker owner: the audio bus (`bus()`) holds the one output stream. A sound plays only while it holds the bus's `Floor`, claimed through one queue (the wake ping in a lane ahead), a turn from its first sound to `end_utterance`; `subscribe()` publishes who holds it and when it is free | live |
 | `pond-adapters-audio-devices` | Finds, tests and watches microphones and speakers (cpal) for pond-core's audio-device policy | live |
 | `pond-adapters-whisper` | In-process ASR with `whisper-rs`: `WhisperRsInput` (voice input) and `WhisperKeywordDetector` (wake word) | live |
 | `pond-adapters-kokoro` | Kokoro-82M TTS (`KokoroOutput`) via `ort`; the only TTS engine | live |

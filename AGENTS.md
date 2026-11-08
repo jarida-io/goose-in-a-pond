@@ -184,5 +184,5 @@ interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake 
 `vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,
 RMS gates, and barge-in on microphone energy (`pond_voice::barge`). `pond-audio` is the single
 microphone owner and `pond-audio-out`'s audio bus the single speaker owner: one stream, one sound at
-a time, each holding the bus's `Floor`. Voice Match is built in `pond-ear` but nothing enrols
-anyone yet.
+a time, each holding the bus's `Floor` from one queue, and its state published. Voice Match is
+built in `pond-ear` but nothing enrols anyone yet.

@@ -16,6 +16,10 @@ use crate::names;
 use crate::probe;
 use crate::sound;
 use crate::sound_server::{self, SystemPactl};
+use pond_audio_out::Claim;
+
+/// How long a device's chime waits for whatever the pond is playing.
+const CHIME_WAITS_FOR_BUS: Duration = Duration::from_secs(10);
 
 /// cpal's only host on Linux is ALSA, whose listing opens every node.
 const ALSA: bool = cfg!(target_os = "linux");
@@ -189,10 +193,14 @@ impl AudioDeviceProber for CpalProber {
     ) -> ProbeOutcome {
         let cards = Self::cards();
         if direction == AudioDirection::Output {
+            // Held before the card is suspended: suspending it under a reply would cut the reply.
+            let Some(floor) = pond_audio_out::bus().claim(Claim::Probe, Some(wait), || true) else {
+                return ProbeOutcome::Untested;
+            };
             let _suspended = ALSA.then(|| {
                 sound_server::suspend_for_devices(&SystemPactl, &cards, None, Some(&device.id))
             });
-            return probe::probe_output(&device.id, wait);
+            return probe::probe_output(&floor, &device.id, wait);
         }
         if !mic_gate::mic_enabled() {
             return ProbeOutcome::Untested;
@@ -247,11 +255,14 @@ impl AudioDeviceProber for CpalProber {
     }
 
     fn chime(&self, device: &AudioDevice) -> Result<(), String> {
+        let floor = pond_audio_out::bus()
+            .claim(Claim::Chime, Some(CHIME_WAITS_FOR_BUS), || true)
+            .ok_or_else(|| "the speaker is busy".to_string())?;
         let cards = Self::cards();
         let _suspended = ALSA.then(|| {
             sound_server::suspend_for_devices(&SystemPactl, &cards, None, Some(&device.id))
         });
-        pond_audio_out::route::play_chime(Some(&device.id)).map_err(|e| e.to_string())
+        pond_audio_out::route::play_chime(&floor, Some(&device.id)).map_err(|e| e.to_string())
     }
 
     // Linux only: on a Mac the person sets the volume and the defaults.

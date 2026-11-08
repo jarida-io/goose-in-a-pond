@@ -12,7 +12,7 @@ pub mod bus;
 pub mod route;
 pub mod tap;
 pub use announce::Announcer;
-pub use bus::{bus, AudioBus, Claim, Floor, TurnFloor};
+pub use bus::{bus, AudioBus, BusState, Claim, Floor, TurnFloor};
 pub use route::{output_device, set_output_device};
 pub use tap::{set_playback_tap, set_spoken_tap, spoken_tap, PlaybackTap, SpokenTap};
 

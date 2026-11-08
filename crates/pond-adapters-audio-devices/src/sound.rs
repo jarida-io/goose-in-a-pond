@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use pond_audio::MicShared;
+use pond_audio_out::{Claim, Floor};
 use pond_core::models::domain::audio_device::{AudioDirection, PairOutcome};
 
 use crate::probe;
@@ -18,6 +19,9 @@ const TAIL: Duration = Duration::from_millis(900);
 /// How long a microphone may take to deliver its first frames.
 const FIRST_FRAMES: Duration = Duration::from_millis(1_500);
 const TONE_RATE: u32 = 48_000;
+/// How long a test waits for whatever the pond is playing to finish.
+const WAIT_FOR_BUS: Duration = Duration::from_secs(10);
+const SPEAKER_BUSY: &str = "the speaker is busy";
 
 fn failed(reason: impl ToString) -> PairOutcome {
     PairOutcome::Failed {
@@ -25,7 +29,7 @@ fn failed(reason: impl ToString) -> PairOutcome {
     }
 }
 
-fn play(speaker: &str) -> Result<(), String> {
+fn play(floor: &Floor, speaker: &str) -> Result<(), String> {
     #[cfg(test)]
     if let Ok(player) = std::env::var("GIAP_TEST_PLAYER") {
         return tests::play_with(&player, speaker);
@@ -38,6 +42,7 @@ fn play(speaker: &str) -> Result<(), String> {
     #[cfg(not(test))]
     let volume = 1.0;
     pond_audio_out::route::play_samples_exactly(
+        floor,
         Some(speaker),
         tone::tone_samples(TONE_RATE),
         TONE_RATE,
@@ -46,24 +51,28 @@ fn play(speaker: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// Other audio pauses for the test sound, as for every sound the pond makes.
-fn with_quiet<T>(f: impl FnOnce() -> T) -> T {
+/// The whole test holds the audio bus, so nothing the pond plays lands in it, and other audio
+/// pauses for it as for every sound the pond makes; `busy` when the bus stayed taken.
+fn exclusively<T>(busy: T, f: impl FnOnce(&Floor) -> T) -> T {
+    let Some(floor) = pond_audio_out::bus().claim(Claim::Test, Some(WAIT_FOR_BUS), || true) else {
+        return busy;
+    };
     let quiet = pond_core::models::services::voice::quiet::installed();
     let _hold = quiet.as_ref().map(|q| {
         let hold = q.hold();
         q.until_quiet_blocking(Duration::from_millis(400));
         hold
     });
-    f()
+    f(&floor)
 }
 
 /// Test with a microphone the mic owner already has open, read from its ring.
 pub fn through_open_mic(speaker: &str, shared: &MicShared) -> PairOutcome {
-    with_quiet(|| {
+    exclusively(failed(SPEAKER_BUSY), |floor| {
         let start = shared.written();
         std::thread::sleep(ROOM);
         let tone_at = shared.written();
-        if let Err(e) = play(speaker) {
+        if let Err(e) = play(floor, speaker) {
             return failed(e);
         }
         std::thread::sleep(TAIL);
@@ -134,10 +143,10 @@ pub fn listen_while_playing(
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let tone_from = with_quiet(|| {
+    let tone_from = exclusively(Err(SPEAKER_BUSY.to_string()), |floor| {
         std::thread::sleep(ROOM);
         let tone_from = windows();
-        play(speaker).map(|()| {
+        play(floor, speaker).map(|()| {
             std::thread::sleep(tail);
             tone_from
         })

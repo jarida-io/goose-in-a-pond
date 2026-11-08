@@ -86,7 +86,7 @@ pub fn clip_sequence(digits: &str) -> Result<Vec<u8>> {
 fn play_on_the_bus(wav: Vec<u8>) -> Result<()> {
     let clips = decode_wav(&wav).context("the joined spoken-code clips are corrupt")?;
     let floor = pond_audio_out::bus()
-        .claim(pond_audio_out::Claim::Sound, Some(WAIT_FOR_BUS), || true)
+        .claim(pond_audio_out::Claim::Code, Some(WAIT_FOR_BUS), || true)
         .context("the speaker stayed busy")?;
     floor.play(clips.samples, clips.sample_rate, 1.0)
 }

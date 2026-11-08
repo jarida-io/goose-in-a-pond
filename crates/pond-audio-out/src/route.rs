@@ -7,9 +7,6 @@ use std::sync::{Mutex, RwLock};
 use anyhow::{anyhow, Result};
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
-/// How long a sound test waits for the speaker before it reports it busy.
-const TEST_WAITS_AT_MOST: std::time::Duration = std::time::Duration::from_secs(10);
-
 static ROUTE: RwLock<Option<String>> = RwLock::new(None);
 /// Bumped on every change, so holders of an open stream know to reopen.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -238,25 +235,23 @@ pub fn chime_samples(rate: u32) -> Vec<f32> {
     final_out
 }
 
-/// Play [`chime_samples`] on `device`, and wait for it to finish.
-pub fn play_chime(device: Option<&str>) -> Result<()> {
+/// Play [`chime_samples`] on `device` while `floor` holds the bus, and wait for it to finish.
+pub fn play_chime(floor: &crate::Floor, device: Option<&str>) -> Result<()> {
     let rate = 44_100;
-    play_samples_exactly(device, chime_samples(rate), rate, 0.5)
+    play_samples_exactly(floor, device, chime_samples(rate), rate, 0.5)
 }
 
 /// Play mono `samples` on exactly `device` and wait for them to finish. Unlike [`open_output`]
 /// this never falls back to the default: a sound test of one speaker must not sound on another.
-/// It holds the audio bus like every sound, and plays on the bus's own stream when that is open on
+/// It needs the bus held, like every sound, and plays on the bus's own stream when that is open on
 /// `device`, which ALSA `hw` would not open twice.
 pub fn play_samples_exactly(
+    floor: &crate::Floor,
     device: Option<&str>,
     samples: Vec<f32>,
     rate: u32,
     volume: f32,
 ) -> Result<()> {
-    let floor = crate::bus()
-        .claim(crate::Claim::Sound, Some(TEST_WAITS_AT_MOST), || true)
-        .ok_or_else(|| anyhow!("the speaker is busy"))?;
     if crate::bus().plays_on(device) {
         return floor.play(samples, rate, volume);
     }

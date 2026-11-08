@@ -128,7 +128,7 @@ decode: Decode Error 1: NoKvCacheSlot." as its result, which was also spoken alo
 error came from a goose build before the fork's `f110ef44d`, which carries on without drafting
 when the verify batch finds no cache slot; the provider shim records any such mid-stream error
 typed, `SessionControls::provider_failure`.) Every `AgentPrompt` run now goes through `chat()`,
-and a spoken one is spoken (`Announcer::speak_text`, once no turn holds the audio bus) only once
+and a spoken one is spoken (`Announcer::speak_text`, queued for the audio bus behind any turn) once
 it has an answer; a failed turn is a failed run and says nothing aloud. The tool calls take most
 of a run, so the first word comes only seconds later than it did when streamed.
 
