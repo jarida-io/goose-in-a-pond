@@ -48,9 +48,10 @@ pub const AUDIO_PROJECTORS: &[&str] = &["gemma4a"];
 /// What the user row stores in place of an unnamed recording, which the pond does not keep.
 pub const VOICE_NOTE_PLACEHOLDER: &str = "[Voice note]";
 
-/// What later turns see where an earlier turn's recording was: the engine heard it then.
+/// What later turns see where an earlier turn's recording was: the engine heard it then. Nothing
+/// here may read as a missing recording, or E4B tells the household it cannot hear the new one.
 pub const HISTORY_VOICE_NOTE_PLACEHOLDER: &str =
-    "[Voice note: heard when it was sent; the recording is no longer attached]";
+    "[Voice note from an earlier turn, heard and answered then]";
 
 /// The row's mark for one recording: its file name when the phone sent one.
 pub fn persisted_mark(clip: &AudioAttachment) -> String {
