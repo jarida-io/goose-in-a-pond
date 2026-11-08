@@ -3,7 +3,9 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pond_audio_out::{play_wav, start_thinking_tone_thread, TurnFloor, TONE_OFF};
+use pond_audio_out::{
+    bus, play_turn_wav, play_wav, start_thinking_tone_thread, Claim, Floor, TurnFloor, TONE_OFF,
+};
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
@@ -11,6 +13,7 @@ use pond_voice::text::{split_text, Boundary, SpeechUnit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 pub mod engine;
@@ -54,7 +57,7 @@ pub struct KokoroConfig {
 const ESPEAKNG_DATA_DIRECTORY: &str = "PIPER_ESPEAKNG_DATA_DIRECTORY";
 
 /// ONNX session load deadline: a cold load takes seconds, but a broken ORT blocks forever.
-const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct KokoroOutput {
     config: KokoroConfig,
@@ -75,8 +78,10 @@ pub struct KokoroOutput {
     speech_interrupted: Arc<AtomicBool>,
     /// Playbacks in flight; zero between sentences, e.g. while a tool runs.
     playing: Arc<std::sync::atomic::AtomicUsize>,
-    /// The audio bus, held from a turn's first sound to its end so nothing plays inside it.
+    /// The audio bus, held from `begin_utterance` to `end_utterance` so nothing plays inside a turn.
     turn: TurnFloor,
+    /// Between `begin_utterance` and `end_utterance`: what plays then is the turn's.
+    in_turn: AtomicBool,
     audio_level_sink: Option<Arc<ThrottledAudioLevelSink>>,
     /// Sample rate of the most recent synthesis, for diagnostics.
     last_sample_rate: Mutex<Option<u32>>,
@@ -90,6 +95,7 @@ impl KokoroOutput {
         }
         let vocab = Vocab::load(&config.tokenizer_path)?;
         tracing::info!(symbols = vocab.len(), "Kokoro vocab loaded");
+        bus().open_early();
 
         Ok(Self {
             model_path: RwLock::new(config.model_path.clone()),
@@ -104,6 +110,7 @@ impl KokoroOutput {
             speech_interrupted: Arc::new(AtomicBool::new(false)),
             playing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             turn: TurnFloor::default(),
+            in_turn: AtomicBool::new(false),
             audio_level_sink: None,
             last_sample_rate: Mutex::new(None),
         })
@@ -310,24 +317,59 @@ impl KokoroOutput {
     }
 }
 
-#[async_trait]
-impl VoiceOutput for KokoroOutput {
-    async fn speak(&self, text: &str) -> Result<()> {
-        self.begin_utterance();
-        let all_units = split_text(text);
-        if all_units.is_empty() {
-            return Ok(());
+/// The longest words said outside a turn queue for the speaker before they are dropped.
+const SPEECH_WAITS_AT_MOST: Duration = Duration::from_secs(120);
+/// The longest a voice sample queues for the speaker: past that, nobody is still waiting for it.
+const SAMPLE_WAITS_AT_MOST: Duration = Duration::from_secs(30);
+
+/// Where a playback holds the audio bus.
+#[derive(Clone)]
+enum Hold {
+    /// The turn's own hold, from `begin_utterance` to `end_utterance`.
+    Turn(TurnFloor),
+    /// A claim of its own, for sound outside any turn.
+    Own(Arc<Floor>),
+}
+
+impl Hold {
+    fn play(
+        &self,
+        wav: Vec<u8>,
+        interrupted: &AtomicBool,
+        utterance: &AtomicU64,
+        sink: Option<&ThrottledAudioLevelSink>,
+    ) -> Result<()> {
+        match self {
+            Hold::Turn(turn) => play_turn_wav(wav, turn, interrupted, utterance, sink),
+            Hold::Own(floor) => play_wav(wav, floor, interrupted, utterance, sink),
         }
-        if all_units.len() == 1 {
-            let wav = self.synth_wav(&all_units[0]).await?;
+    }
+}
+
+impl KokoroOutput {
+    /// Queues for the bus on a blocking thread; `None` when it stayed taken or is no longer wanted.
+    async fn claim(
+        &self,
+        claim: Claim,
+        most: Duration,
+        still_wanted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<Option<Floor>> {
+        tokio::task::spawn_blocking(move || bus().claim(claim, Some(most), still_wanted))
+            .await
+            .context("a Kokoro bus claim panicked")
+    }
+
+    /// Plays `units` where `hold` holds the bus, synthesising each while the one before it plays.
+    async fn say_units(&self, units: Vec<SpeechUnit>, hold: Hold) -> Result<()> {
+        if let [unit] = units.as_slice() {
+            let wav = self.synth_wav(unit).await?;
             if !wav.is_empty() {
-                self.play_audio(wav).await?;
+                self.play_held(wav, hold).await?;
             }
             return Ok(());
         }
 
         let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let turn = self.turn.clone();
         let interrupted = self.speech_interrupted.clone();
         let utterance = self.utterance.clone();
         let sink = self.audio_level_sink.clone();
@@ -341,14 +383,14 @@ impl VoiceOutput for KokoroOutput {
                 if interrupted.load(Ordering::Relaxed) {
                     break;
                 }
-                let turn = turn.clone();
+                let hold = hold.clone();
                 let interrupted = interrupted.clone();
                 let utterance = utterance.clone();
                 let sink = sink.clone();
                 let playing = Playing::start(&playing);
                 let res = tokio::task::spawn_blocking(move || {
                     let _playing = playing;
-                    play_wav(audio, &turn, &interrupted, &utterance, sink.as_deref())
+                    hold.play(audio, &interrupted, &utterance, sink.as_deref())
                 })
                 .await;
                 if res.is_err() {
@@ -357,20 +399,59 @@ impl VoiceOutput for KokoroOutput {
             }
         });
 
-        for unit in all_units {
+        for unit in units {
             if self.speech_interrupted.load(Ordering::Relaxed) {
                 break;
             }
             let wav = self.synth_wav(&unit).await?;
-            if !wav.is_empty() {
-                if audio_tx.send(wav).await.is_err() {
-                    break;
-                }
+            if !wav.is_empty() && audio_tx.send(wav).await.is_err() {
+                break;
             }
         }
         drop(audio_tx);
         let _ = playback_handle.await;
         Ok(())
+    }
+
+    async fn play_held(&self, audio: Vec<u8>, hold: Hold) -> Result<()> {
+        let interrupted = self.speech_interrupted.clone();
+        let utterance = self.utterance.clone();
+        let sink = self.audio_level_sink.clone();
+        let playing = Playing::start(&self.playing);
+        tokio::task::spawn_blocking(move || {
+            let _playing = playing;
+            hold.play(audio, &interrupted, &utterance, sink.as_deref())
+        })
+        .await
+        .context("Kokoro playback task panicked")?
+    }
+}
+
+#[async_trait]
+impl VoiceOutput for KokoroOutput {
+    /// Inside a turn, more of the turn; outside one, words said whole that queue for the bus as
+    /// [`Claim::Speech`] and give way to a turn that begins meanwhile.
+    async fn speak(&self, text: &str) -> Result<()> {
+        let units = split_text(text);
+        if units.is_empty() {
+            return Ok(());
+        }
+        if self.in_turn.load(Ordering::SeqCst) {
+            return self.say_units(units, Hold::Turn(self.turn.clone())).await;
+        }
+        let mine = self.utterance.load(Ordering::SeqCst);
+        let utterance = self.utterance.clone();
+        let wanted = move || utterance.load(Ordering::Relaxed) == mine;
+        let Some(floor) = self
+            .claim(Claim::Speech, SPEECH_WAITS_AT_MOST, wanted)
+            .await?
+        else {
+            tracing::debug!("Kokoro: words outside a turn gave way to a turn or a busy speaker");
+            return Ok(());
+        };
+        // A barge-in on an earlier turn is no reason to cut these short.
+        self.speech_interrupted.store(false, Ordering::SeqCst);
+        self.say_units(units, Hold::Own(Arc::new(floor))).await
     }
 
     async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
@@ -382,18 +463,24 @@ impl VoiceOutput for KokoroOutput {
         Ok((!wav.is_empty()).then_some(wav))
     }
 
+    /// Inside a turn, the turn's next sound; outside one, a [`Claim::Sample`] that a turn takes
+    /// the bus from.
     async fn play_audio(&self, audio: Vec<u8>) -> Result<()> {
         if audio.is_empty() {
             return Ok(());
         }
-        let turn = self.turn.clone();
-        let interrupted = self.speech_interrupted.clone();
-        let utterance = self.utterance.clone();
+        if self.in_turn.load(Ordering::SeqCst) {
+            return self.play_held(audio, Hold::Turn(self.turn.clone())).await;
+        }
+        let floor = self
+            .claim(Claim::Sample, SAMPLE_WAITS_AT_MOST, || true)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the speaker stayed busy"))?;
+        // Its own flags: only the bus, wanted back by a turn, cuts it short.
+        let (interrupted, utterance) = (AtomicBool::new(false), AtomicU64::new(0));
         let sink = self.audio_level_sink.clone();
-        let playing = Playing::start(&self.playing);
         tokio::task::spawn_blocking(move || {
-            let _playing = playing;
-            play_wav(audio, &turn, &interrupted, &utterance, sink.as_deref())
+            play_wav(audio, &floor, &interrupted, &utterance, sink.as_deref())
         })
         .await
         .context("Kokoro playback task panicked")?
@@ -403,14 +490,21 @@ impl VoiceOutput for KokoroOutput {
         Some(self.playing.load(Ordering::SeqCst) > 0)
     }
 
+    /// Queues the turn for the bus now, so it holds it through its thinking as well as its words.
     fn begin_utterance(&self) {
         // Generation first, then clear the interrupt, so stale audio never sees a cleared flag.
-        self.utterance.fetch_add(1, Ordering::SeqCst);
+        let mine = self.utterance.fetch_add(1, Ordering::SeqCst) + 1;
         self.speech_interrupted.store(false, Ordering::SeqCst);
         self.turn.release();
+        self.in_turn.store(true, Ordering::SeqCst);
+        let (utterance, interrupted) = (self.utterance.clone(), self.speech_interrupted.clone());
+        self.turn.begin(move || {
+            utterance.load(Ordering::Relaxed) == mine && !interrupted.load(Ordering::Relaxed)
+        });
     }
 
     fn end_utterance(&self) {
+        self.in_turn.store(false, Ordering::SeqCst);
         self.turn.release();
     }
 

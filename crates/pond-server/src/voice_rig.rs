@@ -19,7 +19,6 @@ use pond_core::models::ports::speech_energy::SpeechEnergy;
 use pond_core::models::ports::voice_input::VoiceInput;
 use pond_core::models::ports::wake_word::StreamingWakeWordDetector;
 use pond_core::models::services::instant_activation::InstantActivation;
-use pond_core::models::services::voice::quiet;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_core::shared::services::chat::{ChatService, SpokenObserver, StateObserver};
 use pond_core::user_data::domain::settings::Settings;
@@ -231,10 +230,7 @@ pub async fn build_listening(mut opts: ListeningOptions<'_>) -> Listening {
     let triggers =
         pond_voice::text::wake_triggers(&wake_word, &settings.voice_wake_word_transcriptions);
     let mut cfg = EarConfig::new(mode, triggers, format!("say \"{wake_word}\""));
-    // `installed()` at each wake: the quiet is installed after the voice loop is wired.
-    cfg.cue = Some(Arc::new(|| {
-        pond_audio_out::play_wake_ping(quiet::installed())
-    }));
+    cfg.cue = Some(Arc::new(pond_audio_out::play_wake_ping));
     cfg.audio_level = opts.audio_level.clone();
     cfg.speaker = opts.speaker.take();
     let transcriber: Arc<dyn Transcriber> = Arc::new(WhisperTranscriber {

@@ -1513,20 +1513,19 @@ async fn run_server(
     // Spotify's Developer Policy III.7: Spotify pauses while the pond speaks, here and in what
     // browsers play from `/tts`. Its token comes from the secret store, which exists further down.
     let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(true);
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let started = quiet::Quiet::start(spotify_focus.clone(), quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        // Paused for as long as the audio bus is held: every sound, a whole turn included.
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     let tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> =
         match &kokoro_engine {
             Some(kokoro) => {
-                use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                 println!("  ✅ TTS: kokoro");
-                let voice = QuietVoiceOutput::new(kokoro.clone(), quiet.clone());
-                Some(Arc::new(voice) as Arc<dyn VoiceOutput>)
+                Some(kokoro.clone() as Arc<dyn VoiceOutput>)
             }
             None => {
                 println!("  ⚠  TTS: unavailable — responses will be text-only");
@@ -5920,7 +5919,7 @@ async fn run_chat(
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake
     // ping included, so whatever the TTS. The server writes the secret store and refreshes the
     // token; this process only reads the store, and never refreshes.
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(false);
         spotify_focus.use_secrets(Arc::new(
@@ -5928,8 +5927,8 @@ async fn run_chat(
         ));
         let started = quiet::Quiet::start(spotify_focus, quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     // Kokoro opens the speaker as it loads, so let the first choice land before it does.
     if let Some(status) = audio_supervisor
@@ -6008,9 +6007,7 @@ async fn run_chat(
                             Some(sink) => out.with_audio_level_sink(sink.clone()),
                             None => out,
                         };
-                        use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                         out!("  Speak    {} @ {:.2}x", out.voice().await, out.speed());
-                        let out = QuietVoiceOutput::new(Arc::new(out), quiet.clone());
                         Arc::new(out) as Arc<dyn VoiceOutput>
                     }
                     Err(e) => {

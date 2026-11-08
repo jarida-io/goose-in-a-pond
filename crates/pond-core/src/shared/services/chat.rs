@@ -2959,8 +2959,8 @@ mod tests {
         }
     }
 
-    /// Other audio is paused for a turn (`QuietVoiceOutput`) until the turn ends, so a turn that
-    /// fails partway must still end, or the music never comes back.
+    /// A turn holds the audio bus, and other audio stays paused, until it ends, so a turn that
+    /// fails partway must still end, or the speaker and the music never come back.
     #[tokio::test]
     async fn every_turn_begun_is_ended_even_one_that_fails() {
         let storage = Arc::new(InMemorySessionStorage::new());

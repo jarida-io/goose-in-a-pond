@@ -51,18 +51,13 @@ fn play(floor: &Floor, speaker: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// The whole test holds the audio bus, so nothing the pond plays lands in it, and other audio
-/// pauses for it as for every sound the pond makes; `busy` when the bus stayed taken.
+/// The whole test holds the audio bus, so nothing the pond plays lands in it, and other audio,
+/// which follows the bus, pauses for it; `busy` when the bus stayed taken.
 fn exclusively<T>(busy: T, f: impl FnOnce(&Floor) -> T) -> T {
     let Some(floor) = pond_audio_out::bus().claim(Claim::Test, Some(WAIT_FOR_BUS), || true) else {
         return busy;
     };
-    let quiet = pond_core::models::services::voice::quiet::installed();
-    let _hold = quiet.as_ref().map(|q| {
-        let hold = q.hold();
-        q.until_quiet_blocking(Duration::from_millis(400));
-        hold
-    });
+    floor.settle(Duration::from_millis(400));
     f(&floor)
 }
 

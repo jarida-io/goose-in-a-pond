@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use pond_core::models::ports::voice_output::VoiceOutput;
-use pond_core::models::services::voice::quiet;
 use pond_core::network::ports::code_announcer::CodeAnnouncer;
 use pond_voice::dsp::{decode_wav, encode_wav_pcm16, f32_to_pcm16};
 
@@ -31,8 +30,6 @@ const AGAIN_CLIP: &[u8] = include_bytes!("../assets/spoken-code/again.wav");
 const DIGIT_GAP: Duration = Duration::from_millis(300);
 /// Around the two readings, so "once more" reads as a new start.
 const PHRASE_GAP: Duration = Duration::from_millis(700);
-/// How long the clips wait for other audio (music) to pause before playing anyway.
-const WAIT_FOR_QUIET: Duration = Duration::from_millis(1500);
 /// How long the clips wait for a turn or another sound to finish.
 const WAIT_FOR_BUS: Duration = Duration::from_secs(30);
 
@@ -107,12 +104,6 @@ impl SpeakerCodeAnnouncer {
 
     async fn play_clips(digits: &str) -> Result<()> {
         let wav = clip_sequence(digits)?;
-        // Music pauses for the clips as it does for the voice (Spotify's Developer Policy III.7).
-        let quiet = quiet::installed();
-        let _hold = quiet.as_ref().map(|q| q.hold());
-        if let Some(quiet) = &quiet {
-            quiet.until_quiet(WAIT_FOR_QUIET).await;
-        }
         tokio::task::spawn_blocking(move || play_on_the_bus(wav))
             .await
             .context("the spoken-code playback task panicked")?
@@ -123,10 +114,8 @@ impl SpeakerCodeAnnouncer {
 impl CodeAnnouncer for SpeakerCodeAnnouncer {
     async fn announce_code(&self, digits: &str) -> Result<()> {
         if let Some(tts) = &self.tts {
-            tts.begin_utterance();
-            let spoken = tts.speak(&spoken_sentence(digits)).await;
-            tts.end_utterance();
-            match spoken {
+            // Words said whole: they queue for the speaker and never cut off a turn.
+            match tts.speak(&spoken_sentence(digits)).await {
                 Ok(()) => return Ok(()),
                 Err(error) => tracing::warn!(
                     %error,

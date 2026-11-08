@@ -456,14 +456,13 @@ mod tests {
         focus.resume(paused).await;
     }
 
-    /// The whole chain as the pond wires it (the controller, the voice around the TTS, this), with
+    /// The whole chain as the pond wires it (the controller following the audio bus, this), with
     /// Spotify's Web API played by a mock: the pause goes out before anything is said, and the resume
-    /// only once the turn is over.
+    /// only once the turn has let the bus go.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_turn_is_said_with_spotify_paused_and_spotify_comes_back_after() {
         use pond_core::models::ports::voice_output::VoiceOutput;
         use pond_core::models::services::voice::quiet::Quiet;
-        use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
 
         let (server, focus) = spotify(true).await;
         let server = Arc::new(server);
@@ -507,11 +506,15 @@ mod tests {
             spotify: server.clone(),
             heard_before_speaking: Mutex::new(Vec::new()),
         });
-        let voice = QuietVoiceOutput::new(inner.clone(), Quiet::start(focus, grace));
+        let quiet = Quiet::start(focus, grace);
+        let (bus, held) = tokio::sync::watch::channel(false);
+        quiet.follow(held);
 
-        voice.begin_utterance();
-        voice.speak("It is twelve degrees.").await.unwrap();
-        voice.speak("Rain later.").await.unwrap();
+        // A turn takes the bus, and a sound waits for quiet before its first sample.
+        bus.send_replace(true);
+        quiet.until_quiet(Duration::from_secs(2)).await;
+        inner.speak("It is twelve degrees.").await.unwrap();
+        inner.speak("Rain later.").await.unwrap();
         assert!(
             inner
                 .heard_before_speaking
@@ -528,7 +531,7 @@ mod tests {
             "resumed while the turn was still going"
         );
 
-        voice.end_utterance();
+        bus.send_replace(false);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !server
             .received_requests()

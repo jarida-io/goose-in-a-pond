@@ -2088,7 +2088,7 @@ struct TtsRequest {
 /// A browser plays what `/tts` returns as soon as it has it, so other audio is paused before it goes
 /// out and stays paused for as long as it plays (Spotify's Developer Policy III.7).
 async fn quiet_while_a_browser_plays(wav: &[u8]) {
-    use pond_core::models::services::voice::{quiet, quiet_voice_output::WAIT_FOR_QUIET};
+    use pond_core::models::services::voice::quiet::{self, WAIT_FOR_QUIET};
     /// From the reply leaving here to the browser playing it, plus the pond's usual grace.
     const SLACK: std::time::Duration = std::time::Duration::from_secs(3);
     /// For audio whose length this cannot read: longer than any one sentence.

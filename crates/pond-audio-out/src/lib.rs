@@ -2,6 +2,7 @@
 //! playback, the working tone and the wake ping.
 
 use anyhow::{anyhow, Context, Result};
+use pond_core::models::services::voice::quiet::WAIT_FOR_QUIET;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,7 @@ pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64, turn:
             release(&thinking_for);
             return;
         }
+        turn.settle(WAIT_FOR_QUIET);
         let Ok(sink) = bus()
             .speaker()
             .and_then(|s| Ok(Sink::try_new(&s.handle())?))
@@ -98,7 +100,8 @@ pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64, turn:
     });
 }
 
-/// The longest the ping waits for other audio to pause, and then for the bus, before it gives up.
+/// The longest the ping waits for the bus, and then for other audio to pause, before it plays or
+/// gives up: later than that it no longer answers the wake word.
 const PING_WAITS_AT_MOST: Duration = Duration::from_millis(400);
 const PING_RATE: u32 = 44_100;
 const PING_VOLUME: f32 = 0.35;
@@ -120,18 +123,15 @@ fn wake_ping_samples() -> Vec<f32> {
     samples
 }
 
-/// Play the wake ping on its own thread once other audio is paused, holding it paused meanwhile.
-pub fn play_wake_ping(quiet: Option<Arc<pond_core::models::services::voice::quiet::Quiet>>) {
+/// Play the wake ping on its own thread: first in the bus's queue, and the holder it outranks
+/// yields to it.
+pub fn play_wake_ping() {
     std::thread::spawn(move || {
-        let _quiet = quiet.as_ref().map(|quiet| {
-            let hold = quiet.hold();
-            quiet.until_quiet_blocking(PING_WAITS_AT_MOST);
-            hold
-        });
         let Some(floor) = bus().claim(Claim::Ping, Some(PING_WAITS_AT_MOST), || true) else {
             tracing::debug!("wake ping skipped: the speaker stayed busy");
             return;
         };
+        floor.settle(PING_WAITS_AT_MOST);
         if let Err(e) = floor.play(wake_ping_samples(), PING_RATE, PING_VOLUME) {
             tracing::debug!(error = %e, "wake ping did not play");
         }
@@ -298,7 +298,7 @@ const STALL_AFTER: Duration = Duration::from_secs(3);
 /// Interruptibly play a turn's WAV once the turn holds the bus; `audio_level_sink` gets one level
 /// per poll tick. Stops when the speaker reopens elsewhere (what was queued on the old stream would
 /// never finish) or the turn loses the bus.
-pub fn play_wav(
+pub fn play_turn_wav(
     wav: Vec<u8>,
     turn: &TurnFloor,
     interrupted: &AtomicBool,
@@ -311,12 +311,34 @@ pub fn play_wav(
     if !turn.hold(wanted) {
         return Ok(());
     }
+    turn.settle(WAIT_FOR_QUIET);
     let speaker = bus().speaker()?;
     let generation = speaker.generation();
     play(
         wav,
         &speaker.handle(),
         || turn.keep() && speaker.generation() == generation,
+        interrupted,
+        utterance,
+        audio_level_sink,
+    )
+}
+
+/// [`play_turn_wav`] for words said outside a turn, on a bus `floor` already held.
+pub fn play_wav(
+    wav: Vec<u8>,
+    floor: &Floor,
+    interrupted: &AtomicBool,
+    utterance: &AtomicU64,
+    audio_level_sink: Option<&ThrottledAudioLevelSink>,
+) -> Result<()> {
+    floor.settle(WAIT_FOR_QUIET);
+    let speaker = bus().speaker()?;
+    let generation = speaker.generation();
+    play(
+        wav,
+        &speaker.handle(),
+        || floor.keep() && speaker.generation() == generation,
         interrupted,
         utterance,
         audio_level_sink,
