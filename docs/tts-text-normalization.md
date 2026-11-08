@@ -19,8 +19,8 @@ model tokens -> ThoughtFilter (reasoning removed) -> ReplySplitter::push(text, p
 | Step | Function | Callers |
 |---|---|---|
 | Split a streaming reply into units | `ReplySplitter::push`, `pause` when the stream stalls or a tool starts, `finish` at its end | `ChatService::stream_response_inner` (voice loop) |
-| Split a whole text into units | `split_text` | `AudioBus::speak_text` (`crates/pond-audio-out/src/bus.rs`, spoken scheduled tasks, once their reply is complete), `KokoroOutput::speak` |
-| Synthesise and play one reply | `SpeechPipeline` (`crates/pond-core/src/models/services/voice/speech_pipeline.rs`) | the voice loop and `AudioBus::speak_text` |
+| Split a whole text into units | `split_text` | `Announcer::speak_text` (`crates/pond-audio-out/src/announce.rs`, spoken scheduled tasks, once their reply is complete), `KokoroOutput::speak` |
+| Synthesise and play one reply | `SpeechPipeline` (`crates/pond-core/src/models/services/voice/speech_pipeline.rs`) | the voice loop and `Announcer::speak_text` |
 | Markdown to plain text, then normalize | `strip_markdown_for_speech` -> `normalize_for_speech` | `tokenizer::chunk` in `crates/pond-adapters-kokoro/src/tokenizer.rs`, so every Kokoro synthesis: the voice loop, `AudioBus`, `POST /api/v1/tts`, voice previews |
 
 Normalization happens inside the Kokoro adapter, not in the callers, so every path gets it once.

@@ -7,13 +7,16 @@ use std::sync::{Mutex, RwLock};
 use anyhow::{anyhow, Result};
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
+/// How long a sound test waits for the speaker before it reports it busy.
+const TEST_WAITS_AT_MOST: std::time::Duration = std::time::Duration::from_secs(10);
+
 static ROUTE: RwLock<Option<String>> = RwLock::new(None);
 /// Bumped on every change, so holders of an open stream know to reopen.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// The device playback last saw stop taking audio, for the device supervisor to collect.
 static STALLED: Mutex<Option<String>> = Mutex::new(None);
-/// Devices a [`crate::Speaker`] or [`crate::AudioKeeper`] holds open, so a probe can read one
-/// as working instead of opening it a second time (ALSA `hw` refuses that).
+/// Devices the audio bus holds open, so a probe can read one as working instead of opening it a
+/// second time (ALSA `hw` refuses that).
 static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The routed device, found once: on ALSA finding a named device opens every node to list them,
 /// which would otherwise happen each time the thinking tone or the wake ping starts.
@@ -129,7 +132,7 @@ pub fn open_output(
 }
 
 /// [`open_output`] on the current route.
-pub fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
+pub(crate) fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
     open_output(output_device().as_deref())
 }
 
@@ -243,12 +246,20 @@ pub fn play_chime(device: Option<&str>) -> Result<()> {
 
 /// Play mono `samples` on exactly `device` and wait for them to finish. Unlike [`open_output`]
 /// this never falls back to the default: a sound test of one speaker must not sound on another.
+/// It holds the audio bus like every sound, and plays on the bus's own stream when that is open on
+/// `device`, which ALSA `hw` would not open twice.
 pub fn play_samples_exactly(
     device: Option<&str>,
     samples: Vec<f32>,
     rate: u32,
     volume: f32,
 ) -> Result<()> {
+    let floor = crate::bus()
+        .claim(crate::Claim::Sound, Some(TEST_WAITS_AT_MOST), || true)
+        .ok_or_else(|| anyhow!("the speaker is busy"))?;
+    if crate::bus().plays_on(device) {
+        return floor.play(samples, rate, volume);
+    }
     let (_stream, handle) = match device {
         Some(name) => {
             let found = find_output(name).ok_or_else(|| anyhow!("speaker '{name}' not found"))?;

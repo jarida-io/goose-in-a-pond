@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pond_audio_out::{play_wav_on, start_thinking_tone_thread, Speaker, TONE_OFF};
+use pond_audio_out::{play_wav, start_thinking_tone_thread, TurnFloor, TONE_OFF};
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
@@ -70,21 +70,20 @@ pub struct KokoroOutput {
     /// Pace, as `f32::to_bits` so it can live in an atomic.
     speed_bits: AtomicU64,
 
-    // ── turn / interrupt state, identical in meaning to the Piper adapter ──
     thinking_for: Arc<AtomicU64>,
     utterance: Arc<AtomicU64>,
     speech_interrupted: Arc<AtomicBool>,
     /// Playbacks in flight; zero between sentences, e.g. while a tool runs.
     playing: Arc<std::sync::atomic::AtomicUsize>,
-    /// Follows the household's speaker choice, so a new route takes effect on the next sentence.
-    speaker: Speaker,
+    /// The audio bus, held from a turn's first sound to its end so nothing plays inside it.
+    turn: TurnFloor,
     audio_level_sink: Option<Arc<ThrottledAudioLevelSink>>,
     /// Sample rate of the most recent synthesis, for diagnostics.
     last_sample_rate: Mutex<Option<u32>>,
 }
 
 impl KokoroOutput {
-    /// Reads the vocab but not the model; fails only on a bad `tokenizer.json` or no audio device.
+    /// Reads the vocab but not the model; fails only on a bad `tokenizer.json`.
     pub fn new(config: KokoroConfig) -> Result<Self> {
         if let Some(dir) = &config.espeak_data {
             std::env::set_var(ESPEAKNG_DATA_DIRECTORY, dir);
@@ -92,7 +91,6 @@ impl KokoroOutput {
         let vocab = Vocab::load(&config.tokenizer_path)?;
         tracing::info!(symbols = vocab.len(), "Kokoro vocab loaded");
 
-        let speaker = Speaker::try_new("kokoro-audio-keeper")?;
         Ok(Self {
             model_path: RwLock::new(config.model_path.clone()),
             config,
@@ -105,7 +103,7 @@ impl KokoroOutput {
             utterance: Arc::new(AtomicU64::new(1)),
             speech_interrupted: Arc::new(AtomicBool::new(false)),
             playing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            speaker,
+            turn: TurnFloor::default(),
             audio_level_sink: None,
             last_sample_rate: Mutex::new(None),
         })
@@ -329,7 +327,7 @@ impl VoiceOutput for KokoroOutput {
         }
 
         let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let speaker = self.speaker.clone();
+        let turn = self.turn.clone();
         let interrupted = self.speech_interrupted.clone();
         let utterance = self.utterance.clone();
         let sink = self.audio_level_sink.clone();
@@ -343,14 +341,14 @@ impl VoiceOutput for KokoroOutput {
                 if interrupted.load(Ordering::Relaxed) {
                     break;
                 }
-                let speaker = speaker.clone();
+                let turn = turn.clone();
                 let interrupted = interrupted.clone();
                 let utterance = utterance.clone();
                 let sink = sink.clone();
                 let playing = Playing::start(&playing);
                 let res = tokio::task::spawn_blocking(move || {
                     let _playing = playing;
-                    play_wav_on(audio, &speaker, &interrupted, &utterance, sink.as_deref())
+                    play_wav(audio, &turn, &interrupted, &utterance, sink.as_deref())
                 })
                 .await;
                 if res.is_err() {
@@ -388,14 +386,14 @@ impl VoiceOutput for KokoroOutput {
         if audio.is_empty() {
             return Ok(());
         }
-        let speaker = self.speaker.clone();
+        let turn = self.turn.clone();
         let interrupted = self.speech_interrupted.clone();
         let utterance = self.utterance.clone();
         let sink = self.audio_level_sink.clone();
         let playing = Playing::start(&self.playing);
         tokio::task::spawn_blocking(move || {
             let _playing = playing;
-            play_wav_on(audio, &speaker, &interrupted, &utterance, sink.as_deref())
+            play_wav(audio, &turn, &interrupted, &utterance, sink.as_deref())
         })
         .await
         .context("Kokoro playback task panicked")?
@@ -409,10 +407,16 @@ impl VoiceOutput for KokoroOutput {
         // Generation first, then clear the interrupt, so stale audio never sees a cleared flag.
         self.utterance.fetch_add(1, Ordering::SeqCst);
         self.speech_interrupted.store(false, Ordering::SeqCst);
+        self.turn.release();
+    }
+
+    fn end_utterance(&self) {
+        self.turn.release();
     }
 
     fn stop_speaking(&self) {
         self.speech_interrupted.store(true, Ordering::SeqCst);
+        self.turn.release();
     }
 
     fn start_thinking_tone(&self) {
@@ -421,7 +425,7 @@ impl VoiceOutput for KokoroOutput {
         if self.thinking_for.swap(mine, Ordering::SeqCst) == mine {
             return;
         }
-        start_thinking_tone_thread(self.thinking_for.clone(), mine);
+        start_thinking_tone_thread(self.thinking_for.clone(), mine, self.turn.clone());
     }
 
     fn stop_thinking_tone(&self) {

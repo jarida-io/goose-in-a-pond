@@ -61,7 +61,9 @@ it, and the follow-up capture can begin with the reply's last words. Headphones 
 ## Stopping the audio
 
 `VoiceOutput` (`crates/pond-core/src/models/ports/voice_output.rs`) is the port; `KokoroOutput`
-implements it with `pond_audio_out::play_wav_on`.
+implements it with `pond_audio_out::play_wav`, which plays only while the turn holds the audio bus
+(`TurnFloor`): taken by the turn's first sound, given back by `end_utterance`, `stop_speaking` and
+the next `begin_utterance`.
 
 - `begin_utterance()` once per turn bumps a generation counter and clears the interrupt flag, so a
   barge-in stops the whole reply, not one sentence.

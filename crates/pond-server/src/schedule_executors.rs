@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use pond_audio_out::AudioBus;
+use pond_audio_out::Announcer;
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::AgentRequest;
@@ -31,7 +31,7 @@ pub struct AgentScheduleExecutor {
     /// Limit concurrent scheduled runs to avoid starving interactive chat.
     semaphore: Semaphore,
     /// Speaks a finished `AgentPrompt` response, gated by `speakable_now`; `None` without TTS.
-    audio_bus: Option<AudioBus>,
+    announcer: Option<Announcer>,
     settings_repo: Option<Arc<dyn SettingsRepository>>,
     /// Counted each run: a schedule has no owner, so its scope is a turn nobody identifies.
     profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
@@ -52,7 +52,7 @@ impl AgentScheduleExecutor {
             http_client: pond_net::client(),
             device_control,
             semaphore: Semaphore::new(max_concurrent.max(1) as usize),
-            audio_bus: voice_output.map(AudioBus::new),
+            announcer: voice_output.map(Announcer::new),
             settings_repo,
             profiles: None,
         }
@@ -91,7 +91,7 @@ impl AgentScheduleExecutor {
             .create_session(session_id.clone())
             .await;
 
-        let should_speak = match (&self.audio_bus, &self.settings_repo) {
+        let should_speak = match (&self.announcer, &self.settings_repo) {
             (Some(_), Some(repo)) => match repo.get().await {
                 Ok(settings) if Self::speakable_now(&settings) => true,
                 Ok(_) => {
@@ -164,9 +164,9 @@ impl AgentScheduleExecutor {
         );
 
         if should_speak {
-            if let Some(bus) = &self.audio_bus {
+            if let Some(announcer) = &self.announcer {
                 tracing::info!("[scheduler] task {task_id}: speaking response aloud");
-                if let Err(e) = bus.speak_text(&response.text, true).await {
+                if let Err(e) = announcer.speak_text(&response.text, true).await {
                     tracing::warn!("[scheduler] task {task_id}: TTS failed: {e}");
                 }
             }

@@ -1,7 +1,6 @@
 //! The pond's [`CodeAnnouncer`]: the configured voice when there is one, else short English clips
 //! compiled into the binary, since a fresh pond may have no voice downloaded yet.
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +33,8 @@ const DIGIT_GAP: Duration = Duration::from_millis(300);
 const PHRASE_GAP: Duration = Duration::from_millis(700);
 /// How long the clips wait for other audio (music) to pause before playing anyway.
 const WAIT_FOR_QUIET: Duration = Duration::from_millis(1500);
+/// How long the clips wait for a turn or another sound to finish.
+const WAIT_FOR_BUS: Duration = Duration::from_secs(30);
 
 /// What the configured voice says. Digits are comma-separated so each is read on its own.
 pub fn spoken_sentence(digits: &str) -> String {
@@ -81,13 +82,13 @@ pub fn clip_sequence(digits: &str) -> Result<Vec<u8>> {
     Ok(encode_wav_pcm16(&f32_to_pcm16(&samples), rate))
 }
 
-/// Opens the default output device for each announcement and closes it after: a code is read
-/// a few times an hour at most, and a held device would block the voice loop's own.
-fn play_on_default_device(wav: Vec<u8>) -> Result<()> {
-    let keeper = pond_audio_out::AudioKeeper::try_new("spoken-code-audio")?;
-    let interrupted = AtomicBool::new(false);
-    let utterance = AtomicU64::new(1);
-    pond_audio_out::play_wav(wav, &keeper.handle, &interrupted, &utterance, None)
+/// Plays the clips on the audio bus once nothing else is playing there.
+fn play_on_the_bus(wav: Vec<u8>) -> Result<()> {
+    let clips = decode_wav(&wav).context("the joined spoken-code clips are corrupt")?;
+    let floor = pond_audio_out::bus()
+        .claim(pond_audio_out::Claim::Sound, Some(WAIT_FOR_BUS), || true)
+        .context("the speaker stayed busy")?;
+    floor.play(clips.samples, clips.sample_rate, 1.0)
 }
 
 fn output_device_present() -> bool {
@@ -112,7 +113,7 @@ impl SpeakerCodeAnnouncer {
         if let Some(quiet) = &quiet {
             quiet.until_quiet(WAIT_FOR_QUIET).await;
         }
-        tokio::task::spawn_blocking(move || play_on_default_device(wav))
+        tokio::task::spawn_blocking(move || play_on_the_bus(wav))
             .await
             .context("the spoken-code playback task panicked")?
     }
