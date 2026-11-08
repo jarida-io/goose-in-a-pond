@@ -309,7 +309,11 @@ impl EarRig {
     }
 
     fn command(&self, raw: &str) -> String {
-        pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
+        let command = pond_voice::text::strip_leading_wake_word(raw, &self.triggers);
+        match pond_voice::text::only_wake_words(&command, &self.triggers) {
+            true => String::new(),
+            false => command,
+        }
     }
 
     /// Let speech the transcriber cannot word reach a model that hears it, as [`UNWORDED_SPEECH`].
@@ -352,6 +356,8 @@ impl Drop for EarRig {
     }
 }
 
+/// Utterances one listen takes: the wake phrase alone and a noise blip each cost one.
+const LISTEN_ROUNDS: usize = 3;
 /// Shorter speech than this, with no words in it, is taken for noise even when the model hears.
 const MIN_UNWORDED_SAMPLES: usize = reference::RATE as usize * 6 / 10;
 /// Where a recording's loudest sample is brought before the model hears it.
@@ -472,8 +478,7 @@ impl VoiceInput for EarRig {
             Some(Primed::Onset(onset)) => from = ListenFrom::Since(onset),
             None => {}
         }
-        // A second round only for an utterance that was the wake phrase and nothing else.
-        for _ in 0..2 {
+        for _ in 0..LISTEN_ROUNDS {
             let Heard::Utterance {
                 end,
                 pcm,
@@ -520,12 +525,20 @@ impl VoiceInput for EarRig {
                 );
                 return self.kept(UNWORDED_SPEECH.to_string(), pcm);
             }
-            if follow_up && command.is_empty() {
-                tracing::info!(
-                    raw = %raw,
-                    "ear: follow-up contained only noise or filler hallucination, ignored"
-                );
-                return Ok(Some(String::new()));
+            if command.is_empty() {
+                let wake = pond_voice::text::heard_wake(&raw, &self.triggers);
+                if follow_up && wake {
+                    return Ok(Some(String::new()));
+                }
+                // A blip often lands as the reply ends or the cue plays; the words come after it.
+                if !wake {
+                    tracing::info!(
+                        raw = %raw,
+                        "ear: only noise or filler hallucination heard, ignored; still listening"
+                    );
+                }
+                from = ListenFrom::At(end);
+                continue;
             }
             let is_echo = self.spoken.lock().unwrap().echo_of(&cleaned).is_some()
                 || self.spoken.lock().unwrap().echo_of(&command).is_some();
@@ -537,13 +550,7 @@ impl VoiceInput for EarRig {
                 );
                 return Ok(Some(String::new()));
             }
-            if !command.is_empty() {
-                return self.kept(command, pcm);
-            }
-            if !pond_voice::text::heard_wake(&raw, &self.triggers) {
-                return Ok(Some(command));
-            }
-            from = ListenFrom::At(end);
+            return self.kept(command, pcm);
         }
         Ok(Some(String::new()))
     }

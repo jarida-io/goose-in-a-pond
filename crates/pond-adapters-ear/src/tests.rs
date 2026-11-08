@@ -354,6 +354,11 @@ async fn speech_the_transcriber_cannot_word_reaches_only_a_model_that_hears() {
         ctl.until("a second of speech", |_, at| at >= from + S)
             .await;
         ctl.emit(utterance(from, ctl.at()));
+        if !forward {
+            ctl.until("the listen after the noise", |l, _| l.listens.len() == 2)
+                .await;
+            ctl.emit(Event::Silence { t: 0.0 });
+        }
         let heard = bounded("the listen", listening).await.unwrap().unwrap();
         match forward {
             true => {
@@ -364,7 +369,11 @@ async fn speech_the_transcriber_cannot_word_reaches_only_a_model_that_hears() {
                 );
             }
             false => {
-                assert_eq!(heard.as_deref(), Some(""), "taken for noise, as before");
+                assert_eq!(
+                    heard.as_deref(),
+                    Some(""),
+                    "taken for noise, and the silence after it ends the listen"
+                );
                 assert!(rig.take_heard_audio().is_none());
             }
         }
@@ -552,31 +561,34 @@ async fn a_wake_in_a_cut_segment_hears_the_request_out() {
 
 #[tokio::test]
 async fn a_segment_that_is_only_the_wake_phrase_listens_for_the_request_after_it() {
-    let says = Says::new(&["Hey goose.", "set a timer for ten minutes"]);
-    let (rig, ctl) = rig(WakeMode::Segments, says.clone()).await;
-    let waiting = tokio::spawn({
-        let rig = rig.clone();
-        async move { rig.wait_for_activation_with_audio().await }
-    });
-    let at = ctl.at();
-    ctl.emit(segment(at - S, at));
-    let activation = bounded("the wake", waiting).await.unwrap().unwrap();
-    rig.prime_with_captured(activation.captured_audio.unwrap());
-    let listening = tokio::spawn({
-        let rig = rig.clone();
-        async move { rig.listen().await }
-    });
-    ctl.until("the listen after the phrase", |l, _| l.listens.len() == 1)
-        .await;
-    assert_eq!(
-        ctl.listens(),
-        vec![at],
-        "listens from where the phrase ended"
-    );
-    ctl.emit(utterance(at, ctl.at()));
-    let heard = bounded("the request", listening).await.unwrap().unwrap();
-    assert_eq!(heard.as_deref(), Some("set a timer for ten minutes"));
-    assert_eq!(says.calls(), 2);
+    // The nano's tiny.en heard a 0.55 s wake as "Hey goose." eight times over.
+    for opening in ["Hey goose.", "Hey goose. Hey goose. Hey goose."] {
+        let says = Says::new(&[opening, "set a timer for ten minutes"]);
+        let (rig, ctl) = rig(WakeMode::Segments, says.clone()).await;
+        let waiting = tokio::spawn({
+            let rig = rig.clone();
+            async move { rig.wait_for_activation_with_audio().await }
+        });
+        let at = ctl.at();
+        ctl.emit(segment(at - S, at));
+        let activation = bounded("the wake", waiting).await.unwrap().unwrap();
+        rig.prime_with_captured(activation.captured_audio.unwrap());
+        let listening = tokio::spawn({
+            let rig = rig.clone();
+            async move { rig.listen().await }
+        });
+        ctl.until("the listen after the phrase", |l, _| l.listens.len() == 1)
+            .await;
+        assert_eq!(
+            ctl.listens(),
+            vec![at],
+            "{opening}: listens from where the phrase ended"
+        );
+        ctl.emit(utterance(at, ctl.at()));
+        let heard = bounded("the request", listening).await.unwrap().unwrap();
+        assert_eq!(heard.as_deref(), Some("set a timer for ten minutes"));
+        assert_eq!(says.calls(), 2);
+    }
 }
 
 /// The nano woke itself five times telling a story about Goosey Goose: the canceller left
@@ -897,8 +909,8 @@ async fn the_real_ear_ends_a_quiet_follow_up_with_silence() {
 }
 
 #[tokio::test]
-async fn a_hallucinated_filler_follow_up_is_ignored() {
-    let says = Says::new(&["Goose, what's the weather?", "Thank you."]);
+async fn a_hallucinated_filler_follow_up_is_ignored_and_the_follow_up_after_it_heard() {
+    let says = Says::new(&["Goose, what's the weather?", "Thank you.", "and tomorrow?"]);
     let (rig, ctl) = rig_for(WakeMode::Segments, says.clone(), "goose").await;
     let waiting = tokio::spawn({
         let rig = rig.clone();
@@ -918,8 +930,11 @@ async fn a_hallucinated_filler_follow_up_is_ignored() {
     ctl.until("the follow-up listen", |l, _| l.listens.len() == 1)
         .await;
     ctl.emit(utterance(ctl.at() - S, ctl.at()));
+    ctl.until("the listen after the filler", |l, _| l.listens.len() == 2)
+        .await;
+    ctl.emit(utterance(ctl.at() - S, ctl.at()));
     let heard = bounded("the follow-up", listening).await.unwrap().unwrap();
-    assert_eq!(heard.as_deref(), Some(""));
+    assert_eq!(heard.as_deref(), Some("and tomorrow?"));
 }
 
 #[tokio::test]
