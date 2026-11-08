@@ -101,10 +101,6 @@ impl Detector {
         self.audio[s.min(self.audio.len())..e.min(self.audio.len())].to_vec()
     }
 
-    pub fn samples_seen(&self) -> usize {
-        self.audio_base + self.audio.len()
-    }
-
     pub fn push(&mut self, pcm: &[f32]) -> (Vec<Score>, Vec<Trigger>) {
         self.audio.extend_from_slice(pcm);
         let (mut scores, mut triggers) = (Vec::new(), Vec::new());
@@ -115,7 +111,7 @@ impl Detector {
                 break;
             }
             let off = self.next_frame * SHIFT - self.audio_base;
-            fbank::frame(&fbank::WESPEAKER, &self.audio[off..], &mut frame);
+            fbank::frame(&self.audio[off..], &mut frame);
             self.frames.extend_from_slice(&frame);
             self.next_frame += 1;
 

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod in_process;
+pub mod wake_model;
 pub use in_process::{TranscribeOpts, WhisperRsInput};
 
 /// How long other audio stays paused while the words after a wake word are captured, renewed as
@@ -621,7 +622,7 @@ fn detection_loop(
                 }
             };
             keep_quiet(QUIET_WHILE_LISTENING);
-            pond_audio_out::play_wake_ping(quiet.clone());
+            pond_audio_out::play_wake_ping();
 
             // Capture until `post_trigger_silence_ms` of silence or the `post_trigger_ms` ceiling.
             let poll_ms = 50u64;

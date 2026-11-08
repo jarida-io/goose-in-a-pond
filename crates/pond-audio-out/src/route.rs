@@ -12,8 +12,8 @@ static ROUTE: RwLock<Option<String>> = RwLock::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// The device playback last saw stop taking audio, for the device supervisor to collect.
 static STALLED: Mutex<Option<String>> = Mutex::new(None);
-/// Devices a [`crate::Speaker`] or [`crate::AudioKeeper`] holds open, so a probe can read one
-/// as working instead of opening it a second time (ALSA `hw` refuses that).
+/// Devices the audio bus holds open, so a probe can read one as working instead of opening it a
+/// second time (ALSA `hw` refuses that).
 static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The routed device, found once: on ALSA finding a named device opens every node to list them,
 /// which would otherwise happen each time the thinking tone or the wake ping starts.
@@ -129,7 +129,7 @@ pub fn open_output(
 }
 
 /// [`open_output`] on the current route.
-pub fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
+pub(crate) fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
     open_output(output_device().as_deref())
 }
 
@@ -235,20 +235,26 @@ pub fn chime_samples(rate: u32) -> Vec<f32> {
     final_out
 }
 
-/// Play [`chime_samples`] on `device`, and wait for it to finish.
-pub fn play_chime(device: Option<&str>) -> Result<()> {
+/// Play [`chime_samples`] on `device` while `floor` holds the bus, and wait for it to finish.
+pub fn play_chime(floor: &crate::Floor, device: Option<&str>) -> Result<()> {
     let rate = 44_100;
-    play_samples_exactly(device, chime_samples(rate), rate, 0.5)
+    play_samples_exactly(floor, device, chime_samples(rate), rate, 0.5)
 }
 
 /// Play mono `samples` on exactly `device` and wait for them to finish. Unlike [`open_output`]
 /// this never falls back to the default: a sound test of one speaker must not sound on another.
+/// It needs the bus held, like every sound, and plays on the bus's own stream when that is open on
+/// `device`, which ALSA `hw` would not open twice.
 pub fn play_samples_exactly(
+    floor: &crate::Floor,
     device: Option<&str>,
     samples: Vec<f32>,
     rate: u32,
     volume: f32,
 ) -> Result<()> {
+    if crate::bus().plays_on(device) {
+        return floor.play(samples, rate, volume);
+    }
     let (_stream, handle) = match device {
         Some(name) => {
             let found = find_output(name).ok_or_else(|| anyhow!("speaker '{name}' not found"))?;
@@ -264,7 +270,14 @@ pub fn play_samples_exactly(
     use rodio::Source;
     let samples = rodio::buffer::SamplesBuffer::new(1, rate, samples).amplify(volume);
     sink.append(crate::tap::tapped(samples));
-    sink.sleep_until_end();
+    let mut stall = crate::bus::Stall::new(&sink);
+    while !sink.empty() {
+        if stall.stuck(&sink) {
+            sink.stop();
+            anyhow::bail!("the speaker took no audio");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     Ok(())
 }
 

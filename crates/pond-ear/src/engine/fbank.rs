@@ -12,30 +12,9 @@ pub const SHIFT: usize = 160;
 pub const NUM_BINS: usize = 80;
 const NFFT_HALF: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Window {
-    Hamming,
-    Povey,
-}
-
-/// What a model was trained on.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FrontEnd {
-    /// Multiplier from the pond's [-1, 1] samples to the model's training scale.
-    pub scale: f32,
-    pub window: Window,
-}
-
-/// WeSpeaker (`infer_onnx.py`): int16 range, Hamming. The wake CNN was trained on it too.
-pub const WESPEAKER: FrontEnd = FrontEnd {
-    scale: 32768.0,
-    window: Window::Hamming,
-};
-/// 3D-Speaker (`processor.py` FBank): [-1, 1], torchaudio's default Povey window.
-pub const THREEDSPEAKER: FrontEnd = FrontEnd {
-    scale: 1.0,
-    window: Window::Povey,
-};
+/// WeSpeaker's front end (`infer_onnx.py`), which the wake CNN was trained on too: the pond's
+/// [-1, 1] samples scaled to int16 range, then a Hamming window.
+const SCALE: f32 = 32768.0;
 
 /// snip_edges=True: only whole frames.
 pub const fn num_frames(samples: usize) -> usize {
@@ -47,7 +26,7 @@ pub const fn num_frames(samples: usize) -> usize {
 }
 
 /// One frame of log-mel energies from `FRAME` samples starting at `pcm[0]`.
-pub fn frame(fe: &FrontEnd, pcm: &[f32], out: &mut [f32]) {
+pub fn frame(pcm: &[f32], out: &mut [f32]) {
     let pcm = &pcm[..FRAME];
     let out = &mut out[..NUM_BINS];
 
@@ -55,7 +34,7 @@ pub fn frame(fe: &FrontEnd, pcm: &[f32], out: &mut [f32]) {
     let mut buf = [0f32; 2 * NFFT_HALF];
     let mut sum = 0f64;
     for (b, &x) in buf.iter_mut().zip(pcm) {
-        *b = x * fe.scale;
+        *b = x * SCALE;
         sum += *b as f64;
     }
     let mean = (sum / FRAME as f64) as f32;
@@ -69,11 +48,7 @@ pub fn frame(fe: &FrontEnd, pcm: &[f32], out: &mut [f32]) {
     }
     buf[0] -= 0.97 * buf[0];
 
-    let win = match fe.window {
-        Window::Hamming => &HAMMING,
-        Window::Povey => &POVEY,
-    };
-    for (b, w) in buf[..FRAME].iter_mut().zip(win.iter()) {
+    for (b, w) in buf[..FRAME].iter_mut().zip(HAMMING.iter()) {
         *b *= w;
     }
 
@@ -115,16 +90,6 @@ pub fn cmn(feats: &mut [f32], frames: usize) {
             *v -= m;
         }
     }
-}
-
-/// Whole-utterance features, row-major `[frame][bin]`, CMN applied. Returns the frame count.
-pub fn fbank(fe: &FrontEnd, pcm: &[f32], out: &mut [f32]) -> usize {
-    let n = num_frames(pcm.len());
-    for t in 0..n {
-        frame(fe, &pcm[t * SHIFT..], &mut out[t * NUM_BINS..]);
-    }
-    cmn(out, n);
-    n
 }
 
 #[cfg(test)]

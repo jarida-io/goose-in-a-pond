@@ -1,19 +1,21 @@
-//! Speaker-side audio for every GIAP TTS engine: output device, playback and the working tone.
+//! Speaker-side audio for the whole process: the audio bus every sound plays on, the voice's
+//! playback, the working tone and the wake ping.
 
 use anyhow::{anyhow, Context, Result};
+use pond_core::models::services::voice::quiet::WAIT_FOR_QUIET;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub mod announce;
 pub mod bus;
 pub mod route;
 pub mod tap;
-pub use bus::AudioBus;
+pub use announce::Announcer;
+pub use bus::{bus, AudioBus, BusState, Claim, Floor, TurnFloor};
 pub use route::{output_device, set_output_device};
 pub use tap::{set_playback_tap, set_spoken_tap, spoken_tap, PlaybackTap, SpokenTap};
-
-// ── Working tone ──────────────────────────────────────────────────────────────
 
 const TONE_RATE: u32 = 22_050;
 /// One breath of the tone: a soft chime, then silence, then repeat.
@@ -51,38 +53,44 @@ fn working_tone_cycle() -> Vec<f32> {
 }
 
 /// Spawn the working-tone thread for turn `mine`; it exits once `thinking_for` names another.
-/// A generation, not a bool: two live turns' start/stop calls would interleave.
-pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64) {
+/// A generation, not a bool: two live turns' start/stop calls would interleave. The tone is the
+/// turn's first sound, so it takes the turn's hold on the bus.
+pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64, turn: TurnFloor) {
     std::thread::spawn(move || {
         use rodio::Sink;
 
+        let ours = |thinking_for: &AtomicU64| thinking_for.load(Ordering::Relaxed) == mine;
         // On a failed start, clear the claim only if a newer turn hasn't taken it.
         let release = |thinking_for: &AtomicU64| {
             let _ =
                 thinking_for.compare_exchange(mine, TONE_OFF, Ordering::SeqCst, Ordering::SeqCst);
         };
 
-        let Ok((_stream, handle, _)) = route::open_routed() else {
+        if !turn.hold(|| ours(&thinking_for)) {
             release(&thinking_for);
             return;
-        };
-        let Ok(sink) = Sink::try_new(&handle) else {
+        }
+        turn.settle(WAIT_FOR_QUIET);
+        let Ok(sink) = bus()
+            .speaker()
+            .and_then(|s| Ok(Sink::try_new(&s.handle())?))
+        else {
             release(&thinking_for);
             return;
         };
 
         let cycle = working_tone_cycle();
         let polls_per_cycle = TONE_CYCLE_MS / 50;
-        let ours = |thinking_for: &AtomicU64| thinking_for.load(Ordering::Relaxed) == mine;
+        let playing = || ours(&thinking_for) && turn.keep();
 
-        while ours(&thinking_for) {
+        while playing() {
             use rodio::Source;
             sink.append(tap::tapped(
                 rodio::buffer::SamplesBuffer::new(1, TONE_RATE, cycle.clone()).amplify(TONE_VOLUME),
             ));
             for _ in 0..polls_per_cycle {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                if !ours(&thinking_for) {
+                if !playing() {
                     sink.stop();
                     return;
                 }
@@ -92,9 +100,8 @@ pub fn start_thinking_tone_thread(thinking_for: Arc<AtomicU64>, mine: u64) {
     });
 }
 
-// ── Wake ping ─────────────────────────────────────────────────────────────────
-
-/// The longest the ping waits for other audio to pause before it plays anyway.
+/// The longest the ping waits for the bus, and then for other audio to pause, before it plays or
+/// gives up: later than that it no longer answers the wake word.
 const PING_WAITS_AT_MOST: Duration = Duration::from_millis(400);
 const PING_RATE: u32 = 44_100;
 const PING_VOLUME: f32 = 0.35;
@@ -116,69 +123,26 @@ fn wake_ping_samples() -> Vec<f32> {
     samples
 }
 
-/// Play the wake ping on its own thread once other audio is paused, holding it paused meanwhile.
-pub fn play_wake_ping(quiet: Option<Arc<pond_core::models::services::voice::quiet::Quiet>>) {
+/// Play the wake ping on its own thread: first in the bus's queue, and the holder it outranks
+/// yields to it.
+pub fn play_wake_ping() {
     std::thread::spawn(move || {
-        let _quiet = quiet.as_ref().map(|quiet| {
-            let hold = quiet.hold();
-            quiet.until_quiet_blocking(PING_WAITS_AT_MOST);
-            hold
-        });
-        use rodio::{Sink, Source};
-        let Ok((_stream, handle, _)) = route::open_routed() else {
+        let Some(floor) = bus().claim(Claim::Ping, Some(PING_WAITS_AT_MOST), || true) else {
+            tracing::debug!("wake ping skipped: the speaker stayed busy");
             return;
         };
-        let Ok(sink) = Sink::try_new(&handle) else {
-            return;
-        };
-        let ping = rodio::buffer::SamplesBuffer::new(1, PING_RATE, wake_ping_samples());
-        sink.append(tap::tapped(ping.amplify(PING_VOLUME)));
-        sink.sleep_until_end();
+        floor.settle(PING_WAITS_AT_MOST);
+        if let Err(e) = floor.play(wake_ping_samples(), PING_RATE, PING_VOLUME) {
+            tracing::debug!(error = %e, "wake ping did not play");
+        }
     });
 }
-
-// ── Persistent audio output ───────────────────────────────────────────────────
 
 /// `rodio::OutputStream` is `!Send` because of cpal's CoreAudio property listeners.
 #[allow(dead_code)] // kept alive for its Drop (closes the audio device); never read
 struct SendableStream(rodio::OutputStream);
-// SAFETY: moved into the keeper thread once and only ever touched there.
+// SAFETY: moved into the speaker thread once and only ever touched there.
 unsafe impl Send for SendableStream {}
-
-/// Keeps the `!Send` output stream alive on its own thread and exposes its `Send` handle.
-/// Reusing one avoids macOS CoreAudio AudioUnit open/close churn, which degrades audio over turns.
-/// Opens the routed speaker; for one held across a route change, use [`Speaker`].
-pub struct AudioKeeper {
-    pub handle: rodio::OutputStreamHandle,
-    stop: Arc<AtomicBool>,
-}
-
-impl AudioKeeper {
-    /// Open the routed output device on a keeper thread; `thread_name` should name the engine.
-    pub fn try_new(thread_name: &str) -> Result<Self> {
-        let (stream, handle, opened) = route::open_routed()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        let sendable = SendableStream(stream);
-        std::thread::Builder::new()
-            .name(thread_name.to_string())
-            .spawn(move || {
-                let _stream = sendable; // keep OutputStream alive on this thread
-                let _hold = route::Hold::new(opened);
-                while !stop_clone.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                }
-            })
-            .context("audio keeper thread spawn failed")?;
-        Ok(Self { handle, stop })
-    }
-}
-
-impl Drop for AudioKeeper {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-    }
-}
 
 /// How often a [`Speaker`]'s thread looks for a route change.
 const FOLLOW_POLL: Duration = Duration::from_millis(200);
@@ -190,10 +154,10 @@ struct SpeakerState {
     device: String,
 }
 
-/// The routed speaker, held open across utterances and reopened when the route moves, so
-/// connecting headphones takes effect on the next sentence. Cheap to clone.
+/// The bus's stream on the routed speaker, held open across sounds and reopened when the route
+/// moves, so connecting headphones takes effect on the next sentence. Cheap to clone.
 #[derive(Clone)]
-pub struct Speaker {
+pub(crate) struct Speaker {
     state: Arc<Mutex<SpeakerState>>,
     _stop: Arc<StopOnDrop>,
 }
@@ -208,7 +172,7 @@ impl Drop for StopOnDrop {
 
 impl Speaker {
     /// Fails only when no output device opens at all.
-    pub fn try_new(thread_name: &str) -> Result<Self> {
+    pub(crate) fn try_new(thread_name: &str) -> Result<Self> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<Arc<Mutex<SpeakerState>>>>();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
@@ -271,7 +235,7 @@ impl Speaker {
         })
     }
 
-    pub fn handle(&self) -> rodio::OutputStreamHandle {
+    pub(crate) fn handle(&self) -> rodio::OutputStreamHandle {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -280,7 +244,7 @@ impl Speaker {
     }
 
     /// Changes whenever the stream is replaced; audio queued on the old one will never finish.
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -288,7 +252,7 @@ impl Speaker {
     }
 
     /// The device this speaker has open.
-    pub fn device(&self) -> String {
+    pub(crate) fn device(&self) -> String {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -296,8 +260,6 @@ impl Speaker {
             .clone()
     }
 }
-
-// ── Playback ──────────────────────────────────────────────────────────────────
 
 /// Per-`window_ms` RMS of an `encode_wav_pcm16` buffer (44-byte header, 16-bit LE mono).
 /// rodio has no per-sample hook after `append()`, so the caller replays one value per poll tick.
@@ -331,41 +293,52 @@ fn compute_audio_envelope(wav: &[u8], window_ms: u64) -> Vec<f32> {
 
 /// No progress for this long while audio is queued means the device stopped taking it. Generous,
 /// because a Bluetooth speaker can take a second to wake.
-const STALL_AFTER: Duration = Duration::from_secs(3);
+pub(crate) const STALL_AFTER: Duration = Duration::from_secs(3);
 
-/// Interruptibly play WAV on an open handle; `audio_level_sink` gets one level per poll tick.
-pub fn play_wav(
+/// Interruptibly play a turn's WAV once the turn holds the bus; `audio_level_sink` gets one level
+/// per poll tick. Stops when the speaker reopens elsewhere (what was queued on the old stream would
+/// never finish) or the turn loses the bus.
+pub fn play_turn_wav(
     wav: Vec<u8>,
-    handle: &rodio::OutputStreamHandle,
+    turn: &TurnFloor,
     interrupted: &AtomicBool,
     utterance: &AtomicU64,
     audio_level_sink: Option<&ThrottledAudioLevelSink>,
 ) -> Result<()> {
+    let mine = utterance.load(Ordering::SeqCst);
+    let wanted =
+        || !interrupted.load(Ordering::Relaxed) && utterance.load(Ordering::Relaxed) == mine;
+    if !turn.hold(wanted) {
+        return Ok(());
+    }
+    turn.settle(WAIT_FOR_QUIET);
+    let speaker = bus().speaker()?;
+    let generation = speaker.generation();
     play(
         wav,
-        handle,
-        || true,
+        &speaker.handle(),
+        || turn.keep() && speaker.generation() == generation,
         interrupted,
         utterance,
         audio_level_sink,
     )
 }
 
-/// [`play_wav`] on a [`Speaker`]. Stops when the speaker reopens elsewhere: what was queued on
-/// the old stream would never finish.
-pub fn play_wav_on(
+/// [`play_turn_wav`] for words said outside a turn, on a bus `floor` already held.
+pub fn play_wav(
     wav: Vec<u8>,
-    speaker: &Speaker,
+    floor: &Floor,
     interrupted: &AtomicBool,
     utterance: &AtomicU64,
     audio_level_sink: Option<&ThrottledAudioLevelSink>,
 ) -> Result<()> {
+    floor.settle(WAIT_FOR_QUIET);
+    let speaker = bus().speaker()?;
     let generation = speaker.generation();
-    let handle = speaker.handle();
     play(
         wav,
-        &handle,
-        || speaker.generation() == generation,
+        &speaker.handle(),
+        || floor.keep() && speaker.generation() == generation,
         interrupted,
         utterance,
         audio_level_sink,
@@ -457,7 +430,7 @@ fn play(
         }
         if !still_current() {
             sink.stop();
-            tracing::info!("TTS playback cut: the speaker changed mid-sentence");
+            tracing::info!("TTS playback cut: the speaker changed or the turn lost the bus");
             return Ok(());
         }
         let now = sink.get_pos();
@@ -696,8 +669,6 @@ mod utterance_generation_tests {
             );
         }
     }
-
-    // ── the working tone ──────────────────────────────────────────────────
 
     /// Exactly the decision the tone thread makes on each poll.
     fn tone_is_ours(thinking_for: &AtomicU64, mine: u64) -> bool {

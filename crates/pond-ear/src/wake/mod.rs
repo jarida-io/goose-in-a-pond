@@ -35,21 +35,6 @@ pub fn window_cmn(feats: &mut [f32]) {
     fbank::cmn(feats, feats.len() / BINS);
 }
 
-/// The detector's input for one window of audio: fbank, then window CMN, exactly as trained.
-pub fn window_features(audio: &[f32]) -> Vec<f32> {
-    let n = fbank::num_frames(audio.len()).min(WINDOW_FRAMES);
-    let mut f = vec![0f32; WINDOW_FRAMES * BINS];
-    for t in 0..n {
-        fbank::frame(
-            &fbank::WESPEAKER,
-            &audio[t * fbank::SHIFT..],
-            &mut f[t * BINS..(t + 1) * BINS],
-        );
-    }
-    window_cmn(&mut f);
-    f
-}
-
 pub fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }

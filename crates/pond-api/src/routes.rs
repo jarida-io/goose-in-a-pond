@@ -2088,7 +2088,7 @@ struct TtsRequest {
 /// A browser plays what `/tts` returns as soon as it has it, so other audio is paused before it goes
 /// out and stays paused for as long as it plays (Spotify's Developer Policy III.7).
 async fn quiet_while_a_browser_plays(wav: &[u8]) {
-    use pond_core::models::services::voice::{quiet, quiet_voice_output::WAIT_FOR_QUIET};
+    use pond_core::models::services::voice::quiet::{self, WAIT_FOR_QUIET};
     /// From the reply leaving here to the browser playing it, plus the pond's usual grace.
     const SLACK: std::time::Duration = std::time::Duration::from_secs(3);
     /// For audio whose length this cannot read: longer than any one sentence.
@@ -2329,7 +2329,8 @@ async fn chat_stream(
 
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
-    req.audio = prepare_turn_audio(&state, std::mem::take(&mut req.audio)).await?;
+    req.audio =
+        prepare_turn_audio(&state, std::mem::take(&mut req.audio), &mut req.message).await?;
     req.document_texts = prepare_turn_documents(&req.documents).await?;
 
     if !req.resumable {
@@ -2434,9 +2435,12 @@ fn audio_limit_status(
 
 /// Pre-stream recording checks for both chat handlers, before anything is saved: the model must
 /// hear it (409), then it must decode, within the time limit, to the engine's WAV (400, 413, 415).
+/// A recording the encoder has no memory for this turn is transcribed instead, its words added to
+/// `message`.
 async fn prepare_turn_audio(
     state: &Arc<AppState>,
     audio: Vec<pond_core::models::domain::message::AudioAttachment>,
+    message: &mut String,
 ) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
     use base64::Engine as _;
     use pond_core::models::domain::audio_input::{AudioLimitError, MAX_AUDIO_MS};
@@ -2452,8 +2456,10 @@ async fn prepare_turn_audio(
     };
     let reported = read_audio_state(state, &provider, &model).await;
     audio_refusal_response(reported.as_ref(), &provider, &model)?;
+    let as_words = words_instead_of_hearing(state, &provider, &model).await;
 
     let mut checked = Vec::with_capacity(audio.len());
+    let mut words = Vec::new();
     for clip in audio {
         let data: String = clip
             .data
@@ -2474,6 +2480,10 @@ async fn prepare_turn_audio(
             })
         })?
         .map_err(audio_limit_status)?;
+        if let Some(transcribe) = as_words.clone() {
+            words.push(transcribe_voice_note(transcribe, normalized.wav).await?);
+            continue;
+        }
         tracing::info!(
             target: "giap::audio",
             model = %model,
@@ -2485,10 +2495,81 @@ async fn prepare_turn_audio(
             data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
             mime_type: "audio/wav".to_string(),
             name: clip.name,
-            transcribed: false,
+            heard_as: None,
         });
     }
+    if as_words.is_some() {
+        let words = words.join(" ");
+        if words.trim().is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "The pond is short of memory to listen to this voice note, and \
+                              could not make out its words. Try again in a moment.",
+                    "code": "voice_note_no_words",
+                })),
+            ));
+        }
+        *message = if message.trim().is_empty() {
+            words
+        } else {
+            format!("{message}\n\n{words}")
+        };
+    }
     Ok(checked)
+}
+
+type Transcriber = Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>;
+
+/// Whisper, when memory is too short to load the encoder that would hear a voice note.
+async fn words_instead_of_hearing(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+) -> Option<Transcriber> {
+    use pond_core::models::domain::audio_input::HearingRoom;
+    let transcribe = state.transcribe_audio.clone()?;
+    let agent = state.agent.clone();
+    let (provider, model) = (provider.to_string(), model.to_string());
+    let room = tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
+        .await
+        .unwrap_or(HearingRoom::Unknown);
+    let HearingRoom::Short {
+        available_mb,
+        needed_mb,
+    } = room
+    else {
+        return None;
+    };
+    tracing::info!(
+        target: "giap::audio",
+        kind = "voice_note_as_words",
+        available_mb,
+        needed_mb,
+        "too little memory to load the encoder; the voice note goes as words"
+    );
+    Some(transcribe)
+}
+
+async fn transcribe_voice_note(
+    transcribe: Transcriber,
+    wav: Vec<u8>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let refused = |detail: String| {
+        tracing::warn!(target: "giap::audio", error = %detail, "a voice note could not be transcribed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "The pond is short of memory to listen to this voice note, and could \
+                          not transcribe it either. Try again in a moment.",
+                "code": "voice_note_untranscribed",
+            })),
+        )
+    };
+    tokio::task::spawn_blocking(move || transcribe(wav))
+        .await
+        .map_err(|e| refused(e.to_string()))?
+        .map_err(|e| refused(format!("{e:#}")))
 }
 
 /// Maps a document refusal onto 413, 422 or 400, with the household sentence and the code.
@@ -12611,7 +12692,8 @@ async fn agent_chat_stream(
         Ok(images) => images,
         Err(resp) => return resp.into_response(),
     };
-    let audio = match prepare_turn_audio(&state, audio).await {
+    let mut message = message;
+    let audio = match prepare_turn_audio(&state, audio, &mut message).await {
         Ok(audio) => audio,
         Err(resp) => return resp.into_response(),
     };

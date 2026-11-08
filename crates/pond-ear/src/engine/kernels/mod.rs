@@ -94,7 +94,6 @@ pub fn conv2d(rung: Rung, a: &ConvArgs, dst: &mut [f32]) {
 /// `[k*k][c]`.
 pub struct DwArgs<'a> {
     pub src: &'a [f32],
-    pub hi: usize,
     pub wi: usize,
     pub c: usize,
     pub ho: usize,

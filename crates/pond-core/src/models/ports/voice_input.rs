@@ -1,6 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// What `listen` returns for speech the transcriber could not put into words, when the model
+/// hears the recording itself: Whisper's English model makes nothing of Swahili, for one.
+pub const UNWORDED_SPEECH: &str = "[spoken]";
+
 /// Early transcript (`Ready`), or `Invalidated` when speech resumed: drop work begun on it.
 #[derive(Clone)]
 pub enum SpeculativeSignal {
@@ -46,4 +50,10 @@ pub trait VoiceInput: Send + Sync {
 #[async_trait]
 pub trait ModelHears: Send + Sync {
     async fn model_hears(&self) -> bool;
+
+    /// Whether this turn's recording can reach the encoder now, as memory stands; a turn it
+    /// cannot reach goes as words.
+    async fn room_to_hear(&self) -> bool {
+        true
+    }
 }

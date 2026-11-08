@@ -47,6 +47,16 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether a recording reaches `model`'s encoder this turn without loading it into memory the
+    /// rest of the turn needs. Blocking: it reads the encoder's header.
+    fn hearing_room(
+        &self,
+        _provider: &str,
+        _model: &str,
+    ) -> crate::models::domain::audio_input::HearingRoom {
+        crate::models::domain::audio_input::HearingRoom::Unknown
+    }
+
     /// Register a model whose files just arrived and settle its picture add-on: verify and
     /// attach what is on disk. Never downloads; must return at once and never fail the caller.
     fn prepare_model(&self, _model: &str) {}

@@ -796,16 +796,18 @@ impl ChatService {
         self
     }
 
-    /// The turn's recording, for a model that hears it; the transcript stays the message.
+    /// The turn's recording, for a model that hears it. The model goes by what it hears, so the
+    /// transcript rides along only as `heard_as`, for memory recall and tool choice.
     async fn heard_audio_for_turn(
         &self,
         wav: Option<Vec<u8>>,
+        transcript: &str,
     ) -> Vec<crate::models::domain::message::AudioAttachment> {
         use base64::Engine as _;
         let (Some(wav), Some(hearing)) = (wav, &self.model_hearing) else {
             return Vec::new();
         };
-        if !hearing.model_hears().await {
+        if !hearing.model_hears().await || !hearing.room_to_hear().await {
             return Vec::new();
         }
         tracing::info!(
@@ -818,7 +820,11 @@ impl ChatService {
             data: base64::engine::general_purpose::STANDARD.encode(&wav),
             mime_type: "audio/wav".to_string(),
             name: None,
-            transcribed: true,
+            // Words the transcriber could not make are no query for memory recall or tool choice.
+            heard_as: Some(match transcript {
+                crate::models::ports::voice_input::UNWORDED_SPEECH => String::new(),
+                words => words.to_string(),
+            }),
         }]
     }
 
@@ -1361,7 +1367,11 @@ impl ChatService {
         let (profile_scope, profile_context) = self.turn_speaker().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
-            message: message.clone(),
+            // A heard turn's words are the recording; Whisper's guess at them stays out of the turn.
+            message: match audio.is_empty() {
+                true => message.clone(),
+                false => String::new(),
+            },
             session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
@@ -2024,7 +2034,9 @@ impl ChatService {
                     continue;
                 }
                 Some(text) => {
-                    if let Some(spoken) = &last_spoken {
+                    // A turn opened by the wake word is a new request, however its words compare.
+                    let echo_of = last_spoken.as_ref().filter(|_| !first_turn);
+                    if let Some(spoken) = echo_of {
                         if pond_voice::text::is_echo_transcript(&text, spoken) {
                             tracing::info!(
                                 input = %text,
@@ -2123,7 +2135,7 @@ impl ChatService {
                 let msg = input_for_task;
                 let fired_at = std::time::Instant::now();
                 tokio::spawn(async move {
-                    let audio = svc.heard_audio_for_turn(heard_audio).await;
+                    let audio = svc.heard_audio_for_turn(heard_audio, &msg).await;
                     svc.stream_response_heard(msg, audio, fired_at).await
                 })
             });
@@ -2947,8 +2959,8 @@ mod tests {
         }
     }
 
-    /// Other audio is paused for a turn (`QuietVoiceOutput`) until the turn ends, so a turn that
-    /// fails partway must still end, or the music never comes back.
+    /// A turn holds the audio bus, and other audio stays paused, until it ends, so a turn that
+    /// fails partway must still end, or the speaker and the music never come back.
     #[tokio::test]
     async fn every_turn_begun_is_ended_even_one_that_fails() {
         let storage = Arc::new(InMemorySessionStorage::new());
@@ -3606,16 +3618,21 @@ mod tests {
         }
     }
 
-    struct Hears(bool);
+    /// Whether the model hears, and whether its encoder has room this turn.
+    struct Hears(bool, bool);
 
     #[async_trait::async_trait]
     impl ModelHears for Hears {
         async fn model_hears(&self) -> bool {
             self.0
         }
+
+        async fn room_to_hear(&self) -> bool {
+            self.1
+        }
     }
 
-    async fn voice_turn_request(hears: bool, wav: &[u8]) -> AgentRequest {
+    async fn voice_turn_request(hears: Hears, wav: &[u8]) -> AgentRequest {
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         storage.create_session("heard".to_string()).await.unwrap();
@@ -3626,11 +3643,33 @@ mod tests {
         ChatService::new(agent.clone(), "heard".to_string(), storage)
             .with_voice_input(input)
             .with_voice_output(Arc::new(CapturingSpeak::default()))
-            .with_model_hearing(Arc::new(Hears(hears)))
+            .with_model_hearing(Arc::new(hears))
             .run_loop()
             .await
             .unwrap();
         agent.last_request().expect("the turn reached the agent")
+    }
+
+    /// The echo check guards a follow-up against the pond hearing itself; a turn the wake word
+    /// opened is someone asking, even when the words match the last reply.
+    #[tokio::test]
+    async fn a_wake_word_turn_is_never_dropped_as_an_echo_of_the_last_reply() {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("echo".to_string()).await.unwrap();
+        // The second listen is a follow-up that hears nothing, so the third waits for the wake.
+        let input = Arc::new(ScriptedListenInput::new(["hello", "", "Echo: hello"]));
+        ChatService::new(agent.clone(), "echo".to_string(), storage)
+            .with_voice_input(input)
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .run_loop()
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.last_request().unwrap().message,
+            "Echo: hello",
+            "the words of the last reply, asked after the wake word, still reach the model"
+        );
     }
 
     #[tokio::test]
@@ -3638,13 +3677,11 @@ mod tests {
         use base64::Engine as _;
         let wav = b"RIFF\x24\x00\x00\x00WAVE".to_vec();
 
-        let heard = voice_turn_request(true, &wav).await;
-        assert_eq!(
-            heard.message, "what time is it",
-            "the transcript stays the message"
-        );
+        let heard = voice_turn_request(Hears(true, true), &wav).await;
+        assert_eq!(heard.message, "", "the model goes by the recording");
+        assert_eq!(heard.message_or_heard(), "what time is it");
         assert_eq!(heard.audio.len(), 1);
-        assert!(heard.audio[0].transcribed);
+        assert_eq!(heard.audio[0].heard_as.as_deref(), Some("what time is it"));
         assert_eq!(heard.audio[0].mime_type, "audio/wav");
         assert_eq!(
             base64::engine::general_purpose::STANDARD
@@ -3653,11 +3690,18 @@ mod tests {
             wav
         );
 
-        let unheard = voice_turn_request(false, &wav).await;
+        let unheard = voice_turn_request(Hears(false, true), &wav).await;
         assert_eq!(unheard.message, "what time is it");
         assert!(
             unheard.audio.is_empty(),
             "a model that cannot hear gets the text alone"
+        );
+
+        let no_room = voice_turn_request(Hears(true, false), &wav).await;
+        assert_eq!(no_room.message, "what time is it");
+        assert!(
+            no_room.audio.is_empty(),
+            "a turn the encoder has no memory for goes as words"
         );
     }
 

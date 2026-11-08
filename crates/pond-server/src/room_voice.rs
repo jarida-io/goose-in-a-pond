@@ -8,10 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pond_adapters_audio_devices::AudioSupervisor;
-use pond_adapters_whisper::WhisperRsInput;
 use pond_api::runs::{RunSupervisor, TurnInFlight};
 use pond_audio::MicHandle;
-use pond_core::models::domain::audio_device::{AudioDeviceStatus, ChoiceBasis};
+use pond_core::models::domain::audio_device::AudioDeviceStatus;
 use pond_core::models::domain::room_voice::{
     LastHeard, RoomEvent, RoomInterrupts, RoomState, RoomStatus, RoomUnavailable, RoomWake,
 };
@@ -42,6 +41,8 @@ const BACKOFF_CEILING: Duration = Duration::from_secs(60);
 /// A loop that ended on its own (an exit phrase) starts again after this.
 const RESTART_AFTER_EXIT: Duration = Duration::from_secs(1);
 const EVENT_BACKLOG: usize = 256;
+/// How long a room start waits for tiny.en's first download; offline, the fetch fails at once.
+const TINY_FETCH_WAIT: Duration = Duration::from_secs(60);
 /// The model claimed at a wake is let go after this if no turn took it: a wake heard as noise.
 const EARLY_TURN_UNUSED_FOR: Duration = Duration::from_secs(30);
 
@@ -70,7 +71,7 @@ pub struct RoomDeps {
     pub telemetry: Option<Arc<dyn TelemetryPort>>,
     pub data_dir: PathBuf,
     pub mic: MicHandle,
-    pub whisper: Option<Arc<WhisperRsInput>>,
+    pub whisper: Option<Arc<crate::serve_whisper::ServeWhisper>>,
     pub output: Option<Arc<dyn VoiceOutput>>,
     pub audio: Arc<dyn RoomAudio>,
     pub runs: Arc<RunSupervisor>,
@@ -103,6 +104,33 @@ impl ModelHears for ActiveModelHears {
         .ok()
         .flatten()
         .is_some_and(|state| state.is_ready())
+    }
+
+    async fn room_to_hear(&self) -> bool {
+        use pond_core::models::domain::audio_input::HearingRoom;
+        let Ok(settings) = self.settings.get().await else {
+            return true;
+        };
+        let agent = self.agent.clone();
+        let room = tokio::task::spawn_blocking(move || {
+            agent.hearing_room(&settings.chat_provider, &settings.chat_model)
+        })
+        .await
+        .unwrap_or(HearingRoom::Unknown);
+        if let HearingRoom::Short {
+            available_mb,
+            needed_mb,
+        } = room
+        {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "voice_turn_as_words",
+                available_mb,
+                needed_mb,
+                "too little memory to load the encoder; the model gets this turn as words"
+            );
+        }
+        room.admits()
     }
 }
 
@@ -156,6 +184,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl RoomVoice {
     /// Start supervising the room; it listens once switched on and able to.
     pub fn start(deps: RoomDeps, enabled: bool, wake: RoomWake) -> Arc<RoomVoice> {
+        if let Some(whisper) = &deps.whisper {
+            whisper.set_hearing(Arc::new(ActiveModelHears {
+                agent: deps.agent.clone(),
+                settings: deps.settings.clone(),
+            }));
+        }
         let inner = Arc::new(Inner {
             deps,
             stopping: std::sync::atomic::AtomicBool::new(false),
@@ -579,12 +613,9 @@ async fn supervise(inner: Arc<Inner>) {
         });
 
         let mut ready = inner.ready(on).await;
-        let untested = inner
-            .deps
-            .audio
-            .status()
-            .is_some_and(|s| s.input.basis == ChoiceBasis::NotTested);
-        if on && !tested && untested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
+        // Once per switch-on, whatever the startup test found: on the nano it chose both devices
+        // without proving them a pair, and the room stayed silent until someone retested.
+        if on && !tested && matches!(ready, Err(RoomUnavailable::NoMicSpeakerPair)) {
             tested = true;
             let audio = inner.deps.audio.clone();
             let _ = tokio::task::spawn_blocking(move || audio.retest()).await;
@@ -671,9 +702,43 @@ async fn run_once(
     settings: &pond_core::user_data::domain::settings::Settings,
     enabled: &mut watch::Receiver<bool>,
 ) -> Ran {
-    let (Some(whisper), Some(output)) = (inner.deps.whisper.clone(), inner.deps.output.clone())
+    let (Some(speech), Some(output)) = (inner.deps.whisper.clone(), inner.deps.output.clone())
     else {
         return Ran::Ended(Err(anyhow::anyhow!("no speech model or voice")));
+    };
+    let hearing = Arc::new(ActiveModelHears {
+        agent: inner.deps.agent.clone(),
+        settings: inner.deps.settings.clone(),
+    });
+    // A model that hears takes the request as audio, so Whisper only spots the wake word and
+    // writes the rough transcript: a wake-only copy of tiny.en does that, leaving the encoder room.
+    let hears = hearing.model_hears().await;
+    if hears
+        && tokio::time::timeout(TINY_FETCH_WAIT, speech.fetch_tiny())
+            .await
+            .is_err()
+    {
+        tracing::warn!(
+            "room voice: tiny.en is still downloading; starting on the full model's copy"
+        );
+    }
+    let chosen = tokio::task::spawn_blocking(move || {
+        if hears {
+            match speech.wake() {
+                Ok(whisper) => return Ok((whisper, true)),
+                Err(e) => tracing::warn!(
+                    error = format!("{e:#}"),
+                    "room voice: no wake-only Whisper; using the full model"
+                ),
+            }
+        }
+        speech.full().map(|whisper| (whisper, false))
+    })
+    .await;
+    let (whisper, whisper_wake_only) = match chosen {
+        Ok(Ok(chosen)) => chosen,
+        Ok(Err(e)) => return Ran::Ended(Err(e)),
+        Err(e) => return Ran::Ended(Err(anyhow::anyhow!("loading Whisper panicked: {e}"))),
     };
     // Its row is made at the first turn: a room switched on and off leaves no empty conversation.
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -713,6 +778,7 @@ async fn run_once(
     let recognises = recognises && listening.ear.is_some();
     if let Some(ear) = &listening.ear {
         ear.set_household(voices);
+        ear.set_forward_unworded(whisper_wake_only);
         // A pause asked for while the room was starting still holds.
         if let Some((until, _)) = inner.paused_until() {
             ear.pause_until(Some(until));
@@ -753,10 +819,7 @@ async fn run_once(
     .with_session_on_first_turn()
     .with_voice_identity(speaker_context(&inner.deps))
     .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()))
-    .with_model_hearing(Arc::new(ActiveModelHears {
-        agent: inner.deps.agent.clone(),
-        settings: inner.deps.settings.clone(),
-    }));
+    .with_model_hearing(hearing);
     if let Some(telemetry) = &inner.deps.telemetry {
         chat = chat.with_telemetry(telemetry.clone());
     }

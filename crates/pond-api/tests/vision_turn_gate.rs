@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use base64::Engine as _;
 use futures::stream::BoxStream;
 use pond_api::{build_router, AppState};
+use pond_core::models::domain::audio_input::HearingRoom;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::domain::vision_encoder::EncoderState;
 use pond_core::models::ports::agent::{Agent, WarmupPhase};
@@ -43,6 +44,7 @@ struct VisionAgent {
     table: Mutex<HashMap<String, EncoderState>>,
     /// `audio_input_state` per model; absent = unknown.
     hearing: Mutex<HashMap<String, EncoderState>>,
+    room: Mutex<HearingRoom>,
     asked: Mutex<Vec<(String, String)>>,
     prepared: Mutex<Vec<String>>,
     prewarms: AtomicUsize,
@@ -55,6 +57,7 @@ impl Default for VisionAgent {
             inner: MockAgent::new(),
             table: Mutex::default(),
             hearing: Mutex::default(),
+            room: Mutex::new(HearingRoom::Unknown),
             asked: Mutex::default(),
             prepared: Mutex::default(),
             prewarms: AtomicUsize::new(0),
@@ -113,6 +116,10 @@ impl Agent for VisionAgent {
 
     fn audio_input_state(&self, _provider: &str, model: &str) -> Option<EncoderState> {
         self.hearing.lock().unwrap().get(model).cloned()
+    }
+
+    fn hearing_room(&self, _provider: &str, _model: &str) -> HearingRoom {
+        *self.room.lock().unwrap()
     }
 
     fn prepare_model(&self, model: &str) {
@@ -193,6 +200,17 @@ struct Pond {
 
 /// Router over a real SQLite tempdir, so "nothing was saved" asks the store the pond writes.
 async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
+    pond_with(agent, provider, model, None).await
+}
+
+type Transcriber = Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>;
+
+async fn pond_with(
+    agent: Arc<VisionAgent>,
+    provider: &str,
+    model: &str,
+    transcribe_audio: Option<Transcriber>,
+) -> Pond {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
     // The default attachment dir is the real app-support directory.
@@ -227,7 +245,7 @@ async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
         whisper_url: "http://127.0.0.1:9000".to_string(),
-        transcribe_audio: None,
+        transcribe_audio,
         session_storage: sessions.clone(),
         http_client: ReqwestClient::new(),
         agent: agent.clone(),
@@ -1201,6 +1219,35 @@ async fn a_voice_note_with_no_message_reaches_the_engine_and_saves_a_marker() {
             .unwrap()
             .is_empty(),
         "the pond never keeps the recording"
+    );
+}
+
+#[tokio::test]
+async fn a_voice_note_the_encoder_has_no_memory_for_reaches_the_model_as_words() {
+    let agent = VisionAgent::hearing(E2B, READY);
+    *agent.room.lock().unwrap() = HearingRoom::Short {
+        available_mb: 900,
+        needed_mb: 979,
+    };
+    let whisper: Transcriber = Arc::new(|_wav| Ok("is it going to rain".to_string()));
+    let pond = pond_with(agent, "local", E2B, Some(whisper)).await;
+
+    let (status, _) = send(
+        &pond,
+        request(
+            "POST",
+            "/api/v1/chat/stream",
+            Some(voice_turn("short", &wav(16_000, 1_500), "audio/x-wav")),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.message, "is it going to rain");
+    assert!(
+        sent.audio.is_empty(),
+        "no recording reaches an encoder that has no memory to load"
     );
 }
 

@@ -50,29 +50,6 @@ pub fn quality(x: &[f32]) -> Quality {
     q
 }
 
-/// The `win`-sample window centred on the speech's energy centroid (Moonshine Micro's
-/// `EnergyCentroidIndex`): how a wake window is cut from a recording of the wake word.
-pub fn centred_window(x: &[f32], win: usize) -> Vec<f32> {
-    if x.len() <= win {
-        let mut v = x.to_vec();
-        v.resize(win, 0.0);
-        return v;
-    }
-    let (mut num, mut den) = (0f64, 0f64);
-    for (i, v) in x.iter().enumerate() {
-        let e = (*v as f64) * (*v as f64);
-        num += e * i as f64;
-        den += e;
-    }
-    let c = if den > 0.0 {
-        (num / den) as usize
-    } else {
-        x.len() / 2
-    };
-    let start = c.saturating_sub(win / 2).min(x.len() - win);
-    x[start..start + win].to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,20 +86,5 @@ mod tests {
     fn a_short_or_silent_clip_has_no_speech() {
         assert_eq!(quality(&[0.1; 100]).speech_s, 0.0);
         assert_eq!(quality(&[0.0; 16_000]).speech_end, 0);
-    }
-
-    #[test]
-    fn the_window_follows_the_energy() {
-        let x = burst(32_000, 20_000, 24_000);
-        let w = centred_window(&x, 8_000);
-        assert_eq!(w.len(), 8_000);
-        let energy = |v: &[f32]| v.iter().map(|a| a * a).sum::<f32>();
-        assert!(energy(&w) > 0.999 * energy(&x));
-        let onset = w.iter().position(|v| v.abs() > 0.01).unwrap();
-        assert!(
-            (1_990..=2_010).contains(&onset),
-            "burst starts at {onset}, not centred"
-        );
-        assert_eq!(centred_window(&x[..100], 400).len(), 400);
     }
 }

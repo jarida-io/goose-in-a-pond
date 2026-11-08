@@ -228,6 +228,15 @@ impl PictureSupport {
         }
     }
 
+    /// The encoder file that hears `chat_model`'s recordings, once it is ready.
+    pub fn hearing_file(&self, data_dir: &Path, chat_model: &str) -> Option<PathBuf> {
+        let declared = declaration(Some(data_dir), chat_model);
+        let spec = declared.spec()?;
+        self.audio_state(data_dir, chat_model)
+            .is_ready()
+            .then(|| encoder_file(data_dir, spec))
+    }
+
     /// Reads the header once per pinned file (~85 KB); an unreadable one is retried next time.
     fn encoder_hears(&self, file: &Path, spec: &EncoderSpec) -> bool {
         if let Some(known) = self

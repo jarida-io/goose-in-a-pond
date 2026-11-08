@@ -40,12 +40,6 @@ fn main() {
         "f32",
         &f32s((0..FRAME).map(|i| 0.54 - 0.46 * (a * i as f64).cos())),
     );
-    array(
-        &mut out,
-        "POVEY",
-        "f32",
-        &f32s((0..FRAME).map(|i| (0.5 - 0.5 * (a * i as f64).cos()).powf(0.85))),
-    );
 
     // Twiddles for the 256-point complex FFT: W256^k = exp(-2 pi i k / 256), k < 128.
     array(

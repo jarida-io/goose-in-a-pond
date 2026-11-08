@@ -334,7 +334,6 @@ pub struct Aec {
     gain: Vec<f32>,
     frame: Vec<f32>,
     est: DelayEstimator,
-    erle: f32,
 }
 
 impl Aec {
@@ -402,7 +401,6 @@ impl Aec {
             gain: vec![1.0; BINS],
             frame: vec![0.0; FFT],
             est: DelayEstimator::new(max_delay),
-            erle: 0.0,
         };
         aec.reset();
         aec
@@ -464,7 +462,6 @@ impl Aec {
         self.gain.fill(1.0);
         self.tail_exact = true;
         self.est.reset();
-        self.erle = 0.0;
     }
 
     fn initial_delay(&self) -> usize {
@@ -503,11 +500,6 @@ impl Aec {
     /// The estimator's speaker-to-microphone delay, once it has locked.
     pub fn estimated_delay(&self) -> Option<usize> {
         self.est.estimate
-    }
-
-    /// Smoothed echo return loss enhancement over the blocks with far-end audio, in dB.
-    pub fn erle_db(&self) -> f32 {
-        self.erle
     }
 
     pub fn bytes(&self) -> usize {
@@ -831,15 +823,6 @@ impl Aec {
             }
         }
         self.adapt(&yb);
-        let (mut mic_e, mut out_e) = (0f32, 0f32);
-        for i in 0..BLOCK {
-            mic_e += self.d[i] * self.d[i];
-            out_e += self.ef[i] * self.ef[i];
-        }
-        if mic_e > 1e3 * BLOCK as f32 {
-            let db = 10.0 * ((mic_e + 1.0) / (out_e + 1.0)).log10();
-            self.erle = 0.95 * self.erle + 0.05 * db;
-        }
         self.yf = yf;
         self.yb = yb;
     }

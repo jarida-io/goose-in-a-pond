@@ -2638,6 +2638,22 @@ pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String 
         .to_string()
 }
 
+/// Whether `transcript` holds nothing but the wake phrase and filler, however many times over:
+/// Whisper repeats a short wake ("Hey goose. Hey goose. Hey goose.") on a clip with no request.
+pub fn only_wake_words(transcript: &str, triggers: &[String]) -> bool {
+    let mut rest = transcript.trim().to_string();
+    while heard_wake(&rest, triggers) {
+        let next = strip_leading_wake_word(&rest, triggers);
+        if next.len() >= rest.len() {
+            break;
+        }
+        rest = next;
+    }
+    normalize_transcript(&rest)
+        .split_whitespace()
+        .all(|w| RUN_UP_WORDS.contains(&w))
+}
+
 /// The sentences the calibration screen asks for, each containing `phrase`.
 ///
 /// Must produce the same list as `buildCalibrationPrompts` in
@@ -2891,6 +2907,19 @@ mod wake_word_tests {
         assert_eq!(
             strip_leading_wake_word("hey goose set a timer", &t),
             "set a timer"
+        );
+    }
+
+    #[test]
+    fn a_wake_whisper_repeated_is_still_only_the_wake() {
+        let t = triggers(&["hey goose", "goose"]);
+        assert!(only_wake_words("Hey goose. Hey goose. Hey goose.", &t));
+        assert!(only_wake_words("Hey goose. Goose. Hey", &t));
+        assert!(only_wake_words("", &t));
+        assert!(!only_wake_words("Hey goose. What time is it?", &t));
+        assert!(
+            !only_wake_words("goose eggs for breakfast", &t),
+            "a request that opens with the word is a request"
         );
     }
 

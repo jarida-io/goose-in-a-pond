@@ -154,8 +154,8 @@ pub fn measure_open(shared: &MicShared, wait: Duration) -> ProbeOutcome {
     }
 }
 
-/// Open a speaker, hand it silence, and see whether it takes it.
-pub fn probe_output(name: &str, wait: Duration) -> ProbeOutcome {
+/// Open a speaker, hand it silence, and see whether it takes it, while `_held` holds the audio bus.
+pub fn probe_output(_held: &pond_audio_out::Floor, name: &str, wait: Duration) -> ProbeOutcome {
     // Already open and playing here; on ALSA `hw` a second open would fail as busy.
     if pond_audio_out::route::is_held(name) {
         return ProbeOutcome::Accepting;
@@ -239,8 +239,11 @@ mod tests {
             probe_input("no-such-device-8f3a2b", Duration::from_secs(5)),
             failed("not connected")
         );
+        let held = pond_audio_out::bus()
+            .claim(pond_audio_out::Claim::Probe, None, || true)
+            .unwrap();
         assert_eq!(
-            probe_output("no-such-device-8f3a2b", Duration::from_secs(5)),
+            probe_output(&held, "no-such-device-8f3a2b", Duration::from_secs(5)),
             failed("not connected")
         );
         assert!(t.elapsed() < Duration::from_secs(3));

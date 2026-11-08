@@ -27,7 +27,7 @@ fn fbank_matches_kaldi() {
     let mut worst = 0f32;
     let mut got = [0f32; NUM_BINS];
     for t in 0..n {
-        fbank::frame(&fbank::WESPEAKER, &clip[t * SHIFT..], &mut got);
+        fbank::frame(&clip[t * SHIFT..], &mut got);
         for (g, w) in got.iter().zip(&want[t * NUM_BINS..(t + 1) * NUM_BINS]) {
             worst = worst.max((g - w).abs());
         }

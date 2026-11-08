@@ -70,14 +70,6 @@ impl CpalCapture {
     }
 }
 
-/// Every input device this host exposes, for a settings picker.
-pub fn input_device_names() -> Vec<String> {
-    cpal::default_host()
-        .input_devices()
-        .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
-}
-
 impl CaptureDevice for CpalCapture {
     fn start(&mut self, shared: Arc<MicShared>) -> Result<(), String> {
         self.stop();
@@ -183,11 +175,6 @@ impl CpalCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn enumeration_is_safe_with_or_without_devices() {
-        let _ = input_device_names();
-    }
 
     /// A stale device setting must not make the assistant deaf.
     #[test]

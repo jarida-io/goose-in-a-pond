@@ -184,7 +184,11 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   draft depth plus one with a drafter attached, instead of a full vocabulary row per ubatch token.
 - **Weights are mmapped**, so on the Orin the CPU-side tensors stay reclaimable page cache. The copy
   of the GPU-side weights the load leaves in the page cache is released (see [Memory fit](#memory-fit)).
-  A picture add-on's encoder is loaded per picture turn, not held resident.
+  The multimodal encoder loads with the first turn that brings a recording or picture and stays
+  loaded while 128 MiB stays free. On unified memory it loads only the tower the turn needs, from a
+  copy written beside the projector (`<name>-audio.gguf`, `<name>-vision.gguf`; Gemma 4's audio
+  tower is 595 of its 945 MiB), and a load that would leave less than 256 MiB available is refused.
+  The pond asks first (`hearing_room`) and sends a recording it has no room for as Whisper's words.
 
 ### Speculative decoding (MTP)
 

@@ -23,6 +23,7 @@ mod ports;
 mod room_memory;
 mod room_voice;
 mod schedule_executors;
+mod serve_whisper;
 mod speech_model;
 mod spoken_code;
 mod system_deps;
@@ -1364,24 +1365,37 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
-    // One model for `/transcribe` and the room.
-    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
-        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
+    // One owner for `/transcribe`, enrolment and the room; nothing loads until one of them asks.
+    let tiny_whisper =
+        voice_models::resolve_whisper("tiny.en", &whisper_catalog, &data_dir.join("models"));
+    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> =
+        whisper_model_path.as_ref().map(|p| {
+            serve_whisper::ServeWhisper::new(
+                p.clone(),
+                tiny_whisper.clone(),
+                &data_dir,
+                mic_handle.clone(),
+            )
+        });
+    if let Some(whisper) = serve_whisper.clone() {
+        tokio::spawn(async move { whisper.fetch_tiny().await });
+    }
+    // Loaded now, before the embedder and the chat model start their own CUDA work: whisper.cpp
+    // setting up CUDA beside them crashed the pond on the Jetson.
+    if settings.voice_room_enabled {
+        if let Some(whisper) = &serve_whisper {
+            if let Err(e) = whisper.wake() {
                 tracing::warn!(
-                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                    error = format!("{e:#}"),
+                    "the room's wake-only Whisper did not load at startup"
                 );
-                startup_problems.speech_recognition =
-                    Some(format!("the speech model did not load ({e})"));
-                None
             }
         }
-    });
+    }
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         serve_whisper.clone().map(|w| {
-            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav(&wav_bytes))
                 as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
@@ -1502,20 +1516,19 @@ async fn run_server(
     // Spotify's Developer Policy III.7: Spotify pauses while the pond speaks, here and in what
     // browsers play from `/tts`. Its token comes from the secret store, which exists further down.
     let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(true);
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let started = quiet::Quiet::start(spotify_focus.clone(), quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        // Paused for as long as the audio bus is held: every sound, a whole turn included.
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     let tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> =
         match &kokoro_engine {
             Some(kokoro) => {
-                use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                 println!("  ✅ TTS: kokoro");
-                let voice = QuietVoiceOutput::new(kokoro.clone(), quiet.clone());
-                Some(Arc::new(voice) as Arc<dyn VoiceOutput>)
+                Some(kokoro.clone() as Arc<dyn VoiceOutput>)
             }
             None => {
                 println!("  ⚠  TTS: unavailable — responses will be text-only");
@@ -3402,15 +3415,30 @@ async fn run_server(
                             env,
                             uri: srv.uri.clone(),
                         };
-                        match mgr.add_extension(req).await {
-                            Ok(_) => tracing::info!("auto-connected MCP server '{}'", srv.name),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to auto-connect MCP server '{}': {e}",
-                                    srv.name
-                                );
-                                startup_problems.extensions.push(srv.name.clone());
-                            }
+                        let connecting = {
+                            let (mgr, name) = (mgr.clone(), srv.name.clone());
+                            tokio::spawn(async move {
+                                let connected = mgr.add_extension(req).await;
+                                match &connected {
+                                    Ok(_) => tracing::info!("auto-connected MCP server '{name}'"),
+                                    Err(e) => tracing::warn!(
+                                        "failed to auto-connect MCP server '{name}': {e}"
+                                    ),
+                                }
+                                connected.is_ok()
+                            })
+                        };
+                        // An extension launched through npx or uvx fetches from the network and
+                        // hangs offline; past this wait it keeps connecting and serve goes on.
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+                            .await
+                        {
+                            Ok(Ok(true)) => {}
+                            Ok(_) => startup_problems.extensions.push(srv.name.clone()),
+                            Err(_) => tracing::warn!(
+                                extension = %srv.name,
+                                "still connecting after 10 s; startup goes on without waiting"
+                            ),
                         }
                     }
                 }
@@ -4809,7 +4837,14 @@ async fn run_server(
     }
 
     tokio::task::spawn_blocking(|| {
-        if let Err(e) = pond_audio_out::route::play_chime(None) {
+        let Some(floor) = pond_audio_out::bus().claim(
+            pond_audio_out::Claim::Chime,
+            Some(std::time::Duration::from_secs(5)),
+            || true,
+        ) else {
+            return;
+        };
+        if let Err(e) = pond_audio_out::route::play_chime(&floor, None) {
             tracing::debug!(error = %e, "startup chime did not play");
         }
     });
@@ -5904,7 +5939,7 @@ async fn run_chat(
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake
     // ping included, so whatever the TTS. The server writes the secret store and refreshes the
     // token; this process only reads the store, and never refreshes.
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(false);
         spotify_focus.use_secrets(Arc::new(
@@ -5912,8 +5947,8 @@ async fn run_chat(
         ));
         let started = quiet::Quiet::start(spotify_focus, quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     // Kokoro opens the speaker as it loads, so let the first choice land before it does.
     if let Some(status) = audio_supervisor
@@ -5992,9 +6027,7 @@ async fn run_chat(
                             Some(sink) => out.with_audio_level_sink(sink.clone()),
                             None => out,
                         };
-                        use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                         out!("  Speak    {} @ {:.2}x", out.voice().await, out.speed());
-                        let out = QuietVoiceOutput::new(Arc::new(out), quiet.clone());
                         Arc::new(out) as Arc<dyn VoiceOutput>
                     }
                     Err(e) => {
