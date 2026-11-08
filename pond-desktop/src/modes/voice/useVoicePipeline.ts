@@ -10,6 +10,7 @@ import {
   type VoiceBackend,
   type VoiceState,
 } from "./VoiceBackend";
+import { asksForAnAnswer } from "./wakePhrase";
 
 const NO_SPEECH_TIMEOUT_MS = 8_000;
 
@@ -35,6 +36,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
 
   const backendRef = useRef<VoiceBackend | null>(null);
   const prevStateRef = useRef<VoiceState>("idle");
+  const bargedInRef = useRef(false);
   const noSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -140,6 +142,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
 
       backend.onWakeInterrupt = () => {
         // Barge-in: pipeline was cancelled by wake listener
+        bargedInRef.current = true;
         dispatch({ type: "SET_VOICE_STATE", payload: "idle" });
       };
 
@@ -199,8 +202,8 @@ export function useVoicePipeline(): VoicePipelineAPI {
   }, [wakeWord, dispatch]);
 
   // ── Conversational turn-taking ─────────────────────────
-  // After a reply, auto-record the next turn. "thinking" -> "idle" counts too: that is a barge-in
-  // mid-thought, because onWakeInterrupt jumps straight to "idle".
+  // After a barge-in, or a reply that asked something, auto-record the next turn. "thinking" ->
+  // "idle" counts too: that is a barge-in mid-thought, because onWakeInterrupt jumps to "idle".
 
   useEffect(() => {
     const prev = prevStateRef.current;
@@ -210,6 +213,17 @@ export function useVoicePipeline(): VoicePipelineAPI {
     if ((prev === "speaking" || prev === "thinking") && curr === "idle") {
       const backend = backendRef.current;
       if (!backend) return;
+      const bargedIn = bargedInRef.current;
+      bargedInRef.current = false;
+      const reply = [...stateRef.current.transcript].reverse().find((m) => m.role === "agent")?.text ?? "";
+      // A room keeps talking after a reply; that talk is not for the pond unless it asked.
+      if (!bargedIn && !asksForAnAnswer(reply)) {
+        if (wakeWord) {
+          dispatch({ type: "SET_VOICE_STATE", payload: "wait" });
+          restartWakeListenerRef.current();
+        }
+        return;
+      }
 
       dispatch({ type: "SET_VOICE_STATE", payload: "recording" });
       backend.recordWithVad(stateRef.current.sessionToken ?? undefined, stateRef.current.sessionId ?? undefined).then((blob) => {

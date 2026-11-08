@@ -99,8 +99,10 @@ Under `--json-events` the refusal is an `error` line and `exit: already_running`
 There is no spoken filler and no tool narration: both would have to finish playing before the
 answer could start.
 
-After a reply the loop listens again without the wake word (a follow-up turn). If nothing is heard
-within 10 s it goes back to waiting for the wake word.
+After a reply that ends with a question, the loop listens again without the wake word (a follow-up
+turn). If nothing is heard within 10 s it goes back to waiting for the wake word. After any other
+reply it waits for the wake word straight away: a room keeps talking after a reply, and that talk is
+not for the pond. Each decision is a `voice_follow_up` trace line.
 
 Control phrases are matched against the whole utterance (`pond_voice::control::classify`):
 "bye", "goodbye", "dismissed", "go to sleep", "that's all", "never mind", "stop", "stop listening"

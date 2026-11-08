@@ -2210,12 +2210,20 @@ impl ChatService {
                     }
                 }
                 Raced::Turn(chat_result) => {
+                    let mut asked = false;
                     if let Ok(Ok(outcome)) = &chat_result {
                         last_spoken = Some(outcome.text.clone());
+                        asked = pond_voice::text::asks_for_an_answer(&outcome.text);
                     }
-                    if !self.finalize_confirmed_turn(chat_result, &input).await {
-                        first_turn = true;
-                    }
+                    let kept = self.finalize_confirmed_turn(chat_result, &input).await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "voice_follow_up",
+                        listening = kept && asked,
+                        "after a reply, the next listen needs the wake word unless the reply asked"
+                    );
+                    // A room keeps talking after a reply; only an asked question expects an answer.
+                    first_turn = !(kept && asked);
                 }
                 Raced::Stop(reason) => {
                     self.abandon_turn(&chat_handle);
@@ -3657,7 +3665,8 @@ mod tests {
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         storage.create_session("echo".to_string()).await.unwrap();
-        // The second listen is a follow-up that hears nothing, so the third waits for the wake.
+        // The reply asks nothing, so the next listen waits for the wake; it hears nothing, and the
+        // third is woken again.
         let input = Arc::new(ScriptedListenInput::new(["hello", "", "Echo: hello"]));
         ChatService::new(agent.clone(), "echo".to_string(), storage)
             .with_voice_input(input)
@@ -3669,6 +3678,41 @@ mod tests {
             agent.last_request().unwrap().message,
             "Echo: hello",
             "the words of the last reply, asked after the wake word, still reach the model"
+        );
+    }
+
+    /// The mock replies "Echo: <input>", so an input ending in a question gives a reply that asks.
+    #[tokio::test]
+    async fn only_a_reply_that_asked_listens_on_without_the_wake_word() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("asked".to_string()).await.unwrap();
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(MockAgent::new()), "asked".to_string(), storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new([
+                "shall we go?",
+                "yes",
+                "hello",
+            ])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_event_sink(collector.sink());
+        run_bounded(&svc).await.unwrap();
+        let marks: Vec<String> = collector
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::StateChanged {
+                    state: WorkflowState::Wait,
+                } => Some("wait".to_string()),
+                WorkflowEvent::Transcript { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            ["wait", "shall we go?", "yes", "wait", "hello", "wait"],
+            "the answer to a question needs no wake; what follows a statement does"
         );
     }
 

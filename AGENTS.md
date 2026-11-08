@@ -180,7 +180,8 @@ Whisper on each speech segment, and endpoints the request with Silero on echo-ca
 Whisper transcribes it → think → tokens split into sentences (a short first clause, and clauses
 when synthesis falls behind) and spoken by Kokoro while the reply
 streams (`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
-interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word. With
+interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word, only when the
+reply ended with a question (`asks_for_an_answer`). With
 `vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,
 RMS gates, and barge-in on microphone energy (`pond_voice::barge`). `pond-audio` is the single
 microphone owner and `pond-audio-out`'s audio bus the single speaker owner: one stream, one sound at
