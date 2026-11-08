@@ -16851,8 +16851,9 @@ async fn long_task_view(
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
     let artifacts = repo.list_artifacts(task.id()).await?;
-    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
-        .map(|a| a.id.clone());
+    let result =
+        pond_core::shared::services::long_task_runner::answer_artifact(task, &steps, &artifacts)
+            .map(|a| a.id.clone());
     // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
     let answer_text = match (&result, task.answer()) {
         (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {

@@ -681,7 +681,8 @@ fn a_short_answers_notification_reads_its_links_as_words_and_stops_at_a_word() {
 }
 
 #[test]
-fn a_short_answer_without_a_result_title_still_has_an_answer_and_a_report_does_not_guess() {
+fn a_short_answer_without_a_result_title_still_has_an_answer_and_a_report_takes_only_its_last_step()
+{
     let found = ArtifactSummary {
         id: "f1".into(),
         task_id: "task-1".into(),
@@ -695,10 +696,57 @@ fn a_short_answer_without_a_result_title_still_has_an_answer_and_a_report_does_n
     let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
     let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
     assert_eq!(
-        answer_artifact(&short, std::slice::from_ref(&found)).map(|a| a.id.as_str()),
+        answer_artifact(&short, &[], std::slice::from_ref(&found)).map(|a| a.id.as_str()),
         Some("f1")
     );
-    assert!(answer_artifact(&report, std::slice::from_ref(&found)).is_none());
+    assert!(
+        answer_artifact(&report, &[], std::slice::from_ref(&found)).is_none(),
+        "with no finished step a report does not guess"
+    );
+    let look = step("look", 0, &[], StepState::Completed, 1);
+    let write = step("write", 1, &[], StepState::Completed, 1);
+    assert!(
+        answer_artifact(
+            &report,
+            &[look.clone(), write],
+            std::slice::from_ref(&found)
+        )
+        .is_none(),
+        "an earlier step's work is a part, not the answer"
+    );
+    assert_eq!(
+        answer_artifact(&report, &[look], std::slice::from_ref(&found)).map(|a| a.id.as_str()),
+        Some("f1"),
+        "the last step's output is the answer whatever it was titled"
+    );
+}
+
+#[test]
+fn a_reports_last_output_under_another_title_is_saved_as_its_result() {
+    let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
+    let steps = [
+        step("research", 0, &[], StepState::Completed, 1),
+        step("finalize", 1, &["research"], StepState::Completed, 1),
+    ];
+    let artifacts = [
+        summary("a1", Some("research"), "Notes on the early years"),
+        summary("a2", Some("finalize"), "Dafoe: A Life"),
+    ];
+    assert_eq!(
+        final_artifact(&steps, &artifacts).map(|a| a.id.as_str()),
+        Some("a2")
+    );
+    let result = result_to_save(&report, &steps, &artifacts, Some("The whole life."), t(10))
+        .expect("the last step's output is kept as the Result");
+    assert_eq!(result.title(), RESULT_TITLE);
+    assert_eq!(result.body(), "The whole life.");
+    assert_eq!(result.step_key().map(|k| k.as_str()), Some("finalize"));
+
+    let titled = [summary("r1", Some("finalize"), "Result")];
+    assert!(
+        result_to_save(&report, &steps, &titled, Some("ignored"), t(10)).is_none(),
+        "a Result the step saved stands"
+    );
 }
 
 #[test]
@@ -712,7 +760,7 @@ fn only_the_plans_last_open_step_is_told_to_save_the_result() {
 }
 
 #[test]
-fn a_short_answer_left_only_in_a_summary_becomes_its_result() {
+fn an_answer_left_only_in_a_summary_becomes_its_result() {
     let mut done = step("look", 0, &[], StepState::Running, 1);
     done.record(
         &StepOutcome::new(
@@ -725,12 +773,15 @@ fn a_short_answer_left_only_in_a_summary_becomes_its_result() {
     )
     .unwrap();
     let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
-    let result = summary_as_result(&short, std::slice::from_ref(&done), &[], t(10))
+    let result = result_to_save(&short, std::slice::from_ref(&done), &[], None, t(10))
         .expect("the summary is the answer");
     assert_eq!(result.title(), RESULT_TITLE);
     assert!(result.body().contains("about an hour"));
     let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
-    assert!(summary_as_result(&report, std::slice::from_ref(&done), &[], t(10)).is_none());
+    assert!(
+        result_to_save(&report, std::slice::from_ref(&done), &[], None, t(10)).is_some(),
+        "a report whose last step only reported its work still has an answer"
+    );
 }
 
 #[test]

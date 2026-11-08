@@ -2,7 +2,7 @@
 //! then each section a step drafted, in plan order, then the sources they cite. So a report is as
 //! long as its plan, never as long as one context window allows.
 use crate::shared::domain::long_task::{ArtifactKind, ArtifactSummary, PlanStep};
-use crate::shared::services::long_task_runner::{result_artifact, RESULT_TITLE};
+use crate::shared::services::long_task_runner::{final_artifact, result_artifact, RESULT_TITLE};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 
 /// The data artifact a plan's dated events are saved in, which the calendar export reads.
@@ -23,7 +23,16 @@ pub struct ReportParts {
 /// A report's sections are its drafts, ordered by their steps' place in the plan; a draft whose
 /// step a replan deleted keeps its place by when it was written, after the planned ones.
 pub fn report_parts(steps: &[PlanStep], artifacts: &[ArtifactSummary]) -> ReportParts {
-    let result = result_artifact(artifacts).map(|a| a.id.clone());
+    // A Result copied from the last step's output leaves that output stored too; it is the
+    // answer, never a section as well.
+    let answer = result_artifact(artifacts).or_else(|| final_artifact(steps, artifacts));
+    let source_of_answer = |a: &ArtifactSummary| {
+        answer.is_some_and(|r| {
+            r.id == a.id
+                || (r.step_key == a.step_key && !a.summary.is_empty() && r.summary == a.summary)
+        })
+    };
+    let result = answer.map(|a| a.id.clone());
     let ordinal = |a: &ArtifactSummary| {
         a.step_key
             .as_ref()
@@ -34,7 +43,9 @@ pub fn report_parts(steps: &[PlanStep], artifacts: &[ArtifactSummary]) -> Report
         .iter()
         // A failed try's Result stays stored; no summary is ever a section.
         .filter(|a| {
-            a.kind == ArtifactKind::Draft && !a.title.trim().eq_ignore_ascii_case(RESULT_TITLE)
+            a.kind == ArtifactKind::Draft
+                && !a.title.trim().eq_ignore_ascii_case(RESULT_TITLE)
+                && !source_of_answer(a)
         })
         .collect();
     drafts.sort_by_key(|a| (ordinal(a).is_none(), ordinal(a), a.created_at));
@@ -595,6 +606,60 @@ mod tests {
         assert_eq!(parts.result.as_deref(), Some("a-result"));
         assert_eq!(parts.sections, ["a-costs", "a-routes", "a-orphan"]);
         assert_eq!(parts.calendars, ["a-cal"]);
+    }
+
+    fn finished(key: &str, ordinal: u32) -> PlanStep {
+        PlanStep::from_parts(PlanStepParts {
+            task_id: "task-1".into(),
+            key: key.into(),
+            ordinal,
+            role: "long-task-worker".into(),
+            instructions: "do it".into(),
+            inputs: Vec::new(),
+            depends_on: Vec::new(),
+            acceptance: None,
+            state: StepState::Completed,
+            attempts: 1,
+            summary: Some("done".into()),
+            failure: None,
+            started_at: Some(t(0)),
+            finished_at: Some(t(1)),
+            agent: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn without_a_result_the_last_steps_draft_is_the_answer_not_a_section() {
+        let steps = [finished("intro", 0), finished("final", 1)];
+        let artifacts = [
+            artifact("a-intro", Some("intro"), ArtifactKind::Draft, "Intro", 1),
+            artifact("a-final", Some("final"), ArtifactKind::Draft, "A Life", 2),
+        ];
+        let parts = report_parts(&steps, &artifacts);
+        assert_eq!(parts.result.as_deref(), Some("a-final"));
+        assert_eq!(parts.sections, ["a-intro"]);
+    }
+
+    #[test]
+    fn a_result_copied_from_the_last_draft_leaves_that_draft_out_of_the_sections() {
+        let steps = [finished("intro", 0), finished("final", 1)];
+        let mut source = artifact("a-final", Some("final"), ArtifactKind::Draft, "A Life", 2);
+        source.summary = "His whole life, in order.".into();
+        let mut copy = artifact("a-copy", Some("final"), ArtifactKind::Draft, "Result", 3);
+        copy.summary = source.summary.clone();
+        let artifacts = [
+            artifact("a-intro", Some("intro"), ArtifactKind::Draft, "Intro", 1),
+            source,
+            copy,
+        ];
+        let parts = report_parts(&steps, &artifacts);
+        assert_eq!(parts.result.as_deref(), Some("a-copy"));
+        assert_eq!(
+            parts.sections,
+            ["a-intro"],
+            "the answer is not printed twice"
+        );
     }
 
     #[test]
