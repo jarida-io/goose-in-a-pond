@@ -187,7 +187,7 @@ In `goose/crates/goose-local-inference/src/llamacpp/`.
   The multimodal encoder loads with the first turn that brings a recording or picture and stays
   loaded while 128 MiB stays free. On unified memory it loads only the tower the turn needs, from a
   copy written beside the projector (`<name>-audio.gguf`, `<name>-vision.gguf`; Gemma 4's audio
-  tower is 595 of its 945 MiB), and a load that would leave less than 384 MiB available is refused.
+  tower is 595 of its 945 MiB), and a load that would leave less than 256 MiB available is refused.
   The pond asks first (`hearing_room`) and sends a recording it has no room for as Whisper's words.
 
 ### Speculative decoding (MTP)
