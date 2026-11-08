@@ -283,6 +283,7 @@ impl KokoroOutput {
             Ok(samples)
         })
         .await?;
+        hand_back_heap();
         *self.last_sample_rate.lock().unwrap() = Some(SAMPLE_RATE);
         Ok(samples)
     }
@@ -897,6 +898,19 @@ fn push_checked(
         }
     }
     Ok(pass)
+}
+
+/// A unit's tensors are freed into the malloc arena of whichever thread ran it, and glibc keeps
+/// them there: on the Orin that held 150-900 MB a unit until the turn ended.
+fn hand_back_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::task::spawn_blocking(|| {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's malloc_trim takes the padding to keep and touches nothing of ours.
+        unsafe { malloc_trim(0) };
+    });
 }
 
 /// Phonemizing and synthesis take about real time; on a runtime worker they stall every task
