@@ -103,14 +103,6 @@ impl RealFft {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.n
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.n == 0
-    }
-
     /// Bins of a transform: `n / 2 + 1`, DC to Nyquist.
     pub fn bins(&self) -> usize {
         self.n / 2 + 1

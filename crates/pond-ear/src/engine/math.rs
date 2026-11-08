@@ -1,4 +1,4 @@
-//! ln / sqrt / exp / erf without libm: range reduction plus a short polynomial, a couple of ulp,
+//! ln / sqrt / exp without libm: range reduction plus a short polynomial, a couple of ulp,
 //! so results do not depend on the platform's libm.
 
 /// Natural log for positive, normal `x`; the front end clamps to `f32::EPSILON` first.
@@ -59,40 +59,9 @@ pub fn exp(x: f32) -> f32 {
     p * f32::from_bits(((k + 127) as u32) << 23)
 }
 
-/// The error function (Abramowitz and Stegun 7.1.26, absolute error under 1.5e-7).
-#[inline(always)]
-pub fn erf(x: f32) -> f32 {
-    let a = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * a);
-    let y = 1.0
-        - t * (0.254_829_6
-            + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152 + t * 1.061_405_4))))
-            * exp(-a * a);
-    if x < 0.0 {
-        -y
-    } else {
-        y
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn erf_matches_tabulated_values() {
-        for (x, want) in [
-            (0.0f32, 0.0f32),
-            (0.1, 0.112_462_92),
-            (0.5, 0.520_499_9),
-            (1.0, 0.842_700_8),
-            (2.0, 0.995_322_3),
-            (3.5, 0.999_999_3),
-            (-1.0, -0.842_700_8),
-        ] {
-            assert!((erf(x) - want).abs() < 3e-7, "erf({x}) = {}", erf(x));
-        }
-    }
 
     fn ulps(a: f32, b: f32) -> u32 {
         (a.to_bits() as i64 - b.to_bits() as i64).unsigned_abs() as u32

@@ -85,11 +85,7 @@ impl Front {
                 *s = self.audio[(start + i) % cap];
             }
             let slot = (self.n_frames % fcap) * NUM_BINS;
-            fbank::frame(
-                &fbank::WESPEAKER,
-                &self.scratch,
-                &mut self.frames[slot..slot + NUM_BINS],
-            );
+            fbank::frame(&self.scratch, &mut self.frames[slot..slot + NUM_BINS]);
             self.n_frames += 1;
         }
         self.ns += t.elapsed().as_nanos() as u64;
@@ -136,7 +132,6 @@ mod tests {
         let mut want = vec![0f32; n * NUM_BINS];
         for t in 0..n {
             fbank::frame(
-                &fbank::WESPEAKER,
                 &pcm[t * SHIFT..],
                 &mut want[t * NUM_BINS..(t + 1) * NUM_BINS],
             );

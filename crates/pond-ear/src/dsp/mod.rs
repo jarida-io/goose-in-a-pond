@@ -4,7 +4,7 @@
 pub mod quality;
 pub mod resample;
 
-pub use quality::{centred_window, quality, Quality};
+pub use quality::{quality, Quality};
 pub use resample::Resampler;
 
 pub const SR: f32 = 16_000.0;

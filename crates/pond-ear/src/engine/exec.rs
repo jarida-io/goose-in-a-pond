@@ -273,7 +273,6 @@ pub fn run(
                 zero_halo(dst, o);
                 let args = kernels::DwArgs {
                     src,
-                    hi: s.h,
                     wi: s.w,
                     c: s.c,
                     ho: o.h,

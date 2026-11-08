@@ -72,19 +72,6 @@ fn rate(v: &[f32], f: impl Fn(f32) -> bool) -> f32 {
     v.iter().filter(|&&s| f(s)).count() as f32 / v.len() as f32
 }
 
-/// Wilson score interval for k successes in n trials; z = 1.645 gives 90%.
-pub fn wilson(k: usize, n: usize, z: f32) -> (f32, f32) {
-    if n == 0 {
-        return (0.0, 1.0);
-    }
-    let (k, n) = (k as f32, n as f32);
-    let p = k / n;
-    let d = 1.0 + z * z / n;
-    let c = (p + z * z / (2.0 * n)) / d;
-    let h = z * ((p * (1.0 - p) + z * z / (4.0 * n)) / n).sqrt() / d;
-    ((c - h).max(0.0), (c + h).min(1.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,15 +82,5 @@ mod tests {
         assert_eq!(e.eer, Some(0.0));
         let t = e.recommended.unwrap();
         assert!(t > 0.2 && t <= 0.8);
-    }
-
-    #[test]
-    fn wilson_bounds_zero_of_three_hundred() {
-        let (lo, hi) = wilson(0, 300, 1.645);
-        assert_eq!(lo, 0.0);
-        assert!(
-            hi < 0.01,
-            "0/300 bounds the rate under 1% (rule of 3): {hi}"
-        );
     }
 }

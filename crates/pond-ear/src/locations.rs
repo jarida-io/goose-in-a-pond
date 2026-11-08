@@ -35,8 +35,3 @@ pub fn speaker(data_dir: &Path) -> PathBuf {
         .join("voice-match")
         .join("resnet34_LM.onnx")
 }
-
-/// The first of `paths` that exists.
-pub fn first_existing(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    paths.into_iter().find(|p| p.exists())
-}

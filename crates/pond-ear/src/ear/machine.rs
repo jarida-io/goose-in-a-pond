@@ -136,7 +136,6 @@ pub struct Ear {
     /// `None` with `segments` on: the host's wake detector reads the segments, so the CNN would
     /// only hold its weights and arena.
     wake: Option<WakeCnn>,
-    wake_threshold: f32,
     speaker: Option<SpeakerNet>,
     vad: VadSilero,
     endpointer: Endpointer,
@@ -147,13 +146,11 @@ pub struct Ear {
     barge: Barge,
     max_push: usize,
     scores: Vec<(f64, f32)>,
-    vad_scores: Vec<(f64, f32)>,
     aec_ns: u64,
 }
 
 impl Ear {
     pub fn new(cfg: Config, household: Household) -> Result<Ear, Error> {
-        let wake_threshold = cfg.wake.threshold;
         let wake = match cfg.segments {
             true => None,
             false => Some(WakeCnn::new(
@@ -176,7 +173,6 @@ impl Ear {
             mic_samples: 0,
             front,
             wake,
-            wake_threshold,
             speaker,
             vad,
             endpointer: Endpointer::new(cfg.endpoint),
@@ -187,7 +183,6 @@ impl Ear {
             barge: Barge::default(),
             max_push,
             scores: Vec::with_capacity(SCORE_HISTORY),
-            vad_scores: Vec::with_capacity(SCORE_HISTORY),
             aec_ns: 0,
         };
         ear.warm_up();
@@ -236,7 +231,6 @@ impl Ear {
         self.state = State::Wait;
         self.barge = Barge::default();
         self.scores.clear();
-        self.vad_scores.clear();
         self.aec_ns = 0;
     }
 
@@ -256,17 +250,6 @@ impl Ear {
 
     pub fn has_speaker(&self) -> bool {
         self.speaker.is_some()
-    }
-
-    pub fn set_wake_threshold(&mut self, t: f32) {
-        self.wake_threshold = t;
-        if let Some(w) = self.wake.as_mut() {
-            w.threshold = t;
-        }
-    }
-
-    pub fn wake_threshold(&self) -> f32 {
-        self.wake_threshold
     }
 
     pub fn endpoint(&self) -> Endpoint {
@@ -307,11 +290,6 @@ impl Ear {
     /// Wake scores since the last call, `(t, p)` per 80 ms hop.
     pub fn take_scores(&mut self) -> Vec<(f64, f32)> {
         std::mem::take(&mut self.scores)
-    }
-
-    /// Voice-activity probabilities since the last call, `(t, p)` per 32 ms.
-    pub fn take_vad(&mut self) -> Vec<(f64, f32)> {
-        std::mem::take(&mut self.vad_scores)
     }
 
     /// The echo-cancelled audio between absolute samples, clamped to what the ring still holds.
@@ -416,7 +394,6 @@ impl Ear {
             }
         }
         trim(&mut self.scores);
-        trim(&mut self.vad_scores);
     }
 
     fn on_wake_frame(&mut self, n: usize, out: &mut Vec<Event>) {
@@ -446,7 +423,6 @@ impl Ear {
 
     fn on_vad(&mut self, end: usize, p: f32, out: &mut Vec<Event>) {
         let t = end as f64 / RATE as f64;
-        self.vad_scores.push((t, p));
         let listening = self.endpointer.listening();
         let step = self.endpointer.vad(end, p);
         if let Some(on) = step.speech {
