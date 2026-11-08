@@ -42,6 +42,8 @@ const BACKOFF_CEILING: Duration = Duration::from_secs(60);
 /// A loop that ended on its own (an exit phrase) starts again after this.
 const RESTART_AFTER_EXIT: Duration = Duration::from_secs(1);
 const EVENT_BACKLOG: usize = 256;
+/// The model claimed at a wake is let go after this if no turn took it: a wake heard as noise.
+const EARLY_TURN_UNUSED_FOR: Duration = Duration::from_secs(30);
 
 /// The microphone and speaker the room would use, as serve's audio supervisor knows them.
 pub trait RoomAudio: Send + Sync {
@@ -514,6 +516,10 @@ impl Inner {
                         }
                     }
                     WorkflowState::Wait | WorkflowState::Listen => {
+                        // Back to waiting for a wake: a claim no turn took lets the model go.
+                        if matches!(state, WorkflowState::Wait) {
+                            drop(pond_core::models::domain::inference_bus::take_early_turn());
+                        }
                         if turn.take().is_some() {
                             crate::room_memory::log_turn(
                                 *lock(&self.memory_at_start),
@@ -525,6 +531,8 @@ impl Inner {
             }
             WorkflowEvent::Wake { who } => {
                 self.deps.runs.preempt();
+                // Claimed now, so whatever holds the model stops while the person is speaking.
+                pond_core::models::domain::inference_bus::claim_turn_early(EARLY_TURN_UNUSED_FOR);
                 if let Some(who) = who {
                     let heard = LastHeard {
                         profile_id: who.profile_id.clone(),

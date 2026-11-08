@@ -27,6 +27,9 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use pond_core::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
+use pond_core::models::domain::inference_bus::{
+    inference_bus, running_under, take_early_turn, InferenceClaim, InferenceFloor, InferenceHold,
+};
 use pond_core::shared::domain::agent::{AgentStreamEvent, SubagentStatus};
 use pond_core::shared::domain::orchestration::{
     max_concurrent_subagents, BackgroundAvailability, ChildModel, ReportNudge, TaskRun, TaskSpec,
@@ -113,6 +116,8 @@ struct DeviceHoldState {
     /// One permit, taken by each child inheriting this hold: a child must not queue behind its
     /// parent (blocked in a tool call) but must still queue behind its siblings.
     children: Arc<Semaphore>,
+    /// The latest turn's floor on the inference bus; its children's calls run under it.
+    hold: InferenceHold,
 }
 
 /// The one ledger on this pond; see [`DeviceLedger`].
@@ -155,16 +160,18 @@ impl DeviceLedger {
             .unwrap_or(0.0)
     }
 
-    /// Record that a turn of `giap_session_id` holds the device permit.
-    fn hold_device(self: &Arc<Self>, giap_session_id: &str) -> DeviceHold {
+    /// Record that a turn of `giap_session_id` holds the device under `hold`.
+    fn hold_device(self: &Arc<Self>, giap_session_id: &str, hold: InferenceHold) -> DeviceHold {
         let mut holders = self.lock_holders();
         let state = holders
             .entry(giap_session_id.to_string())
             .or_insert_with(|| DeviceHoldState {
                 holders: 0,
                 children: Arc::new(Semaphore::new(1)),
+                hold: hold.clone(),
             });
         state.holders += 1;
+        state.hold = hold;
         drop(holders);
         DeviceHold {
             ledger: Arc::clone(self),
@@ -187,6 +194,14 @@ impl DeviceLedger {
             .get(giap_session_id)
             .filter(|state| state.holders > 0)
             .map(|state| Arc::clone(&state.children))
+    }
+
+    /// The hold a child of this session's live turn runs under, or `None` with no live turn.
+    pub fn inherited_hold(&self, giap_session_id: &str) -> Option<InferenceHold> {
+        self.lock_holders()
+            .get(giap_session_id)
+            .filter(|state| state.holders > 0)
+            .map(|state| state.hold.clone())
     }
 
     /// Live children of this session. Diagnostics and tests only.
@@ -243,11 +258,18 @@ impl Drop for DeviceHold {
     }
 }
 
-/// A parent turn's exclusive claim on this device, held for the whole turn. Field order is drop
-/// order: the ledger record clears before the permit frees, so no child inherits a free permit.
+/// A parent turn's claim on this device's model, held for the whole turn. Field order is drop
+/// order: the ledger record clears before the floor frees, so no child inherits a free bus.
 pub struct TurnDeviceClaim {
     _hold: DeviceHold,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    floor: Arc<InferenceFloor>,
+}
+
+impl TurnDeviceClaim {
+    /// What this turn's engine calls, and its children's, run under.
+    pub fn inference_hold(&self) -> InferenceHold {
+        InferenceHold::Floor(Arc::downgrade(&self.floor))
+    }
 }
 
 /// Take the device for a parent turn. `None` (off-device provider, or cancelled while queueing)
@@ -257,22 +279,30 @@ pub async fn claim_device_for_turn(
     provider: &str,
     cancel: &CancellationToken,
 ) -> Option<TurnDeviceClaim> {
-    let needed = parent_turn_permits(provider);
-    if needed == 0 {
+    if parent_turn_permits(provider) == 0 {
         return None;
     }
-    let permits = process_subagent_permits();
-    let permit = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return None,
-        acquired = permits.acquire_many_owned(needed) => acquired.ok()?,
+    // A wake may have claimed the model already, while the person was still speaking.
+    let floor = match take_early_turn() {
+        Some(floor) => floor,
+        None => {
+            let claimed = inference_bus().claim(InferenceClaim::Turn, None, || true);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                floor = claimed => Arc::new(floor?),
+            }
+        }
     };
-    // Recorded only once the permit is held, or a queueing turn's child would inherit it early.
-    let hold = process_device_ledger().hold_device(giap_session_id);
-    Some(TurnDeviceClaim {
-        _hold: hold,
-        _permit: permit,
-    })
+    // Recorded only once the floor is held, or a queueing turn's child would inherit it early.
+    let claim = TurnDeviceClaim {
+        _hold: process_device_ledger().hold_device(
+            giap_session_id,
+            InferenceHold::Floor(Arc::downgrade(&floor)),
+        ),
+        floor,
+    };
+    Some(claim)
 }
 
 // ── The progress channel ────────────────────────────────────────────────────
@@ -975,7 +1005,9 @@ async fn drive_run(
     // A child's engine calls take the model's one context rather than a second beside the parent's.
     let (compile, retention) = (plan.compile_shape.clone(), plan.prefill_retention);
     let rebuild = plan.prefill_rebuild;
-    let outcome = goose_providers::request_context::as_helper(prime_waiting, async {
+    // A child of a live turn runs under that turn's floor; any other runs under its caller's hold.
+    let hold = ledger.inherited_hold(&parent_session_id);
+    let helper = goose_providers::request_context::as_helper(prime_waiting, async {
         use goose_providers::request_context::{
             compiling_prefill, compiling_prefill_retaining, rebuilding_prefill,
         };
@@ -990,8 +1022,11 @@ async fn drive_run(
             (Some(shape), None) => compiling_prefill(shape, runner.run(plan, cancel.clone())).await,
             (None, _) => runner.run(plan, cancel.clone()).await,
         }
-    })
-    .await;
+    });
+    let outcome = match hold {
+        Some(hold) => running_under(hold, helper).await,
+        None => helper.await,
+    };
     runner.release(&plan_child_session_id).await;
 
     let (status, result, error) = match outcome {
