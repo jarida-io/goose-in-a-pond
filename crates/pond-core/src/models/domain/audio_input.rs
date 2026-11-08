@@ -362,6 +362,29 @@ pub fn voice_notes_status(state: Option<&EncoderState>) -> &'static str {
     }
 }
 
+/// Whether the encoder that hears a recording can take this turn now, as memory stands. A turn
+/// it cannot take goes as the words Whisper made of the recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HearingRoom {
+    Loaded,
+    Fits {
+        available_mb: u64,
+        needed_mb: u64,
+    },
+    Short {
+        available_mb: u64,
+        needed_mb: u64,
+    },
+    /// Nothing to judge by, so the recording goes to the model as before.
+    Unknown,
+}
+
+impl HearingRoom {
+    pub fn admits(self) -> bool {
+        !matches!(self, HearingRoom::Short { .. })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

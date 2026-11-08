@@ -103,6 +103,33 @@ impl ModelHears for ActiveModelHears {
         .flatten()
         .is_some_and(|state| state.is_ready())
     }
+
+    async fn room_to_hear(&self) -> bool {
+        use pond_core::models::domain::audio_input::HearingRoom;
+        let Ok(settings) = self.settings.get().await else {
+            return true;
+        };
+        let agent = self.agent.clone();
+        let room = tokio::task::spawn_blocking(move || {
+            agent.hearing_room(&settings.chat_provider, &settings.chat_model)
+        })
+        .await
+        .unwrap_or(HearingRoom::Unknown);
+        if let HearingRoom::Short {
+            available_mb,
+            needed_mb,
+        } = room
+        {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "voice_turn_as_words",
+                available_mb,
+                needed_mb,
+                "too little memory to load the encoder; the model gets this turn as words"
+            );
+        }
+        room.admits()
+    }
 }
 
 /// The part of the status the loop moves.

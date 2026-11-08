@@ -50,4 +50,10 @@ pub trait VoiceInput: Send + Sync {
 #[async_trait]
 pub trait ModelHears: Send + Sync {
     async fn model_hears(&self) -> bool;
+
+    /// Whether this turn's recording can reach the encoder now, as memory stands; a turn it
+    /// cannot reach goes as words.
+    async fn room_to_hear(&self) -> bool {
+        true
+    }
 }

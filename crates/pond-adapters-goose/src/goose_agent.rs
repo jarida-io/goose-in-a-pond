@@ -4864,6 +4864,35 @@ impl AgentPort for GooseAdapter {
         ))
     }
 
+    fn hearing_room(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> pond_core::models::domain::audio_input::HearingRoom {
+        use goose::providers::local_inference::HearingRoom as Engine;
+        use pond_core::models::domain::audio_input::HearingRoom;
+        const MIB: u64 = 1024 * 1024;
+        let file = match (provider, self.data_dir.as_deref()) {
+            ("local" | "gguf", Some(dd)) => self.pictures.hearing_file(dd, model),
+            _ => None,
+        };
+        let Some(file) = file else {
+            return HearingRoom::Unknown;
+        };
+        match goose::providers::local_inference::hearing_room(&file) {
+            Engine::Loaded => HearingRoom::Loaded,
+            Engine::Fits { available, needed } => HearingRoom::Fits {
+                available_mb: available / MIB,
+                needed_mb: needed / MIB,
+            },
+            Engine::Short { available, needed } => HearingRoom::Short {
+                available_mb: available / MIB,
+                needed_mb: needed / MIB,
+            },
+            Engine::Unknown => HearingRoom::Unknown,
+        }
+    }
+
     /// Registers a model whose file just arrived, from the file its row names, then settles its
     /// add-on; never downloads. A no-op for llama.cpp without a Tokio runtime.
     fn prepare_model(&self, model: &str) {

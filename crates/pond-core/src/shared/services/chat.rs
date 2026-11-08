@@ -807,7 +807,7 @@ impl ChatService {
         let (Some(wav), Some(hearing)) = (wav, &self.model_hearing) else {
             return Vec::new();
         };
-        if !hearing.model_hears().await {
+        if !hearing.model_hears().await || !hearing.room_to_hear().await {
             return Vec::new();
         }
         tracing::info!(
@@ -3618,16 +3618,21 @@ mod tests {
         }
     }
 
-    struct Hears(bool);
+    /// Whether the model hears, and whether its encoder has room this turn.
+    struct Hears(bool, bool);
 
     #[async_trait::async_trait]
     impl ModelHears for Hears {
         async fn model_hears(&self) -> bool {
             self.0
         }
+
+        async fn room_to_hear(&self) -> bool {
+            self.1
+        }
     }
 
-    async fn voice_turn_request(hears: bool, wav: &[u8]) -> AgentRequest {
+    async fn voice_turn_request(hears: Hears, wav: &[u8]) -> AgentRequest {
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         storage.create_session("heard".to_string()).await.unwrap();
@@ -3638,7 +3643,7 @@ mod tests {
         ChatService::new(agent.clone(), "heard".to_string(), storage)
             .with_voice_input(input)
             .with_voice_output(Arc::new(CapturingSpeak::default()))
-            .with_model_hearing(Arc::new(Hears(hears)))
+            .with_model_hearing(Arc::new(hears))
             .run_loop()
             .await
             .unwrap();
@@ -3672,7 +3677,7 @@ mod tests {
         use base64::Engine as _;
         let wav = b"RIFF\x24\x00\x00\x00WAVE".to_vec();
 
-        let heard = voice_turn_request(true, &wav).await;
+        let heard = voice_turn_request(Hears(true, true), &wav).await;
         assert_eq!(heard.message, "", "the model goes by the recording");
         assert_eq!(heard.message_or_heard(), "what time is it");
         assert_eq!(heard.audio.len(), 1);
@@ -3685,11 +3690,18 @@ mod tests {
             wav
         );
 
-        let unheard = voice_turn_request(false, &wav).await;
+        let unheard = voice_turn_request(Hears(false, true), &wav).await;
         assert_eq!(unheard.message, "what time is it");
         assert!(
             unheard.audio.is_empty(),
             "a model that cannot hear gets the text alone"
+        );
+
+        let no_room = voice_turn_request(Hears(true, false), &wav).await;
+        assert_eq!(no_room.message, "what time is it");
+        assert!(
+            no_room.audio.is_empty(),
+            "a turn the encoder has no memory for goes as words"
         );
     }
 
