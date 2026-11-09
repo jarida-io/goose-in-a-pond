@@ -519,6 +519,67 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
     }
 }
 
+/// A page as the news reads it: where it ended, its title, its text as lines, and what its head
+/// says of it: the picture it names, its publisher and its date.
+#[derive(Debug, Clone)]
+pub struct ArticlePage {
+    pub address: String,
+    pub title: String,
+    pub lines: Vec<String>,
+    pub preview_image: Option<String>,
+    pub site_name: Option<String>,
+    pub published: Option<String>,
+}
+
+/// Reads a page a news search found, past the cache and the address book, filed under the news
+/// rather than the turn in flight.
+pub async fn read_article(address: &str) -> Result<ArticlePage, FetchFailure> {
+    let client = web_search::page_client()
+        .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
+    let (final_address, body) = fetch_page_as(
+        client,
+        address,
+        Some(pond_core::shared::services::egress::EgressPurpose::News),
+    )
+    .await?;
+    let parsing = tokio::task::spawn_blocking(move || match body {
+        Body::Html(html) => {
+            let document = bounded_html::parse_within(
+                &html,
+                web_search::MAX_NODES_PER_PAGE,
+                web_search::PARSE_TIME_PER_PAGE,
+            );
+            let preview = reqwest::Url::parse(&final_address)
+                .ok()
+                .and_then(|base| page_data::preview_of(&document, &base));
+            let (site_name, published) = crate::news_web::head_of(&document);
+            let (title, lines) = lines_of(&document);
+            ArticlePage {
+                address: final_address,
+                title,
+                lines: lines.into_iter().map(|l| l.text).collect(),
+                preview_image: preview,
+                site_name,
+                published,
+            }
+        }
+        Body::Text(text) => ArticlePage {
+            address: final_address,
+            title: String::new(),
+            lines: lines_from_text(&text).into_iter().map(|l| l.text).collect(),
+            preview_image: None,
+            site_name: None,
+            published: None,
+        },
+    });
+    match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
+        Ok(Ok(page)) => Ok(page),
+        _ => Err(FetchFailure::Unreachable(
+            "the page was too large to read in time".into(),
+        )),
+    }
+}
+
 async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body), String> {
     fetch_page(client, address).await.map_err(|f| f.text())
 }
@@ -527,17 +588,30 @@ async fn fetch_page(
     client: &reqwest::Client,
     address: &str,
 ) -> Result<(String, Body), FetchFailure> {
+    fetch_page_as(client, address, None).await
+}
+
+/// [`fetch_page`], filed under `purpose` with no session when one is given, as a call no chat
+/// turn made.
+async fn fetch_page_as(
+    client: &reqwest::Client,
+    address: &str,
+    purpose: Option<pond_core::shared::services::egress::EgressPurpose>,
+) -> Result<(String, Body), FetchFailure> {
     let parsed = reqwest::Url::parse(address).map_err(|_| FetchFailure::NotAnAddress)?;
     let host = parsed.host_str().unwrap_or_default().to_string();
     if let Err(refused) = pond_net::public_only::check_target(&parsed) {
         tracing::info!(target: "giap::trace", kind = "web_page_refused", host = %host, %refused);
         return Err(FetchFailure::NotPublic);
     }
-    let response = crate::http::traced_get_with(client, address, |b| {
+    let customize = |b: reqwest::RequestBuilder| {
         b.timeout(PAGE_TIMEOUT)
             .header(reqwest::header::ACCEPT, ACCEPT)
-    })
-    .await
+    };
+    let response = match purpose {
+        Some(purpose) => crate::http::traced_get_for(client, address, purpose, "", customize).await,
+        None => crate::http::traced_get_with(client, address, customize).await,
+    }
     .map_err(|e| {
         tracing::info!(target: "giap::trace", kind = "web_page_unread", host = %host, error = %e);
         FetchFailure::Unreachable(web_search::describe_failure(&e))

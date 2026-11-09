@@ -159,7 +159,7 @@ pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
     }
 }
 
-fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
+pub(crate) fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
     static META: LazyLock<scraper::Selector> = LazyLock::new(|| {
         selector(
             r#"meta[property="og:image"], meta[property="og:image:url"], meta[name="twitter:image"]"#,

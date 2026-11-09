@@ -8,6 +8,7 @@ pub mod interview;
 pub mod knowledge;
 pub mod long_task;
 pub mod memory;
+pub mod news_web;
 pub mod orchestrator;
 pub mod page_data;
 pub mod report_images;
