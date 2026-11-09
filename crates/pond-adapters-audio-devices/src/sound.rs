@@ -94,18 +94,20 @@ pub fn listen_while_playing(
     macro_rules! build {
         ($t:ty, $to_f32:expr) => {{
             let listener = listener.clone();
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[$t], _: &_| {
-                    let mono = data.iter().step_by(channels).map(|s| $to_f32(*s));
-                    listener
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(mono);
-                },
-                on_err,
-                None,
-            )
+            pond_core::shared::services::process_env::reading(|| {
+                device.build_input_stream(
+                    &config.config(),
+                    move |data: &[$t], _: &_| {
+                        let mono = data.iter().step_by(channels).map(|s| $to_f32(*s));
+                        listener
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(mono);
+                    },
+                    on_err,
+                    None,
+                )
+            })
         }};
     }
     let stream = match config.sample_format() {

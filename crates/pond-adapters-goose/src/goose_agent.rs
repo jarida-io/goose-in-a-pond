@@ -1296,15 +1296,13 @@ impl GooseAdapter {
             *last = signature.clone();
         }
 
-        // SAFETY: set_var is unsound with threads; Goose already sets OLLAMA_HOST/OLLAMA_TIMEOUT
-        // on this path, and the signature guard limits it to actual changes.
-        #[allow(unused_unsafe)]
-        unsafe {
-            for (key, value) in &knobs {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
+        // Through process_env: at start-up this runs while the speaker route lists ALSA devices,
+        // and a bare setenv here crashed the pond in ALSA's getenv. The signature guard above
+        // limits it to actual changes.
+        for (key, value) in &knobs {
+            match value {
+                Some(v) => pond_core::shared::services::process_env::set(key, v),
+                None => pond_core::shared::services::process_env::remove(key),
             }
         }
         tracing::info!(
@@ -1904,8 +1902,8 @@ impl GooseAdapter {
             // llamafile uses the Ollama wire protocol over HTTP.
             "llamafile" if settings.chat_model.trim().is_empty() => None,
             "llamafile" => {
-                std::env::set_var("OLLAMA_HOST", &self.llamafile_url);
-                std::env::set_var("OLLAMA_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OLLAMA_HOST", &self.llamafile_url);
+                pond_core::shared::services::process_env::set("OLLAMA_TIMEOUT", "600");
                 let model_name = settings.chat_model.clone();
                 let cfg = goose_providers::model::ModelConfig::new(&model_name);
                 tracing::debug!(
@@ -1934,13 +1932,19 @@ impl GooseAdapter {
             "mistralrs" => {
                 let host = std::env::var("GIAP_MISTRALRS_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
-                std::env::set_var("OPENAI_HOST", &host);
-                std::env::set_var("OPENAI_BASE_PATH", "v1/chat/completions");
+                pond_core::shared::services::process_env::set("OPENAI_HOST", &host);
+                pond_core::shared::services::process_env::set(
+                    "OPENAI_BASE_PATH",
+                    "v1/chat/completions",
+                );
                 // mistral.rs needs no key, but goose's OpenAI provider won't build without one.
                 if std::env::var("OPENAI_API_KEY").is_err() {
-                    std::env::set_var("OPENAI_API_KEY", "not-required-by-mistralrs");
+                    pond_core::shared::services::process_env::set(
+                        "OPENAI_API_KEY",
+                        "not-required-by-mistralrs",
+                    );
                 }
-                std::env::set_var("OPENAI_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OPENAI_TIMEOUT", "600");
                 let model_name = if settings.chat_model.is_empty() {
                     "default".to_string()
                 } else {
@@ -1958,8 +1962,8 @@ impl GooseAdapter {
             "ollama" => {
                 let ollama_host = std::env::var("GIAP_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-                std::env::set_var("OLLAMA_HOST", &ollama_host);
-                std::env::set_var("OLLAMA_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OLLAMA_HOST", &ollama_host);
+                pond_core::shared::services::process_env::set("OLLAMA_TIMEOUT", "600");
                 let model_name = if settings.chat_model.is_empty() {
                     "llama3.2".to_string()
                 } else {
@@ -2044,9 +2048,12 @@ impl GooseAdapter {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some((p, model_cfg));
             // Goose's fallback for sessions with no model_config reads env before config.yaml.
-            std::env::set_var("GOOSE_MODEL", &settings.chat_model);
+            pond_core::shared::services::process_env::set("GOOSE_MODEL", &settings.chat_model);
             // Goose resolves the fallback provider before the model, so both must be exported.
-            std::env::set_var("GOOSE_PROVIDER", &settings.chat_provider);
+            pond_core::shared::services::process_env::set(
+                "GOOSE_PROVIDER",
+                &settings.chat_provider,
+            );
             // Log the read-back, not the write: these have been seen unset after this ran.
             tracing::info!(
                 goose_provider = ?std::env::var("GOOSE_PROVIDER").ok(),

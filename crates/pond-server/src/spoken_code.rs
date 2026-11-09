@@ -90,7 +90,9 @@ fn play_on_the_bus(wav: Vec<u8>) -> Result<()> {
 
 fn output_device_present() -> bool {
     use cpal::traits::HostTrait;
-    cpal::default_host().default_output_device().is_some()
+    pond_core::shared::services::process_env::reading(|| {
+        cpal::default_host().default_output_device().is_some()
+    })
 }
 
 pub struct SpeakerCodeAnnouncer {

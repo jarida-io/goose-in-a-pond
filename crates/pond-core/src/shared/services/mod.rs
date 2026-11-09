@@ -15,6 +15,7 @@ pub mod passages;
 pub mod pond_admin;
 pub mod prefill_progress;
 pub mod print_output;
+pub mod process_env;
 pub mod research_report;
 pub mod sensor_persisting_event_bus;
 pub mod session_summary;
