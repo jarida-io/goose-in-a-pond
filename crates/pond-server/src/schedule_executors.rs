@@ -11,6 +11,7 @@ use pond_core::user_data::domain::schedule::{
     routine_rejection, ActionsFailed, TaskKind, TriggerAction,
 };
 use pond_core::user_data::ports::device_control::DeviceControlPort;
+use pond_core::user_data::ports::device_registry::DeviceRegistry;
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::session_storage::SessionStorage;
@@ -28,6 +29,8 @@ pub struct AgentScheduleExecutor {
     http_client: reqwest::Client,
     /// Actuation seam for rule actions. `None` → device actions report failure.
     device_control: Option<Arc<dyn DeviceControlPort>>,
+    /// Names devices in a run's result and its notification; ids without it.
+    device_registry: Option<Arc<dyn DeviceRegistry + Send + Sync>>,
     /// Limit concurrent scheduled runs to avoid starving interactive chat.
     semaphore: Semaphore,
     /// Speaks a finished `AgentPrompt` response, gated by `speakable_now`; `None` without TTS.
@@ -51,6 +54,7 @@ impl AgentScheduleExecutor {
             session_storage,
             http_client: pond_net::client(),
             device_control,
+            device_registry: None,
             semaphore: Semaphore::new(max_concurrent.max(1) as usize),
             announcer: voice_output.map(Announcer::new),
             settings_repo,
@@ -61,6 +65,26 @@ impl AgentScheduleExecutor {
     pub fn with_profiles(mut self, profiles: Arc<dyn ProfileRepository + Send + Sync>) -> Self {
         self.profiles = Some(profiles);
         self
+    }
+
+    pub fn with_device_registry(mut self, registry: Arc<dyn DeviceRegistry + Send + Sync>) -> Self {
+        self.device_registry = Some(registry);
+        self
+    }
+
+    /// A device as people know it: its name, or its id when it has none or the registry is down.
+    async fn device_name(&self, device_id: &str) -> String {
+        let Some(registry) = &self.device_registry else {
+            return device_id.to_string();
+        };
+        match registry.get_device(device_id).await {
+            Ok(Some(device)) if !device.name.trim().is_empty() => device.name,
+            Ok(_) => device_id.to_string(),
+            Err(e) => {
+                tracing::debug!(error = %e, "[scheduler] device name unavailable; using its id");
+                device_id.to_string()
+            }
+        }
     }
 
     /// Checks quiet hours and `unprompted_speech_enabled` only; not `speak_unprompted`'s
@@ -226,7 +250,8 @@ impl AgentScheduleExecutor {
                 Some(dc) => {
                     dc.set_power(device_id, *on).await?;
                     Ok(format!(
-                        "{device_id} switched {}",
+                        "{} switched {}",
+                        self.device_name(device_id).await,
                         if *on { "on" } else { "off" }
                     ))
                 }
@@ -254,6 +279,15 @@ impl AgentScheduleExecutor {
         }
     }
 
+    /// What an action acts on, to name it when it fails.
+    async fn action_target(&self, action: &TriggerAction) -> String {
+        match action {
+            TriggerAction::DevicePower { device_id, .. } => self.device_name(device_id).await,
+            TriggerAction::Notify { .. } => "the notification".to_string(),
+            TriggerAction::AgentPrompt { .. } => "the assistant".to_string(),
+        }
+    }
+
     /// Run every action of a routine, even after one fails: a dead plug must not leave the
     /// lights off. Fails if any action failed, naming those.
     async fn run_routine(&self, task_id: &str, actions: &[TriggerAction]) -> Result<String> {
@@ -267,7 +301,7 @@ impl AgentScheduleExecutor {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(e) => {
                     tracing::warn!("[routine] task {task_id} action failed: {e}");
-                    let what = action_target(action);
+                    let what = self.action_target(action).await;
                     outcomes.push(format!("{what} failed: {e}"));
                     failed.push(what);
                 }
@@ -282,15 +316,6 @@ impl AgentScheduleExecutor {
             outcomes,
         }
         .into())
-    }
-}
-
-/// What an action acts on, to name it when it fails.
-fn action_target(action: &TriggerAction) -> String {
-    match action {
-        TriggerAction::DevicePower { device_id, .. } => device_id.clone(),
-        TriggerAction::Notify { .. } => "the notification".to_string(),
-        TriggerAction::AgentPrompt { .. } => "the assistant".to_string(),
     }
 }
 
@@ -683,6 +708,94 @@ mod tests {
         );
         assert!(
             failed.outcomes.contains("water-heater-plug failed"),
+            "{}",
+            failed.outcomes
+        );
+    }
+
+    /// Names two devices; any other has no row.
+    struct NamedDevices;
+
+    #[async_trait]
+    impl DeviceRegistry for NamedDevices {
+        async fn register(
+            &self,
+            _: pond_core::user_data::ports::device_registry::RegisterDeviceRequest,
+        ) -> Result<pond_core::user_data::ports::device_registry::Device> {
+            unimplemented!("a routine only reads names")
+        }
+        async fn list_devices(
+            &self,
+        ) -> Result<Vec<pond_core::user_data::ports::device_registry::Device>> {
+            unimplemented!("a routine reads one device at a time")
+        }
+        async fn get_device(
+            &self,
+            id: &str,
+        ) -> Result<Option<pond_core::user_data::ports::device_registry::Device>> {
+            let name = match id {
+                "kitchen-lights" => "Kitchen",
+                "water-heater-plug" => "Water heater",
+                _ => return Ok(None),
+            };
+            Ok(Some(pond_core::user_data::ports::device_registry::Device {
+                id: id.to_string(),
+                name: name.to_string(),
+                device_type: "light".to_string(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec![],
+                registered_at: "2026-11-05T00:00:00Z".to_string(),
+                last_seen: None,
+                is_online: true,
+                room_id: None,
+            }))
+        }
+        async fn unregister(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn rename(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_routine_names_devices_as_people_know_them() {
+        let executor = AgentScheduleExecutor::new(
+            Arc::new(FailingEngine(TurnFailure::Engine)),
+            Arc::new(InMemorySessionStorage::new()),
+            Some(Arc::new(OfflinePlug::default())),
+            1,
+            None,
+            None,
+        )
+        .with_device_registry(Arc::new(NamedDevices));
+        let routine = TaskKind::Routine {
+            actions: vec![
+                power("water-heater-plug"),
+                power("kitchen-lights"),
+                power("porch-light"),
+            ],
+        };
+
+        let err = executor
+            .execute("morning", &routine)
+            .await
+            .expect_err("the water heater is offline");
+        let failed = err.downcast_ref::<ActionsFailed>().expect("outcomes kept");
+
+        assert_eq!(failed.error, "did not run: Water heater");
+        assert!(
+            failed.outcomes.contains("Kitchen switched on"),
+            "{}",
+            failed.outcomes
+        );
+        // No row: its id is all there is to say.
+        assert!(
+            failed.outcomes.contains("porch-light switched on"),
             "{}",
             failed.outcomes
         );

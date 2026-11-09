@@ -3217,7 +3217,8 @@ async fn run_server(
                 tts.clone(),
                 Some(settings_repo.clone()),
             )
-            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone())))
+            .with_device_registry(device_registry.clone()),
         );
         deferred_executor
             .init(
