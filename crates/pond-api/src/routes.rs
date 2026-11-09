@@ -6517,6 +6517,20 @@ async fn update_settings(
     ) {
         let geocoder = pond_adapters_weather::Geocoder::new(state.http_client.clone());
         match geocoder.geocode(&name).await {
+            // A new spelling of the place a phone or a person pinned keeps the pin: replacing it
+            // with the town's centre is how a Find my location away from home undid a phone's fix.
+            Ok(geo) if current.precise_location_is_near(geo.latitude, geo.longitude) => {
+                merged.weather_latitude = current.weather_latitude;
+                merged.weather_longitude = current.weather_longitude;
+                merged.weather_location_source = current.weather_location_source.clone();
+                tracing::info!(
+                    kind = "home_location",
+                    change = "renamed",
+                    source = %current.weather_location_source,
+                    place = %name,
+                    "the home location's name changed; its precise position is kept"
+                );
+            }
             Ok(geo) => {
                 merged.weather_latitude = geo.latitude;
                 merged.weather_longitude = geo.longitude;
@@ -6526,6 +6540,13 @@ async fn update_settings(
                 write_keys.insert("weather_latitude".to_string());
                 write_keys.insert("weather_longitude".to_string());
                 write_keys.insert("weather_location_source".to_string());
+                tracing::info!(
+                    kind = "home_location",
+                    change = "geocoded",
+                    previous_source = %current.weather_location_source,
+                    place = %name,
+                    "the home location is now a looked-up place's centre"
+                );
             }
             Err(e) => tracing::warn!(
                 error = %e,
@@ -6544,6 +6565,12 @@ async fn update_settings(
             merged.weather_location_source =
                 pond_core::user_data::domain::settings::WEATHER_LOCATION_MANUAL.to_string();
             write_keys.insert("weather_location_source".to_string());
+            tracing::info!(
+                kind = "home_location",
+                change = "manual",
+                previous_source = %current.weather_location_source,
+                "the home location was set as coordinates"
+            );
         }
     }
 

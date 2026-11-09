@@ -147,6 +147,9 @@ pub const DEFAULT_ADOPTIONS: &[DefaultAdoption] = &[
     },
 ];
 
+/// How far a looked-up place's centre may be from a precise location and still be the same place:
+/// a town's centre and a home in it are a few kilometres apart, a neighbouring town is further.
+pub const SAME_PLACE_KM: f64 = 15.0;
 /// `weather_location_source`: the coordinates are a place name's, looked up.
 pub const WEATHER_LOCATION_GEOCODED: &str = "geocoded";
 /// `weather_location_source`: the coordinates were entered as coordinates.
@@ -1114,6 +1117,17 @@ impl Settings {
             WEATHER_LOCATION_MANUAL | WEATHER_LOCATION_DEVICE
         ) && (self.weather_latitude != 0.0 || self.weather_longitude != 0.0)
     }
+
+    /// Whether looked-up coordinates `(lat, lon)` name the place this precise location is in, so
+    /// a new spelling of its name ("Ndenderu, Kenya" for "Ndenderu, Kiambu County") keeps the
+    /// fix rather than replacing it with the town's centre. False when the location is a guess.
+    pub fn precise_location_is_near(&self, lat: f64, lon: f64) -> bool {
+        self.weather_location_is_precise()
+            && crate::user_data::services::nearby::distance_km(
+                (self.weather_latitude, self.weather_longitude),
+                (lat, lon),
+            ) <= SAME_PLACE_KM
+    }
     fn default_vision_enabled() -> bool {
         false
     }
@@ -1528,6 +1542,41 @@ mod tests {
         }
 
         problems
+    }
+
+    fn at(source: &str, lat: f64, lon: f64) -> Settings {
+        Settings {
+            weather_location_source: source.to_string(),
+            weather_latitude: lat,
+            weather_longitude: lon,
+            ..Settings::default()
+        }
+    }
+
+    // A phone's fix in Ndenderu, and the centre a lookup of "Ndenderu, Kenya" returns.
+    const HOME: (f64, f64) = (-1.215, 36.741);
+    const NDENDERU_CENTRE: (f64, f64) = (-1.19376, 36.74625);
+    const MOMBASA: (f64, f64) = (-4.0435, 39.6682);
+
+    #[test]
+    fn a_new_name_for_the_same_place_keeps_a_precise_location() {
+        for source in [WEATHER_LOCATION_DEVICE, WEATHER_LOCATION_MANUAL] {
+            let s = at(source, HOME.0, HOME.1);
+            assert!(
+                s.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_town_or_a_guess_does_not_keep_the_location() {
+        let device = at(WEATHER_LOCATION_DEVICE, HOME.0, HOME.1);
+        assert!(!device.precise_location_is_near(MOMBASA.0, MOMBASA.1));
+        let guess = at(WEATHER_LOCATION_GEOCODED, HOME.0, HOME.1);
+        assert!(!guess.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1));
+        let older_pond = at("", HOME.0, HOME.1);
+        assert!(!older_pond.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1));
     }
 
     #[test]
