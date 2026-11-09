@@ -36,4 +36,23 @@ pub trait ModelRepository: Send + Sync {
 
     /// Remove the assignment for a role (no-op if not set).
     async fn clear_assignment(&self, role: &str) -> Result<()>;
+
+    // ── Rollback history ──────────────────────────────────────────────────────
+    // A catalog that keeps no history offers no rollback; only a stored one overrides these.
+
+    /// `model_id` just gave a real answer for `role`.
+    async fn note_working(&self, _role: &str, _model_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// `role` is switching to `new_model_id`: its last working model, unless that is the new
+    /// one, becomes what a rollback returns to.
+    async fn arm_rollback(&self, _role: &str, _new_model_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// The model a rollback of `role` would return to, if any.
+    async fn rollback_target(&self, _role: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
