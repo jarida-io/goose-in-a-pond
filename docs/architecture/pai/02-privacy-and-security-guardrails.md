@@ -1442,6 +1442,33 @@ cannot change class quietly.
   the outcome is unchanged — but the remaining work is one attribution lookup on the way into the
   `Principal`, not a schema. Worth re-checking before anyone plans around it: `grep -n
   "proven_profile_id:" crates --include='*.rs' | grep -v None` returns only the field declaration.
+- **P9 — Pond Keychain. PLANNED 2026-11-09.** Move the secret store behind the platform's own
+  keychain, so that a copy of the data directory no longer opens the secrets. Today P4's master key
+  sits at `<data_dir>/secrets/master.key`, beside the `secrets.json` envelope it opens.
+  - **The keychain holds the master key; the envelope stays.** `secrets.json` stays
+    XChaCha20-Poly1305, and only the key moves. That keeps the store's size free of keychain limits
+    and keeps P4's atomic write path.
+  - **Chosen at runtime, no flag:**
+
+    | Platform | Keychain |
+    |---|---|
+    | macOS | The login Keychain |
+    | Linux desktop | The Secret Service |
+    | The nano | A key sealed by the hardware |
+
+    The `keyring` crate covers the first two. For the nano, check NVIDIA's Jetson Linux R36.4
+    security docs (OP-TEE, the EKB, firmware TPM) before choosing. `systemd-creds` needs systemd 250,
+    and JetPack 6 ships 249. The kernel keyring does not survive a reboot.
+  - **Migration:**
+    1. Read the keyfile.
+    2. Store the key in the keychain.
+    3. Prove a decrypt with the stored key.
+    4. Only then remove the keyfile.
+
+    A pond with no usable keychain keeps the keyfile, and `giap.sh doctor` says so and why.
+  - **It gates web sign-in.** Exploring agents may sign in to sites with a member's saved accounts
+    (`docs/architecture/web-watch-and-exploration.md`). That waits for P9. Site passwords and
+    session cookies are stored only behind the Pond Keychain, per member, never under a keyfile.
 - **DEFERRED** SQLCipher for the full database.
 
 ---
