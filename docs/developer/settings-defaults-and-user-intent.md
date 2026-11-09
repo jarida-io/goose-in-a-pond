@@ -14,11 +14,36 @@ The SQLite adapter is `crates/pond-infra/src/sqlite_settings.rs`. Every write is
 `INSERT ... ON CONFLICT(key) DO UPDATE`, never `INSERT OR REPLACE`, which would delete the row
 and reset `is_user_set`.
 
+## Factory defaults: `factory_defaults.toml`
+
+Most `default_*()` functions read their literal from `crates/pond-core/config/factory_defaults.toml`
+via `user_data::domain::factory_defaults`, instead of returning a hardcoded value directly. The
+file is embedded into the binary at compile time (`include_str!`), so there is no runtime
+file-path or missing-file risk — it is as reliable as a hardcoded literal, just in one readable
+place instead of scattered across ~120 functions.
+
+Every lookup takes a fallback — the same literal the function used to return directly — so a
+missing key or an unparsable file degrades to that fallback rather than breaking startup. A test
+in `factory_defaults.rs` (`every_expected_key_is_present_in_the_file`) catches the file and the
+code drifting apart instead of letting it fail silently.
+
+A handful of fields are deliberately **not** in this file: ones whose default already comes from a
+named constant owned by another module (several `vision_*` fields, `compaction_verbatim_days`,
+`agent_prefill_retention_days`) keep reading that constant directly. Moving them into the TOML
+file would create a second, independently-editable copy of a value another part of the codebase
+already treats as its single source of truth.
+
+This is unrelated to `DEFAULT_ADOPTIONS` below, which never reads `default_*()` or this file — it
+compares a *stored* value against literal old/new snapshots taken at the time a default changed,
+so moving where "the current default" lives does not affect it.
+
 ## Adding a field
 
 Each field needs all of these, or it deserializes, applies, and vanishes on the next read:
 
-1. The field on `Settings` with a `#[serde(default = "...")]` and its `default_*()` function.
+1. The field on `Settings` with a `#[serde(default = "...")]` and its `default_*()` function —
+   add its factory literal to `factory_defaults.toml` too, unless it falls under the exception
+   above.
 2. An `upsert!` line in `SqliteSettingsRepository::update_fields`.
 3. An arm in `apply_key` (same file), which turns the stored string back into the field.
 4. A disposition in `every_settings_field_is_dispositioned` (pond-core): `UI_WIRED` (a desktop

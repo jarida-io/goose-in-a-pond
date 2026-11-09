@@ -164,6 +164,8 @@ schemars = { version = "1.0.2", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+# Parses the embedded factory-defaults config (crates/pond-core/config/factory_defaults.toml).
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 tera = { version = "1", default-features = false }
 shellexpand = { version = "3.1", features = ["base-0", "tilde"] }
 tempfile = "3"
