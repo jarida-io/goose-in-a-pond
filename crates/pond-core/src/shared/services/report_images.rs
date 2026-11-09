@@ -3,6 +3,7 @@
 //! image from another site, so no site learns who reads the report; the pond fetches each one,
 //! keeps a bounded copy, and serves it with its credit.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -10,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 /// Preview images remembered at most, newest kept.
 const MAX_PREVIEWS: usize = 512;
+/// Pages a list has asked to fetch a picture for at most; past it, none until a restart.
+const MAX_LIST_FETCHES: usize = 512;
+const MAX_PAGE_CHARS: usize = 2_048;
 
 /// One picture a report shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +40,10 @@ pub trait ReportImages: Send + Sync {
     async fn for_pages(&self, pages: &[String], limit: usize) -> Vec<ReportImage>;
     /// A kept picture's bytes and media type.
     async fn read(&self, key: &str) -> Option<(Vec<u8>, String)>;
+    /// The first picture already kept for `pages`, without reaching any site: a list asks this.
+    async fn kept(&self, _pages: &[String]) -> Option<ReportImage> {
+        None
+    }
 }
 
 static INSTALLED: OnceLock<Arc<dyn ReportImages>> = OnceLock::new();
@@ -72,4 +80,74 @@ pub fn preview_of(page: &str) -> Option<String> {
 /// Whether `key` is one the pond made: hex only, so a request can't name a path.
 pub fn is_key(key: &str) -> bool {
     (16..=64).contains(&key.len()) && key.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The web pages a message names, in order and once each: the links an answer cites and the
+/// address a page read reports.
+pub fn pages_named(text: &str, limit: usize) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for (at, _) in text.match_indices("](http") {
+        let rest = &text[at + 2..];
+        let end = rest.find([')', ' ', '\n']).unwrap_or(rest.len());
+        found.push((at, rest[..end].to_string()));
+    }
+    for (at, _) in text.match_indices("Address: http") {
+        let rest = &text[at + "Address: ".len()..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        found.push((at, rest[..end].to_string()));
+    }
+    found.sort_by_key(|(at, _)| *at);
+    let mut pages: Vec<String> = Vec::new();
+    for (_, page) in found {
+        let usable = page.len() <= MAX_PAGE_CHARS
+            && (page.starts_with("https://") || page.starts_with("http://"));
+        if usable && !pages.contains(&page) {
+            pages.push(page);
+        }
+        if pages.len() == limit {
+            break;
+        }
+    }
+    pages
+}
+
+static LIST_FETCHES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Whether a list may fetch `page`'s picture now: once per page per run, so a page with no
+/// picture is not asked for on every list.
+pub fn first_list_fetch(page: &str) -> bool {
+    let mut asked = LIST_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+    let asked = asked.get_or_insert_with(HashSet::new);
+    if asked.len() >= MAX_LIST_FETCHES || asked.contains(page) {
+        return false;
+    }
+    asked.insert(page.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_named_takes_cited_links_and_read_addresses_in_order_once() {
+        let text = "Page: Playboi Carti\nAddress: https://en.wikipedia.org/wiki/Playboi_Carti\n\
+                    He is a rapper ([Wikipedia](https://en.wikipedia.org/wiki/Playboi_Carti)) \
+                    signed to [AWGE](https://awge.com/about \"AWGE\") and [x](ftp://nope).";
+        assert_eq!(
+            pages_named(text, 3),
+            vec![
+                "https://en.wikipedia.org/wiki/Playboi_Carti".to_string(),
+                "https://awge.com/about".to_string(),
+            ]
+        );
+        assert_eq!(pages_named(text, 1).len(), 1);
+        assert!(pages_named("No pages here.", 3).is_empty());
+    }
+
+    #[test]
+    fn a_list_fetches_a_page_once() {
+        let page = "https://example.com/only-once-for-this-test";
+        assert!(first_list_fetch(page));
+        assert!(!first_list_fetch(page));
+    }
 }

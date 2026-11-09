@@ -46,7 +46,7 @@ impl DiskReportImages {
         )
     }
 
-    async fn kept(&self, key: &str) -> Option<Stored> {
+    async fn stored_at(&self, key: &str) -> Option<Stored> {
         let (_, meta) = self.paths(key);
         let text = tokio::fs::read_to_string(meta).await.ok()?;
         serde_json::from_str(&text).ok()
@@ -54,7 +54,7 @@ impl DiskReportImages {
 
     async fn for_page(&self, page: &str) -> Option<ReportImage> {
         let key = key_of(page);
-        if let Some(stored) = self.kept(&key).await {
+        if let Some(stored) = self.stored_at(&key).await {
             return Some(stored.image);
         }
         let found = match article_of(page) {
@@ -107,11 +107,20 @@ impl ReportImages for DiskReportImages {
             .collect()
     }
 
+    async fn kept(&self, pages: &[String]) -> Option<ReportImage> {
+        for page in pages {
+            if let Some(stored) = self.stored_at(&key_of(page)).await {
+                return Some(stored.image);
+            }
+        }
+        None
+    }
+
     async fn read(&self, key: &str) -> Option<(Vec<u8>, String)> {
         if !is_key(key) {
             return None;
         }
-        let stored = self.kept(key).await?;
+        let stored = self.stored_at(key).await?;
         let (img, _) = self.paths(key);
         let bytes = tokio::fs::read(img).await.ok()?;
         Some((bytes, stored.content_type))
