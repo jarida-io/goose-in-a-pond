@@ -4311,6 +4311,7 @@ async fn list_sessions(
             "sessions the pond opened for its own work left out of the conversation list",
         );
     }
+    let mut list_fetches = 0usize;
     for s in sessions.iter().filter(|s| {
         pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
     }) {
@@ -4344,10 +4345,13 @@ async fn list_sessions(
             .map(session_preview)
             .filter(|p| !p.is_empty());
 
+        let picture = session_picture(&state, &s.id, &mut list_fetches).await;
+
         session_list.push(json!({
             "id": s.id,
             "title": effective_title,
             "preview": preview,
+            "picture": picture,
             "message_count": message_count,
             "total_prompt_tokens": s.total_prompt_tokens,
             "total_completion_tokens": s.total_completion_tokens,
@@ -4358,6 +4362,61 @@ async fn list_sessions(
     }
 
     Ok(Json(json!({ "sessions": session_list })))
+}
+
+/// Pages a conversation card's picture is looked for among.
+const CARD_PICTURE_PAGES: usize = 3;
+/// Pictures one list may set fetching in the background; the rest wait for a later list.
+const CARD_PICTURE_FETCHES: usize = 3;
+
+/// A conversation's picture: the first one sent in it, else one kept for the first page it cited
+/// or read. A list never waits on a site: a page with none kept yet is fetched in the background
+/// for the next list.
+async fn session_picture(state: &AppState, session_id: &str, fetches: &mut usize) -> Option<Value> {
+    use pond_core::shared::services::report_images::{first_list_fetch, installed, pages_named};
+    let sent = state
+        .session_storage
+        .list_session_attachments(session_id)
+        .await
+        .ok()
+        .and_then(|atts| atts.into_iter().find(|a| a.mime_type.starts_with("image/")));
+    if let Some(sent) = sent {
+        return Some(json!({
+            "kind": "sent",
+            "src": format!(
+                "/api/v1/sessions/{}/attachments/{}",
+                urlencoding_lite(&sent.session_id),
+                urlencoding_lite(&sent.id),
+            ),
+        }));
+    }
+    let images = installed()?;
+    let message = state
+        .session_storage
+        .first_web_message(session_id)
+        .await
+        .ok()
+        .flatten()?;
+    let pages = pages_named(&message, CARD_PICTURE_PAGES);
+    if let Some(image) = images.kept(&pages).await {
+        return Some(json!({
+            "kind": "page",
+            "key": image.key,
+            "src": format!("/api/v1/report-images/{}", image.key),
+            "page": image.page,
+            "credit": image.credit,
+            "caption": image.caption,
+        }));
+    }
+    if *fetches < CARD_PICTURE_FETCHES {
+        if pages.first().is_some_and(|p| first_list_fetch(p)) {
+            *fetches += 1;
+            tokio::spawn(async move {
+                images.for_pages(&pages, 1).await;
+            });
+        }
+    }
+    None
 }
 
 /// Short label from a session's first user message, for the untitled-session fallback.
