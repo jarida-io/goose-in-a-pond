@@ -45,8 +45,8 @@ JSON Schema descriptions) are what the model reads. Changing either changes the 
 
 ```rust
 #[tool(description = "\
-Current weather. Omit location for the configured home rather than asking \
-which city. Never guess weather or shell out for it.")]
+Current weather. One call per place; for a trip, here and the destination. Omit \
+location for home rather than asking which city. Never guess weather.")]
 ```
 
 - A tool group's catalogue entry (`TOOL_GROUPS`) is embedded and scored against what the user says,

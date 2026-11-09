@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct WeatherParams {
+    /// The place asked about, e.g. where they are going. Omit for home.
     pub location: Option<String>,
     /// Catch-all for unexpected fields the model might send.
     #[serde(flatten)]
@@ -32,6 +33,7 @@ pub struct WeatherParams {
 /// the tool counts from the household's today (see `docs/developer/example_workflow_weather.md`).
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ForecastParams {
+    /// The place asked about, e.g. where they are going. Omit for home.
     pub location: Option<String>,
     /// 1-7 (omitted: 3).
     pub days: Option<u8>,
@@ -77,8 +79,8 @@ impl WeatherMcpServer {
     }
 
     #[tool(description = "\
-Current weather. Omit location for the configured home rather than asking \
-which city. Never guess weather or shell out for it.")]
+Current weather. One call per place; for a trip, here and the destination. Omit \
+location for home rather than asking which city. Never guess weather.")]
     async fn get_current_weather(
         &self,
         _ctx: RequestContext<RoleServer>,
@@ -144,7 +146,8 @@ which city. Never guess weather or shell out for it.")]
     #[tool(description = "\
 Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date. Else days 1-7 from \
 today, each labelled with its weekday (a week or a weekday name: 7). Highs/lows, rain chance, \
-UV, sun times. One call per place. Omit location for the configured home. Never guess data.")]
+UV, sun times. One call per place; for a trip, here and the destination. Omit location \
+for home. Never guess data.")]
     async fn get_weather_forecast(
         &self,
         _ctx: RequestContext<RoleServer>,
