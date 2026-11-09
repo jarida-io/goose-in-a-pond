@@ -297,7 +297,12 @@ unidentified speaker gets none:
 2. Rank with `rank_by_relevance`: `0.5 * similarity + 0.3 * importance + 0.2 * recency`, recency
    halving every 14 days from `created_at` (`RECENCY_HALF_LIFE_DAYS`).
 3. Keep the context profile's `max_memory_fragments` (3 to 15, by context size,
-   `pond-core/src/models/services/context/context_budget.rs`) within its `memory_token_budget`.
+   `pond-core/src/models/services/context/context_budget.rs`) with `select_for_turn`, then as many
+   as fit its `memory_token_budget`. The memory closest to the message leads them, however old,
+   when its cosine clears the embedder's `closest_memory` floor (0.55 on MiniLM, 0.77 on
+   EmbeddingGemma 2, none for an unmeasured model; `fixtures/embedding-floors`). On
+   EmbeddingGemma 2's narrow scale an answer two weeks old otherwise loses to every important
+   memory from the day before.
 4. Send only lines not already shown earlier in the conversation, inside the user message's
    `<system-context>`, which keeps the system-prompt prefix stable for KV reuse.
 5. `record_access` on each injected memory, which feeds decay.

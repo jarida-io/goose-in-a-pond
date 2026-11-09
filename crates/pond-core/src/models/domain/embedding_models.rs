@@ -63,6 +63,9 @@ pub enum Weights {
 pub struct SimilarityFloors {
     /// Tool selection keeps a non-core group that scores at least this.
     pub tool_relevance: f32,
+    /// A turn keeps the memory closest to its message, however old, when it scores at least this
+    /// against `embed_query`; below it the closest memory is often off the message's subject.
+    pub closest_memory: f32,
     /// Memory dedup's bands on this model's scale; `None` reads the `memory_*_threshold` dials,
     /// which are set on MiniLM.
     pub dedup: Option<DedupBands>,
@@ -198,6 +201,8 @@ pub const ALL_MINILM_L6_V2: EmbeddingModel = EmbeddingModel {
         // Unrelated text scores ~0.00-0.15 and on-topic >0.40; low because a missing group costs a
         // ~10 s round trip, a surplus one only prompt tokens.
         tool_relevance: 0.28,
+        // fixtures/embedding-floors/closest.py on P0's vectors.
+        closest_memory: 0.55,
         dedup: None,
     }),
 };
@@ -249,6 +254,8 @@ pub const EMBEDDINGGEMMA_2: EmbeddingModel = EmbeddingModel {
     // drops, these keep 82% of the tool groups a turn needs to its 56%.
     floors: Some(SimilarityFloors {
         tool_relevance: 0.71,
+        // fixtures/embedding-floors/closest.py on P0's Orin vectors, at this 256-dimension cut.
+        closest_memory: 0.77,
         dedup: Some(DedupBands {
             reinforce: 0.97,
             relate: 0.92,
@@ -533,6 +540,7 @@ mod tests {
             ALL_MINILM_L6_V2.floors,
             Some(SimilarityFloors {
                 tool_relevance: 0.28,
+                closest_memory: 0.55,
                 dedup: None,
             })
         );

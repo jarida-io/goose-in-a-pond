@@ -88,6 +88,35 @@ pub fn rank_by_relevance(candidates: &mut [(MemoryFragment, Option<f32>)], now: 
     });
 }
 
+/// The blend's best `limit`, led by the memory closest to the message when it scores at least
+/// `closest_floor`, since on a narrow scale no cosine lifts an older answer past fresh ones.
+pub fn select_for_turn(
+    mut candidates: Vec<(MemoryFragment, Option<f32>)>,
+    limit: usize,
+    closest_floor: Option<f32>,
+    now: DateTime<Utc>,
+) -> Vec<(MemoryFragment, Option<f32>)> {
+    rank_by_relevance(&mut candidates, now);
+    if let Some(floor) = closest_floor {
+        // Strictly greater, so a tie goes to the better-blended memory.
+        let closest = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, similarity))| similarity.filter(|s| s.is_finite()).map(|s| (i, s)))
+            .fold(None, |best: Option<(usize, f32)>, (i, s)| match best {
+                Some((_, b)) if b >= s => best,
+                _ => Some((i, s)),
+            });
+        if let Some((i, _)) = closest.filter(|&(_, s)| s >= floor) {
+            // First, because the token budget trims from the end.
+            let seat = candidates.remove(i);
+            candidates.insert(0, seat);
+        }
+    }
+    candidates.truncate(limit);
+    candidates
+}
+
 // ── Lexical dedup ────────────────────────────────────────────────────────────
 // Sole dedup with no embedder, or one whose cosine scale is unmeasured, so it must catch
 // rewordings, not just substrings.
@@ -300,6 +329,7 @@ pub fn is_duplicate_content(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::domain::embedding_models::{ALL_MINILM_L6_V2, EMBEDDINGGEMMA_2};
     use crate::user_data::domain::memory::MemorySegment;
     use chrono::Duration;
 
@@ -401,6 +431,182 @@ mod tests {
         rank_by_relevance(&mut reversed, now);
         assert_eq!(forward[0].0.id, "aaa");
         assert_eq!(reversed[0].0.id, "aaa");
+    }
+
+    // ── a turn's five ───────────────────────────────────────────────────
+
+    const SLOTS: usize = 5;
+
+    fn eg2_floor() -> f32 {
+        EMBEDDINGGEMMA_2.floors.expect("measured").closest_memory
+    }
+
+    fn scored(id: &str, importance: f32, age_days: i64, cosine: f32) -> Candidate {
+        (fragment(id, importance, age_days), Some(cosine))
+    }
+
+    type Candidate = (MemoryFragment, Option<f32>);
+
+    /// The nano owner's 49: "phone" answers but is 17 days old, 44th on importance and recency, and
+    /// ten important day-old memories are not about it. `unrelated` spreads the other 47 cosines.
+    fn household(answer: f32, nearby: f32, unrelated: (f32, f32)) -> Vec<Candidate> {
+        let at = |i: usize| unrelated.0 + (unrelated.1 - unrelated.0) * i as f32 / 46.0;
+        let mut store = vec![
+            scored("phone", 0.8, 17, answer),
+            scored("nearby", 0.6, 5, nearby),
+        ];
+        for i in 0..10 {
+            store.push(scored(
+                &format!("fresh-{i:02}"),
+                0.85 + 0.01 * (i % 5) as f32,
+                1,
+                at(i),
+            ));
+        }
+        for i in 0..32 {
+            let importance = 0.7 + 0.006 * (i % 25) as f32;
+            store.push(scored(
+                &format!("week-{i:02}"),
+                importance,
+                2 + (i % 8) as i64,
+                at(i + 10),
+            ));
+        }
+        for i in 0..5 {
+            store.push(scored(
+                &format!("old-{i}"),
+                0.4,
+                30 + 15 * i as i64,
+                at(i + 42),
+            ));
+        }
+        store
+    }
+
+    fn ids(kept: &[Candidate]) -> Vec<&str> {
+        kept.iter().map(|(m, _)| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_older_memory_about_the_question_keeps_a_seat_among_fresh_ones() {
+        let now = Utc::now();
+        // EmbeddingGemma 2 at 256 dimensions: an answer scores a median 0.79 against its question,
+        // a memory that is not the answer 0.61, and the nearest of those 0.76.
+        let store = household(0.80, 0.76, (0.55, 0.70));
+
+        let mut by_standing: Vec<Candidate> =
+            store.iter().map(|(m, _)| (m.clone(), None)).collect();
+        rank_by_relevance(&mut by_standing, now);
+        let standing = by_standing.iter().position(|(m, _)| m.id == "phone");
+        assert_eq!(
+            standing,
+            Some(43),
+            "the shape: 44th of 49 on importance and recency"
+        );
+        let blend_alone = select_for_turn(store.clone(), SLOTS, None, now);
+        assert!(
+            !ids(&blend_alone).contains(&"phone"),
+            "the blend alone drops the answer"
+        );
+
+        let kept = select_for_turn(store, SLOTS, Some(eg2_floor()), now);
+        assert_eq!(kept.len(), SLOTS);
+        assert_eq!(
+            ids(&kept)[0],
+            "phone",
+            "the closest memory leads: {:?}",
+            ids(&kept)
+        );
+        assert_eq!(ids(&kept)[1..], ids(&blend_alone)[..SLOTS - 1]);
+    }
+
+    #[test]
+    fn a_memory_merely_near_the_question_takes_no_seat() {
+        let now = Utc::now();
+        // Nothing clears the floor: the closest is a near miss, as close as EG2's usually are.
+        let store = household(0.74, 0.76, (0.55, 0.70));
+        assert_eq!(
+            ids(&select_for_turn(
+                store.clone(),
+                SLOTS,
+                Some(eg2_floor()),
+                now
+            )),
+            ids(&select_for_turn(store, SLOTS, None, now)),
+        );
+    }
+
+    #[test]
+    fn only_the_closest_memory_takes_the_seat() {
+        let now = Utc::now();
+        let kept = select_for_turn(
+            household(0.80, 0.79, (0.55, 0.70)),
+            SLOTS,
+            Some(eg2_floor()),
+            now,
+        );
+        assert_eq!(ids(&kept)[0], "phone");
+        assert!(!ids(&kept).contains(&"nearby"), "{:?}", ids(&kept));
+    }
+
+    #[test]
+    fn the_seat_holds_on_minilms_scale_too() {
+        let now = Utc::now();
+        let floor = ALL_MINILM_L6_V2.floors.expect("measured").closest_memory;
+        // MiniLM spreads unrelated memories near 0.1, so the blend drops an older answer only when
+        // the fresh ones sit near it, as a question's closest non-answers do (median 0.47).
+        let store = household(0.58, 0.50, (0.36, 0.46));
+        assert!(!ids(&select_for_turn(store.clone(), SLOTS, None, now)).contains(&"phone"));
+        assert_eq!(
+            ids(&select_for_turn(store, SLOTS, Some(floor), now))[0],
+            "phone"
+        );
+    }
+
+    #[test]
+    fn a_closest_memory_already_kept_moves_to_the_front() {
+        let now = Utc::now();
+        let mut store = household(0.60, 0.60, (0.55, 0.70));
+        store.push(scored("fresh-closest", 0.5, 1, 0.80));
+        let blend_alone = select_for_turn(store.clone(), SLOTS, None, now);
+        let at = ids(&blend_alone)
+            .iter()
+            .position(|id| *id == "fresh-closest");
+        assert!(at.is_some_and(|i| i > 0), "{:?}", ids(&blend_alone));
+
+        let kept = select_for_turn(store, SLOTS, Some(eg2_floor()), now);
+        assert_eq!(ids(&kept)[0], "fresh-closest");
+        let mut rest = ids(&blend_alone);
+        rest.retain(|id| *id != "fresh-closest");
+        assert_eq!(ids(&kept)[1..], rest[..]);
+    }
+
+    #[test]
+    fn without_a_measured_floor_or_any_cosine_the_blend_decides() {
+        let now = Utc::now();
+        let store = household(0.80, 0.76, (0.55, 0.70));
+        let mut ranked = store.clone();
+        rank_by_relevance(&mut ranked, now);
+        ranked.truncate(SLOTS);
+        assert_eq!(ids(&select_for_turn(store, SLOTS, None, now)), ids(&ranked));
+
+        // Keyword hits carry no cosine, so nothing can claim the seat.
+        let keyword_hits: Vec<Candidate> = household(0.80, 0.76, (0.55, 0.70))
+            .into_iter()
+            .map(|(m, _)| (m, None))
+            .collect();
+        let mut ranked = keyword_hits.clone();
+        rank_by_relevance(&mut ranked, now);
+        ranked.truncate(SLOTS);
+        assert_eq!(
+            ids(&select_for_turn(
+                keyword_hits,
+                SLOTS,
+                Some(eg2_floor()),
+                now
+            )),
+            ids(&ranked)
+        );
     }
 
     #[test]
