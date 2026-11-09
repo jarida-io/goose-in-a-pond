@@ -14,6 +14,8 @@
 #   bash scripts/giap.sh node         # find, or download and verify, the Node this repo needs
 #   bash scripts/giap.sh node --check # only report; change nothing (exit 1 if the shell's node is wrong)
 #   bash scripts/giap.sh node --method nvm|fnm|volta|download --major N --install-deps
+#   bash scripts/giap.sh go           # find, or download and verify, the Go the remote-access helper needs
+#   bash scripts/giap.sh go --check   # only report; change nothing (exit 1 if there is none)
 #   bash scripts/giap.sh litert status       # the LiteRT-LM library (.litertlm models): recorded packages, verified
 #   bash scripts/giap.sh litert build [macos-arm64|linux-arm64] [--distdir DIR]   # build, package, verify, record
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
@@ -99,6 +101,8 @@ cd "$REPO_ROOT" || exit 1
 # preferred major comes from .nvmrc.
 # shellcheck source=lib/node-setup.sh
 source "$HERE/lib/node-setup.sh"
+# shellcheck source=lib/go-setup.sh
+source "$HERE/lib/go-setup.sh"
 # `check` runs what CI runs, on the repo's Node; like provision it takes only its own options.
 # shellcheck source=lib/local-checks.sh
 source "$HERE/lib/local-checks.sh"
@@ -111,6 +115,11 @@ fi
 
 DRY_RUN=false
 ASSUME_YES=false
+# Below this, a release build is stopped before it starts: an incremental link needs a few GiB of
+# scratch and output. The doctor's floor (10 GiB) is for a build from clean.
+BUILD_DISK_FLOOR_GIB=5
+# Set by action_build_server when it started the pond again on the new binary.
+BUILD_STARTED_SVC=false
 SERVICE_NAME="goose-in-a-pond.service"
 NODE_METHOD=auto; NODE_MAJOR=""; CHECK_ONLY=false; NODE_DEPS=false
 
@@ -168,6 +177,7 @@ pause() { [ -t 0 ] || return 0; printf '\n%spress return%s ' "$C_DIM" "$C_RST"; 
 # Plain variables only — bash 3.2 has no associative arrays.
 D_OS=""; D_ARCH=""; D_KERNEL=""; D_BOARD=""; D_IS_JETSON=false; D_L4T=""
 D_CUDA_STATE=""; D_NVCC=""; D_ACCEL=""
+D_GO=""; D_GO_NEED=""; D_GO_OK=false; D_GO_DIR=""
 D_RUST=""; D_CMAKE=""; D_NODE=""; D_NODE_OK=false; D_NODE_REPO_OK=false; D_NODE_MATTER_OK=false; D_NODE_NOTE=""; D_NODE_FROM=""
 D_BRANCH=""; D_SHA=""; D_DIRTY=""; D_SUB_PIN=""; D_SUB_HEAD=""; D_SUB_STATE=""
 D_UI_STATE=""; D_UI_WHEN=""
@@ -254,6 +264,15 @@ detect_toolchain() {
     node_version_ui_ok "$D_NODE" && D_NODE_OK=true
     node_version_ok "$D_NODE" && D_NODE_REPO_OK=true
     node_version_matter_ok "$D_NODE" && D_NODE_MATTER_OK=true
+  fi
+  # The Go that builds the remote-access helper: the first at or above go.mod's pin, wherever it is.
+  D_GO=""; D_GO_OK=false; D_GO_DIR=""
+  D_GO_NEED="$(go_required_version 2>/dev/null)" || D_GO_NEED=""
+  local go_line
+  if [ -n "$D_GO_NEED" ] && go_line="$(go_find_ok "$D_GO_NEED")"; then
+    D_GO="${go_line%%|*}"; D_GO_DIR="${go_line#*|}"; D_GO_OK=true
+  elif command -v go >/dev/null 2>&1; then
+    D_GO="$(go_version_of "$(command -v go)")" || D_GO=""
   fi
 }
 
@@ -814,6 +833,14 @@ doctor() {
     warn "node ${D_NODE:-absent} cannot run the Matter controller: $(node_why_not_matter "${D_NODE:-none}") — Matter will report it and stay off; bash scripts/giap.sh node fixes it, once the pond is restarted"
     DOC_WARN=$((DOC_WARN+1)); fi
 
+  # 8c. Go for the remote-access helper. A pond builds and runs without it, with remote access off.
+  if [ "$D_GO_OK" = true ]; then ok "go $D_GO can build the remote-access helper ($D_GO_DIR)"
+  elif [ -n "$D_GO_NEED" ]; then
+    warn "go ${D_GO:-absent} cannot build the remote-access helper: native/pondnet/go.mod asks for Go $D_GO_NEED, so a build here leaves remote access off"
+    note "fix: bash scripts/giap.sh go   (finds one already installed, or downloads and verifies $D_GO_NEED after asking)"
+    DOC_WARN=$((DOC_WARN+1))
+  fi
+
   # 9. desktop app
   case "$D_DESKTOP" in
     installed*|packaged*) ok "desktop app present ($D_DESKTOP)" ;;
@@ -1345,6 +1372,16 @@ ensure_node_for_ui() {
 }
 
 # `giap.sh node`, and menu item 9: report, or find/download the Node this repo runs on.
+action_go() {
+  head1 "Go for the remote-access helper  (go.mod asks for ${D_GO_NEED:-?})"
+  if [ "$CHECK_ONLY" = true ]; then
+    if [ "$D_GO_OK" = true ]; then ok "go $D_GO in $D_GO_DIR"; return 0; fi
+    warn "go ${D_GO:-absent} is below ${D_GO_NEED:-the pin}"; return 1
+  fi
+  go_ensure || return 1
+  detect_toolchain
+}
+
 action_node() {
   head1 "Node for this repo  (needs $NODE_RANGE_TEXT)"
   case "$NODE_MAJOR" in ''|[0-9]*) ;; *) bad "--major must be a number"; return 2 ;; esac
@@ -1400,19 +1437,35 @@ action_build_server() {
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
+  # The linker writes an 800 MB binary at the very end; on a full disk it dies with "signal 7 [Bus
+  # error]", which reads like a toolchain fault, after the half hour the build took to get there.
+  detect_resources
+  if [ "${D_DISK_FREE:-0}" -lt "$BUILD_DISK_FLOOR_GIB" ] 2>/dev/null; then
+    bad "only ${D_DISK_FREE} GiB free here; the release link needs about $BUILD_DISK_FLOOR_GIB GiB and would fail at the end"
+    note "menu 4 reclaims build artifacts; old binaries and models beside the pond are worth a look too"
+    if ! confirm "Build anyway?"; then
+      [ "${RESTART_SVC_AFTER:-false}" = true ] && { svc_ctl start; RESTART_SVC_AFTER=false; }
+      return 1
+    fi
+  fi
+  # The remote-access helper is Go; asked for before the long build so the answer is not waited on.
+  local have_go=false
+  if go_use_repo >/dev/null 2>&1 || { go_ensure && go_use_repo >/dev/null 2>&1; }; then have_go=true; fi
   run_sh "$(release_build_cmd "$feats")"
   local rc=$?
-  # The remote-access helper is Go; a host without Go still gets a working pond, just without it.
-  if [ $rc -eq 0 ] && command -v go >/dev/null 2>&1; then
+  # A host without Go still gets a working pond, just with remote access off.
+  if [ $rc -eq 0 ] && [ "$have_go" = true ]; then
     run bash "$REPO_ROOT/scripts/build-network-helper.sh" "$REPO_ROOT/target/release"
     rc=$?
   elif [ $rc -eq 0 ]; then
-    warn "no Go on this host: the remote-access helper (pondnet) was not built, so remote access stays off here"
-    note "install Go (go.mod pins the toolchain), then run this build again"
+    warn "no Go ${D_GO_NEED:-} here: the remote-access helper (pondnet) was not built, so remote access stays off here"
+    note "fix: bash scripts/giap.sh go, then run this build again"
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
+  # `update` reads this, so it does not restart a pond this build has already started.
+  BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    svc_ctl start; RESTART_SVC_AFTER=false
+    svc_ctl start; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
   fi
   detect_binaries
   return $rc
@@ -2253,7 +2306,7 @@ action_update() {
   case "$D_SVC_SCOPE" in
     user|system)
       # A build that stopped the pond has already started it on the new binary.
-      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "$BUILD_STARTED_SVC" != true ]; }; then
+      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "${BUILD_STARTED_SVC:-false}" != true ]; }; then
         svc_ctl restart || return 1
       fi
       await_health
@@ -2565,6 +2618,7 @@ case "$CMD" in
   build)     action_build_ui; action_build_server ;;
   update)    action_update ;;
   build-ui)  action_build_ui ;;
+  go)        action_go ;;
   build-desktop) action_build_desktop ;;
   deploy)    action_deploy ;;
   logs)      action_logs ;;

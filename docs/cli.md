@@ -35,13 +35,14 @@ interactive menu.
 | `status` | Print the detection banner only |
 | `doctor` | Banner plus a read-only health report; exits 1 if any check FAILs |
 | `install` | Guardrailed `bash scripts/install.sh`: passes `--no-service` when a service unit already exists, offers to stop a running Jetson service for the build, and offers Full or Minimal (`--minimal`) when interactive |
-| `build` | `build-ui`, then a release `pond-server` with this host's features (CUDA features on a Jetson; stops the service during the build there). Also builds the `pondnet` remote-access helper when Go is installed, and writes a build stamp |
+| `build` | `build-ui`, then a release `pond-server` with this host's features (CUDA features on a Jetson; stops the service during the build there). Stops first, asking, when the disk has under 5 GiB free (a full disk fails the link at the end with `signal 7 [Bus error]`). Also builds the `pondnet` remote-access helper, with a Go at or above `native/pondnet/go.mod`'s pin, offering to download one first when there is none; without Go the pond builds with remote access off. Writes a build stamp |
 | `build-ui` | `npm ci` when the lockfile is newer than `node_modules`, then `npm run build` in `pond-desktop/`, then touches `dist/` so cargo re-embeds it |
 | `build-desktop` | macOS only: `npm ci && npm run bundle:app` in `pond-desktop/` (stages a release sidecar first) |
 | `update` | Fast-forward to the upstream branch (refuses a dirty checkout or local commits), update the goose submodule, ensure Node, rebuild when the build stamp's commit differs, restart the service and wait for health, offer the Wi-Fi grant on Linux, then run `doctor` |
 | `deploy` | From a dev machine: `bash scripts/jetson.sh deploy`, after warning if `HEAD` is not on the remotes. Refuses to run on the Jetson |
 | `logs` | Shows today's rolling log file (`<data_dir>/logs/pond.log.YYYY-MM-DD`) and offers tail, errors, turn telemetry or engine lines |
 | `gui` | macOS only: launch the installed or locally packaged app against the running server (`GIAP_SERVER_PORT`) |
+| `go` | Find a Go at or above the version `native/pondnet/go.mod` pins (on `PATH`, recorded, a previous download, `/usr/local/go`, Ubuntu's `/usr/lib/go-*`), or download it from `dl.google.com/go` into `~/.giap/go` after asking, checked against the `.sha256` Go publishes beside it, and record it. An older Go (Ubuntu 22.04's 1.18) cannot even read the pin. `--check` only reports |
 | `node` | Report the Node the repo needs (range `^22.13.0 \|\| ^24.0.0 \|\| >=26.0.0`, preferred major from `.nvmrc`), or find, download and verify one |
 | `litert status` | The LiteRT-LM C API library goose's `litert` backend loads for `.litertlm` models: recorded packages, verified |
 | `litert build [macos-arm64\|linux-arm64]` | Build, package, verify and record the library; default platform is this host's |
@@ -61,7 +62,7 @@ interactive menu.
 |---|---|---|
 | `--dry-run` | all | Print every command instead of running it |
 | `-y`, `--yes` | all | Answer yes to confirmation prompts |
-| `--check` | `node`, `models pairings` | Report only, change nothing; exit 1 if the shell's Node is wrong or the committed table is stale |
+| `--check` | `node`, `go`, `models pairings` | Report only, change nothing; exit 1 if the shell's Node or the Go is wrong, or the committed table is stale |
 | `--method nvm\|fnm\|volta\|download` | `node` | How to install Node (default `auto`) |
 | `--major N` | `node` | Node major to install |
 | `--install-deps` | `node` | Also run `npm ci` in `pond-desktop/` and `extensions/music/` |
@@ -71,7 +72,8 @@ interactive menu.
 `provision` takes its own options (`--host`, `--key`, `--data-dir`, `--pondnet`, `--pond-server`,
 `--card`); see the header of `scripts/provision-device.sh`.
 
-The bash tests for the Node setup are `bash scripts/lib/node-setup.test.sh`.
+The bash tests for the Node setup are `bash scripts/lib/node-setup.test.sh`, and for the Go setup
+`bash scripts/lib/go-setup.test.sh`.
 
 ## Makefile targets
 

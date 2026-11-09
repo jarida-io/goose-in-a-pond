@@ -419,6 +419,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/node-setup.test.sh
 
+  # The Go setup (`giap.sh go`, and the release build) can download a Go toolchain, so it is tested
+  # the same way: the pin from go.mod, the checksum check and its refusals, against a fake download site.
+  go-setup:
+    name: Go setup script - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/go-setup.test.sh
+
   # scripts/jetson/deploy.sh reaches the Jetson through scripts/lib/jetson-remote.sh: one pinned
   # address per deploy, a detached build it follows, and retries on a lost connection.
   jetson-remote:
