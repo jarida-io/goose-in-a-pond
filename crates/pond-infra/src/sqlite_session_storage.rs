@@ -1091,7 +1091,8 @@ impl SessionStorage for SqliteSessionStorage {
             "SELECT content FROM session_messages \
              WHERE session_id = ? AND ( \
                (role = 'assistant' AND content LIKE '%](http%') \
-               OR (role = 'tool' AND content LIKE '%Address: http%')) \
+               OR (role = 'tool' AND (content LIKE '%Address: http%' \
+                 OR content LIKE '%Source: http%' OR content LIKE '%\"source_url\":\"http%'))) \
              ORDER BY created_at ASC, rowid ASC \
              LIMIT 1",
         )
@@ -1963,6 +1964,23 @@ mod tests {
         }
         let first = s.first_web_message("sess-w").await.unwrap().unwrap();
         assert!(first.starts_with("Page: Fares"), "took {first:?}");
+
+        // A lookup names its page on its last line.
+        s.create_session("sess-s".to_string()).await.unwrap();
+        s.add_message(
+            "sess-s".to_string(),
+            SessionMessage::new(
+                "s0".to_string(),
+                "sess-s".to_string(),
+                ChatMessage::tool_result(
+                    "An actor.\n\nSource: https://en.wikipedia.org/wiki/X",
+                    "c2",
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(s.first_web_message("sess-s").await.unwrap().is_some());
     }
 
     #[tokio::test]

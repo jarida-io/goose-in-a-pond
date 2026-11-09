@@ -140,8 +140,8 @@ pub trait SessionStorage: Send + Sync {
         Ok(None)
     }
 
-    /// The earliest answer that cites a web page, or page read that names its address: where a
-    /// conversation card finds its picture.
+    /// The earliest answer that cites a web page, or tool result that names its page (a read's
+    /// address, a lookup's source): where a conversation card finds its picture.
     async fn first_web_message(
         &self,
         _session_id: &str,

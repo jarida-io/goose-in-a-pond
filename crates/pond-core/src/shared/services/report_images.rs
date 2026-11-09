@@ -82,19 +82,28 @@ pub fn is_key(key: &str) -> bool {
     (16..=64).contains(&key.len()) && key.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// The web pages a message names, in order and once each: the links an answer cites and the
-/// address a page read reports.
+/// Where a tool's or a read's own words name the page it came from.
+const PAGE_MARKERS: &[&str] = &["Address: ", "Source: ", "\"source_url\":\""];
+
+/// The web pages a message names, in order and once each: the links an answer cites, the address
+/// a page read reports, and the source a lookup ends with. A stored tool row is JSON, so an
+/// address also ends at a quote or an escape's backslash.
 pub fn pages_named(text: &str, limit: usize) -> Vec<String> {
+    let ends_address = |c: char| c.is_whitespace() || matches!(c, '"' | '\\' | '<' | '>');
     let mut found: Vec<(usize, String)> = Vec::new();
     for (at, _) in text.match_indices("](http") {
         let rest = &text[at + 2..];
-        let end = rest.find([')', ' ', '\n']).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| c == ')' || ends_address(c))
+            .unwrap_or(rest.len());
         found.push((at, rest[..end].to_string()));
     }
-    for (at, _) in text.match_indices("Address: http") {
-        let rest = &text[at + "Address: ".len()..];
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        found.push((at, rest[..end].to_string()));
+    for marker in PAGE_MARKERS {
+        for (at, _) in text.match_indices(marker) {
+            let rest = &text[at + marker.len()..];
+            let end = rest.find(ends_address).unwrap_or(rest.len());
+            found.push((at, rest[..end].to_string()));
+        }
     }
     found.sort_by_key(|(at, _)| *at);
     let mut pages: Vec<String> = Vec::new();
@@ -142,6 +151,23 @@ mod tests {
         );
         assert_eq!(pages_named(text, 1).len(), 1);
         assert!(pages_named("No pages here.", 3).is_empty());
+    }
+
+    #[test]
+    fn pages_named_reads_a_stored_tool_row() {
+        let row = r#"{"tool_call_id":"x","content":"Robert John Downey Jr. is an actor.\n\nSource: https://en.wikipedia.org/wiki/Robert_Downey_Jr.","arguments":"{}"}"#;
+        assert_eq!(
+            pages_named(row, 3),
+            vec!["https://en.wikipedia.org/wiki/Robert_Downey_Jr.".to_string()]
+        );
+        let read = r#"{"content":"Page: Fares\nAddress: https://example.com/p\nlines","card":{"data":{"source_url":"https://example.com/q"}}}"#;
+        assert_eq!(
+            pages_named(read, 3),
+            vec![
+                "https://example.com/p".to_string(),
+                "https://example.com/q".to_string()
+            ]
+        );
     }
 
     #[test]
