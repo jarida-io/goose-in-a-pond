@@ -507,6 +507,16 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         rows.into_iter().map(row_to_step).collect()
     }
 
+    async fn set_deadline(&self, task_id: &str, deadline: Option<DateTime<Utc>>) -> Result<bool> {
+        let done = sqlx::query("UPDATE long_tasks SET deadline = ?, updated_at = ? WHERE id = ?")
+            .bind(deadline.map(sql_ts))
+            .bind(sql_ts(Utc::now()))
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     async fn update_step(&self, step: &PlanStep) -> Result<()> {
         let task_id = step.task_id();
         let key = step.key().as_str();
@@ -669,6 +679,17 @@ mod tests {
             at,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_task_is_given_more_time() {
+        let (_tmp, _pool, repo) = repo().await;
+        let task = household_task(t(0));
+        repo.create_task(&task).await.unwrap();
+        assert!(repo.set_deadline(task.id(), Some(t(2_700))).await.unwrap());
+        let got = repo.get_task(task.id()).await.unwrap().unwrap();
+        assert_eq!(got.budget().deadline(), Some(t(2_700)));
+        assert!(!repo.set_deadline("no-such-task", None).await.unwrap());
     }
 
     #[tokio::test]

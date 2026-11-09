@@ -87,6 +87,8 @@ export interface AppState {
    * wall even mid-conversation.
    */
   requestedConversation: string | null;
+  /** A web watch a notification asked to open; the watches screen takes it once. */
+  requestedWatch: string | null;
 }
 
 export type AppAction =
@@ -135,6 +137,8 @@ export type AppAction =
   | { type: "SET_DEBRIEF_CONTEXT"; payload: DebriefContext | null }
   | { type: "REQUEST_CONVERSATION"; payload: string }
   | { type: "TAKE_CONVERSATION_REQUEST" }
+  | { type: "REQUEST_WATCH"; payload: string }
+  | { type: "TAKE_WATCH_REQUEST" }
   | { type: "CLEAR_DEBRIEF_CONTEXT" };
 
 let _transcriptIdCounter = 0;
@@ -186,6 +190,7 @@ export function buildInitialState(): AppState {
     noticeFeedFailed: false,
     debriefContext: null,
     requestedConversation: null,
+    requestedWatch: null,
   };
 }
 
@@ -434,6 +439,12 @@ export function reducer(state: AppState, action: AppAction): AppState {
       return state.requestedConversation === null
         ? state
         : { ...state, requestedConversation: null };
+
+    case "REQUEST_WATCH":
+      return { ...state, requestedWatch: action.payload };
+
+    case "TAKE_WATCH_REQUEST":
+      return state.requestedWatch === null ? state : { ...state, requestedWatch: null };
 
     default:
       return state;

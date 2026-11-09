@@ -63,6 +63,9 @@ pub trait LongTaskRepository: Send + Sync {
     /// may become the new one; the plan fields are written only by `replace_open_steps`.
     async fn update_step(&self, step: &PlanStep) -> Result<()>;
 
+    /// Moves a task's deadline, as a member's "extend" does; `Ok(false)` if there is no such task.
+    async fn set_deadline(&self, task_id: &str, deadline: Option<DateTime<Utc>>) -> Result<bool>;
+
     /// Store a new artifact; its task must exist.
     async fn insert_artifact(&self, artifact: &Artifact) -> Result<()>;
 

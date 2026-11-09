@@ -3664,6 +3664,25 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
+    pond_core::shared::services::report_images::install(Arc::new(
+        pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
+    ));
+    // Members' web watches: checked in code, their owners told on their own devices.
+    pond_mcp_server::web_watch_runner::spawn(
+        Arc::new(
+            pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
+                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
+                Arc::new(pond_mcp_server::web_watch_runner::PageReader),
+                Arc::new(pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+                    targeted_notification_sender.clone(),
+                )),
+            ),
+        ),
+        settings_repo.clone(),
+    );
     #[cfg(unix)]
     {
         let runtime = embedded.clone();
@@ -7112,6 +7131,23 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
+    pond_mcp_server::saved_items::init_saved_item_deps(
+        pond_mcp_server::saved_items::SavedItemDeps {
+            repo: Arc::new(
+                pond_infra::sqlite_saved_item::SqliteSavedItemRepository::new(pool.clone()),
+            ),
+            sessions: Arc::new(
+                pond_infra::sqlite_session_storage::SqliteSessionStorage::new(pool.clone()),
+            ),
+            authorities: orchestration.authorities(),
+        },
+    );
+    pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
+        repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+            pool.clone(),
+        )),
+        authorities: orchestration.authorities(),
+    });
     let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
         pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool),
     );
@@ -7602,6 +7638,21 @@ async fn advance_long_task(
 
     match runner::next_run(task, &steps, tries, now) {
         NextRun::Wait => Ok(false),
+        NextRun::SkipForTime(keys) => {
+            // Its time is up: what has not run is skipped, and the last step answers with the rest.
+            for mut step in steps.iter().filter(|s| keys.contains(s.key())).cloned() {
+                if step.skip(now).is_ok() {
+                    tasks.update_step(&step).await?;
+                }
+            }
+            tracing::info!(
+                kind = "long_task_time_up",
+                task = %task.id(),
+                skipped = keys.len(),
+                "the task's time ran out; its last step answers with what was found"
+            );
+            Ok(true)
+        }
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)

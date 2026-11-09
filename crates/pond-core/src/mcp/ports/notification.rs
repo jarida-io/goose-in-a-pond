@@ -58,6 +58,8 @@ pub enum OpenScreen {
     RemoteAccess,
     /// The phone's My Pond screen: the Pond's administration, where an unlock is seen and locked.
     MyPond,
+    /// One web watch, at its changes; the watches list when there is no id.
+    Watch { watch_id: Option<String> },
 }
 
 impl OpenScreen {
@@ -112,6 +114,12 @@ impl OpenScreen {
             Self::Extensions => "extensions",
             Self::RemoteAccess => "remote_access",
             Self::MyPond => "my_pond",
+            Self::Watch { watch_id } => {
+                if let Some(watch_id) = watch_id {
+                    fields.insert("watch_id".into(), watch_id.as_str().into());
+                }
+                "watch"
+            }
         };
         fields.insert("open".into(), screen.into());
         fields
@@ -177,6 +185,21 @@ pub trait MemberNotifier: Send + Sync {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_watch_hint_names_the_watch_or_opens_the_list() {
+        assert_eq!(
+            OpenScreen::Watch {
+                watch_id: Some("w1".into())
+            }
+            .data(),
+            json!({"open": "watch", "watch_id": "w1"})
+        );
+        assert_eq!(
+            OpenScreen::Watch { watch_id: None }.data(),
+            json!({"open": "watch"})
+        );
+    }
 
     #[test]
     fn a_schedule_hint_names_the_schedule_and_the_run() {

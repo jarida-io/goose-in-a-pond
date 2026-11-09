@@ -574,11 +574,35 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route(
+            "/saved-items",
+            get(crate::saved_items::list).post(crate::saved_items::create),
+        )
+        .route(
+            "/saved-items/collections",
+            get(crate::saved_items::collections),
+        )
+        .route(
+            "/saved-items/{id}",
+            get(crate::saved_items::get)
+                .patch(crate::saved_items::edit)
+                .delete(crate::saved_items::delete),
+        )
+        .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
+        .route("/report-images/{key}", get(report_image))
+        .route("/web-watches", get(crate::web_watches::list))
+        .route(
+            "/web-watches/{id}",
+            get(crate::web_watches::get)
+                .patch(crate::web_watches::edit)
+                .delete(crate::web_watches::delete),
+        )
         .route("/long-tasks", get(list_long_tasks))
         .route("/long-tasks/deep-research", get(deep_research_availability))
         .route("/long-tasks/queue", get(long_task_queue))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route("/long-tasks/{id}/extend", post(extend_long_task))
         .route(
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
@@ -17042,7 +17066,7 @@ async fn pond_capabilities(
 
 /// The caller of a long-task route, as a member's scope: a paired member's device, or the
 /// desktop on this host acting for the primary member. Nobody identified reaches no task.
-async fn long_task_caller(
+pub(crate) async fn long_task_caller(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     peer: Result<
@@ -17160,6 +17184,8 @@ async fn long_task_view(
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
+        // The card's "12 of 30 min" and its extend button; none for a task without a time limit.
+        "deadline": task.budget().deadline(),
         "updated_at": task.updated_at(),
         "finished_at": task.finished_at(),
         "steps": steps.iter().map(|step| json!({
@@ -17611,20 +17637,25 @@ async fn get_long_task_report(
         Err(response) => return response,
     };
     match long_task_report(&state, &task).await {
-        Ok((markdown, events, sections)) => Json(json!({
-            "id": task.id(),
-            "title": report::assembled_title(&markdown),
-            "state": task.state(),
-            "kind": task.kind(),
-            "markdown": markdown,
-            "sections": sections,
-            "sources": report::sources(&markdown)
-                .into_iter()
-                .map(|s| json!({"title": s.title, "url": s.url}))
-                .collect::<Vec<_>>(),
-            "calendar_events": events.len(),
-        }))
-        .into_response(),
+        Ok((markdown, events, sections)) => {
+            let images = report_images_for(&markdown).await;
+            Json(json!({
+                "id": task.id(),
+                "title": report::assembled_title(&markdown),
+                "state": task.state(),
+                "kind": task.kind(),
+                "markdown": markdown,
+                "sections": sections,
+                "sources": report::sources(&markdown)
+                    .into_iter()
+                    .map(|s| json!({"title": s.title, "url": s.url}))
+                    .collect::<Vec<_>>(),
+                "calendar_events": events.len(),
+                "options": pond_core::shared::services::task_options::options_in(&markdown),
+                "images": images,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -17830,6 +17861,130 @@ async fn cancel_long_task(
     {
         Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtendBody {
+    minutes: Option<i64>,
+}
+
+/// Gives a running task more time, counted from its deadline or from now if that has passed,
+/// within the most a task may have.
+async fn extend_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    body: Option<Json<ExtendBody>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::{extended_deadline, EXTEND_MINUTES};
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    let minutes = body
+        .and_then(|Json(b)| b.minutes)
+        .unwrap_or(EXTEND_MINUTES)
+        .clamp(1, 60);
+    let now = chrono::Utc::now();
+    let deadline = extended_deadline(task.budget().deadline(), task.created_at(), minutes, now);
+    match long_task_repo(&state)
+        .set_deadline(&id, Some(deadline))
+        .await
+    {
+        Ok(true) => Json(json!({"id": id, "deadline": deadline})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Pictures a report shows: up to three, from the pages it cites, each served by the pond.
+const REPORT_IMAGES: usize = 3;
+
+async fn report_images_for(markdown: &str) -> Vec<Value> {
+    use pond_core::shared::services::report_images::installed;
+    let Some(images) = installed() else {
+        return Vec::new();
+    };
+    let pages: Vec<String> = pond_core::shared::services::research_report::sources(markdown)
+        .into_iter()
+        .map(|s| s.url)
+        .collect();
+    images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect()
+}
+
+/// A report picture the pond kept, for the screens to draw without reaching the site.
+async fn report_image(Path(key): Path<String>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::{installed, is_key};
+    if !is_key(&key) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(images) = installed() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match images.read(&key).await {
+        Some((bytes, content_type)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=86400".to_string(),
+                ),
+                (
+                    axum::http::header::HeaderName::from_static("x-content-type-options"),
+                    "nosniff".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

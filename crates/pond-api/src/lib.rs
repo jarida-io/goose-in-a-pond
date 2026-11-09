@@ -30,6 +30,7 @@ pub mod rides;
 pub mod room_voice;
 pub mod routes;
 pub mod runs;
+pub mod saved_items;
 pub mod speech_model;
 pub mod spoken_code;
 pub mod spotify_focus;
@@ -43,6 +44,7 @@ mod voice_match;
 pub mod voice_sample;
 mod wake_check;
 pub mod web_search;
+pub mod web_watches;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).
 #[async_trait::async_trait]

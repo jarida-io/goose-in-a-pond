@@ -27,7 +27,10 @@ pub fn research_task(
         None,
         &goal,
         Some(session_id.to_string()),
-        LongTaskBudget::new(RESEARCH_STEPS, None)?,
+        LongTaskBudget::new(
+            RESEARCH_STEPS,
+            Some(crate::shared::domain::long_task::default_deadline(now)),
+        )?,
         now,
     )?
     .with_kind(LongTaskKind::Research))

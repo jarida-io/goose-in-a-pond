@@ -98,6 +98,15 @@ impl LongTaskRepository for MockLongTaskRepository {
         Ok(Some(task.clone()))
     }
 
+    async fn set_deadline(&self, task_id: &str, deadline: Option<DateTime<Utc>>) -> Result<bool> {
+        let mut ledger = self.ledger.lock().unwrap();
+        let Some(task) = ledger.tasks.iter_mut().find(|task| task.id() == task_id) else {
+            return Ok(false);
+        };
+        task.set_deadline(deadline, Utc::now());
+        Ok(true)
+    }
+
     async fn decide_task_answer(&self, id: &str, answer: AnswerShape) -> Result<bool> {
         let mut ledger = self.ledger.lock().unwrap();
         Ok(ledger

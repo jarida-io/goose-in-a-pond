@@ -24,6 +24,8 @@ export type NotificationAction = {
   run?: ScheduleRunNotification;
   /** Carried when route is "chat" and the notice names the conversation it is about. */
   sessionId?: string;
+  /** Carried when route is "watches" and the notice names the watch it is about. */
+  watchId?: string;
 };
 
 export interface Notification {

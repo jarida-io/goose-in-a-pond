@@ -48,6 +48,16 @@ import {
   type LongTaskExportFormat,
   type LongTaskReport,
   type LongTaskSource,
+  type NewSavedItem,
+  type ReportImage,
+  type ReportOption,
+  type SavedCollection,
+  type SavedItem,
+  type SavedItemEdit,
+  type SavedKind,
+  type WebWatch,
+  type WebWatchDetail,
+  type WebWatchEdit,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
@@ -163,7 +173,52 @@ function readReport(answer: unknown, id: string): LongTaskReport | null {
     sections: typeof r.sections === "number" ? r.sections : 0,
     sources: Array.isArray(r.sources) ? r.sources.filter(isSource) : [],
     calendar_events: typeof r.calendar_events === "number" ? r.calendar_events : 0,
+    options: Array.isArray(r.options) ? r.options.flatMap(readOption) : [],
+    images: Array.isArray(r.images) ? r.images.flatMap(readImage) : [],
   };
+}
+
+const nonBlank = (v: unknown): string | undefined => (typeof v === "string" && v.trim() !== "" ? v : undefined);
+
+function readOption(value: unknown): ReportOption[] {
+  if (typeof value !== "object" || value === null) return [];
+  const o = value as Record<string, unknown>;
+  const title = nonBlank(o.title);
+  if (!title) return [];
+  const fields = Array.isArray(o.fields)
+    ? o.fields.filter((f): f is [string, string] => Array.isArray(f) && f.length === 2 && f.every((x) => typeof x === "string"))
+    : [];
+  return [{
+    title,
+    price: nonBlank(o.price),
+    link: nonBlank(o.link),
+    why: nonBlank(o.why),
+    fields,
+    sources: Array.isArray(o.sources) ? o.sources.filter(isSource) : [],
+  }];
+}
+
+/** The only pictures a report may draw are the pond's own copies. */
+const REPORT_IMAGE_PATH = /^\/api\/v1\/report-images\/[0-9a-fA-F]{16,64}$/;
+
+export function isReportImagePath(src: string): boolean {
+  return REPORT_IMAGE_PATH.test(src);
+}
+
+function readImage(value: unknown): ReportImage[] {
+  if (typeof value !== "object" || value === null) return [];
+  const i = value as Record<string, unknown>;
+  const src = nonBlank(i.src);
+  const credit = nonBlank(i.credit);
+  if (!src || !credit || !isReportImagePath(src)) return [];
+  return [{
+    src,
+    credit,
+    page: nonBlank(i.page) ?? "",
+    licence: nonBlank(i.licence),
+    caption: nonBlank(i.caption),
+    file_page: nonBlank(i.file_page),
+  }];
 }
 
 /** A refusal body's text and code: its sentence where it has one beside the code (the onboarding
@@ -1778,6 +1833,64 @@ export class PondApiClient {
     return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
   }
 
+  /** A report picture's bytes. Fetched here because the route needs the bearer token, which an `<img>` can't send. */
+  async getReportImage(src: string): Promise<Blob> {
+    if (!isReportImagePath(src)) throw new Error("Not a picture the pond keeps.");
+    const res = await this.send("GET", src);
+    return res.blob();
+  }
+
+  /** The caller's own watches; an empty list for a device that is not a household member's. */
+  listWebWatches(): Promise<WebWatch[]> {
+    return this.get("/api/v1/web-watches");
+  }
+
+  /** One watch with its items and its 50 newest changes. 404 for one that is not the caller's. */
+  getWebWatch(id: string): Promise<WebWatchDetail> {
+    return this.get(`/api/v1/web-watches/${encodeURIComponent(id)}`);
+  }
+
+  /** Answers the watch as it now is. */
+  editWebWatch(id: string, edit: WebWatchEdit): Promise<WebWatch> {
+    return this.patch(`/api/v1/web-watches/${encodeURIComponent(id)}`, edit);
+  }
+
+  async deleteWebWatch(id: string): Promise<void> {
+    await this.del(`/api/v1/web-watches/${encodeURIComponent(id)}`);
+  }
+
+  /** The caller's cards and the household's shared ones. */
+  listSavedItems(filter: { collection?: string; kind?: SavedKind } = {}): Promise<SavedItem[]> {
+    const query = new URLSearchParams();
+    if (filter.collection) query.set("collection", filter.collection);
+    if (filter.kind) query.set("kind", filter.kind);
+    const qs = query.toString();
+    return this.get(`/api/v1/saved-items${qs ? `?${qs}` : ""}`);
+  }
+
+  listSavedCollections(): Promise<SavedCollection[]> {
+    return this.get("/api/v1/saved-items/collections");
+  }
+
+  /** 409 once the member keeps the most cards they may. */
+  createSavedItem(card: NewSavedItem): Promise<SavedItem> {
+    return this.post("/api/v1/saved-items", card);
+  }
+
+  /** 404 for a card that is not the caller's: only its owner changes it. */
+  editSavedItem(id: string, edit: SavedItemEdit): Promise<SavedItem> {
+    return this.patch(`/api/v1/saved-items/${encodeURIComponent(id)}`, edit);
+  }
+
+  async deleteSavedItem(id: string): Promise<void> {
+    await this.del(`/api/v1/saved-items/${encodeURIComponent(id)}`);
+  }
+
+  /** "Watch price": a watch on a saved listing's or place's link, or the one already on it. */
+  watchSavedItem(id: string, body: { max_price?: number; every_hours?: number } = {}): Promise<WebWatch> {
+    return this.post(`/api/v1/saved-items/${encodeURIComponent(id)}/watch`, body);
+  }
+
   /** An artifact's whole body, for "Read the result". */
   getLongTaskArtifact(id: string, artifactId: string): Promise<LongTaskArtifactBody> {
     return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`);
@@ -1786,6 +1899,11 @@ export class PondApiClient {
   /** Stops a task; a step already under way finishes first. 409 if it has already ended. */
   async cancelLongTask(id: string): Promise<void> {
     await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
+  }
+
+  /** Gives a running task more time (15 minutes unless told). 409 if it has already ended. */
+  async extendLongTask(id: string, minutes?: number): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/extend`, minutes === undefined ? {} : { minutes });
   }
 
   /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */

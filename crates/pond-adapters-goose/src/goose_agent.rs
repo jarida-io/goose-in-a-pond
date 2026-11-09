@@ -2863,6 +2863,8 @@ impl GooseAdapter {
 
         // Goose maintains its own sessions.db with auto-generated IDs.
         let goose_sid = self.resolve_goose_session(&session_id).await;
+        // Tools see the engine session, so a turn's page reads are counted under it.
+        pond_core::mcp::services::source_ledger::global().chat_turn_started(&goose_sid);
 
         // ── 0. Load GIAP builtin MCP extensions (once per session) ────────────
         {

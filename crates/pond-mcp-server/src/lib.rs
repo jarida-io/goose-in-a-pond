@@ -9,6 +9,9 @@ pub mod knowledge;
 pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
+pub mod page_data;
+pub mod report_images;
+pub mod saved_items;
 pub mod schedule;
 pub mod secrets;
 pub mod sensors;
@@ -20,6 +23,8 @@ pub mod vision;
 pub mod weather;
 pub mod web_page;
 pub mod web_search;
+pub mod web_watch;
+pub mod web_watch_runner;
 pub mod wolfram;
 
 // ── Shared utilities for Knowledge-family servers ───────────────────────────
