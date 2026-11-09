@@ -26,6 +26,7 @@
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
 #   bash scripts/giap.sh time-sync [remove|status]  # Linux: named time servers before the NTP pool, so the clock is right soon after a boot (sudo)
+#   bash scripts/giap.sh data-encrypt [finish|unlock|undo|status]  # Linux: the pond's private data in a LUKS2 volume opened by the TPM, the admin card its recovery key (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
@@ -83,6 +84,8 @@ source "$HERE/lib/admin-card.sh"
 source "$HERE/lib/connect-setup.sh"
 # shellcheck source=lib/time-sync.sh
 source "$HERE/lib/time-sync.sh"
+# shellcheck source=lib/data-volume.sh
+source "$HERE/lib/data-volume.sh"
 # shellcheck source=lib/release-build.sh
 source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
@@ -936,6 +939,13 @@ doctor() {
     DOC_WARN=$((DOC_WARN + TIMESYNC_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + TIMESYNC_DOCTOR_UNK))
   fi
 
+  # The pond's private data at rest: an encrypted volume, or plain files anyone holding the
+  # storage can read. Closed is a failure: the pond cannot start.
+  if [ "$D_OS" = "linux" ]; then
+    dv_doctor "$D_DATA_DIR"
+    DOC_WARN=$((DOC_WARN + DATA_VOLUME_DOCTOR_WARN)); DOC_FAIL=$((DOC_FAIL + DATA_VOLUME_DOCTOR_FAIL))
+  fi
+
   # Remote reach. A Pond with no tailnet is not broken — remote access is simply
   # a capability it does not have — so absent is a note, not a failure. What is
   # worth flagging is a daemon that is installed and NOT up, because the operator
@@ -1306,6 +1316,25 @@ action_wifi_grant() { # $1 = "" | remove | status
     remove)   connect_grant_remove ;;
     status)   connect_doctor "$user" ;;
     *)        bad "unknown wifi-grant action: $1 (grant, remove or status)"; return 2 ;;
+  esac
+}
+
+# `giap.sh data-encrypt [finish|unlock|undo|status]`: the pond's private data in an encrypted
+# volume (scripts/lib/data-volume.sh). Asking for it is the consent; sudo asks for the password,
+# and --dry-run prints every step.
+action_data_encrypt() { # $1 = "" | finish | unlock | undo | status
+  head1 "Encrypted data volume"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: on a Mac, FileVault encrypts the disk"
+    return 0
+  fi
+  case "${1:-}" in
+    "")     dv_encrypt "$D_DATA_DIR" "$D_SVC_SCOPE" "$(id -un)" ;;
+    finish) dv_finish "$D_DATA_DIR" ;;
+    unlock) dv_unlock "$D_DATA_DIR" ;;
+    undo)   dv_decrypt "$D_DATA_DIR" ;;
+    status) dv_doctor "$D_DATA_DIR" ;;
+    *)      bad "unknown data-encrypt action: $1 (finish, unlock, undo or status)"; return 2 ;;
   esac
 }
 
@@ -2506,7 +2535,7 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant`, `time-sync`, `admin-card`, `service-account` (a subcommand) and
+# `onnxruntime`, `wifi-grant`, `time-sync`, `data-encrypt`, `admin-card`, `service-account` (a subcommand) and
 # `console` (a host) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
@@ -2532,7 +2561,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert|kv|swap) ;;
-  ctx|context|n_ctx|models|wifi-grant|time-sync|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  ctx|context|n_ctx|models|wifi-grant|time-sync|data-encrypt|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -2566,6 +2595,7 @@ case "$CMD" in
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   time-sync) action_time_sync "$CMD_SUB" ;;
+  data-encrypt) action_data_encrypt "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
   swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;

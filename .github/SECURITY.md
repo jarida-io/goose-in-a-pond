@@ -153,17 +153,24 @@ device, writing memory, installing an extension, exfiltrating a secret) without
 the user's intent is in scope, and is more valuable to us than most memory-safety
 reports.
 
-**Sensitive data stays on the device, unencrypted at rest.** Face-recognition
-enrolments, camera event detections, microphone audio, chat history, and memory
-fragments live in local SQLite (`pond_system.db`, `pond_logs.db`). Secrets live
-in `secrets.json`, encrypted with XChaCha20-Poly1305 under a `master.key` kept
-beside it unless `POND_SECRET_KEY_FILE` moves it; that protects the file on its
-own, not a running or stolen device. Full-disk encryption is the operator's
-responsibility and its absence is not a finding. Anything that moves this data
-**off the device**, or exposes it through the API to a client that should not see
-it, very much is: inference, voice, and memory run on your hardware. Outbound calls
-go through the egress gate, are recorded in the egress log, and are refused under
-`network_mode = offline`; one that bypasses the gate is a finding.
+**Sensitive data stays on the device, and can be encrypted at rest.** Face-recognition
+enrolments, camera event detections, microphone audio, chat history, saved conversation state and
+memory fragments live in the pond's data directory (`pond_system.db`, `pond_logs.db`, Goose's
+sessions and prompt cache). Secrets live in `secrets.json`, encrypted with XChaCha20-Poly1305 under
+a `master.key` kept beside it unless `POND_SECRET_KEY_FILE` moves it. On a Linux pond,
+`giap.sh data-encrypt` puts the whole private part of the data directory in a LUKS2 volume whose
+key is sealed to the board's TPM, with the household's admin card as the recovery key; `giap.sh
+doctor` warns while a pond's data is not encrypted
+([data-volume-encryption.md](../docs/architecture/data-volume-encryption.md)). On a board whose
+security fuses are not burned, the TPM's secret is not guaranteed to be unique, so the volume may
+open with the storage moved into another unfused Jetson; that is documented and reported by the
+doctor, and is not a finding on its own. These are in scope: a way to read the volume's contents
+without the board's TPM or the card; a pond that writes private data outside the volume, or starts
+on the bare directory while the volume is closed; and the admin card or a volume key appearing in
+an argument list, a log or the event log. Anything that moves this data **off the device**, or
+exposes it through the API to a client that should not see it, very much is too: inference, voice,
+and memory run on your hardware. Outbound calls go through the egress gate, are recorded in the
+egress log, and are refused under `network_mode = offline`; one that bypasses the gate is a finding.
 
 **Compromise reaches the physical world.** GIAP drives Matter devices. Assess
 severity with that in mind: an authorization bypass here can unlock a door, not
@@ -213,8 +220,13 @@ Not vulnerabilities, but the difference between a safe and an unsafe install:
   home.
 - **Only install extensions you trust**, and read the command and arguments
   before confirming. Treat installing one as running that code yourself.
-- **Enable full-disk encryption** on the device. Biometric enrolments and chat
-  history are stored unencrypted.
+- **Encrypt the pond's data** with `bash scripts/giap.sh data-encrypt` (Linux;
+  `--dry-run` first). Until then, biometric enrolments and chat history are plain files
+  that anyone holding the storage can read. Keep the printed admin card safe: it is the
+  volume's recovery key. On a Mac, turn on FileVault.
+- **Treat an unfused Jetson as protecting a copied disk, not a moved one.** Until the
+  board's security fuses are burned, its TPM may open the volume with the storage in
+  another unfused Jetson.
 - **Keep the host patched**, and pull `main` regularly — there is no
   auto-update.
 - **Re-pair rather than share.** Each client should hold its own session; do not

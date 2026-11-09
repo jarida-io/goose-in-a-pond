@@ -503,6 +503,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/time-sync.test.sh
 
+  # The encrypted data volume (scripts/lib/data-volume.sh): refusals, the order of the move, the
+  # boot helper and unit, card rotation, against fakes of every root tool. No root, TPM or LUKS.
+  data-volume-scripts:
+    name: Data volume scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/data-volume.test.sh
+
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.
   pond-health:
