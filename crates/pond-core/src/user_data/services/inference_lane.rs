@@ -31,6 +31,10 @@ pub enum LaneJob {
     /// Compose questions out of the household's own memories.
     /// Declared after `MemoryExtraction` because it reads what extraction writes.
     SuggestionGeneration,
+    /// Write a member's topic map and news stories from the pages it finds.
+    NewsTiles,
+    /// Write a member's daily digest from the day's stories, ready by their digest time.
+    NewsDigest,
 }
 
 impl LaneJob {
@@ -44,6 +48,8 @@ impl LaneJob {
         LaneJob::SummaryRefresh,
         LaneJob::MemoryExtraction,
         LaneJob::SuggestionGeneration,
+        LaneJob::NewsTiles,
+        LaneJob::NewsDigest,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -57,6 +63,8 @@ impl LaneJob {
             LaneJob::SummaryRefresh => "summary_refresh",
             LaneJob::MemoryExtraction => "memory_extraction",
             LaneJob::SuggestionGeneration => "suggestion_generation",
+            LaneJob::NewsTiles => "news_tiles",
+            LaneJob::NewsDigest => "news_digest",
         }
     }
 
@@ -71,6 +79,8 @@ impl LaneJob {
             LaneJob::SummaryRefresh => "Refresh conversation summaries",
             LaneJob::MemoryExtraction => "Read conversations for memories",
             LaneJob::SuggestionGeneration => "Think of things to suggest",
+            LaneJob::NewsTiles => "Write members' news",
+            LaneJob::NewsDigest => "Write members' daily digests",
         }
     }
 
@@ -405,6 +415,8 @@ mod tests {
             LaneJob::SummaryRefresh,
             LaneJob::MemoryExtraction,
             LaneJob::SuggestionGeneration,
+            LaneJob::NewsTiles,
+            LaneJob::NewsDigest,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),
@@ -412,7 +424,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 8, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 10, "a job was added or removed");
     }
 
     #[test]

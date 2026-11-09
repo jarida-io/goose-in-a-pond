@@ -60,6 +60,8 @@ pub enum OpenScreen {
     MyPond,
     /// One web watch, at its changes; the watches list when there is no id.
     Watch { watch_id: Option<String> },
+    /// My Goose's news, at the digest the notice is about.
+    News { digest_id: Option<String> },
 }
 
 impl OpenScreen {
@@ -119,6 +121,12 @@ impl OpenScreen {
                     fields.insert("watch_id".into(), watch_id.as_str().into());
                 }
                 "watch"
+            }
+            Self::News { digest_id } => {
+                if let Some(digest_id) = digest_id {
+                    fields.insert("digest_id".into(), digest_id.as_str().into());
+                }
+                "news"
             }
         };
         fields.insert("open".into(), screen.into());
@@ -198,6 +206,17 @@ mod tests {
         assert_eq!(
             OpenScreen::Watch { watch_id: None }.data(),
             json!({"open": "watch"})
+        );
+    }
+
+    #[test]
+    fn a_news_hint_names_the_digest() {
+        assert_eq!(
+            OpenScreen::News {
+                digest_id: Some("d1".into())
+            }
+            .data(),
+            json!({"open": "news", "digest_id": "d1"})
         );
     }
 
