@@ -1,7 +1,7 @@
 # Web watches and exploration: build plan
 
 The running plan for building `web-watch-and-exploration.md`. It is updated as each phase lands.
-Last update: 2026-11-09: phases 1, 2, 4, 5 and 6 merged on the fork.
+Last update: 2026-11-09: phases 1, 2, 4, 5, 6 and 9 merged on the fork.
 
 ## How the work runs
 
@@ -28,7 +28,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5 and 6 merged on the fork.
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
 | 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Proposed as its own session | |
-| 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Proposed as its own session | |
+| 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
 
 ## Phase 2: watches, what landed
@@ -48,7 +48,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5 and 6 merged on the fork.
 Not done in phase 2:
 - Creating a watch over REST. It comes with "Watch price" in phase 5; until then a watch starts from a conversation.
 - Compiling pond-server on this Mac (llama, whisper and espeak don't fit in the free disk). The two lines in `main.rs` were checked by reading; the nano build will compile them.
-- The desktop doesn't yet know the `watch` screen, so it opens its default view (phase 9).
+- The desktop doesn't yet know the `watch` screen, so it opens its default view (done in phase 9).
 
 ## Phase 4: exploration, what landed
 
@@ -81,7 +81,7 @@ Not done in phase 4:
 | Tests: pond-core 2,626, pond-mcp-server 383, pond-infra 613, pond-api 341 | Tests | Done |
 
 Not done in phase 5:
-- Saving an option card straight from a report: the phone and desktop send it with `POST /saved-items` (phase 3 and phase 9).
+- Saving an option card straight from a report: the phone and desktop send it with `POST /saved-items` (phase 3; the desktop's is done in phase 9).
 - One flaky pond-core test (`device_budget`, "the qat row is its own entry") failed once and passed on two reruns. It is unrelated to this work and needs its own look.
 
 ## Phase 6: report images, what landed
@@ -95,14 +95,36 @@ Not done in phase 5:
 | Tests: pond-core 2,629 (egress guard included), pond-mcp-server 386, pond-api 341 | Tests | Done |
 
 Not done in phase 6:
-- Drawing the pictures. The route needs the client's token, so a screen fetches each picture with it (a blob on the desktop, headers on the phone) instead of a bare `<img>`. Phone in phase 3, desktop in phase 9.
-- The numbered source chips in the text. The report still cites `[title](link)`; the chips phase switches the composer to ledger numbers and the screens to chips.
+- Drawing the pictures. The route needs the client's token, so a screen fetches each picture with it (a blob on the desktop, headers on the phone) instead of a bare `<img>`. Phone in phase 3; the desktop's is done in phase 9.
+- The numbered source chips in the text. The report still cites `[title](link)`; the chips phase switches the composer to ledger numbers. The desktop draws chips from the links since phase 9.
+
+## Phase 9: desktop screens, what landed
+
+All of it is in `pond-desktop`, against the routes phases 2, 5 and 6 added. No pond-server code changed.
+
+| Step | Kind | Status |
+|---|---|---|
+| Client: watches (`GET /web-watches`, `GET/PATCH/DELETE /web-watches/{id}`), saved cards (`GET/POST /saved-items`, collections, `PATCH/DELETE /saved-items/{id}`, `POST /saved-items/{id}/watch`), report pictures as blobs. The report's `options` and `images` are read defensively, and a picture path must be `/api/v1/report-images/{hex key}` | Code | Done |
+| Watches screen: the list (what it looks for, how often, item and match counts, failing checks); one watch with what changed (matches marked), what is on the page, and its words, price, year, mileage and interval to edit, pause and delete | Code | Done |
+| Saved screen: collection chips (All, each one, Not in a collection); a face per kind (a recipe's size and counts, a listing's price first, a place's address and hours); a recipe's ingredients and numbered steps; Watch price on a listing; rename, move (or a new collection), the share switch and delete for the owner; another member's shared card is read-only | Code | Done |
+| Report sheet: pictures fetched with the token and drawn from object URLs, credit and licence link under each; option cards with Save (as a listing) and Watch price (saves first); citations as numbered chips after their words, a tap opens title, site and link; the pond's Sources list folded into one collapsed "N sources" row | Code | Done |
+| A `watch` notice opens the Watches screen at its `watch_id` (`householdNotices.ts`, `REQUEST_WATCH`) | Code | Done |
+| Both shells: Saved and Watches in the drawer's Pond group and the classic section list; hub routes `saved` and `watches` | Code | Done |
+| Tests: desktop 3,079 across 187 files; typecheck, lint and `vite build` clean | Tests | Done |
+
+Not done in phase 9:
+- Nothing has been looked at on screen or run against a live pond: only typecheck and component tests so far. The first look comes with the nano deploy, which also carries these screens to browsers and phones through the embedded web bundle (`npm run build` before the pond-server build).
+- A listing's `photos` are not drawn. They are remote addresses, and loading them would tell the site who is looking. They need pond-kept copies, as report pictures have.
+- A watch's items are not marked one by one as matching; the screen shows the pond's counts. Marking them would copy pond-core's filter rules into the desktop, or need the pond to send a flag per item.
+- A report forgets that an option was saved once its sheet closes, so a second Save makes a second card.
+- A `Saved { item_id }` notice screen: the pond does not send one yet.
+- The chips follow the model's `[title](link)` words. Ledger numbers, with the line used and the date read in the chip's card, come with the chips phase.
 
 ## What waits on you
 
 | What | Why |
 |---|---|
-| **A nano deploy of fork main (`7ea54c09`)** | pond-server has not been compiled with these phases: the Mac lacks the disk for its native crates. Its new lines are four short calls in `main.rs`, typed against compiled signatures. The deploy is also the first live check of reads, watches, pushes, time budgets, saved cards and pictures |
+| **A nano deploy of fork main** | pond-server has not been compiled with these phases: the Mac lacks the disk for its native crates. Its new lines are four short calls in `main.rs`, typed against compiled signatures. The deploy is also the first live check of reads, watches, pushes, time budgets, saved cards and pictures, and the first look at the phase 9 desktop screens |
 | Phase 3, the phone screens | They live in goose-on-the-go: watches, saved collections, a report's pictures, options and source chips, and the `watch` notice screen (`services/notification-link.ts`). Say where to start it |
 | Phase 7, Lightpanda on the nano | Building and measuring it runs on the nano beside the live pond, so it waits for your OK |
 | Merging org PRs #849 and #851 | They are merged on the fork only; later phases have no org PRs |

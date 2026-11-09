@@ -194,6 +194,8 @@ describe("ChatHubView, a long task the prime starts", () => {
       sections: 1,
       sources: [{ title: "Ferry co", url: "https://example.com/ferry" }],
       calendar_events: 0,
+      options: [],
+      images: [],
     });
     await openSession("sess-hub");
     render(<ChatHubView />);
@@ -203,6 +205,7 @@ describe("ChatHubView, a long task the prime starts", () => {
     const dialog = await screen.findByRole("dialog", { name: "Trip plan" });
     expect(within(dialog).getByRole("heading", { name: "Ferry" })).toBeTruthy();
     expect(within(dialog).getByText("7:00").tagName).toBe("STRONG");
+    fireEvent.click(within(dialog).getByRole("button", { name: "1 source" }));
     expect(within(dialog).getByRole("link", { name: "Ferry co" }).getAttribute("href")).toBe("https://example.com/ferry");
     expect(api.getLongTaskReport).toHaveBeenCalledWith(TASK_ID);
     expect(api.getLongTaskArtifact).not.toHaveBeenCalled();

@@ -12,6 +12,8 @@ import { RoutinesView } from "./views/Routines";
 import { AgentsView } from "./views/AgentsHub";
 import { SettingsHubView } from "./views/SettingsHub";
 import { NotificationsView } from "./views/Notifications";
+import { WatchesScreen } from "../watches/WatchesScreen";
+import { SavedScreen } from "../saved/SavedScreen";
 import { ModelsDetail } from "./views/settings/Models";
 import { PromptsDetail } from "./views/settings/Prompts";
 import { VoiceDetail } from "./views/settings/Voice";
@@ -37,6 +39,8 @@ import type { SettingsRowId } from "./data/settingsConfig";
 const HUB_ROUTE_FOR: Partial<Record<GuiSection, string>> = {
   dashboard:     "home",
   chat:          "chat",
+  saved:         "saved",
+  watches:       "watches",
   canvas:        "canvas",
   schedules:     "routines",
   recipes:       "agents",
@@ -52,6 +56,8 @@ const HUB_ROUTE_FOR: Partial<Record<GuiSection, string>> = {
 const SECTION_FOR_HUB_ROUTE: Record<string, GuiSection> = {
   home:          "dashboard",
   chat:          "chat",
+  saved:         "saved",
+  watches:       "watches",
   canvas:        "canvas",
   routines:      "schedules",
   agents:        "recipes",
@@ -153,6 +159,8 @@ export function Hub() {
     // Top-level routes
     if (route === "home")          return <HomeView go={goToSection} />;
     if (route === "chat")          return <ChatHubView />;
+    if (route === "saved")         return <SavedScreen variant="hub" onOpenChat={() => go("chat")} />;
+    if (route === "watches")       return <WatchesScreen variant="hub" onOpenChat={() => go("chat")} />;
     if (route === "canvas")        return <CanvasHubView />;
     if (route === "routines")      return <RoutinesView />;
     if (route === "agents")        return <AgentsView go={go} />;

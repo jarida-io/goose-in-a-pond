@@ -88,6 +88,7 @@ const SECTION_FOR_OPEN: Record<string, GuiSection> = {
   models: "models",
   extensions: "extensions",
   remote_access: "pairing",
+  watch: "watches",
 };
 
 export function openSection(notice: Pick<HouseholdNotice, "data">): GuiSection | null {
@@ -107,5 +108,16 @@ const POND_ID = /^[A-Za-z0-9_-]{1,128}$/;
 export function openSessionId(notice: Pick<HouseholdNotice, "data">): string | null {
   if (notice.data?.open !== "chat") return null;
   const id = notice.data?.session_id;
+  return typeof id === "string" && POND_ID.test(id) ? id : null;
+}
+
+/**
+ * The watch a `watch` hint names (`data.watch_id`), which the watches screen opens at its changes.
+ * Null when it names none, opens another screen, or carries an id not of the shape the Pond mints;
+ * the action then opens the watches list.
+ */
+export function openWatchId(notice: Pick<HouseholdNotice, "data">): string | null {
+  if (notice.data?.open !== "watch") return null;
+  const id = notice.data?.watch_id;
   return typeof id === "string" && POND_ID.test(id) ? id : null;
 }

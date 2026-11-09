@@ -359,3 +359,295 @@
     padding: var(--space-4) var(--space-4) var(--space-8);
   }
 }
+
+/* A citation's number: a quiet chip in the line, so the text still reads at length. */
+.rcite {
+  position: relative;
+  display: inline;
+}
+
+.rcite__chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.35em;
+  height: 1.35em;
+  margin-left: 2px;
+  padding: 0 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  line-height: 1;
+  vertical-align: 0.25em;
+  cursor: pointer;
+}
+
+.rcite__chip:hover,
+.rcite__chip[aria-expanded="true"] {
+  border-color: var(--border-ink);
+  color: var(--color-text);
+}
+
+.rcite__card {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(320px, 70vw);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+.rcite__title {
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.rcite__site {
+  color: var(--color-text-secondary);
+}
+
+.rcite__open,
+.ropt__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+/* Every source, collapsed to one row so the report ends on its text. */
+.rsrc {
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.rsrc__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: var(--lt-control-h, var(--tap-min));
+  padding: var(--space-2) 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.rsrc__toggle:hover {
+  color: var(--color-text);
+}
+
+.rsrc__caret {
+  transition: transform var(--dur-fast);
+}
+
+.rsrc__caret.is-open {
+  transform: rotate(180deg);
+}
+
+.rsrc__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 0 var(--space-2);
+  list-style: none;
+}
+
+.rsrc__item {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-base);
+}
+
+.rsrc__n {
+  flex: none;
+  min-width: 1.6em;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.rsrc__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rsrc__site {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Pictures from the cited pages: one leads, two or three share the row. */
+.rimgs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin: 0 0 var(--space-5);
+}
+
+.rimgs[data-count="1"] {
+  grid-template-columns: 1fr;
+}
+
+.rimg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  min-width: 0;
+}
+
+.rimg__pic {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-hover);
+}
+
+.rimgs[data-count="1"] .rimg__pic {
+  aspect-ratio: 16 / 9;
+}
+
+.rimg__caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+}
+
+.rimg__credit {
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.rimg__credit a {
+  color: inherit;
+}
+
+/* The options a task compared: content, but inside a reading sheet, so a hairline rather than the ink edge. */
+.ropts {
+  margin-bottom: var(--space-5);
+}
+
+.ropts__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+}
+
+.ropt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-base);
+  line-height: var(--leading-snug);
+}
+
+.ropt__head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ropt__title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.ropt__price {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-weight: var(--weight-semibold);
+}
+
+.ropt__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.ropt__fact {
+  display: contents;
+}
+
+.ropt__fact dt {
+  color: var(--color-text-secondary);
+}
+
+.ropt__fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ropt__why {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.ropt__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+
+.ropt__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--lt-control-h, var(--tap-min));
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.ropt__link {
+  margin-top: 0;
+  font-size: var(--text-sm);
+}
+
+.ropt__problem {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-destructive-fg);
+}
+
+.ropt--hub .ropt__btn,
+.ropt--hub .ropt__link {
+  font-size: var(--text-base);
+}

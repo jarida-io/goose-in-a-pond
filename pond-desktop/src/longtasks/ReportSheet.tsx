@@ -9,6 +9,10 @@ import { MarkdownText } from "../components/MarkdownText";
 import { useDialogFocusTrap } from "../components/shared";
 import { blockId, outlineOf, parseMarkdown } from "../lib/markdownBlocks";
 import { ReportExport } from "./ReportExport";
+import { ReportImages } from "./ReportImages";
+import { ReportOptions } from "./ReportOptions";
+import { SourceChip, SourcesRow } from "./ReportSources";
+import { numberedSources, withoutSourcesList, wordsOnlyPoint } from "./sourceNumbers";
 import { CLOSE_REPORT, REPORT_SECTIONS_LABEL, REPORT_TEXT_LABEL, reportCounts } from "./reportWords";
 import { withoutTitle } from "./longTaskWords";
 import type { LongTaskReportHandle, ReportView } from "./useLongTaskReport";
@@ -35,18 +39,32 @@ export function ReportSheet({ task, report, handle, variant, onClose }: Props) {
   // The text takes focus first, so the arrow and page keys read it at once; Escape and Tab stay inside.
   const dialogRef = useDialogFocusTrap<HTMLDivElement>(true, close, scrollRef);
 
-  const markdown = useMemo(() => withoutTitle(report.markdown, report.title), [report.markdown, report.title]);
+  const numbered = useMemo(() => numberedSources(report.sources), [report.sources]);
+  // The sources row at the end replaces the list the pond appends.
+  const markdown = useMemo(() => {
+    const text = withoutTitle(report.markdown, report.title);
+    return numbered.sources.length > 0 ? withoutSourcesList(text) : text;
+  }, [report.markdown, report.title, numbered]);
   const outline = useMemo(() => outlineOf(parseMarkdown(markdown)).filter((entry) => entry.level <= OUTLINE_DEPTH), [markdown]);
   const shallowest = Math.min(...outline.map((entry) => entry.level));
   const counts = reportCounts(report.sections, report.sources.length);
 
-  // A pond whose markdown does not list what it cites still gets its sources shown.
-  const sourcesApart = useMemo(
-    () =>
-      report.sources.some((source) => markdown.includes(source.url))
-        ? []
-        : report.sources.filter((source) => /^https?:\/\//i.test(source.url)),
-    [report.sources, markdown],
+  // A citation keeps its words and gains its number; words that only point give way to the number.
+  const cite = useCallback(
+    (href: string, label: string) => {
+      const n = numbered.numberOf(href);
+      if (n === null) return null;
+      const chip = <SourceChip n={n} source={numbered.sources[n - 1]} />;
+      return wordsOnlyPoint(label, href) ? (
+        chip
+      ) : (
+        <>
+          {label}
+          {chip}
+        </>
+      );
+    },
+    [numbered],
   );
 
   function goTo(index: number) {
@@ -100,21 +118,10 @@ export function ReportSheet({ task, report, handle, variant, onClose }: Props) {
 
           <div ref={scrollRef} className="rsheet__scroll" role="region" aria-label={REPORT_TEXT_LABEL} tabIndex={0}>
             <div className="rsheet__read">
-              <MarkdownText source={markdown} headings="report" idPrefix={prefix} />
-              {sourcesApart.length > 0 ? (
-                <section className="rsheet__sources" aria-label="Sources">
-                  <h3 className="md__h md__h2">Sources</h3>
-                  <ul className="md__list">
-                    {sourcesApart.map((source) => (
-                      <li key={source.url}>
-                        <a href={source.url} target="_blank" rel="noopener noreferrer">
-                          {source.title}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ) : null}
+              <ReportImages images={report.images} />
+              <ReportOptions options={report.options} variant={variant} />
+              <MarkdownText source={markdown} headings="report" idPrefix={prefix} cite={cite} />
+              <SourcesRow sources={numbered.sources} />
             </div>
           </div>
         </div>

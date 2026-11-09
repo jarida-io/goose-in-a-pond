@@ -1,4 +1,4 @@
-import { Fragment, useId, useMemo, type ReactNode } from "react";
+import { createContext, Fragment, useContext, useId, useMemo, type ReactNode } from "react";
 import { Check } from "lucide-react";
 import { blockId, parseMarkdown, type Align, type Block, type Inline, type Tasks } from "../lib/markdownBlocks";
 import "./markdown.css";
@@ -17,7 +17,17 @@ interface Ctx {
   idPrefix?: string;
 }
 
+/** Draws a link another way, such as a numbered source chip; `null` keeps the plain link. */
+export type CiteLink = (href: string, label: string) => ReactNode | null;
+
+const CiteContext = createContext<CiteLink | null>(null);
+
+function plainText(nodes: Inline[]): string {
+  return nodes.map((node) => (node.t === "text" || node.t === "code" ? node.v : plainText(node.c))).join("");
+}
+
 function Inlines({ nodes }: { nodes: Inline[] }) {
+  const cite = useContext(CiteContext);
   return (
     <>
       {nodes.map((node, i): ReactNode => {
@@ -48,12 +58,15 @@ function Inlines({ nodes }: { nodes: Inline[] }) {
                 <Inlines nodes={node.c} />
               </del>
             );
-          case "link":
+          case "link": {
+            const chip = cite?.(node.href, plainText(node.c));
+            if (chip != null) return <Fragment key={i}>{chip}</Fragment>;
             return (
               <a key={i} href={node.href} target="_blank" rel="noopener noreferrer">
                 <Inlines nodes={node.c} />
               </a>
             );
+          }
         }
       })}
     </>
@@ -195,14 +208,17 @@ interface Props {
   headings?: HeadingStyle;
   /** Gives each top-level heading an id (`blockId(prefix, index)`) and makes it focusable, so an outline can land on it. */
   idPrefix?: string;
+  cite?: CiteLink;
 }
 
 /** Draws markdown the pond wrote as elements, never as HTML, so nothing in it can run. */
-export function MarkdownText({ source, className, headings = "chat", idPrefix }: Props) {
+export function MarkdownText({ source, className, headings = "chat", idPrefix, cite }: Props) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
   return (
     <div className={`md${className ? ` ${className}` : ""}`}>
-      <Blocks blocks={blocks} ctx={{ headings, idPrefix }} />
+      <CiteContext.Provider value={cite ?? null}>
+        <Blocks blocks={blocks} ctx={{ headings, idPrefix }} />
+      </CiteContext.Provider>
     </div>
   );
 }

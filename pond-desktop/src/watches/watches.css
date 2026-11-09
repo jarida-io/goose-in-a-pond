@@ -1,0 +1,410 @@
+/* The watches and saved screens. The ink edge marks the content (watch rows, saved cards); the form,
+   bars and lists stay on hairlines (DESIGN.md rule 3). Secondary text on --color-bg: 5.62:1 light, 5.65:1 dark. */
+
+.wpage {
+  --w-control-h: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 880px;
+  color: var(--color-text);
+  font-family: var(--font-body);
+}
+
+.wpage--hub {
+  --w-control-h: var(--tap-min);
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 26px 30px 40px;
+}
+
+@media (pointer: coarse) {
+  .wpage {
+    --w-control-h: var(--tap-min);
+  }
+}
+
+.wpage__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.wpage__title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-xl);
+  font-style: italic;
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.wpage__title:focus {
+  outline: none;
+}
+
+.wpage__title:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.wpage__intro,
+.wpage__note {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  line-height: var(--leading-snug);
+}
+
+.wpage__h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+}
+
+.wpage__count {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-secondary);
+}
+
+.wpage__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.wpage__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--w-control-h);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.wpage__back:hover {
+  border-color: var(--color-text);
+}
+
+.wpage__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.wpage__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--w-control-h);
+  padding: 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.wpage__btn--danger {
+  color: var(--color-destructive-fg);
+}
+
+.wpage__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--w-control-h);
+  color: var(--color-text);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.wpage__problem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  color: var(--color-destructive-fg);
+  font-size: var(--text-base);
+}
+
+.wpage__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-6) 0;
+}
+
+.wpage__empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-brand-soft);
+  color: var(--fg-brand);
+}
+
+.wpage__empty-title {
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+}
+
+.wpage__empty-body {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--color-text-secondary);
+  line-height: var(--leading-snug);
+}
+
+/* The list: one card per watch, the whole card the control. */
+.wwatch-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wwatch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wwatch-row[data-paused="true"] {
+  opacity: 0.65;
+}
+
+.wwatch-row__main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wwatch-row__title {
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.wwatch-row__site,
+.wwatch-row__meta {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.wwatch-row__filters {
+  font-size: var(--text-base);
+}
+
+.wwatch-row__failing,
+.wwatch__failing {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-warning-fg);
+}
+
+.wwatch-row__go {
+  flex: none;
+  color: var(--color-text-secondary);
+}
+
+.wwatch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* The edit form sits on a hairline: it is a tool for the content, not the content. */
+.wform {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.wform__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+.wform__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.wform__field--wide {
+  grid-column: 1 / -1;
+}
+
+.wform__label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.wform__hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.wform__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--w-control-h);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-base);
+}
+
+.wform__input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.wform__save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  grid-column: 1 / -1;
+}
+
+.wform__note {
+  font-size: var(--text-sm);
+}
+
+.wform__note--saved {
+  color: var(--color-text-secondary);
+}
+
+.wform__note--problem {
+  color: var(--color-destructive-fg);
+}
+
+.wsec {
+  display: flex;
+  flex-direction: column;
+}
+
+.wchanges,
+.witems {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.wchange,
+.witem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-base);
+  line-height: var(--leading-snug);
+}
+
+.wchange a,
+.witem a {
+  color: var(--color-text);
+}
+
+.wchange__icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+}
+
+.wchange__text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.wchange__when {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* A match is the one change that was pushed: it gets the accent's edge, never accent text. */
+.wchange__match {
+  flex: none;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-ink);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.witem {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.witem__title {
+  overflow-wrap: anywhere;
+}
+
+.witem__facts {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.wpage--hub .wchange,
+.wpage--hub .witem,
+.wpage--hub .wwatch-row__filters {
+  font-size: var(--text-md);
+}

@@ -10,6 +10,7 @@ import {
   mergeNotices,
   openSection,
   openSessionId,
+  openWatchId,
 } from "./householdNotices";
 import { reducer, buildInitialState } from "./reducer";
 
@@ -125,6 +126,7 @@ describe("openSection", () => {
     ["models", "models"],
     ["extensions", "extensions"],
     ["remote_access", "pairing"],
+    ["watch", "watches"],
   ])("maps %s to %s", (hint, section) => {
     expect(openSection({ data: { open: hint } })).toBe(section);
   });
@@ -152,7 +154,28 @@ describe("openSessionId", () => {
   });
 });
 
+describe("openWatchId", () => {
+  it("reads the watch a watch hint names", () => {
+    expect(openWatchId({ data: { open: "watch", watch_id: "0b7c-9f" } })).toBe("0b7c-9f");
+  });
+
+  it("names none without a watch hint, an id, or with an id the Pond does not mint", () => {
+    expect(openWatchId({ data: { open: "watch" } })).toBeNull();
+    expect(openWatchId({ data: { open: "chat", watch_id: "w1" } })).toBeNull();
+    expect(openWatchId({ data: { open: "watch", watch_id: "../x" } })).toBeNull();
+    expect(openWatchId({ data: { open: "watch", watch_id: 7 } })).toBeNull();
+  });
+});
+
 describe("reducer", () => {
+  it("holds a requested watch until the watches screen takes it", () => {
+    let state = reducer(buildInitialState(), { type: "REQUEST_WATCH", payload: "w1" });
+    expect(state.requestedWatch).toBe("w1");
+    state = reducer(state, { type: "TAKE_WATCH_REQUEST" });
+    expect(state.requestedWatch).toBeNull();
+    expect(reducer(state, { type: "TAKE_WATCH_REQUEST" })).toBe(state);
+  });
+
   it("holds a requested conversation until the chat takes it", () => {
     let state = reducer(buildInitialState(), { type: "REQUEST_CONVERSATION", payload: "sess-1" });
     expect(state.requestedConversation).toBe("sess-1");
