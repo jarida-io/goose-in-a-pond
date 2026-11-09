@@ -83,6 +83,8 @@ source "$HERE/lib/admin-card.sh"
 source "$HERE/lib/connect-setup.sh"
 # shellcheck source=lib/time-sync.sh
 source "$HERE/lib/time-sync.sh"
+# shellcheck source=lib/remote-access.sh
+source "$HERE/lib/remote-access.sh"
 # shellcheck source=lib/release-build.sh
 source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
@@ -936,31 +938,10 @@ doctor() {
     DOC_WARN=$((DOC_WARN + TIMESYNC_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + TIMESYNC_DOCTOR_UNK))
   fi
 
-  # Remote reach. A Pond with no tailnet is not broken — remote access is simply
-  # a capability it does not have — so absent is a note, not a failure. What is
-  # worth flagging is a daemon that is installed and NOT up, because the operator
-  # believes they have remote access and does not.
-  if command -v tailscale >/dev/null 2>&1; then
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
-    case "$ts_ip" in
-      # 100.64.0.0/10, spelled out because a case glob cannot express a numeric
-      # range. It has to agree with `is_tailnet_v4` in crates/pond-api/src/routes.rs:
-      # a bare `100.*` calls 100.128.0.1 healthy while /api/v1/system/info publishes
-      # `tailnet_address: null` for it, so doctor would contradict the server on
-      # exactly the near-misses the arm below exists to report.
-      100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
-             ok "tailnet address $ts_ip — a paired phone can reach this Pond from outside the house" ;;
-      "")    warn "tailscale is installed but this host has no tailnet address"
-             note "remote pairing will fall back to the LAN address, which fails once the phone leaves"
-             note "fix: tailscale up   (add --login-server=<url> for a self-hosted Headscale)"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-      *)     warn "tailscale reported '$ts_ip', which is outside 100.64.0.0/10"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-    esac
-  else
-    note "tailscale not installed — this Pond is reachable on the LAN only"
-    note "see docs/remote-access.md to give a paired phone access from outside the house"
-  fi
+  # Remote reach: the Pond's built-in network, or the host's own tailscale. Absent is a note;
+  # turned on and not up is a warning. See scripts/lib/remote-access.sh.
+  remote_doctor "$D_DATA_DIR" "$D_PORT" "$D_HEALTH"
+  DOC_WARN=$((DOC_WARN + REMOTE_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + REMOTE_DOCTOR_UNK))
 
   # 14. LiteRT-LM library, which goose's litert backend loads into the server process for
   # .litertlm models. Having none is a note; one that fails its manifest is a FAIL.
