@@ -18,6 +18,8 @@ export const HP_PATHS = {
   rain:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 18l-1 3M12 18l-1 3M16 18l-1 3",
   // Lucide's cloud-snow, cloud-lightning and cloud-fog on the same cloud as `rain`, and its
   // cloud-moon for a partly cloudy night: the Pond sent rain's cloud for snow and a storm.
+  // Lucide's cloud-drizzle on the same cloud: drizzle is lighter than rain, and the phone draws it so.
+  drizzle:     "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 19v1M8 14v1M16 19v1M16 14v1M12 21v1M12 16v1",
   snow:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 15h.01M8 19h.01M12 17h.01M12 21h.01M16 15h.01M16 19h.01",
   storm:       "M6 16.3A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 .5 8.97M13 12l-3 5h4l-3 5",
   fog:         "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M16 17H7M17 21H9",

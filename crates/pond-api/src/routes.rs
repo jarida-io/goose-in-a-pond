@@ -6764,6 +6764,9 @@ async fn get_weather(
         "wind": current.wind_speed_kmh.round() as i64,
         "sunrise": current.sunrise,
         "sunset": current.sunset,
+        // Whether it is day where the Pond is, from the weather service, so a client draws a
+        // clear night as the moon without working out the sun's times in the Pond's time zone.
+        "is_day": current.is_day,
         "forecast": upcoming,
     })))
 }
@@ -6781,13 +6784,17 @@ fn weather_icon_key(description: &str) -> &'static str {
         "storm"
     } else if d.contains("snow") {
         "snow"
-    } else if d.contains("rain") || d.contains("drizzle") || d.contains("shower") {
+    } else if d.contains("drizzle") {
+        // Lighter than rain, and drawn so, as the phone's cards draw it.
+        "drizzle"
+    } else if d.contains("rain") || d.contains("shower") {
         "rain"
     } else if d.contains("fog") {
         "fog"
-    } else if d.contains("clear sky") {
+    } else if d.contains("clear") {
+        // "Mainly clear" too: the sun, as both apps' chat cards draw it.
         "sun"
-    } else if d.contains("clear") || d.contains("partly") {
+    } else if d.contains("partly") {
         "cloudSun"
     } else {
         "cloud"
@@ -6802,12 +6809,12 @@ mod weather_icon_tests {
     fn every_wmo_description_gets_the_icon_of_its_own_condition() {
         for (description, icon) in [
             ("Clear sky", "sun"),
-            ("Mainly clear", "cloudSun"),
+            ("Mainly clear", "sun"),
             ("Partly cloudy", "cloudSun"),
             ("Overcast", "cloud"),
             ("Fog", "fog"),
-            ("Light drizzle", "rain"),
-            ("Freezing drizzle", "rain"),
+            ("Light drizzle", "drizzle"),
+            ("Freezing drizzle", "drizzle"),
             ("Moderate rain", "rain"),
             ("Freezing rain", "rain"),
             ("Violent showers", "rain"),
