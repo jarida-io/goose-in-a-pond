@@ -568,6 +568,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route("/web-watches", get(crate::web_watches::list))
+        .route(
+            "/web-watches/{id}",
+            get(crate::web_watches::get)
+                .patch(crate::web_watches::edit)
+                .delete(crate::web_watches::delete),
+        )
         .route("/long-tasks", get(list_long_tasks))
         .route("/long-tasks/deep-research", get(deep_research_availability))
         .route("/long-tasks/queue", get(long_task_queue))
@@ -16758,7 +16765,7 @@ async fn pond_capabilities(
 
 /// The caller of a long-task route, as a member's scope: a paired member's device, or the
 /// desktop on this host acting for the primary member. Nobody identified reaches no task.
-async fn long_task_caller(
+pub(crate) async fn long_task_caller(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     peer: Result<

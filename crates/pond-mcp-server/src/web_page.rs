@@ -376,17 +376,94 @@ async fn read_page(address: &str, depth: u8) -> Result<Page, String> {
     Ok(page)
 }
 
+/// Why a page could not be fetched, kept apart so a watch can back off on a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchFailure {
+    NotAnAddress,
+    NotPublic,
+    Unreachable(String),
+    Status(u16),
+    StoppedArriving,
+    NotAPage(String),
+}
+
+impl FetchFailure {
+    /// The failure as the model reads it.
+    fn text(&self) -> String {
+        let what = "reading that page";
+        match self {
+            FetchFailure::NotAnAddress => format_dead_end(what, "That is not a web address."),
+            FetchFailure::NotPublic => format_dead_end(
+                what,
+                "That address is not on the public web, and the pond reads only public pages.",
+            ),
+            FetchFailure::Unreachable(why) => format_api_error("Reading the page", why),
+            FetchFailure::Status(code) => {
+                let why = match code {
+                    404 | 410 => "There is no page at that address.".to_string(),
+                    401 | 403 => "The site would not let the pond read the page.".to_string(),
+                    429 => "The site asked the pond to wait before reading more.".to_string(),
+                    code => format!("The site answered HTTP {code}."),
+                };
+                format_dead_end(what, &why)
+            }
+            FetchFailure::StoppedArriving => {
+                format_api_error("Reading the page", "the page stopped arriving")
+            }
+            FetchFailure::NotAPage(mime) => format_dead_end(
+                what,
+                &format!("That address is a file ({mime}), not a web page."),
+            ),
+        }
+    }
+}
+
+/// A watched page as a check reads it: where it ended, its title and its items.
+#[derive(Debug, Clone)]
+pub struct WatchedPage {
+    pub address: String,
+    pub title: String,
+    pub items: Vec<page_data::Item>,
+}
+
+/// Reads a watched page fresh, past the cache, for its items. The address was resolved when the
+/// member set the watch up, so the address book is not asked again.
+pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
+    let client = web_search::page_client()
+        .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
+    let (final_address, body) = fetch_page(client, address).await?;
+    let parsing = tokio::task::spawn_blocking(move || {
+        let (title, _, data) = match body {
+            Body::Html(html) => parse_html(&html, &final_address),
+            Body::Text(_) => (String::new(), Vec::new(), PageData::default()),
+        };
+        WatchedPage {
+            address: final_address,
+            title,
+            items: data.items,
+        }
+    });
+    match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
+        Ok(Ok(page)) => Ok(page),
+        _ => Err(FetchFailure::Unreachable(
+            "the page was too large to read in time".into(),
+        )),
+    }
+}
+
 async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body), String> {
-    let what = "reading that page";
-    let parsed = reqwest::Url::parse(address)
-        .map_err(|_| format_dead_end(what, "That is not a web address."))?;
+    fetch_page(client, address).await.map_err(|f| f.text())
+}
+
+async fn fetch_page(
+    client: &reqwest::Client,
+    address: &str,
+) -> Result<(String, Body), FetchFailure> {
+    let parsed = reqwest::Url::parse(address).map_err(|_| FetchFailure::NotAnAddress)?;
     let host = parsed.host_str().unwrap_or_default().to_string();
     if let Err(refused) = pond_net::public_only::check_target(&parsed) {
         tracing::info!(target: "giap::trace", kind = "web_page_refused", host = %host, %refused);
-        return Err(format_dead_end(
-            what,
-            "That address is not on the public web, and the pond reads only public pages.",
-        ));
+        return Err(FetchFailure::NotPublic);
     }
     let response = crate::http::traced_get_with(client, address, |b| {
         b.timeout(PAGE_TIMEOUT)
@@ -395,17 +472,11 @@ async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body)
     .await
     .map_err(|e| {
         tracing::info!(target: "giap::trace", kind = "web_page_unread", host = %host, error = %e);
-        format_api_error("Reading the page", &web_search::describe_failure(&e))
+        FetchFailure::Unreachable(web_search::describe_failure(&e))
     })?;
     let status = response.status();
     if !status.is_success() {
-        let why = match status.as_u16() {
-            404 | 410 => "There is no page at that address.".to_string(),
-            401 | 403 => "The site would not let the pond read the page.".to_string(),
-            429 => "The site asked the pond to wait before reading more.".to_string(),
-            code => format!("The site answered HTTP {code}."),
-        };
-        return Err(format_dead_end(what, &why));
+        return Err(FetchFailure::Status(status.as_u16()));
     }
     let final_address = response.url().to_string();
     let mime = response
@@ -418,16 +489,11 @@ async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body)
     let plain = match mime.as_str() {
         "text/html" | "application/xhtml+xml" | "" => false,
         "text/plain" | "text/markdown" => true,
-        other => {
-            return Err(format_dead_end(
-                what,
-                &format!("That address is a file ({other}), not a web page."),
-            ))
-        }
+        other => return Err(FetchFailure::NotAPage(other.to_string())),
     };
     let body = web_search::read_capped(response, web_search::PAGE_BYTE_CAP)
         .await
-        .ok_or_else(|| format_api_error("Reading the page", "the page stopped arriving"))?;
+        .ok_or(FetchFailure::StoppedArriving)?;
     let body = if plain {
         Body::Text(body)
     } else {

@@ -74,6 +74,7 @@ impl KnowledgeMcpServer {
         tools.extend(Self::wolfram_tool_router().list_all());
         tools.extend(Self::web_search_tool_router().list_all());
         tools.extend(Self::web_page_tool_router().list_all());
+        tools.extend(Self::web_watch_tool_router().list_all());
         tools
     }
 
@@ -85,7 +86,8 @@ impl KnowledgeMcpServer {
             tool_router: Self::tool_router()
                 + Self::wolfram_tool_router()
                 + Self::web_search_tool_router()
-                + Self::web_page_tool_router(),
+                + Self::web_page_tool_router()
+                + Self::web_watch_tool_router(),
         }
     }
 
@@ -168,7 +170,8 @@ GIAP Knowledge server: encyclopedia articles, computation, web search and web pa
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
 stored), read_web_page (one web page: a link the person gave, a source search_web found, or a \
-link or search form a page it read listed).
+link or search form a page it read listed), web_watch (keep checking a page of listings and \
+tell the person when something they want appears or drops in price).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
@@ -176,7 +179,9 @@ happened, what a place is like), use get_wikipedia_article; it auto-searches whe
 not exact. If it is current, local or specific (news, opening hours, prices, products, \
 businesses, recent results), use search_web. When the person gives a link, or a number, \
 price, time or date matters and a search source has it, read that page with read_web_page. \
-A turn reads at most three pages; pick the most relevant.
+A turn reads at most three pages; pick the most relevant. When the person wants to hear when \
+listings change, such as a car under a price, start web_watch on a listings page you read, with \
+their words as filters.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 

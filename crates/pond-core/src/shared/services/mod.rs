@@ -24,3 +24,4 @@ pub mod step_bindings;
 pub mod turn_authority;
 pub mod voice_agent;
 pub mod voice_control;
+pub mod web_watch_checker;

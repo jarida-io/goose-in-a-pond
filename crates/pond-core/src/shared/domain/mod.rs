@@ -8,4 +8,5 @@ pub mod session_activity;
 pub mod time_tick;
 pub mod turn_failure;
 pub mod turn_stats;
+pub mod web_watch;
 pub mod wipe;
