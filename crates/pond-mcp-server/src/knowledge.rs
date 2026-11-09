@@ -167,14 +167,16 @@ GIAP Knowledge server: encyclopedia articles, computation, web search and web pa
 
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
-stored), read_web_page (one web page: a link the person gave, or a source search_web found).
+stored), read_web_page (one web page: a link the person gave, a source search_web found, or a \
+link or search form a page it read listed).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
 happened, what a place is like), use get_wikipedia_article; it auto-searches when the title is \
 not exact. If it is current, local or specific (news, opening hours, prices, products, \
 businesses, recent results), use search_web. When the person gives a link, or a number, \
-price, time or date matters and a search source has it, read that page with read_web_page.
+price, time or date matters and a search source has it, read that page with read_web_page. \
+A turn reads at most three pages; pick the most relevant.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 
