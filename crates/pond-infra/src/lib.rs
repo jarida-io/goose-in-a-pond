@@ -47,6 +47,7 @@ pub mod sqlite_recipe;
 pub mod sqlite_reminder;
 pub mod sqlite_ride_store;
 pub mod sqlite_room_registry;
+pub mod sqlite_saved_item;
 pub mod sqlite_security_policy;
 pub mod sqlite_sensor;
 pub mod sqlite_session_storage;

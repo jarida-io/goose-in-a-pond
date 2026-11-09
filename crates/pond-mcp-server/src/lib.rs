@@ -10,6 +10,7 @@ pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
 pub mod page_data;
+pub mod saved_items;
 pub mod schedule;
 pub mod secrets;
 pub mod sensors;

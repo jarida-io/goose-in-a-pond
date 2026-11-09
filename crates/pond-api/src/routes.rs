@@ -568,6 +568,21 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route(
+            "/saved-items",
+            get(crate::saved_items::list).post(crate::saved_items::create),
+        )
+        .route(
+            "/saved-items/collections",
+            get(crate::saved_items::collections),
+        )
+        .route(
+            "/saved-items/{id}",
+            get(crate::saved_items::get)
+                .patch(crate::saved_items::edit)
+                .delete(crate::saved_items::delete),
+        )
+        .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
         .route("/web-watches", get(crate::web_watches::list))
         .route(
             "/web-watches/{id}",

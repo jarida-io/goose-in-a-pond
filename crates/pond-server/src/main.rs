@@ -7104,6 +7104,17 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
+    pond_mcp_server::saved_items::init_saved_item_deps(
+        pond_mcp_server::saved_items::SavedItemDeps {
+            repo: Arc::new(
+                pond_infra::sqlite_saved_item::SqliteSavedItemRepository::new(pool.clone()),
+            ),
+            sessions: Arc::new(
+                pond_infra::sqlite_session_storage::SqliteSessionStorage::new(pool.clone()),
+            ),
+            authorities: orchestration.authorities(),
+        },
+    );
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),
