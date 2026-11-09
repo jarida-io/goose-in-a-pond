@@ -64,7 +64,8 @@ Jetson on 2026-11-09).
    databases and `secrets.json`. Any difference stops before the switch.
 6. Keeps the plain directory as `<data dir>.plain-<time>`, mounts the volume in its place, installs
    the unit, helper and drop-in, and starts the pond.
-7. `data-encrypt finish`, after one reboot has shown the TPM opens it, deletes the plain copy and runs
+7. `data-encrypt finish` refuses until the board has booted since the move, so a boot has shown the
+   TPM opens it unattended; then it deletes the plain copy and runs
    `fstrim`. Deleted files can stay readable in an SSD's free blocks; a discard is the best that can
    be done short of reformatting the storage.
 
@@ -115,3 +116,10 @@ rotated card opened it and the old one did not; undo restored the plain files; n
 behind. Adding the card's keyslot took the longest: LUKS2's Argon2 asks for about 650 MB, and with
 the pond's model loaded the board had about 545 MB free. `data-encrypt` stops the pond first, so a
 real run has that memory.
+
+**Run on the Jetson's own data 2026-11-09.** 3,026 MB of private data, 28,725 files, moved into the
+volume with the databases and secrets matching; the pond came back on it with its 1,913 messages
+and its settings. After a reboot at 12:57:42 the unit opened the volume with the TPM alone at
+12:57:58 (`pond-data: clean`), and the pond started a second later with no restart. `finish` then
+removed the plain copy and trimmed 16.2 GiB. (`finish` ran before that reboot on this first run;
+it now refuses until the board has booted since the move.)

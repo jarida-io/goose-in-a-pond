@@ -217,9 +217,20 @@ test_finish_waits_for_an_open_volume() {
   contains "$(logged)" "finish only after a reboot"
 }
 
+test_finish_keeps_the_plain_copy_until_a_boot_has_opened_the_volume() {
+  pond open
+  mkdir -p "$W/data.plain-20261109-120000"
+  dv_booted_since() { return 1; }
+  dv_finish "$W/data" && return 1
+  [ -d "$W/data.plain-20261109-120000" ] || { echo "the plain copy went before a reboot"; return 1; }
+  contains "$(logged)" "reboot first" || return 1
+  eq "$(calls)" ""
+}
+
 test_finish_drops_the_plain_copy_and_discards_the_space() {
   pond open
   mkdir -p "$W/data.plain-20261109-120000"
+  dv_booted_since() { return 0; }
   dv_finish "$W/data" || return 1
   [ ! -e "$W/data.plain-20261109-120000" ] || { echo "the plain copy is still there"; return 1; }
   contains "$(calls)" "fstrim -v $W"

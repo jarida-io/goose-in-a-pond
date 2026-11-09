@@ -349,6 +349,15 @@ dv_wait_healthy() { # $1 = port
   return 1
 }
 
+# True when the board booted after the plain copy was made (its name ends -YYYYMMDD-HHMMSS).
+dv_booted_since() { # $1 = plain copy
+  local stamp made booted
+  stamp="${1##*.plain-}"
+  made="$(date -d "${stamp:0:8} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null)" || return 1
+  booted="$(date -d "$(uptime -s)" +%s 2>/dev/null)" || return 1
+  [ "$booted" -gt "$made" ]
+}
+
 # After a reboot has proved the TPM opens the volume: drop the plain copy, and ask the SSD to
 # discard the freed blocks, the best that can be done for deleted files short of reformatting.
 dv_finish() { # $1 = data dir
@@ -358,6 +367,12 @@ dv_finish() { # $1 = data dir
   fi
   for backup in "$data".plain-*; do
     [ -d "$backup" ] || continue
+    # The plain copy is the fallback until a boot has opened the volume with the TPM alone.
+    if ! dv_booted_since "$backup"; then
+      warn "this board has not booted since the data was moved, so the TPM has not yet opened it unattended"
+      note "reboot first, then run finish again; the plain copy stays at $backup"
+      return 1
+    fi
     confirm "Delete the plain copy $backup?" || return 1
     dv_run rm -rf "$backup" || return 1
   done
