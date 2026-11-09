@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod agent_prefill;
 pub mod long_task;
+pub mod news;
 pub mod orchestration;
 pub mod pond_admin;
 pub mod role_block;
