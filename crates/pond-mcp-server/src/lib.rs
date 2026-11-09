@@ -10,6 +10,7 @@ pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
 pub mod page_data;
+pub mod product_page;
 pub mod report_images;
 pub mod saved_items;
 pub mod schedule;

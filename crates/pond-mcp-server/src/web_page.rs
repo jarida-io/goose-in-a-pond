@@ -42,7 +42,7 @@ const SEARCH_WEB_TOOL: &str = "giap-knowledge__search_web";
 pub(crate) const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parsing one page off the async workers, at most.
-const EXTRACT_DEADLINE: Duration = Duration::from_secs(4);
+pub(crate) const EXTRACT_DEADLINE: Duration = Duration::from_secs(4);
 
 /// A part, about 800 tokens: a helper can read two beside its brief.
 const PART_BYTES: usize = 3_200;
@@ -517,6 +517,17 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
             "the page was too large to read in time".into(),
         )),
     }
+}
+
+/// A product page fresh, past the cache, for the cart: where it ended and its HTML (or its text,
+/// for a plain-text page).
+pub(crate) async fn fetch_product_page(address: &str) -> Result<(String, String), FetchFailure> {
+    let client = web_search::page_client()
+        .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
+    let (final_address, body) = fetch_page(client, address).await?;
+    Ok(match body {
+        Body::Html(html) | Body::Text(html) => (final_address, html),
+    })
 }
 
 async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body), String> {
