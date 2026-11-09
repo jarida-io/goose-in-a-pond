@@ -478,7 +478,7 @@ say "log dig"
 cat "$DATA_DIR"/server*.out 2>/dev/null \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E 'WARN|ERROR|panic' \
-  | sed 's/^[0-9TZ:.-]* *//' \
+  | sed 's/^[0-9TZ:.+-]* *//' \
   | sort | uniq -c | sort -rn
 if grep -qi panic "$DATA_DIR"/server*.out 2>/dev/null; then
   echo "PANIC in the server log" >&2

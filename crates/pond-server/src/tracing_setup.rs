@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::field::Visit;
 use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
@@ -358,7 +359,8 @@ pub fn init_tracing_with_console(
     };
 
     // ── Rolling file appender ────────────────────────────────────────────
-    // Produces daily files: <data_dir>/logs/pond.log.YYYY-MM-DD
+    // Produces daily files: <data_dir>/logs/pond.log.YYYY-MM-DD. The appender rolls at UTC
+    // midnight and names the file by the UTC date; the lines inside carry local time.
     let log_dir = data_dir.join("logs");
     let file_appender = tracing_appender::rolling::daily(&log_dir, "pond.log");
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
@@ -369,10 +371,12 @@ pub fn init_tracing_with_console(
 
     let console_layer = match console {
         ConsoleSink::Stdout => tracing_subscriber::fmt::layer()
+            .with_timer(log_clock())
             .with_writer(std::io::stdout as fn() -> std::io::Stdout)
             .with_filter(console_filter)
             .boxed(),
         ConsoleSink::Stderr => tracing_subscriber::fmt::layer()
+            .with_timer(log_clock())
             .with_writer(std::io::stderr as fn() -> std::io::Stderr)
             .with_filter(console_filter)
             .boxed(),
@@ -382,6 +386,7 @@ pub fn init_tracing_with_console(
         .with(console_layer)
         .with(
             tracing_subscriber::fmt::layer()
+                .with_timer(log_clock())
                 .with_writer(non_blocking_file)
                 .with_ansi(false)
                 .with_filter(file_filter),
@@ -393,6 +398,14 @@ pub fn init_tracing_with_console(
     crate::node_path::log_decision();
 
     LogDrainHandle { rx, file_guard }
+}
+
+/// The clock on every log line: the host's local time with its UTC offset
+/// (`2026-11-09T08:23:04.969674+03:00`), so a line reads in the time of the place the Pond is
+/// and still names one instant. The default was UTC with a `Z`, three hours off the wall clock
+/// of a Pond in Nairobi. Local time comes from `TZ` or `/etc/localtime`, as for `date`.
+fn log_clock() -> ChronoLocal {
+    ChronoLocal::rfc_3339()
 }
 
 #[cfg(test)]
@@ -730,6 +743,21 @@ mod tests {
              production filter drops — they will never appear in a log. Use \
              `info!`, or add the kind to GRANDFATHERED with a reason:\n  {}",
             offenders.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn log_lines_carry_their_utc_offset() {
+        use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
+        let mut line = String::new();
+        log_clock()
+            .format_time(&mut Writer::new(&mut line))
+            .expect("the clock formats");
+        let stamp = chrono::DateTime::parse_from_rfc3339(&line).expect("an RFC 3339 instant");
+        assert_eq!(
+            stamp.offset().local_minus_utc(),
+            chrono::Local::now().offset().local_minus_utc(),
+            "the line is in the host's local time: {line}"
         );
     }
 }
