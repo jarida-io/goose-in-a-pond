@@ -39,6 +39,7 @@ pub mod uber_accounts;
 pub mod voice_agent;
 mod voice_match;
 pub mod voice_sample;
+mod wake_check;
 pub mod web_search;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).

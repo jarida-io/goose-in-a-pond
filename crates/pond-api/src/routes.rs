@@ -636,6 +636,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
         .route("/voice/takes", post(crate::voice_match::post_take))
+        // A phone listening for a phrase other than "hey goose" asks whether a segment held it.
+        .route(
+            "/voice/wake/check",
+            post(crate::wake_check::check_wake).layer(axum::extract::DefaultBodyLimit::max(
+                crate::wake_check::WAKE_CHECK_BODY_LIMIT,
+            )),
+        )
         .route("/voice/prints", get(crate::voice_match::get_prints))
         .route("/voice/prints/model", post(crate::voice_match::fetch_model))
         .route(
