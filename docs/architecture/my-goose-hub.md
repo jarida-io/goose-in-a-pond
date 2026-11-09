@@ -19,7 +19,9 @@ else Goose can do. This document is the contract between the Pond and the phone.
 - Brave's search results are transient: a stored digest or story keeps the model's own words, the
   page addresses and the pictures, never a snippet.
 - Every background prompt names the member, says what is already known about them, and is told
-  that one question asked once is curiosity, not an interest.
+  that one question asked once is curiosity, not an interest. Prompts name their sources, give an
+  exact JSON schema with each property defined, ask for granular, technical, scored items with
+  priorities tailored to the member, and ask for JSON only.
 
 ## 0. What this Pond serves
 
@@ -81,7 +83,7 @@ or after the interests change. The news and ideas prompts read it.
 ```
 NewsSettings = { "digest": bool, "digest_time": "07:00", "spoken_on_speaker": bool,
                  "tiles": bool, "timezone": "Africa/Nairobi" }
-Story = { "id", "headline", "dek": "one line", "picture": path|null,
+Story = { "id", "kind": "news|long_read", "headline", "dek": "one line", "picture": path|null,
   "source": {"name","url"}, "interest": {"id","topic"}, "published_at"|null, "written_at" }
 StoryDetail = Story + { "summary": "markdown, 120-250 words, in Goose's words",
   "why_you": "one line tying it to the member", "sources": [{"title","url","site"}] }
@@ -100,6 +102,12 @@ Digest = { "id", "title", "written_at", "intro": "two sentences",
 - `GET /me/news/digests/{id}/listen` → `audio/wav` in the Pond's voice
 - `POST /me/news/digests/{id}/speak` → 202, read on the house speaker now
 - `POST /me/news/refresh` → 202 `{"state":"writing"}`
+
+What to look up comes from the member's topic map (`member_topics`, rebuilt daily): about 40
+scored web-search queries written from that member's interests, portrait, memories and scheduled
+tasks, in batches by area, at most four per subject, weighted by what this member cares about,
+with private matters the public web cannot answer dropped. Newsworthy topics feed the tiles and
+the digest; the rest feed ideas and an occasional long read (a Story of kind `long_read`).
 
 Tiles are refreshed a few times a day, a handful per interest, each a page the Pond read and
 summarised itself. The digest is written once a day, ready by `digest_time`, from the day's
