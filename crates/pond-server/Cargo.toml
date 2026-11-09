@@ -206,7 +206,7 @@ futures = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "chrono"] }
 tokio-util = { workspace = true }
 # Required to query pond_logs.db directly in the debug log-tail task.
 sqlx = { workspace = true }
