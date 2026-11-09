@@ -469,8 +469,13 @@ impl TasksMcpServer {
                         .to_string(),
                 )
             })?;
-        let budget = LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)
-            .map_err(|e| Refusal::Rejected(e.to_string()))?;
+        let budget = LongTaskBudget::new(
+            DEFAULT_LONG_TASK_STEPS,
+            Some(pond_core::shared::domain::long_task::default_deadline(
+                Utc::now(),
+            )),
+        )
+        .map_err(|e| Refusal::Rejected(e.to_string()))?;
         let answer = non_blank(params.answer.take())
             .or_else(|| take_alias(&mut params.extra, &ANSWER_ALIASES))
             .and_then(|raw| AnswerShape::read(&raw))

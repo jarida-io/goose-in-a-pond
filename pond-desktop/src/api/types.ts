@@ -1107,6 +1107,8 @@ export interface LongTask {
   queue?: LongTaskQueuePlace | null;
   /** A step is running but a person's turn has the model; it resumes after. Absent from an older pond. */
   paused_for_turn?: boolean;
+  /** When the task answers with what it has found; `null` for a task with no time limit, absent from an older pond. */
+  deadline?: string | null;
 }
 
 /** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */

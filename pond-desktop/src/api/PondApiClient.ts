@@ -1787,6 +1787,11 @@ export class PondApiClient {
     await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
   }
 
+  /** Gives a running task more time (15 minutes unless told). 409 if it has already ended. */
+  async extendLongTask(id: string, minutes?: number): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/extend`, minutes === undefined ? {} : { minutes });
+  }
+
   /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */
   getAgentPrefills(): Promise<PrefillReport> {
     return this.get("/api/v1/agents/prefills");

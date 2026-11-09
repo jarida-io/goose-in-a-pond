@@ -125,11 +125,12 @@ fn a_settled_plan_finishes_and_a_waiting_task_runs_nothing() {
 }
 
 #[test]
-fn a_task_gives_up_past_its_deadline_or_after_fruitless_plans() {
+fn a_task_gives_up_past_its_grace_or_after_fruitless_plans() {
     let task = task_in(LongTaskState::Running, Some(t(100)));
     let pending = [step("a", 0, &[], StepState::Pending, 0)];
+    let grace = WRAP_UP_GRACE_MINUTES * 60;
     assert!(matches!(
-        next_run(&task, &pending, 0, t(101)),
+        next_run(&task, &pending, 0, t(100 + grace)),
         NextRun::GiveUp(_)
     ));
     assert!(
@@ -140,6 +141,63 @@ fn a_task_gives_up_past_its_deadline_or_after_fruitless_plans() {
         next_run(&task, &pending, MAX_FRUITLESS_PLANS, t(2)),
         NextRun::GiveUp(_)
     ));
+}
+
+#[test]
+fn past_its_deadline_a_task_skips_what_has_not_run_and_its_last_step_answers() {
+    let task = task_in(LongTaskState::Running, Some(t(100)));
+    let late = t(101);
+    let steps = [
+        step("a", 0, &[], StepState::Completed, 1),
+        step("b", 1, &[], StepState::Pending, 0),
+        step("c", 2, &[], StepState::Failed, 1),
+        step("answer", 3, &["a", "b", "c"], StepState::Pending, 0),
+    ];
+    let NextRun::SkipForTime(keys) = next_run(&task, &steps, 0, late) else {
+        panic!("the steps not run are skipped first");
+    };
+    let keys: Vec<&str> = keys.iter().map(StepKey::as_str).collect();
+    assert_eq!(keys, vec!["b", "c"]);
+    let skipped = [
+        step("a", 0, &[], StepState::Completed, 1),
+        step("b", 1, &[], StepState::Skipped, 0),
+        step("c", 2, &[], StepState::Skipped, 1),
+        step("answer", 3, &["a", "b", "c"], StepState::Pending, 0),
+    ];
+    assert_eq!(
+        key_of(&next_run(&task, &skipped, 0, late)).as_deref(),
+        Some("answer"),
+        "the last step runs although what it depended on was skipped"
+    );
+    let answered = [
+        step("a", 0, &[], StepState::Completed, 1),
+        step("b", 1, &[], StepState::Skipped, 0),
+        step("answer", 2, &["a", "b"], StepState::Completed, 1),
+    ];
+    assert_eq!(next_run(&task, &answered, 0, late), NextRun::Finish);
+    let running = [
+        step("a", 0, &[], StepState::Running, 1),
+        step("answer", 1, &["a"], StepState::Pending, 0),
+    ];
+    assert_eq!(
+        next_run(&task, &running, 0, late),
+        NextRun::Wait,
+        "a running step finishes first"
+    );
+    assert!(matches!(next_run(&task, &[], 0, late), NextRun::GiveUp(_)));
+}
+
+#[test]
+fn the_planner_is_told_how_many_steps_its_time_fits() {
+    let task = task_in(LongTaskState::Planning, Some(t(30 * 60)));
+    assert_eq!(
+        step_cap_line(&task, t(0)),
+        "At most 10 steps in all: the task has 30 minutes left, and a step takes one to three.\n"
+    );
+    let nearly = step_cap_line(&task, t(29 * 60));
+    assert!(nearly.starts_with("At most 2 steps"), "{nearly}");
+    let untimed = task_in(LongTaskState::Planning, None);
+    assert!(step_cap_line(&untimed, t(0)).starts_with("At most "));
 }
 
 fn summary(id: &str, step_key: Option<&str>, title: &str) -> ArtifactSummary {
@@ -847,4 +905,40 @@ fn a_draft_without_a_heading_is_named_from_its_key() {
     )
     .unwrap();
     assert_eq!(kept.title(), "Comfort");
+}
+
+#[test]
+fn more_time_counts_from_the_deadline_or_now_and_stays_within_the_most() {
+    use crate::shared::domain::long_task::{extended_deadline, MAX_TIME_BUDGET_MINUTES};
+    let started = t(0);
+    let min = |m: i64| t(m * 60);
+    assert_eq!(
+        extended_deadline(Some(min(30)), started, 15, min(10)),
+        min(45)
+    );
+    assert_eq!(
+        extended_deadline(Some(min(30)), started, 15, min(40)),
+        min(55),
+        "from now once passed"
+    );
+    assert_eq!(extended_deadline(None, started, 15, min(5)), min(20));
+    assert_eq!(
+        extended_deadline(Some(min(MAX_TIME_BUDGET_MINUTES - 5)), started, 15, min(10)),
+        min(MAX_TIME_BUDGET_MINUTES)
+    );
+}
+
+#[test]
+fn a_step_answering_after_the_time_is_up_is_told_so_and_given_everything() {
+    let task = task_in(LongTaskState::Running, Some(t(100)));
+    let steps = [
+        step("a", 0, &[], StepState::Completed, 1),
+        step("answer", 1, &[], StepState::Pending, 0),
+    ];
+    let artifacts = [summary("art-a", Some("a"), "Findings")];
+    let on_time = worker_brief(&task, &steps[1], &artifacts, &HashMap::new(), t(50));
+    let late = worker_brief(&task, &steps[1], &artifacts, &HashMap::new(), t(101));
+    assert!(!on_time.contains("time is up"));
+    assert!(late.contains("The task's time is up"), "{late}");
+    assert!(late.contains("art-a"), "everything saved is given: {late}");
 }

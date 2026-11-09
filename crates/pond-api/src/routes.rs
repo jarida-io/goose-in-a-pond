@@ -580,6 +580,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/long-tasks/queue", get(long_task_queue))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route("/long-tasks/{id}/extend", post(extend_long_task))
         .route(
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
@@ -16883,6 +16884,8 @@ async fn long_task_view(
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
+        // The card's "12 of 30 min" and its extend button; none for a task without a time limit.
+        "deadline": task.budget().deadline(),
         "updated_at": task.updated_at(),
         "finished_at": task.finished_at(),
         "steps": steps.iter().map(|step| json!({
@@ -17346,6 +17349,7 @@ async fn get_long_task_report(
                 .map(|s| json!({"title": s.title, "url": s.url}))
                 .collect::<Vec<_>>(),
             "calendar_events": events.len(),
+            "options": pond_core::shared::services::task_options::options_in(&markdown),
         }))
         .into_response(),
         Err(e) => (
@@ -17553,6 +17557,77 @@ async fn cancel_long_task(
     {
         Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtendBody {
+    minutes: Option<i64>,
+}
+
+/// Gives a running task more time, counted from its deadline or from now if that has passed,
+/// within the most a task may have.
+async fn extend_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    body: Option<Json<ExtendBody>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::{extended_deadline, EXTEND_MINUTES};
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    let minutes = body
+        .and_then(|Json(b)| b.minutes)
+        .unwrap_or(EXTEND_MINUTES)
+        .clamp(1, 60);
+    let now = chrono::Utc::now();
+    let deadline = extended_deadline(task.budget().deadline(), task.created_at(), minutes, now);
+    match long_task_repo(&state)
+        .set_deadline(&id, Some(deadline))
+        .await
+    {
+        Ok(true) => Json(json!({"id": id, "deadline": deadline})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 

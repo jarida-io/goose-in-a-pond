@@ -273,6 +273,31 @@ pub struct LongTaskBudget {
     deadline: Option<DateTime<Utc>>,
 }
 
+/// Minutes a member's task has before it answers with what it found; they may extend it.
+pub const DEFAULT_TIME_BUDGET_MINUTES: i64 = 30;
+/// Minutes one tap on "extend" adds.
+pub const EXTEND_MINUTES: i64 = 15;
+/// The most time a task may be given in all, from when it was started.
+pub const MAX_TIME_BUDGET_MINUTES: i64 = 180;
+
+/// The deadline a member's task starts with.
+pub fn default_deadline(now: DateTime<Utc>) -> DateTime<Utc> {
+    now + chrono::Duration::minutes(DEFAULT_TIME_BUDGET_MINUTES)
+}
+
+/// `deadline` moved `minutes` later, counted from now if it has passed, and never past
+/// [`MAX_TIME_BUDGET_MINUTES`] after `started`.
+pub fn extended_deadline(
+    deadline: Option<DateTime<Utc>>,
+    started: DateTime<Utc>,
+    minutes: i64,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let from = deadline.map_or(now, |d| d.max(now));
+    let cap = started + chrono::Duration::minutes(MAX_TIME_BUDGET_MINUTES);
+    (from + chrono::Duration::minutes(minutes.max(1))).min(cap.max(from))
+}
+
 impl LongTaskBudget {
     /// Refused, not clamped, above [`MAX_LONG_TASK_STEPS`], so the starter learns the real cap.
     pub fn new(max_steps: u32, deadline: Option<DateTime<Utc>>) -> Result<Self, LongTaskError> {
@@ -454,6 +479,12 @@ impl LongTask {
 
     pub fn owner_profile_id(&self) -> Option<&str> {
         self.owner_profile_id.as_deref()
+    }
+
+    /// A member gave the task more time.
+    pub fn set_deadline(&mut self, deadline: Option<DateTime<Utc>>, at: DateTime<Utc>) {
+        self.budget.deadline = deadline;
+        self.updated_at = at;
     }
 
     pub fn scope(&self) -> &ProfileScope {

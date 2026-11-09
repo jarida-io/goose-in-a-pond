@@ -105,6 +105,21 @@ export function aheadWords(ahead: readonly LongTaskAhead[]): string {
   return `Ahead of this one: ${parts.join(" and ")}.`;
 }
 
+/**
+ * The task's time as "12 of 30 min", or that it is answering with what it found once its time is up;
+ * `null` for a task without a time limit, or one that has ended.
+ */
+export function timeWords(task: Pick<LongTask, "state" | "created_at"> & Partial<Pick<LongTask, "deadline">>, now: Date): string | null {
+  if (!task.deadline || isEnded(task.state)) return null;
+  const started = Date.parse(task.created_at);
+  const deadline = Date.parse(task.deadline);
+  if (Number.isNaN(started) || Number.isNaN(deadline)) return null;
+  if (now.getTime() >= deadline) return "Time's up: answering with what it found";
+  const total = Math.max(1, Math.round((deadline - started) / 60_000));
+  const used = Math.min(total, Math.max(0, Math.round((now.getTime() - started) / 60_000)));
+  return `${used} of ${total} min`;
+}
+
 export function taskWords(task: Pick<LongTask, "state" | "steps"> & Partial<Pick<LongTask, "queue" | "paused_for_turn">>): string {
   if (isWaiting({ state: task.state, queue: task.queue })) return `Waiting its turn: ${placeWords(task.queue?.position ?? 1)}`;
   switch (task.state) {
