@@ -8,6 +8,17 @@ interface WeatherWidgetProps {
   variant?: "card" | "hero";
 }
 
+/**
+ * The icon for the sky now, after dark as well: the Pond names the sky only, since it does not
+ * know this dashboard's hour, and a clear night showed the sun.
+ */
+function skyIconKey(iconKey: string, phase: string): string {
+  if (phase !== "night") return iconKey;
+  if (iconKey === "sun") return "moon";
+  if (iconKey === "cloudSun") return "cloudMoon";
+  return iconKey;
+}
+
 function getForecastIcon(iconKey: string): string | React.ReactNode {
   if (iconKey === "sun") return sunEl;
   const path = HP_PATHS[iconKey as keyof typeof HP_PATHS];
@@ -25,7 +36,7 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
     <div
       className={`wx wx--${variant} wx--${phase} wx--sky-${sky}`}
       // In words as well as colour, for anyone who can't see the sky (DESIGN.md §6).
-      aria-label={`${w.cond}, ${w.temp} degrees, ${phase}`}
+      aria-label={`${w.cond}, ${w.temp} degrees Celsius, ${phase}`}
     >
       <div className="wx__main">
         <span className="wx__icon">
@@ -34,16 +45,17 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
               disappear. Every other label on the card (.wx__cond etc.) already inherits that
               white by not setting its own color -- this was the one exception. */}
           <HubIco
-            d={getForecastIcon(w.icon) || HP_PATHS.cloudSun}
+            d={getForecastIcon(skyIconKey(w.icon, phase)) || HP_PATHS.cloud}
             size={variant === "hero" ? 44 : 34}
             color="currentColor"
             sw={1.7}
           />
         </span>
-        <div className="wx__temp">{w.temp}<span>°</span></div>
+        {/* The Pond asks open-meteo for Celsius, and says so. */}
+        <div className="wx__temp">{w.temp}<span>°C</span></div>
         <div className="wx__meta">
           <span className="wx__cond">{w.cond}</span>
-          <span className="wx__range">H:{w.hi}° L:{w.lo}°</span>
+          <span className="wx__range">H:{w.hi}°C L:{w.lo}°C</span>
         </div>
       </div>
       <div className="wx__fc">
@@ -53,7 +65,7 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
             {/* currentColor, same reason as the main icon above -- --color-text-secondary
                 is a dark slate in light mode and disappeared on the dark sky gradient. */}
             <HubIco d={getForecastIcon(f.i)} size={16} color="currentColor" sw={1.7} />
-            <strong>{f.t}°</strong>
+            <strong>{f.t}°C</strong>
           </div>
         ))}
       </div>

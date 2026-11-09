@@ -6,7 +6,9 @@ import {
   CloudLightning,
   CloudRain,
   CloudSnow,
+  CloudMoon,
   CloudSun,
+  Moon,
   Sun,
 } from "lucide-react";
 import {
@@ -58,6 +60,7 @@ describe("readWeatherPayload", () => {
       condition: "Partly cloudy",
       humidity: 64,
       wind: 11.2,
+      isDay: true,
     });
   });
 
@@ -188,5 +191,13 @@ describe("conditionIcon", () => {
     ["", Cloud],
   ])("draws %s with the matching icon", (condition, icon) => {
     expect(conditionIcon(condition)).toBe(icon);
+  });
+
+  it("draws a clear or partly cloudy night with the moon, and leaves other skies as they are", () => {
+    expect(conditionIcon("Clear sky", false)).toBe(Moon);
+    expect(conditionIcon("Mainly clear", false)).toBe(Moon);
+    expect(conditionIcon("Partly cloudy", false)).toBe(CloudMoon);
+    expect(conditionIcon("Light drizzle", false)).toBe(CloudDrizzle);
+    expect(conditionIcon("Clear sky", true)).toBe(Sun);
   });
 });
