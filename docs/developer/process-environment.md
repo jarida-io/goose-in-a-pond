@@ -14,7 +14,7 @@ walks `environ` with no lock at all. If it does so while another thread adds a v
 freed memory.
 
 On the Jetson this crashed the pond with SIGSEGV on about one start in five (2026-11-09). A core
-dump showed the crashing thread in `getenv("ALSA_CONFIG_PATH")`, under
+dump showed the crashing thread in `getenv("SA_CONFIG_PATH")`, ALSA's configuration path, under
 `snd_device_name_hint`: the speaker route was listing ALSA devices while the Goose adapter set its
 context and compaction knobs (`GOOSE_CONTEXT_LIMIT` and the rest) during start-up. No thread was
 still in `setenv` when it died; the writer had finished and freed the array the reader was still

@@ -2,10 +2,11 @@
 //!
 //! glibc's `setenv` grows the environment by reallocating the array it made the time before, which
 //! frees the old one. A C library that calls `getenv` on another thread at that moment walks freed
-//! memory. On the Jetson, ALSA did: it read `ALSA_CONFIG_PATH` while listing sound devices for the
-//! speaker route, as the Goose adapter set its context knobs at start-up, and the pond died with
-//! SIGSEGV in `getenv` on about one start in five (2026-11-09). Rust's own `std::env::var` takes
-//! std's lock; C code reads `environ` directly and takes none.
+//! memory. On the Jetson, ALSA did: it looked up its configuration path (`getenv("SA_CONFIG_PATH")`
+//! in the core dump) while listing sound devices for the speaker route, as the Goose adapter set
+//! its context knobs at start-up, and the pond died with SIGSEGV in `getenv` on about one start in
+//! five (2026-11-09). Rust's own `std::env::var` takes std's lock; C code reads `environ` directly
+//! and takes none.
 //!
 //! So once threads run, every change to the environment goes through [`set`] or [`remove`], which
 //! hold [`ENV`] for writing, and a call into a C library that reads the environment on its own
