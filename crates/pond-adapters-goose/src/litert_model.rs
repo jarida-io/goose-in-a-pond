@@ -20,7 +20,7 @@ pub fn apply_device_environment() {
     let budgeted = device_budget::budgeted_device();
     match litert::prefill_signatures(budgeted, current.as_deref()) {
         Some(value) => {
-            std::env::set_var(litert::PREFILL_SIGNATURES_ENV, value);
+            pond_core::shared::services::process_env::set(litert::PREFILL_SIGNATURES_ENV, value);
             tracing::info!(
                 target: "giap::trace",
                 kind = "litert_device_environment",

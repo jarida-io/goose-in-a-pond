@@ -91,7 +91,7 @@ impl KokoroOutput {
     /// Reads the vocab but not the model; fails only on a bad `tokenizer.json`.
     pub fn new(config: KokoroConfig) -> Result<Self> {
         if let Some(dir) = &config.espeak_data {
-            std::env::set_var(ESPEAKNG_DATA_DIRECTORY, dir);
+            pond_core::shared::services::process_env::set(ESPEAKNG_DATA_DIRECTORY, dir);
         }
         let vocab = Vocab::load(&config.tokenizer_path)?;
         tracing::info!(symbols = vocab.len(), "Kokoro vocab loaded");

@@ -78,9 +78,12 @@ impl Drop for Hold {
 }
 
 pub fn default_output_name() -> Option<String> {
-    rodio::cpal::default_host()
-        .default_output_device()
-        .and_then(|d| d.name().ok())
+    // ALSA reads the environment from C while it resolves the default; see process_env.
+    pond_core::shared::services::process_env::reading(|| {
+        rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.name().ok())
+    })
 }
 
 /// Find an output device by name. ALSA's `default` is not worth listing every node for.
@@ -90,15 +93,16 @@ pub fn find_output(name: &str) -> Option<rodio::cpal::Device> {
             return Some(device.clone());
         }
     }
-    let host = rodio::cpal::default_host();
-    let found = host
-        .default_output_device()
-        .filter(|d| d.name().ok().as_deref() == Some(name))
-        .or_else(|| {
-            host.output_devices()
-                .ok()?
-                .find(|d| d.name().ok().as_deref() == Some(name))
-        })?;
+    let found = pond_core::shared::services::process_env::reading(|| {
+        let host = rodio::cpal::default_host();
+        host.default_output_device()
+            .filter(|d| d.name().ok().as_deref() == Some(name))
+            .or_else(|| {
+                host.output_devices()
+                    .ok()?
+                    .find(|d| d.name().ok().as_deref() == Some(name))
+            })
+    })?;
     *RESOLVED.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), found.clone()));
     Some(found)
 }
@@ -114,7 +118,11 @@ pub fn open_output(
     device: Option<&str>,
 ) -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
     if let Some(want) = device {
-        match find_output(want).map(|d| rodio::OutputStream::try_from_device(&d)) {
+        match find_output(want).map(|d| {
+            pond_core::shared::services::process_env::reading(|| {
+                rodio::OutputStream::try_from_device(&d)
+            })
+        }) {
             Some(Ok((stream, handle))) => return Ok((stream, handle, want.to_string())),
             Some(Err(e)) => {
                 forget_devices();
@@ -123,8 +131,9 @@ pub fn open_output(
             None => tracing::warn!(device = %want, "speaker not found; using the default"),
         }
     }
-    let (stream, handle) = rodio::OutputStream::try_default()
-        .map_err(|e| anyhow!("audio output device unavailable: {e}"))?;
+    let (stream, handle) =
+        pond_core::shared::services::process_env::reading(rodio::OutputStream::try_default)
+            .map_err(|e| anyhow!("audio output device unavailable: {e}"))?;
     Ok((stream, handle, default_output_name().unwrap_or_default()))
 }
 
@@ -258,12 +267,15 @@ pub fn play_samples_exactly(
     let (_stream, handle) = match device {
         Some(name) => {
             let found = find_output(name).ok_or_else(|| anyhow!("speaker '{name}' not found"))?;
-            rodio::OutputStream::try_from_device(&found).map_err(|e| {
+            pond_core::shared::services::process_env::reading(|| {
+                rodio::OutputStream::try_from_device(&found)
+            })
+            .map_err(|e| {
                 forget_devices();
                 anyhow!("speaker '{name}' failed to open: {e}")
             })?
         }
-        None => rodio::OutputStream::try_default()
+        None => pond_core::shared::services::process_env::reading(rodio::OutputStream::try_default)
             .map_err(|e| anyhow!("audio output device unavailable: {e}"))?,
     };
     let sink = rodio::Sink::try_new(&handle).map_err(|e| anyhow!("no sink: {e}"))?;

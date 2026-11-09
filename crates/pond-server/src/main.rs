@@ -583,7 +583,7 @@ fn pin_goose_state_under(data_dir: &std::path::Path) {
         );
         return;
     }
-    std::env::set_var("GOOSE_PATH_ROOT", &engine_root);
+    pond_core::shared::services::process_env::set("GOOSE_PATH_ROOT", &engine_root);
 }
 
 /// The budgeted device's choices that must be in place before an engine loads or a turn compacts:
@@ -8167,8 +8167,7 @@ fn ensure_onnx_runtime() {
 
     // ── 1b. The Jetson's GPU runtime, once giap.sh has built and installed it ─
     if let Some(lib) = onnx_gpu::installed_runtime(&default_data_dir(), ORT_VERSION, on_jetson()) {
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib) };
+        pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib);
         return;
     }
 
@@ -8189,8 +8188,7 @@ fn ensure_onnx_runtime() {
 
     for p in system_candidates {
         if std::path::Path::new(p).exists() {
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", p) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", p);
             return;
         }
     }
@@ -8205,7 +8203,7 @@ fn ensure_onnx_runtime() {
     // The versioned file is the real binary; the bare name covers a manual install.
     for candidate in [&local_versioned, &local_unversioned] {
         if candidate.exists() {
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", candidate);
             return;
         }
     }
@@ -8235,8 +8233,7 @@ fn ensure_onnx_runtime() {
         Ok(lib_path) => {
             eprintln!("  Setup    ONNX Runtime ready");
             tracing::info!("ONNX Runtime installed to {}", lib_path.display());
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib_path) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib_path);
         }
         Err(e) => {
             eprintln!("  Setup    FAILED to download ONNX Runtime: {e}");
@@ -8401,16 +8398,15 @@ fn apply_face_recognition_defaults() {
             .join("models")
             .join("face")
             .join("antispoof.onnx");
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH", default_path) };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PATH", default_path);
     }
 
     // Shipped 3-class Silent-Face export: live is slot 2 and it expects [0, 1] pixels.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_LIVE_INDEX", "2");
     }
     if std::env::var_os("POND_FACE_ANTISPOOF_PIXEL_SCALE").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit");
     }
 
     // Secondary anti-spoof model is optional and only used if explicitly configured.

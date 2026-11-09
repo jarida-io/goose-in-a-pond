@@ -11899,6 +11899,7 @@ name = "pond-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "pond-core",
  "pond-voice",
  "tracing",
 ]

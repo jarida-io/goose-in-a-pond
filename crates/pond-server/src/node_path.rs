@@ -221,7 +221,7 @@ pub fn ensure_node_on_path() -> Option<Prepended> {
     let mut dirs = vec![decision.dir.clone()];
     dirs.extend(std::env::split_paths(&current));
     let joined = std::env::join_paths(dirs).ok()?;
-    std::env::set_var("PATH", joined);
+    pond_core::shared::services::process_env::set("PATH", joined);
     let _ = DECISION.set(decision.clone());
     Some(decision)
 }

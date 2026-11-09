@@ -129,8 +129,7 @@ pub fn run_engines(data_dir: &Path, version: &str, on_jetson: bool) -> anyhow::R
     // Only the installed GPU runtime, never a download: this command has nothing for the CPU.
     if std::env::var_os("ORT_DYLIB_PATH").is_none() {
         if let Some(lib) = installed_runtime(data_dir, version, on_jetson) {
-            // SAFETY: before any thread that reads the environment exists.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", lib) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", lib);
         }
     }
     let Some(plan) = plan(data_dir, version, on_jetson) else {
