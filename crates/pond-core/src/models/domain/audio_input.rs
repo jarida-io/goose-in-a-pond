@@ -53,17 +53,20 @@ pub const VOICE_NOTE_PLACEHOLDER: &str = "[Voice note]";
 pub const HISTORY_VOICE_NOTE_PLACEHOLDER: &str =
     "[Voice note from an earlier turn, heard and answered then]";
 
-/// The row's mark for one recording: its file name when the phone sent one.
+/// The row's mark for one recording: the words a voice turn's client heard in it, else its file
+/// name when the phone sent one.
 pub fn persisted_mark(clip: &AudioAttachment) -> String {
-    match clip
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-    {
+    if let Some(words) = filled(clip.heard_as.as_deref()) {
+        return words.to_string();
+    }
+    match filled(clip.name.as_deref()) {
         Some(name) => format!("[Audio: {}]", super::document_input::display_name(name)),
         None => VOICE_NOTE_PLACEHOLDER.to_string(),
     }
+}
+
+fn filled(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
 }
 
 /// Whether an encoder with this header carries an audio tower the engine runs.
@@ -575,6 +578,11 @@ mod tests {
         let mut named = clip("UklGRg==", "audio/mp4");
         named.name = Some("../lecture 3.m4a".to_string());
         assert_eq!(persisted_mark(&named), "[Audio: lecture 3.m4a]");
+        let spoken = AudioAttachment {
+            heard_as: Some(" what time is it ".to_string()),
+            ..clip("UklGRg==", "audio/wav")
+        };
+        assert_eq!(persisted_mark(&spoken), "what time is it");
         assert_eq!(
             persisted_mark(&clip("UklGRg==", "audio/wav")),
             VOICE_NOTE_PLACEHOLDER

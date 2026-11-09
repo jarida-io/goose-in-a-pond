@@ -1,3 +1,5 @@
+import type { AudioAttachment } from "../../api/types";
+
 // ── WAV Encoding ──────────────────────────────────────────────────
 
 /**
@@ -12,6 +14,22 @@ export const MIC_CONSTRAINTS: MediaStreamConstraints = {
     noiseSuppression: true,
   } as MediaTrackConstraints,
 };
+
+/** Raw base64 of `bytes`, in chunks: a whole recording spread into one call overflows the stack. */
+export function base64OfBytes(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = "";
+  for (let i = 0; i < view.length; i += 0x8000) {
+    binary += String.fromCharCode(...view.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** A spoken turn's recording, with what Whisper heard in it: the model hears the clip where it
+ *  can, and the pond uses the words where it cannot. */
+export function spokenClip(words: string, wav: ArrayBuffer): AudioAttachment {
+  return { data: base64OfBytes(wav), mime_type: "audio/wav", heard_as: words };
+}
 
 /** 16-bit mono WAV (44-byte header) of samples in [-1, 1], as pond-server's Whisper endpoint takes. */
 export function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {

@@ -1252,6 +1252,65 @@ async fn a_voice_note_the_encoder_has_no_memory_for_reaches_the_model_as_words()
 }
 
 #[tokio::test]
+async fn a_recording_the_model_cannot_hear_reaches_it_as_whispers_words() {
+    for state in [EncoderState::NotDeclared, EncoderState::Absent] {
+        let whisper: Transcriber = Arc::new(|_wav| Ok("is it going to rain".to_string()));
+        let pond = pond_with(
+            VisionAgent::hearing(E2B, state.clone()),
+            "local",
+            E2B,
+            Some(whisper),
+        )
+        .await;
+        let (status, body) = send_json(
+            &pond,
+            request(
+                "POST",
+                "/api/v1/chat/stream",
+                Some(voice_turn("unheard", &wav(16_000, 1_500), "audio/wav")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{state:?}: {body}");
+        let sent = pond.agent.inner.last_request().unwrap();
+        assert_eq!(sent.message, "is it going to rain", "{state:?}");
+        assert!(sent.audio.is_empty(), "{state:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_clients_own_transcript_goes_in_place_of_whisper() {
+    let whisper: Transcriber = Arc::new(|_wav| anyhow::bail!("Whisper was not needed"));
+    let pond = pond_with(
+        VisionAgent::hearing(E2B, EncoderState::NotDeclared),
+        "local",
+        E2B,
+        Some(whisper),
+    )
+    .await;
+    let mut turn = voice_turn("transcribed", &wav(16_000, 1_500), "audio/wav");
+    turn["audio"][0]["heard_as"] = json!("turn the kitchen lights on");
+    let (status, body) = send_json(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.message, "turn the kitchen lights on");
+    assert!(sent.audio.is_empty());
+}
+
+#[tokio::test]
+async fn a_heard_recording_keeps_the_clients_transcript_beside_it() {
+    let pond = pond(VisionAgent::hearing(E2B, READY), "local", E2B).await;
+    let mut turn = voice_turn("beside", &wav(16_000, 1_500), "audio/wav");
+    turn["audio"][0]["heard_as"] = json!("what time is it");
+    let (status, _) = send(&pond, request("POST", "/api/v1/chat/stream", Some(turn))).await;
+    assert_eq!(status, StatusCode::OK);
+    let sent = pond.agent.inner.last_request().unwrap();
+    assert_eq!(sent.message, "");
+    assert_eq!(sent.audio.len(), 1);
+    assert_eq!(sent.audio[0].heard_as.as_deref(), Some("what time is it"));
+}
+
+#[tokio::test]
 async fn a_model_that_cannot_hear_refuses_with_409_and_saves_nothing() {
     for (state, code) in [
         (Some(EncoderState::NotDeclared), "audio_unsupported"),
@@ -1425,6 +1484,24 @@ async fn capabilities_report_audio_input_only_when_the_model_hears() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["audio_input"], json!(want), "{state:?}: {body}");
         assert_eq!(body["voice_notes"], voice_notes, "{state:?}: {body}");
+        assert_eq!(body["voice_notes_heard"], json!(want), "{state:?}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn with_whisper_every_voice_note_is_taken_whether_or_not_the_model_hears() {
+    for (state, heard) in [(READY, true), (EncoderState::NotDeclared, false)] {
+        let whisper: Transcriber = Arc::new(|_wav| Ok(String::new()));
+        let pond = pond_with(
+            VisionAgent::hearing(E2B, state.clone()),
+            "local",
+            E2B,
+            Some(whisper),
+        )
+        .await;
+        let (_, body) = send_json(&pond, request("GET", "/api/v1/models/capabilities", None)).await;
+        assert_eq!(body["voice_notes"], "ready", "{state:?}: {body}");
+        assert_eq!(body["voice_notes_heard"], json!(heard), "{state:?}: {body}");
     }
 }
 

@@ -12,6 +12,7 @@ import {
   isWhisperArtifact, checkDismissal, getToolAnnouncement, getQuip,
   filterThinkingFull, createVadState, advanceVad, DEFAULT_VAD_CONFIG,
   registerTtsSource, clearTtsSource, stopTtsPlayback, isTtsInterrupted, resetTtsInterrupt,
+  spokenClip,
 } from "./webAudioUtils";
 
 // ── Internal types ───────────────────────────────────────────────
@@ -119,7 +120,8 @@ export class WebVoiceBackend implements VoiceBackend {
 
         if (wasSpeech && vad.phase === "trailing_silence") {
           const silenceOnset = Date.now();
-          speculative = this.transcribe(this.collectWav());
+          const heardWav = this.collectWav();
+          speculative = this.transcribe(heardWav);
           // Start the chat stream once ASR resolves, still inside the silence-confirmation window.
           speculative.then((transcript) => {
             if (!transcript || this.cancelled) return;
@@ -132,7 +134,7 @@ export class WebVoiceBackend implements VoiceBackend {
               headers,
               // false: the voice prompt garbled small models, and TTS makes any reply speakable. Known cost: it
               // also drops the voice turn cap and `spoken_time`; the fix is splitting the flag, not flipping it.
-              body: JSON.stringify({ message: transcript, session_id: sessionId, voice_mode: false }),
+              body: JSON.stringify(spokenTurn(transcript, heardWav, sessionId)),
               signal: llmAbort.signal,
             });
             this.speculativeLlm = { transcript, response: responsePromise, abort: llmAbort, firedAt, silenceOnset };
@@ -223,7 +225,7 @@ export class WebVoiceBackend implements VoiceBackend {
       const stopThink = opts.thinkingTone !== false ? playThinkingTone() : null;
       this.stopThinkingFn = stopThink;
 
-      await this.streamChat(text, opts, ac, () => {
+      await this.streamChat(text, await wav.arrayBuffer(), opts, ac, () => {
         stopThink?.(); this.stopThinkingFn = null;
         // Stop quip if still playing so first real sentence starts immediately
         if (!quipDone) { stopTtsPlayback(); resetTtsInterrupt(); }
@@ -401,6 +403,7 @@ export class WebVoiceBackend implements VoiceBackend {
 
   private async streamChat(
     text: string,
+    wav: ArrayBuffer,
     opts: PipelineOpts,
     controller: AbortController,
     onFirst: () => void,
@@ -419,8 +422,7 @@ export class WebVoiceBackend implements VoiceBackend {
       const firedAt = Date.now();
       const freshRes = await fetch(`${opts.serverUrl}/api/v1/chat/stream`, {
         method: "POST", headers, signal: controller.signal,
-        // See the speculative fetch above for why this is false, not true.
-        body: JSON.stringify({ message: text, session_id: opts.sessionId, voice_mode: false }),
+        body: JSON.stringify(spokenTurn(text, wav, opts.sessionId)),
       });
       return [freshRes, firedAt, firedAt, false];
     })();
@@ -667,4 +669,11 @@ export class WebVoiceBackend implements VoiceBackend {
       : `Mic error: ${msg}`);
     this.onStateChange?.("error");
   }
+}
+
+/** A spoken turn's body: the words ride beside the recording, never as the message, so the pond
+ *  sends the model one or the other. `voice_mode` false: the voice prompt garbled small models,
+ *  and TTS makes any reply speakable; it also drops the voice turn cap and `spoken_time`. */
+function spokenTurn(words: string, wav: ArrayBuffer, sessionId?: string) {
+  return { message: "", session_id: sessionId, voice_mode: false, audio: [spokenClip(words, wav)] };
 }

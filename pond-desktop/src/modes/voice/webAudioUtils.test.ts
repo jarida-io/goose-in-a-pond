@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ReplySplitter, splitText, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech } from "./webAudioUtils";
+import { ReplySplitter, splitText, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech, encodeWav, spokenClip } from "./webAudioUtils";
 import type { SpeechUnit } from "./webAudioUtils";
 
 const texts = (units: SpeechUnit[]) => units.map((u) => u.text);
@@ -188,5 +188,16 @@ describe("stripMarkupForSpeech", () => {
     expect(stripMarkupForSpeech("3 < 5 and 7 > 2")).toBe("3 < 5 and 7 > 2");
     expect(stripMarkupForSpeech("The __init__ method runs first.")).toBe("The __init__ method runs first.");
     expect(stripMarkupForSpeech("I <3 tea.")).toBe("I <3 tea.");
+  });
+});
+
+describe("spokenClip", () => {
+  it("carries the recording as raw base64 with the words heard in it", () => {
+    const wav = encodeWav(new Float32Array(48_000).fill(0.25), 16_000);
+    const clip = spokenClip("what time is it", wav);
+    expect(clip.mime_type).toBe("audio/wav");
+    expect(clip.heard_as).toBe("what time is it");
+    expect(clip.data.startsWith("data:")).toBe(false);
+    expect(Buffer.from(clip.data, "base64").equals(Buffer.from(wav))).toBe(true);
   });
 });

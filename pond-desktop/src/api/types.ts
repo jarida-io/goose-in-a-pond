@@ -1164,6 +1164,14 @@ export interface ImageAttachment {
   mime_type: string;
 }
 
+/** A recording sent with a turn; raw base64, no `data:` prefix. `heard_as` is the client's own
+ *  transcript, which the pond uses in place of Whisper's when the model cannot hear the clip. */
+export interface AudioAttachment {
+  data: string;
+  mime_type: string;
+  heard_as?: string;
+}
+
 /** Request body for POST /api/v1/chat/stream */
 export interface ChatStreamRequest {
   message: string;
@@ -1171,6 +1179,7 @@ export interface ChatStreamRequest {
   canvas_mode?: boolean;
   voice_mode?: boolean;
   images?: ImageAttachment[];
+  audio?: AudioAttachment[];
   /** Ask the server to keep this turn running if the connection drops. */
   resumable?: boolean;
   /** The message is a research question: the pond starts deep research on it. */
