@@ -6947,34 +6947,6 @@ fn weather_icon_key(description: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod weather_icon_tests {
-    use super::weather_icon_key;
-
-    #[test]
-    fn every_wmo_description_gets_the_icon_of_its_own_condition() {
-        for (description, icon) in [
-            ("Clear sky", "sun"),
-            ("Mainly clear", "sun"),
-            ("Partly cloudy", "cloudSun"),
-            ("Overcast", "cloud"),
-            ("Fog", "fog"),
-            ("Light drizzle", "drizzle"),
-            ("Freezing drizzle", "drizzle"),
-            ("Moderate rain", "rain"),
-            ("Freezing rain", "rain"),
-            ("Violent showers", "rain"),
-            ("Slight snow", "snow"),
-            ("Snow grains", "snow"),
-            ("Snow showers", "snow"),
-            ("Thunderstorm", "storm"),
-            ("Thunderstorm with hail", "storm"),
-            ("Unknown", "cloud"),
-        ] {
-            assert_eq!(weather_icon_key(description), icon, "{description}");
-        }
-    }
-}
 
 fn weather_short_weekday(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
@@ -23163,5 +23135,34 @@ mod session_preview_tests {
             preview.ends_with('…') && preview.chars().count() <= 241,
             "{preview}"
         );
+    }
+}
+
+#[cfg(test)]
+mod weather_icon_tests {
+    use super::weather_icon_key;
+
+    #[test]
+    fn every_wmo_description_gets_the_icon_of_its_own_condition() {
+        for (description, icon) in [
+            ("Clear sky", "sun"),
+            ("Mainly clear", "sun"),
+            ("Partly cloudy", "cloudSun"),
+            ("Overcast", "cloud"),
+            ("Fog", "fog"),
+            ("Light drizzle", "drizzle"),
+            ("Freezing drizzle", "drizzle"),
+            ("Moderate rain", "rain"),
+            ("Freezing rain", "rain"),
+            ("Violent showers", "rain"),
+            ("Slight snow", "snow"),
+            ("Snow grains", "snow"),
+            ("Snow showers", "snow"),
+            ("Thunderstorm", "storm"),
+            ("Thunderstorm with hail", "storm"),
+            ("Unknown", "cloud"),
+        ] {
+            assert_eq!(weather_icon_key(description), icon, "{description}");
+        }
     }
 }
