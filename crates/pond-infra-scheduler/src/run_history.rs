@@ -12,6 +12,10 @@ struct PersistedRuns {
     runs: Vec<ScheduleRun>,
 }
 
+/// Why a run that was going when the Pond stopped did not finish, as the history shows it.
+pub const INTERRUPTED_BY_RESTART: &str =
+    "The Pond restarted while this ran, so it did not finish. Run it again with Run now.";
+
 pub struct JsonRunHistory {
     path: PathBuf,
     state: Mutex<Vec<ScheduleRun>>,
@@ -19,8 +23,12 @@ pub struct JsonRunHistory {
 }
 
 impl JsonRunHistory {
+    /// Opens the history, once, as the scheduler starts. A run still marked running belongs to
+    /// the process before this one, which stopped (a restart, a crash, a power cut) before the run
+    /// could finish; nothing will ever finish it, so it is closed here as failed, saying why.
+    /// Without this it read "running" for good, and the day's run was lost without a word.
     pub async fn new(path: PathBuf, max_runs_per_schedule: u32) -> Result<Self> {
-        let runs = if path.exists() {
+        let mut runs = if path.exists() {
             let json = tokio::fs::read_to_string(&path).await?;
             let persisted: PersistedRuns =
                 serde_json::from_str(&json).unwrap_or(PersistedRuns { runs: vec![] });
@@ -29,11 +37,31 @@ impl JsonRunHistory {
             vec![]
         };
 
-        Ok(Self {
+        let mut interrupted = 0;
+        for run in runs.iter_mut().filter(|r| r.status == RunStatus::Running) {
+            run.status = RunStatus::Failed;
+            run.error = Some(INTERRUPTED_BY_RESTART.to_string());
+            interrupted += 1;
+            tracing::warn!(
+                kind = "schedule_run_interrupted",
+                schedule_id = %run.schedule_id,
+                started_at = %run.started_at,
+                "a scheduled run was going when the Pond stopped; it is recorded as failed"
+            );
+        }
+
+        let history = Self {
             path,
             state: Mutex::new(runs),
             max_runs_per_schedule: max_runs_per_schedule.max(1) as usize,
-        })
+        };
+        if interrupted > 0 {
+            let guard = history.state.lock().await;
+            if let Err(e) = history.save_inner(&guard).await {
+                tracing::warn!(error = %e, "could not save the interrupted runs; they read failed until the next save");
+            }
+        }
+        Ok(history)
     }
 
     /// Record that a scheduled task has started.  Returns the run ID.
@@ -172,6 +200,40 @@ mod tests {
         let runs = reopened.get_runs("morning", 10).await;
         let late: Vec<_> = runs.iter().filter_map(|r| r.caught_up_from).collect();
         assert_eq!(late, [due]);
+    }
+
+    #[tokio::test]
+    async fn a_run_going_when_the_pond_stopped_is_closed_as_failed_on_the_next_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("runs.json");
+        let before = JsonRunHistory::new(path.clone(), 10).await.unwrap();
+        let finished = before.record_start("brief").await;
+        before
+            .record_finish(&finished, RunStatus::Completed, Some("done".into()), None)
+            .await;
+        before.record_start("brief").await;
+        drop(before);
+
+        let after = JsonRunHistory::new(path.clone(), 10).await.unwrap();
+        let runs = after.get_runs("brief", 10).await;
+        assert!(runs.iter().all(|r| r.status != RunStatus::Running));
+        let interrupted: Vec<_> = runs
+            .iter()
+            .filter(|r| r.error.as_deref() == Some(INTERRUPTED_BY_RESTART))
+            .collect();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].status, RunStatus::Failed);
+        assert_eq!(
+            runs.iter()
+                .filter(|r| r.status == RunStatus::Completed)
+                .count(),
+            1,
+            "a finished run is left as it was"
+        );
+
+        // Saved, so a third start finds nothing left to close.
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("\"running\""), "{saved}");
     }
 
     #[tokio::test]
