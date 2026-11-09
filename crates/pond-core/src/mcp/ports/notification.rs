@@ -60,6 +60,8 @@ pub enum OpenScreen {
     MyPond,
     /// One web watch, at its changes; the watches list when there is no id.
     Watch { watch_id: Option<String> },
+    /// One watched link in My Goose's cart.
+    Cart { cart_id: String },
 }
 
 impl OpenScreen {
@@ -119,6 +121,10 @@ impl OpenScreen {
                     fields.insert("watch_id".into(), watch_id.as_str().into());
                 }
                 "watch"
+            }
+            Self::Cart { cart_id } => {
+                fields.insert("cart_id".into(), cart_id.as_str().into());
+                "cart"
             }
         };
         fields.insert("open".into(), screen.into());
@@ -198,6 +204,17 @@ mod tests {
         assert_eq!(
             OpenScreen::Watch { watch_id: None }.data(),
             json!({"open": "watch"})
+        );
+    }
+
+    #[test]
+    fn a_cart_hint_names_the_link() {
+        assert_eq!(
+            OpenScreen::Cart {
+                cart_id: "c1".into()
+            }
+            .data(),
+            json!({"open": "cart", "cart_id": "c1"})
         );
     }
 
