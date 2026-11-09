@@ -3,6 +3,7 @@
 pub mod account_sync;
 pub mod agent_activations;
 pub mod ble_setup;
+pub mod cart_runner;
 pub mod conversation_extractor;
 pub mod hf_cache_migration;
 pub mod host_credential;

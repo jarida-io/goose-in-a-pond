@@ -3695,11 +3695,18 @@ async fn run_server(
                     pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
                         targeted_notification_sender.clone(),
                     )
-                    .with_speech(spoken_watch_alerts),
+                    .with_speech(spoken_watch_alerts.clone()),
                 ),
             ),
         ),
         settings_repo.clone(),
+    );
+    // Members' watched links: the cart's loop, its routes and the chat's tool share one reader.
+    pond_server::cart_runner::spawn(
+        db.system.clone(),
+        llm_provider.clone(),
+        targeted_notification_sender.clone(),
+        spoken_watch_alerts,
     );
     #[cfg(unix)]
     {
@@ -4074,15 +4081,25 @@ async fn run_server(
 
         // Delayed so no first turn waits on a calendar server; calendars rarely change.
         if let Some(secrets) = secret_repo.clone() {
-            let syncer = Arc::new(pond_server::account_sync::AccountSyncer::new(
-                context_repo.clone(),
-                pipeline.clone(),
-                secrets.clone(),
-            ));
+            const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let syncer = Arc::new(
+                pond_server::account_sync::AccountSyncer::new(
+                    context_repo.clone(),
+                    pipeline.clone(),
+                    secrets.clone(),
+                )
+                .with_hook_events(
+                    Arc::new(
+                        pond_infra::sqlite_hook_event_sink::SqliteHookEventSink::new(
+                            db.system.clone(),
+                        ),
+                    ),
+                    INTERVAL,
+                ),
+            );
             account_syncer = Some(syncer.clone());
             tokio::spawn(async move {
                 const FIRST_RUN_DELAY: std::time::Duration = std::time::Duration::from_secs(90);
-                const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
                 tokio::time::sleep(FIRST_RUN_DELAY).await;
                 loop {
                     match syncer.run(chrono::Utc::now()).await {
