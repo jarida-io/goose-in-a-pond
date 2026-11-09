@@ -10,6 +10,7 @@ import {
   type ChatEvent,
   type ChatStreamRequest,
   type ResearchAnswer,
+  type AudioAttachment,
   type CleanupResponse,
   type CompactionReport,
   type ContextIndexHealth,
@@ -1841,6 +1842,7 @@ export class PondApiClient {
     resumable?: boolean,
     deepResearch?: boolean,
     deepResearchAnswer?: ResearchAnswer,
+    audio?: AudioAttachment[],
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1848,6 +1850,7 @@ export class PondApiClient {
       canvas_mode: canvasMode ?? false,
       // Only when non-empty, so text-only bodies stay unchanged.
       ...(images && images.length > 0 ? { images } : {}),
+      ...(audio && audio.length > 0 ? { audio } : {}),
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
       ...(deepResearch ? { deep_research: true } : {}),

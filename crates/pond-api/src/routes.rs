@@ -2450,17 +2450,19 @@ fn audio_limit_status(
     )
 }
 
-/// Pre-stream recording checks for both chat handlers, before anything is saved: the model must
-/// hear it (409), then it must decode, within the time limit, to the engine's WAV (400, 413, 415).
-/// A recording the encoder has no memory for this turn is transcribed instead, its words added to
-/// `message`.
+/// Pre-stream recording checks for both chat handlers, before anything is saved: it must decode,
+/// within the time limit, to the engine's WAV (400, 413, 415). A recording the model cannot hear,
+/// or has no memory to hear this turn, goes as words instead: the client's own transcript
+/// (`heard_as`), else Whisper's, added to `message`. With no Whisper either, it is refused (409).
 async fn prepare_turn_audio(
     state: &Arc<AppState>,
     audio: Vec<pond_core::models::domain::message::AudioAttachment>,
     message: &mut String,
 ) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
     use base64::Engine as _;
-    use pond_core::models::domain::audio_input::{AudioLimitError, MAX_AUDIO_MS};
+    use pond_core::models::domain::audio_input::{
+        audio_refusal_for, AudioLimitError, MAX_AUDIO_MS,
+    };
 
     if audio.is_empty() {
         return Ok(audio);
@@ -2472,8 +2474,25 @@ async fn prepare_turn_audio(
         Err(_) => (String::new(), String::new()),
     };
     let reported = read_audio_state(state, &provider, &model).await;
-    audio_refusal_response(reported.as_ref(), &provider, &model)?;
-    let as_words = words_instead_of_hearing(state, &provider, &model).await;
+    let as_words = match audio_refusal_for(reported.as_ref()) {
+        None => words_instead_of_hearing(state, &provider, &model).await,
+        Some(refusal) => match state.transcribe_audio.clone() {
+            Some(transcribe) => {
+                tracing::info!(
+                    target: "giap::audio",
+                    kind = "voice_note_as_words",
+                    model = %model,
+                    code = refusal.code.as_str(),
+                    "the model cannot hear this recording; it goes as words"
+                );
+                Some(transcribe)
+            }
+            None => {
+                audio_refusal_response(reported.as_ref(), &provider, &model)?;
+                None
+            }
+        },
+    };
 
     let mut checked = Vec::with_capacity(audio.len());
     let mut words = Vec::new();
@@ -2497,8 +2516,17 @@ async fn prepare_turn_audio(
             })
         })?
         .map_err(audio_limit_status)?;
+        let heard_as = clip
+            .heard_as
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string);
         if let Some(transcribe) = as_words.clone() {
-            words.push(transcribe_voice_note(transcribe, normalized.wav).await?);
+            words.push(match heard_as {
+                Some(heard) => heard,
+                None => transcribe_voice_note(transcribe, normalized.wav).await?,
+            });
             continue;
         }
         tracing::info!(
@@ -2512,7 +2540,7 @@ async fn prepare_turn_audio(
             data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
             mime_type: "audio/wav".to_string(),
             name: clip.name,
-            heard_as: None,
+            heard_as,
         });
     }
     if as_words.is_some() {
@@ -2521,8 +2549,8 @@ async fn prepare_turn_audio(
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
-                    "error": "The pond is short of memory to listen to this voice note, and \
-                              could not make out its words. Try again in a moment.",
+                    "error": "The pond could not make out any words in this voice note. Try \
+                              again in a moment.",
                     "code": "voice_note_no_words",
                 })),
             ));
@@ -2577,8 +2605,8 @@ async fn transcribe_voice_note(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
-                "error": "The pond is short of memory to listen to this voice note, and could \
-                          not transcribe it either. Try again in a moment.",
+                "error": "The pond could not listen to this voice note or transcribe it. Try \
+                          again in a moment.",
                 "code": "voice_note_untranscribed",
             })),
         )
@@ -7053,7 +7081,7 @@ async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
 // ── Model registry handlers ───────────────────────────────────────────────────
 
 /// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
-/// `audio_input` and `voice_notes` are read live, so they turn ready once the encoder hears.
+/// `audio_input` and `voice_notes_heard` are read live, so they turn true once the encoder hears.
 async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Value> {
     use pond_core::models::domain::audio_input::voice_notes_status;
 
@@ -7064,7 +7092,14 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
     };
     caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
     let mut body = serde_json::to_value(caps).unwrap_or_default();
-    body["voice_notes"] = json!(voice_notes_status(audio.as_ref()));
+    // A note the model cannot hear still goes, as Whisper's words.
+    let heard = voice_notes_status(audio.as_ref());
+    let taken = match state.transcribe_audio.is_some() {
+        true => "ready",
+        false => heard,
+    };
+    body["voice_notes"] = json!(taken);
+    body["voice_notes_heard"] = json!(heard == "ready");
     body["attachments"] = attachment_limits();
     Json(body)
 }

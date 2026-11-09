@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import { api } from "../api/PondApiClient";
+import { spokenClip } from "../modes/voice/webAudioUtils";
 import { nextCardId } from "../state/reducer";
 import type { ChatEvent } from "../api/types";
 import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
@@ -184,11 +185,12 @@ export function Canvas() {
       if (!wavBlob || voiceCancelledRef.current) { setVoiceRecState("idle"); return; }
 
       setVoiceRecState("transcribing");
-      const result = await api.transcribe(await wavBlob.arrayBuffer());
+      const wav = await wavBlob.arrayBuffer();
+      const result = await api.transcribe(wav);
       const text = result.text?.trim();
       setVoiceRecState("idle");
 
-      if (text) sendPrompt(text);
+      if (text) sendPrompt(text, wav);
     } catch (err) {
       closeMic();
       setVoiceRecState("idle");
@@ -271,7 +273,8 @@ export function Canvas() {
     setCards((c) => c.filter((card) => card.id !== id));
   }
 
-  async function sendPrompt(prompt: string) {
+  /** `spoken`: the recording `prompt` was heard in, sent beside it for a model that hears. */
+  async function sendPrompt(prompt: string, spoken?: ArrayBuffer) {
     const text = prompt.trim();
     if (!text || streaming || !state.serverOnline) return;
     setDraft("");
@@ -285,7 +288,10 @@ export function Canvas() {
 
     try {
       // The client's own session: another tab may have rotated the one this tab loaded with.
-      for await (const event of api.chatStream(text, sessionIdRef.current, undefined, true)) {
+      const turn = spoken
+        ? api.chatStream("", sessionIdRef.current, undefined, true, undefined, undefined, undefined, undefined, [spokenClip(text, spoken)])
+        : api.chatStream(text, sessionIdRef.current, undefined, true);
+      for await (const event of turn) {
         const ev = event as ChatEvent;
 
         if (ev.type === "text" && (ev.content ?? ev.token)) {

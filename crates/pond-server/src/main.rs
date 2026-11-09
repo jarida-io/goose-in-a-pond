@@ -5580,6 +5580,8 @@ async fn run_chat(
         _ => None,
     };
 
+    let hearing_settings = settings_repo_arc.clone();
+
     // ── Build the GooseAdapter (MCP tools + model routing) ───────────────────────
     #[cfg(feature = "goose-agent")]
     let agent: Arc<dyn Agent> = {
@@ -5686,11 +5688,14 @@ async fn run_chat(
         .with_thinking_tone(settings.voice_thinking_tone_enabled);
     // A shared microphone: anyone in the room may speak, unlike a typed turn from the shell.
     if voice_mode {
-        chat_service = chat_service.with_unrecognised_scope(
-            pond_core::shared::services::chat::unrecognised_voice_scope(Some(Arc::new(
-                SqliteProfileRepository::new(db.system.clone()),
-            ))),
-        );
+        chat_service = chat_service
+            .with_unrecognised_scope(pond_core::shared::services::chat::unrecognised_voice_scope(
+                Some(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+            ))
+            .with_model_hearing(room_voice::model_hearing(
+                warm_agent.clone(),
+                hearing_settings,
+            ));
     }
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
