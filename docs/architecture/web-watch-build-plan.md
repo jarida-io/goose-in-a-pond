@@ -22,7 +22,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 |---|---|---|---|
 | 1 | Reading: structured items, same-site links two clicks deep, GET forms, source ledger, 3 reads per chat turn | Merged | fork #3 (org #851) |
 | 2 | Watches: store, code-only checks, push on a match, daily digest, `web_watch` tool, routes | Merged | fork #4 |
-| 3 | Phone (GOTG): watch list and detail, saved collections, report with chips and images | Ready: its routes exist | goose-on-the-go repo |
+| 3 | Phone (GOTG): watch list and detail, saved collections, report and chat with chips and pictures, pictures on conversation cards | PR open | goose-on-the-go #272, org #855 and #856 |
 | 4 | Exploration: 30-minute budget on the card, one site per step, compare step writes options | Merged | fork #5 |
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
@@ -49,6 +49,22 @@ Not done in phase 2:
 - Creating a watch over REST. It comes with "Watch price" in phase 5; until then a watch starts from a conversation.
 - Compiling pond-server on this Mac (llama, whisper and espeak don't fit in the free disk). The two lines in `main.rs` were checked by reading; the nano build will compile them.
 - The desktop doesn't yet know the `watch` screen, so it opens its default view (done in phase 9).
+
+## Phase 3: phone screens, what landed
+
+| Step | Status |
+|---|---|
+| Watches list and one watch (what changed, what is on the page, edit, pause, delete); a `watch` notice opens it | Done, on the phone |
+| Saved cards by collection, one card whole, share switch, Watch price, delete | Done, on the phone |
+| Report: pictures in their own shape with credit, option cards with Save and Watch price, citations as numbered chips | Done, on the phone |
+| Chat answers carry the same chips and pictures (`POST /report-images/for-pages`, org #855) | Merged and deployed; checked on the phone |
+| A source chip opens its page's card in place: title, site, address, picture, Open page, Close. One source opens in one tap | Done, checked on the phone |
+| Pictures on conversation cards (across the head of a wall card, a thumbnail on a list row) from the first page a conversation cited or read (org #856) | Code and tests; needs #856 on the nano to show |
+
+Not done in phase 3:
+- The `form_confirm` sheet and the spoken-matches switch (phase 8's routes).
+- A wall card's picture shows no credit; the credit is under the picture in the conversation.
+- Asking for a watch should start it without asking for filters first; the model asked for price, mileage and interval in the live test.
 
 ## Phase 4: exploration, what landed
 
@@ -145,8 +161,6 @@ Not done in phase 9:
 
 | What | Why |
 |---|---|
-| **A nano deploy of fork main** | `cargo check -p pond-server --all-targets` now passes on the Mac, phase 8's wiring included, but nothing has been built for or run on the Orin. The deploy is the first live check of reads, watches, pushes, time budgets, saved cards, pictures, POST forms and spoken matches, and the first look at the phase 9 desktop screens |
-| Phase 3, the phone screens | They live in goose-on-the-go: watches, saved collections, a report's pictures, options and source chips, the `watch` notice screen (`services/notification-link.ts`), the `form_confirm` sheet and the spoken-matches switch. Say where to start it |
+| **Merge and deploy org #856, merge goose-on-the-go #272** | #856 gives each conversation its picture; the phone shows it once the nano runs it. Main through #855 is merged and deployed |
 | Phase 7, Lightpanda on the nano | Building and measuring it runs on the nano beside the live pond, so it waits for your OK |
-| Merging org PRs #849 and #851 | They are merged on the fork only; later phases have no org PRs |
 | Defaults: 30 days of change history, 20 watches and 500 cards per member, digest at 18:00, a turn's pause counted against the 30 minutes for now | Proposed in the design; building with them unless you say otherwise |
