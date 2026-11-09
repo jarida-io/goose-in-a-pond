@@ -222,7 +222,7 @@ impl SpokenWatchAlerts {
                 }
             }
             UnpromptedSpeech::Refused(why) => {
-                tracing::debug!(
+                tracing::info!(
                     target: "giap::trace",
                     kind = "spoken_watch_alert_withheld",
                     reason = why.as_str(),
