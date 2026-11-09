@@ -126,13 +126,15 @@ pub fn options_in(markdown: &str) -> Vec<TaskOption> {
 
 fn finished((mut option, text): (TaskOption, String)) -> Option<TaskOption> {
     option.sources = sources(&text);
-    if option.link.is_none() {
-        option.link = option.sources.first().map(|s| s.url.clone());
-    }
     let named_part = NOT_OPTIONS.contains(&option.title.to_lowercase().as_str());
+    // An option says what it costs or where it is on its own lines; a section that only cites a
+    // page is a report's section, not something to save or watch.
     let is_option = !option.title.is_empty()
         && !named_part
         && (option.price.is_some() || option.link.is_some());
+    if option.link.is_none() {
+        option.link = option.sources.first().map(|s| s.url.clone());
+    }
     is_option.then_some(option)
 }
 
@@ -219,6 +221,11 @@ mod tests {
     #[test]
     fn a_heading_without_a_price_or_link_is_not_an_option() {
         assert!(options_in("## Summary\nNothing fit.\n## Sources\n- none\n").is_empty());
+        assert!(
+            options_in("## Complete Biography\nBorn in 1955, as [Wikipedia](https://en.wikipedia.org/wiki/X) says.\n")
+                .is_empty(),
+            "a section that only cites a page is not an option"
+        );
         let bare = options_in("## Kettle\n- Link: https://shop.example/k1.\n");
         assert_eq!(bare[0].link.as_deref(), Some("https://shop.example/k1"));
     }
