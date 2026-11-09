@@ -322,6 +322,8 @@ pub struct RecordCounts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PondOverview {
     pub disk: DiskSpace,
+    /// The encrypted data volume, when the data directory is one; `None` otherwise.
+    pub volume: Option<DiskSpace>,
     pub data_dir_bytes: u64,
     pub areas: Vec<AreaUsage>,
     pub databases: Vec<DatabaseUsage>,
@@ -402,6 +404,8 @@ pub struct HostHealth {
     pub host: HostInfo,
     pub memory: MemoryUsage,
     pub disk: DiskSpace,
+    /// The encrypted data volume, when the data directory is one: it can fill before the disk.
+    pub volume: Option<DiskSpace>,
     pub temperatures: Vec<Temperature>,
     pub process: ProcessUsage,
 }
@@ -436,7 +440,11 @@ pub fn health_checks(health: &HostHealth) -> Vec<HealthCheck> {
             part as f64 / whole as f64
         }
     };
-    let free = share(health.disk.free_bytes, health.disk.total_bytes);
+    // The fuller of the disk and the data volume: either one full stops the pond.
+    let free = std::iter::once(&health.disk)
+        .chain(health.volume.as_ref())
+        .map(|d| share(d.free_bytes, d.total_bytes))
+        .fold(1.0, f64::min);
     let disk = if free < DISK_CRITICAL_FREE {
         CheckStatus::Critical
     } else if free < DISK_WARNING_FREE {
@@ -688,6 +696,7 @@ mod tests {
                 total_bytes: 100,
                 free_bytes: free,
             },
+            volume: None,
             temperatures: vec![
                 Temperature {
                     zone: "cpu".into(),
@@ -724,6 +733,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_nearly_full_data_volume_warns_though_the_disk_has_room() {
+        let mut h = health(50, 50, 50.0);
+        h.volume = Some(DiskSpace {
+            total_bytes: 100,
+            free_bytes: 4,
+        });
+        assert_eq!(statuses(&h)[0], CheckStatus::Critical);
+        h.volume = Some(DiskSpace {
+            total_bytes: 100,
+            free_bytes: 80,
+        });
+        assert_eq!(statuses(&h)[0], CheckStatus::Ok);
+    }
     #[test]
     fn cache_ids_round_trip_and_nothing_else_parses() {
         for id in CacheId::ALL {
