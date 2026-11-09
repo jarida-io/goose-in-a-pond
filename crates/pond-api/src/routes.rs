@@ -593,6 +593,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
         .route("/report-images/{key}", get(report_image))
+        .route("/report-images/for-pages", post(pictures_for_pages))
         .route("/web-watches", get(crate::web_watches::list))
         .route(
             "/web-watches/spoken-alerts",
@@ -17936,6 +17937,41 @@ async fn report_images_for(markdown: &str) -> Vec<Value> {
             view
         })
         .collect()
+}
+
+/// Pages one ask may name; a chat answer cites a handful.
+const PICTURE_PAGES: usize = 6;
+
+#[derive(Debug, Deserialize)]
+struct PicturePages {
+    pages: Vec<String>,
+}
+
+/// Pictures for pages a chat answer cites or read, as a report has for its own: kept and served
+/// by the pond, so the phone never reaches the sites. Web addresses only.
+async fn pictures_for_pages(Json(body): Json<PicturePages>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::installed;
+    let pages: Vec<String> = body
+        .pages
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| p.len() <= 2_048 && (p.starts_with("https://") || p.starts_with("http://")))
+        .take(PICTURE_PAGES)
+        .collect();
+    let Some(images) = installed() else {
+        return Json(json!([])).into_response();
+    };
+    let found: Vec<Value> = images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect();
+    Json(Value::Array(found)).into_response()
 }
 
 /// A report picture the pond kept, for the screens to draw without reaching the site.
