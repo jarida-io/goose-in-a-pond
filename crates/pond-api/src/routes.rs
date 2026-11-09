@@ -439,6 +439,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rides/{id}/confirm", post(crate::rides::confirm))
         .route("/rides/{id}/decline", post(crate::rides::decline))
         .route("/rides/{id}/cancel", post(crate::rides::cancel))
+        .route("/web-forms/{id}", get(crate::web_forms::get))
+        .route("/web-forms/{id}/confirm", post(crate::web_forms::confirm))
+        .route("/web-forms/{id}/decline", post(crate::web_forms::decline))
         .route("/uber/accounts", get(crate::uber_accounts::list))
         .route(
             "/uber/accounts/connect",

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::AppState;
 
-type Refusal = (StatusCode, Json<Value>);
+pub(crate) type Refusal = (StatusCode, Json<Value>);
 
 static BOOKING: OnceLock<Arc<RideBooking>> = OnceLock::new();
 
@@ -60,6 +60,21 @@ async fn booking_for_new_rides(state: &AppState) -> Result<&'static Arc<RideBook
 
 /// The member this request's paired phone belongs to.
 async fn member(state: &AppState, principal: Option<&Principal>) -> Result<String, Refusal> {
+    phone_member(
+        state,
+        principal,
+        "rides are booked from the member's own paired phone",
+    )
+    .await
+}
+
+/// The member a request's paired phone belongs to; `no_device` is the refusal for any other
+/// caller.
+pub(crate) async fn phone_member(
+    state: &AppState,
+    principal: Option<&Principal>,
+    no_device: &str,
+) -> Result<String, Refusal> {
     let device = principal.map_or_else(ProvenDevice::none, ProvenDevice::from_principal);
     let attribution = match device.id() {
         Some(id) => {
@@ -73,16 +88,13 @@ async fn member(state: &AppState, principal: Option<&Principal>) -> Result<Strin
     };
     match device.rung(attribution) {
         DeviceRung::Member(profile_id) => Ok(profile_id),
-        DeviceRung::NoDevice => Err(refuse(
-            StatusCode::FORBIDDEN,
-            "rides are booked from the member's own paired phone",
-        )),
+        DeviceRung::NoDevice => Err(refuse(StatusCode::FORBIDDEN, no_device)),
         DeviceRung::Unattributed => Err(refuse(
             StatusCode::FORBIDDEN,
             "this phone is not linked to a household member",
         )),
         DeviceRung::Unavailable(why) => {
-            tracing::warn!(error = %why, "rides: could not read the phone's member");
+            tracing::warn!(error = %why, "could not read the phone's member");
             Err(refuse(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "could not tell whose phone this is",

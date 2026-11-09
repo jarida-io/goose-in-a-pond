@@ -1,5 +1,6 @@
 //! Shared HTTP client for the Knowledge-family MCP servers. Every outbound request MUST go
-//! through [`traced_get`] / [`traced_get_with`], which gate it and record it as egress.
+//! through [`traced_get`] / [`traced_get_with`], or for a call no chat tool makes
+//! [`traced_get_for`] / [`traced_post_form_for`], which gate it and record it as egress.
 
 use reqwest::Client;
 use std::time::Duration;
@@ -36,6 +37,48 @@ where
 {
     let builder = customize(client.get(url));
     send_traced(builder, "GET", url).await
+}
+
+/// Traced `GET` the pond makes on a member's behalf outside a chat tool, filed under `purpose`
+/// and `session_id`, never under the tool or turn in flight.
+pub async fn traced_get_for<F>(
+    client: &Client,
+    url: &str,
+    purpose: egress::EgressPurpose,
+    session_id: &str,
+    customize: F,
+) -> anyhow::Result<reqwest::Response>
+where
+    F: FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+{
+    let call = egress::begin_for(url, "GET", purpose, session_id)?;
+    send_call(customize(client.get(url)), call).await
+}
+
+/// Traced `POST` of a URL-encoded form, attributed as [`traced_get_for`]: only a member's
+/// confirmed form is ever sent this way.
+pub async fn traced_post_form_for<F>(
+    client: &Client,
+    url: &str,
+    fields: &[(String, String)],
+    purpose: egress::EgressPurpose,
+    session_id: &str,
+    customize: F,
+) -> anyhow::Result<reqwest::Response>
+where
+    F: FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+{
+    let call = egress::begin_for(url, "POST", purpose, session_id)?;
+    send_call(customize(client.post(url).form(fields)), call).await
+}
+
+async fn send_call(
+    builder: reqwest::RequestBuilder,
+    call: egress::EgressCall,
+) -> anyhow::Result<reqwest::Response> {
+    let result = builder.send().await.map_err(reqwest::Error::without_url);
+    call.finish(result.as_ref().ok().map(|r| r.status().as_u16()));
+    Ok(result?)
 }
 
 /// Send a prepared request builder, recording the egress regardless of outcome.

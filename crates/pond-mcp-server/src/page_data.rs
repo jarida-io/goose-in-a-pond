@@ -1,12 +1,12 @@
 //! What a page carries beside its text: the items its structured data lists (schema.org JSON-LD,
 //! or the page data a Next.js or Nuxt app ships in its first HTML), the links in its content, and
-//! its GET forms. Many listing sites build their text with scripts but still send their items in
+//! its forms. Many listing sites build their text with scripts but still send their items in
 //! the first HTML, so items are read before any browser would be needed.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use pond_core::mcp::services::page_addresses::{FormField, SearchForm};
+use pond_core::mcp::services::page_addresses::{FormField, FormMethod, SearchForm};
 use pond_core::shared::services::passages;
 use reqwest::Url;
 use serde_json::{Map, Value};
@@ -643,8 +643,8 @@ fn is_private(name: &str, kind: &str, autocomplete: &str) -> bool {
             .any(|word| PRIVATE_NAME_WORDS.contains(&word))
 }
 
-/// The page's GET forms that ask for nothing private, as fields a reader may fill.
-fn forms_of(document: &scraper::Html, base: &Url) -> Vec<SearchForm> {
+/// The page's GET and POST forms that ask for nothing private, as fields a reader may fill.
+pub fn forms_of(document: &scraper::Html, base: &Url) -> Vec<SearchForm> {
     static FORM: LazyLock<scraper::Selector> = LazyLock::new(|| selector("form"));
     static FIELD: LazyLock<scraper::Selector> =
         LazyLock::new(|| selector("input[name], select[name], textarea[name]"));
@@ -656,7 +656,19 @@ fn forms_of(document: &scraper::Html, base: &Url) -> Vec<SearchForm> {
             break;
         }
         let method = form.value().attr("method").unwrap_or("get").trim();
-        if !method.eq_ignore_ascii_case("get") {
+        let method = if method.eq_ignore_ascii_case("get") || method.is_empty() {
+            FormMethod::Get
+        } else if method.eq_ignore_ascii_case("post") {
+            FormMethod::Post
+        } else {
+            continue;
+        };
+        // A file upload sends the person's own file, never a field the reader fills.
+        if form
+            .value()
+            .attr("enctype")
+            .is_some_and(|e| e.trim().eq_ignore_ascii_case("multipart/form-data"))
+        {
             continue;
         }
         let Some(mut action) = base
@@ -741,6 +753,7 @@ fn forms_of(document: &scraper::Html, base: &Url) -> Vec<SearchForm> {
         if !private && fillable {
             forms.push(SearchForm {
                 action: action.to_string(),
+                method,
                 fields,
             });
         }
@@ -850,20 +863,40 @@ mod tests {
     }
 
     #[test]
-    fn get_search_forms_are_read_and_private_ones_skipped() {
+    fn forms_are_read_and_private_ones_skipped() {
         let page = data(
             r#"<form action="/search"><input name="q"><select name="make"><option value="">Any</option>
               <option value="subaru">Subaru</option><option>Toyota</option></select>
               <input type="radio" name="fuel" value="petrol"><input type="radio" name="fuel" value="diesel">
               <input type="hidden" name="kind" value="used"><button type="submit">Go</button></form>
-            <form method="post" action="/contact"><input name="message"></form>
-            <form action="/login"><input name="user"><input type="password" name="pw"></form>
-            <form action="/news"><input type="email" name="address"></form>
+            <form method="POST" action="/enquire"><input type="hidden" name="csrf" value="t0k">
+              <textarea name="message"></textarea></form>
+            <form method="post" action="/login"><input name="user"><input type="password" name="pw"></form>
+            <form method="post" action="/news"><input type="email" name="address"></form>
+            <form method="post" action="/call"><input type="tel" name="number"></form>
+            <form method="post" action="/cv" enctype="multipart/form-data"><input name="name"></form>
+            <form method="post" action="/upload"><input type="file" name="doc"></form>
+            <form method="dialog"><input name="x"></form>
             <form action="/pay"><input name="card_number"></form>"#,
         );
-        assert_eq!(page.forms.len(), 1, "{:?}", page.forms);
+        assert_eq!(page.forms.len(), 2, "{:?}", page.forms);
         let form = &page.forms[0];
         assert_eq!(form.action, "https://cars.example/search");
+        assert_eq!(form.method, FormMethod::Get);
+        assert_eq!(
+            page.forms[1],
+            SearchForm {
+                action: "https://cars.example/enquire".into(),
+                method: FormMethod::Post,
+                fields: vec![
+                    FormField::Fixed {
+                        name: "csrf".into(),
+                        value: "t0k".into()
+                    },
+                    FormField::Text("message".into()),
+                ],
+            }
+        );
         assert_eq!(
             form.fields,
             vec![

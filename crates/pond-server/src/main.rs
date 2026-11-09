@@ -3651,6 +3651,10 @@ async fn run_server(
     pond_core::shared::services::report_images::install(Arc::new(
         pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
     ));
+    // POST forms wait for the member's yes on their phone; the phone's confirm route sends them.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
     // Members' web watches: checked in code, their owners told on their own devices.
     pond_mcp_server::web_watch_runner::spawn(
         Arc::new(
@@ -5296,6 +5300,10 @@ async fn run_chat(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
 
+    // A POST form asked for here waits in the shared database; serve's route sends it.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
     // giap-travel's links and ride offers reach the speaker's phone from this process too: queued
     // in the shared database, which the serve process hands to the phone, and woken by the relay.
     let (member_notification_tx, _) =

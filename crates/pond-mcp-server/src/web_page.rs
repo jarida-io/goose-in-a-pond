@@ -4,6 +4,7 @@
 //! items the page's structured data carries, its search forms, and the links the question names.
 //! Only an address the person wrote, a task's goal names, a search found, or a link or form on a
 //! page read from those, on its own site and within two clicks, is fetched (`page_addresses`).
+//! A POST form is never fetched here: it waits for the member's yes on their phone (`web_form`).
 //! Each read goes into the session's source ledger, which also holds a conversation turn to
 //! three pages.
 
@@ -38,7 +39,7 @@ const TOOL_NAME: &str = "read_web_page";
 const SEARCH_WEB_TOOL: &str = "giap-knowledge__search_web";
 
 /// Longer than a search gives each page: this read is the whole of the call.
-const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parsing one page off the async workers, at most.
 const EXTRACT_DEADLINE: Duration = Duration::from_secs(4);
@@ -80,7 +81,7 @@ const SHOWN_OPTIONS: usize = 12;
 const CACHED_PAGES: usize = 8;
 const CACHE_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
-const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain;q=0.8";
+pub(crate) const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain;q=0.8";
 
 const URL_ALIASES: &[&str] = &[
     "address", "link", "page", "href", "source", "site", "website", "uri",
@@ -180,7 +181,26 @@ whole, and what the page lists.")]
             tracing::info!(target: "giap::trace", kind = "web_page_turn_cap", reads = MAX_CHAT_TURN_READS);
             return Ok(text_result(&turn_cap_reached()));
         }
-        let (address, depth) = match page_addresses::global().resolve_with_depth(&asked_address) {
+        let book = page_addresses::global();
+        let mut answer_note = None;
+        let found = match book.resolve_with_depth(&asked_address) {
+            Some(found) => Some(found),
+            None => match book.post_request(&asked_address) {
+                Some(request) => match crate::web_form::ask_to_send(&ctx.meta, request).await {
+                    crate::web_form::FormAnswer::Said(text) => return Ok(text_result(&text)),
+                    crate::web_form::FormAnswer::Read {
+                        address,
+                        depth,
+                        note,
+                    } => {
+                        answer_note = Some(note);
+                        Some((address, depth))
+                    }
+                },
+                None => None,
+            },
+        };
+        let (address, depth) = match found {
             Some(found) => found,
             None => {
                 // The host only: the rest of an address nobody gave may be the data it carries.
@@ -208,7 +228,10 @@ whole, and what the page lists.")]
             },
         };
         let request = Request::from(&params);
-        let reply = page.reply_as(&request, turn_reads.map(|n| n + 1));
+        let mut reply = page.reply_as(&request, turn_reads.map(|n| n + 1));
+        if let Some(note) = answer_note {
+            reply.text = format!("{note}\n{}", reply.text);
+        }
         let source = session.as_deref().map(|s| {
             let site = web_search::domain_of(&page.address);
             ledger.record(s, &page.address, &page.title, &site, reply.used.clone())
@@ -377,6 +400,48 @@ async fn read_page(address: &str, depth: u8) -> Result<Page, String> {
         pond_core::shared::services::report_images::note_preview(&page.address, image);
     }
     Ok(page)
+}
+
+/// Keeps a sent form's answer as a page read at `depth`, so the conversation reads it from the
+/// cache: a POST's answer may not come back to a plain read of its address. Returns its title.
+pub(crate) async fn keep_answer(address: String, html: String, depth: u8) -> String {
+    let fallback_title = web_search::domain_of(&address);
+    let parsing = tokio::task::spawn_blocking(move || {
+        let (title, lines, data) = parse_html(&html, &address);
+        Page::new(address, title, fallback_title, lines)
+            .with_data(data)
+            .at_depth(depth)
+    });
+    let Ok(Ok(page)) = tokio::time::timeout(EXTRACT_DEADLINE, parsing).await else {
+        return String::new();
+    };
+    let book = page_addresses::global();
+    book.note_read(&page.address, &page.title, depth);
+    book.note_links_from(&page.address, depth, &page.followable());
+    book.note_forms_from(&page.address, depth, page.data.forms.clone());
+    let title = page.title.clone();
+    let address = page.address.clone();
+    cache_page(&address, Arc::new(page));
+    title
+}
+
+/// The forms of a page's HTML, as a read would list them.
+pub(crate) async fn forms_on(address: String, html: String) -> Vec<page_addresses::SearchForm> {
+    let parsing = tokio::task::spawn_blocking(move || {
+        let Ok(base) = reqwest::Url::parse(&address) else {
+            return Vec::new();
+        };
+        let document = bounded_html::parse_within(
+            &html,
+            web_search::MAX_NODES_PER_PAGE,
+            web_search::PARSE_TIME_PER_PAGE,
+        );
+        page_data::forms_of(&document, &base)
+    });
+    match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
+        Ok(Ok(forms)) => forms,
+        _ => Vec::new(),
+    }
 }
 
 /// Why a page could not be fetched, kept apart so a watch can back off on a refusal.
@@ -1003,7 +1068,8 @@ impl Page {
         out
     }
 
-    /// The page's search forms, as addresses a reader may fill in.
+    /// The page's forms, as addresses a reader may fill in. A POST form's hidden fields are left
+    /// out: the pond fills them in fresh when it sends.
     fn forms_text(&self) -> String {
         if self.depth >= MAX_LINK_DEPTH {
             return String::new();
@@ -1018,12 +1084,23 @@ impl Page {
             return String::new();
         }
         let mut out = String::from(
-            "\nSearch forms on this page. To search, call read_web_page with the form's address \
-             and a query of its own fields, such as ?field=value&other=value; set fields only:",
+            "\nForms on this page. To use one, call read_web_page with the form's address and a \
+             query of its own fields, such as ?field=value&other=value; set fields only:",
         );
         for form in forms {
-            let fields: Vec<String> = form.fields.iter().map(field_words).collect();
-            let line = format!("\n- {}: {}", form.action, fields.join("; "));
+            let posts = form.method == page_addresses::FormMethod::Post;
+            let fields: Vec<String> = form
+                .fields
+                .iter()
+                .filter(|f| !(posts && matches!(f, page_addresses::FormField::Fixed { .. })))
+                .map(field_words)
+                .collect();
+            let how = if posts {
+                " (POST: sent only after the person says yes on their phone)"
+            } else {
+                ""
+            };
+            let line = format!("\n- {}{how}: {}", form.action, fields.join("; "));
             out.push_str(&passages::clip(&line, FORM_LINE_BYTES));
         }
         out
@@ -1197,7 +1274,9 @@ fn echo(question: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pond_core::mcp::services::page_addresses::{FormField, PageAddresses, SearchForm};
+    use pond_core::mcp::services::page_addresses::{
+        FormField, FormMethod, PageAddresses, SearchForm,
+    };
 
     fn listing(depth: u8) -> Page {
         let item = |title: &str, price: &str, link: &str| page_data::Item {
@@ -1231,16 +1310,30 @@ mod tests {
                     text: "Subaru Forester reviews".into(),
                 },
             ],
-            forms: vec![SearchForm {
-                action: "https://cars.example/search".into(),
-                fields: vec![
-                    FormField::Text("q".into()),
-                    FormField::Fixed {
-                        name: "kind".into(),
-                        value: "used".into(),
-                    },
-                ],
-            }],
+            forms: vec![
+                SearchForm {
+                    action: "https://cars.example/search".into(),
+                    method: FormMethod::Get,
+                    fields: vec![
+                        FormField::Text("q".into()),
+                        FormField::Fixed {
+                            name: "kind".into(),
+                            value: "used".into(),
+                        },
+                    ],
+                },
+                SearchForm {
+                    action: "https://cars.example/enquire".into(),
+                    method: FormMethod::Post,
+                    fields: vec![
+                        FormField::Fixed {
+                            name: "csrf".into(),
+                            value: "t0k".into(),
+                        },
+                        FormField::Text("message".into()),
+                    ],
+                },
+            ],
             preview_image: None,
         };
         Page::new(
@@ -1279,6 +1372,18 @@ mod tests {
         assert!(reply
             .text
             .contains("- https://cars.example/search: q (text); kind (keep as used)"));
+        assert!(
+            reply.text.contains(
+                "- https://cars.example/enquire (POST: sent only after the person says yes on \
+                 their phone): message (text)"
+            ),
+            "{}",
+            reply.text
+        );
+        assert!(
+            !reply.text.contains("t0k"),
+            "a POST form's hidden values are the pond's"
+        );
     }
 
     #[test]
@@ -1309,7 +1414,7 @@ mod tests {
         assert!(reply.text.contains("2017 Subaru Forester"));
         assert!(!reply.text.contains("To read one"), "{}", reply.text);
         assert!(!reply.text.contains("Links on this page"), "{}", reply.text);
-        assert!(!reply.text.contains("Search forms"), "{}", reply.text);
+        assert!(!reply.text.contains("Forms on this page"), "{}", reply.text);
         assert!(page.followable().is_empty());
     }
 

@@ -1,6 +1,7 @@
 //! The addresses `read_web_page` may fetch: one the person wrote, one a long task's goal names, a
 //! search result, or a link or GET form on a page read from these, on that page's own site and
-//! within two clicks. A model may pass the tool any string, and an address it wrote could carry
+//! within two clicks. A POST form found the same way is never fetched: it resolves to a
+//! [`PostRequest`], which waits for the member's yes on their phone. A model may pass the tool any string, and an address it wrote could carry
 //! the household's data to whoever owns the host, so only an address one of these gave, or a host
 //! one of them names, is read. Held in memory only.
 
@@ -72,19 +73,42 @@ impl FormField {
     }
 }
 
-/// A page's GET form: where it sends, and the fields it sends.
+/// How a form sends: in the address, or in a body that may change something on the site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FormMethod {
+    #[default]
+    Get,
+    Post,
+}
+
+/// A page's form: where it sends, how, and the fields it sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchForm {
     /// The address it sends to, without a query.
     pub action: String,
+    pub method: FormMethod,
     pub fields: Vec<FormField>,
+}
+
+/// A POST form asked for as its action with a query of its own fields: what would be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostRequest {
+    /// The page the form sits on.
+    pub page: String,
+    /// The form's action, without a query.
+    pub action: String,
+    pub values: Vec<(String, String)>,
+    /// The depth of the page the form sits on.
+    pub depth: u8,
 }
 
 #[derive(Debug, Clone)]
 struct NotedForm {
-    /// Host and path of the action, as `key_of` writes them.
+    /// Method, host and path of the action: a page's GET and POST forms to one path are two.
     key: String,
     form: SearchForm,
+    /// The page the form sits on.
+    page: String,
     /// The depth of the page the form sits on.
     depth: u8,
     at: Instant,
@@ -144,7 +168,7 @@ impl PageAddresses {
         noted
     }
 
-    /// Notes the GET forms of a page read at `page_depth` that send to its own site, while the
+    /// Notes the forms of a page read at `page_depth` that send to its own site, while the
     /// results they give stay within [`MAX_LINK_DEPTH`]. Returns how many were noted.
     pub fn note_forms_from(&self, page: &str, page_depth: u8, forms: Vec<SearchForm>) -> usize {
         if page_depth.saturating_add(1) > MAX_LINK_DEPTH {
@@ -162,11 +186,12 @@ impl PageAddresses {
             if host_of(&action) != host || form.fields.is_empty() {
                 continue;
             }
-            let key = action_key(&action);
+            let key = form_key(form.method, &action);
             held.retain(|f| f.key != key);
             held.push(NotedForm {
                 key,
                 form,
+                page: page.to_string(),
                 depth: page_depth,
                 at: now,
             });
@@ -248,11 +273,31 @@ impl PageAddresses {
         self.resolve_with_depth_at(asked, now).map(|(a, _)| a)
     }
 
+    /// The POST form `asked` sends, when it is a noted form's action with a query of that form's
+    /// own fields, each admitted.
+    pub fn post_request(&self, asked: &str) -> Option<PostRequest> {
+        self.post_request_at(asked, Instant::now())
+    }
+
+    fn post_request_at(&self, asked: &str, now: Instant) -> Option<PostRequest> {
+        let address = normalize(cleaned(asked))?;
+        let url = url::Url::parse(&address).ok()?;
+        let key = form_key(FormMethod::Post, &address);
+        let mut forms = self.forms.lock().unwrap_or_else(|e| e.into_inner());
+        forms.retain(|f| now.saturating_duration_since(f.at) < ADDRESS_LIFETIME);
+        let form = forms.iter().rev().find(|f| f.key == key && f.sends(&url))?;
+        let mut action = url.clone();
+        action.set_query(None);
+        Some(PostRequest {
+            page: form.page.clone(),
+            action: action.to_string(),
+            values: url.query_pairs().into_owned().collect(),
+            depth: form.depth,
+        })
+    }
+
     fn resolve_with_depth_at(&self, asked: &str, now: Instant) -> Option<(String, u8)> {
-        let asked = asked
-            .trim()
-            .trim_matches(|c: char| "<>\"'`()[]".contains(c))
-            .trim();
+        let asked = cleaned(asked);
         if asked.is_empty() {
             return None;
         }
@@ -288,10 +333,11 @@ impl PageAddresses {
             .find_map(|a| newest_on_host(&noted, &host_of(a)).map(found))
     }
 
-    /// The depth of the results `address` is, when it is a noted form sent with its own fields.
+    /// The depth of the results `address` is, when it is a noted GET form sent with its own
+    /// fields.
     fn sent_by_a_form(&self, address: &str, now: Instant) -> Option<u8> {
         let url = url::Url::parse(address).ok()?;
-        let key = action_key(address);
+        let key = form_key(FormMethod::Get, address);
         let mut forms = self.forms.lock().unwrap_or_else(|e| e.into_inner());
         forms.retain(|f| now.saturating_duration_since(f.at) < ADDRESS_LIFETIME);
         forms
@@ -308,12 +354,28 @@ pub fn same_site(a: &str, b: &str) -> bool {
     !host.is_empty() && host == host_of(b)
 }
 
-/// Host and path of a form's action, the query left out: the form writes its own.
-fn action_key(address: &str) -> String {
-    let Ok(url) = url::Url::parse(address) else {
-        return address.to_string();
+/// Method, host and path of a form's action, the query left out: the form writes its own.
+fn form_key(method: FormMethod, address: &str) -> String {
+    let method = match method {
+        FormMethod::Get => "GET",
+        FormMethod::Post => "POST",
     };
-    format!("{}{}", host_of(address), url.path().trim_end_matches('/'))
+    let Ok(url) = url::Url::parse(address) else {
+        return format!("{method} {address}");
+    };
+    format!(
+        "{method} {}{}",
+        host_of(address),
+        url.path().trim_end_matches('/')
+    )
+}
+
+/// An asked-for address without the quotes and brackets a model wraps it in.
+fn cleaned(asked: &str) -> &str {
+    asked
+        .trim()
+        .trim_matches(|c: char| "<>\"'`()[]".contains(c))
+        .trim()
 }
 
 fn newest_on_host<'a>(noted: &'a [Noted], host: &str) -> Option<&'a Noted> {
@@ -600,6 +662,7 @@ mod tests {
     fn search_form() -> SearchForm {
         SearchForm {
             action: "https://cars.example/search".into(),
+            method: FormMethod::Get,
             fields: vec![
                 FormField::Text("q".into()),
                 FormField::Choice {
@@ -658,6 +721,51 @@ mod tests {
             0
         );
         assert_eq!(book.resolve("https://cars.example/search?q=x"), None);
+    }
+
+    #[test]
+    fn a_post_form_resolves_to_what_it_would_send_and_is_never_read() {
+        let book = PageAddresses::new();
+        let mut post = search_form();
+        post.method = FormMethod::Post;
+        post.action = "https://cars.example/enquire".into();
+        assert_eq!(
+            book.note_forms_from("https://www.cars.example/used/9", 1, vec![post]),
+            1
+        );
+        let asked = "<https://cars.example/enquire?q=is+it+available&make=subaru>";
+        assert_eq!(book.resolve(asked), None, "a POST form is never fetched");
+        assert_eq!(
+            book.post_request(asked),
+            Some(PostRequest {
+                page: "https://www.cars.example/used/9".into(),
+                action: "https://cars.example/enquire".into(),
+                values: vec![
+                    ("q".into(), "is it available".into()),
+                    ("make".into(), "subaru".into())
+                ],
+                depth: 1,
+            })
+        );
+        for refused in [
+            "https://cars.example/enquire?make=ferrari",
+            "https://cars.example/enquire?q=x&token=abc",
+            "https://cars.example/enquire",
+            "https://cars.example/search?q=x",
+        ] {
+            assert_eq!(book.post_request(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_get_and_a_post_form_to_one_path_are_both_kept() {
+        let book = PageAddresses::new();
+        let mut post = search_form();
+        post.method = FormMethod::Post;
+        book.note_forms_from("https://cars.example/", 0, vec![search_form(), post]);
+        let asked = "https://cars.example/search?q=forester";
+        assert!(book.resolve(asked).is_some());
+        assert!(book.post_request(asked).is_some());
     }
 
     #[test]
