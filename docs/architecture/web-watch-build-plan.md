@@ -59,7 +59,7 @@ Not done in phase 2:
 | Report: pictures in their own shape with credit, option cards with Save and Watch price, citations as numbered chips | Done, on the phone |
 | Chat answers carry the same chips and pictures (`POST /report-images/for-pages`, org #855) | Merged and deployed; checked on the phone |
 | A source chip opens its page's card in place: title, site, address, picture, Open page, Close. One source opens in one tap | Done, checked on the phone |
-| Pictures on conversation cards (across the head of a wall card, a thumbnail on a list row) from the first page a conversation cited or read (org #856) | Code and tests; needs #856 on the nano to show |
+| Pictures on conversation cards (across the head of a wall card with three lines of preview, a thumbnail on a list row): the first picture sent in the conversation, else the first page it cited or read (org #856) | Code and tests; previewed on the phone by hand, needs #856 on the nano to show for real |
 
 Not done in phase 3:
 - The `form_confirm` sheet and the spoken-matches switch (phase 8's routes).
