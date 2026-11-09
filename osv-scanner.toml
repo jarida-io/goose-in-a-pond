@@ -161,3 +161,18 @@ reason = "crypto-bigint 0.5.5: some operations meant to be constant-time branch 
 id = "RUSTSEC-2026-0441"
 ignoreUntil = 2027-03-31
 reason = "pin-utils 0.1.0 is unmaintained: its repository was archived on 2026-10-01. No vulnerable code and no patch to take. It arrives transitively through async-imap 0.11.3 (pond-adapters-imap) and aws-smithy-http 0.63.6, aws-smithy-runtime 1.11.3 and aws-smithy-types 1.5.0 (goose's Bedrock provider), whose latest releases still depend on it; also in goose/Cargo.lock through the same aws-smithy crates. Remove when they move to core::pin::pin! or pin-project-lite."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0459"
+ignoreUntil = 2027-01-31
+reason = "libsqlite3-sys 0.30.1 bundles SQLite 3.46 (CVE-2026-119375: stale page-cache memory when a database is opened with a crafted sibling -wal file). Fixed in 0.39.0, but no sqlx release can take it: sqlx-sqlite 0.8.6 requires ~0.30 and 0.9.0 requires <0.38, and links = sqlite3 allows one copy, so rusqlite (breez-sdk-spark, optional lightning feature) cannot move alone. Not reachable as an attack: the pond opens only its own databases in its owner-only data directory, never a file someone else supplies. Also in goose/Cargo.lock through sqlx. Remove when sqlx allows libsqlite3-sys >= 0.39."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0457"
+ignoreUntil = 2026-12-15
+reason = "rmcp 2.1.0 OAuth discovery SSRF (host strings checked, not resolved addresses; fixed in 3.7.0). Not fixable from this lockfile: the goose fork pins rmcp =2.1.0 and the workspace pin must match; upstream goose moved to rmcp 3 after the fork's last sync. Reachable through a remote (streamable_http) MCP extension an owner adds; the builtin giap-* and stdio extensions never use this client. Short exception while rmcp 3.9 is ported into the fork and the workspace. Also in goose/Cargo.lock."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0462"
+ignoreUntil = 2026-12-15
+reason = "rmcp 2.1.0 Streamable HTTP clients buffer a response body with no limit, so a server that never ends its reply exhausts memory (fixed in 3.9.0). Same blocker and same reach as RUSTSEC-2026-0457: only a remote MCP extension an owner adds. Short exception while rmcp 3.9 is ported into the fork and the workspace. Also in goose/Cargo.lock."
