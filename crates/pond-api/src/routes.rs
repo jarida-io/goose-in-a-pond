@@ -698,6 +698,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .put(put_profile_threshold_handler)
                 .delete(delete_profile_threshold_handler),
         )
+        .merge(crate::me::routes())
         .route("/faces/debug/pairwise", get(face_pairwise_debug))
         .route("/faces/debug/eval", get(face_eval_debug))
         .route("/faces/models", get(list_face_models_handler))
@@ -7006,7 +7007,6 @@ fn weather_icon_key(description: &str) -> &'static str {
         "cloud"
     }
 }
-
 
 fn weather_short_weekday(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
