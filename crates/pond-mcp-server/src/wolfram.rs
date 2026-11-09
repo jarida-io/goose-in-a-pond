@@ -986,11 +986,8 @@ mod tests {
         assert!(names.contains(&"search_web"), "got: {names:?}");
         assert!(names.contains(&"read_web_page"), "got: {names:?}");
         assert!(names.contains(&"web_watch"), "got: {names:?}");
-        assert_eq!(
-            names.len(),
-            5,
-            "giap-knowledge serves five tools: {names:?}"
-        );
+        assert!(names.contains(&"saved_items"), "got: {names:?}");
+        assert_eq!(names.len(), 6, "giap-knowledge serves six tools: {names:?}");
     }
 
     #[tokio::test]

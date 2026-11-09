@@ -54,6 +54,10 @@ impl WebWatchChecker {
     async fn check(&self, watch: &WebWatch, now: DateTime<Utc>) -> Result<()> {
         let read = self.reader.read(&watch.address).await;
         let (outcome, notice) = match read {
+            // A first check that finds nothing to compare has no baseline to keep.
+            Ok(items) if items.is_empty() && watch.items.is_none() => {
+                self.failed(watch, now, Failure::Emptied)
+            }
             Ok(items) => match compare(watch.items.as_deref(), &items, &watch.filters) {
                 Comparison::Emptied => self.failed(watch, now, Failure::Emptied),
                 comparison => {
@@ -471,6 +475,23 @@ mod tests {
             1,
             "the last good items are kept"
         );
+    }
+
+    #[tokio::test]
+    async fn a_first_check_that_finds_nothing_keeps_no_baseline() {
+        let now = Utc::now();
+        let store = Arc::new(Store::default());
+        let mut fresh = watch(now);
+        fresh.items = None;
+        store.create(&fresh).await.unwrap();
+        let checker = checker(
+            store.clone(),
+            vec![Ok(Vec::new())],
+            Arc::new(Told::default()),
+        );
+        checker.check_due(now).await.unwrap();
+        let watch = store.get("w1").await.unwrap().unwrap();
+        assert_eq!((watch.failures, watch.items), (1, None));
     }
 
     #[tokio::test]
