@@ -49,13 +49,16 @@ pub fn init_saved_item_deps(deps: SavedItemDeps) {
 }
 
 // Few, plain fields on purpose: this tool is in every turn's tool block.
+// `default` keeps every field out of the schema's `required`; a small model asks for each one listed.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(transform = crate::without_null_defaults)]
 pub struct SavedItemsParams {
     /// save, find or list
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "save"))]
     pub action: Option<String>,
     /// recipe, listing, place or note
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "note"))]
     pub kind: Option<String>,
     #[schemars(with = "String")]
     pub title: Option<String>,
