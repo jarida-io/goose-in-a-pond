@@ -277,6 +277,7 @@ async fn pond_with_parts(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     Fixture {

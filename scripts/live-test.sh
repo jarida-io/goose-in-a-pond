@@ -406,6 +406,11 @@ if [ "$AUTH_OK" -eq 1 ]; then
     RC=1
   fi
 
+  # Developer mode: refused on a home Pond until `pond-server test-pond on` marks this running pond.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/developer_checks.py; then
+    RC=1
+  fi
+
   # ── PAI-2 P7: the onboarding holes close, and a reset reopens them ─────────
   #
   # This pond was onboarded a few lines above, by the two writes that had to be

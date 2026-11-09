@@ -89,6 +89,7 @@ async fn make_harness() -> Harness {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
         vector_index: None,

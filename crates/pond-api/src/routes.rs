@@ -535,6 +535,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/logs", get(list_logs))
         .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
+        // A test Pond's debug switch, which decides what the logs above may show.
+        .route(
+            "/developer/debug",
+            get(crate::developer::status).put(crate::developer::set_debug),
+        )
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
         // Before the `{id}` route, or axum matches "extraction-status" as an id.

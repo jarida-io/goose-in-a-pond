@@ -239,6 +239,7 @@ async fn make_app(agent: Arc<dyn Agent>) -> Harness {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     Harness {

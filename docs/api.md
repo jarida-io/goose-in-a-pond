@@ -452,6 +452,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /security/policy-report | token +onb | | What the policy would deny under enforcement |
 | GET | /logs | token +onb | | Recent `event_log` rows |
 | GET | /logs/export | token +onb | | The event log as CSV |
+| GET | /developer/debug | token +onb | | Whether this is a test Pond, and its debug switch |
+| PUT | /developer/debug | token +onb | | Turn a test Pond's debug switch on or off |
 | GET | /telemetry/turns | token +onb | | Per-turn metrics for a session |
 | GET | /telemetry/summary | token +onb | | Aggregated metrics for a session |
 
@@ -1361,8 +1363,15 @@ writes are scoped to the member the caller resolves to; a guest cannot create a 
 | `GET /security/policy-report` | `?window=` | `{window, since, events, allow, would_deny, deny, unclassified, scanned, truncated, process: {...}}` |
 | `GET /logs` | `?limit=&level=INFO\|WARN\|ERROR` | recent `event_log` rows |
 | `GET /logs/export` | | `text/csv` |
+| `GET /developer/debug` | | `{test_pond, debug}`; a home Pond answers `test_pond: false` |
+| `PUT /developer/debug` | `{enabled}` | `{test_pond, debug}`; `409 not_a_test_pond` on a home Pond |
 | `GET /telemetry/turns` | `?session_id=` | `{turns: [...]}`; `503` when telemetry is off |
 | `GET /telemetry/summary` | `?session_id=` | an aggregate for the session |
+
+Developer mode is for Jarida test Ponds. Only the host marks one, with `pond-server test-pond on`
+(`<data_dir>/setup/test-pond`); no route can. While a test Pond's debug switch is on, the logs
+above show what the household said and the members' names instead of hiding them. The switch is
+off after every restart, and goes off within a minute of the host taking the mark away.
 
 ## Extensions, marketplace, secrets and sign-in
 

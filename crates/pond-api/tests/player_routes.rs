@@ -326,6 +326,7 @@ async fn pond(manager: Option<Arc<CapturingManager>>, installed: Arc<Installed>)
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     Pond {

@@ -1,4 +1,5 @@
 pub mod admin_card;
+pub mod developer_mode;
 pub mod event;
 pub mod oauth_provider;
 pub mod proven_device;
