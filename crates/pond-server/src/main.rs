@@ -3027,6 +3027,7 @@ async fn run_server(
         device_control.clone(),
     );
     pond_mcp_server::init_vision_deps(camera_storage.clone(), settings_repo.clone());
+    pond_mcp_server::init_device_rooms(room_registry.clone());
 
     let (agent, extension_manager, _tool_caller, tool_registry) = if mistralrs_active {
         // No goose: no extension manager or tool specialist, and an empty registry.
@@ -5292,6 +5293,8 @@ async fn run_chat(
         pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
     );
 
+    // Without it, giap-device names every device's room "Unassigned" in voice sessions.
+    pond_mcp_server::init_device_rooms(Arc::new(SqliteRoomRegistry::new(db.system.clone())));
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
         Arc::new(SqliteSensorStorage::new(db.logs.clone())),
