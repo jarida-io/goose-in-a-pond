@@ -1,6 +1,7 @@
 # Web watches, exploration, saved items and source chips
 
-Design decided with Jerry on 2026-11-09. Nothing here is built yet.
+Design decided with Jerry on 2026-11-09. What is built so far, phase by phase, is in
+[web-watch-build-plan.md](web-watch-build-plan.md).
 
 The member asks for something on the web, for example "find me a Subaru Forester under 1.5M". The
 pond explores several sites, prepares options, and keeps watching the pages that matter. It tells

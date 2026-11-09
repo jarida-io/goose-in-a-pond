@@ -1,7 +1,7 @@
 # Web watches and exploration: build plan
 
 The running plan for building `web-watch-and-exploration.md`. It is updated as each phase lands.
-Last update: 2026-11-09: phases 1, 2, 4, 5, 6 and 9 merged on the fork.
+Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 
 ## How the work runs
 
@@ -27,7 +27,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6 and 9 merged on the fork.
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
 | 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
-| 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Proposed as its own session | |
+| 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Merged | fork #10 |
 | 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
 
@@ -98,6 +98,27 @@ Not done in phase 6:
 - Drawing the pictures. The route needs the client's token, so a screen fetches each picture with it (a blob on the desktop, headers on the phone) instead of a bare `<img>`. Phone in phase 3; the desktop's is done in phase 9.
 - The numbered source chips in the text. The report still cites `[title](link)`; the chips phase switches the composer to ledger numbers. The desktop draws chips from the links since phase 9.
 
+## Phase 8: POST forms and spoken alerts, what landed
+
+| Step | Kind | Status |
+|---|---|---|
+| A read page's POST forms are read like its GET forms. A form asking for a password, card, email, phone or file, or sending a file, is still left out | Code | Done |
+| Table `web_form_submissions` (migration 0085), port in pond-core, SQLite in pond-infra. It lives in `pond_system.db`, so a form asked for in the voice child is answered through `serve`, and a restart keeps what waits | Code | Done |
+| Asking `read_web_page` for a POST form's address with its fields sends nothing. The pond keeps the form and pushes `Send this form to {site}?` (`action: form_confirm`) to the speaker's own phones, as `book_ride` does | Code | Done |
+| `GET /web-forms/{id}`, `POST /web-forms/{id}/confirm` and `/decline`, from the member's own paired phone only. On a yes the pond reads the form's page again for its fresh hidden values and cookies, posts it once through the tracked client, and keeps the answer as a page one click past the form's. Both requests are filed as `giap-web-forms` under the conversation that asked, never the turn in flight | Code | Done |
+| A no, no answer within 15 minutes, a form gone from its page, or a lost answer: the next read of the form's address says which, and whether the site may have the form. A form is kept a day | Code | Done |
+| A watch notice has a kind: match, trouble or digest. A match is also said aloud through the announcer when all of these hold: the member opted in (`web_watch_spoken_alerts` in their preferences, off by default); it is outside the household's quiet hours and the member's own (22:00 to 07:00 by default); the household's `unprompted_speech_enabled` is on; presence says they are home; no turn holds the model | Code | Done |
+| `GET/PUT /web-watches/spoken-alerts`: the member's choice and quiet hours, beside the household's switch | Code | Done |
+| A page's reply lists a POST form as "POST: sent only after the person says yes on their phone", without its hidden fields. The tool block is unchanged | Model | Done |
+| Tests: pond-core 2,647, pond-mcp-server 393 (a stub site takes a confirmed form: fresh hidden value, the page's cookie, the answer kept), pond-infra 617, pond-api 343, pond-audio-out 38; route tests for the phone's confirm and the spoken-alerts switch. `cargo check -p pond-server --all-targets` passes on this Mac, with the target in a short path (`/private/tmp/...`) | Tests | Done |
+
+Not done in phase 8:
+- The phone. GOTG needs a sheet for the `form_confirm` notice (the site, the fields, Yes and No, on the three routes) and a switch for spoken matches with their quiet hours (phase 3). The desktop has no switch either: phase 9 merged before these routes.
+- Presence counts a conversation from the member's phone, and a phone may be away from home. Until presence knows where a phone is, a match can be spoken while its member chats from elsewhere.
+- A field the conversation left unset is not sent. A site that expects a select's default value may refuse such a form, and the outcome says so.
+- Nothing has run on the nano or against live sites.
+- One pond-api test fails on main, before this phase: `a_long_report_is_joined_from_its_sections_and_exports_three_ways` (`agent_suggestions_routes.rs`). Its drafts all share the Result's step and summary, so `report_parts` has dropped them as copies of the answer since `ee34a8ec`. The test or the rule needs a look of its own.
+
 ## Phase 9: desktop screens, what landed
 
 All of it is in `pond-desktop`, against the routes phases 2, 5 and 6 added. No pond-server code changed.
@@ -124,8 +145,8 @@ Not done in phase 9:
 
 | What | Why |
 |---|---|
-| **A nano deploy of fork main** | pond-server has not been compiled with these phases: the Mac lacks the disk for its native crates. Its new lines are four short calls in `main.rs`, typed against compiled signatures. The deploy is also the first live check of reads, watches, pushes, time budgets, saved cards and pictures, and the first look at the phase 9 desktop screens |
-| Phase 3, the phone screens | They live in goose-on-the-go: watches, saved collections, a report's pictures, options and source chips, and the `watch` notice screen (`services/notification-link.ts`). Say where to start it |
+| **A nano deploy of fork main** | `cargo check -p pond-server --all-targets` now passes on the Mac, phase 8's wiring included, but nothing has been built for or run on the Orin. The deploy is the first live check of reads, watches, pushes, time budgets, saved cards, pictures, POST forms and spoken matches, and the first look at the phase 9 desktop screens |
+| Phase 3, the phone screens | They live in goose-on-the-go: watches, saved collections, a report's pictures, options and source chips, the `watch` notice screen (`services/notification-link.ts`), the `form_confirm` sheet and the spoken-matches switch. Say where to start it |
 | Phase 7, Lightpanda on the nano | Building and measuring it runs on the nano beside the live pond, so it waits for your OK |
 | Merging org PRs #849 and #851 | They are merged on the fork only; later phases have no org PRs |
 | Defaults: 30 days of change history, 20 watches and 500 cards per member, digest at 18:00, a turn's pause counted against the 30 minutes for now | Proposed in the design; building with them unless you say otherwise |
