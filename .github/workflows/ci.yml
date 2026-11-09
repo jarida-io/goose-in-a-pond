@@ -514,6 +514,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/data-volume.test.sh
 
+  # What giap.sh doctor says about remote access (scripts/lib/remote-access.sh): the Pond's
+  # built-in network or the host's tailscale, against a fake Pond answer and a fake CLI.
+  remote-access-scripts:
+    name: Remote access doctor - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/remote-access.test.sh
+
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.
   pond-health:
