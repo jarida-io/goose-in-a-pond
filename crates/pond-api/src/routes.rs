@@ -297,6 +297,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/vision-status", get(get_vision_status))
         .route("/models/memory-status", get(get_memory_status))
         .route("/models/active-roles", get(get_active_roles))
+        .route("/models/rollback", post(rollback_model))
         .route("/models/registry/refresh", post(refresh_model_registry))
         .route("/models/ollama", get(list_ollama_models))
         .route("/models/ollama/pull", post(pull_ollama_model))
@@ -3721,6 +3722,18 @@ async fn drive_turn(
         None => None,
     };
 
+    // A real answer makes this the model a rollback returns to after the next switch.
+    let answered = usage_completion_tokens > 0 || !turn.full_text.trim().is_empty();
+    if let (true, Some(repo)) = (answered, &state.model_repo) {
+        let id = ModelRecord::id_for(
+            &ModelCategory::for_chat_model(&settings.chat_provider, &settings.chat_model),
+            &settings.chat_model,
+        );
+        if let Err(e) = repo.note_working("chat", &id).await {
+            tracing::warn!(error = %e, "could not record the model that answered");
+        }
+    }
+
     let turn_context_limit = ContextGovernor::resolve(&ContextInputs {
         provider: &settings.chat_provider,
         model: &settings.chat_model,
@@ -7114,11 +7127,26 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
     let chat_provider = settings.chat_provider.clone();
     let chat_model = settings.chat_model.clone();
 
+    // What `POST /models/rollback` would return to; null when there is no way back.
+    let chat_rollback = match state.model_repo.as_ref() {
+        Some(repo) => match repo.rollback_target("chat").await.ok().flatten() {
+            Some(id) => repo
+                .get_by_id(&id)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| json!({ "model_id": m.id, "model": m.name })),
+            None => None,
+        },
+        None => None,
+    };
+
     Json(json!({
         "chat":  {
             "provider": chat_provider,
             "model":    chat_model,
             "model_id": assignments.get("chat"),
+            "rollback": chat_rollback,
         },
         "tool": {
             "model": settings.tool_model,
@@ -8132,6 +8160,66 @@ async fn activate_model(
         )
     })?;
 
+    assign_role(&state, model_repo, cat, name, role).await
+}
+
+/// POST /api/v1/models/rollback — return a role to the model that last answered before the
+/// latest switch. Only the chat role keeps that history: its turns are what prove a model works.
+async fn rollback_model(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(model_repo) = state.model_repo.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "registry not available"})),
+        ));
+    };
+    let Json(body) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid JSON: {e}")})),
+        )
+    })?;
+    let role = body["role"].as_str().unwrap_or("chat").to_string();
+
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    let nothing = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "nothing_to_roll_back", "role": role})),
+        )
+    };
+    let target = model_repo
+        .rollback_target(&role)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+    // Removed from the catalog since: there is no longer anything to return to.
+    let record = model_repo
+        .get_by_id(&target)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+
+    assign_role(&state, model_repo, record.category, record.name, role).await
+}
+
+/// Assign `name` to `role` and bring the running engine in line, as a switch from the Models
+/// tab does. A rollback takes the same path, so it rebuilds and warms the same way.
+async fn assign_role(
+    state: &Arc<AppState>,
+    model_repo: Arc<dyn pond_core::models::ports::model_repository::ModelRepository + Send + Sync>,
+    cat: ModelCategory,
+    name: String,
+    role: String,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let category = cat.as_str().to_string();
     if !ModelRoleAssignment::category_matches_role(&cat, &role) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -8161,7 +8249,7 @@ async fn activate_model(
             )
         })?;
     // Accepted, it would only fail on the first turn.
-    refuse_unavailable_engine(&state, &record, "activate")?;
+    refuse_unavailable_engine(state, &record, "activate")?;
     // The found record's id: a forgiving TTS lookup may resolve another category.
     let model_id = record.id.clone();
 
@@ -8176,6 +8264,14 @@ async fn activate_model(
         ModelCategory::TtsHttp => "tts",
         ModelCategory::Embedding => "embedding",
     };
+
+    // Only a real change moves the way back; picking the current model again keeps it.
+    let current = model_repo.get_assignment(&role).await.ok().flatten();
+    if current.is_some_and(|a| a.model_id != model_id) {
+        if let Err(e) = model_repo.arm_rollback(&role, &model_id).await {
+            tracing::warn!(error = %e, role = %role, "could not keep the way back to the last model");
+        }
+    }
 
     model_repo
         .set_assignment(&role, &model_id)
@@ -8232,7 +8328,7 @@ async fn activate_model(
                 .await;
             // The model brings its own engine; `embedding_provider` stays the on/off switch.
             if let Ok(settings) = settings_repo.get().await {
-                crate::apply_embedding_choice(&state, &settings).await;
+                crate::apply_embedding_choice(state, &settings).await;
             }
         }
         _ => {}
@@ -8240,10 +8336,10 @@ async fn activate_model(
 
     if matches!(role.as_str(), "chat" | "think" | "task") {
         // Log-only; Jetson's fail-closed residency check belongs in the local-inference loader.
-        warn_if_model_spills(&state, &record).await;
+        warn_if_model_spills(state, &record).await;
 
         let settings = state.settings_repo.get().await.unwrap_or_default();
-        rebuild_llm_provider(&state, &settings).await;
+        rebuild_llm_provider(state, &settings).await;
     }
 
     // As in PUT /settings: warm the prefix now, in the background. Nothing is fetched.

@@ -493,6 +493,60 @@ async fn activate_whisper_model_for_asr_role() {
 }
 
 /// One switch for the whole binary: the route reaches it through a process-wide install.
+// ── POST /api/v1/models/rollback ──────────────────────────────────────────────
+
+async fn activate(app: &axum::Router, name: &str) {
+    let req = auth_req(
+        "POST",
+        &format!("/api/v1/models/gguf/{name}/activate"),
+        Some(serde_json::json!({ "role": "chat" })),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_switch_rolls_back_to_the_model_that_last_answered() {
+    let (app, repo, _tmp) = make_app().await;
+    repo.upsert(&gguf_record("llama-3b")).await.unwrap();
+    repo.upsert(&gguf_record("gemma-2b")).await.unwrap();
+    activate(&app, "llama-3b").await;
+    repo.note_working("chat", "gguf/llama-3b").await.unwrap();
+    activate(&app, "gemma-2b").await;
+
+    let req = auth_req(
+        "POST",
+        "/api/v1/models/rollback",
+        Some(serde_json::json!({ "role": "chat" })),
+    );
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let assignment = repo.get_assignment("chat").await.unwrap().unwrap();
+    assert_eq!(assignment.model_id, "gguf/llama-3b");
+}
+
+#[tokio::test]
+async fn a_rollback_with_no_way_back_says_so() {
+    let (app, repo, _tmp) = make_app().await;
+    repo.upsert(&gguf_record("gemma-2b")).await.unwrap();
+    activate(&app, "gemma-2b").await;
+
+    let req = auth_req(
+        "POST",
+        "/api/v1/models/rollback",
+        Some(serde_json::json!({ "role": "chat" })),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "nothing_to_roll_back");
+}
+
 fn speech_switch() -> Arc<pond_core::models::mocks::mock_speech_model::MockSpeechModelSwitch> {
     static SWITCH: std::sync::OnceLock<
         Arc<pond_core::models::mocks::mock_speech_model::MockSpeechModelSwitch>,

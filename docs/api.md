@@ -317,6 +317,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /models/vision-status | token +onb | | Picture support for the active chat model |
 | GET | /models/memory-status | token +onb | | The LLM memory budget |
 | GET | /models/active-roles | token +onb | | Which model holds each role |
+| POST | /models/rollback | token | | Return a role to the model that last answered |
 | POST | /models/registry/refresh | token +onb | | Refresh the catalog from upstream |
 | POST | /models/scan | token +onb | | Scan the models directory for new files |
 | POST | /models/cleanup | token +onb | | Sweep unreferenced Hugging Face cache blobs |
@@ -1029,7 +1030,8 @@ for helpers, `pictures`, `drafter`, `camera`, `faces`.
 | `GET /models/capabilities` | | `ModelCapabilities {thinking, vision, audio_input, context_window_tokens, structured_output, tool_calling}`; see [architecture/model_capabilities.md](architecture/model_capabilities.md) |
 | `GET /models/vision-status` | | `{state, model, size_bytes, message}`; a pure read, polled |
 | `GET /models/memory-status` | | `{total_mb, available_for_llm_mb, budget_mb, loaded_model, reclaimable_mb}` |
-| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, holders: {chat, tool, asr, tts, embedding}, helpers: [{id, title, uses, section, serves}], router_name}`. `holders` names the row holding each job, as the rows' `roles` do. `helpers` lists models in use that are no row of their own: the conversation model's picture encoder (once installed) and MTP drafter (on disk, on a budgeted device), the camera detector (once loaded) and face recognition (once ready). Both clients show a helper whose `serves` names a listed row as part of that row ("Pictures included", "Faster answers"), never as a model of its own; only the camera detector and face recognition are listed alone, under the `pictures` section, which both clients title "Camera and faces" |
+| `GET /models/active-roles` | | `{chat: {provider, model, model_id, rollback}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, holders: {chat, tool, asr, tts, embedding}, helpers: [{id, title, uses, section, serves}], router_name}`. `holders` names the row holding each job, as the rows' `roles` do. `helpers` lists models in use that are no row of their own: the conversation model's picture encoder (once installed) and MTP drafter (on disk, on a budgeted device), the camera detector (once loaded) and face recognition (once ready). Both clients show a helper whose `serves` names a listed row as part of that row ("Pictures included", "Faster answers"), never as a model of its own; only the camera detector and face recognition are listed alone, under the `pictures` section, which both clients title "Camera and faces". `chat.rollback` is `{model_id, model}` when a rollback would go somewhere, else null |
+| `POST /models/rollback` | `{role}` (default `chat`) | as activate; 404 `nothing_to_roll_back` when no model answered before the last switch. Only `chat` keeps that history |
 | `POST /models/registry/refresh` | | `{status}`; the refresh runs in the background |
 | `POST /models/scan` | | `{found, entries}` |
 | `POST /models/cleanup` | | `{reclaimed_bytes, removed}` |
