@@ -41,7 +41,9 @@ Interest = { "id", "topic": "Formula 1",
   "depth": "curious|keen|devoted",
   "news": "off|tiles|digest|both",              // whether and how it feeds the news
   "avoid": false,                               // true: never raise it
-  "origin": "interview|chat|you", "evidence": 3, "confirmed": true, "updated_at" }
+  "origin": "interview|chat|you", "evidence": 3, "confirmed": true,
+  "picture": path|null,   // the topic's own picture (Wikipedia's lead image), when one is found
+  "updated_at" }
 ```
 
 - `GET /me/interests` → `{"interests":[Interest]}` (confirmed first, then guesses by evidence)
@@ -84,7 +86,8 @@ or after the interests change. The news and ideas prompts read it.
 NewsSettings = { "digest": bool, "digest_time": "07:00", "spoken_on_speaker": bool,
                  "tiles": bool, "timezone": "Africa/Nairobi" }
 Story = { "id", "kind": "news|long_read", "headline", "dek": "one line", "picture": path|null,
-  "source": {"name","url"}, "interest": {"id","topic"}, "published_at"|null, "written_at" }
+  "source": {"name","url"}, "interest": {"id","topic","category"}, "published_at"|null,
+  "written_at", "read": bool }
 StoryDetail = Story + { "summary": "markdown, 120-250 words, in Goose's words",
   "why_you": "one line tying it to the member", "sources": [{"title","url","site"}] }
 Digest = { "id", "title", "written_at", "intro": "two sentences",
@@ -102,6 +105,13 @@ Digest = { "id", "title", "written_at", "intro": "two sentences",
 - `GET /me/news/digests/{id}/listen` → `audio/wav` in the Pond's voice
 - `POST /me/news/digests/{id}/speak` → 202, read on the house speaker now
 - `POST /me/news/refresh` → 202 `{"state":"writing"}`
+- `GET /me/news?interest={id}` → the same shape, only that interest's stories, newest first, up to
+  30: the page for one interest
+- `POST /me/news/stories/{id}/read` → 204; `GET /me/news/history` → `{"stories":[Story +
+  "read_at"]}`, the last 30 days
+- `POST /me/news/stories/{id}/feedback` `{"vote":"up|down|wrong", "note"?}` → 204. Up and down
+  move that interest's topics at the next topic-map rebuild; `wrong` hides the story and keeps
+  the note for the writer's log.
 
 What to look up comes from the member's topic map (`member_topics`, rebuilt daily): about 40
 scored web-search queries written from that member's interests, portrait, memories and scheduled
