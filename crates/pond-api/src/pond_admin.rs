@@ -191,7 +191,8 @@ async fn announce_unlock(state: &AppState, device: &str) {
              replace the admin card on the Pond."
         ),
         timestamp: Utc::now().to_rfc3339(),
-        data: Some(OpenScreen::Devices.data()),
+        // My Pond is where an unlock is seen and locked again; Devices only listed the phone.
+        data: Some(OpenScreen::MyPond.data()),
     };
     if let Err(e) = sender.broadcast(notice).await {
         tracing::warn!(error = %e, "failed to push the admin unlock notice");
