@@ -440,6 +440,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rides/{id}/confirm", post(crate::rides::confirm))
         .route("/rides/{id}/decline", post(crate::rides::decline))
         .route("/rides/{id}/cancel", post(crate::rides::cancel))
+        .route("/web-forms/{id}", get(crate::web_forms::get))
+        .route("/web-forms/{id}/confirm", post(crate::web_forms::confirm))
+        .route("/web-forms/{id}/decline", post(crate::web_forms::decline))
         .route("/uber/accounts", get(crate::uber_accounts::list))
         .route(
             "/uber/accounts/connect",
@@ -591,6 +594,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
         .route("/report-images/{key}", get(report_image))
         .route("/web-watches", get(crate::web_watches::list))
+        .route(
+            "/web-watches/spoken-alerts",
+            get(crate::web_watches::spoken_alerts).put(crate::web_watches::set_spoken_alerts),
+        )
         .route(
             "/web-watches/{id}",
             get(crate::web_watches::get)

@@ -101,6 +101,13 @@ impl Announcer {
     }
 }
 
+#[async_trait::async_trait]
+impl pond_core::models::ports::announce::Announce for Announcer {
+    async fn announce(&self, text: &str) -> Result<()> {
+        self.speak_text(text).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

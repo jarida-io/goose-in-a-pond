@@ -43,6 +43,7 @@ pub mod voice_agent;
 mod voice_match;
 pub mod voice_sample;
 mod wake_check;
+pub mod web_forms;
 pub mod web_search;
 pub mod web_watches;
 

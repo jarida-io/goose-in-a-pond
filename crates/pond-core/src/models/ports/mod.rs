@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod announce;
 pub mod answer_reviewer;
 pub mod audio_devices;
 pub mod audio_focus;

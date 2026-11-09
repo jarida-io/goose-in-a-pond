@@ -59,5 +59,6 @@ pub mod sqlite_telemetry;
 pub mod sqlite_usage_tally;
 pub mod sqlite_vector_index;
 pub mod sqlite_voice_recognition;
+pub mod sqlite_web_form;
 pub mod sqlite_web_watch;
 pub mod stub_push_relay;

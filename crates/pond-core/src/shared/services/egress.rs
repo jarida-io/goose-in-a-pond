@@ -268,11 +268,13 @@ pub enum EgressPurpose {
     Extensions,
     /// Push notifications through Firebase Cloud Messaging.
     Push,
+    /// A POST form a member confirmed on their phone, and the page it sits on.
+    WebForms,
 }
 
 impl EgressPurpose {
     /// Every purpose, for tests that pin the wire names.
-    pub const ALL: [EgressPurpose; 12] = [
+    pub const ALL: [EgressPurpose; 13] = [
         Self::Assistant,
         Self::SignIn,
         Self::Music,
@@ -285,6 +287,7 @@ impl EgressPurpose {
         Self::Schedules,
         Self::Extensions,
         Self::Push,
+        Self::WebForms,
     ];
 
     /// The name the event log records in the `tool` attribute.
@@ -302,6 +305,7 @@ impl EgressPurpose {
             Self::Schedules => "giap-schedules",
             Self::Extensions => "giap-extensions",
             Self::Push => "giap-push",
+            Self::WebForms => "giap-web-forms",
         }
     }
 }
@@ -849,6 +853,7 @@ mod tests {
                 "giap-schedules",
                 "giap-extensions",
                 "giap-push",
+                "giap-web-forms",
             ]
         );
         let distinct: std::collections::BTreeSet<&str> = names.iter().copied().collect();

@@ -21,6 +21,7 @@ pub mod toolkit;
 pub mod travel;
 pub mod vision;
 pub mod weather;
+pub mod web_form;
 pub mod web_page;
 pub mod web_search;
 pub mod web_watch;
