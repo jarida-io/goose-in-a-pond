@@ -7,18 +7,25 @@ import type { Settings } from "../../../api/types";
 import { FE_STEP_TO_BE } from "../onboarding.constants";
 
 /** Persists a step: Settings fields via PUT /api/v1/settings, member prefs (name, birthday,
- *  accessibility) via PATCH /api/v1/profiles/{id}, creating a primary profile if needed. */
+ *  accessibility) via PATCH /api/v1/profiles/{id}, creating a primary profile if needed. Settings
+ *  fields are sent only if `touched` names them — the backend marks every key in a settings PUT
+ *  as user-chosen, so a step the user clicked through without changing anything must send nothing,
+ *  or it permanently opts that setting out of ever adopting a future factory-default change. */
 export function useOnboardingPersist() {
   const [isPersisting, setIsPersisting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const persist = useCallback(async (stepId: string, draft: OnboardingDraft): Promise<boolean> => {
+  const persist = useCallback(async (
+    stepId: string,
+    draft: OnboardingDraft,
+    touched: ReadonlySet<keyof OnboardingDraft>,
+  ): Promise<boolean> => {
     setError(null);
     setIsPersisting(true);
 
     try {
-      const settingsPatch = buildSettingsPatch(stepId, draft);
-      const profilePatch = buildProfilePatch(stepId, draft);
+      const settingsPatch = buildSettingsPatch(stepId, draft, touched);
+      const profilePatch = buildProfilePatch(stepId, draft, touched);
 
       if (settingsPatch && Object.keys(settingsPatch).length > 0) {
         await api.updateSettings(settingsPatch);
@@ -52,43 +59,59 @@ export function useOnboardingPersist() {
   return { persist, isPersisting, error, clearError };
 }
 
-function buildSettingsPatch(stepId: string, draft: OnboardingDraft): Partial<Settings> | null {
+/** Builds a Settings patch from only the fields `touched` names — any field this step could set
+ *  but the user never actually interacted with is left out entirely, not sent with its (possibly
+ *  only pre-filled or still-default) current draft value. An export for tests. */
+export function buildSettingsPatch(
+  stepId: string,
+  draft: OnboardingDraft,
+  touched: ReadonlySet<keyof OnboardingDraft>,
+): Partial<Settings> | null {
   switch (stepId) {
     case "about-you":
       return {
-        user_name: draft.userName.trim(),
+        ...(touched.has("userName") ? { user_name: draft.userName.trim() } : {}),
       };
 
     case "locale":
       return {
-        timezone: draft.timezone,
-        weather_location_name: draft.locationName,
-        weather_enabled: draft.enableWeather,
+        ...(touched.has("timezone") ? { timezone: draft.timezone } : {}),
+        ...(touched.has("locationName") ? { weather_location_name: draft.locationName } : {}),
+        ...(touched.has("enableWeather") ? { weather_enabled: draft.enableWeather } : {}),
         // 0/0 means unset: sending it would overwrite coordinates the server already geocoded.
-        ...(draft.latitude !== 0 || draft.longitude !== 0
+        ...((touched.has("latitude") || touched.has("longitude"))
+          && (draft.latitude !== 0 || draft.longitude !== 0)
           ? { weather_latitude: draft.latitude, weather_longitude: draft.longitude }
           : {}),
       };
 
     case "personality":
       return {
-        prompt_style: draft.promptStyle,
-        assistant_personality: draft.personality,
-        assistant_name: draft.assistantName.trim(),
-        voice_tts_voice: draft.ttsVoice,
-        voice_tts_speed: draft.ttsRate / 100,
+        ...(touched.has("promptStyle") ? { prompt_style: draft.promptStyle } : {}),
+        ...(touched.has("personality") ? { assistant_personality: draft.personality } : {}),
+        ...(touched.has("assistantName") ? { assistant_name: draft.assistantName.trim() } : {}),
+        ...(touched.has("ttsVoice") ? { voice_tts_voice: draft.ttsVoice } : {}),
+        ...(touched.has("ttsRate") ? { voice_tts_speed: draft.ttsRate / 100 } : {}),
       };
 
-    case "wake-word":
+    case "wake-word": {
+      const wakeWordTouched = draft.wakeWord === "custom"
+        ? touched.has("wakeWordCustom")
+        : touched.has("wakeWord");
       return {
-        voice_wake_word: draft.wakeWord === "custom"
-          ? draft.wakeWordCustom.trim()
-          : draft.wakeWord,
+        ...(wakeWordTouched
+          ? {
+              voice_wake_word: draft.wakeWord === "custom"
+                ? draft.wakeWordCustom.trim()
+                : draft.wakeWord,
+            }
+          : {}),
       };
+    }
 
     case "complete":
       return {
-        agent_memory_inject: draft.enableMcpMemory,
+        ...(touched.has("enableMcpMemory") ? { agent_memory_inject: draft.enableMcpMemory } : {}),
       };
 
     default:
@@ -109,21 +132,35 @@ export const PROFILE_PREF_KEYS = {
 } as const;
 
 /** String values (`profiles.preferences` is HashMap<String, String>; flags compare to "true").
- *  Empty values are omitted: the prompt builder would render them blank. */
+ *  Gated by `touched` like `buildSettingsPatch` — avatar and the accessibility flags default to
+ *  non-empty values ("🦆", "false"), so leaving them ungated would send them even when
+ *  the user never touched this step. Empty values are also omitted: the prompt builder would
+ *  render them blank. */
 export function buildProfilePatch(
   stepId: string,
   draft: OnboardingDraft,
+  touched: ReadonlySet<keyof OnboardingDraft>,
 ): Record<string, string> | null {
   if (stepId !== "about-you") return null;
 
   const raw: Record<string, string> = {
-    [PROFILE_PREF_KEYS.preferredName]: (draft.preferredName ?? "").trim(),
-    [PROFILE_PREF_KEYS.birthday]: (draft.birthday ?? "").trim(),
-    [PROFILE_PREF_KEYS.avatar]: draft.avatar ?? "",
-    [PROFILE_PREF_KEYS.atypicalSpeech]: draft.atypicalSpeech ? "true" : "false",
-    [PROFILE_PREF_KEYS.slowSpeech]: draft.slowSpeech ? "true" : "false",
-    [PROFILE_PREF_KEYS.highContrast]: draft.highContrast ? "true" : "false",
-    [PROFILE_PREF_KEYS.reduceMotion]: draft.reduceMotion ? "true" : "false",
+    ...(touched.has("preferredName")
+      ? { [PROFILE_PREF_KEYS.preferredName]: (draft.preferredName ?? "").trim() }
+      : {}),
+    ...(touched.has("birthday") ? { [PROFILE_PREF_KEYS.birthday]: (draft.birthday ?? "").trim() } : {}),
+    ...(touched.has("avatar") ? { [PROFILE_PREF_KEYS.avatar]: draft.avatar ?? "" } : {}),
+    ...(touched.has("atypicalSpeech")
+      ? { [PROFILE_PREF_KEYS.atypicalSpeech]: draft.atypicalSpeech ? "true" : "false" }
+      : {}),
+    ...(touched.has("slowSpeech")
+      ? { [PROFILE_PREF_KEYS.slowSpeech]: draft.slowSpeech ? "true" : "false" }
+      : {}),
+    ...(touched.has("highContrast")
+      ? { [PROFILE_PREF_KEYS.highContrast]: draft.highContrast ? "true" : "false" }
+      : {}),
+    ...(touched.has("reduceMotion")
+      ? { [PROFILE_PREF_KEYS.reduceMotion]: draft.reduceMotion ? "true" : "false" }
+      : {}),
   };
   return Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== ""));
 }
