@@ -188,6 +188,7 @@ The route summary's "Also" column names these.
 | GET | /warmup | wizard | | Prefix warm-up state for the boot banner |
 | GET | /time/zones | open | | Every IANA zone with today's offset |
 | POST | /location/detect | wizard | | Where this pond is, cheapest source first |
+| PUT | /location/device | token | LAN only | A household phone's fix replaces the Pond's guessed location |
 | GET | /test | host | | Probe whisper, llamafile, Ollama and the chat model |
 | POST | /test/speak | host | cred | Speak text on the host's speaker |
 | GET | /dev/goose | token +onb | | Goose agent status and loaded extensions |
@@ -196,7 +197,19 @@ The route summary's "Also" column names these.
 | GET | /lane | token +onb | | Background jobs and what each waits for |
 | POST | /lane/jobs/{job}/run | token +onb | | Wake one background job |
 
-### Pairing and tokens
+#**Where the Pond is.** A Pond has no GPS. Typed place names are geocoded to the town's centre and
+`weather_location_source` records `geocoded`; coordinates sent as coordinates record `manual`.
+`PUT /location/device` lets a paired phone send its own fix, refused (`403 not_on_home_network`)
+unless the request came from the household LAN: a request over the tailnet carries
+`TailnetMachine` and a peer outside every LAN interface, and is refused either way, so a phone
+away from home never moves the household. It replaces only a guess (no `manual` or `device`
+source) unless `replace` is set by an explicit choice on the phone; the fix must be within 2 km
+and is stored to three decimal places (about 110 m) with the phone's name for the place, and
+`weather_location_source` becomes `device`. The weather follows the settings on every request
+(`LiveWeather`), so a new place applies without a restart. Logs carry the place's name, never its
+coordinates (`kind=location_from_phone`, `kind=weather_place`).
+
+## Pairing and tokens
 
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
@@ -632,7 +645,8 @@ carries `tls_spki_sha256`.
 | `GET /test` | | `{whisper, llamafile, ollama, llm}`; each has `status` (`ok`, `error`, `unavailable` or `not_configured`) |
 | `POST /test/speak` | optional `{text}` | `{status, text, latency_ms}` |
 | `GET /dev/goose` | | `{goose_active, extension_count, extensions: [{name, kind, tools}], tool_count}`, or `{goose_active: false, message}` |
-| `GET /weather` | | `{enabled: false}` without a location, else the current conditions and `forecast` |
+| `PUT /location/device` | `{latitude, longitude, accuracy_m, name?, replace?}` | `{applied, reason?, name, latitude, longitude}`; `403 not_on_home_network`, `422 invalid_coordinates` or `too_imprecise` |
+| `GET /weather` | | `{enabled: false}` when switched off or with no location, else the current conditions and `forecast` |
 | `GET /usage/summary` | | `{total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, counted_reasoning_turns, total_tokens, session_count, cloud_input_price_per_million, cloud_output_price_per_million}` |
 | `GET /lane` | | The lane's jobs: per job `title`, `enabled`, `since_last_run_secs`, `blocked_by`, refusal counters, plus `running` and `observed_secs_ago` |
 | `POST /lane/jobs/{job}/run` | | `{known, lane, job, woken, reason}`; `404` for no such job. The job still waits for the single slot |

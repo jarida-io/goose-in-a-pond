@@ -127,6 +127,20 @@ export async function detectPlace(typedName?: string): Promise<DetectedPlace> {
   });
 }
 
+/**
+ * What Settings says of a detection. Only a browser's own coordinates are the place itself; a name
+ * looked up is its town's centre and a time zone's city is a guess, and both say so, pointing to
+ * the household's phone: the Pond has no GPS and can only look names up, while Goose On The Go at
+ * home can give it the exact place (`PUT /location/device`).
+ */
+export function placeNote(at: DetectedPlace): string {
+  if (at.note) return at.note;
+  const exact = "For your exact place, open Goose On The Go at home and use Find my location.";
+  if (at.source === "device") return `Found ${at.name}`;
+  if (at.certain) return `Found ${at.name}. That is the town's centre. ${exact}`;
+  return `Guessed ${at.name} from your time zone. ${exact}`;
+}
+
 /** Reset the cached catalogue. Tests only. */
 export function __resetZoneCache() {
   cache = null;

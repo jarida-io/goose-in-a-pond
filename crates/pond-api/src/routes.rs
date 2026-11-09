@@ -636,6 +636,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
         .route("/voice/takes", post(crate::voice_match::post_take))
+        // A household phone's fix, from the home network only (see home_location.rs).
+        .route(
+            "/location/device",
+            put(crate::home_location::set_from_device),
+        )
         .route("/voice/prints", get(crate::voice_match::get_prints))
         .route("/voice/prints/model", post(crate::voice_match::fetch_model))
         .route(
@@ -6517,17 +6522,60 @@ async fn update_settings(
     ) {
         let geocoder = pond_adapters_weather::Geocoder::new(state.http_client.clone());
         match geocoder.geocode(&name).await {
+            // A new spelling of the place a phone or a person pinned keeps the pin: replacing it
+            // with the town's centre is how a Find my location away from home undid a phone's fix.
+            Ok(geo) if current.precise_location_is_near(geo.latitude, geo.longitude) => {
+                merged.weather_latitude = current.weather_latitude;
+                merged.weather_longitude = current.weather_longitude;
+                merged.weather_location_source = current.weather_location_source.clone();
+                tracing::info!(
+                    kind = "home_location",
+                    change = "renamed",
+                    source = %current.weather_location_source,
+                    place = %name,
+                    "the home location's name changed; its precise position is kept"
+                );
+            }
             Ok(geo) => {
                 merged.weather_latitude = geo.latitude;
                 merged.weather_longitude = geo.longitude;
+                // A town's centre: a phone on the home network may replace it with a real fix.
+                merged.weather_location_source =
+                    pond_core::user_data::domain::settings::WEATHER_LOCATION_GEOCODED.to_string();
                 write_keys.insert("weather_latitude".to_string());
                 write_keys.insert("weather_longitude".to_string());
+                write_keys.insert("weather_location_source".to_string());
+                tracing::info!(
+                    kind = "home_location",
+                    change = "geocoded",
+                    previous_source = %current.weather_location_source,
+                    place = %name,
+                    "the home location is now a looked-up place's centre"
+                );
             }
             Err(e) => tracing::warn!(
                 error = %e,
                 location = %name,
                 "geocode-on-save failed; keeping provided coordinates"
             ),
+        }
+    }
+
+    // Coordinates entered as coordinates are a position someone chose: a phone does not replace
+    // them unasked.
+    if let (Some(lat), Some(lon)) = (patch_lat, patch_lon) {
+        if (lat != current.weather_latitude || lon != current.weather_longitude)
+            && (lat != 0.0 || lon != 0.0)
+        {
+            merged.weather_location_source =
+                pond_core::user_data::domain::settings::WEATHER_LOCATION_MANUAL.to_string();
+            write_keys.insert("weather_location_source".to_string());
+            tracing::info!(
+                kind = "home_location",
+                change = "manual",
+                previous_source = %current.weather_location_source,
+                "the home location was set as coordinates"
+            );
         }
     }
 
@@ -6721,7 +6769,16 @@ async fn get_weather(
     };
 
     // `{e:#}` keeps the whole anyhow chain, where an egress refusal's reason, mode and host live.
-    let current = provider.current().await.map_err(|e| {
+    let current = match provider.current().await {
+        Err(e)
+            if e.downcast_ref::<pond_adapters_weather::WeatherOff>()
+                .is_some() =>
+        {
+            return Ok(Json(json!({ "enabled": false })));
+        }
+        other => other,
+    }
+    .map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("Failed to fetch weather: {e:#}")})),

@@ -41,7 +41,7 @@ use pond_adapters_llamafile::LlamafileProvider;
 #[cfg(feature = "mesh")]
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
-use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
+use pond_adapters_weather::{LiveWeather, OpenMeteoWeatherAdapter, WeatherProvider};
 use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
@@ -2470,19 +2470,10 @@ async fn run_server(
     }
 
     // For the MCP weather tool (giap__get_current_weather), not AppState.
-    let weather: Option<Arc<dyn WeatherProvider>> = {
-        // `Location::weather_target` decides: coordinates, or a name the adapter geocodes.
-        let place = pond_core::user_data::services::location::resolve(&settings);
-        if let (true, Some((lat, lon, loc))) = (settings.weather_enabled, place.weather_target()) {
-            tracing::info!("weather enabled: {} ({}, {})", loc, lat, lon);
-            Some(Arc::new(OpenMeteoWeatherAdapter::new(lat, lon, loc)))
-        } else {
-            tracing::info!(
-                "weather disabled — enable via PUT /api/v1/settings (weather_enabled + lat/lon or location_name)"
-            );
-            None
-        }
-    };
+    // Read from the settings on every call, so a place set later (the dashboard, owner setup, a
+    // phone's fix on the home network) applies at once; off is `WeatherOff`, not a failure.
+    let weather: Option<Arc<dyn WeatherProvider>> =
+        Some(Arc::new(LiveWeather::new(settings_repo.clone())));
 
     // libp2p MeshTransport, gated on `mesh_enabled`; wired into AppState so the
     // /api/v1/mesh/* routes can use it.
