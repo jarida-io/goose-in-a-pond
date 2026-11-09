@@ -994,6 +994,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -1386,6 +1387,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.

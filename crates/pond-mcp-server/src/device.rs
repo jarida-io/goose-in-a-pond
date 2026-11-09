@@ -226,7 +226,12 @@ impl DeviceMcpServer {
         text(audio::outcome(choice, asked.as_ref()))
     }
 
-    #[tool(description = "Get user profile: name, assistant name, timezone, location.")]
+    #[tool(
+        description = "Who and where home is: the user's name, the assistant's name, the time zone, \
+                       and home, the household's place, where the Pond is. Call it for 'where do I \
+                       live', 'where is home', or 'where am I' when the turn's context does not say \
+                       where the person's phone is now."
+    )]
     async fn get_user_profile(
         &self,
         _ctx: RequestContext<RoleServer>,
@@ -244,7 +249,7 @@ impl DeviceMcpServer {
             .unwrap_or("unknown")
             .to_string();
         let text = format!(
-            "User: {}\nAssistant name: {}\nTimezone: {}\nLocation: {}",
+            "User: {}\nAssistant name: {}\nTimezone: {}\nHome (where the Pond is): {}",
             settings.user_name, settings.assistant_name, settings.timezone, location,
         );
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
@@ -339,7 +344,7 @@ impl ServerHandler for DeviceMcpServer {
             .with_instructions(
                 "GIAP Device MCP server — device registry, user profile, model configuration, \
                  skills, and agent recipes.\n\n\
-                 Tools: list_registered_devices, get_user_profile (name/timezone/location), \
+                 Tools: list_registered_devices, get_user_profile (name, time zone, home), \
                  get_model_assignments (active LLM config), list_skills (active user skill \
                  names + descriptions), load_skill (a skill's full instructions by name — call \
                  this when a listed skill looks relevant before acting on it), \

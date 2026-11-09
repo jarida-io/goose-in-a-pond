@@ -853,7 +853,13 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 
 ### `POST /chat`
 
-`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?}`.
+`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?}`.
+`device_place` is where the asking phone is now, as its app named it ("Westlands, Nairobi"),
+sent only while the person has turned on telling Goose where the phone is. It is a name, never
+coordinates, and rides that one turn's `<system-context>` (cleaned, at most 80 characters,
+without `<` or `>`). The conversation is saved from the message alone, and the engine's history
+drops a past turn's `<system-context>` when the next turn starts. Home, where the Pond is, stays the tools' answer
+(`get_user_profile`).
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
