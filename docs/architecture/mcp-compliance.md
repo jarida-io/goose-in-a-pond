@@ -61,8 +61,8 @@ sees it as `<extension>__<tool>`.
 | `giap-schedule` | `schedule.rs` | on (needs a scheduler) | `list_schedules`, `set_timer`, `create_schedule`, `schedule_action`, `world_clock` |
 | `giap-weather` | `weather.rs` | on | `get_current_weather`, `get_weather_forecast` |
 | `giap-knowledge` | `knowledge.rs`, `wolfram.rs`, `web_search.rs`, `web_page.rs` | on | `get_wikipedia_article`, `compute_answer`, `search_web`, `read_web_page` |
-| `giap-system` | `system.rs` | on | `get_current_time`, `get_system_info`, `send_notification` |
-| `giap-device` | `device.rs` | on (`ext_device_enabled`) | `list_registered_devices`, `set_audio_device`, `get_user_profile`, `list_skills`, `load_skill` |
+| `giap-system` | `system.rs` | on | `get_user_profile`, `get_current_time`, `get_system_info`, `send_notification` |
+| `giap-device` | `device.rs` | on (`ext_device_enabled`) | `list_registered_devices`, `set_audio_device`, `list_skills`, `load_skill` |
 | `giap-device-control` | `device_control.rs` | with `giap-device` | `describe_device`, `get_device_state`, `set_device_state` |
 | `giap-sensors` | `sensors.rs` | on | `get_sensor_reading`, `get_sensor_history`, `list_sensors` |
 | `giap-travel` | `travel.rs` | off | `get_directions_link`, `book_ride`, `get_ride_link` |

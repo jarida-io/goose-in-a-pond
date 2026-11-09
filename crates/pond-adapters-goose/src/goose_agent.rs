@@ -8855,7 +8855,7 @@ mod tests {
         for tool in [
             "giap-weather__get_current_weather",
             "music__status",
-            "giap-device__get_user_profile",
+            "giap-system__get_user_profile",
         ] {
             *counts.entry((tool.to_string(), fp)).or_insert(0) += 1;
         }

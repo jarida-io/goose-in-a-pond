@@ -137,6 +137,8 @@ mod tests {
 
         // Core groups first (`prefix_sort_key` tier 0), then by name. `giap-knowledge` joined
         // the core set on 2026-11-02 so web search is always offered; its keyless tools lead.
+        // `get_user_profile` moved from giap-device to giap-system on 2026-11-09, so every
+        // conversation can say where home is.
         let expected_head = [
             "giap-knowledge__get_wikipedia_article",
             "giap-knowledge__read_web_page",
@@ -145,6 +147,7 @@ mod tests {
             "giap-memory__save_memory",
             "giap-system__get_current_time",
             "giap-system__get_system_info",
+            "giap-system__get_user_profile",
             "giap-system__send_notification",
             "giap-toolkit__enable_tool_group",
             "giap-toolkit__list_tool_groups",
