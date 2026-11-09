@@ -52,27 +52,73 @@ impl ToolSelection {
 /// Upper bound on any single embedded signal. Embedding models truncate anyway.
 const MAX_SIGNAL_CHARS: usize = 2000;
 
+/// Most list items of one message scored on their own; each is one more embedding call.
+const MAX_LISTED_TOPICS: usize = 8;
+
 /// A session's topic texts (question, standing context, skills), scored SEPARATELY and merged
 /// with `max`: concatenated, a kilobyte of memories dominates a short question's vector.
+///
+/// A message that lists several things ("a briefing on weather, calendar, top news and the
+/// exchange rate") also contributes each item as a signal of its own. Its whole-message vector
+/// sits between its topics, so only the one that dominates clears the floor and a topic named in
+/// a single word is lost: the Daily Brief got web results for the weather this way. The embedder
+/// still decides what each item is about; the split only stops one topic drowning the rest.
 pub fn selection_signals(first_message: &str, memories: &str, skills: &str) -> Vec<String> {
-    [first_message, memories, skills]
+    let mut signals: Vec<String> = [first_message, memories, skills]
         .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            if s.len() <= MAX_SIGNAL_CHARS {
-                return s.to_string();
-            }
-            // Truncate on a char boundary — the signal is user text.
-            let cut = s
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|i| *i <= MAX_SIGNAL_CHARS)
-                .last()
-                .unwrap_or(0);
-            s[..cut].to_string()
-        })
-        .collect()
+        .map(bounded)
+        .collect();
+    signals.extend(listed_topics(first_message).into_iter().map(bounded));
+    signals
+}
+
+/// Truncated to [`MAX_SIGNAL_CHARS`] on a char boundary: the signal is user text.
+fn bounded(s: &str) -> String {
+    if s.len() <= MAX_SIGNAL_CHARS {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= MAX_SIGNAL_CHARS)
+        .last()
+        .unwrap_or(0);
+    s[..cut].to_string()
+}
+
+/// The items of a message that lists several, split at commas, semicolons, line breaks and
+/// sentence ends; empty when it names only one. Fragments with no letter ("1,000") are not items.
+fn listed_topics(message: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut prev = None;
+    let mut chars = message.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|(_, n)| *n);
+        let next_is_space = next.is_none_or(char::is_whitespace);
+        let in_number = prev.is_some_and(|p: char| p.is_ascii_digit())
+            && next.is_some_and(|n| n.is_ascii_digit());
+        prev = Some(c);
+        let ends = matches!(c, ';' | '\n')
+            || (c == ',' && !in_number)
+            || (matches!(c, '.' | '?' | '!') && next_is_space);
+        if ends {
+            parts.push(&message[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    parts.push(&message[start..]);
+    let topics: Vec<&str> = parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|p| p.chars().any(char::is_alphabetic))
+        .collect();
+    if topics.len() < 2 {
+        return Vec::new();
+    }
+    topics.into_iter().take(MAX_LISTED_TOPICS).collect()
 }
 
 /// Best score per group across signals: they are alternative topic texts, so a mean dilutes.
@@ -919,6 +965,46 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert!(sigs[1].len() <= 2001);
         assert!(sigs[1].chars().count() > 0);
+    }
+
+    #[test]
+    fn each_listed_topic_is_a_signal_of_its_own() {
+        let brief = "Get me a briefing on weather, calendar, top news(Kenya and The World), \
+                     the exchange rate of dollar to ksh.";
+        let sigs = selection_signals(brief, "", "");
+        assert_eq!(sigs[0], brief, "the whole message still comes first");
+        assert_eq!(
+            &sigs[1..],
+            [
+                "Get me a briefing on weather",
+                "calendar",
+                "top news(Kenya and The World)",
+                "the exchange rate of dollar to ksh",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_message_naming_one_thing_is_not_split() {
+        assert_eq!(
+            selection_signals("What's the weather tomorrow?", "", ""),
+            vec!["What's the weather tomorrow?".to_string()]
+        );
+        // Neither a decimal point nor a thousands separator ends an item.
+        assert_eq!(
+            selection_signals("Set the heat to 21.5 for 1,000 minutes", "", "").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn listed_topics_are_capped() {
+        let many = (0..20)
+            .map(|i| format!("topic {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sigs = selection_signals(&many, "", "");
+        assert_eq!(sigs.len(), 1 + MAX_LISTED_TOPICS);
     }
 
     #[test]
