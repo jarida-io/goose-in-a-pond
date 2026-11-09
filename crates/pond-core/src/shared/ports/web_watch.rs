@@ -102,10 +102,21 @@ pub trait WatchPageReader: Send + Sync {
     async fn read(&self, address: &str) -> std::result::Result<Vec<WatchItem>, WatchReadError>;
 }
 
+/// What a watch notice is about: only a match may also be said aloud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// Something the member asked for appeared, or dropped in price.
+    Match,
+    /// The page could not be checked several times in a row.
+    Trouble,
+    Digest,
+}
+
 /// A notice for a watch's owner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WatchNotice {
     pub owner: String,
+    pub kind: NoticeKind,
     pub title: String,
     pub body: String,
     /// The watch a tap opens; `None` for a digest across several.

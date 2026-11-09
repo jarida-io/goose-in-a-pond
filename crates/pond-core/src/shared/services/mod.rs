@@ -20,6 +20,7 @@ pub mod research_report;
 pub mod sensor_persisting_event_bus;
 pub mod session_summary;
 pub mod session_title;
+pub mod spoken_watch_alerts;
 pub mod stdin_input;
 pub mod step_bindings;
 pub mod task_options;

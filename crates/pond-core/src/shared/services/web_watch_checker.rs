@@ -11,8 +11,8 @@ use crate::shared::domain::web_watch::{
     backoff_hours, compare, Comparison, WatchChange, CHANGE_HISTORY_DAYS, FAILURES_BEFORE_TELLING,
 };
 use crate::shared::ports::web_watch::{
-    CheckOutcome, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError, WebWatch,
-    WebWatchRepository,
+    CheckOutcome, NoticeKind, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
+    WebWatch, WebWatchRepository,
 };
 
 /// Watches checked in one pass at most, so a pass stays short.
@@ -103,6 +103,7 @@ impl WebWatchChecker {
         let wait = backoff_hours(watch.interval_hours, failures);
         let notice = (failures == FAILURES_BEFORE_TELLING).then(|| WatchNotice {
             owner: watch.owner.clone(),
+            kind: NoticeKind::Trouble,
             title: format!("Can't check {}", watch.title),
             body: format!(
                 "{} The pond will keep trying every {wait} hours.",
@@ -134,6 +135,7 @@ impl WebWatchChecker {
                 changes.iter().map(|c| c.watch_id.as_str()).collect();
             let notice = WatchNotice {
                 owner: owner.clone(),
+                kind: NoticeKind::Digest,
                 title: format!(
                     "Today on your watches: {} change{}",
                     lines.len(),
@@ -193,6 +195,7 @@ fn match_notice(watch: &WebWatch, changes: &[WatchChange]) -> Option<WatchNotice
     }
     Some(WatchNotice {
         owner: watch.owner.clone(),
+        kind: NoticeKind::Match,
         title: match lines.len() {
             1 => format!("A match on {}", watch.title),
             n => format!("{n} matches on {}", watch.title),
@@ -424,6 +427,7 @@ mod tests {
             assert_eq!(notices.len(), 1);
             assert_eq!(notices[0].owner, "amina");
             assert_eq!(notices[0].title, "A match on Used cars");
+            assert_eq!(notices[0].kind, NoticeKind::Match);
             assert_eq!(notices[0].body, "New: 2016 Subaru Forester, 1,400,000");
         }
         let watch = store.get("w1").await.unwrap().unwrap();
@@ -432,6 +436,7 @@ mod tests {
         assert_eq!(checker.send_digests(now).await.unwrap(), 1);
         let notices = told.0.lock().unwrap();
         assert_eq!(notices[1].title, "Today on your watches: 2 changes");
+        assert_eq!(notices[1].kind, NoticeKind::Digest);
         assert!(
             notices[1].body.contains("New: 2018 Mazda CX-5"),
             "{}",
@@ -466,6 +471,7 @@ mod tests {
         assert_eq!(waits, vec![12, 24, 24, 24]);
         let notices = told.0.lock().unwrap();
         assert_eq!(notices.len(), 1, "told at the third refusal only");
+        assert_eq!(notices[0].kind, NoticeKind::Trouble);
         assert!(notices[0]
             .body
             .starts_with("The site has refused the pond 3 times in a row."));

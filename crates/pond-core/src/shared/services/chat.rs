@@ -134,6 +134,10 @@ pub enum SpeechRefusal {
     NotAddressedToAMember,
     /// The member it is for is not present; anyone who hears it is the wrong person.
     MemberNotPresent,
+    /// The member it is for has not asked to hear this kind of thing aloud.
+    NotOptedIn,
+    /// Inside the member's own quiet hours.
+    MemberQuietHours,
     NothingToSay,
 }
 
@@ -150,6 +154,8 @@ impl SpeechRefusal {
             Self::GuestSession => "guest_session",
             Self::NotAddressedToAMember => "not_addressed_to_a_member",
             Self::MemberNotPresent => "member_not_present",
+            Self::NotOptedIn => "not_opted_in",
+            Self::MemberQuietHours => "member_quiet_hours",
             Self::NothingToSay => "nothing_to_say",
         }
     }
@@ -180,7 +186,7 @@ pub struct UnpromptedUtterance<'a> {
 
 /// Whether `now` is inside the `[start, end)` quiet window, which may wrap midnight.
 /// `None` if a bound isn't `HH:MM`. Equal bounds (compared parsed: `9:00` = `09:00`) are all day.
-fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
+pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
     let parse = |s: &str| {
         let t = chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()?;
         LocalTimeOfDay::new(chrono::Timelike::hour(&t), chrono::Timelike::minute(&t))

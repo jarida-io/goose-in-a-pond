@@ -3655,6 +3655,17 @@ async fn run_server(
     pond_mcp_server::web_form::install(Arc::new(
         pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
     ));
+    // A match is also said aloud to a member who opted in, while presence says they are home.
+    let spoken_watch_alerts = tts.clone().map(|voice| {
+        Arc::new(
+            pond_core::shared::services::spoken_watch_alerts::SpokenWatchAlerts::new(
+                profile_repo.clone(),
+                settings_repo.clone(),
+                pond_core::shared::services::spoken_watch_alerts::follow_presence(&event_bus),
+                Arc::new(pond_audio_out::Announcer::new(voice)),
+            ),
+        )
+    });
     // Members' web watches: checked in code, their owners told on their own devices.
     pond_mcp_server::web_watch_runner::spawn(
         Arc::new(
@@ -3663,9 +3674,12 @@ async fn run_server(
                     db.system.clone(),
                 )),
                 Arc::new(pond_mcp_server::web_watch_runner::PageReader),
-                Arc::new(pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
-                    targeted_notification_sender.clone(),
-                )),
+                Arc::new(
+                    pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+                        targeted_notification_sender.clone(),
+                    )
+                    .with_speech(spoken_watch_alerts),
+                ),
             ),
         ),
         settings_repo.clone(),

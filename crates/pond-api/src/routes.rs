@@ -589,6 +589,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/report-images/{key}", get(report_image))
         .route("/web-watches", get(crate::web_watches::list))
         .route(
+            "/web-watches/spoken-alerts",
+            get(crate::web_watches::spoken_alerts).put(crate::web_watches::set_spoken_alerts),
+        )
+        .route(
             "/web-watches/{id}",
             get(crate::web_watches::get)
                 .patch(crate::web_watches::edit)
