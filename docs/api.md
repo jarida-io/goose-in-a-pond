@@ -291,6 +291,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | POST | /voice/tts/unload | token +onb | | Unload the speech engine |
 | POST | /voice/calibrate | wizard | | Add a wake-phrase calibration sample |
 | DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration |
+| POST | /voice/wake/check | token | | Whether a phone's speech segment opens with the household's wake phrase |
 | POST | /transcribe | token +onb | | Transcribe multipart audio |
 | GET | /voice/room | token +onb | | Room voice: switched on, able to listen or why not, its state, wake detector and last speaker |
 | PUT | /voice/room | token +onb | `{enabled}` | Switch room voice on or off now, saved as `voice_room_enabled` |
@@ -969,6 +970,7 @@ Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 | `POST /voice/tts/prewarm`, `/voice/tts/unload` | | `{status}`; `503` without an engine |
 | `POST /voice/calibrate` | multipart `audio` (WAV), optional `prompt` | `{transcript, normalized, heard, new_variant, all_variants, sample_count, target_count, complete}` |
 | `DELETE /voice/calibrate` | | `{cleared, message}` |
+| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
 | `POST /transcribe` | multipart `audio` | `{text}` |
 | `GET /audio/devices` | | `AudioDeviceStatus {input, output, updated_at_ms, source, pid, raised?, sound_server?}` |
 | `POST /audio/devices/test` | empty, or `{chime: bool}` | `AudioDeviceStatus` after a re-test |
@@ -981,6 +983,14 @@ setting: `400` for any other body, `404 unknown_voice` (it never downloads one),
 one, and otherwise post to `voice_whisper_url` (gated by the network-egress policy; `502` if it
 refuses or fails). Wake-phrase calibration is described in
 [wake-word-calibration.md](wake-word-calibration.md).
+
+`/voice/wake/check` is for a phone listening for a phrase other than "hey goose", which only its
+own detector knows: the phone cuts what it hears into speech segments, as the ear does for
+Whisper, and asks here. The transcript is matched with the room's own triggers, the phrase and its
+learned pronunciations as they are at that moment, so a change on the Pond counts from the next
+segment; `phrase` lets the phone notice a return to "hey goose". It needs the in-process
+whisper-rs model. The recording and the transcript are dropped, never logged and never returned:
+a heard wake logs `kind=wake_check heard=true` at info, a miss only at debug.
 
 ## Models
 

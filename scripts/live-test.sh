@@ -367,6 +367,15 @@ if [ "$AUTH_OK" -eq 1 ]; then
     esac
   done
 
+  # A phone's wake check takes what was said near it: never without a paired device's token.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -F "audio=@/dev/null;type=audio/wav" \
+    "http://127.0.0.1:$AUTH_PORT/api/v1/voice/wake/check")
+  case "$code" in
+    401) printf '  PASS  POST /voice/wake/check   requires a token\n' ;;
+    *)   printf '  FAIL  POST /voice/wake/check returned %s with NO TOKEN\n' "$code"
+         RC=1 ;;
+  esac
+
   # A second fresh pond, claimed with its card over loopback, with no bypass to hide behind.
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py card; then
     RC=1
