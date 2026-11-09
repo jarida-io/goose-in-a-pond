@@ -1489,7 +1489,7 @@ fn sentences(text: &str) -> Vec<&str> {
 
 /// Whether `element` and everything under it is page furniture rather than content.
 /// `class_test` applies Readability's class and id test (off inside tables and code).
-fn is_boilerplate(element: &scraper::node::Element, class_test: bool) -> bool {
+pub(crate) fn is_boilerplate(element: &scraper::node::Element, class_test: bool) -> bool {
     let name = element.name();
     if NEVER_DROPPED.contains(&name) {
         return false;

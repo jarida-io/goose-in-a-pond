@@ -9,6 +9,7 @@ pub mod knowledge;
 pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
+pub mod page_data;
 pub mod schedule;
 pub mod secrets;
 pub mod sensors;
