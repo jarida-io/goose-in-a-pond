@@ -583,6 +583,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .delete(crate::saved_items::delete),
         )
         .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
+        .route("/report-images/{key}", get(report_image))
         .route("/web-watches", get(crate::web_watches::list))
         .route(
             "/web-watches/{id}",
@@ -17352,21 +17353,25 @@ async fn get_long_task_report(
         Err(response) => return response,
     };
     match long_task_report(&state, &task).await {
-        Ok((markdown, events, sections)) => Json(json!({
-            "id": task.id(),
-            "title": report::assembled_title(&markdown),
-            "state": task.state(),
-            "kind": task.kind(),
-            "markdown": markdown,
-            "sections": sections,
-            "sources": report::sources(&markdown)
-                .into_iter()
-                .map(|s| json!({"title": s.title, "url": s.url}))
-                .collect::<Vec<_>>(),
-            "calendar_events": events.len(),
-            "options": pond_core::shared::services::task_options::options_in(&markdown),
-        }))
-        .into_response(),
+        Ok((markdown, events, sections)) => {
+            let images = report_images_for(&markdown).await;
+            Json(json!({
+                "id": task.id(),
+                "title": report::assembled_title(&markdown),
+                "state": task.state(),
+                "kind": task.kind(),
+                "markdown": markdown,
+                "sections": sections,
+                "sources": report::sources(&markdown)
+                    .into_iter()
+                    .map(|s| json!({"title": s.title, "url": s.url}))
+                    .collect::<Vec<_>>(),
+                "calendar_events": events.len(),
+                "options": pond_core::shared::services::task_options::options_in(&markdown),
+                "images": images,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -17643,6 +17648,59 @@ async fn extend_long_task(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// Pictures a report shows: up to three, from the pages it cites, each served by the pond.
+const REPORT_IMAGES: usize = 3;
+
+async fn report_images_for(markdown: &str) -> Vec<Value> {
+    use pond_core::shared::services::report_images::installed;
+    let Some(images) = installed() else {
+        return Vec::new();
+    };
+    let pages: Vec<String> = pond_core::shared::services::research_report::sources(markdown)
+        .into_iter()
+        .map(|s| s.url)
+        .collect();
+    images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect()
+}
+
+/// A report picture the pond kept, for the screens to draw without reaching the site.
+async fn report_image(Path(key): Path<String>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::{installed, is_key};
+    if !is_key(&key) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(images) = installed() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match images.read(&key).await {
+        Some((bytes, content_type)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=86400".to_string(),
+                ),
+                (
+                    axum::http::header::HeaderName::from_static("x-content-type-options"),
+                    "nosniff".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
