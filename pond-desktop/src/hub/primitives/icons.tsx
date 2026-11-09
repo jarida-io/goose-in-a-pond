@@ -43,6 +43,8 @@ export const HP_PATHS = {
   mic:         "rect:9,2,6,12,3 path:M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8", // compound — use micEl below
   // Home header icons
   chat:        "M21 12a8 8 0 0 1-11.5 7.2L4 21l1.8-5.4A8 8 0 1 1 21 12z",
+  bookmark:    "M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
+  eye:         "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
   keyboard:    "M4 6h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM7 10h.01M11 10h.01M15 10h.01M17 10h.01M7 13h.01M17 13h.01M9 13h6",
   // Rail icons (from goose-hub-shell.jsx)
   railHome:     "M3 9.6L12 3l9 6.6V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z",

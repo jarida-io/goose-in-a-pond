@@ -19,6 +19,8 @@ const REPORT: LongTaskReport = {
   sections: 3,
   sources: [{ title: "KRA", url: "https://www.kra.go.ke/" }],
   calendar_events: 2,
+  options: [],
+  images: [],
 };
 
 const report = () => vi.mocked(api.getLongTaskReport);
@@ -51,6 +53,8 @@ describe("a task's report", () => {
       sections: 3,
       sources: REPORT.sources,
       calendarEvents: 2,
+      options: [],
+      images: [],
       summaryOnly: false,
     };
     expect(loaded).toEqual(expected);
@@ -77,7 +81,7 @@ describe("a task's report", () => {
     expect(artifact()).toHaveBeenCalledWith(TASK_ID, "art-1");
     expect(result.current.state).toEqual({
       status: "ready",
-      report: { title: "Trip plan", markdown: "- ferry at **7:00**", sections: 0, sources: [], calendarEvents: 0, summaryOnly: true },
+      report: { title: "Trip plan", markdown: "- ferry at **7:00**", sections: 0, sources: [], calendarEvents: 0, options: [], images: [], summaryOnly: true },
     });
   });
 
