@@ -1,7 +1,9 @@
 //! A member's web watches for their screens: the list, one watch with its changes, an edit (what
-//! they look for, how often, paused) and a delete. Each route reaches only the caller's own
-//! watches; a watch is started from a conversation, where the page is read first.
+//! they look for, how often, paused) and a delete, and whether their matches are also said aloud.
+//! Each route reaches only the caller's own watches; a watch is started from a conversation, where
+//! the page is read first.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -12,6 +14,8 @@ use pond_core::security::ports::policy::Principal;
 use pond_core::security::ports::remote_access::TailnetMachine;
 use pond_core::shared::domain::web_watch::{WatchFilters, MAX_INTERVAL_HOURS, MIN_INTERVAL_HOURS};
 use pond_core::shared::ports::web_watch::{StoredChange, WatchEdit, WebWatch, WebWatchRepository};
+use pond_core::shared::services::spoken_watch_alerts::{is_time_of_day, SpokenAlertChoice};
+use pond_core::user_data::domain::settings::Settings;
 use pond_infra::sqlite_web_watch::SqliteWebWatchRepository;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -234,4 +238,119 @@ pub async fn delete(
         Ok(false) => not_found(),
         Err(e) => failed(e),
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct SpokenAlertsBody {
+    pub enabled: Option<bool>,
+    pub quiet_start: Option<String>,
+    pub quiet_end: Option<String>,
+}
+
+/// The member's choice, beside the household's own switch and quiet hours, which also apply.
+fn spoken_view(choice: &SpokenAlertChoice, household: Option<&Settings>) -> Value {
+    json!({
+        "enabled": choice.enabled,
+        "quiet_start": choice.quiet_start,
+        "quiet_end": choice.quiet_end,
+        "household_allows_speech": household.map(|s| s.unprompted_speech_enabled),
+        "household_quiet_start": household.map(|s| s.quiet_hours_start.as_str()),
+        "household_quiet_end": household.map(|s| s.quiet_hours_end.as_str()),
+    })
+}
+
+async fn spoken_choice(
+    state: &Arc<AppState>,
+    member: &str,
+) -> Result<(HashMap<String, String>, SpokenAlertChoice), Response> {
+    match state.profile_repo.get(member).await {
+        Ok(Some(profile)) => {
+            let choice = SpokenAlertChoice::of(&profile.preferences);
+            Ok((profile.preferences, choice))
+        }
+        Ok(None) => Err(unknown_caller()),
+        Err(e) => Err(failed(e)),
+    }
+}
+
+/// `GET /api/v1/web-watches/spoken-alerts` — whether the caller's matches are said aloud.
+pub async fn spoken_alerts(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    peer: Peer,
+    insecure: Insecure,
+    tailnet: Option<Extension<TailnetMachine>>,
+) -> Response {
+    let Some(member) = caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return unknown_caller();
+    };
+    let (_, choice) = match spoken_choice(&state, &member).await {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    let household = state.settings_repo.get().await.ok();
+    Json(spoken_view(&choice, household.as_ref())).into_response()
+}
+
+/// `PUT /api/v1/web-watches/spoken-alerts` — turn spoken matches on or off, or move the
+/// caller's quiet hours. Fields left out keep their value.
+pub async fn set_spoken_alerts(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    peer: Peer,
+    insecure: Insecure,
+    tailnet: Option<Extension<TailnetMachine>>,
+    Json(body): Json<SpokenAlertsBody>,
+) -> Response {
+    let Some(member) = caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return unknown_caller();
+    };
+    for time in [&body.quiet_start, &body.quiet_end].into_iter().flatten() {
+        if !is_time_of_day(time) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "quiet hours are a time of day such as 22:00"})),
+            )
+                .into_response();
+        }
+    }
+    let (mut preferences, mut choice) = match spoken_choice(&state, &member).await {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    if let Some(enabled) = body.enabled {
+        choice.enabled = enabled;
+    }
+    if let Some(start) = body.quiet_start {
+        choice.quiet_start = start.trim().to_string();
+    }
+    if let Some(end) = body.quiet_end {
+        choice.quiet_end = end.trim().to_string();
+    }
+    choice.write_into(&mut preferences);
+    if let Err(e) = state
+        .profile_repo
+        .update_preferences(&member, preferences)
+        .await
+    {
+        return failed(e);
+    }
+    let household = state.settings_repo.get().await.ok();
+    Json(spoken_view(&choice, household.as_ref())).into_response()
 }

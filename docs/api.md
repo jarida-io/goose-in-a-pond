@@ -39,6 +39,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [Agent, tools, prompts, skills and recipes](#agent-tools-prompts-skills-and-recipes)
 - [Music player](#music-player)
 - [Rides and Uber accounts](#rides-and-uber-accounts)
+- [Web forms and spoken watch alerts](#web-forms-and-spoken-watch-alerts)
 - [My Pond (administration)](#my-pond-administration)
 - [Faces](#faces)
 - [Mesh](#mesh)
@@ -520,6 +521,16 @@ The route summary's "Also" column names these.
 | GET | /uber/accounts | token +onb | loopback, cred | Members who connected Uber |
 | POST | /uber/accounts/connect | token +onb | loopback, cred | Start a member's Uber sign-in |
 | DELETE | /uber/accounts/{profile_id} | token +onb | loopback, cred | Forget a member's Uber sign-in |
+
+### Web forms and spoken watch alerts
+
+| Method | Path | Auth | Also | Summary |
+|---|---|---|---|---|
+| GET | /web-forms/{id} | token +onb | member | A POST form waiting for, or answered by, the member's yes |
+| POST | /web-forms/{id}/confirm | token +onb | member | Send the form now |
+| POST | /web-forms/{id}/decline | token +onb | member | Never send it |
+| GET | /web-watches/spoken-alerts | token +onb | member | Whether the caller's watch matches are said aloud |
+| PUT | /web-watches/spoken-alerts | token +onb | member | Turn that on or off, or move their quiet hours |
 
 ### My Pond (administration)
 
@@ -1125,6 +1136,7 @@ for any other device the stream marks what it sends delivered. Each SSE `data` i
 | Key | Values | Sent by |
 |---|---|---|
 | `action` | `open_url`, `ride_offer`, `ride_update` | travel; see [architecture/rides-and-maps.md](architecture/rides-and-maps.md) |
+| `action` | `form_confirm` (with `id`, `site`, `label`) | a POST form waiting for the member's yes; see [Web forms](#web-forms-and-spoken-watch-alerts) |
 | `open` | `schedule` (with `schedule_id`, `run_id`), `devices`, `chat`, `models`, `extensions`, `remote_access` | schedule runs, pairing outcomes, Matter, proposals, system notices |
 | `kind` | a system notice's catalogue name, e.g. `model_downloaded`; `pond_warmup` for the live-only warm-up status | system notices, warm-up |
 | `transient` | `true` | every live-only status (`publish_live`, the warm-up): never queued, never in the history; a notification centre leaves it out |
@@ -1457,6 +1469,38 @@ credential; a refusal is `{error, code}`, with `code` `host_only` off this machi
 | `POST /uber/accounts/connect` | `{profile_id, origin?}` | `{auth_url, state}`; follow with `GET /oauth/status/{state}`. `404 not_a_member`, `502 uber_relay_failed`, `503 no_secret_store` or `uber_sign_in_off` |
 | `GET /uber/accounts` | | `{connected: [profile_id]}` |
 | `DELETE /uber/accounts/{profile_id}` | | `204` |
+
+## Web forms and spoken watch alerts
+
+**POST forms.** When the conversation asks `read_web_page` for a POST form a read page carries,
+nothing is sent: the pond keeps the form and pushes a `form_confirm` notice (category
+`action_required`, titled "Send this form to {site}?") to the speaker's own phones. The form is
+sent only on that member's yes, at most once, and lapses unsent after 15 minutes. As with rides,
+the member is the one the phone's pairing names; another member's form answers `404`, and the
+desktop or a phone paired to nobody gets `403`. Every route is `503` on a pond without forms set
+up. See [architecture/web-watch-and-exploration.md](architecture/web-watch-and-exploration.md).
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /web-forms/{id}` | | the form: `{id, site, page, action, fields: [{name, value}], state, asked_at, answer_by, decided_at, result, message}` |
+| `POST /web-forms/{id}/confirm` | | the form, `state: "sent"` with `result: {status, address, title}`; `502` with `state: "failed"` and `message` when it could not be sent or its answer was lost (the message says whether the site may have it); `409` already answered; `410` lapsed |
+| `POST /web-forms/{id}/decline` | | `204`; `409` already answered; `410` lapsed |
+
+`state` is `waiting`, `sending`, `sent`, `declined`, `timed_out` or `failed`. Before sending, the
+pond reads the form's page again, for its fresh hidden values and the site's cookies; a form gone
+from its page, or no longer taking a confirmed value, is not sent.
+
+**Spoken watch alerts.** A member can have their watches' matches said aloud too. It is off until
+they turn it on, and is kept in their `profiles.preferences` (`web_watch_spoken_alerts`,
+`web_watch_quiet_start`, `web_watch_quiet_end`). A match is spoken only while the household
+allows unprompted speech (`unprompted_speech_enabled`), outside the household's quiet hours and
+the member's own, while presence says the member is home, and while no conversation holds the
+model.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /web-watches/spoken-alerts` | | `{enabled, quiet_start, quiet_end, household_allows_speech, household_quiet_start, household_quiet_end}`; quiet hours default to `22:00` and `07:00` |
+| `PUT /web-watches/spoken-alerts` | `{enabled?, quiet_start?, quiet_end?}` | the same; `400` for a time that is not `HH:MM` |
 
 ## Faces
 

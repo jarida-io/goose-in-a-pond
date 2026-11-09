@@ -40,6 +40,7 @@ pub mod uber_accounts;
 pub mod voice_agent;
 mod voice_match;
 pub mod voice_sample;
+pub mod web_forms;
 pub mod web_search;
 pub mod web_watches;
 

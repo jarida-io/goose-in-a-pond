@@ -13,8 +13,9 @@ use pond_core::mcp::ports::notification::{
 };
 use pond_core::shared::domain::web_watch::{WatchItem, DIGEST_HOUR};
 use pond_core::shared::ports::web_watch::{
-    WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
+    NoticeKind, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
 };
+use pond_core::shared::services::spoken_watch_alerts::SpokenWatchAlerts;
 use pond_core::shared::services::web_watch_checker::WebWatchChecker;
 use pond_core::user_data::ports::settings::SettingsRepository;
 
@@ -44,14 +45,25 @@ impl WatchPageReader for PageReader {
     }
 }
 
-/// Tells a watch's owner on their own devices, never the household.
+/// Tells a watch's owner on their own devices, never the household, and says a match aloud to
+/// an owner who asked for that.
 pub struct MemberWatchNotifier {
     members: Arc<dyn MemberNotifier>,
+    speech: Option<Arc<SpokenWatchAlerts>>,
 }
 
 impl MemberWatchNotifier {
     pub fn new(members: Arc<dyn MemberNotifier>) -> Self {
-        Self { members }
+        Self {
+            members,
+            speech: None,
+        }
+    }
+
+    /// Says matches aloud through `speech`; `None` on a pond with no voice.
+    pub fn with_speech(mut self, speech: Option<Arc<SpokenWatchAlerts>>) -> Self {
+        self.speech = speech;
+        self
     }
 }
 
@@ -59,6 +71,14 @@ impl MemberWatchNotifier {
 impl WatchNotifier for MemberWatchNotifier {
     async fn notify(&self, notice: WatchNotice) -> anyhow::Result<()> {
         let now = Utc::now();
+        // Spawned: speech waits its turn for the speaker, and the checks must not wait with it.
+        if let (NoticeKind::Match, Some(speech)) = (notice.kind, &self.speech) {
+            let (speech, owner) = (speech.clone(), notice.owner.clone());
+            let (title, body) = (notice.title.clone(), notice.body.clone());
+            tokio::spawn(async move {
+                speech.speak(&owner, &title, &body, now).await;
+            });
+        }
         let notification = Notification {
             id: format!(
                 "web-watch-{}-{}",
