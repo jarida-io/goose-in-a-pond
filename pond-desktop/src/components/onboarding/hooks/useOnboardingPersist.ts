@@ -133,7 +133,7 @@ export const PROFILE_PREF_KEYS = {
 
 /** String values (`profiles.preferences` is HashMap<String, String>; flags compare to "true").
  *  Gated by `touched` like `buildSettingsPatch` — avatar and the accessibility flags default to
- *  non-empty values ("🦆", "false"), so leaving them ungated would send them even when
+ *  non-empty values (the duck avatar, "false"), so leaving them ungated would send them even when
  *  the user never touched this step. Empty values are also omitted: the prompt builder would
  *  render them blank. */
 export function buildProfilePatch(
