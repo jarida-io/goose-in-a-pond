@@ -985,10 +985,11 @@ mod tests {
         assert!(names.contains(&"get_wikipedia_article"), "got: {names:?}");
         assert!(names.contains(&"search_web"), "got: {names:?}");
         assert!(names.contains(&"read_web_page"), "got: {names:?}");
+        assert!(names.contains(&"web_watch"), "got: {names:?}");
         assert_eq!(
             names.len(),
-            4,
-            "giap-knowledge serves four tools: {names:?}"
+            5,
+            "giap-knowledge serves five tools: {names:?}"
         );
     }
 

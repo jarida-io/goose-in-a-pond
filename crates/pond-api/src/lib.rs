@@ -40,6 +40,7 @@ pub mod voice_agent;
 mod voice_match;
 pub mod voice_sample;
 pub mod web_search;
+pub mod web_watches;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).
 #[async_trait::async_trait]

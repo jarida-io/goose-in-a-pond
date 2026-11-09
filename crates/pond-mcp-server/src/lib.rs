@@ -21,6 +21,8 @@ pub mod vision;
 pub mod weather;
 pub mod web_page;
 pub mod web_search;
+pub mod web_watch;
+pub mod web_watch_runner;
 pub mod wolfram;
 
 // ── Shared utilities for Knowledge-family servers ───────────────────────────

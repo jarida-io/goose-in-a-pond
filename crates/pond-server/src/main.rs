@@ -3647,6 +3647,21 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // Members' web watches: checked in code, their owners told on their own devices.
+    pond_mcp_server::web_watch_runner::spawn(
+        Arc::new(
+            pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
+                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
+                Arc::new(pond_mcp_server::web_watch_runner::PageReader),
+                Arc::new(pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+                    targeted_notification_sender.clone(),
+                )),
+            ),
+        ),
+        settings_repo.clone(),
+    );
     #[cfg(unix)]
     {
         let runtime = embedded.clone();
@@ -7089,6 +7104,12 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
+    pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
+        repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+            pool.clone(),
+        )),
+        authorities: orchestration.authorities(),
+    });
     let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
         pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool),
     );
