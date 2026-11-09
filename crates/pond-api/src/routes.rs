@@ -4369,10 +4369,27 @@ const CARD_PICTURE_PAGES: usize = 3;
 /// Pictures one list may set fetching in the background; the rest wait for a later list.
 const CARD_PICTURE_FETCHES: usize = 3;
 
-/// A conversation's picture, if one is kept for the first page it cited or read. A list never
-/// waits on a site: a page with none kept yet is fetched in the background for the next list.
+/// A conversation's picture: the first one sent in it, else one kept for the first page it cited
+/// or read. A list never waits on a site: a page with none kept yet is fetched in the background
+/// for the next list.
 async fn session_picture(state: &AppState, session_id: &str, fetches: &mut usize) -> Option<Value> {
     use pond_core::shared::services::report_images::{first_list_fetch, installed, pages_named};
+    let sent = state
+        .session_storage
+        .list_session_attachments(session_id)
+        .await
+        .ok()
+        .and_then(|atts| atts.into_iter().find(|a| a.mime_type.starts_with("image/")));
+    if let Some(sent) = sent {
+        return Some(json!({
+            "kind": "sent",
+            "src": format!(
+                "/api/v1/sessions/{}/attachments/{}",
+                urlencoding_lite(&sent.session_id),
+                urlencoding_lite(&sent.id),
+            ),
+        }));
+    }
     let images = installed()?;
     let message = state
         .session_storage
@@ -4383,6 +4400,7 @@ async fn session_picture(state: &AppState, session_id: &str, fetches: &mut usize
     let pages = pages_named(&message, CARD_PICTURE_PAGES);
     if let Some(image) = images.kept(&pages).await {
         return Some(json!({
+            "kind": "page",
             "key": image.key,
             "src": format!("/api/v1/report-images/{}", image.key),
             "page": image.page,
