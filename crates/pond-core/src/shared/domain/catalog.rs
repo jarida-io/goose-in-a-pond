@@ -317,12 +317,14 @@ mod tests {
 
     #[test]
     fn states_follow_the_settings_and_connectors() {
-        let mut settings = Settings::default();
-        settings.ext_travel_enabled = true;
-        settings.ext_orchestrator_enabled = true;
-        settings.long_tasks_enabled = true;
-        settings.chat_provider = "ollama".into();
-        settings.chat_model = "gemma4:latest".into();
+        let settings = Settings {
+            ext_travel_enabled: true,
+            ext_orchestrator_enabled: true,
+            long_tasks_enabled: true,
+            chat_provider: "ollama".into(),
+            chat_model: "gemma4:latest".into(),
+            ..Default::default()
+        };
         let connectors = vec![
             connector("mail:mail:gmail:jerry", ConnectorStatus::Connected),
             connector("uber", ConnectorStatus::NeedsSetup),
