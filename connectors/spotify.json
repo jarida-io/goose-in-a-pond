@@ -1,0 +1,9 @@
+{
+  "id": "spotify",
+  "name": "Spotify",
+  "summary": "Goose plays, pauses and picks music on your Spotify account.",
+  "icon": "music",
+  "category": "music",
+  "kind": "account",
+  "connect": { "via": "oauth", "provider": "spotify" }
+}

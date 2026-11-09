@@ -4,6 +4,7 @@ pub mod agent_templates;
 pub mod cart_watch;
 pub mod chat;
 pub mod child_sessions;
+pub mod connector_hub;
 pub mod deep_research;
 pub mod delegation;
 pub mod egress;

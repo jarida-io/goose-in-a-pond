@@ -1,0 +1,11 @@
+{
+  "id": "agents",
+  "name": "Long tasks and agents",
+  "summary": "Goose works on a bigger job while the house is quiet, such as researching a question in depth, and reports back.",
+  "icon": "bot",
+  "category": "custom",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_orchestrator_enabled", "also": ["long_tasks_enabled"] },
+  "feeds": ["ideas"],
+  "extension": "giap-orchestrator"
+}
