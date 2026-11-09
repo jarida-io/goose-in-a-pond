@@ -3,7 +3,7 @@ import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause, 
 import "./longTasks.css";
 import type { LongTask, LongTaskState } from "../api/types";
 import { useConfirm } from "../components/shared";
-import { isEnded, isOwnAhead, isResearch, isWaiting, resultLine, resultOf, shortAnswerOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
+import { isEnded, isOwnAhead, isResearch, isWaiting, resultLine, resultOf, shortAnswerOf, stepAgent, stepWords, taskKindLabel, taskWords, timeWords } from "./longTaskWords";
 import { MarkdownText } from "../components/MarkdownText";
 import type { LongTasksState } from "./useLongTasks";
 import { useLongTaskReport } from "./useLongTaskReport";
@@ -78,6 +78,8 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
   // The line's own choice covers this task, so the card does not offer a second Stop beside it.
   const choosingInLine = isWaiting(task) && (task.queue?.ahead ?? []).some(isOwnAhead);
   const stopping = longTasks.stopping[id] === true;
+  const extending = longTasks.extending?.[id] === true;
+  const timeLine = timeWords(task, new Date());
   const stopError = longTasks.stopErrors[id];
   const result = task.state === "completed" ? resultOf(task) : null;
   // A short answer is the answer itself, so the card shows it whole rather than a line about it.
@@ -125,6 +127,7 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
       <p className="lt__state" aria-live="polite">
         {taskWords(task)}
       </p>
+      {timeLine ? <p className="lt__time">{timeLine}</p> : null}
       <LongTaskQueue task={task} longTasks={longTasks} />
 
       {task.steps.length > 0 ? (
@@ -165,6 +168,17 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
             </button>
             <ReportExport task={task} handle={report} variant={variant} placement="inline" />
           </>
+        ) : null}
+        {!ended && timeLine && longTasks.extend ? (
+          <button
+            type="button"
+            className="ink-btn ink-btn--quiet lt__btn"
+            disabled={extending}
+            aria-label={`Give the task 15 more minutes: ${task.goal}`}
+            onClick={() => void longTasks.extend?.(id)}
+          >
+            {extending ? "Adding time..." : "+15 min"}
+          </button>
         ) : null}
         {!ended && !choosingInLine ? (
           <button

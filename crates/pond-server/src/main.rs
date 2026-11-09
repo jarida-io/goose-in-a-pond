@@ -7600,6 +7600,21 @@ async fn advance_long_task(
 
     match runner::next_run(task, &steps, tries, now) {
         NextRun::Wait => Ok(false),
+        NextRun::SkipForTime(keys) => {
+            // Its time is up: what has not run is skipped, and the last step answers with the rest.
+            for mut step in steps.iter().filter(|s| keys.contains(s.key())).cloned() {
+                if step.skip(now).is_ok() {
+                    tasks.update_step(&step).await?;
+                }
+            }
+            tracing::info!(
+                kind = "long_task_time_up",
+                task = %task.id(),
+                skipped = keys.len(),
+                "the task's time ran out; its last step answers with what was found"
+            );
+            Ok(true)
+        }
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)

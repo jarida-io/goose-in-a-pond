@@ -94,11 +94,16 @@
 }
 
 .lt__state,
+.lt__time,
 .lt__note,
 .lt__resultline {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
+}
+
+.lt__time {
+  font-variant-numeric: tabular-nums;
 }
 
 .lt__resultline {
