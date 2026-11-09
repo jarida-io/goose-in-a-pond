@@ -20,6 +20,10 @@ context and compaction knobs (`GOOSE_CONTEXT_LIMIT` and the rest) during start-u
 still in `setenv` when it died; the writer had finished and freed the array the reader was still
 walking.
 
+Measured on the Jetson the same day: before the fix, 3 of 15 starts crashed (2 of 9 ordinary
+starts, then the 6th of a restart loop, whose core dump is the one above). With the fix, 25 starts
+in a row came up with no crash.
+
 ## How it works
 
 `process_env` holds one `RwLock`. `set` and `remove` take it for writing, `reading` for reading,
