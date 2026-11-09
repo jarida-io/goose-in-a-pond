@@ -290,7 +290,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | POST | /voice/tts/prewarm | token +onb | | Load the speech engine |
 | POST | /voice/tts/unload | token +onb | | Unload the speech engine |
 | POST | /voice/calibrate | wizard | | Add a wake-phrase calibration sample |
-| DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration |
+| DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration, or with `?variant=` forget one variant |
 | POST | /voice/wake/check | token | | Whether a phone's speech segment opens with the household's wake phrase |
 | POST | /transcribe | token +onb | | Transcribe multipart audio |
 | GET | /voice/room | token +onb | | Room voice: switched on, able to listen or why not, its state, wake detector and last speaker |
@@ -969,7 +969,7 @@ Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 | `GET /voice/tts/status` | | `{available, loaded}` |
 | `POST /voice/tts/prewarm`, `/voice/tts/unload` | | `{status}`; `503` without an engine |
 | `POST /voice/calibrate` | multipart `audio` (WAV), optional `prompt` | `{transcript, normalized, heard, new_variant, all_variants, sample_count, target_count, complete}` |
-| `DELETE /voice/calibrate` | | `{cleared, message}` |
+| `DELETE /voice/calibrate` | optional `?variant=` (one variant as heard, e.g. the one a take just added) | `{cleared, message}`; with `variant`, `{removed, all_variants}` |
 | `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
 | `POST /transcribe` | multipart `audio` | `{text}` |
 | `GET /audio/devices` | | `AudioDeviceStatus {input, output, updated_at_ms, source, pid, raised?, sound_server?}` |
