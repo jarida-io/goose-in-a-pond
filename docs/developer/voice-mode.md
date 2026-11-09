@@ -92,15 +92,17 @@ Under `--json-events` the refusal is an `error` line and `exit: already_running`
 | Moment | What the user gets |
 |---|---|
 | Wake word heard | a two-note ping (C6 then E6, about 220 ms) |
-| Working | a soft chime (G4 + E5) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false` |
+| Working | a soft chime (G5 + E6) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false`. An octave lower, the wake word model took it for "hey goose" |
 | Answer ready | the tone stops and the reply is spoken as it streams: a short first clause, then whole sentences |
 | Tool calls | shown in the UI (`tool_call`/`tool_result`), never spoken; the tone keeps playing |
 
 There is no spoken filler and no tool narration: both would have to finish playing before the
 answer could start.
 
-After a reply the loop listens again without the wake word (a follow-up turn). If nothing is heard
-within 10 s it goes back to waiting for the wake word.
+After a reply that ends with a question, the loop listens again without the wake word (a follow-up
+turn). If nothing is heard within 10 s it goes back to waiting for the wake word. After any other
+reply it waits for the wake word straight away: a room keeps talking after a reply, and that talk is
+not for the pond. Each decision is a `voice_follow_up` trace line.
 
 Control phrases are matched against the whole utterance (`pond_voice::control::classify`):
 "bye", "goodbye", "dismissed", "go to sleep", "that's all", "never mind", "stop", "stop listening"

@@ -2654,6 +2654,16 @@ pub fn only_wake_words(transcript: &str, triggers: &[String]) -> bool {
         .all(|w| RUN_UP_WORDS.contains(&w))
 }
 
+/// Whether a reply ends by asking the person something. Only then is what the room says next
+/// taken for an answer without the wake word; otherwise it is talk not meant for the pond.
+pub fn asks_for_an_answer(reply: &str) -> bool {
+    reply
+        .trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '*' | '_' | '”' | '’' | '»')
+        })
+        .ends_with(['?', '？'])
+}
+
 /// The sentences the calibration screen asks for, each containing `phrase`.
 ///
 /// Must produce the same list as `buildCalibrationPrompts` in
@@ -2921,6 +2931,18 @@ mod wake_word_tests {
             !only_wake_words("goose eggs for breakfast", &t),
             "a request that opens with the word is a request"
         );
+    }
+
+    #[test]
+    fn only_a_reply_that_asks_waits_for_an_answer() {
+        assert!(asks_for_an_answer("Which room do you mean?"));
+        assert!(asks_for_an_answer("Shall I set it for **seven**?** \n"));
+        assert!(asks_for_an_answer(
+            "Do you want the long version (it takes a minute)?)"
+        ));
+        assert!(!asks_for_an_answer("It is sunny and 24 degrees."));
+        assert!(!asks_for_an_answer("Did you know? Geese mate for life."));
+        assert!(!asks_for_an_answer(""));
     }
 
     #[test]

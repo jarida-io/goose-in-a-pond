@@ -26,6 +26,12 @@ export function containsTrigger(haystack: string, trigger: string): boolean {
   return false;
 }
 
+/** Whether a reply ends by asking something: only then is the next thing said taken for an answer
+ *  without the wake word. Mirrors `asks_for_an_answer` in crates/pond-voice/src/text.rs. */
+export function asksForAnAnswer(reply: string): boolean {
+  return /[?？]$/u.test(reply.replace(/[\s"')\]*_”’»]+$/u, ""));
+}
+
 /** Why a phrase cannot be stored, or `null`. */
 export function wakePhraseError(phrase: string): string | null {
   const p = phrase.trim();
