@@ -144,6 +144,8 @@ pub struct PageData {
     pub items_from: Option<ItemSource>,
     pub links: Vec<Link>,
     pub forms: Vec<SearchForm>,
+    /// The picture the page names for itself when shared (`og:image`), for a report to show.
+    pub preview_image: Option<String>,
 }
 
 pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
@@ -153,7 +155,20 @@ pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
         items_from,
         links: links_of(document, base),
         forms: forms_of(document, base),
+        preview_image: preview_of(document, base),
     }
+}
+
+fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
+    static META: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"meta[property="og:image"], meta[property="og:image:url"], meta[name="twitter:image"]"#,
+        )
+    });
+    document
+        .select(&META)
+        .filter_map(|m| m.value().attr("content"))
+        .find_map(|c| absolute(c, base))
 }
 
 fn selector(css: &'static str) -> scraper::Selector {

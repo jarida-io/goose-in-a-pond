@@ -373,6 +373,9 @@ async fn read_page(address: &str, depth: u8) -> Result<Page, String> {
     book.note_read(&page.address, &page.title, depth);
     book.note_links_from(&page.address, depth, &page.followable());
     book.note_forms_from(&page.address, depth, page.data.forms.clone());
+    if let Some(image) = &page.data.preview_image {
+        pond_core::shared::services::report_images::note_preview(&page.address, image);
+    }
     Ok(page)
 }
 
@@ -1238,6 +1241,7 @@ mod tests {
                     },
                 ],
             }],
+            preview_image: None,
         };
         Page::new(
             "https://cars.example/used".into(),

@@ -1,7 +1,7 @@
 # Web watches and exploration: build plan
 
 The running plan for building `web-watch-and-exploration.md`. It is updated as each phase lands.
-Last update: 2026-11-09, phase 5 merged.
+Last update: 2026-11-09, phase 6 merged.
 
 ## How the work runs
 
@@ -25,7 +25,7 @@ Last update: 2026-11-09, phase 5 merged.
 | 3 | Phone (GOTG): watch list and detail, saved collections, report with chips and images | Ready: its routes exist | goose-on-the-go repo |
 | 4 | Exploration: 30-minute budget on the card, one site per step, compare step writes options | Merged | fork #5 |
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
-| 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Next | |
+| 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
 | 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | | |
 | 9 | Desktop screens | | |
@@ -83,6 +83,20 @@ Not done in phase 4:
 Not done in phase 5:
 - Saving an option card straight from a report: the phone and desktop send it with `POST /saved-items` (phase 3 and phase 9).
 - One flaky pond-core test (`device_budget`, "the qat row is its own entry") failed once and passed on two reruns. It is unrelated to this work and needs its own look.
+
+## Phase 6: report images, what landed
+
+| Step | Kind | Status |
+|---|---|---|
+| A cited Wikipedia article gives its lead image, with licence, author, caption and file page; a non-free (fair use) image is never taken | Code | Done |
+| Any other cited page gives the preview image it names for itself (`og:image`), credited "Image from {site}" | Code | Done |
+| The pond fetches each picture through its tracked, public-only client, keeps JPEG, PNG, WebP or GIF only (no SVG), at most 2 MB each and 200 MB in all (oldest go first), and serves it at `GET /report-images/{key}` | Code | Done |
+| The report JSON carries `images` (up to 3): `src`, `credit`, `licence`, `caption`, `page`, `file_page` | Code | Done |
+| Tests: pond-core 2,629 (egress guard included), pond-mcp-server 386, pond-api 341 | Tests | Done |
+
+Not done in phase 6:
+- Drawing the pictures. The route needs the client's token, so a screen fetches each picture with it (a blob on the desktop, headers on the phone) instead of a bare `<img>`. Phone in phase 3, desktop in phase 9.
+- The numbered source chips in the text. The report still cites `[title](link)`; the chips phase switches the composer to ledger numbers and the screens to chips.
 
 ## What waits on you
 

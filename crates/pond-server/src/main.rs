@@ -3647,6 +3647,10 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
+    pond_core::shared::services::report_images::install(Arc::new(
+        pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
+    ));
     // Members' web watches: checked in code, their owners told on their own devices.
     pond_mcp_server::web_watch_runner::spawn(
         Arc::new(
