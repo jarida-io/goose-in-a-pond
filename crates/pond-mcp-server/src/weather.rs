@@ -1,7 +1,7 @@
 //! Weather MCP server: current weather and forecasts.
 
 use chrono::{DateTime, Days, NaiveDate, Utc};
-use pond_adapters_weather::{ForecastData, WeatherProvider};
+use pond_adapters_weather::{ForecastData, WeatherOff, WeatherProvider};
 use pond_core::user_data::ports::settings::SettingsRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -130,6 +130,13 @@ which city. Never guess weather or shell out for it.")]
                             full_result,
                         )]))
                     }
+                    // Switched off or no place set: the same answer as no provider at all.
+                    Err(e) if e.downcast_ref::<WeatherOff>().is_some() => {
+                        Ok(CallToolResult::error(vec![ContentBlock::text(
+                            "Weather is not configured on this pond: no location is set in settings. \
+                             No other tool, shell command or external request can supply it.",
+                        )]))
+                    }
                     Err(e) => {
                         tracing::warn!("weather: fetch failed: {e}");
                         Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -230,6 +237,12 @@ impl WeatherMcpServer {
         };
         let mut data = match result {
             Ok(data) => data,
+            Err(e) if e.downcast_ref::<WeatherOff>().is_some() => {
+                return CallToolResult::error(vec![ContentBlock::text(
+                    "Weather is not configured on this pond: no location is set in settings. \
+                     No other tool, shell command or external request can supply a forecast.",
+                )]);
+            }
             Err(e) => {
                 tracing::warn!(kind = "forecast_fetch_failed", error = %e, "weather: forecast fetch failed");
                 return CallToolResult::error(vec![ContentBlock::text(format!(

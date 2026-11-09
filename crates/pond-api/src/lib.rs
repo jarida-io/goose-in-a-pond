@@ -8,6 +8,7 @@ pub mod connections;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
+mod home_location;
 pub mod host_guard;
 pub mod idempotency;
 pub(crate) mod image_normalize;
