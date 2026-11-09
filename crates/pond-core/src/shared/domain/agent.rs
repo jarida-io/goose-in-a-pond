@@ -61,6 +61,11 @@ pub struct AgentRequest {
     /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interview: Option<String>,
+    /// Where the asking phone is now, as the person's app named it ("Westlands, Nairobi"), sent
+    /// only while they have turned on telling Goose where the phone is. A place name, never
+    /// coordinates; `None` from every other caller, and from the app with the switch off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_place: Option<String>,
 }
 
 impl AgentRequest {
@@ -592,6 +597,7 @@ mod agent_request_scope_tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         }
     }
 

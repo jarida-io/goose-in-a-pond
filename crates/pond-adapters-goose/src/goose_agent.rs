@@ -97,6 +97,8 @@ struct TurnEnvelope<'a> {
     memories: &'a str,
     /// The user's words are the attached recording, which the model hears.
     heard: bool,
+    /// Where the person's phone is now (`device_place_note`), when their app shares it.
+    device_place: Option<String>,
 }
 
 /// A heard room turn's <user-message>: its words are the recording. Never empty, as an empty
@@ -115,9 +117,13 @@ impl TurnEnvelope<'_> {
         msg.push_str("\n</user-message>\n");
         // Always emitted, since the answer contract is unconditional.
         msg.push_str("<system-context>\n");
-        for part in [self.suggestion.as_deref(), self.research.as_deref()]
-            .into_iter()
-            .flatten()
+        for part in [
+            self.suggestion.as_deref(),
+            self.research.as_deref(),
+            self.device_place.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             msg.push_str(part);
             msg.push('\n');
@@ -3691,6 +3697,10 @@ impl GooseAdapter {
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
             heard: request.audio.iter().any(|clip| clip.heard_as.is_some()),
+            device_place: request
+                .device_place
+                .as_deref()
+                .and_then(pond_core::user_data::services::location::device_place_note),
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -4749,6 +4759,7 @@ impl AgentPort for GooseAdapter {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let shape = if voice_mode {
@@ -8182,6 +8193,29 @@ mod tests {
         assert!(!typed.contains(HEARD_TURN_NOTE));
     }
 
+    /// Where the phone is rides inside the turn's context, after the words, and only when shared.
+    #[test]
+    fn a_shared_phone_place_rides_in_the_system_context_only() {
+        let note =
+            pond_core::user_data::services::location::device_place_note("Westlands, Nairobi");
+        let shared = TurnEnvelope {
+            message: "where am I",
+            device_place: note.clone(),
+            ..Default::default()
+        }
+        .render();
+        let context = &shared[shared.find("<system-context>").unwrap()..];
+        assert!(context.contains(note.as_deref().unwrap()));
+        assert!(!shared[..shared.find("<system-context>").unwrap()].contains("Westlands"));
+
+        let unshared = TurnEnvelope {
+            message: "where am I",
+            ..Default::default()
+        }
+        .render();
+        assert!(!unshared.contains("phone is in"));
+    }
+
     // ── F3: the vision-capability prompt section ─────────────────────────
 
     /// A text-only model told it can see will describe an image that was never there.
@@ -8828,7 +8862,7 @@ mod tests {
         for tool in [
             "giap-weather__get_current_weather",
             "music__status",
-            "giap-device__get_user_profile",
+            "giap-system__get_user_profile",
         ] {
             *counts.entry((tool.to_string(), fp)).or_insert(0) += 1;
         }
@@ -9617,6 +9651,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

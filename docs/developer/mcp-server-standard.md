@@ -10,11 +10,11 @@ pipe. For third-party servers see [Building Extensions](extensions.md).
 |---|---|---|---|
 | `giap-toolkit` | `toolkit.rs` | `list_tool_groups`, `enable_tool_group` | always |
 | `giap-memory` | `memory.rs` | `recall_memories`, `save_memory`, `forget_memory` | `ext_memory_enabled` |
-| `giap-system` | `system.rs` | `get_current_time`, `get_system_info`, `send_notification` | `ext_system_enabled` |
+| `giap-system` | `system.rs` | `get_user_profile`, `get_current_time`, `get_system_info`, `send_notification` | `ext_system_enabled` |
 | `giap-schedule` | `schedule.rs` | `list_schedules`, `set_timer`, `create_schedule`, `schedule_action`, `world_clock` | `ext_schedule_enabled` (and a scheduler) |
 | `giap-weather` | `weather.rs` | `get_current_weather`, `get_weather_forecast` | `ext_weather_enabled` |
 | `giap-knowledge` | `knowledge.rs`, `web_search.rs`, `web_page.rs`, `wolfram.rs` | `get_wikipedia_article`, `search_web`, `read_web_page`, `compute_answer` | `ext_knowledge_enabled` |
-| `giap-device` | `device.rs` | `list_registered_devices`, `set_audio_device`, `get_user_profile`, `list_skills`, `load_skill` | `ext_device_enabled` |
+| `giap-device` | `device.rs` | `list_registered_devices`, `set_audio_device`, `list_skills`, `load_skill` | `ext_device_enabled` |
 | `giap-device-control` | `device_control.rs` | `describe_device`, `get_device_state`, `set_device_state` | `ext_device_enabled` |
 | `giap-sensors` | `sensors.rs` | `get_sensor_reading`, `get_sensor_history`, `list_sensors` | `ext_sensor_enabled` |
 | `giap-travel` | `travel.rs` | `get_directions_link`, `book_ride`, `get_ride_link` | `ext_travel_enabled` (off by default) |

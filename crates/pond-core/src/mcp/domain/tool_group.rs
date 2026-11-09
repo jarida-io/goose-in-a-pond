@@ -69,8 +69,9 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
     },
     ToolGroup {
         extension: "giap-system",
-        description: "This machine and the current moment: the date, time and timezone, operating \
-                      system and hostname, memory and disk usage, and desktop notifications.",
+        description: "The household and this machine: the user's name, the assistant's name and \
+                      home (where the Pond is), the date, time and timezone, operating system and \
+                      hostname, memory and disk usage, and desktop notifications.",
         core: true,
     },
     ToolGroup {

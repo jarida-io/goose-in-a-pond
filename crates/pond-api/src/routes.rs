@@ -1851,6 +1851,10 @@ struct ChatRequest {
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
+    /// Where the asking phone is now, as its app named it, only while the person has turned on
+    /// telling Goose where the phone is. A place name, never coordinates; rides this turn only.
+    #[serde(default)]
+    device_place: Option<String>,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -3426,6 +3430,7 @@ async fn drive_turn(
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
+        device_place: req.device_place.clone(),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -12780,6 +12785,7 @@ async fn agent_chat_stream(
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -18183,6 +18189,7 @@ async fn run_recipe(
         deep_research: false,
         deep_research_answer: None,
         deep_research_for: None,
+        device_place: None,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))

@@ -384,9 +384,7 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             },
             "required": ["path", "content"]
         }),
-        "giap-device__list_registered_devices"
-        | "giap-device__get_user_profile"
-        | "giap-device__list_skills" => {
+        "giap-device__list_registered_devices" | "giap-device__list_skills" => {
             json!({ "type": "object", "properties": {} })
         }
         _ => json!({ "type": "object", "properties": {} }),
