@@ -227,10 +227,8 @@ impl DeviceMcpServer {
     }
 
     #[tool(
-        description = "Who and where home is: the user's name, the assistant's name, the time zone, \
-                       and home, the household's place, where the Pond is. Call it for 'where do I \
-                       live', 'where is home', or 'where am I' when the turn's context does not say \
-                       where the person's phone is now."
+        description = "User's name, assistant name, time zone, and home: where the Pond is. \
+                       Answers 'where am I' unless the turn says where the phone is."
     )]
     async fn get_user_profile(
         &self,
