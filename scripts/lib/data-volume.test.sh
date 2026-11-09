@@ -53,7 +53,7 @@ pond() {
   export DV_CRYPTSETUP_ATTACH="$W/bin/systemd-cryptsetup"
   unset DRY_RUN
   fake uname 'echo Linux'
-  for tool in cryptsetup systemd-cryptenroll losetup mkfs.ext4 rsync fallocate chattr fstrim systemctl mount umount systemd-cryptsetup; do
+  for tool in cryptsetup systemd-cryptenroll losetup mkfs.ext4 rsync truncate chattr fstrim systemctl mount umount systemd-cryptsetup; do
     record "$tool"
   done
   # Reads its secret from stdin, the way the library hands it over, and says only whether it had one.

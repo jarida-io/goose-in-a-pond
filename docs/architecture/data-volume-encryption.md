@@ -15,7 +15,13 @@ Jetson's SSD was found to work as a pond in another Jetson.
 ## What changes
 
 The data directory becomes the mount point of a LUKS2 volume kept in one file,
-`/var/lib/goose-in-a-pond-data/data.luks` (16 GB by default, ext4 inside). Its key is never on the
+`/var/lib/goose-in-a-pond-data/data.luks` (16 GB by default, ext4 inside). The file is sparse: it
+takes only what the volume has written and grows with the pond's data, so the host disk must keep
+room for that growth (the doctor's disk-headroom check covers it). The first run on the Jetson
+created it fully allocated (`fallocate`). The unused 13 GB came back by copying the closed volume's
+file with `cp --sparse=always`, checking the copy with `cmp`, and moving it into place: 16 GB to
+3.3 GB, and the TPM opened it as before. `fallocate --dig-holes` did not help: ext4 reports space
+reserved but never written as a hole, so it is skipped. Its key is never on the
 disk in a usable form. Two keyslots open it:
 
 | Keyslot | Opens it | When |
@@ -51,9 +57,9 @@ Jetson on 2026-11-09).
 `bash scripts/giap.sh data-encrypt` (with `--dry-run` first, which runs nothing):
 
 1. Refuses unless: Linux, a user-session pond, not already encrypted, every tool present
-   (`cryptsetup`, `systemd-cryptenroll`, `losetup`, `mkfs.ext4`, `rsync`, `fallocate`, `chattr`,
+   (`cryptsetup`, `systemd-cryptenroll`, `losetup`, `mkfs.ext4`, `rsync`, `truncate`, `chattr`,
    `findmnt`, `mountpoint`, `fstrim`), a TPM, a sealed admin card to enroll, the private data under
-   80% of the volume, and room for the volume, a copy and 1 GB.
+   80% of the volume, and room for a copy of it and 2 GB.
 2. Stops the pond and moves the downloads out.
 3. Creates the volume under a one-time random key in `/run`, adds the admin card and the TPM, then
    removes the one-time key. The card reaches `cryptsetup` and `systemd-cryptenroll` on stdin, never

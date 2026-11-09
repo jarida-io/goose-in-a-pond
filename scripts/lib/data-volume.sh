@@ -198,7 +198,7 @@ dv_preflight() { # $1 = data dir, $2 = service scope (user|system)
     ok "the data volume is already encrypted ($DV_IMAGE)"; return 1
   fi
   if [ ! -d "$data" ]; then warn "no data directory at $data"; return 1; fi
-  for tool in cryptsetup systemd-cryptenroll losetup mkfs.ext4 rsync fallocate chattr findmnt mountpoint fstrim; do
+  for tool in cryptsetup systemd-cryptenroll losetup mkfs.ext4 rsync truncate chattr findmnt mountpoint fstrim; do
     command -v "$tool" >/dev/null 2>&1 || { warn "$tool is not installed"; return 1; }
   done
   if ! dv_has_tpm_device; then
@@ -214,9 +214,11 @@ dv_preflight() { # $1 = data dir, $2 = service scope (user|system)
     note "set DV_SIZE_MB to a larger size and run it again"; return 1
   fi
   free="$(df -Pk "$(dirname "$data")" | awk 'NR == 2 { print $4 }')"
-  need=$((DV_SIZE_MB * 1024 + private + 1024 * 1024))
+  # The volume file is sparse: it takes the private data's size, and the plain copy stays until
+  # finish. The rest must stay free for the pond's data to grow into.
+  need=$((private + 2 * 1024 * 1024))
   if [ "${free:-0}" -lt "$need" ]; then
-    warn "not enough free space: $((free / 1024)) MB free, $((need / 1024)) MB needed (the volume, a copy of the private data, 1 GB spare)"
+    warn "not enough free space: $((free / 1024)) MB free, $((need / 1024)) MB needed (a copy of the private data, 2 GB spare)"
     return 1
   fi
   ok "private data: $((private / 1024)) MB, into a ${DV_SIZE_MB} MB volume; $((free / 1024)) MB free"
@@ -258,7 +260,8 @@ dv_encrypt() { # $1 = data dir, $2 = service scope, $3 = user
   head1 "3. Create the volume and its two keys"
   key="/run/$DV_NAME.key"
   dv_root install -d -m 0755 "$DV_DIR" || return 1
-  dv_root fallocate -l "${DV_SIZE_MB}M" "$DV_IMAGE" || return 1
+  # Sparse: the file takes only what the volume has written, and grows as the pond's data does.
+  dv_root truncate -s "${DV_SIZE_MB}M" "$DV_IMAGE" || return 1
   dv_root chmod 0600 "$DV_IMAGE" || return 1
   # A one-time key formats the volume and is removed once the card and the TPM can open it.
   dv_root sh -c "umask 077; head -c 64 /dev/urandom > '$key'" || return 1
