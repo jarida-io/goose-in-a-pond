@@ -1,7 +1,7 @@
 # Web watches and exploration: build plan
 
 The running plan for building `web-watch-and-exploration.md`. It is updated as each phase lands.
-Last update: 2026-11-09, phase 6 merged.
+Last update: 2026-11-09: phases 1, 2, 4, 5 and 6 merged on the fork.
 
 ## How the work runs
 
@@ -27,8 +27,8 @@ Last update: 2026-11-09, phase 6 merged.
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
 | 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
-| 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | | |
-| 9 | Desktop screens | | |
+| 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Proposed as its own session | |
+| 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Proposed as its own session | |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
 
 ## Phase 2: watches, what landed
@@ -102,6 +102,8 @@ Not done in phase 6:
 
 | What | Why |
 |---|---|
-| A nano deploy, now that phase 2 has landed | First live check of reads, watches and pushes, and the first compile of pond-server with them |
-| Merging org PRs #849 and #851 | They are merged on the fork only |
-| Defaults: 30 days of change history, 20 watches per member, digest at 18:00, a turn's pause not counted against 30 minutes | Proposed in the design; I'm building with them unless you say otherwise |
+| **A nano deploy of fork main (`7ea54c09`)** | pond-server has not been compiled with these phases: the Mac lacks the disk for its native crates. Its new lines are four short calls in `main.rs`, typed against compiled signatures. The deploy is also the first live check of reads, watches, pushes, time budgets, saved cards and pictures |
+| Phase 3, the phone screens | They live in goose-on-the-go: watches, saved collections, a report's pictures, options and source chips, and the `watch` notice screen (`services/notification-link.ts`). Say where to start it |
+| Phase 7, Lightpanda on the nano | Building and measuring it runs on the nano beside the live pond, so it waits for your OK |
+| Merging org PRs #849 and #851 | They are merged on the fork only; later phases have no org PRs |
+| Defaults: 30 days of change history, 20 watches and 500 cards per member, digest at 18:00, a turn's pause counted against the 30 minutes for now | Proposed in the design; building with them unless you say otherwise |
