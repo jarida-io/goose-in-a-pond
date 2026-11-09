@@ -384,6 +384,13 @@ remote access is enabled. Restore the authority first.
 
 ## Verification
 
+On the Pond, `bash scripts/giap.sh doctor` reports remote access from the Pond's own answer
+(`GET /api/v1/system/info`, its `tailnet_address`): an address in `100.64.0.0/10` from the
+built-in node is OK, and no `tailscale` program is needed on the host. Remote access turned on
+in `embedded-network/config.json` with no address is a warning, a Pond that does not answer is
+unknown, and a Pond with neither the built-in node nor the host's own tailscale gets a note
+that it is reachable on the LAN only (`scripts/lib/remote-access.sh`).
+
 Run the Go tests (`go test -race ./...` in `native/pondnet`), the Rust tests in
 `embedded_network.rs`, and `scripts/live-test.sh` against scratch data including a
 restart with populated databases. Physical acceptance needs real phones and a Pond: home

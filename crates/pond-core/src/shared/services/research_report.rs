@@ -28,8 +28,13 @@ pub fn report_parts(steps: &[PlanStep], artifacts: &[ArtifactSummary]) -> Report
     let answer = result_artifact(artifacts).or_else(|| final_artifact(steps, artifacts));
     let source_of_answer = |a: &ArtifactSummary| {
         answer.is_some_and(|r| {
+            // Only a step's own output can be the Result's source: drafts saved outside any step
+            // share no step with it, however alike their one-line summaries.
             r.id == a.id
-                || (r.step_key == a.step_key && !a.summary.is_empty() && r.summary == a.summary)
+                || (r.step_key.is_some()
+                    && r.step_key == a.step_key
+                    && !a.summary.is_empty()
+                    && r.summary == a.summary)
         })
     };
     let result = answer.map(|a| a.id.clone());

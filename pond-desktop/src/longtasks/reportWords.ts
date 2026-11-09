@@ -47,3 +47,37 @@ export function reportCounts(sections: number, sources: number): string {
   if (sources > 0) parts.push(`${sources} ${sources === 1 ? "source" : "sources"}`);
   return parts.join(", ");
 }
+
+export const SOURCES_LABEL = "Sources";
+
+export function sourcesRow(count: number): string {
+  return `${count} ${count === 1 ? "source" : "sources"}`;
+}
+
+export function sourceChipLabel(n: number, title: string): string {
+  return `Source ${n}: ${title}`;
+}
+
+export function openSite(site: string): string {
+  return `Open ${site}`;
+}
+
+export const PICTURES_LABEL = "Pictures from the sources";
+export const PICTURE_FILE_PAGE = "Licence details";
+
+export const OPTIONS_LABEL = "Options";
+export const OPEN_OPTION = "Open the listing";
+export const SAVE_OPTION = "Save";
+export const SAVING_OPTION = "Saving...";
+export const SAVED_OPTION = "Saved";
+export const WATCH_PRICE = "Watch price";
+export const WATCHING_PRICE = "Starting the watch...";
+export const PRICE_WATCHED = "Watching the price";
+
+export function couldntSave(reason: string): string {
+  return `Couldn't save it. ${reason}`;
+}
+
+export function couldntWatch(reason: string): string {
+  return `Couldn't start the watch. ${reason}`;
+}

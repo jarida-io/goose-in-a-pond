@@ -14,6 +14,8 @@
 #   bash scripts/giap.sh node         # find, or download and verify, the Node this repo needs
 #   bash scripts/giap.sh node --check # only report; change nothing (exit 1 if the shell's node is wrong)
 #   bash scripts/giap.sh node --method nvm|fnm|volta|download --major N --install-deps
+#   bash scripts/giap.sh go           # find, or download and verify, the Go the remote-access helper needs
+#   bash scripts/giap.sh go --check   # only report; change nothing (exit 1 if there is none)
 #   bash scripts/giap.sh litert status       # the LiteRT-LM library (.litertlm models): recorded packages, verified
 #   bash scripts/giap.sh litert build [macos-arm64|linux-arm64] [--distdir DIR]   # build, package, verify, record
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
@@ -26,7 +28,9 @@
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
 #   bash scripts/giap.sh time-sync [remove|status]  # Linux: named time servers before the NTP pool, so the clock is right soon after a boot (sudo)
+#   bash scripts/giap.sh data-encrypt [finish|unlock|undo|status]  # Linux: the pond's private data in a LUKS2 volume opened by the TPM, the admin card its recovery key (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
+#   bash scripts/giap.sh test-pond [on|off|status]  # mark this pond as a Jarida test Pond, whose debug switch shows household content in the logs, or a home Pond again
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
@@ -83,6 +87,10 @@ source "$HERE/lib/admin-card.sh"
 source "$HERE/lib/connect-setup.sh"
 # shellcheck source=lib/time-sync.sh
 source "$HERE/lib/time-sync.sh"
+# shellcheck source=lib/data-volume.sh
+source "$HERE/lib/data-volume.sh"
+# shellcheck source=lib/remote-access.sh
+source "$HERE/lib/remote-access.sh"
 # shellcheck source=lib/release-build.sh
 source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
@@ -94,6 +102,8 @@ cd "$REPO_ROOT" || exit 1
 # preferred major comes from .nvmrc.
 # shellcheck source=lib/node-setup.sh
 source "$HERE/lib/node-setup.sh"
+# shellcheck source=lib/go-setup.sh
+source "$HERE/lib/go-setup.sh"
 # `check` runs what CI runs, on the repo's Node; like provision it takes only its own options.
 # shellcheck source=lib/local-checks.sh
 source "$HERE/lib/local-checks.sh"
@@ -106,6 +116,11 @@ fi
 
 DRY_RUN=false
 ASSUME_YES=false
+# Below this, a release build is stopped before it starts: an incremental link needs a few GiB of
+# scratch and output. The doctor's floor (10 GiB) is for a build from clean.
+BUILD_DISK_FLOOR_GIB=5
+# Set by action_build_server when it started the pond again on the new binary.
+BUILD_STARTED_SVC=false
 SERVICE_NAME="goose-in-a-pond.service"
 NODE_METHOD=auto; NODE_MAJOR=""; CHECK_ONLY=false; NODE_DEPS=false
 
@@ -163,6 +178,7 @@ pause() { [ -t 0 ] || return 0; printf '\n%spress return%s ' "$C_DIM" "$C_RST"; 
 # Plain variables only — bash 3.2 has no associative arrays.
 D_OS=""; D_ARCH=""; D_KERNEL=""; D_BOARD=""; D_IS_JETSON=false; D_L4T=""
 D_CUDA_STATE=""; D_NVCC=""; D_ACCEL=""
+D_GO=""; D_GO_NEED=""; D_GO_OK=false; D_GO_DIR=""
 D_RUST=""; D_CMAKE=""; D_NODE=""; D_NODE_OK=false; D_NODE_REPO_OK=false; D_NODE_MATTER_OK=false; D_NODE_NOTE=""; D_NODE_FROM=""
 D_BRANCH=""; D_SHA=""; D_DIRTY=""; D_SUB_PIN=""; D_SUB_HEAD=""; D_SUB_STATE=""
 D_UI_STATE=""; D_UI_WHEN=""
@@ -249,6 +265,15 @@ detect_toolchain() {
     node_version_ui_ok "$D_NODE" && D_NODE_OK=true
     node_version_ok "$D_NODE" && D_NODE_REPO_OK=true
     node_version_matter_ok "$D_NODE" && D_NODE_MATTER_OK=true
+  fi
+  # The Go that builds the remote-access helper: the first at or above go.mod's pin, wherever it is.
+  D_GO=""; D_GO_OK=false; D_GO_DIR=""
+  D_GO_NEED="$(go_required_version 2>/dev/null)" || D_GO_NEED=""
+  local go_line
+  if [ -n "$D_GO_NEED" ] && go_line="$(go_find_ok "$D_GO_NEED")"; then
+    D_GO="${go_line%%|*}"; D_GO_DIR="${go_line#*|}"; D_GO_OK=true
+  elif command -v go >/dev/null 2>&1; then
+    D_GO="$(go_version_of "$(command -v go)")" || D_GO=""
   fi
 }
 
@@ -809,6 +834,14 @@ doctor() {
     warn "node ${D_NODE:-absent} cannot run the Matter controller: $(node_why_not_matter "${D_NODE:-none}") — Matter will report it and stay off; bash scripts/giap.sh node fixes it, once the pond is restarted"
     DOC_WARN=$((DOC_WARN+1)); fi
 
+  # 8c. Go for the remote-access helper. A pond builds and runs without it, with remote access off.
+  if [ "$D_GO_OK" = true ]; then ok "go $D_GO can build the remote-access helper ($D_GO_DIR)"
+  elif [ -n "$D_GO_NEED" ]; then
+    warn "go ${D_GO:-absent} cannot build the remote-access helper: native/pondnet/go.mod asks for Go $D_GO_NEED, so a build here leaves remote access off"
+    note "fix: bash scripts/giap.sh go   (finds one already installed, or downloads and verifies $D_GO_NEED after asking)"
+    DOC_WARN=$((DOC_WARN+1))
+  fi
+
   # 9. desktop app
   case "$D_DESKTOP" in
     installed*|packaged*) ok "desktop app present ($D_DESKTOP)" ;;
@@ -936,31 +969,17 @@ doctor() {
     DOC_WARN=$((DOC_WARN + TIMESYNC_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + TIMESYNC_DOCTOR_UNK))
   fi
 
-  # Remote reach. A Pond with no tailnet is not broken — remote access is simply
-  # a capability it does not have — so absent is a note, not a failure. What is
-  # worth flagging is a daemon that is installed and NOT up, because the operator
-  # believes they have remote access and does not.
-  if command -v tailscale >/dev/null 2>&1; then
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
-    case "$ts_ip" in
-      # 100.64.0.0/10, spelled out because a case glob cannot express a numeric
-      # range. It has to agree with `is_tailnet_v4` in crates/pond-api/src/routes.rs:
-      # a bare `100.*` calls 100.128.0.1 healthy while /api/v1/system/info publishes
-      # `tailnet_address: null` for it, so doctor would contradict the server on
-      # exactly the near-misses the arm below exists to report.
-      100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
-             ok "tailnet address $ts_ip — a paired phone can reach this Pond from outside the house" ;;
-      "")    warn "tailscale is installed but this host has no tailnet address"
-             note "remote pairing will fall back to the LAN address, which fails once the phone leaves"
-             note "fix: tailscale up   (add --login-server=<url> for a self-hosted Headscale)"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-      *)     warn "tailscale reported '$ts_ip', which is outside 100.64.0.0/10"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-    esac
-  else
-    note "tailscale not installed — this Pond is reachable on the LAN only"
-    note "see docs/remote-access.md to give a paired phone access from outside the house"
+  # The pond's private data at rest: an encrypted volume, or plain files anyone holding the
+  # storage can read. Closed is a failure: the pond cannot start.
+  if [ "$D_OS" = "linux" ]; then
+    dv_doctor "$D_DATA_DIR"
+    DOC_WARN=$((DOC_WARN + DATA_VOLUME_DOCTOR_WARN)); DOC_FAIL=$((DOC_FAIL + DATA_VOLUME_DOCTOR_FAIL))
   fi
+
+  # Remote reach: the Pond's built-in network, or the host's own tailscale. Absent is a note;
+  # turned on and not up is a warning. See scripts/lib/remote-access.sh.
+  remote_doctor "$D_DATA_DIR" "$D_PORT" "$D_HEALTH"
+  DOC_WARN=$((DOC_WARN + REMOTE_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + REMOTE_DOCTOR_UNK))
 
   # 14. LiteRT-LM library, which goose's litert backend loads into the server process for
   # .litertlm models. Having none is a note; one that fails its manifest is a FAIL.
@@ -1309,6 +1328,25 @@ action_wifi_grant() { # $1 = "" | remove | status
   esac
 }
 
+# `giap.sh data-encrypt [finish|unlock|undo|status]`: the pond's private data in an encrypted
+# volume (scripts/lib/data-volume.sh). Asking for it is the consent; sudo asks for the password,
+# and --dry-run prints every step.
+action_data_encrypt() { # $1 = "" | finish | unlock | undo | status
+  head1 "Encrypted data volume"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: on a Mac, FileVault encrypts the disk"
+    return 0
+  fi
+  case "${1:-}" in
+    "")     dv_encrypt "$D_DATA_DIR" "$D_SVC_SCOPE" "$(id -un)" ;;
+    finish) dv_finish "$D_DATA_DIR" ;;
+    unlock) dv_unlock "$D_DATA_DIR" ;;
+    undo)   dv_decrypt "$D_DATA_DIR" ;;
+    status) dv_doctor "$D_DATA_DIR" ;;
+    *)      bad "unknown data-encrypt action: $1 (finish, unlock, undo or status)"; return 2 ;;
+  esac
+}
+
 # `giap.sh time-sync [remove|status]`, and menu item 19: the time servers systemd-timesyncd asks.
 # Asking for it is the consent; sudo asks for the password, and --dry-run prints the change.
 action_time_sync() { # $1 = "" | remove | status
@@ -1335,6 +1373,16 @@ ensure_node_for_ui() {
 }
 
 # `giap.sh node`, and menu item 9: report, or find/download the Node this repo runs on.
+action_go() {
+  head1 "Go for the remote-access helper  (go.mod asks for ${D_GO_NEED:-?})"
+  if [ "$CHECK_ONLY" = true ]; then
+    if [ "$D_GO_OK" = true ]; then ok "go $D_GO in $D_GO_DIR"; return 0; fi
+    warn "go ${D_GO:-absent} is below ${D_GO_NEED:-the pin}"; return 1
+  fi
+  go_ensure || return 1
+  detect_toolchain
+}
+
 action_node() {
   head1 "Node for this repo  (needs $NODE_RANGE_TEXT)"
   case "$NODE_MAJOR" in ''|[0-9]*) ;; *) bad "--major must be a number"; return 2 ;; esac
@@ -1390,19 +1438,35 @@ action_build_server() {
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
+  # The linker writes an 800 MB binary at the very end; on a full disk it dies with "signal 7 [Bus
+  # error]", which reads like a toolchain fault, after the half hour the build took to get there.
+  detect_resources
+  if [ "${D_DISK_FREE:-0}" -lt "$BUILD_DISK_FLOOR_GIB" ] 2>/dev/null; then
+    bad "only ${D_DISK_FREE} GiB free here; the release link needs about $BUILD_DISK_FLOOR_GIB GiB and would fail at the end"
+    note "menu 4 reclaims build artifacts; old binaries and models beside the pond are worth a look too"
+    if ! confirm "Build anyway?"; then
+      [ "${RESTART_SVC_AFTER:-false}" = true ] && { svc_ctl start; RESTART_SVC_AFTER=false; }
+      return 1
+    fi
+  fi
+  # The remote-access helper is Go; asked for before the long build so the answer is not waited on.
+  local have_go=false
+  if go_use_repo >/dev/null 2>&1 || { go_ensure && go_use_repo >/dev/null 2>&1; }; then have_go=true; fi
   run_sh "$(release_build_cmd "$feats")"
   local rc=$?
-  # The remote-access helper is Go; a host without Go still gets a working pond, just without it.
-  if [ $rc -eq 0 ] && command -v go >/dev/null 2>&1; then
+  # A host without Go still gets a working pond, just with remote access off.
+  if [ $rc -eq 0 ] && [ "$have_go" = true ]; then
     run bash "$REPO_ROOT/scripts/build-network-helper.sh" "$REPO_ROOT/target/release"
     rc=$?
   elif [ $rc -eq 0 ]; then
-    warn "no Go on this host: the remote-access helper (pondnet) was not built, so remote access stays off here"
-    note "install Go (go.mod pins the toolchain), then run this build again"
+    warn "no Go ${D_GO_NEED:-} here: the remote-access helper (pondnet) was not built, so remote access stays off here"
+    note "fix: bash scripts/giap.sh go, then run this build again"
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
+  # `update` reads this, so it does not restart a pond this build has already started.
+  BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    svc_ctl start; RESTART_SVC_AFTER=false
+    svc_ctl start; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
   fi
   detect_binaries
   return $rc
@@ -2243,7 +2307,7 @@ action_update() {
   case "$D_SVC_SCOPE" in
     user|system)
       # A build that stopped the pond has already started it on the new binary.
-      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "$BUILD_STARTED_SVC" != true ]; }; then
+      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "${BUILD_STARTED_SVC:-false}" != true ]; }; then
         svc_ctl restart || return 1
       fi
       await_health
@@ -2312,6 +2376,32 @@ action_admin_card() {
     return 0
   fi
   admin_card_run "${1:-}" "$bin" "$data" "$user"
+}
+
+# `giap.sh test-pond [on|off|status]`: whether a paired phone may turn on developer mode's debug
+# switch, which shows household content in the logs. Only a Jarida test Pond should say on.
+action_test_pond() { # $1 = "" | on | off | status
+  head1 "Test Pond (developer mode)"
+  local sub="${1:-status}" user bin
+  case "$sub" in
+    on|off|status) ;;
+    *) bad "test-pond takes on, off or status, not: $sub"; return 2 ;;
+  esac
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    bad "no pond-server binary yet; build it first (bash scripts/giap.sh build)"; return 1
+  fi
+  if [ "$sub" = on ]; then
+    confirm "Mark this pond as a test Pond? A paired phone may then make its logs show what the household says." || return 1
+  fi
+  if [ "$DRY_RUN" = true ] && [ "$sub" != status ]; then info "dry run: nothing changed"; return 0; fi
+  # The mark lives in the data directory, so it is written as the account that owns it.
+  if [ "$user" = "$(id -un)" ]; then
+    POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  else
+    sudo -u "$user" env POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  fi
 }
 
 # `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
@@ -2506,8 +2596,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant`, `time-sync`, `admin-card`, `service-account` (a subcommand) and
-# `console` (a host) take more.
+# `onnxruntime`, `wifi-grant`, `time-sync`, `data-encrypt`, `admin-card`, `test-pond`,
+# `service-account` (a subcommand) and `console` (a host) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2532,7 +2622,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert|kv|swap) ;;
-  ctx|context|n_ctx|models|wifi-grant|time-sync|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  ctx|context|n_ctx|models|wifi-grant|time-sync|data-encrypt|onnxruntime|console|admin-card|test-pond|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -2555,6 +2645,7 @@ case "$CMD" in
   build)     action_build_ui; action_build_server ;;
   update)    action_update ;;
   build-ui)  action_build_ui ;;
+  go)        action_go ;;
   build-desktop) action_build_desktop ;;
   deploy)    action_deploy ;;
   logs)      action_logs ;;
@@ -2566,7 +2657,9 @@ case "$CMD" in
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
   time-sync) action_time_sync "$CMD_SUB" ;;
+  data-encrypt) action_data_encrypt "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
+  test-pond) action_test_pond "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
   swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;

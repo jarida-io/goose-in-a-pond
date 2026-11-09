@@ -210,6 +210,8 @@ const REPORT: LongTaskReport = {
   sections: 2,
   sources: [{ title: "KRA", url: "https://www.kra.go.ke/" }],
   calendar_events: 0,
+  options: [],
+  images: [],
 };
 
 const readButton = () => screen.getByRole("button", { name: "Read the result" });
@@ -237,6 +239,7 @@ describe("reading the whole report", () => {
     expect(within(dialog).getByRole("heading", { name: "Income tax" }).tagName).toBe("H3");
     expect(within(dialog).getByRole("table")).toBeTruthy();
     expect(within(dialog).getByRole("checkbox", { name: "passport" }).getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(within(dialog).getByRole("button", { name: "1 source" }));
     expect(within(dialog).getByRole("link", { name: "KRA" }).getAttribute("target")).toBe("_blank");
     expect(within(dialog).getByText("2 sections, 1 source")).toBeTruthy();
   });

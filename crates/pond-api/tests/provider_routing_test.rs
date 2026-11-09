@@ -301,6 +301,7 @@ async fn make_app_with_provider(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
@@ -660,6 +661,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 
@@ -793,6 +795,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 

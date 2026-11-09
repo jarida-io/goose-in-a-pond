@@ -9,6 +9,9 @@ pub mod knowledge;
 pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
+pub mod page_data;
+pub mod report_images;
+pub mod saved_items;
 pub mod schedule;
 pub mod secrets;
 pub mod sensors;
@@ -18,8 +21,11 @@ pub mod toolkit;
 pub mod travel;
 pub mod vision;
 pub mod weather;
+pub mod web_form;
 pub mod web_page;
 pub mod web_search;
+pub mod web_watch;
+pub mod web_watch_runner;
 pub mod wolfram;
 
 // ── Shared utilities for Knowledge-family servers ───────────────────────────
@@ -197,7 +203,7 @@ pub use orchestrator::{
 pub use secrets::{init_secret_deps, secret, tools_withheld_for_missing_secrets};
 pub use sensors::{init_sensor_deps, spawn_sensor_server};
 pub use session_meta::{session_from_meta, SESSION_ID_META_KEY};
-pub use system::spawn_system_server;
+pub use system::{init_system_deps, spawn_system_server};
 pub use toolkit::{init_toolkit_deps, spawn_toolkit_server};
 pub use travel::{init_travel_deps, spawn_travel_server, TRAVEL_EXTENSION};
 pub use vision::{init_vision_deps, spawn_vision_server, vision_runtime_context, VisionMcpServer};

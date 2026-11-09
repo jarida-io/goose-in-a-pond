@@ -10,6 +10,8 @@ import { centreUnreadCount } from "../state/householdNotices";
 
 import { Dashboard } from "../sections/Dashboard";
 import { Chat } from "../sections/Chat";
+import { Saved } from "../sections/Saved";
+import { Watches } from "../sections/Watches";
 import { Devices } from "../sections/Devices";
 import { Mesh } from "../sections/Mesh";
 import { Pairing } from "../sections/Pairing";
@@ -30,6 +32,8 @@ function SectionContent({ section }: { section: GuiSection }) {
   switch (section) {
     case "dashboard": return <Dashboard />;
     case "chat":      return <Chat />;
+    case "saved":     return <Saved />;
+    case "watches":   return <Watches />;
     case "devices":   return <Devices />;
     case "mesh":      return <Mesh />;
     case "pairing":   return <Pairing />;

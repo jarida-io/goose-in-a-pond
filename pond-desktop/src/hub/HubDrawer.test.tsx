@@ -1,6 +1,6 @@
 // The drawer is live from first paint, so it's tested in the pre-load store state as well as loaded.
 
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 
 const home = {
@@ -76,5 +76,16 @@ describe("quick routines", () => {
     open();
     expect(screen.getByText("Quick routines")).toBeTruthy();
     expect(screen.getByText("Sunset Bath")).toBeTruthy();
+  });
+});
+
+describe("the pond group", () => {
+  it("reaches what the pond keeps for the member: saved cards and web watches", () => {
+    const onNavigate = vi.fn();
+    render(<HubDrawer open onClose={() => {}} active="watches" onNavigate={onNavigate} />);
+    fireEvent.click(screen.getByRole("button", { name: "Saved" }));
+    expect(onNavigate).toHaveBeenCalledWith({ kind: "section", section: "saved" });
+    fireEvent.click(screen.getByRole("button", { name: "Watches" }));
+    expect(onNavigate).toHaveBeenCalledWith({ kind: "section", section: "watches" });
   });
 });

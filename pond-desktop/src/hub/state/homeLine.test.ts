@@ -125,7 +125,7 @@ describe("what is on", () => {
 
   it("does not count a light that never said", () => {
     const d = [dev({ id: "A", kind: "light" })];
-    expect(line(d)).toBe("Partly cloudy, 64° out.");
+    expect(line(d)).toBe("Partly cloudy, 64°C out.");
   });
 
   it("says everything is off when every light said so", () => {
@@ -139,20 +139,20 @@ describe("what is on", () => {
 
 describe("a pond with no devices in it", () => {
   it("talks about the sky rather than the empty house", () => {
-    expect(line([])).toBe("Partly cloudy, 64° out.");
+    expect(line([])).toBe("Partly cloudy, 64°C out.");
   });
 
   it("says so when it is raining", () => {
     const wet = { ...weather, cond: "Light rain" };
     expect(homeLine({ user: "Jerry", devices: [], weather: wet, now: at(15) })).toBe(
-      "Light rain out, and 64°.",
+      "Light rain out, and 64°C.",
     );
   });
 
   it("reads differently in the morning", () => {
     const clear = { ...weather, cond: "Clear" };
     expect(homeLine({ user: "Jerry", devices: [], weather: clear, now: at(8) })).toBe(
-      "Clear and 64° this morning.",
+      "Clear and 64°C this morning.",
     );
   });
 

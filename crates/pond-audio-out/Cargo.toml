@@ -20,3 +20,6 @@ tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 # rodio is isolated to this crate — playback must not leak into every crate
 # that happens to want to make a sound.
 rodio = "0.19"
+
+[dev-dependencies]
+pond-ear = { workspace = true }

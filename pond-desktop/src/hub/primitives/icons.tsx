@@ -16,6 +16,14 @@ export const HP_PATHS = {
   // drops. The hand-drawn cloud it replaces bulged to y -0.6 and x 0.2, past the 24-unit viewBox,
   // so the SVG clipped its top and left on every rainy day; icons.test.ts holds the bounds.
   rain:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 18l-1 3M12 18l-1 3M16 18l-1 3",
+  // Lucide's cloud-snow, cloud-lightning and cloud-fog on the same cloud as `rain`, and its
+  // cloud-moon for a partly cloudy night: the Pond sent rain's cloud for snow and a storm.
+  // Lucide's cloud-drizzle on the same cloud: drizzle is lighter than rain, and the phone draws it so.
+  drizzle:     "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 19v1M8 14v1M16 19v1M16 14v1M12 21v1M12 16v1",
+  snow:        "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M8 15h.01M8 19h.01M12 17h.01M12 21h.01M16 15h.01M16 19h.01",
+  storm:       "M6 16.3A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 .5 8.97M13 12l-3 5h4l-3 5",
+  fog:         "M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.24M16 17H7M17 21H9",
+  cloudMoon:   "M10.19 8.5A6 6 0 0 1 16 4a1 1 0 0 0 6 6 6 6 0 0 1-3 5.2M13 16a3 3 0 1 1 0 6H7a5 5 0 1 1 4.9-6Z",
   music:       "M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
   play:        "M6 4l14 8-14 8V4z",
   skipF:       "M5 4l10 8-10 8V4zM19 5v14",
@@ -43,6 +51,8 @@ export const HP_PATHS = {
   mic:         "rect:9,2,6,12,3 path:M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8", // compound — use micEl below
   // Home header icons
   chat:        "M21 12a8 8 0 0 1-11.5 7.2L4 21l1.8-5.4A8 8 0 1 1 21 12z",
+  bookmark:    "M19 21l-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
+  eye:         "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
   keyboard:    "M4 6h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM7 10h.01M11 10h.01M15 10h.01M17 10h.01M7 13h.01M17 13h.01M9 13h6",
   // Rail icons (from goose-hub-shell.jsx)
   railHome:     "M3 9.6L12 3l9 6.6V20a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z",

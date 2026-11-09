@@ -1,7 +1,12 @@
 //! `read_web_page` for `giap-knowledge`: one page fetched through the public-only client, its
 //! content turned into Markdown lines and broken into parts. With a question it quotes the lines
-//! that answer it, grouped by part; with a part number, that part whole. Only an address the
-//! person wrote, a task's goal names or a search found is fetched (`page_addresses`).
+//! that answer it, grouped by part; with a part number, that part whole. Beside them it lists the
+//! items the page's structured data carries, its search forms, and the links the question names.
+//! Only an address the person wrote, a task's goal names, a search found, or a link or form on a
+//! page read from those, on its own site and within two clicks, is fetched (`page_addresses`).
+//! A POST form is never fetched here: it waits for the member's yes on their phone (`web_form`).
+//! Each read goes into the session's source ledger, which also holds a conversation turn to
+//! three pages.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -10,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
 use pond_core::mcp::domain::transient_result::{transient_meta, web_page_stub};
-use pond_core::mcp::services::page_addresses;
+use pond_core::mcp::services::page_addresses::{self, MAX_LINK_DEPTH};
+use pond_core::mcp::services::source_ledger::{self, MAX_CHAT_TURN_READS};
 use pond_core::shared::services::passages;
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -24,6 +30,7 @@ use serde_json::Value;
 
 use crate::format::{format_api_error, format_dead_end};
 use crate::knowledge::KnowledgeMcpServer;
+use crate::page_data::{self, PageData};
 use crate::web_search::{self, bounded_html, Sink};
 
 /// The tool this module serves, as the egress record attributes it.
@@ -32,7 +39,7 @@ const TOOL_NAME: &str = "read_web_page";
 const SEARCH_WEB_TOOL: &str = "giap-knowledge__search_web";
 
 /// Longer than a search gives each page: this read is the whole of the call.
-const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parsing one page off the async workers, at most.
 const EXTRACT_DEADLINE: Duration = Duration::from_secs(4);
@@ -56,11 +63,25 @@ const MAX_TITLE_BYTES: usize = 120;
 const OUTLINE_PARTS: usize = 12;
 const MAX_PART_NAME_BYTES: usize = 40;
 
+/// Links of one page noted as readable, beside its items' own: the address book is shared.
+const NOTED_LINKS: usize = 40;
+
+/// Items a reply lists at most, and their bytes: about 400 tokens.
+const MAX_SHOWN_ITEMS: usize = 15;
+const ITEMS_BYTES: usize = 1_600;
+
+/// Links a reply offers at most, those the question names.
+const MAX_SHOWN_LINKS: usize = 6;
+
+/// One form's line at most: a long option list is cut.
+const FORM_LINE_BYTES: usize = 600;
+const SHOWN_OPTIONS: usize = 12;
+
 /// Pages kept parsed, so asking for a part after a question costs no second fetch.
 const CACHED_PAGES: usize = 8;
 const CACHE_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
-const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain;q=0.8";
+pub(crate) const ACCEPT: &str = "text/html,application/xhtml+xml,text/plain;q=0.8";
 
 const URL_ALIASES: &[&str] = &[
     "address", "link", "page", "href", "source", "site", "website", "uri",
@@ -72,7 +93,8 @@ const PART_ALIASES: &[&str] = &["section", "part_number", "page_part", "number"]
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ReadWebPageParams {
-    /// The link the person gave, or a source's domain from search_web.
+    /// The link the person gave, a source's domain from search_web, or a link or filled-in
+    /// search form a page read with this tool listed.
     #[schemars(with = "String")]
     pub url: Option<String>,
     /// What to find on the page, in the person's own words.
@@ -135,11 +157,12 @@ impl ReadWebPageParams {
 #[tool_router(router = web_page_tool_router, vis = "pub")]
 impl KnowledgeMcpServer {
     #[tool(description = "\
-Read a web page: a link the person gave, or a source search_web found, by its domain. Returns \
-the lines that answer the question, or one part whole.")]
+Read a web page: a link the person gave, a source search_web found (by its domain), or a link \
+or search form a page read here listed. Returns the lines that answer the question, or one part \
+whole, and what the page lists.")]
     async fn read_web_page(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<ReadWebPageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool(TOOL_NAME);
@@ -151,8 +174,34 @@ the lines that answer the question, or one part whole.")]
                  person gave, or to a source's domain as search_web showed it.",
             ));
         }
-        let address = match page_addresses::global().resolve(&asked_address) {
-            Some(address) => address,
+        let session = crate::session_from_meta(&ctx.meta);
+        let ledger = source_ledger::global();
+        let turn_reads = session.as_deref().and_then(|s| ledger.turn_reads(s));
+        if turn_reads.is_some_and(|n| n >= MAX_CHAT_TURN_READS) {
+            tracing::info!(target: "giap::trace", kind = "web_page_turn_cap", reads = MAX_CHAT_TURN_READS);
+            return Ok(text_result(&turn_cap_reached()));
+        }
+        let book = page_addresses::global();
+        let mut answer_note = None;
+        let found = match book.resolve_with_depth(&asked_address) {
+            Some(found) => Some(found),
+            None => match book.post_request(&asked_address) {
+                Some(request) => match crate::web_form::ask_to_send(&ctx.meta, request).await {
+                    crate::web_form::FormAnswer::Said(text) => return Ok(text_result(&text)),
+                    crate::web_form::FormAnswer::Read {
+                        address,
+                        depth,
+                        note,
+                    } => {
+                        answer_note = Some(note);
+                        Some((address, depth))
+                    }
+                },
+                None => None,
+            },
+        };
+        let (address, depth) = match found {
+            Some(found) => found,
             None => {
                 // The host only: the rest of an address nobody gave may be the data it carries.
                 tracing::info!(
@@ -169,7 +218,7 @@ the lines that answer the question, or one part whole.")]
         let started = Instant::now();
         let (page, cached) = match cached_page(&address) {
             Some(page) => (page, true),
-            None => match read_page(&address).await {
+            None => match read_page(&address, depth).await {
                 Ok(page) => {
                     let page = Arc::new(page);
                     cache_page(&address, page.clone());
@@ -179,13 +228,27 @@ the lines that answer the question, or one part whole.")]
             },
         };
         let request = Request::from(&params);
-        let reply = page.reply(&request);
+        let mut reply = page.reply_as(&request, turn_reads.map(|n| n + 1));
+        if let Some(note) = answer_note {
+            reply.text = format!("{note}\n{}", reply.text);
+        }
+        let source = session.as_deref().map(|s| {
+            let site = web_search::domain_of(&page.address);
+            ledger.record(s, &page.address, &page.title, &site, reply.used.clone())
+        });
         tracing::info!(
             target: "giap::trace",
             kind = "web_page",
             host = %web_search::domain_of(&page.address),
             lines = page.lines.len(),
             parts = page.parts.len(),
+            items = page.data.items.len(),
+            items_from = page.data.items_from.map(|f| f.as_str()).unwrap_or("none"),
+            links = page.data.links.len(),
+            forms = page.data.forms.len(),
+            depth,
+            source = source.unwrap_or(0),
+            turn_read = turn_reads.map_or(0, |n| n + 1),
             mode = reply.mode,
             bytes = reply.text.len(),
             cached,
@@ -202,10 +265,81 @@ fn text_result(text: &str) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text.to_string())])
 }
 
+/// What a conversation turn hears after its last read.
+fn last_read_note() -> String {
+    format!(
+        "That was this turn's last page ({MAX_CHAT_TURN_READS} is the most a conversation turn \
+         reads). Answer now from what you have. If there is clearly more to find, offer to keep \
+         exploring as a long task."
+    )
+}
+
+/// What a conversation turn hears when it asks for a page past its last.
+fn turn_cap_reached() -> String {
+    format_dead_end(
+        "reading another page",
+        &format!(
+            "This turn has read {MAX_CHAT_TURN_READS} pages, the most a conversation turn reads. \
+             Answer from what you have, and if there is clearly more to find, offer to keep \
+             exploring as a long task."
+        ),
+    )
+}
+
+/// An item as one line: its title, then what it states of price, distance, year and link.
+fn item_row(item: &page_data::Item) -> String {
+    let mut fields = vec![item.title.clone()];
+    if let Some(price) = &item.price {
+        fields.push(match &item.currency {
+            Some(currency) if !price.contains(currency.as_str()) => format!("{currency} {price}"),
+            _ => price.clone(),
+        });
+    }
+    if let Some(mileage) = &item.mileage {
+        fields.push(mileage.clone());
+    }
+    if let Some(year) = item
+        .year
+        .as_ref()
+        .filter(|y| !item.title.contains(y.as_str()))
+    {
+        fields.push(year.clone());
+    }
+    if let Some(link) = &item.link {
+        fields.push(link.clone());
+    }
+    fields.join(" | ")
+}
+
+/// A form field as the reader fills it.
+fn field_words(field: &page_addresses::FormField) -> String {
+    use page_addresses::FormField;
+    match field {
+        FormField::Text(name) => format!("{name} (text)"),
+        FormField::Choice { name, options } => {
+            let shown: Vec<&str> = options
+                .iter()
+                .map(String::as_str)
+                .filter(|o| !o.is_empty())
+                .take(SHOWN_OPTIONS)
+                .collect();
+            let more = options.len().saturating_sub(shown.len());
+            let tail = if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            };
+            format!("{name} (one of: {}{tail})", shown.join(", "))
+        }
+        FormField::Fixed { name, value } => format!("{name} (keep as {value})"),
+    }
+}
+
 fn unknown_address(searchable: bool) -> String {
     let why = if searchable {
         format!(
-            "I read only a page whose address the person gave or a search found. Find it with \
+            "I read only a page whose address the person gave or a search found, or a link or \
+             search form on a page read from those, on that page's own site. Find it with \
              {SEARCH_WEB_TOOL}, then read one of its sources by its domain."
         )
     } else {
@@ -221,8 +355,9 @@ enum Body {
     Text(String),
 }
 
-/// The page at `address`, read and broken into parts; the model's text for why not.
-async fn read_page(address: &str) -> Result<Page, String> {
+/// The page at `address`, `depth` clicks from one given outright, read and broken into parts;
+/// the model's text for why not.
+async fn read_page(address: &str, depth: u8) -> Result<Page, String> {
     let Some(client) = web_search::page_client() else {
         return Err(format_api_error(
             "Reading the page",
@@ -232,11 +367,13 @@ async fn read_page(address: &str) -> Result<Page, String> {
     let (final_address, body) = fetch(client, address).await?;
     let fallback_title = web_search::domain_of(&final_address);
     let parsing = tokio::task::spawn_blocking(move || {
-        let (title, lines) = match body {
-            Body::Html(html) => lines_from_html(&html),
-            Body::Text(text) => (String::new(), lines_from_text(&text)),
+        let (title, lines, data) = match body {
+            Body::Html(html) => parse_html(&html, &final_address),
+            Body::Text(text) => (String::new(), lines_from_text(&text), PageData::default()),
         };
         Page::new(final_address, title, fallback_title, lines)
+            .with_data(data)
+            .at_depth(depth)
     });
     let page = match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
         Ok(Ok(page)) => page,
@@ -247,7 +384,7 @@ async fn read_page(address: &str) -> Result<Page, String> {
             ))
         }
     };
-    if page.lines.is_empty() {
+    if page.lines.is_empty() && page.data.items.is_empty() {
         return Err(format_dead_end(
             "reading that page",
             "The page has no text the pond can read: it may be built in the browser by \
@@ -255,21 +392,146 @@ async fn read_page(address: &str) -> Result<Page, String> {
         ));
     }
     // A redirect's end came from the site, not the model, so it may be read again by name.
-    page_addresses::global().note_source(&page.address, &page.title);
+    let book = page_addresses::global();
+    book.note_read(&page.address, &page.title, depth);
+    book.note_links_from(&page.address, depth, &page.followable());
+    book.note_forms_from(&page.address, depth, page.data.forms.clone());
+    if let Some(image) = &page.data.preview_image {
+        pond_core::shared::services::report_images::note_preview(&page.address, image);
+    }
     Ok(page)
 }
 
+/// Keeps a sent form's answer as a page read at `depth`, so the conversation reads it from the
+/// cache: a POST's answer may not come back to a plain read of its address. Returns its title.
+pub(crate) async fn keep_answer(address: String, html: String, depth: u8) -> String {
+    let fallback_title = web_search::domain_of(&address);
+    let parsing = tokio::task::spawn_blocking(move || {
+        let (title, lines, data) = parse_html(&html, &address);
+        Page::new(address, title, fallback_title, lines)
+            .with_data(data)
+            .at_depth(depth)
+    });
+    let Ok(Ok(page)) = tokio::time::timeout(EXTRACT_DEADLINE, parsing).await else {
+        return String::new();
+    };
+    let book = page_addresses::global();
+    book.note_read(&page.address, &page.title, depth);
+    book.note_links_from(&page.address, depth, &page.followable());
+    book.note_forms_from(&page.address, depth, page.data.forms.clone());
+    let title = page.title.clone();
+    let address = page.address.clone();
+    cache_page(&address, Arc::new(page));
+    title
+}
+
+/// The forms of a page's HTML, as a read would list them.
+pub(crate) async fn forms_on(address: String, html: String) -> Vec<page_addresses::SearchForm> {
+    let parsing = tokio::task::spawn_blocking(move || {
+        let Ok(base) = reqwest::Url::parse(&address) else {
+            return Vec::new();
+        };
+        let document = bounded_html::parse_within(
+            &html,
+            web_search::MAX_NODES_PER_PAGE,
+            web_search::PARSE_TIME_PER_PAGE,
+        );
+        page_data::forms_of(&document, &base)
+    });
+    match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
+        Ok(Ok(forms)) => forms,
+        _ => Vec::new(),
+    }
+}
+
+/// Why a page could not be fetched, kept apart so a watch can back off on a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchFailure {
+    NotAnAddress,
+    NotPublic,
+    Unreachable(String),
+    Status(u16),
+    StoppedArriving,
+    NotAPage(String),
+}
+
+impl FetchFailure {
+    /// The failure as the model reads it.
+    fn text(&self) -> String {
+        let what = "reading that page";
+        match self {
+            FetchFailure::NotAnAddress => format_dead_end(what, "That is not a web address."),
+            FetchFailure::NotPublic => format_dead_end(
+                what,
+                "That address is not on the public web, and the pond reads only public pages.",
+            ),
+            FetchFailure::Unreachable(why) => format_api_error("Reading the page", why),
+            FetchFailure::Status(code) => {
+                let why = match code {
+                    404 | 410 => "There is no page at that address.".to_string(),
+                    401 | 403 => "The site would not let the pond read the page.".to_string(),
+                    429 => "The site asked the pond to wait before reading more.".to_string(),
+                    code => format!("The site answered HTTP {code}."),
+                };
+                format_dead_end(what, &why)
+            }
+            FetchFailure::StoppedArriving => {
+                format_api_error("Reading the page", "the page stopped arriving")
+            }
+            FetchFailure::NotAPage(mime) => format_dead_end(
+                what,
+                &format!("That address is a file ({mime}), not a web page."),
+            ),
+        }
+    }
+}
+
+/// A watched page as a check reads it: where it ended, its title and its items.
+#[derive(Debug, Clone)]
+pub struct WatchedPage {
+    pub address: String,
+    pub title: String,
+    pub items: Vec<page_data::Item>,
+}
+
+/// Reads a watched page fresh, past the cache, for its items. The address was resolved when the
+/// member set the watch up, so the address book is not asked again.
+pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
+    let client = web_search::page_client()
+        .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
+    let (final_address, body) = fetch_page(client, address).await?;
+    let parsing = tokio::task::spawn_blocking(move || {
+        let (title, _, data) = match body {
+            Body::Html(html) => parse_html(&html, &final_address),
+            Body::Text(_) => (String::new(), Vec::new(), PageData::default()),
+        };
+        WatchedPage {
+            address: final_address,
+            title,
+            items: data.items,
+        }
+    });
+    match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
+        Ok(Ok(page)) => Ok(page),
+        _ => Err(FetchFailure::Unreachable(
+            "the page was too large to read in time".into(),
+        )),
+    }
+}
+
 async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body), String> {
-    let what = "reading that page";
-    let parsed = reqwest::Url::parse(address)
-        .map_err(|_| format_dead_end(what, "That is not a web address."))?;
+    fetch_page(client, address).await.map_err(|f| f.text())
+}
+
+async fn fetch_page(
+    client: &reqwest::Client,
+    address: &str,
+) -> Result<(String, Body), FetchFailure> {
+    let parsed = reqwest::Url::parse(address).map_err(|_| FetchFailure::NotAnAddress)?;
     let host = parsed.host_str().unwrap_or_default().to_string();
     if let Err(refused) = pond_net::public_only::check_target(&parsed) {
         tracing::info!(target: "giap::trace", kind = "web_page_refused", host = %host, %refused);
-        return Err(format_dead_end(
-            what,
-            "That address is not on the public web, and the pond reads only public pages.",
-        ));
+        return Err(FetchFailure::NotPublic);
     }
     let response = crate::http::traced_get_with(client, address, |b| {
         b.timeout(PAGE_TIMEOUT)
@@ -278,17 +540,11 @@ async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body)
     .await
     .map_err(|e| {
         tracing::info!(target: "giap::trace", kind = "web_page_unread", host = %host, error = %e);
-        format_api_error("Reading the page", &web_search::describe_failure(&e))
+        FetchFailure::Unreachable(web_search::describe_failure(&e))
     })?;
     let status = response.status();
     if !status.is_success() {
-        let why = match status.as_u16() {
-            404 | 410 => "There is no page at that address.".to_string(),
-            401 | 403 => "The site would not let the pond read the page.".to_string(),
-            429 => "The site asked the pond to wait before reading more.".to_string(),
-            code => format!("The site answered HTTP {code}."),
-        };
-        return Err(format_dead_end(what, &why));
+        return Err(FetchFailure::Status(status.as_u16()));
     }
     let final_address = response.url().to_string();
     let mime = response
@@ -301,16 +557,11 @@ async fn fetch(client: &reqwest::Client, address: &str) -> Result<(String, Body)
     let plain = match mime.as_str() {
         "text/html" | "application/xhtml+xml" | "" => false,
         "text/plain" | "text/markdown" => true,
-        other => {
-            return Err(format_dead_end(
-                what,
-                &format!("That address is a file ({other}), not a web page."),
-            ))
-        }
+        other => return Err(FetchFailure::NotAPage(other.to_string())),
     };
     let body = web_search::read_capped(response, web_search::PAGE_BYTE_CAP)
         .await
-        .ok_or_else(|| format_api_error("Reading the page", "the page stopped arriving"))?;
+        .ok_or(FetchFailure::StoppedArriving)?;
     let body = if plain {
         Body::Text(body)
     } else {
@@ -504,27 +755,46 @@ impl Lines {
     }
 }
 
+/// The page's title, its content as lines, and what it carries beside them.
+fn parse_html(html: &str, address: &str) -> (String, Vec<Line>, PageData) {
+    let document = bounded_html::parse_within(
+        html,
+        web_search::MAX_NODES_PER_PAGE,
+        web_search::PARSE_TIME_PER_PAGE,
+    );
+    let data = reqwest::Url::parse(address)
+        .map(|base| page_data::page_data(&document, &base))
+        .unwrap_or_default();
+    let (title, lines) = lines_of(&document);
+    (title, lines, data)
+}
+
 /// The page's title and its content as lines, boilerplate dropped as a search's pages are.
+#[cfg(test)]
 fn lines_from_html(html: &str) -> (String, Vec<Line>) {
     let document = bounded_html::parse_within(
         html,
         web_search::MAX_NODES_PER_PAGE,
         web_search::PARSE_TIME_PER_PAGE,
     );
-    let strict = web_search::walk::<Lines>(&document, true).lines;
+    lines_of(&document)
+}
+
+fn lines_of(document: &scraper::Html) -> (String, Vec<Line>) {
+    let strict = web_search::walk::<Lines>(document, true).lines;
     // Readability's retry, as `extract_blocks` makes it: too little text means the class test
     // dropped the content's own container.
     let lines = if text_bytes(&strict) >= web_search::READABILITY_CHAR_THRESHOLD {
         strict
     } else {
-        let lenient = web_search::walk::<Lines>(&document, false).lines;
+        let lenient = web_search::walk::<Lines>(document, false).lines;
         if text_bytes(&lenient) > text_bytes(&strict) {
             lenient
         } else {
             strict
         }
     };
-    (title_of(&document), lines)
+    (title_of(document), lines)
 }
 
 fn title_of(document: &scraper::Html) -> String {
@@ -562,6 +832,9 @@ struct Page {
     title: String,
     lines: Vec<Line>,
     parts: Vec<Range<usize>>,
+    data: PageData,
+    /// Clicks from an address given outright; at [`MAX_LINK_DEPTH`] its links lead nowhere.
+    depth: u8,
 }
 
 /// What the call asked of the page.
@@ -583,6 +856,8 @@ impl From<&ReadWebPageParams> for Request {
 struct Reply {
     text: String,
     mode: &'static str,
+    /// The page's lines the reply gave, for the source ledger.
+    used: Vec<String>,
 }
 
 impl Page {
@@ -602,15 +877,81 @@ impl Page {
             title,
             lines,
             parts,
+            data: PageData::default(),
+            depth: 0,
         }
     }
 
+    fn with_data(mut self, data: PageData) -> Self {
+        self.data = data;
+        self
+    }
+
+    fn at_depth(mut self, depth: u8) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// The links a reader may follow from here, with their names: its items', then the first of
+    /// its content's, on its own site; none once the next click would pass the depth.
+    fn followable(&self) -> Vec<(String, String)> {
+        if self.depth >= MAX_LINK_DEPTH {
+            return Vec::new();
+        }
+        let items = self
+            .data
+            .items
+            .iter()
+            .filter_map(|i| i.link.clone().map(|l| (l, i.title.clone())));
+        let links = self
+            .data
+            .links
+            .iter()
+            .map(|l| (l.address.clone(), l.text.clone()));
+        let mut seen = HashSet::new();
+        items
+            .chain(links.take(NOTED_LINKS))
+            .filter(|(a, _)| page_addresses::same_site(a, &self.address))
+            .filter(|(a, _)| seen.insert(a.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
     fn reply(&self, request: &Request) -> Reply {
+        self.reply_as(request, None)
+    }
+
+    /// The reply, with what the page carries beside its text, and a word on the turn's reads
+    /// when `turn_read` is the last one a conversation turn may make.
+    fn reply_as(&self, request: &Request, turn_read: Option<usize>) -> Reply {
+        let mut reply = self.text_reply(request);
+        let first = request.part.is_none_or(|n| n == 1);
+        if first {
+            reply.text.push_str(&self.items_text(&request.question));
+            reply.text.push_str(&self.forms_text());
+        }
+        if request.part.is_none() {
+            reply.text.push_str(&self.links_text(&request.question));
+        }
+        if turn_read.is_some_and(|n| n >= MAX_CHAT_TURN_READS) {
+            reply.text.push_str(&format!("\n{}", last_read_note()));
+        }
+        reply
+    }
+
+    fn text_reply(&self, request: &Request) -> Reply {
+        let lines = |range: &Range<usize>| -> Vec<String> {
+            self.lines[range.clone()]
+                .iter()
+                .map(|l| l.text.clone())
+                .collect()
+        };
         if let Some(n) = request.part {
             return match self.parts.get(n - 1) {
                 Some(range) => Reply {
                     text: self.part_text(n, range),
                     mode: "part",
+                    used: lines(range),
                 },
                 None => Reply {
                     text: format!(
@@ -622,6 +963,7 @@ impl Page {
                         self.outline()
                     ),
                     mode: "no_such_part",
+                    used: Vec::new(),
                 },
             };
         }
@@ -629,18 +971,139 @@ impl Page {
             return Reply {
                 text: self.whole_text(),
                 mode: "whole",
+                used: lines(&(0..self.lines.len())),
             };
         }
         match self.quote(&request.question) {
-            Some(text) => Reply {
+            Some((text, used)) => Reply {
                 text,
                 mode: "question",
+                used,
             },
             None => Reply {
                 text: self.part_text(1, &self.parts[0]),
                 mode: "first_part",
+                used: lines(&self.parts[0]),
             },
         }
+    }
+
+    /// The page's listed items, those the question names first, within [`ITEMS_BYTES`].
+    fn items_text(&self, question: &str) -> String {
+        let items = &self.data.items;
+        if items.is_empty() {
+            return String::new();
+        }
+        let rows: Vec<String> = items.iter().map(item_row).collect();
+        let mut order: Vec<usize> = Vec::new();
+        if !question.trim().is_empty() {
+            order.extend(
+                passages::rank(question, &rows)
+                    .into_iter()
+                    .filter(|r| r.score > 0.0)
+                    .map(|r| r.index),
+            );
+        }
+        let ranked: HashSet<usize> = order.iter().copied().collect();
+        order.extend((0..rows.len()).filter(|i| !ranked.contains(i)));
+        let mut shown = Vec::new();
+        let mut used = 0;
+        for i in order {
+            let cost = rows[i].len() + 5;
+            if shown.len() == MAX_SHOWN_ITEMS || used + cost > ITEMS_BYTES {
+                break;
+            }
+            used += cost;
+            shown.push(i);
+        }
+        shown.sort_unstable();
+        let mut out = format!(
+            "\nListed on this page, from its own data ({} of {}):",
+            shown.len(),
+            items.len()
+        );
+        for (n, i) in shown.into_iter().enumerate() {
+            out.push_str(&format!("\n{}. {}", n + 1, rows[i]));
+        }
+        if self.depth < MAX_LINK_DEPTH {
+            out.push_str("\nTo read one, call read_web_page with its link.");
+        }
+        out
+    }
+
+    /// Links on the page's own site that the question names, which may be read next.
+    fn links_text(&self, question: &str) -> String {
+        if self.depth >= MAX_LINK_DEPTH || question.trim().is_empty() {
+            return String::new();
+        }
+        let item_links: HashSet<&str> = self
+            .data
+            .items
+            .iter()
+            .filter_map(|i| i.link.as_deref())
+            .collect();
+        let links: Vec<&page_data::Link> = self
+            .data
+            .links
+            .iter()
+            .take(NOTED_LINKS)
+            .filter(|l| page_addresses::same_site(&l.address, &self.address))
+            .filter(|l| !item_links.contains(l.address.as_str()))
+            .collect();
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        let picked: Vec<&page_data::Link> = passages::rank(question, &texts)
+            .into_iter()
+            .filter(|r| r.score > 0.0)
+            .take(MAX_SHOWN_LINKS)
+            .map(|r| links[r.index])
+            .collect();
+        if picked.is_empty() {
+            return String::new();
+        }
+        let mut out =
+            String::from("\nLinks on this page that may say more (read one by its link):");
+        for link in picked {
+            out.push_str(&format!("\n- {}: {}", link.text, link.address));
+        }
+        out
+    }
+
+    /// The page's forms, as addresses a reader may fill in. A POST form's hidden fields are left
+    /// out: the pond fills them in fresh when it sends.
+    fn forms_text(&self) -> String {
+        if self.depth >= MAX_LINK_DEPTH {
+            return String::new();
+        }
+        let forms: Vec<&page_addresses::SearchForm> = self
+            .data
+            .forms
+            .iter()
+            .filter(|f| page_addresses::same_site(&f.action, &self.address))
+            .collect();
+        if forms.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(
+            "\nForms on this page. To use one, call read_web_page with the form's address and a \
+             query of its own fields, such as ?field=value&other=value; set fields only:",
+        );
+        for form in forms {
+            let posts = form.method == page_addresses::FormMethod::Post;
+            let fields: Vec<String> = form
+                .fields
+                .iter()
+                .filter(|f| !(posts && matches!(f, page_addresses::FormField::Fixed { .. })))
+                .map(field_words)
+                .collect();
+            let how = if posts {
+                " (POST: sent only after the person says yes on their phone)"
+            } else {
+                ""
+            };
+            let line = format!("\n- {}{how}: {}", form.action, fields.join("; "));
+            out.push_str(&passages::clip(&line, FORM_LINE_BYTES));
+        }
+        out
     }
 
     fn header(&self) -> String {
@@ -681,7 +1144,7 @@ impl Page {
 
     /// The lines that answer `question` within [`ANSWER_BYTES`], in page order under their parts;
     /// `None` when no line shares a word or an answer's shape with it.
-    fn quote(&self, question: &str) -> Option<String> {
+    fn quote(&self, question: &str) -> Option<(String, Vec<String>)> {
         let eligible: Vec<usize> = (0..self.lines.len())
             .filter(|&i| self.lines[i].is_quotable())
             .collect();
@@ -711,6 +1174,7 @@ impl Page {
             return None;
         }
         chosen.sort_unstable();
+        let used = chosen.iter().map(|&i| self.lines[i].text.clone()).collect();
         let mut out = format!("{}\nLines that answer: {}", self.header(), echo(question));
         let mut last_part = None;
         let mut last_section: Option<&str> = None;
@@ -732,7 +1196,7 @@ impl Page {
         }
         out.push('\n');
         out.push_str(&self.outline());
-        Some(out)
+        Some((out, used))
     }
 
     fn part_of(&self, index: usize) -> usize {
@@ -810,7 +1274,193 @@ fn echo(question: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pond_core::mcp::services::page_addresses::PageAddresses;
+    use pond_core::mcp::services::page_addresses::{
+        FormField, FormMethod, PageAddresses, SearchForm,
+    };
+
+    fn listing(depth: u8) -> Page {
+        let item = |title: &str, price: &str, link: &str| page_data::Item {
+            title: title.into(),
+            price: Some(price.into()),
+            currency: Some("KES".into()),
+            link: Some(link.into()),
+            ..Default::default()
+        };
+        let data = PageData {
+            items: vec![
+                item("2016 Toyota RAV4", "1200000", "https://cars.example/used/1"),
+                item(
+                    "2017 Subaru Forester",
+                    "1450000",
+                    "https://cars.example/used/2",
+                ),
+            ],
+            items_from: Some(page_data::ItemSource::JsonLd),
+            links: vec![
+                page_data::Link {
+                    address: "https://cars.example/finance".into(),
+                    text: "Car finance and loans".into(),
+                },
+                page_data::Link {
+                    address: "https://cars.example/subaru-guide".into(),
+                    text: "Buying a used Subaru Forester".into(),
+                },
+                page_data::Link {
+                    address: "https://other.example/forester".into(),
+                    text: "Subaru Forester reviews".into(),
+                },
+            ],
+            forms: vec![
+                SearchForm {
+                    action: "https://cars.example/search".into(),
+                    method: FormMethod::Get,
+                    fields: vec![
+                        FormField::Text("q".into()),
+                        FormField::Fixed {
+                            name: "kind".into(),
+                            value: "used".into(),
+                        },
+                    ],
+                },
+                SearchForm {
+                    action: "https://cars.example/enquire".into(),
+                    method: FormMethod::Post,
+                    fields: vec![
+                        FormField::Fixed {
+                            name: "csrf".into(),
+                            value: "t0k".into(),
+                        },
+                        FormField::Text("message".into()),
+                    ],
+                },
+            ],
+            preview_image: None,
+        };
+        Page::new(
+            "https://cars.example/used".into(),
+            "Used cars".into(),
+            "cars.example".into(),
+            Vec::new(),
+        )
+        .with_data(data)
+        .at_depth(depth)
+    }
+
+    fn ask(question: &str) -> Request {
+        Request {
+            question: question.into(),
+            part: None,
+        }
+    }
+
+    #[test]
+    fn a_page_with_only_structured_data_lists_its_items() {
+        let reply = listing(0).reply(&ask("subaru forester price"));
+        assert!(
+            reply
+                .text
+                .contains("Listed on this page, from its own data (2 of 2):"),
+            "{}",
+            reply.text
+        );
+        assert!(reply
+            .text
+            .contains("2017 Subaru Forester | KES 1450000 | https://cars.example/used/2"));
+        assert!(reply
+            .text
+            .contains("To read one, call read_web_page with its link."));
+        assert!(reply
+            .text
+            .contains("- https://cars.example/search: q (text); kind (keep as used)"));
+        assert!(
+            reply.text.contains(
+                "- https://cars.example/enquire (POST: sent only after the person says yes on \
+                 their phone): message (text)"
+            ),
+            "{}",
+            reply.text
+        );
+        assert!(
+            !reply.text.contains("t0k"),
+            "a POST form's hidden values are the pond's"
+        );
+    }
+
+    #[test]
+    fn links_shown_are_on_the_site_and_named_by_the_question() {
+        let reply = listing(0).reply(&ask("subaru forester"));
+        assert!(reply
+            .text
+            .contains("- Buying a used Subaru Forester: https://cars.example/subaru-guide"));
+        assert!(!reply.text.contains("other.example"), "{}", reply.text);
+        assert!(!reply.text.contains("Car finance"), "{}", reply.text);
+        let page = listing(0);
+        let followable: Vec<String> = page.followable().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(
+            followable,
+            vec![
+                "https://cars.example/used/1",
+                "https://cars.example/used/2",
+                "https://cars.example/finance",
+                "https://cars.example/subaru-guide",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_two_clicks_deep_offers_no_way_on() {
+        let page = listing(MAX_LINK_DEPTH);
+        let reply = page.reply(&ask("subaru forester"));
+        assert!(reply.text.contains("2017 Subaru Forester"));
+        assert!(!reply.text.contains("To read one"), "{}", reply.text);
+        assert!(!reply.text.contains("Links on this page"), "{}", reply.text);
+        assert!(!reply.text.contains("Forms on this page"), "{}", reply.text);
+        assert!(page.followable().is_empty());
+    }
+
+    #[test]
+    fn a_conversation_turns_last_read_says_to_answer() {
+        let page = listing(0);
+        let third = page.reply_as(&ask("price"), Some(MAX_CHAT_TURN_READS));
+        assert!(
+            third.text.contains("That was this turn's last page"),
+            "{}",
+            third.text
+        );
+        assert!(third
+            .text
+            .contains("offer to keep exploring as a long task"));
+        let second = page.reply_as(&ask("price"), Some(MAX_CHAT_TURN_READS - 1));
+        assert!(!second.text.contains("last page"));
+        let step = page.reply_as(&ask("price"), None);
+        assert!(!step.text.contains("last page"));
+        assert!(turn_cap_reached().contains("3 pages"));
+    }
+
+    #[test]
+    fn a_reply_names_the_lines_it_gave() {
+        let reply = page(FARES).reply(&ask("economy fare"));
+        assert!(reply.used.iter().any(|l| l.contains("Economy | KSh 1,500")));
+        let long = long_page();
+        let quoted = long.reply(&ask("What is the economy fare?"));
+        assert!(quoted
+            .used
+            .contains(&"The economy fare is KSh 1,500 for an adult.".to_string()));
+        assert!(quoted.used.len() < long.lines.len());
+    }
+
+    #[test]
+    fn a_page_reads_its_structured_data_beside_its_lines() {
+        let html = r#"<html><head><title>Cars</title><script type="application/ld+json">
+            {"@type":"Car","name":"2017 Subaru Forester","offers":{"price":1450000,"priceCurrency":"KES"}}
+            </script></head><body><main><p>Used cars for sale in Nairobi this week.</p>
+            <a href="/used/2">2017 Subaru Forester in Nairobi</a></main></body></html>"#;
+        let (title, lines, data) = parse_html(html, "https://cars.example/used");
+        assert_eq!(title, "Cars");
+        assert!(!lines.is_empty());
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.links[0].address, "https://cars.example/used/2");
+    }
 
     fn page(html: &str) -> Page {
         let (title, lines) = lines_from_html(html);
@@ -1076,7 +1726,9 @@ mod live {
         let url = std::env::var("PAGE_URL").expect("set PAGE_URL");
         let question = std::env::var("PAGE_QUESTION").unwrap_or_default();
         let part = std::env::var("PAGE_PART").ok().and_then(|p| p.parse().ok());
-        let page = read_page(&url).await.unwrap_or_else(|why| panic!("{why}"));
+        let page = read_page(&url, 0)
+            .await
+            .unwrap_or_else(|why| panic!("{why}"));
         if std::env::var("DUMP_LINES").is_ok() {
             for (i, line) in page.lines.iter().enumerate() {
                 eprintln!("{:>4} [{}] {}", i, page.part_of(i) + 1, line.text);

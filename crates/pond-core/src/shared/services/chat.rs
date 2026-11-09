@@ -134,6 +134,10 @@ pub enum SpeechRefusal {
     NotAddressedToAMember,
     /// The member it is for is not present; anyone who hears it is the wrong person.
     MemberNotPresent,
+    /// The member it is for has not asked to hear this kind of thing aloud.
+    NotOptedIn,
+    /// Inside the member's own quiet hours.
+    MemberQuietHours,
     NothingToSay,
 }
 
@@ -150,6 +154,8 @@ impl SpeechRefusal {
             Self::GuestSession => "guest_session",
             Self::NotAddressedToAMember => "not_addressed_to_a_member",
             Self::MemberNotPresent => "member_not_present",
+            Self::NotOptedIn => "not_opted_in",
+            Self::MemberQuietHours => "member_quiet_hours",
             Self::NothingToSay => "nothing_to_say",
         }
     }
@@ -180,7 +186,7 @@ pub struct UnpromptedUtterance<'a> {
 
 /// Whether `now` is inside the `[start, end)` quiet window, which may wrap midnight.
 /// `None` if a bound isn't `HH:MM`. Equal bounds (compared parsed: `9:00` = `09:00`) are all day.
-fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
+pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
     let parse = |s: &str| {
         let t = chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()?;
         LocalTimeOfDay::new(chrono::Timelike::hour(&t), chrono::Timelike::minute(&t))
@@ -994,6 +1000,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -1386,6 +1393,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
@@ -2210,12 +2218,20 @@ impl ChatService {
                     }
                 }
                 Raced::Turn(chat_result) => {
+                    let mut asked = false;
                     if let Ok(Ok(outcome)) = &chat_result {
                         last_spoken = Some(outcome.text.clone());
+                        asked = pond_voice::text::asks_for_an_answer(&outcome.text);
                     }
-                    if !self.finalize_confirmed_turn(chat_result, &input).await {
-                        first_turn = true;
-                    }
+                    let kept = self.finalize_confirmed_turn(chat_result, &input).await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "voice_follow_up",
+                        listening = kept && asked,
+                        "after a reply, the next listen needs the wake word unless the reply asked"
+                    );
+                    // A room keeps talking after a reply; only an asked question expects an answer.
+                    first_turn = !(kept && asked);
                 }
                 Raced::Stop(reason) => {
                     self.abandon_turn(&chat_handle);
@@ -3657,7 +3673,8 @@ mod tests {
         let agent = Arc::new(MockAgent::new());
         let storage = Arc::new(InMemorySessionStorage::new());
         storage.create_session("echo".to_string()).await.unwrap();
-        // The second listen is a follow-up that hears nothing, so the third waits for the wake.
+        // The reply asks nothing, so the next listen waits for the wake; it hears nothing, and the
+        // third is woken again.
         let input = Arc::new(ScriptedListenInput::new(["hello", "", "Echo: hello"]));
         ChatService::new(agent.clone(), "echo".to_string(), storage)
             .with_voice_input(input)
@@ -3669,6 +3686,41 @@ mod tests {
             agent.last_request().unwrap().message,
             "Echo: hello",
             "the words of the last reply, asked after the wake word, still reach the model"
+        );
+    }
+
+    /// The mock replies "Echo: <input>", so an input ending in a question gives a reply that asks.
+    #[tokio::test]
+    async fn only_a_reply_that_asked_listens_on_without_the_wake_word() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("asked".to_string()).await.unwrap();
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(MockAgent::new()), "asked".to_string(), storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new([
+                "shall we go?",
+                "yes",
+                "hello",
+            ])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_event_sink(collector.sink());
+        run_bounded(&svc).await.unwrap();
+        let marks: Vec<String> = collector
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::StateChanged {
+                    state: WorkflowState::Wait,
+                } => Some("wait".to_string()),
+                WorkflowEvent::Transcript { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            ["wait", "shall we go?", "yes", "wait", "hello", "wait"],
+            "the answer to a question needs no wake; what follows a statement does"
         );
     }
 

@@ -19,7 +19,9 @@ import {
   CloudLightning,
   CloudRain,
   CloudSnow,
+  CloudMoon,
   CloudSun,
+  Moon,
   Sun,
   type LucideIcon,
 } from "lucide-react";
@@ -38,7 +40,8 @@ export interface CurrentWeather {
   /** Relative humidity, 0-100. */
   humidity: number | null;
   /** Wind speed in km/h. */
-  wind: number | null;
+  wind: number | null;  /** Day or night where the Pond is (`is_day`), so a clear night is the moon; null when unsent. */
+  isDay: boolean | null;
 }
 
 /** One day of a forecast. */
@@ -127,6 +130,7 @@ export function readWeatherPayload(data: Data): WeatherPayload | null {
     condition,
     humidity: num(data.humidity),
     wind: num(data.wind_speed),
+    isDay: typeof data.is_day === "boolean" ? data.is_day : null,
   };
 }
 
@@ -142,9 +146,11 @@ export function awaitingResult(data: Data): boolean {
 /**
  * The icon for a condition. The Pond writes conditions in English from a fixed list (the WMO
  * weather codes, `pond-adapters-weather/src/wmo.rs`) whatever the dashboard's language, so they
- * are matched as words. Anything not recognised is a plain cloud, the sky that claims least.
+ * are matched as words. Anything not recognised is a plain cloud, the sky that claims least. A
+ * clear or partly cloudy night (`isDay` false) is the moon, alone or behind a cloud; the phone's
+ * cards and the Home card draw the same.
  */
-export function conditionIcon(condition: string): LucideIcon {
+export function conditionIcon(condition: string, isDay: boolean | null = null): LucideIcon {
   const c = condition.toLowerCase();
   if (c.includes("thunder")) return CloudLightning;
   if (c.includes("snow")) return CloudSnow;
@@ -152,8 +158,8 @@ export function conditionIcon(condition: string): LucideIcon {
   if (c.includes("rain") || c.includes("shower")) return CloudRain;
   if (c.includes("fog")) return CloudFog;
   if (c.includes("overcast")) return Cloud;
-  if (c.includes("partly")) return CloudSun;
-  if (c.includes("clear")) return Sun;
+  if (c.includes("partly")) return isDay === false ? CloudMoon : CloudSun;
+  if (c.includes("clear")) return isDay === false ? Moon : Sun;
   return Cloud;
 }
 

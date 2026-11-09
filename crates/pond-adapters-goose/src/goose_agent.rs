@@ -95,14 +95,15 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
-    /// The user's words are the attached recording, which the model hears.
+    /// The user's words are in the attached audio, which the model hears.
     heard: bool,
+    /// Where the person's phone is now (`device_place_note`), when their app shares it.
+    device_place: Option<String>,
 }
 
-/// A heard room turn's <user-message>: its words are the recording. Never empty, as an empty
-/// one fuses the newlines around it into one token and the turn misses the preamble snapshot.
-const HEARD_TURN_NOTE: &str =
-    "[Spoken: the user's words are the attached recording. Answer what you hear.]";
+/// A heard turn's <user-message>. No "recording": the model says it back. Never empty, or the
+/// newlines around it fuse into one token and the turn misses the preamble snapshot.
+const HEARD_TURN_NOTE: &str = "[Said aloud to you. Answer what you hear.]";
 
 impl TurnEnvelope<'_> {
     fn render(&self) -> String {
@@ -115,9 +116,13 @@ impl TurnEnvelope<'_> {
         msg.push_str("\n</user-message>\n");
         // Always emitted, since the answer contract is unconditional.
         msg.push_str("<system-context>\n");
-        for part in [self.suggestion.as_deref(), self.research.as_deref()]
-            .into_iter()
-            .flatten()
+        for part in [
+            self.suggestion.as_deref(),
+            self.research.as_deref(),
+            self.device_place.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             msg.push_str(part);
             msg.push('\n');
@@ -1296,15 +1301,13 @@ impl GooseAdapter {
             *last = signature.clone();
         }
 
-        // SAFETY: set_var is unsound with threads; Goose already sets OLLAMA_HOST/OLLAMA_TIMEOUT
-        // on this path, and the signature guard limits it to actual changes.
-        #[allow(unused_unsafe)]
-        unsafe {
-            for (key, value) in &knobs {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
+        // Through process_env: at start-up this runs while the speaker route lists ALSA devices,
+        // and a bare setenv here crashed the pond in ALSA's getenv. The signature guard above
+        // limits it to actual changes.
+        for (key, value) in &knobs {
+            match value {
+                Some(v) => pond_core::shared::services::process_env::set(key, v),
+                None => pond_core::shared::services::process_env::remove(key),
             }
         }
         tracing::info!(
@@ -1904,8 +1907,8 @@ impl GooseAdapter {
             // llamafile uses the Ollama wire protocol over HTTP.
             "llamafile" if settings.chat_model.trim().is_empty() => None,
             "llamafile" => {
-                std::env::set_var("OLLAMA_HOST", &self.llamafile_url);
-                std::env::set_var("OLLAMA_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OLLAMA_HOST", &self.llamafile_url);
+                pond_core::shared::services::process_env::set("OLLAMA_TIMEOUT", "600");
                 let model_name = settings.chat_model.clone();
                 let cfg = goose_providers::model::ModelConfig::new(&model_name);
                 tracing::debug!(
@@ -1934,13 +1937,19 @@ impl GooseAdapter {
             "mistralrs" => {
                 let host = std::env::var("GIAP_MISTRALRS_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:9002".to_string());
-                std::env::set_var("OPENAI_HOST", &host);
-                std::env::set_var("OPENAI_BASE_PATH", "v1/chat/completions");
+                pond_core::shared::services::process_env::set("OPENAI_HOST", &host);
+                pond_core::shared::services::process_env::set(
+                    "OPENAI_BASE_PATH",
+                    "v1/chat/completions",
+                );
                 // mistral.rs needs no key, but goose's OpenAI provider won't build without one.
                 if std::env::var("OPENAI_API_KEY").is_err() {
-                    std::env::set_var("OPENAI_API_KEY", "not-required-by-mistralrs");
+                    pond_core::shared::services::process_env::set(
+                        "OPENAI_API_KEY",
+                        "not-required-by-mistralrs",
+                    );
                 }
-                std::env::set_var("OPENAI_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OPENAI_TIMEOUT", "600");
                 let model_name = if settings.chat_model.is_empty() {
                     "default".to_string()
                 } else {
@@ -1958,8 +1967,8 @@ impl GooseAdapter {
             "ollama" => {
                 let ollama_host = std::env::var("GIAP_OLLAMA_URL")
                     .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-                std::env::set_var("OLLAMA_HOST", &ollama_host);
-                std::env::set_var("OLLAMA_TIMEOUT", "600");
+                pond_core::shared::services::process_env::set("OLLAMA_HOST", &ollama_host);
+                pond_core::shared::services::process_env::set("OLLAMA_TIMEOUT", "600");
                 let model_name = if settings.chat_model.is_empty() {
                     "llama3.2".to_string()
                 } else {
@@ -2044,9 +2053,12 @@ impl GooseAdapter {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some((p, model_cfg));
             // Goose's fallback for sessions with no model_config reads env before config.yaml.
-            std::env::set_var("GOOSE_MODEL", &settings.chat_model);
+            pond_core::shared::services::process_env::set("GOOSE_MODEL", &settings.chat_model);
             // Goose resolves the fallback provider before the model, so both must be exported.
-            std::env::set_var("GOOSE_PROVIDER", &settings.chat_provider);
+            pond_core::shared::services::process_env::set(
+                "GOOSE_PROVIDER",
+                &settings.chat_provider,
+            );
             // Log the read-back, not the write: these have been seen unset after this ran.
             tracing::info!(
                 goose_provider = ?std::env::var("GOOSE_PROVIDER").ok(),
@@ -2131,28 +2143,30 @@ impl GooseAdapter {
             .clone()
     }
 
-    /// Memories relevant to `message`, with cosine similarity when known. Never fails the turn.
+    /// Memories relevant to `message`, with cosine similarity when known, and the embedder's
+    /// `closest_memory` floor for those cosines. Never fails the turn.
     async fn topical_memories(
         &self,
         message: &str,
         scope: &ProfileScope,
         limit: usize,
-    ) -> Vec<(MemoryFragment, Option<f32>)> {
+    ) -> (Vec<(MemoryFragment, Option<f32>)>, Option<f32>) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
-            return Vec::new();
+            return (Vec::new(), None);
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
             match provider.embed_query(message).await {
                 Ok(query_vector) => {
+                    let closest_floor = provider.similarity_floors().map(|f| f.closest_memory);
                     match self
                         .memory_repo
                         .search_similar(&query_vector, scope, limit)
                         .await
                     {
                         Ok(hits) => {
-                            return hits
+                            let hits = hits
                                 .into_iter()
                                 .map(|fragment| {
                                     // No vector, or one from another model (other width): `None`,
@@ -2165,6 +2179,7 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
+                            return (hits, closest_floor);
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -2175,17 +2190,17 @@ impl GooseAdapter {
 
         let keywords = pond_core::user_data::services::memory_relevance::keyword_terms(message);
         if keywords.is_empty() {
-            return vec![];
+            return (vec![], None);
         }
         match self
             .memory_repo
             .search_by_content(&keywords, scope, limit)
             .await
         {
-            Ok(hits) => hits.into_iter().map(|m| (m, None)).collect(),
+            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None),
             Err(e) => {
                 tracing::warn!("memory: keyword search failed: {e}");
-                vec![]
+                (vec![], None)
             }
         }
     }
@@ -2848,6 +2863,8 @@ impl GooseAdapter {
 
         // Goose maintains its own sessions.db with auto-generated IDs.
         let goose_sid = self.resolve_goose_session(&session_id).await;
+        // Tools see the engine session, so a turn's page reads are counted under it.
+        pond_core::mcp::services::source_ledger::global().chat_turn_started(&goose_sid);
 
         // ── 0. Load GIAP builtin MCP extensions (once per session) ────────────
         {
@@ -2906,10 +2923,11 @@ impl GooseAdapter {
                         self.topical_memories(request.message_or_heard(), &turn_scope, limit)
                             .await
                     }
-                    None => vec![],
+                    None => (vec![], None),
                 }
             },
         );
+        let (relevant_memories, closest_floor) = relevant_memories;
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -3152,13 +3170,14 @@ impl GooseAdapter {
         let compaction_profile = &turn_profile;
 
         if !memory_candidates.is_empty() {
-            // Blended ranking, so a topical memory can displace the high-importance identity block.
-            pond_core::user_data::services::memory_relevance::rank_by_relevance(
-                &mut memory_candidates,
+            // Blended ranking, so a topical memory can displace the high-importance identity block,
+            // and the memory closest to the message keeps a seat however old it is.
+            memory_candidates = pond_core::user_data::services::memory_relevance::select_for_turn(
+                memory_candidates,
+                compaction_profile.max_memory_fragments,
+                closest_floor,
                 chrono::Utc::now(),
             );
-
-            memory_candidates.truncate(compaction_profile.max_memory_fragments);
 
             let token_budget =
                 memory_token_budget(compaction_profile.memory_token_budget, is_voice);
@@ -3186,6 +3205,8 @@ impl GooseAdapter {
                     fragments_injected = fresh.len(),
                     fragments_already_shown = rendered.len() - fresh.len(),
                     fragments_available = memory_candidates.len(),
+                    closest_floor = ?closest_floor,
+                    lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
                     tokens_used,
                     token_budget,
                     semantic = self
@@ -3684,6 +3705,10 @@ impl GooseAdapter {
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
             heard: request.audio.iter().any(|clip| clip.heard_as.is_some()),
+            device_place: request
+                .device_place
+                .as_deref()
+                .and_then(pond_core::user_data::services::location::device_place_note),
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -4581,8 +4606,12 @@ impl GooseAdapter {
                     if request.warmup {
                         break 'attempts;
                     }
-                    // The final reply is the last attempt: one that wrote nothing is not re-asked.
-                    if final_attempt || attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
+                    // A final reply that wrote nothing still leaves the steered re-engagements:
+                    // a guard-stopped turn already left above, so this one only reasoned. On the
+                    // Jetson the Daily Brief's planning round, then its final reply, both came
+                    // back empty, and ending there failed a run the same prompt answers on a
+                    // second try.
+                    if attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
                         tracing::warn!(
                             session_id = %session_id,
                             attempts = attempt + 1,
@@ -4742,6 +4771,7 @@ impl AgentPort for GooseAdapter {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let shape = if voice_mode {
@@ -8153,9 +8183,11 @@ mod tests {
         assert_eq!(image_parts(&msg).len(), 1);
     }
 
-    /// A heard room turn carries no text of its own words; only it gets the note.
+    /// A heard room turn carries no text of its own words; only it gets the note, which never
+    /// calls the audio a recording.
     #[test]
-    fn only_a_heard_turn_says_its_words_are_the_recording() {
+    fn only_a_heard_turn_says_it_was_said_aloud() {
+        assert!(!HEARD_TURN_NOTE.to_lowercase().contains("record"));
         let heard = TurnEnvelope {
             message: "",
             heard: true,
@@ -8173,6 +8205,29 @@ mod tests {
         }
         .render();
         assert!(!typed.contains(HEARD_TURN_NOTE));
+    }
+
+    /// Where the phone is rides inside the turn's context, after the words, and only when shared.
+    #[test]
+    fn a_shared_phone_place_rides_in_the_system_context_only() {
+        let note =
+            pond_core::user_data::services::location::device_place_note("Westlands, Nairobi");
+        let shared = TurnEnvelope {
+            message: "where am I",
+            device_place: note.clone(),
+            ..Default::default()
+        }
+        .render();
+        let context = &shared[shared.find("<system-context>").unwrap()..];
+        assert!(context.contains(note.as_deref().unwrap()));
+        assert!(!shared[..shared.find("<system-context>").unwrap()].contains("Westlands"));
+
+        let unshared = TurnEnvelope {
+            message: "where am I",
+            ..Default::default()
+        }
+        .render();
+        assert!(!unshared.contains("phone is in"));
     }
 
     // ── F3: the vision-capability prompt section ─────────────────────────
@@ -8821,7 +8876,7 @@ mod tests {
         for tool in [
             "giap-weather__get_current_weather",
             "music__status",
-            "giap-device__get_user_profile",
+            "giap-system__get_user_profile",
         ] {
             *counts.entry((tool.to_string(), fp)).or_insert(0) += 1;
         }
@@ -9610,6 +9665,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

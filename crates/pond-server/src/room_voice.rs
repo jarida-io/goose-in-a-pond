@@ -90,6 +90,14 @@ struct ActiveModelHears {
     settings: Arc<dyn SettingsRepository + Send + Sync>,
 }
 
+/// Whether a voice turn may carry its recording: room voice's check, for the voice child too.
+pub(crate) fn model_hearing(
+    agent: Arc<dyn Agent>,
+    settings: Arc<dyn SettingsRepository + Send + Sync>,
+) -> Arc<dyn ModelHears> {
+    Arc::new(ActiveModelHears { agent, settings })
+}
+
 #[async_trait]
 impl ModelHears for ActiveModelHears {
     async fn model_hears(&self) -> bool {

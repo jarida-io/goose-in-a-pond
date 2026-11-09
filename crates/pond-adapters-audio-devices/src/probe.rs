@@ -13,6 +13,11 @@ const MEASURE: Duration = Duration::from_millis(400);
 const POLL: Duration = Duration::from_millis(20);
 
 pub fn find(direction: AudioDirection, name: &str) -> Option<cpal::Device> {
+    // ALSA reads the environment from C while it lists devices; see process_env.
+    pond_core::shared::services::process_env::reading(|| find_unguarded(direction, name))
+}
+
+fn find_unguarded(direction: AudioDirection, name: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
     let default = match direction {
         AudioDirection::Input => host.default_input_device(),
@@ -80,16 +85,18 @@ pub fn probe_input(name: &str, wait: Duration) -> ProbeOutcome {
     macro_rules! build {
         ($t:ty, $to_f32:expr) => {{
             let level = level.clone();
-            device.build_input_stream(
-                &config.config(),
-                move |data: &[$t], _: &_| {
-                    // The first channel is enough to tell sound from silence.
-                    let mono = data.iter().step_by(channels).map(|s| $to_f32(*s));
-                    level.lock().unwrap_or_else(|e| e.into_inner()).add(mono);
-                },
-                on_err,
-                None,
-            )
+            pond_core::shared::services::process_env::reading(|| {
+                device.build_input_stream(
+                    &config.config(),
+                    move |data: &[$t], _: &_| {
+                        // The first channel is enough to tell sound from silence.
+                        let mono = data.iter().step_by(channels).map(|s| $to_f32(*s));
+                        level.lock().unwrap_or_else(|e| e.into_inner()).add(mono);
+                    },
+                    on_err,
+                    None,
+                )
+            })
         }};
     }
     let stream = match config.sample_format() {
@@ -173,15 +180,17 @@ pub fn probe_output(_held: &pond_audio_out::Floor, name: &str, wait: Duration) -
     macro_rules! build {
         ($t:ty, $silence:expr) => {{
             let pulled = pulled.clone();
-            device.build_output_stream(
-                &config.config(),
-                move |data: &mut [$t], _: &_| {
-                    data.fill($silence);
-                    *pulled.lock().unwrap_or_else(|e| e.into_inner()) += data.len() as u64;
-                },
-                on_err,
-                None,
-            )
+            pond_core::shared::services::process_env::reading(|| {
+                device.build_output_stream(
+                    &config.config(),
+                    move |data: &mut [$t], _: &_| {
+                        data.fill($silence);
+                        *pulled.lock().unwrap_or_else(|e| e.into_inner()) += data.len() as u64;
+                    },
+                    on_err,
+                    None,
+                )
+            })
         }};
     }
     let stream = match config.sample_format() {

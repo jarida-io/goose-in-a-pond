@@ -36,8 +36,9 @@ pub struct Notification {
 /// still opens the right screen, and one that cannot open the id (unknown, deleted, another
 /// member's) falls back to that screen too.
 ///
-/// `models`, `extensions` and `remote_access` (2026-10-27) are newer than the app's allow-list:
-/// an app that does not know one opens where it was, exactly as for a notice with no hint.
+/// `models`, `extensions` and `remote_access` (2026-10-27) and `my_pond` (2026-11-08) are newer
+/// than the app's allow-list: an app that does not know one opens where it was, exactly as for a
+/// notice with no hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenScreen {
     /// The schedules list, with the schedule and the run the notification reports on.
@@ -55,6 +56,10 @@ pub enum OpenScreen {
     Extensions,
     /// The remote-access screen: reaching the Pond from outside the home.
     RemoteAccess,
+    /// The phone's My Pond screen: the Pond's administration, where an unlock is seen and locked.
+    MyPond,
+    /// One web watch, at its changes; the watches list when there is no id.
+    Watch { watch_id: Option<String> },
 }
 
 impl OpenScreen {
@@ -108,6 +113,13 @@ impl OpenScreen {
             Self::Models => "models",
             Self::Extensions => "extensions",
             Self::RemoteAccess => "remote_access",
+            Self::MyPond => "my_pond",
+            Self::Watch { watch_id } => {
+                if let Some(watch_id) = watch_id {
+                    fields.insert("watch_id".into(), watch_id.as_str().into());
+                }
+                "watch"
+            }
         };
         fields.insert("open".into(), screen.into());
         fields
@@ -175,6 +187,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_watch_hint_names_the_watch_or_opens_the_list() {
+        assert_eq!(
+            OpenScreen::Watch {
+                watch_id: Some("w1".into())
+            }
+            .data(),
+            json!({"open": "watch", "watch_id": "w1"})
+        );
+        assert_eq!(
+            OpenScreen::Watch { watch_id: None }.data(),
+            json!({"open": "watch"})
+        );
+    }
+
+    #[test]
     fn a_schedule_hint_names_the_schedule_and_the_run() {
         let hint = OpenScreen::Schedule {
             schedule_id: "sched-1".into(),
@@ -206,6 +233,7 @@ mod tests {
             OpenScreen::RemoteAccess.data(),
             json!({"open": "remote_access"})
         );
+        assert_eq!(OpenScreen::MyPond.data(), json!({"open": "my_pond"}));
     }
 
     #[test]

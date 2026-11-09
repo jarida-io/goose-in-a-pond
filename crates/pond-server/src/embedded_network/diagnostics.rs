@@ -153,11 +153,26 @@ impl LineBudget {
     }
 }
 
+/// Whether a helper stderr line is a peer that hung up before TLS: Go's `http.Server` logs
+/// "http: TLS handshake error from 100.64.0.2:35603: EOF" for every connection that opens and
+/// closes without a handshake. That is what a reachability check does (the phone's is a bare TCP
+/// connect), so it is not a fault of the node. A handshake that failed for any other reason (a
+/// certificate refused, a protocol mismatch) is still a warning.
+fn dropped_handshake(line: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim_end();
+    line.contains("http: TLS handshake error from")
+        && (line.ends_with(": EOF")
+            || line.ends_with("connection reset by peer")
+            || line.ends_with("i/o timeout"))
+}
+
 /// Copy the helper's stderr into the Pond's log until the helper exits.
 ///
 /// The helper writes there only when something is wrong (it could not start, its listener
 /// stopped, it panicked), so each line is a warning. Every line goes through [`helper_complaint`]:
-/// one line, bounded, and with any node-authorisation URL redacted.
+/// one line, bounded, and with any node-authorisation URL redacted. A peer that hung up before
+/// TLS ([`dropped_handshake`]) is logged at debug and does not spend the minute's budget.
 pub(super) fn forward_helper_stderr(stderr: ChildStderr) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
@@ -177,6 +192,14 @@ pub(super) fn forward_helper_stderr(stderr: ChildStderr) {
                 }
             }
             if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            if dropped_handshake(&line) {
+                tracing::debug!(
+                    kind = "network_helper_dropped_handshake",
+                    complaint = %helper_complaint(&line),
+                    "a tailnet peer closed its connection before TLS, as a reachability check does"
+                );
                 continue;
             }
             match budget.admit(Instant::now()) {
@@ -271,6 +294,24 @@ mod tests {
         let mut watch = DownWatch::default();
         watch.observe("NoState", t0);
         assert_eq!(watch.observe("Running", t0 + DOWN_GRACE - SECOND), None);
+    }
+
+    #[test]
+    fn a_peer_that_hung_up_before_tls_is_not_a_complaint() {
+        for line in [
+            "2026/11/07 14:10:55 http: TLS handshake error from 100.64.0.2:35603: EOF\n",
+            "http: TLS handshake error from 100.64.0.3:4100: read tcp 100.64.0.1:443->100.64.0.3:4100: read: connection reset by peer",
+            "http: TLS handshake error from [fd7a::2]:51000: read tcp: i/o timeout",
+        ] {
+            assert!(dropped_handshake(line.as_bytes()), "{line}");
+        }
+        for line in [
+            "http: TLS handshake error from 100.64.0.2:35603: remote error: tls: bad certificate",
+            "http: TLS handshake error from 100.64.0.2:35603: tls: client offered only unsupported versions",
+            "listener stopped: EOF",
+        ] {
+            assert!(!dropped_handshake(line.as_bytes()), "{line}");
+        }
     }
 
     #[test]

@@ -1187,6 +1187,17 @@ describe("calibrateWakeWord()", () => {
   });
 });
 
+describe("removeWakeWordVariant()", () => {
+  it("DELETEs one variant by name and returns the ones left", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ removed: "hey juice", all_variants: ["goose"] }));
+    await expect(client().removeWakeWordVariant("hey juice")).resolves.toEqual(["goose"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4000/api/v1/voice/calibrate?variant=hey%20juice",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+});
+
 describe("resetWakeWordCalibration()", () => {
   it("DELETEs /voice/calibrate", async () => {
     fetchMock.mockResolvedValueOnce(okJson({ cleared: true }));

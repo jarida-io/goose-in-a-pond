@@ -45,6 +45,8 @@ function report(over: Partial<ReportView> = {}): ReportView {
     sections: 3,
     sources: [{ title: "KRA", url: "https://www.kra.go.ke/" }],
     calendarEvents: 0,
+    options: [],
+    images: [],
     summaryOnly: false,
     ...over,
   };
@@ -129,13 +131,14 @@ describe("the sections outline", () => {
     const names = within(nav() as HTMLElement)
       .getAllByRole("button")
       .map((b) => b.textContent);
-    expect(names).toEqual(["Income tax", "Bands", "Packing", "Sources"]);
+    // The pond's own Sources list gives way to the sources row, so it is no section.
+    expect(names).toEqual(["Income tax", "Bands", "Packing"]);
   });
 
   it("shows a part one step in from its section", () => {
     sheet();
     const buttons = within(nav() as HTMLElement).getAllByRole("button");
-    expect(buttons.map((b) => b.getAttribute("data-depth"))).toEqual(["0", "1", "0", "0"]);
+    expect(buttons.map((b) => b.getAttribute("data-depth"))).toEqual(["0", "1", "0"]);
   });
 
   it("is left out of a report with too few headings to need it", () => {
@@ -247,17 +250,22 @@ describe("saving and printing from the sheet", () => {
 });
 
 describe("what a report cites", () => {
-  it("shows each source the text lists as a link that opens in the browser, once", () => {
+  it("ends on one collapsed row of every source, which opens to the list, each a link to the browser", () => {
     sheet();
+    expect(within(text()).queryByRole("heading", { name: "Sources" })).toBeNull();
+    const row = within(text()).getByRole("button", { name: "1 source" });
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(within(text()).queryByRole("link", { name: "KRA" })).toBeNull();
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-expanded")).toBe("true");
     const links = within(text()).getAllByRole("link", { name: "KRA" });
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute("href")).toBe("https://www.kra.go.ke/");
     expect(links[0].getAttribute("target")).toBe("_blank");
     expect(links[0].getAttribute("rel")).toBe("noopener noreferrer");
-    expect(document.querySelector(".rsheet__sources")).toBeNull();
   });
 
-  it("lists the sources itself when the text does not, and only the ones a browser may open", () => {
+  it("lists only the sources a browser may open", () => {
     sheet({
       markdown: "## Findings\n\nText.\n",
       sources: [
@@ -267,8 +275,46 @@ describe("what a report cites", () => {
       ],
     });
     const aside = screen.getByRole("region", { name: "Sources" });
+    fireEvent.click(within(aside).getByRole("button", { name: "1 source" }));
     expect(within(aside).getAllByRole("link").map((a) => a.getAttribute("href"))).toEqual(["https://www.kra.go.ke/"]);
-    expect(within(aside).getByRole("link", { name: "KRA" }).getAttribute("target")).toBe("_blank");
+  });
+
+  it("turns a citation into a numbered chip after its words, which opens the source's title, site and link", () => {
+    sheet({
+      markdown: "## Findings\n\nRates rose, says [the KRA guide](https://www.kra.go.ke/), and [2](https://e.co/b) agrees.\n",
+      sources: [
+        { title: "the KRA guide", url: "https://www.kra.go.ke/" },
+        { title: "Tax news", url: "https://e.co/b" },
+      ],
+    });
+    const body = text();
+    expect(body.textContent).toContain("says the KRA guide");
+    const first = within(body).getByRole("button", { name: "Source 1: the KRA guide" });
+    expect(first.textContent).toBe("1");
+    // Words that only point give way to the number, so "2" is said once, by the chip.
+    expect(within(body).getByRole("button", { name: "Source 2: Tax news" }).textContent).toBe("2");
+    expect(body.textContent).toContain(", and 2 agrees");
+
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    const card = within(body).getByRole("group", { name: "Source 1: the KRA guide" });
+    expect(card.textContent).toContain("kra.go.ke");
+    const open = within(card).getByRole("link", { name: "Open kra.go.ke" });
+    expect(open.getAttribute("href")).toBe("https://www.kra.go.ke/");
+    expect(open.getAttribute("target")).toBe("_blank");
+  });
+
+  it("closes an open source card on the first Escape, and the sheet on the second", () => {
+    const { onClose } = sheet({
+      markdown: "## Findings\n\nSee [KRA](https://www.kra.go.ke/).\n",
+    });
+    const chip = within(text()).getByRole("button", { name: "Source 1: KRA" });
+    fireEvent.click(chip);
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(within(text()).queryByRole("group", { name: "Source 1: KRA" })).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("makes a link of an address written out in the text", () => {

@@ -117,9 +117,44 @@ pub enum NextRun<'a> {
     Do(&'a PlanStep),
     /// Every step is settled.
     Finish,
+    /// The time is up: skip these steps, which have not run, so the last step answers with
+    /// what the others found.
+    SkipForTime(Vec<StepKey>),
     GiveUp(String),
     /// Nothing to run until somebody acts (paused, awaiting approval, or finished).
     Wait,
+}
+
+/// Minutes past its deadline a task's last step may still take to answer.
+pub const WRAP_UP_GRACE_MINUTES: i64 = 20;
+
+/// Past the deadline a task stops reaching for more: what has not run is skipped and the last
+/// step, the one that answers, runs on what the others saved.
+fn wrap_up(steps: &[PlanStep]) -> NextRun<'_> {
+    let Some(last) = steps.iter().max_by_key(|s| s.ordinal()) else {
+        return NextRun::GiveUp("its time ran out before it had a plan".to_string());
+    };
+    let settled = |s: &PlanStep| matches!(s.state(), StepState::Completed | StepState::Skipped);
+    if steps.iter().any(|s| s.state() == StepState::Running) {
+        return NextRun::Wait;
+    }
+    let skip: Vec<StepKey> = steps
+        .iter()
+        .filter(|s| s.key() != last.key() && !settled(s))
+        .map(|s| s.key().clone())
+        .collect();
+    if !skip.is_empty() {
+        return NextRun::SkipForTime(skip);
+    }
+    match last.state() {
+        StepState::Completed | StepState::Skipped => NextRun::Finish,
+        StepState::Pending => NextRun::Do(last),
+        StepState::Failed if last.attempts() < MAX_STEP_ATTEMPTS => NextRun::Do(last),
+        StepState::Failed => {
+            NextRun::GiveUp("its last step failed after its time ran out".to_string())
+        }
+        _ => NextRun::Wait,
+    }
 }
 
 /// The one decision the runner makes per slot.
@@ -133,8 +168,13 @@ pub fn next_run<'a>(
         LongTaskState::Planning | LongTaskState::Running => {}
         _ => return NextRun::Wait,
     }
-    if task.budget().deadline_passed(now) {
-        return NextRun::GiveUp("it ran past its deadline".to_string());
+    if let Some(deadline) = task.budget().deadline() {
+        if now >= deadline + chrono::Duration::minutes(WRAP_UP_GRACE_MINUTES) {
+            return NextRun::GiveUp("it ran past its deadline".to_string());
+        }
+        if now >= deadline {
+            return wrap_up(steps);
+        }
     }
     if fruitless_plans >= MAX_FRUITLESS_PLANS {
         return NextRun::GiveUp(format!(
@@ -455,6 +495,18 @@ const SHORT_PLAN: &str = "The person wants a short answer. You only write the pl
      sources, and no heading.\n";
 
 /// A research report gathers, writes a section per part, then the Result that opens it.
+/// What the answering step is told once the task's time has run out.
+const TIME_UP: &str = "The task's time is up, so the steps that had not run were skipped. \
+     Answer from what the other steps saved, and say plainly what was not checked.\n";
+
+/// For a person who wants to choose: a step per site, then one that compares, in a shape the
+/// pond reads back into option cards (`task_options`).
+const OPTIONS_PLAN: &str = "If the person wants options to choose from, such as a car, a \
+     house or a product: give each site its own step, which reads that site's listings and \
+     saves the options that fit, each with its price and link. The last step compares them and \
+     writes each one worth considering, best first, as a \"## Option N: name\" section with \
+     \"- Price:\", \"- Link:\" and \"- Why:\" lines.\n";
+
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \
      a page for a narrow question, many for a trip or a big decision. Plan it in three parts. \
      First, one step for each thing the question is about, such as each option a comparison \
@@ -577,6 +629,28 @@ fn date_line(now: DateTime<Utc>) -> String {
 
 /// What the planner sees: the goal, who can do steps, what is done and why anything failed.
 /// `context` is the task's brief, read by the caller.
+/// Minutes one step takes at most on the device, as the planner should count them.
+const STEP_MINUTES: i64 = 3;
+
+/// How many steps the plan may hold: the budget's cap, and no more than the time left fits.
+fn step_cap_line(task: &LongTask, now: DateTime<Utc>) -> String {
+    let cap = task.budget().max_steps();
+    match task.budget().deadline() {
+        Some(deadline) => {
+            let minutes = (deadline - now).num_minutes().max(1);
+            let fit = u32::try_from(minutes / STEP_MINUTES)
+                .unwrap_or(u32::MAX)
+                .clamp(2, cap.max(2));
+            format!(
+                "At most {} steps in all: the task has {minutes} minutes left, and a step takes \
+                 one to three.\n",
+                fit.min(cap)
+            )
+        }
+        None => format!("At most {cap} steps in all.\n"),
+    }
+}
+
 pub fn planner_brief(
     task: &LongTask,
     steps: &[PlanStep],
@@ -595,10 +669,9 @@ pub fn planner_brief(
         ));
     }
     brief.push_str(&answer_plan(task));
-    brief.push_str(&format!(
-        "At most {} steps in all.\n\nRoles that can do a step:\n",
-        task.budget().max_steps()
-    ));
+    brief.push_str(OPTIONS_PLAN);
+    brief.push_str(&step_cap_line(task, now));
+    brief.push_str("\nRoles that can do a step:\n");
     for role in roles {
         brief.push_str(&format!(
             "  - {}: {}\n",
@@ -694,10 +767,19 @@ pub fn worker_brief(
     bodies: &HashMap<String, String>,
     now: DateTime<Utc>,
 ) -> String {
-    let given = given_artifacts(step, artifacts);
+    let time_up = task.budget().deadline_passed(now);
+    // Out of time, the answering step is given everything saved, not only what it depended on.
+    let given = if time_up {
+        artifacts.iter().collect()
+    } else {
+        given_artifacts(step, artifacts)
+    };
     let mut brief = date_line(now);
     brief.push_str(&format!("The task's goal: {}\n", task.goal()));
     brief.push_str(&answer_step(task));
+    if time_up {
+        brief.push_str(TIME_UP);
+    }
     brief.push_str(&format!(
         "Your step ({}): {}\n",
         step.key(),

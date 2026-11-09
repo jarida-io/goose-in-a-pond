@@ -228,6 +228,7 @@ async fn make_app_with_provider(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     (
         build_router(state.clone(), std::path::PathBuf::from("pond-desktop/dist")),

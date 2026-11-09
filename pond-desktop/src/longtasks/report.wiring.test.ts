@@ -14,6 +14,11 @@ const DRAWS_REPORT_TEXT = [
   "longtasks/ReportSheet.tsx",
   "longtasks/ReportExport.tsx",
   "longtasks/LongTaskCard.tsx",
+  "longtasks/ReportImages.tsx",
+  "longtasks/ReportOptions.tsx",
+  "longtasks/ReportSources.tsx",
+  "saved/SavedScreen.tsx",
+  "watches/WatchesScreen.tsx",
   "lib/saveFile.ts",
   "lib/printHtml.ts",
 ];
@@ -45,6 +50,13 @@ describe("the card and the sheet keep the report's controls", () => {
 
   it("the sheet offers saving and printing too", () => {
     expect(read("longtasks/ReportSheet.tsx").includes("<ReportExport"), "the sheet lost its save and print control").toBe(true);
+  });
+
+  it("a picture is fetched through the api client and drawn from a local address, never from the pond's path", () => {
+    const src = read("longtasks/ReportImages.tsx");
+    expect(src.includes("api.getReportImage"), "pictures are not fetched through the client").toBe(true);
+    expect(src.includes("URL.createObjectURL"), "pictures are not drawn from a local address").toBe(true);
+    expect(/src=\{image\./.test(src), "a picture is pointed at the pond's path, which needs the token").toBe(false);
   });
 
   it("saving goes through the api client, which sends the bearer token a plain link cannot", () => {

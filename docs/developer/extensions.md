@@ -36,6 +36,14 @@ Tool loading in the hub): `all` (default), `relevant`, or `minimal`. Only `giap-
 `TOOL_GROUPS` (`crates/pond-core/src/mcp/domain/tool_group.rs`) are narrowed; an added extension's
 tools are always offered.
 
+In `relevant` mode each group's description is embedded and scored against the opening message,
+the household's memories and its skills, each as a separate signal, keeping a group's best score.
+A message that lists several things ("a briefing on weather, calendar, top news and the exchange
+rate", the usual shape of a scheduled brief) also has each item scored on its own, up to eight:
+the whole message's vector sits between its topics, so a topic named in one word would otherwise
+fall under the floor and the model would answer it from the web
+(`selection_signals` in `crates/pond-core/src/mcp/services/tool_selection.rs`).
+
 ### The extension session
 
 Added extensions belong to one engine session named `giap-extensions`, not to a chat; chats see their

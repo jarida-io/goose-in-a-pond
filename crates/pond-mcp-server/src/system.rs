@@ -1,16 +1,19 @@
-//! System MCP server: time, system info, notifications, shell and file I/O. Stateless.
+//! System MCP server: the household's profile and home, time, system info, notifications, shell
+//! and file I/O. Its one dependency is the settings, for the profile; see [`init_system_deps`].
 
+use pond_core::user_data::ports::settings::SettingsRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
+        ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::sync::{Arc, OnceLock};
 
 // ── Parameter structs ──────────────────────────────────────────────────────
 
@@ -57,6 +60,8 @@ pub struct WriteFileParams {
 pub struct SystemMcpServer {
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
+    /// The household's settings, for `get_user_profile`. `None` where no binary installed them.
+    settings_repo: Option<Arc<dyn SettingsRepository + Send + Sync>>,
 }
 
 #[tool_router]
@@ -69,7 +74,52 @@ impl SystemMcpServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            settings_repo: None,
         }
+    }
+
+    /// A server that can answer `get_user_profile` from these settings.
+    pub fn with_settings(settings_repo: Arc<dyn SettingsRepository + Send + Sync>) -> Self {
+        Self {
+            settings_repo: Some(settings_repo),
+            ..Self::new()
+        }
+    }
+
+    #[tool(
+        description = "User's name, assistant name, time zone, and home: where the Pond is. \
+                       Answers 'where am I' unless the turn says where the phone is."
+    )]
+    async fn get_user_profile(
+        &self,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Here, not in giap-device: system is a core group, loaded in every conversation, and
+        // "where is home?" or "what is my name?" is no question about smart-home devices.
+        let Some(settings_repo) = &self.settings_repo else {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "the household's profile is not available on this server",
+                None,
+            ));
+        };
+        let settings = settings_repo.get().await.map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Settings error: {}", e),
+                None,
+            )
+        })?;
+        // The location service falls back to the time zone, so this is usually a place.
+        let location = pond_core::user_data::services::location::resolve(&settings)
+            .describe()
+            .unwrap_or("unknown")
+            .to_string();
+        let text = format!(
+            "User: {}\nAssistant name: {}\nTimezone: {}\nHome (where the Pond is): {}",
+            settings.user_name, settings.assistant_name, settings.timezone, location,
+        );
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(description = "Get current date, time, and timezone.")]
@@ -243,8 +293,9 @@ impl ServerHandler for SystemMcpServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "GIAP System MCP server — time, system info, notifications, shell, and file I/O.\n\n\
-                 Tools: get_current_time, get_system_info (OS/memory/disk), send_notification \
+                "GIAP System MCP server — the household's profile and home, time, system info, \
+                 notifications, shell, and file I/O.\n\n\
+                 Tools: get_user_profile (name, time zone, home: where the Pond is), get_current_time, get_system_info (OS/memory/disk), send_notification \
                  (desktop popup), run_shell_command (sandboxed allow-list), read_file (with line \
                  limit), write_file (with append mode).\n\n\
                  Shell commands are limited to a safe allow-list with a 10-second timeout. \
@@ -253,13 +304,29 @@ impl ServerHandler for SystemMcpServer {
     }
 }
 
-// ── Spawn function for Goose builtin registry (stateless — no deps) ──────
+// ── Spawn function for Goose builtin registry ──────────────────────────────
 
 use tokio::io::DuplexStream;
 
-/// Spawn function compatible with Goose's `SpawnServerFn` type; needs no `init_*`.
+static SYSTEM_DEPS: OnceLock<Arc<dyn SettingsRepository + Send + Sync>> = OnceLock::new();
+
+/// Give the system server the household's settings, for `get_user_profile`. Call once at startup.
+pub fn init_system_deps(settings_repo: Arc<dyn SettingsRepository + Send + Sync>) {
+    let _ = SYSTEM_DEPS.set(settings_repo);
+}
+
+/// Spawn function compatible with Goose's `SpawnServerFn` type. Without [`init_system_deps`] the
+/// server still starts, and only `get_user_profile` says the profile is not available.
 pub fn spawn_system_server(reader: DuplexStream, writer: DuplexStream) {
-    let server = SystemMcpServer::default();
+    let server = match SYSTEM_DEPS.get() {
+        Some(settings) => SystemMcpServer::with_settings(settings.clone()),
+        None => {
+            tracing::warn!(
+                "spawn_system_server called before init_system_deps; get_user_profile will not answer"
+            );
+            SystemMcpServer::default()
+        }
+    };
     crate::serve_builtin("giap-system", server, reader, writer);
 }
 

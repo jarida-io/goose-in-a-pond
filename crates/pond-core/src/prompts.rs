@@ -253,7 +253,7 @@ Under {{reasoning_budget_words}} words.
 {% if voice_mode %}
 
 <voice-mode>
-Read aloud via TTS: natural spoken phrasing. Concise (1 to 3 sentences for direct chat; thorough when asked for a daily brief or summary). No Markdown, asterisks, bullets, headers or visual symbols. Spell out symbols, units and decimal numbers (\"twenty point zero degrees Celsius\", \"three point fourteen\", \"one hundred Kenyan shillings\"). Summarise URLs and paths rather than reading them. If speech was unclear, ask to repeat.
+Read aloud via TTS: natural spoken phrasing. Concise (1 to 3 sentences for direct chat; thorough when asked for a daily brief or summary). No Markdown, asterisks, bullets, headers or visual symbols. Spell out symbols, units and decimal numbers (\"twenty point zero degrees Celsius\", \"three point fourteen\", \"one hundred Kenyan shillings\"). Summarise URLs and paths rather than reading them. You hear the person directly, with your own ears: never mention a recording, an audio file or an attachment. If you hear nothing or can't make out the words, say you couldn't hear them and ask them to say it again.
 </voice-mode>
 {% endif %}
 ";
@@ -308,7 +308,7 @@ Hard problems: reason first, under {{reasoning_budget_words}} words. Simple ones
 {%- endif %}
 {% if voice_mode %}
 <voice-mode>
-Read aloud via TTS: natural spoken phrasing. Short (1 to 2 sentences; complete for briefings). No formatting, asterisks, bullets or headers. Spell out symbols, units and decimal numbers. If speech was unclear, ask to repeat.
+Read aloud via TTS: natural spoken phrasing. Short (1 to 2 sentences; complete for briefings). No formatting, asterisks, bullets or headers. Spell out symbols, units and decimal numbers. You hear the person directly, with your own ears: never mention a recording, an audio file or an attachment. If you hear nothing or can't make out the words, say you couldn't hear them and ask them to say it again.
 </voice-mode>
 {% endif %}
 ";
@@ -370,7 +370,7 @@ uncertainty. Already determined: just answer. At most {{reasoning_budget_words}}
 {%- endif %}
 {% if voice_mode %}
 <voice-mode>
-Read aloud via TTS: natural spoken phrasing. Concise for chat; thorough when delivering a briefing or report. No Markdown, asterisks, bullets or headers. Spell out symbols, units, decimals, and summarise URLs and paths.
+Read aloud via TTS: natural spoken phrasing. Concise for chat; thorough when delivering a briefing or report. No Markdown, asterisks, bullets or headers. Spell out symbols, units, decimals, and summarise URLs and paths. You hear the person directly, with your own ears: never mention a recording, an audio file or an attachment. If you hear nothing or can't make out the words, say you couldn't hear them and ask them to say it again.
 </voice-mode>
 {% endif %}
 ";
@@ -434,7 +434,7 @@ Tricky, comparative or multi-step: I think it through first, under \
 {%- endif %}
 {% if voice_mode %}
 <voice-mode>
-You're in voice mode — I'm speaking aloud via TTS. Conversational, spoken phrasing (1 to 3 sentences for conversation; thorough when asked for a daily brief or summary). No Markdown, asterisks, bullets, headers or visual symbols. Spell out symbols, units and decimal numbers. If I didn't catch something, I'll ask you to repeat.
+You're in voice mode — I'm speaking aloud via TTS. Conversational, spoken phrasing (1 to 3 sentences for conversation; thorough when asked for a daily brief or summary). No Markdown, asterisks, bullets, headers or visual symbols. Spell out symbols, units and decimal numbers. You hear me directly, with your own ears: never mention a recording, an audio file or an attachment. If you hear nothing or can't make out my words, tell me you couldn't hear me and ask me to say it again.
 </voice-mode>
 {% endif %}
 ";

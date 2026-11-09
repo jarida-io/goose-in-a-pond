@@ -197,6 +197,17 @@ describe("the Pond's household notices", () => {
     expect(go).toHaveBeenCalledWith("chat", undefined);
   });
 
+  it("asks for the watch a watch notice names, then opens the watches screen", () => {
+    const go = vi.fn();
+    appState.householdNotices = [
+      notice({ id: "w", title: "Price down: Subaru Forester", data: { open: "watch", watch_id: "watch-7" } }),
+    ];
+    render(<NotificationsView go={go} />);
+    fireEvent.click(screen.getByText("Open the watch"));
+    expect(dispatch).toHaveBeenCalledWith({ type: "REQUEST_WATCH", payload: "watch-7" });
+    expect(go).toHaveBeenCalledWith("watches", undefined);
+  });
+
   it("opens chat alone for a malformed conversation id", () => {
     const go = vi.fn();
     appState.householdNotices = [

@@ -71,7 +71,7 @@ pub fn ensure_library_dir(data_dir: &Path) -> bool {
                     dir
                 };
                 tracing::info!(dir = %dir.display(), from, "LiteRT-LM library directory");
-                std::env::set_var(LIB_DIR_ENV, &dir);
+                pond_core::shared::services::process_env::set(LIB_DIR_ENV, &dir);
             }
             Choice::Nothing => tracing::info!(
                 "no LiteRT-LM library beside the executable, in the data directory or recorded; \

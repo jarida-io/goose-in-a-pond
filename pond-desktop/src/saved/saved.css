@@ -1,0 +1,241 @@
+/* Saved cards. The cards wear the ink edge; the collection chips are filters, so they stay on a
+   hairline and the chosen one rises (DESIGN.md: state is elevation, not hue). Page layout is in watches.css. */
+
+.scoll {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.scoll__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap-dense);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.scoll__chip[aria-pressed="true"] {
+  border: 2px solid var(--border-ink);
+  box-shadow: 2px 2px 0 var(--border-ink);
+}
+
+.scoll__count {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-secondary);
+}
+
+.wpage--hub .scoll__chip {
+  min-height: var(--tap-min);
+  font-size: var(--text-base);
+}
+
+.sgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sgrid > li {
+  display: flex;
+}
+
+.scard {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scard__kind {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.scard__title {
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+
+.scard--hub .scard__title {
+  font-size: var(--text-lg);
+}
+
+/* A listing is chosen on its price, so the price is the line that reads first after the name. */
+.scard__price,
+.slisting__price {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.scard__facts,
+.scard__excerpt {
+  font-size: var(--text-sm);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.scard__excerpt {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.scard__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.scard__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.sdetail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.sdetail .scard__foot {
+  margin-top: var(--space-1);
+  padding-top: 0;
+}
+
+.sdetail__body {
+  font-size: var(--text-md);
+  line-height: var(--leading-loose);
+}
+
+.sfacts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  font-size: var(--text-base);
+}
+
+.sfacts__row {
+  display: contents;
+}
+
+.sfacts__row dt {
+  color: var(--color-text-secondary);
+}
+
+.sfacts__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.srecipe,
+.slisting,
+.splace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.slisting__price {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.srecipe__ingredients,
+.srecipe__steps,
+.ssources {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--text-md);
+  line-height: var(--leading-snug);
+}
+
+.srecipe__steps > li::marker {
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+
+.ssources a {
+  color: var(--color-text);
+}
+
+.swatch__done {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+}
+
+/* The owner's tools: hairline chrome under the card's content. */
+.sowner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.sowner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2) var(--space-3);
+}
+
+.sowner__grow {
+  flex: 1 1 220px;
+}
+
+.sowner__share {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.sowner__share-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}

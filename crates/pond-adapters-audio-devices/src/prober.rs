@@ -66,12 +66,15 @@ impl CpalProber {
     }
 
     fn default_name(direction: AudioDirection) -> Option<String> {
-        let host = cpal::default_host();
-        let device = match direction {
-            AudioDirection::Input => host.default_input_device(),
-            AudioDirection::Output => host.default_output_device(),
-        }?;
-        device.name().ok()
+        // ALSA reads the environment from C while it resolves a device; see process_env.
+        pond_core::shared::services::process_env::reading(|| {
+            let host = cpal::default_host();
+            let device = match direction {
+                AudioDirection::Input => host.default_input_device(),
+                AudioDirection::Output => host.default_output_device(),
+            }?;
+            device.name().ok()
+        })
     }
 
     fn open_input(&self) -> Option<String> {
@@ -88,14 +91,18 @@ impl AudioDeviceProber for CpalProber {
     }
 
     fn devices(&self, direction: AudioDirection) -> Result<Vec<AudioDevice>, String> {
-        let host = cpal::default_host();
         let default = Self::default_name(direction);
         let cards = Self::cards();
         let _suspended = ALSA.then(|| sound_server::suspend_active(&SystemPactl, direction));
-        let listed: Vec<cpal::Device> = match direction {
-            AudioDirection::Input => host.input_devices().map_err(|e| e.to_string())?.collect(),
-            AudioDirection::Output => host.output_devices().map_err(|e| e.to_string())?.collect(),
-        };
+        let listed: Vec<cpal::Device> = pond_core::shared::services::process_env::reading(|| {
+            let host = cpal::default_host();
+            Ok::<_, String>(match direction {
+                AudioDirection::Input => host.input_devices().map_err(|e| e.to_string())?.collect(),
+                AudioDirection::Output => {
+                    host.output_devices().map_err(|e| e.to_string())?.collect()
+                }
+            })
+        })?;
         drop(_suspended);
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -253,11 +260,12 @@ impl AudioDeviceProber for CpalProber {
                 read("/proc/asound/pcm")
             );
         }
-        let host = cpal::default_host();
-        let mut all: Vec<String> = host
-            .devices()
-            .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default();
+        let mut all: Vec<String> = pond_core::shared::services::process_env::reading(|| {
+            cpal::default_host()
+                .devices()
+                .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
+                .unwrap_or_default()
+        });
         all.sort();
         format!(
             "{}|in={}|out={}",

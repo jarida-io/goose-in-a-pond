@@ -367,6 +367,15 @@ if [ "$AUTH_OK" -eq 1 ]; then
     esac
   done
 
+  # A phone's wake check takes what was said near it: never without a paired device's token.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -F "audio=@/dev/null;type=audio/wav" \
+    "http://127.0.0.1:$AUTH_PORT/api/v1/voice/wake/check")
+  case "$code" in
+    401) printf '  PASS  POST /voice/wake/check   requires a token\n' ;;
+    *)   printf '  FAIL  POST /voice/wake/check returned %s with NO TOKEN\n' "$code"
+         RC=1 ;;
+  esac
+
   # A second fresh pond, claimed with its card over loopback, with no bypass to hide behind.
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py card; then
     RC=1
@@ -394,6 +403,11 @@ if [ "$AUTH_OK" -eq 1 ]; then
 
   # My Pond: a member's device, unlocked by the admin card the CLI makes on this running pond.
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/admin_checks.py; then
+    RC=1
+  fi
+
+  # Developer mode: refused on a home Pond until `pond-server test-pond on` marks this running pond.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/developer_checks.py; then
     RC=1
   fi
 
@@ -478,7 +492,7 @@ say "log dig"
 cat "$DATA_DIR"/server*.out 2>/dev/null \
   | sed 's/\x1b\[[0-9;]*m//g' \
   | grep -E 'WARN|ERROR|panic' \
-  | sed 's/^[0-9TZ:.-]* *//' \
+  | sed 's/^[0-9TZ:.+-]* *//' \
   | sort | uniq -c | sort -rn
 if grep -qi panic "$DATA_DIR"/server*.out 2>/dev/null; then
   echo "PANIC in the server log" >&2

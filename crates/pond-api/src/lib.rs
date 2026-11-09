@@ -5,9 +5,11 @@ mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub(crate) mod audio_normalize;
 pub mod connections;
+pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
+mod home_location;
 pub mod host_guard;
 pub mod idempotency;
 pub(crate) mod image_normalize;
@@ -28,6 +30,7 @@ pub mod rides;
 pub mod room_voice;
 pub mod routes;
 pub mod runs;
+pub mod saved_items;
 pub mod speech_model;
 pub mod spoken_code;
 pub mod spotify_focus;
@@ -39,7 +42,10 @@ pub mod uber_accounts;
 pub mod voice_agent;
 mod voice_match;
 pub mod voice_sample;
+mod wake_check;
+pub mod web_forms;
 pub mod web_search;
+pub mod web_watches;
 
 /// Local llamafile server lifecycle, injected by `pond-server` (`None` in tests).
 #[async_trait::async_trait]
@@ -329,6 +335,8 @@ pub struct AppState {
     pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
+    /// Developer mode: the host's test Pond mark and the logs' debug switch. The default is a home Pond.
+    pub developer: Arc<crate::developer::DeveloperMode>,
 }
 
 impl AppState {

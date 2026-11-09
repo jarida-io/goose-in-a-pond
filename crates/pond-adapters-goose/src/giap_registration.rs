@@ -95,6 +95,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_system_enabled {
+        pond_mcp_server::init_system_deps(settings_repo.clone());
         register_builtin_extension("giap-system", pond_mcp_server::spawn_system_server);
         registered.push("giap-system".into());
     }

@@ -15,5 +15,6 @@ path = "src/lib.rs"
 # on CoreAudio, so the owner is an OS thread with a channel, not an async task.
 [dependencies]
 cpal = "0.15"
+pond-core = { workspace = true }
 pond-voice = { path = "../pond-voice" }
 tracing = { workspace = true }

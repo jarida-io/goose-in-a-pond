@@ -56,6 +56,7 @@ const BASE: AppState = {
   noticeFeedFailed: false,
   debriefContext: null,
   requestedConversation: null,
+  requestedWatch: null,
 };
 
 function msg(overrides?: Partial<TranscriptMessage>): TranscriptMessage {

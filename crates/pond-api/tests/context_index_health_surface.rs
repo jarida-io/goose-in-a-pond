@@ -223,6 +223,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     Harness {

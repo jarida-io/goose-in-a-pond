@@ -3,6 +3,7 @@ import { DetailShell } from "./DetailShell";
 import { Card, Row } from "./controls";
 import { HubIco } from "../../primitives/HubIco";
 import { api } from "../../../api/PondApiClient";
+import { openExternal } from "../../../api/followSignIn";
 import { useAppDispatch } from "../../../state/useAppContext";
 import type { Settings } from "../../../api/types";
 import type { Device } from "../../../api/types";
@@ -172,6 +173,8 @@ function EditableRow({ label, value, onSave, placeholder, testId }: EditableRowP
 interface AccountDetailProps {
   go: (route: string) => void;
 }
+
+const ISSUES_URL = "https://github.com/jarida-io/goose-in-a-pond/issues";
 
 export function AccountDetail({ go }: AccountDetailProps) {
   const dispatch = useAppDispatch();
@@ -347,11 +350,9 @@ export function AccountDetail({ go }: AccountDetailProps) {
           sub={version ? `Version ${version}` : undefined}
         />
         <Row
-          label="Help &amp; feedback"
+          label="Help & feedback"
           control={<HubIco d={CHEVR_PATH} size={16} color="var(--color-text-tertiary,#566178)" />}
-          onClick={() => {
-            /* TODO: open help/feedback modal */
-          }}
+          onClick={() => void openExternal(ISSUES_URL)}
         />
         <Row
           label="Restart onboarding"

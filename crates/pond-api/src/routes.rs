@@ -297,6 +297,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/vision-status", get(get_vision_status))
         .route("/models/memory-status", get(get_memory_status))
         .route("/models/active-roles", get(get_active_roles))
+        .route("/models/rollback", post(rollback_model))
         .route("/models/registry/refresh", post(refresh_model_registry))
         .route("/models/ollama", get(list_ollama_models))
         .route("/models/ollama/pull", post(pull_ollama_model))
@@ -439,6 +440,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rides/{id}/confirm", post(crate::rides::confirm))
         .route("/rides/{id}/decline", post(crate::rides::decline))
         .route("/rides/{id}/cancel", post(crate::rides::cancel))
+        .route("/web-forms/{id}", get(crate::web_forms::get))
+        .route("/web-forms/{id}/confirm", post(crate::web_forms::confirm))
+        .route("/web-forms/{id}/decline", post(crate::web_forms::decline))
         .route("/uber/accounts", get(crate::uber_accounts::list))
         .route(
             "/uber/accounts/connect",
@@ -534,6 +538,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/logs", get(list_logs))
         .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
+        // A test Pond's debug switch, which decides what the logs above may show.
+        .route(
+            "/developer/debug",
+            get(crate::developer::status).put(crate::developer::set_debug),
+        )
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
         // Before the `{id}` route, or axum matches "extraction-status" as an id.
@@ -568,11 +577,39 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route(
+            "/saved-items",
+            get(crate::saved_items::list).post(crate::saved_items::create),
+        )
+        .route(
+            "/saved-items/collections",
+            get(crate::saved_items::collections),
+        )
+        .route(
+            "/saved-items/{id}",
+            get(crate::saved_items::get)
+                .patch(crate::saved_items::edit)
+                .delete(crate::saved_items::delete),
+        )
+        .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
+        .route("/report-images/{key}", get(report_image))
+        .route("/web-watches", get(crate::web_watches::list))
+        .route(
+            "/web-watches/spoken-alerts",
+            get(crate::web_watches::spoken_alerts).put(crate::web_watches::set_spoken_alerts),
+        )
+        .route(
+            "/web-watches/{id}",
+            get(crate::web_watches::get)
+                .patch(crate::web_watches::edit)
+                .delete(crate::web_watches::delete),
+        )
         .route("/long-tasks", get(list_long_tasks))
         .route("/long-tasks/deep-research", get(deep_research_availability))
         .route("/long-tasks/queue", get(long_task_queue))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route("/long-tasks/{id}/extend", post(extend_long_task))
         .route(
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
@@ -636,6 +673,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
         .route("/voice/takes", post(crate::voice_match::post_take))
+        // A household phone's fix, from the home network only (see home_location.rs).
+        .route(
+            "/location/device",
+            put(crate::home_location::set_from_device),
+        )
+        // A phone listening for a phrase other than "hey goose" asks whether a segment held it.
+        .route(
+            "/voice/wake/check",
+            post(crate::wake_check::check_wake).layer(axum::extract::DefaultBodyLimit::max(
+                crate::wake_check::WAKE_CHECK_BODY_LIMIT,
+            )),
+        )
         .route("/voice/prints", get(crate::voice_match::get_prints))
         .route("/voice/prints/model", post(crate::voice_match::fetch_model))
         .route(
@@ -1851,6 +1900,10 @@ struct ChatRequest {
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
+    /// Where the asking phone is now, as its app named it, only while the person has turned on
+    /// telling Goose where the phone is. A place name, never coordinates; rides this turn only.
+    #[serde(default)]
+    device_place: Option<String>,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -2433,17 +2486,19 @@ fn audio_limit_status(
     )
 }
 
-/// Pre-stream recording checks for both chat handlers, before anything is saved: the model must
-/// hear it (409), then it must decode, within the time limit, to the engine's WAV (400, 413, 415).
-/// A recording the encoder has no memory for this turn is transcribed instead, its words added to
-/// `message`.
+/// Pre-stream recording checks for both chat handlers, before anything is saved: it must decode,
+/// within the time limit, to the engine's WAV (400, 413, 415). A recording the model cannot hear,
+/// or has no memory to hear this turn, goes as words instead: the client's own transcript
+/// (`heard_as`), else Whisper's, added to `message`. With no Whisper either, it is refused (409).
 async fn prepare_turn_audio(
     state: &Arc<AppState>,
     audio: Vec<pond_core::models::domain::message::AudioAttachment>,
     message: &mut String,
 ) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
     use base64::Engine as _;
-    use pond_core::models::domain::audio_input::{AudioLimitError, MAX_AUDIO_MS};
+    use pond_core::models::domain::audio_input::{
+        audio_refusal_for, AudioLimitError, MAX_AUDIO_MS,
+    };
 
     if audio.is_empty() {
         return Ok(audio);
@@ -2455,8 +2510,25 @@ async fn prepare_turn_audio(
         Err(_) => (String::new(), String::new()),
     };
     let reported = read_audio_state(state, &provider, &model).await;
-    audio_refusal_response(reported.as_ref(), &provider, &model)?;
-    let as_words = words_instead_of_hearing(state, &provider, &model).await;
+    let as_words = match audio_refusal_for(reported.as_ref()) {
+        None => words_instead_of_hearing(state, &provider, &model).await,
+        Some(refusal) => match state.transcribe_audio.clone() {
+            Some(transcribe) => {
+                tracing::info!(
+                    target: "giap::audio",
+                    kind = "voice_note_as_words",
+                    model = %model,
+                    code = refusal.code.as_str(),
+                    "the model cannot hear this recording; it goes as words"
+                );
+                Some(transcribe)
+            }
+            None => {
+                audio_refusal_response(reported.as_ref(), &provider, &model)?;
+                None
+            }
+        },
+    };
 
     let mut checked = Vec::with_capacity(audio.len());
     let mut words = Vec::new();
@@ -2480,8 +2552,17 @@ async fn prepare_turn_audio(
             })
         })?
         .map_err(audio_limit_status)?;
+        let heard_as = clip
+            .heard_as
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string);
         if let Some(transcribe) = as_words.clone() {
-            words.push(transcribe_voice_note(transcribe, normalized.wav).await?);
+            words.push(match heard_as {
+                Some(heard) => heard,
+                None => transcribe_voice_note(transcribe, normalized.wav).await?,
+            });
             continue;
         }
         tracing::info!(
@@ -2495,7 +2576,7 @@ async fn prepare_turn_audio(
             data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
             mime_type: "audio/wav".to_string(),
             name: clip.name,
-            heard_as: None,
+            heard_as,
         });
     }
     if as_words.is_some() {
@@ -2504,8 +2585,8 @@ async fn prepare_turn_audio(
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
-                    "error": "The pond is short of memory to listen to this voice note, and \
-                              could not make out its words. Try again in a moment.",
+                    "error": "The pond could not make out any words in this voice note. Try \
+                              again in a moment.",
                     "code": "voice_note_no_words",
                 })),
             ));
@@ -2560,8 +2641,8 @@ async fn transcribe_voice_note(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
-                "error": "The pond is short of memory to listen to this voice note, and could \
-                          not transcribe it either. Try again in a moment.",
+                "error": "The pond could not listen to this voice note or transcribe it. Try \
+                          again in a moment.",
                 "code": "voice_note_untranscribed",
             })),
         )
@@ -3426,6 +3507,7 @@ async fn drive_turn(
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
+        device_place: req.device_place.clone(),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -3703,6 +3785,18 @@ async fn drive_turn(
         }
         None => None,
     };
+
+    // A real answer makes this the model a rollback returns to after the next switch.
+    let answered = usage_completion_tokens > 0 || !turn.full_text.trim().is_empty();
+    if let (true, Some(repo)) = (answered, &state.model_repo) {
+        let id = ModelRecord::id_for(
+            &ModelCategory::for_chat_model(&settings.chat_provider, &settings.chat_model),
+            &settings.chat_model,
+        );
+        if let Err(e) = repo.note_working("chat", &id).await {
+            tracing::warn!(error = %e, "could not record the model that answered");
+        }
+    }
 
     let turn_context_limit = ContextGovernor::resolve(&ContextInputs {
         provider: &settings.chat_provider,
@@ -6512,17 +6606,60 @@ async fn update_settings(
     ) {
         let geocoder = pond_adapters_weather::Geocoder::new(state.http_client.clone());
         match geocoder.geocode(&name).await {
+            // A new spelling of the place a phone or a person pinned keeps the pin: replacing it
+            // with the town's centre is how a Find my location away from home undid a phone's fix.
+            Ok(geo) if current.precise_location_is_near(geo.latitude, geo.longitude) => {
+                merged.weather_latitude = current.weather_latitude;
+                merged.weather_longitude = current.weather_longitude;
+                merged.weather_location_source = current.weather_location_source.clone();
+                tracing::info!(
+                    kind = "home_location",
+                    change = "renamed",
+                    source = %current.weather_location_source,
+                    place = %name,
+                    "the home location's name changed; its precise position is kept"
+                );
+            }
             Ok(geo) => {
                 merged.weather_latitude = geo.latitude;
                 merged.weather_longitude = geo.longitude;
+                // A town's centre: a phone on the home network may replace it with a real fix.
+                merged.weather_location_source =
+                    pond_core::user_data::domain::settings::WEATHER_LOCATION_GEOCODED.to_string();
                 write_keys.insert("weather_latitude".to_string());
                 write_keys.insert("weather_longitude".to_string());
+                write_keys.insert("weather_location_source".to_string());
+                tracing::info!(
+                    kind = "home_location",
+                    change = "geocoded",
+                    previous_source = %current.weather_location_source,
+                    place = %name,
+                    "the home location is now a looked-up place's centre"
+                );
             }
             Err(e) => tracing::warn!(
                 error = %e,
                 location = %name,
                 "geocode-on-save failed; keeping provided coordinates"
             ),
+        }
+    }
+
+    // Coordinates entered as coordinates are a position someone chose: a phone does not replace
+    // them unasked.
+    if let (Some(lat), Some(lon)) = (patch_lat, patch_lon) {
+        if (lat != current.weather_latitude || lon != current.weather_longitude)
+            && (lat != 0.0 || lon != 0.0)
+        {
+            merged.weather_location_source =
+                pond_core::user_data::domain::settings::WEATHER_LOCATION_MANUAL.to_string();
+            write_keys.insert("weather_location_source".to_string());
+            tracing::info!(
+                kind = "home_location",
+                change = "manual",
+                previous_source = %current.weather_location_source,
+                "the home location was set as coordinates"
+            );
         }
     }
 
@@ -6716,7 +6853,16 @@ async fn get_weather(
     };
 
     // `{e:#}` keeps the whole anyhow chain, where an egress refusal's reason, mode and host live.
-    let current = provider.current().await.map_err(|e| {
+    let current = match provider.current().await {
+        Err(e)
+            if e.downcast_ref::<pond_adapters_weather::WeatherOff>()
+                .is_some() =>
+        {
+            return Ok(Json(json!({ "enabled": false })));
+        }
+        other => other,
+    }
+    .map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("Failed to fetch weather: {e:#}")})),
@@ -6764,28 +6910,43 @@ async fn get_weather(
         "wind": current.wind_speed_kmh.round() as i64,
         "sunrise": current.sunrise,
         "sunset": current.sunset,
+        // Whether it is day where the Pond is, from the weather service, so a client draws a
+        // clear night as the moon without working out the sun's times in the Pond's time zone.
+        "is_day": current.is_day,
         "forecast": upcoming,
     })))
 }
 
-/// Maps a WMO description to one of the dashboard widget's icon keys.
+/// Maps a WMO description (`pond-adapters-weather`'s `wmo.rs`) to one of the dashboard widget's
+/// icon keys, so the icon shows the condition the text names.
+///
+/// Storm and snow come first: "Thunderstorm" is not rain to look at, and "Snow showers" carries
+/// "shower" too. Snow, a storm and fog showed the rain cloud or a plain cloud before
+/// (2026-11-08). The widget swaps `sun` and `cloudSun` for the moon after dark; the Pond does not
+/// know the dashboard's hour, so the key names the sky only.
 fn weather_icon_key(description: &str) -> &'static str {
     let d = description.to_lowercase();
-    if d.contains("rain")
-        || d.contains("drizzle")
-        || d.contains("shower")
-        || d.contains("snow")
-        || d.contains("thunder")
-    {
+    if d.contains("thunder") {
+        "storm"
+    } else if d.contains("snow") {
+        "snow"
+    } else if d.contains("drizzle") {
+        // Lighter than rain, and drawn so, as the phone's cards draw it.
+        "drizzle"
+    } else if d.contains("rain") || d.contains("shower") {
         "rain"
-    } else if d.contains("clear sky") {
+    } else if d.contains("fog") {
+        "fog"
+    } else if d.contains("clear") {
+        // "Mainly clear" too: the sun, as both apps' chat cards draw it.
         "sun"
-    } else if d.contains("clear") || d.contains("partly") {
+    } else if d.contains("partly") {
         "cloudSun"
     } else {
         "cloud"
     }
 }
+
 
 fn weather_short_weekday(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
@@ -6928,7 +7089,7 @@ async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
 // ── Model registry handlers ───────────────────────────────────────────────────
 
 /// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
-/// `audio_input` and `voice_notes` are read live, so they turn ready once the encoder hears.
+/// `audio_input` and `voice_notes_heard` are read live, so they turn true once the encoder hears.
 async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Value> {
     use pond_core::models::domain::audio_input::voice_notes_status;
 
@@ -6939,7 +7100,14 @@ async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Valu
     };
     caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
     let mut body = serde_json::to_value(caps).unwrap_or_default();
-    body["voice_notes"] = json!(voice_notes_status(audio.as_ref()));
+    // A note the model cannot hear still goes, as Whisper's words.
+    let heard = voice_notes_status(audio.as_ref());
+    let taken = match state.transcribe_audio.is_some() {
+        true => "ready",
+        false => heard,
+    };
+    body["voice_notes"] = json!(taken);
+    body["voice_notes_heard"] = json!(heard == "ready");
     body["attachments"] = attachment_limits();
     Json(body)
 }
@@ -7002,11 +7170,26 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
     let chat_provider = settings.chat_provider.clone();
     let chat_model = settings.chat_model.clone();
 
+    // What `POST /models/rollback` would return to; null when there is no way back.
+    let chat_rollback = match state.model_repo.as_ref() {
+        Some(repo) => match repo.rollback_target("chat").await.ok().flatten() {
+            Some(id) => repo
+                .get_by_id(&id)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| json!({ "model_id": m.id, "model": m.name })),
+            None => None,
+        },
+        None => None,
+    };
+
     Json(json!({
         "chat":  {
             "provider": chat_provider,
             "model":    chat_model,
             "model_id": assignments.get("chat"),
+            "rollback": chat_rollback,
         },
         "tool": {
             "model": settings.tool_model,
@@ -8020,6 +8203,66 @@ async fn activate_model(
         )
     })?;
 
+    assign_role(&state, model_repo, cat, name, role).await
+}
+
+/// POST /api/v1/models/rollback — return a role to the model that last answered before the
+/// latest switch. Only the chat role keeps that history: its turns are what prove a model works.
+async fn rollback_model(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(model_repo) = state.model_repo.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "registry not available"})),
+        ));
+    };
+    let Json(body) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid JSON: {e}")})),
+        )
+    })?;
+    let role = body["role"].as_str().unwrap_or("chat").to_string();
+
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    let nothing = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "nothing_to_roll_back", "role": role})),
+        )
+    };
+    let target = model_repo
+        .rollback_target(&role)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+    // Removed from the catalog since: there is no longer anything to return to.
+    let record = model_repo
+        .get_by_id(&target)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+
+    assign_role(&state, model_repo, record.category, record.name, role).await
+}
+
+/// Assign `name` to `role` and bring the running engine in line, as a switch from the Models
+/// tab does. A rollback takes the same path, so it rebuilds and warms the same way.
+async fn assign_role(
+    state: &Arc<AppState>,
+    model_repo: Arc<dyn pond_core::models::ports::model_repository::ModelRepository + Send + Sync>,
+    cat: ModelCategory,
+    name: String,
+    role: String,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let category = cat.as_str().to_string();
     if !ModelRoleAssignment::category_matches_role(&cat, &role) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -8049,7 +8292,7 @@ async fn activate_model(
             )
         })?;
     // Accepted, it would only fail on the first turn.
-    refuse_unavailable_engine(&state, &record, "activate")?;
+    refuse_unavailable_engine(state, &record, "activate")?;
     // The found record's id: a forgiving TTS lookup may resolve another category.
     let model_id = record.id.clone();
 
@@ -8064,6 +8307,14 @@ async fn activate_model(
         ModelCategory::TtsHttp => "tts",
         ModelCategory::Embedding => "embedding",
     };
+
+    // Only a real change moves the way back; picking the current model again keeps it.
+    let current = model_repo.get_assignment(&role).await.ok().flatten();
+    if current.is_some_and(|a| a.model_id != model_id) {
+        if let Err(e) = model_repo.arm_rollback(&role, &model_id).await {
+            tracing::warn!(error = %e, role = %role, "could not keep the way back to the last model");
+        }
+    }
 
     model_repo
         .set_assignment(&role, &model_id)
@@ -8120,7 +8371,7 @@ async fn activate_model(
                 .await;
             // The model brings its own engine; `embedding_provider` stays the on/off switch.
             if let Ok(settings) = settings_repo.get().await {
-                crate::apply_embedding_choice(&state, &settings).await;
+                crate::apply_embedding_choice(state, &settings).await;
             }
         }
         _ => {}
@@ -8128,10 +8379,10 @@ async fn activate_model(
 
     if matches!(role.as_str(), "chat" | "think" | "task") {
         // Log-only; Jetson's fail-closed residency check belongs in the local-inference loader.
-        warn_if_model_spills(&state, &record).await;
+        warn_if_model_spills(state, &record).await;
 
         let settings = state.settings_repo.get().await.unwrap_or_default();
-        rebuild_llm_provider(&state, &settings).await;
+        rebuild_llm_provider(state, &settings).await;
     }
 
     // As in PUT /settings: warm the prefix now, in the background. Nothing is fetched.
@@ -10045,9 +10296,20 @@ async fn calibrate_wake_word(
     })))
 }
 
+/// `?variant=` on `DELETE /api/v1/voice/calibrate`: the one way of hearing the phrase to forget.
+#[derive(Debug, Deserialize)]
+struct CalibrationRemoval {
+    variant: Option<String>,
+}
+
 /// `DELETE /api/v1/voice/calibrate` — always safe: the detector falls back to the wake word.
+///
+/// With `?variant=gus` only that variant is forgotten, so a take that heard the phrase wrongly can
+/// be taken back without starting the calibration over; the response then lists what is left.
+/// Without it every variant is cleared.
 async fn reset_wake_word_calibration(
     State(state): State<Arc<AppState>>,
+    Query(removal): Query<CalibrationRemoval>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut settings = state.settings_repo.get().await.map_err(|e| {
         (
@@ -10056,7 +10318,16 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    settings.voice_wake_word_transcriptions.clear();
+    let variant = removal
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    match &variant {
+        Some(v) => settings.voice_wake_word_transcriptions.retain(|t| t != v),
+        None => settings.voice_wake_word_transcriptions.clear(),
+    }
 
     state.settings_repo.update(&settings).await.map_err(|e| {
         (
@@ -10065,9 +10336,24 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    Ok(Json(
-        json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
-    ))
+    tracing::info!(
+        kind = "wake_calibration_removed",
+        one_variant = variant.is_some(),
+        remaining = settings.voice_wake_word_transcriptions.len(),
+        "wake-word calibration: {}",
+        if variant.is_some() {
+            "one variant forgotten"
+        } else {
+            "cleared"
+        }
+    );
+    Ok(Json(match variant {
+        Some(v) => json!({
+            "removed": v,
+            "all_variants": settings.voice_wake_word_transcriptions,
+        }),
+        None => json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
+    }))
 }
 
 // ── Service connectivity test ─────────────────────────────────────────────────
@@ -12780,6 +13066,7 @@ async fn agent_chat_stream(
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -16758,7 +17045,7 @@ async fn pond_capabilities(
 
 /// The caller of a long-task route, as a member's scope: a paired member's device, or the
 /// desktop on this host acting for the primary member. Nobody identified reaches no task.
-async fn long_task_caller(
+pub(crate) async fn long_task_caller(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     peer: Result<
@@ -16876,6 +17163,8 @@ async fn long_task_view(
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
+        // The card's "12 of 30 min" and its extend button; none for a task without a time limit.
+        "deadline": task.budget().deadline(),
         "updated_at": task.updated_at(),
         "finished_at": task.finished_at(),
         "steps": steps.iter().map(|step| json!({
@@ -17327,20 +17616,25 @@ async fn get_long_task_report(
         Err(response) => return response,
     };
     match long_task_report(&state, &task).await {
-        Ok((markdown, events, sections)) => Json(json!({
-            "id": task.id(),
-            "title": report::assembled_title(&markdown),
-            "state": task.state(),
-            "kind": task.kind(),
-            "markdown": markdown,
-            "sections": sections,
-            "sources": report::sources(&markdown)
-                .into_iter()
-                .map(|s| json!({"title": s.title, "url": s.url}))
-                .collect::<Vec<_>>(),
-            "calendar_events": events.len(),
-        }))
-        .into_response(),
+        Ok((markdown, events, sections)) => {
+            let images = report_images_for(&markdown).await;
+            Json(json!({
+                "id": task.id(),
+                "title": report::assembled_title(&markdown),
+                "state": task.state(),
+                "kind": task.kind(),
+                "markdown": markdown,
+                "sections": sections,
+                "sources": report::sources(&markdown)
+                    .into_iter()
+                    .map(|s| json!({"title": s.title, "url": s.url}))
+                    .collect::<Vec<_>>(),
+                "calendar_events": events.len(),
+                "options": pond_core::shared::services::task_options::options_in(&markdown),
+                "images": images,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -17546,6 +17840,130 @@ async fn cancel_long_task(
     {
         Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtendBody {
+    minutes: Option<i64>,
+}
+
+/// Gives a running task more time, counted from its deadline or from now if that has passed,
+/// within the most a task may have.
+async fn extend_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    body: Option<Json<ExtendBody>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::{extended_deadline, EXTEND_MINUTES};
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    let minutes = body
+        .and_then(|Json(b)| b.minutes)
+        .unwrap_or(EXTEND_MINUTES)
+        .clamp(1, 60);
+    let now = chrono::Utc::now();
+    let deadline = extended_deadline(task.budget().deadline(), task.created_at(), minutes, now);
+    match long_task_repo(&state)
+        .set_deadline(&id, Some(deadline))
+        .await
+    {
+        Ok(true) => Json(json!({"id": id, "deadline": deadline})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Pictures a report shows: up to three, from the pages it cites, each served by the pond.
+const REPORT_IMAGES: usize = 3;
+
+async fn report_images_for(markdown: &str) -> Vec<Value> {
+    use pond_core::shared::services::report_images::installed;
+    let Some(images) = installed() else {
+        return Vec::new();
+    };
+    let pages: Vec<String> = pond_core::shared::services::research_report::sources(markdown)
+        .into_iter()
+        .map(|s| s.url)
+        .collect();
+    images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect()
+}
+
+/// A report picture the pond kept, for the screens to draw without reaching the site.
+async fn report_image(Path(key): Path<String>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::{installed, is_key};
+    if !is_key(&key) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(images) = installed() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match images.read(&key).await {
+        Some((bytes, content_type)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=86400".to_string(),
+                ),
+                (
+                    axum::http::header::HeaderName::from_static("x-content-type-options"),
+                    "nosniff".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -18183,6 +18601,7 @@ async fn run_recipe(
         deep_research: false,
         deep_research_answer: None,
         deep_research_for: None,
+        device_place: None,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))
@@ -22716,5 +23135,34 @@ mod session_preview_tests {
             preview.ends_with('…') && preview.chars().count() <= 241,
             "{preview}"
         );
+    }
+}
+
+#[cfg(test)]
+mod weather_icon_tests {
+    use super::weather_icon_key;
+
+    #[test]
+    fn every_wmo_description_gets_the_icon_of_its_own_condition() {
+        for (description, icon) in [
+            ("Clear sky", "sun"),
+            ("Mainly clear", "sun"),
+            ("Partly cloudy", "cloudSun"),
+            ("Overcast", "cloud"),
+            ("Fog", "fog"),
+            ("Light drizzle", "drizzle"),
+            ("Freezing drizzle", "drizzle"),
+            ("Moderate rain", "rain"),
+            ("Freezing rain", "rain"),
+            ("Violent showers", "rain"),
+            ("Slight snow", "snow"),
+            ("Snow grains", "snow"),
+            ("Snow showers", "snow"),
+            ("Thunderstorm", "storm"),
+            ("Thunderstorm with hail", "storm"),
+            ("Unknown", "cloud"),
+        ] {
+            assert_eq!(weather_icon_key(description), icon, "{description}");
+        }
     }
 }

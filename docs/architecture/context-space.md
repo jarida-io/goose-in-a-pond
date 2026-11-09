@@ -584,6 +584,10 @@ content hashes, and dropping one-time codes.
 - The three databases are plain SQLite. Snapshots, face embeddings and the TLS key are plaintext
   files.
 - `secrets.json` is encrypted, under a key file kept beside it.
+- Since 2026-11-09 a pond in its user's session can put its data directory in a LUKS2 volume whose
+  key is sealed to the fTPM with no PCRs, the admin card its recovery keyslot (`giap.sh
+  data-encrypt`; [data-volume-encryption.md](data-volume-encryption.md)). The doctor warns while it
+  is not. The `agamemnon` layout is not covered yet.
 - `agamemnon` keeps the pond's data in `/var/lib/goose-in-a-pond` (`0750`), away from the login.
 - The nano has an OP-TEE firmware TPM with `tpm2-tools`. When the admin card is made, its recovery
   copy is sealed to it under the owner hierarchy, so that copy cannot be opened from the disk on
@@ -605,7 +609,7 @@ content hashes, and dropping one-time codes.
 
 | Threat | Stopped? |
 |---|---|
-| A copy of the disk, or storage pulled from the board | Yes, from P1: the volume key never leaves the fTPM |
+| A copy of the disk, or storage pulled from the board | A copy, yes, once `data-encrypt` has run: the volume key never leaves the fTPM. Storage moved into another Jetson, only on a fused board: an unfused board's fTPM secret is not documented as unique (data-volume-encryption.md) |
 | The whole board taken, on an unfused board | No. Without secure boot, a modified OS can run as root and unseal. Fusing OemK1 closes this (decision 2) |
 | The network | Pinned TLS, and WireGuard off the LAN |
 | Another member | The principal filter (rule 2) |

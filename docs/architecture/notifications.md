@@ -21,6 +21,7 @@ What a tap on a notice opens. The Pond writes `data.open` only through `OpenScre
 | `schedule` | `schedule_id`, and `run_id` for a run's result | the schedules list at that schedule (`ScheduleDetail`, without `run_id`, is the missed-run question) |
 | `chat` | `session_id` when the notice is about a conversation | that conversation; the chat screen when there is no `session_id` |
 | `devices`, `models`, `extensions`, `remote_access` | none | that screen |
+| `my_pond` (2026-11-08) | none | the phone's My Pond screen; the "My Pond unlocked" notice carries it. The dashboard has no such screen and offers no action |
 
 **The id rides beside the screen, never instead of it.** A client that does not read an id still
 opens the right screen, and a client that cannot open the id opens the screen alone. Each client
@@ -199,6 +200,8 @@ name in the first column.
 | pairing | a device pairs, or a pairing verification fails | `New device paired` / `Failed pairing attempt` | `info` / `alert` | `devices` | household | failures: one per 10 minutes |
 | Matter | device added, device left, pairing failed, controller unreachable / back, first-run set-up started / finished | see `pond-adapters-matter/src/notify.rs` | `info` / `alert` | `devices` | household | alerts one per 10 minutes per kind; "back" only after an announced outage; a removal the Pond asked for is silent |
 | ride links and offers | `giap-travel` | see [rides and maps](rides-and-maps.md) | | `action` payload | the member who asked | |
+| web watch | a watch finds a match (`A match on {watch}`), cannot check its page three times in a row, or the daily digest at 18:00 | the change lines | `info` | `watch` (with `watch_id`; none for a digest across several) | the watch's owner's devices only | one per check with a match; one digest a day. A match is also said aloud to an owner who opted in ([web watches](web-watch-and-exploration.md)) |
+| POST form | `read_web_page` is asked for a POST form | `Send this form to {site}?` / its fields and values | `action_required` | `action: form_confirm` with `id` | the member who asked | one per ask; it lapses unsent after 15 minutes |
 
 ### System notices (2026-10-27)
 
@@ -253,3 +256,5 @@ goose-on-the-go) and ignores a value it does not know, opening where it was. A `
 `session_id` opens that conversation from goose-on-the-go `fix/notification-popup-and-open` on. `models`, `extensions`
 and `remote_access` open the app's Models, Extensions and Remote access screens from
 goose-on-the-go `feature/notification-open-system-screens` on; an older app ignores them.
+`my_pond` opens My Pond from goose-on-the-go `fix/unlock-notice-opens-my-pond` on; before it the
+unlock notice opened Devices.

@@ -120,6 +120,7 @@ void i18n.use(initReactI18next).init({
     open: {
       schedules: 'Open schedules', devices: 'Open devices', chat: 'Open chat',
       models: 'Open models', extensions: 'Open extensions', pairing: 'Open remote access',
+      watches: 'Open the watch',
     },
   }, pairing: {
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',

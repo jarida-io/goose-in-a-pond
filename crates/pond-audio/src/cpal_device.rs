@@ -74,8 +74,11 @@ impl CaptureDevice for CpalCapture {
     fn start(&mut self, shared: Arc<MicShared>) -> Result<(), String> {
         self.stop();
 
-        let device = self.pick()?;
-        let opened = self.open(&device, shared);
+        // ALSA reads the environment from C while it finds and opens a device; see process_env.
+        let opened = pond_core::shared::services::process_env::reading(|| {
+            let device = self.pick()?;
+            self.open(&device, shared)
+        });
         if opened.is_err() {
             // The device may have gone; find it afresh next time instead of reusing the handle.
             self.resolved = None;

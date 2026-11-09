@@ -41,7 +41,7 @@ use pond_adapters_llamafile::LlamafileProvider;
 #[cfg(feature = "mesh")]
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
-use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
+use pond_adapters_weather::{LiveWeather, OpenMeteoWeatherAdapter, WeatherProvider};
 use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
@@ -329,6 +329,18 @@ enum Commands {
         status: bool,
     },
 
+    /// Mark this pond as a Jarida test Pond, or as a home Pond again.
+    ///
+    /// On a test Pond a paired phone may turn on developer mode's debug switch, which lets the
+    /// logs show what the household said and the members' names. Only this host sets the mark;
+    /// the running server sees it without a restart. Run it as the account that owns the pond's
+    /// data: `bash scripts/giap.sh test-pond` does.
+    TestPond {
+        /// on, off, or status
+        #[arg(value_enum, default_value_t = TestPondAction::Status)]
+        action: TestPondAction,
+    },
+
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
     #[command(hide = true)]
     BleHelper,
@@ -583,7 +595,7 @@ fn pin_goose_state_under(data_dir: &std::path::Path) {
         );
         return;
     }
-    std::env::set_var("GOOSE_PATH_ROOT", &engine_root);
+    pond_core::shared::services::process_env::set("GOOSE_PATH_ROOT", &engine_root);
 }
 
 /// The budgeted device's choices that must be in place before an engine loads or a turn compacts:
@@ -694,6 +706,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             json,
             status,
         }) => run_admin_card(rotate, json, status).await,
+        Some(Commands::TestPond { action }) => run_test_pond(action),
         Some(Commands::SetupCode {
             json,
             card,
@@ -2470,19 +2483,10 @@ async fn run_server(
     }
 
     // For the MCP weather tool (giap__get_current_weather), not AppState.
-    let weather: Option<Arc<dyn WeatherProvider>> = {
-        // `Location::weather_target` decides: coordinates, or a name the adapter geocodes.
-        let place = pond_core::user_data::services::location::resolve(&settings);
-        if let (true, Some((lat, lon, loc))) = (settings.weather_enabled, place.weather_target()) {
-            tracing::info!("weather enabled: {} ({}, {})", loc, lat, lon);
-            Some(Arc::new(OpenMeteoWeatherAdapter::new(lat, lon, loc)))
-        } else {
-            tracing::info!(
-                "weather disabled — enable via PUT /api/v1/settings (weather_enabled + lat/lon or location_name)"
-            );
-            None
-        }
-    };
+    // Read from the settings on every call, so a place set later (the dashboard, owner setup, a
+    // phone's fix on the home network) applies at once; off is `WeatherOff`, not a failure.
+    let weather: Option<Arc<dyn WeatherProvider>> =
+        Some(Arc::new(LiveWeather::new(settings_repo.clone())));
 
     // libp2p MeshTransport, gated on `mesh_enabled`; wired into AppState so the
     // /api/v1/mesh/* routes can use it.
@@ -3226,7 +3230,8 @@ async fn run_server(
                 tts.clone(),
                 Some(settings_repo.clone()),
             )
-            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone())))
+            .with_device_registry(device_registry.clone()),
         );
         deferred_executor
             .init(
@@ -3478,17 +3483,29 @@ async fn run_server(
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
     let household_names = tracing_setup::HouseholdNames::default();
+    let debug_switch = pond_core::security::domain::developer_mode::DebugSwitch::default();
+    let developer = Arc::new(pond_api::developer::DeveloperMode::new(
+        Arc::new(pond_infra::file_test_pond::FileTestPondMark::new(&data_dir)),
+        debug_switch.clone(),
+    ));
     let _file_guard = drain_handle.drain_into(
         operational_log.clone(),
-        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+        tracing_setup::LogScrubber::household(
+            redactor.clone(),
+            household_names.clone(),
+            debug_switch,
+        ),
     );
-    // A new or renamed member is hidden from the Logs viewer within a minute.
+    // A new or renamed member is hidden from the Logs viewer within a minute, and so is content
+    // once the host takes the test Pond mark away.
     {
         let profiles = profile_repo.clone();
+        let developer = developer.clone();
         tokio::spawn(async move {
             let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 every_minute.tick().await;
+                developer.current().await;
                 match profiles.list().await {
                     Ok(members) => {
                         household_names.set(members.iter().map(|m| m.display_name.as_str()))
@@ -3647,6 +3664,43 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
+    pond_core::shared::services::report_images::install(Arc::new(
+        pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
+    ));
+    // POST forms wait for the member's yes on their phone; the phone's confirm route sends them.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
+    // A match is also said aloud to a member who opted in, while presence says they are home.
+    let spoken_watch_alerts = tts.clone().map(|voice| {
+        Arc::new(
+            pond_core::shared::services::spoken_watch_alerts::SpokenWatchAlerts::new(
+                profile_repo.clone(),
+                settings_repo.clone(),
+                pond_core::shared::services::spoken_watch_alerts::follow_presence(&event_bus),
+                Arc::new(pond_audio_out::Announcer::new(voice)),
+            ),
+        )
+    });
+    // Members' web watches: checked in code, their owners told on their own devices.
+    pond_mcp_server::web_watch_runner::spawn(
+        Arc::new(
+            pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
+                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
+                Arc::new(pond_mcp_server::web_watch_runner::PageReader),
+                Arc::new(
+                    pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+                        targeted_notification_sender.clone(),
+                    )
+                    .with_speech(spoken_watch_alerts),
+                ),
+            ),
+        ),
+        settings_repo.clone(),
+    );
     #[cfg(unix)]
     {
         let runtime = embedded.clone();
@@ -4456,6 +4510,7 @@ async fn run_server(
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: Some(pond_admin),
+        developer: developer.clone(),
     });
     state.device_events.clone().follow(event_bus.clone());
 
@@ -5277,6 +5332,10 @@ async fn run_chat(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
 
+    // A POST form asked for here waits in the shared database; serve's route sends it.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
     // giap-travel's links and ride offers reach the speaker's phone from this process too: queued
     // in the shared database, which the serve process hands to the phone, and woken by the relay.
     let (member_notification_tx, _) =
@@ -5588,6 +5647,8 @@ async fn run_chat(
         _ => None,
     };
 
+    let hearing_settings = settings_repo_arc.clone();
+
     // ── Build the GooseAdapter (MCP tools + model routing) ───────────────────────
     #[cfg(feature = "goose-agent")]
     let agent: Arc<dyn Agent> = {
@@ -5694,11 +5755,14 @@ async fn run_chat(
         .with_thinking_tone(settings.voice_thinking_tone_enabled);
     // A shared microphone: anyone in the room may speak, unlike a typed turn from the shell.
     if voice_mode {
-        chat_service = chat_service.with_unrecognised_scope(
-            pond_core::shared::services::chat::unrecognised_voice_scope(Some(Arc::new(
-                SqliteProfileRepository::new(db.system.clone()),
-            ))),
-        );
+        chat_service = chat_service
+            .with_unrecognised_scope(pond_core::shared::services::chat::unrecognised_voice_scope(
+                Some(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+            ))
+            .with_model_hearing(room_voice::model_hearing(
+                warm_agent.clone(),
+                hearing_settings,
+            ));
     }
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
@@ -7089,6 +7153,23 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
+    pond_mcp_server::saved_items::init_saved_item_deps(
+        pond_mcp_server::saved_items::SavedItemDeps {
+            repo: Arc::new(
+                pond_infra::sqlite_saved_item::SqliteSavedItemRepository::new(pool.clone()),
+            ),
+            sessions: Arc::new(
+                pond_infra::sqlite_session_storage::SqliteSessionStorage::new(pool.clone()),
+            ),
+            authorities: orchestration.authorities(),
+        },
+    );
+    pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
+        repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+            pool.clone(),
+        )),
+        authorities: orchestration.authorities(),
+    });
     let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
         pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool),
     );
@@ -7579,6 +7660,21 @@ async fn advance_long_task(
 
     match runner::next_run(task, &steps, tries, now) {
         NextRun::Wait => Ok(false),
+        NextRun::SkipForTime(keys) => {
+            // Its time is up: what has not run is skipped, and the last step answers with the rest.
+            for mut step in steps.iter().filter(|s| keys.contains(s.key())).cloned() {
+                if step.skip(now).is_ok() {
+                    tasks.update_step(&step).await?;
+                }
+            }
+            tracing::info!(
+                kind = "long_task_time_up",
+                task = %task.id(),
+                skipped = keys.len(),
+                "the task's time ran out; its last step answers with what was found"
+            );
+            Ok(true)
+        }
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)
@@ -8167,8 +8263,7 @@ fn ensure_onnx_runtime() {
 
     // ── 1b. The Jetson's GPU runtime, once giap.sh has built and installed it ─
     if let Some(lib) = onnx_gpu::installed_runtime(&default_data_dir(), ORT_VERSION, on_jetson()) {
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib) };
+        pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib);
         return;
     }
 
@@ -8189,8 +8284,7 @@ fn ensure_onnx_runtime() {
 
     for p in system_candidates {
         if std::path::Path::new(p).exists() {
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", p) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", p);
             return;
         }
     }
@@ -8205,7 +8299,7 @@ fn ensure_onnx_runtime() {
     // The versioned file is the real binary; the bare name covers a manual install.
     for candidate in [&local_versioned, &local_unversioned] {
         if candidate.exists() {
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", candidate);
             return;
         }
     }
@@ -8235,8 +8329,7 @@ fn ensure_onnx_runtime() {
         Ok(lib_path) => {
             eprintln!("  Setup    ONNX Runtime ready");
             tracing::info!("ONNX Runtime installed to {}", lib_path.display());
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib_path) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib_path);
         }
         Err(e) => {
             eprintln!("  Setup    FAILED to download ONNX Runtime: {e}");
@@ -8401,16 +8494,15 @@ fn apply_face_recognition_defaults() {
             .join("models")
             .join("face")
             .join("antispoof.onnx");
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH", default_path) };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PATH", default_path);
     }
 
     // Shipped 3-class Silent-Face export: live is slot 2 and it expects [0, 1] pixels.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_LIVE_INDEX", "2");
     }
     if std::env::var_os("POND_FACE_ANTISPOOF_PIXEL_SCALE").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit");
     }
 
     // Secondary anti-spoof model is optional and only used if explicitly configured.
@@ -10422,6 +10514,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 suggestion_context: None,
                 deep_research_task: None,
                 interview: None,
+                device_place: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10498,6 +10591,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     suggestion_context: None,
                     deep_research_task: None,
                     interview: None,
+                    device_place: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -10937,6 +11031,30 @@ fn run_dashboard() -> Result<()> {
 
 /// Works on the data directory directly, so it answers whether or not the server is running;
 /// a running server reads the new card on the next unlock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum TestPondAction {
+    On,
+    Off,
+    Status,
+}
+
+fn run_test_pond(action: TestPondAction) -> Result<()> {
+    let mark = pond_infra::file_test_pond::FileTestPondMark::new(default_data_dir());
+    match action {
+        TestPondAction::On => mark.set(true)?,
+        TestPondAction::Off => mark.set(false)?,
+        TestPondAction::Status => {}
+    }
+    if mark.is_marked()? {
+        println!(
+            "This is a test Pond: a paired phone may turn on debug, which shows household content in the logs."
+        );
+    } else {
+        println!("This is a home Pond: debug stays off and the logs hide household content.");
+    }
+    Ok(())
+}
+
 async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     use pond_core::security::ports::admin_card::AdminCardStore as _;
     let store = pond_infra::file_admin_card::FileAdminCardStore::new(default_data_dir());

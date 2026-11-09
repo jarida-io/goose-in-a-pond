@@ -24,8 +24,9 @@ use crate::{
 enum SpeechCapture {
     /// No speech detected within the onset wait — nothing to transcribe.
     Empty,
-    /// A matching speculative transcript was already computed; use it, skip re-inference.
-    Transcript(String),
+    /// A matching speculative transcript was already computed; use it, skip re-inference. The
+    /// 16 kHz samples ride along for a model that hears them.
+    Transcript(String, Vec<f32>),
     /// No usable speculative transcript (e.g. hit the hard cap first); transcribe normally.
     Samples(Vec<f32>),
 }
@@ -109,6 +110,8 @@ pub struct WhisperRsInput {
     silence_ms: u64,
     /// Pre-captured WAV bytes from the wake-word detector (one-breath path).
     captured: Mutex<Option<Vec<u8>>>,
+    /// The 16 kHz samples behind the last `listen()` that returned words.
+    heard: Mutex<Option<Vec<f32>>>,
     /// When speech that barged in over a reply began; the next capture starts there.
     onset: Mutex<Option<std::time::Instant>>,
     /// Normalized wake words, stripped because the capture reaches back past the trigger.
@@ -161,6 +164,7 @@ impl WhisperRsInput {
             duration_secs: DEFAULT_DURATION_SECS,
             silence_ms: DEFAULT_SILENCE_MS,
             captured: Mutex::new(None),
+            heard: Mutex::new(None),
             onset: Mutex::new(None),
             wake_words: std::sync::RwLock::new(Vec::new()),
             audio_level_sink: None,
@@ -472,8 +476,8 @@ impl WhisperRsInput {
 
 const ABANDONED: &str = "transcription abandoned";
 
-/// Over noise Whisper can say its prompt back, once or over and over, the last copy cut short;
-/// nobody says it that way.
+/// Over noise Whisper can say its prompt back, once or over and over, the last copy cut short, or
+/// loop just its opening ("Hey goose. Hey goose. Hey goose."); nobody says it that way.
 fn is_prompt_echo(text: &str, prompt: &str) -> bool {
     let heard = pond_voice::text::normalize_transcript(text);
     let prompt = pond_voice::text::normalize_transcript(prompt);
@@ -481,13 +485,20 @@ fn is_prompt_echo(text: &str, prompt: &str) -> bool {
         heard.split_whitespace().collect(),
         prompt.split_whitespace().collect(),
     );
+    let said_over = |words: usize, copies: usize| {
+        heard.len() >= words * copies
+            && heard
+                .iter()
+                .enumerate()
+                .all(|(i, w)| *w == prompt[i % words])
+    };
     !prompt.is_empty()
-        && heard.len() >= prompt.len()
-        && heard
-            .iter()
-            .enumerate()
-            .all(|(i, w)| *w == prompt[i % prompt.len()])
+        && (said_over(prompt.len(), 1)
+            || (1..prompt.len()).any(|words| said_over(words, LOOPED_OPENING)))
 }
+
+/// Copies of the prompt's opening that make a loop: a person may call the pond twice in a breath.
+const LOOPED_OPENING: usize = 3;
 /// Whisper keeps only the last half of its 448-token text context as the prompt.
 const MAX_PROMPT_TOKENS: usize = 224;
 
@@ -728,7 +739,10 @@ impl WhisperRsInput {
                     return Ok(SpeechCapture::Empty);
                 }
                 if let Some(transcript) = speculative_transcript {
-                    return Ok(SpeechCapture::Transcript(transcript));
+                    return Ok(SpeechCapture::Transcript(
+                        transcript,
+                        resample_to_16k(&samples, sample_rate),
+                    ));
                 }
                 Ok(SpeechCapture::Samples(resample_to_16k(
                     &samples,
@@ -739,17 +753,23 @@ impl WhisperRsInput {
         .await
         .map_err(|e| anyhow!("audio capture join error: {}", e))??;
 
+        *self.heard.lock().unwrap() = None;
         let samples_result = match capture_result {
             SpeechCapture::Empty => return Ok(Some(String::new())),
             // Already stripped in the speculative thread.
-            SpeechCapture::Transcript(t) => return Ok(Some(t)),
+            SpeechCapture::Transcript(t, samples) => {
+                *self.heard.lock().unwrap() = Some(samples);
+                return Ok(Some(t));
+            }
             SpeechCapture::Samples(s) => s,
         };
 
+        let kept = samples_result.clone();
         let transcript =
             tokio::task::spawn_blocking(move || Self::transcribe_samples(&engine, samples_result))
                 .await
                 .map_err(|e| anyhow!("inference join error: {}", e))??;
+        *self.heard.lock().unwrap() = Some(kept);
 
         Ok(Some(self.without_wake_word(transcript)))
     }
@@ -791,6 +811,14 @@ impl VoiceInput for WhisperRsInput {
 
     fn prime_with_onset(&self, onset: std::time::Instant) {
         *self.onset.lock().unwrap() = Some(onset);
+    }
+
+    fn take_heard_audio(&self) -> Option<Vec<u8>> {
+        let samples = self.heard.lock().unwrap().take()?;
+        Some(pond_voice::dsp::encode_wav_pcm16(
+            &pond_voice::dsp::f32_to_pcm16(&samples),
+            16_000,
+        ))
     }
 }
 
@@ -841,6 +869,26 @@ mod tests {
         ));
         assert!(!is_prompt_echo("", prompt));
         assert!(!is_prompt_echo("anything", ""));
+    }
+
+    #[test]
+    fn the_wake_phrase_looped_from_the_prompt_is_an_echo_and_said_once_or_twice_is_not() {
+        let prompt = "Hey goose. Jerry Anyumba.";
+        let looped = "Hey goose. ".repeat(8);
+        assert!(is_prompt_echo(&looped, prompt));
+        assert!(is_prompt_echo(
+            "Hey goose, hey goose, hey goose, hey",
+            prompt
+        ));
+        assert!(!is_prompt_echo("Hey goose.", prompt), "a wake");
+        assert!(
+            !is_prompt_echo("Hey goose. Hey goose.", prompt),
+            "called twice"
+        );
+        assert!(!is_prompt_echo(
+            "Hey goose, hey goose, hey goose, what time is it?",
+            prompt
+        ));
     }
 
     #[test]

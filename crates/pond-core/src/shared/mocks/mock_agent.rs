@@ -110,6 +110,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let response = agent.chat(request).await.unwrap();
         assert_eq!(response.text, "Echo: Hello, Pond!");
@@ -134,6 +135,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let mut stream = agent.chat_stream(request).await.unwrap();
 

@@ -22,7 +22,7 @@ import type {
   Settings,
   ZoneChoice,
 } from "../api/types";
-import { allZones, detectPlace, deviceZone } from "../lib/place";
+import { allZones, detectPlace, deviceZone, placeNote } from "../lib/place";
 import { engineOf, providerOf } from "../lib/modelProvider";
 import { modelLabel, rolesFor } from "../sections/models/modelsView";
 import { diffSettings, foldServerState } from "./state";
@@ -654,13 +654,7 @@ export function SettingsCatalogueView({
       }
 
       // Phrased by source: a time-zone guess must not read as a located fact.
-      setLocationNote(
-        at.note
-          ? at.note
-          : at.certain
-            ? `Found ${at.name}`
-            : `Guessed ${at.name} from your time zone`,
-      );
+      setLocationNote(placeNote(at));
     } catch (e) {
       setLocationNote(e instanceof Error ? e.message : String(e));
     } finally {
