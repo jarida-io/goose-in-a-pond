@@ -152,6 +152,15 @@ again after `not_yet` (at the snooze, else the next morning), at most three time
 the to-do open and stops asking. The chat model gets `todo` tools (add, list, done) so "remind me
 to ... when I get home" makes a row.
 
+A dated mention the Pond lifts from a chat ("call the garage on Friday", the `reminders` table) is
+offered as a to-do instead of a bare suggestion: a push, `category: "action_required"`,
+`data: {"action":"todo_offer","reminder_id","text","when_said"}`, answered with Add or No.
+
+- `GET /me/todos/offers` → `{"offers":[{"reminder_id","text","when_said","due_at"|null,"said_at"}]}`
+- `POST /me/todos/offers/{reminder_id}/accept` `{"due_at"?}` → Todo (a time hook at the due time
+  the Pond worked out from `when_said`, or the one the phone sends)
+- `POST /me/todos/offers/{reminder_id}/decline` → 204 (the reminder is dismissed)
+
 ## 4. Cart: watched links and kept listings
 
 ```
