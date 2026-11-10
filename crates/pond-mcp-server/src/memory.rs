@@ -274,29 +274,74 @@ impl MemoryMcpServer {
                  the user — do not search the web for a fact about them.",
             )
         } else {
-            filtered
-                .iter()
-                .map(|f| {
-                    let seg = f
-                        .segment
-                        .as_ref()
-                        .map(|s| format!("{:?}", s).to_lowercase())
-                        .unwrap_or_else(|| "—".to_string());
-                    let imp = f
-                        .importance
-                        .map(|i| format!("{:.1}", i))
-                        .unwrap_or_else(|| "—".to_string());
-                    format!(
-                        "[{}] [id:{}] [{}, {}] {}",
-                        f.created_at.format("%Y-%m-%d"),
-                        f.id,
-                        seg,
-                        imp,
-                        f.content
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            let mut corrections = Vec::new();
+            let mut identity = Vec::new();
+            let mut preferences = Vec::new();
+            let mut projects = Vec::new();
+            let mut knowledge = Vec::new();
+
+            for f in &filtered {
+                let seg = f
+                    .segment
+                    .as_ref()
+                    .map(|s| format!("{:?}", s).to_lowercase())
+                    .unwrap_or_else(|| "—".to_string());
+                let imp = f
+                    .importance
+                    .map(|i| format!("{:.1}", i))
+                    .unwrap_or_else(|| "—".to_string());
+                let mut line = format!(
+                    "- [{}] [id:{}] [{}, {}] {}",
+                    f.created_at.format("%Y-%m-%d"),
+                    f.id,
+                    seg,
+                    imp,
+                    f.content
+                );
+                if let Some(ref corrects) = f.corrects {
+                    line.push_str(&format!(" (Replaces: {corrects})"));
+                }
+
+                if seg == "correction" || f.corrects.is_some() {
+                    corrections.push(line);
+                } else if seg == "identity" || seg == "relationship" {
+                    identity.push(line);
+                } else if seg == "preference" || seg == "routine" {
+                    preferences.push(line);
+                } else if seg == "project" || seg == "context" {
+                    projects.push(line);
+                } else {
+                    knowledge.push(line);
+                }
+            }
+
+            let mut sections = Vec::new();
+            if !corrections.is_empty() {
+                sections.push(format!(
+                    "<corrections>\n{}\n</corrections>",
+                    corrections.join("\n")
+                ));
+            }
+            if !identity.is_empty() {
+                sections.push(format!("<identity>\n{}\n</identity>", identity.join("\n")));
+            }
+            if !preferences.is_empty() {
+                sections.push(format!(
+                    "<preferences>\n{}\n</preferences>",
+                    preferences.join("\n")
+                ));
+            }
+            if !projects.is_empty() {
+                sections.push(format!("<projects>\n{}\n</projects>", projects.join("\n")));
+            }
+            if !knowledge.is_empty() {
+                sections.push(format!(
+                    "<knowledge>\n{}\n</knowledge>",
+                    knowledge.join("\n")
+                ));
+            }
+
+            sections.join("\n")
         };
 
         if !filtered.is_empty() {
@@ -1056,6 +1101,71 @@ mod tests {
             !got.contains("peanuts"),
             "Otieno's helper read Amina's memory: {got}"
         );
+    }
+
+    #[tokio::test]
+    async fn recall_formats_into_structured_sections() {
+        let pond = Pond::new().await;
+        let mut c = MemoryFragment::from_chat(
+            "c1".into(),
+            Some(AMINA.into()),
+            None,
+            "User prefers dark mode".into(),
+        );
+        c.segment = Some(MemorySegment::Correction);
+        c.corrects = Some("User prefers light mode".into());
+        pond.repo.add(c).await.unwrap();
+
+        let mut id = MemoryFragment::from_chat(
+            "i1".into(),
+            Some(AMINA.into()),
+            None,
+            "User is Amina".into(),
+        );
+        id.segment = Some(MemorySegment::Identity);
+        pond.repo.add(id).await.unwrap();
+
+        let mut pref = MemoryFragment::from_chat(
+            "p1".into(),
+            Some(AMINA.into()),
+            None,
+            "Drinks mint tea".into(),
+        );
+        pref.segment = Some(MemorySegment::Preference);
+        pond.repo.add(pref).await.unwrap();
+
+        let mut proj = MemoryFragment::from_chat(
+            "j1".into(),
+            Some(AMINA.into()),
+            None,
+            "Working on pond server".into(),
+        );
+        proj.segment = Some(MemorySegment::Project);
+        pond.repo.add(proj).await.unwrap();
+
+        let mut k = MemoryFragment::from_chat(
+            "k1".into(),
+            Some(AMINA.into()),
+            None,
+            "Coffee machine code is 1234".into(),
+        );
+        k.segment = Some(MemorySegment::Knowledge);
+        pond.repo.add(k).await.unwrap();
+
+        let _turn = pond.turn("engine-test", ProfileScope::Owner(AMINA.into()));
+        let res = pond
+            .server(false)
+            .run_recall(&meta_for("engine-test"), recall(None))
+            .await
+            .unwrap();
+        let got = text(&res);
+
+        assert!(got.contains("<corrections>"));
+        assert!(got.contains("(Replaces: User prefers light mode)"));
+        assert!(got.contains("<identity>"));
+        assert!(got.contains("<preferences>"));
+        assert!(got.contains("<projects>"));
+        assert!(got.contains("<knowledge>"));
     }
 
     #[tokio::test]

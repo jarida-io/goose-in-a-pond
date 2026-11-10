@@ -9305,15 +9305,13 @@ async fn run_onboard(reset: bool) -> Result<()> {
                 println!("Step: Wake Word");
                 println!("Presets: 1) goose  2) hey goose  3) ok computer  4) custom");
 
-                let wake_word = loop {
-                    let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
-                    break match choice.trim() {
-                        "1" => "goose".to_string(),
-                        "2" => "hey goose".to_string(),
-                        "3" => "ok computer".to_string(),
-                        "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
-                        other => other.to_string(),
-                    };
+                let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
+                let wake_word = match choice.trim() {
+                    "1" => "goose".to_string(),
+                    "2" => "hey goose".to_string(),
+                    "3" => "ok computer".to_string(),
+                    "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
+                    other => other.to_string(),
                 };
 
                 user_data.insert("voice_wake_word".to_string(), wake_word);

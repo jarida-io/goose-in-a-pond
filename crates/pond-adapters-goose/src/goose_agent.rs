@@ -3186,24 +3186,23 @@ impl GooseAdapter {
 
             if !budgeted.is_empty() {
                 use pond_core::models::services::context::memory_block;
-                let rendered: Vec<String> = budgeted
-                    .iter()
-                    .map(|m| {
-                        let seg = m
-                            .segment
-                            .as_ref()
-                            .map(|s| format!("{:?}", s).to_lowercase());
-                        memory_block::line(seg.as_deref(), &m.content)
-                    })
-                    .collect();
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
-                let fresh = memory_block::not_yet_shown(&rendered, &earlier);
+                let fresh_fragments: Vec<&pond_core::user_data::domain::memory::MemoryFragment> =
+                    budgeted
+                        .iter()
+                        .copied()
+                        .filter(|m| {
+                            let seg = m.segment.as_ref().map(|s| s.as_str());
+                            let l = memory_block::line(seg, &m.content);
+                            !earlier.iter().any(|text| memory_block::shown_in(&l, text))
+                        })
+                        .collect();
 
                 tracing::debug!(
-                    fragments_injected = fresh.len(),
-                    fragments_already_shown = rendered.len() - fresh.len(),
+                    fragments_injected = fresh_fragments.len(),
+                    fragments_already_shown = budgeted.len() - fresh_fragments.len(),
                     fragments_available = memory_candidates.len(),
                     closest_floor = ?closest_floor,
                     lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
@@ -3217,11 +3216,8 @@ impl GooseAdapter {
                     effective_ctx,
                 );
 
-                memory_block_for_user_msg = fresh
-                    .iter()
-                    .map(|line| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                memory_block_for_user_msg =
+                    memory_block::render_fragments(fresh_fragments.iter().copied());
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
