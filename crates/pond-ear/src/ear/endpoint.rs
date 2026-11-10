@@ -15,6 +15,19 @@ pub struct Endpoint {
     pub command_timeout_ms: u32,
     /// Longest utterance.
     pub max_ms: u32,
+    /// Longest segment for the host's wake detector, which reads only a segment's opening: speech
+    /// that never pauses (a television, a room of talk) is cut this often.
+    pub segment_max_ms: u32,
+    pub adaptive: bool,
+}
+
+impl Endpoint {
+    pub fn adaptive() -> Self {
+        Self {
+            adaptive: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Endpoint {
@@ -25,6 +38,8 @@ impl Default for Endpoint {
             end_silence_ms: 800,
             command_timeout_ms: 5_000,
             max_ms: 30_000,
+            segment_max_ms: SEGMENT_MAX_MS,
+            adaptive: false,
         }
     }
 }
@@ -66,6 +81,7 @@ pub struct Endpointer {
     pub cfg: Endpoint,
     speaking: bool,
     turn: Option<Turn>,
+    noise_floor: f32,
 }
 
 impl Endpointer {
@@ -74,12 +90,14 @@ impl Endpointer {
             cfg,
             speaking: false,
             turn: None,
+            noise_floor: 0.03,
         }
     }
 
     pub fn reset(&mut self) {
         self.speaking = false;
         self.turn = None;
+        self.noise_floor = 0.03;
     }
 
     pub fn speaking(&self) -> bool {
@@ -118,12 +136,27 @@ impl Endpointer {
 
     /// One Silero chunk ending at absolute sample `end` with speech probability `p`.
     pub fn vad(&mut self, end: usize, p: f32) -> Step {
-        let was = self.speaking;
-        self.speaking = if was {
-            p >= self.cfg.off
+        let (thresh_on, thresh_off) = if self.cfg.adaptive {
+            if !self.speaking && p < 0.35 {
+                const ALPHA: f32 = 0.02;
+                self.noise_floor = self.noise_floor * (1.0 - ALPHA) + p * ALPHA;
+            }
+            let dynamic_on = (self.noise_floor + 0.25).clamp(0.28, self.cfg.on);
+            let dynamic_off = (dynamic_on - 0.12).clamp(0.18, self.cfg.off);
+            if self.turn.is_some() {
+                (
+                    (dynamic_on - 0.04).clamp(0.24, self.cfg.on),
+                    (dynamic_off - 0.04).clamp(0.16, self.cfg.off),
+                )
+            } else {
+                (dynamic_on, dynamic_off)
+            }
         } else {
-            p >= self.cfg.on
+            (self.cfg.on, self.cfg.off)
         };
+
+        let was = self.speaking;
+        self.speaking = if was { p >= thresh_off } else { p >= thresh_on };
         let mut step = Step {
             speech: (self.speaking != was).then_some(self.speaking),
             outcome: None,
@@ -166,6 +199,9 @@ impl Endpointer {
 
 /// Silero turns on after a word has begun; a host transcribing the segment needs its first consonant.
 pub const SEGMENT_PRE_ROLL_MS: usize = 200;
+/// From the nano's room bench: in babble a 30 s segment hid a wake past its scanned opening; 8 s
+/// caught 58 of 60 wakes at +10 dB where 30 s caught 47.
+pub const SEGMENT_MAX_MS: u32 = 8_000;
 /// Less voiced time than this is a click or a cough, and Whisper invents words for it (the official
 /// `min_speech_duration_ms`).
 pub const SEGMENT_MIN_SPEECH_MS: usize = 250;
@@ -177,8 +213,8 @@ struct Open {
     voiced: usize,
 }
 
-/// Each stretch of speech outside a turn, for a wake detector that reads whole segments: it ends
-/// after the endpoint's quiet stretch, and none outlasts the longest utterance.
+/// Each stretch of speech outside a turn, for a wake detector that reads a segment's opening: it ends
+/// after the endpoint's quiet stretch, or is cut at the segment cap with speech still going.
 #[derive(Clone, Debug, Default)]
 pub struct Segmenter {
     open: Option<Open>,
@@ -203,8 +239,14 @@ impl Segmenter {
     }
 
     /// One voice-activity step ending at absolute sample `end`, `speaking` after the endpointer's
-    /// hysteresis; returns a finished segment `(start, end)` in absolute samples.
-    pub fn step(&mut self, cfg: &Endpoint, end: usize, speaking: bool) -> Option<(usize, usize)> {
+    /// hysteresis; returns a finished segment `(start, end)` in absolute samples, and whether the cap
+    /// cut it with speech going on.
+    pub fn step(
+        &mut self,
+        cfg: &Endpoint,
+        end: usize,
+        speaking: bool,
+    ) -> Option<(usize, usize, bool)> {
         let chunk = end.saturating_sub(self.last_end);
         self.last_end = end;
         let ms = |samples: usize| samples * 1000 / RATE;
@@ -219,7 +261,7 @@ impl Segmenter {
         }
         let open = self.open?;
         let quiet = !speaking && ms(end - open.last_voice) >= cfg.end_silence_ms as usize;
-        let too_long = ms(end - open.start) >= cfg.max_ms as usize;
+        let too_long = ms(end - open.start) >= cfg.segment_max_ms.min(cfg.max_ms) as usize;
         if !quiet && !too_long {
             return None;
         }
@@ -236,7 +278,7 @@ impl Segmenter {
             return None;
         }
         let pad = RATE * SPEECH_PAD_MS / 1000;
-        Some((open.start, (open.last_voice + pad).min(end)))
+        Some((open.start, (open.last_voice + pad).min(end), !quiet))
     }
 }
 
@@ -355,7 +397,7 @@ mod tests {
             for _ in 0..n {
                 at += CHUNK;
                 e.vad(at, p);
-                if let Some((start, end)) = s.step(&cfg, at, e.speaking()) {
+                if let Some((start, end, _)) = s.step(&cfg, at, e.speaking()) {
                     out.push((at, start, end));
                 }
             }
@@ -393,9 +435,9 @@ mod tests {
     }
 
     #[test]
-    fn endless_speech_is_cut_into_segments_of_the_longest_utterance() {
+    fn endless_speech_is_cut_into_segments_of_the_segment_cap() {
         let cfg = Endpoint {
-            max_ms: 3_000,
+            segment_max_ms: 3_000,
             ..Endpoint::default()
         };
         let out = segments(cfg, &[(0.9, 200), (0.1, 40)]);
@@ -409,6 +451,31 @@ mod tests {
     }
 
     #[test]
+    fn only_a_segment_the_cap_cut_says_so() {
+        let cfg = Endpoint {
+            segment_max_ms: 3_000,
+            ..Endpoint::default()
+        };
+        let mut e = Endpointer::new(cfg);
+        let mut s = Segmenter::default();
+        let (mut at, mut cuts) = (0, Vec::new());
+        for &(p, n) in &[(0.9f32, 120usize), (0.1, 40), (0.9, 20), (0.1, 40)] {
+            for _ in 0..n {
+                at += CHUNK;
+                e.vad(at, p);
+                if let Some((_, _, cut)) = s.step(&cfg, at, e.speaking()) {
+                    cuts.push(cut);
+                }
+            }
+        }
+        assert_eq!(
+            cuts,
+            [true, false, false],
+            "a cut, its quiet ending, a short one"
+        );
+    }
+
+    #[test]
     fn listening_without_a_wake_takes_the_first_speech_as_the_command() {
         let mut e = Endpointer::new(Endpoint::default());
         let mut at = 0;
@@ -418,5 +485,18 @@ mod tests {
             panic!("{out:?}")
         };
         assert_eq!(*end, 15 * CHUNK + 480);
+    }
+
+    #[test]
+    fn adaptive_vad_tracks_ambient_noise_and_detects_quiet_far_field_speech() {
+        let mut e = Endpointer::new(Endpoint::adaptive());
+        let mut at = 0;
+        for _ in 0..30 {
+            at += CHUNK;
+            assert_eq!(e.vad(at, 0.02).speech, None);
+        }
+        at += CHUNK;
+        assert_eq!(e.vad(at, 0.32).speech, Some(true));
+        assert!(e.speaking());
     }
 }

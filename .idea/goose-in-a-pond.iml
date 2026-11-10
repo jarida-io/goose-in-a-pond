@@ -78,6 +78,22 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-mesh-inference/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-silero/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-silero/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-audio-devices/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-audio-devices/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-ear/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-mistralrs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-uber/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-adapters-whisper/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-bus/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-connect/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-connect/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-connect/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-ear/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-ear/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-net/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-onnx-accel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/pond-server/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/services/pondcredentials/token/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/goose/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/crates/pond-mcp-server/target" />

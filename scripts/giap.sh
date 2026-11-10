@@ -3,7 +3,7 @@
 # giap.sh — one entry point for building, installing, running and repairing GIAP.
 #
 #   bash scripts/giap.sh              # interactive menu
-#   bash scripts/giap.sh install      # first-time install on this host
+#   bash scripts/giap.sh install      # first-time install on this host (alias: setup)
 #   bash scripts/giap.sh install -y   # ... without the confirmation prompts
 #   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
@@ -14,15 +14,23 @@
 #   bash scripts/giap.sh node         # find, or download and verify, the Node this repo needs
 #   bash scripts/giap.sh node --check # only report; change nothing (exit 1 if the shell's node is wrong)
 #   bash scripts/giap.sh node --method nvm|fnm|volta|download --major N --install-deps
+#   bash scripts/giap.sh go           # find, or download and verify, the Go the remote-access helper needs
+#   bash scripts/giap.sh go --check   # only report; change nothing (exit 1 if there is none)
 #   bash scripts/giap.sh litert status       # the LiteRT-LM library (.litertlm models): recorded packages, verified
 #   bash scripts/giap.sh litert build [macos-arm64|linux-arm64] [--distdir DIR]   # build, package, verify, record
 #   bash scripts/giap.sh litert import DIR  # take in a package built on another host (the Jetson)
 #   bash scripts/giap.sh onnxruntime status  # Jetson: the GPU ONNX Runtime (vision and faces on TensorRT), verified
 #   bash scripts/giap.sh onnxruntime build   # Jetson: build it from source in the background (hours), install, build engines
+#   bash scripts/giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]  # inspect or switch KV cache quantization (POND_KV_TYPE)
+#   bash scripts/giap.sh ctx [status|8k|16k|24k|32k|48k|64k|auto|N] # inspect or configure context window n_ctx (POND_CONTEXT_SIZE)
+#   bash scripts/giap.sh swap [status|setup|N]       # Linux: inspect or configure total swap to ~6 GB target
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
+#   bash scripts/giap.sh time-sync [remove|status]  # Linux: named time servers before the NTP pool, so the clock is right soon after a boot (sudo)
+#   bash scripts/giap.sh data-encrypt [finish|unlock|undo|status]  # Linux: the pond's private data in a LUKS2 volume opened by the TPM, the admin card its recovery key (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
+#   bash scripts/giap.sh test-pond [on|off|status]  # mark this pond as a Jarida test Pond, whose debug switch shows household content in the logs, or a home Pond again
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
@@ -77,6 +85,14 @@ source "$HERE/lib/setup-code.sh"
 source "$HERE/lib/admin-card.sh"
 # shellcheck source=lib/connect-setup.sh
 source "$HERE/lib/connect-setup.sh"
+# shellcheck source=lib/time-sync.sh
+source "$HERE/lib/time-sync.sh"
+# shellcheck source=lib/data-volume.sh
+source "$HERE/lib/data-volume.sh"
+# shellcheck source=lib/remote-access.sh
+source "$HERE/lib/remote-access.sh"
+# shellcheck source=lib/release-build.sh
+source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
 # shellcheck source=lib/install-systemd.sh
 source "$HERE/lib/install-systemd.sh"
@@ -86,6 +102,8 @@ cd "$REPO_ROOT" || exit 1
 # preferred major comes from .nvmrc.
 # shellcheck source=lib/node-setup.sh
 source "$HERE/lib/node-setup.sh"
+# shellcheck source=lib/go-setup.sh
+source "$HERE/lib/go-setup.sh"
 # `check` runs what CI runs, on the repo's Node; like provision it takes only its own options.
 # shellcheck source=lib/local-checks.sh
 source "$HERE/lib/local-checks.sh"
@@ -98,6 +116,11 @@ fi
 
 DRY_RUN=false
 ASSUME_YES=false
+# Below this, a release build is stopped before it starts: an incremental link needs a few GiB of
+# scratch and output. The doctor's floor (10 GiB) is for a build from clean.
+BUILD_DISK_FLOOR_GIB=5
+# Set by action_build_server when it started the pond again on the new binary.
+BUILD_STARTED_SVC=false
 SERVICE_NAME="goose-in-a-pond.service"
 NODE_METHOD=auto; NODE_MAJOR=""; CHECK_ONLY=false; NODE_DEPS=false
 
@@ -155,6 +178,7 @@ pause() { [ -t 0 ] || return 0; printf '\n%spress return%s ' "$C_DIM" "$C_RST"; 
 # Plain variables only — bash 3.2 has no associative arrays.
 D_OS=""; D_ARCH=""; D_KERNEL=""; D_BOARD=""; D_IS_JETSON=false; D_L4T=""
 D_CUDA_STATE=""; D_NVCC=""; D_ACCEL=""
+D_GO=""; D_GO_NEED=""; D_GO_OK=false; D_GO_DIR=""
 D_RUST=""; D_CMAKE=""; D_NODE=""; D_NODE_OK=false; D_NODE_REPO_OK=false; D_NODE_MATTER_OK=false; D_NODE_NOTE=""; D_NODE_FROM=""
 D_BRANCH=""; D_SHA=""; D_DIRTY=""; D_SUB_PIN=""; D_SUB_HEAD=""; D_SUB_STATE=""
 D_UI_STATE=""; D_UI_WHEN=""
@@ -167,6 +191,8 @@ D_ENGINE=""; D_ENGINE_FAILED=""; D_NVMAP=""
 D_LITERT_MAC=""; D_LITERT_MAC_TAG=""; D_LITERT_MAC_DIR=""; D_LITERT_LNX=""; D_LITERT_LNX_TAG=""; D_LITERT_LNX_DIR=""
 D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
 D_ORTGPU=""; D_ORTGPU_TAG=""; D_ORTGPU_DIR=""; D_ORTGPU_BUILD=""
+D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
+D_CTX_CFG=""; D_CTX_SRC=""
 
 human_mb() { # $1 = MB
   local m="${1:-0}"
@@ -239,6 +265,15 @@ detect_toolchain() {
     node_version_ui_ok "$D_NODE" && D_NODE_OK=true
     node_version_ok "$D_NODE" && D_NODE_REPO_OK=true
     node_version_matter_ok "$D_NODE" && D_NODE_MATTER_OK=true
+  fi
+  # The Go that builds the remote-access helper: the first at or above go.mod's pin, wherever it is.
+  D_GO=""; D_GO_OK=false; D_GO_DIR=""
+  D_GO_NEED="$(go_required_version 2>/dev/null)" || D_GO_NEED=""
+  local go_line
+  if [ -n "$D_GO_NEED" ] && go_line="$(go_find_ok "$D_GO_NEED")"; then
+    D_GO="${go_line%%|*}"; D_GO_DIR="${go_line#*|}"; D_GO_OK=true
+  elif command -v go >/dev/null 2>&1; then
+    D_GO="$(go_version_of "$(command -v go)")" || D_GO=""
   fi
 }
 
@@ -452,10 +487,79 @@ sqlite_setting() { # $1 = key
     "SELECT value FROM settings WHERE key='$1' LIMIT 1;" 2>/dev/null
 }
 
+pond_data_run() {
+  local pond_u
+  pond_u="$(connect_pond_user 2>/dev/null || true)"
+  if [ -n "$pond_u" ] && [ "$pond_u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n -u "$pond_u" true 2>/dev/null; then
+      sudo -n -u "$pond_u" "$@"
+      return $?
+    fi
+  fi
+  "$@"
+}
+
+detect_kv() {
+  D_KV_CFG=""; D_KV_SRC=""; D_KV_REG=""; D_KV_LOG=""; D_KV_SUMMARY=""
+  D_CTX_CFG=""; D_CTX_SRC=""
+  local kv_file="$D_DATA_DIR/kv.env" dropin="" v="" c=""
+  if pond_data_run test -f "$kv_file" 2>/dev/null; then
+    v="$(pond_data_run sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$kv_file" 2>/dev/null | tail -1)"
+    [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$kv_file"; }
+    c="$(pond_data_run sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$kv_file" 2>/dev/null | tail -1)"
+    [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$kv_file"; }
+  fi
+  if [ "$D_OS" = "linux" ]; then
+    if [ "$D_SVC_SCOPE" = "system" ]; then dropin="/etc/systemd/system/$SERVICE_NAME.d/override.conf"
+    elif [ "$D_SVC_SCOPE" = "user" ]; then dropin="$HOME/.config/systemd/user/$SERVICE_NAME.d/override.conf"; fi
+    if [ -n "$dropin" ] && [ -r "$dropin" ]; then
+      if [ -z "$D_KV_CFG" ]; then
+        v="$(sed -n 's/^Environment="\{0,1\}POND_KV_TYPE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
+        [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$dropin"; }
+      fi
+      if [ -z "$D_CTX_CFG" ]; then
+        c="$(sed -n 's/^Environment="\{0,1\}POND_CONTEXT_SIZE=\([^"]*\)"\{0,1\}$/\1/p' "$dropin" 2>/dev/null | tail -1)"
+        [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$dropin"; }
+      fi
+    fi
+  fi
+  if [ -f "$REPO_ROOT/.env.override" ]; then
+    if [ -z "$D_KV_CFG" ]; then
+      v="$(sed -n 's/^POND_KV_TYPE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
+      [ -n "$v" ] && { D_KV_CFG="$v"; D_KV_SRC="$REPO_ROOT/.env.override"; }
+    fi
+    if [ -z "$D_CTX_CFG" ]; then
+      c="$(sed -n 's/^POND_CONTEXT_SIZE="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$REPO_ROOT/.env.override" 2>/dev/null | tail -1)"
+      [ -n "$c" ] && { D_CTX_CFG="$c"; D_CTX_SRC="$REPO_ROOT/.env.override"; }
+    fi
+  fi
+  local reg="$D_DATA_DIR/engine/data/models/registry.json"
+  if pond_data_run test -f "$reg" 2>/dev/null; then
+    D_KV_REG="$(pond_data_run grep -E '"type_k"|"type_v"' "$reg" 2>/dev/null | head -2 \
+      | sed -n 's/.*"\(type_[kv]\)": *"\([^"]*\)".*/\2/p' | paste -sd',' - 2>/dev/null || true)"
+  fi
+  local lf; lf="$(log_file_today)"
+  if [ -f "$lf" ]; then
+    local last_ctx
+    last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+    if [ -n "$last_ctx" ]; then
+      local kib nctx
+      kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+      nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+      [ -n "$kib" ] && D_KV_LOG="${kib} KiB/tok${nctx:+, n_ctx=$nctx}"
+    fi
+  fi
+  local eff="${D_KV_CFG:-default (q8_0,q8_0)}"
+  D_KV_SUMMARY="$eff"
+  [ -n "$D_CTX_CFG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · target n_ctx=$D_CTX_CFG"
+  [ -n "$D_KV_REG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · stamped $D_KV_REG"
+  [ -n "$D_KV_LOG" ] && D_KV_SUMMARY="$D_KV_SUMMARY · $D_KV_LOG"
+}
+
 detect_all() {
   detect_host; detect_accel; detect_toolchain; detect_repo; detect_ui
   detect_binaries; detect_service; detect_runtime; detect_resources
-  detect_jetson_power; detect_capabilities; detect_engine; detect_nvmap; detect_litert; detect_onnxruntime
+  detect_jetson_power; detect_capabilities; detect_engine; detect_nvmap; detect_litert; detect_onnxruntime; detect_kv
 }
 
 # ── banner ───────────────────────────────────────────────────────────────────
@@ -489,6 +593,7 @@ banner() {
   printf '  %-9s %s process(es)%s · health %s · engine %s\n' "Runtime" "$D_PROCS" \
     "$( [ -n "$D_PORT" ] && echo " · port $D_PORT" )" "$D_HEALTH" \
     "$D_ENGINE$( [ -n "$D_ENGINE_FAILED" ] && echo ", last model load FAILED: $D_ENGINE_FAILED" )"
+  [ -n "$D_KV_SUMMARY" ] && printf '  %-9s %s\n' "KV cache" "$D_KV_SUMMARY"
   printf '  %-9s RAM %s%s · disk %s GiB free · target debug %s GiB / release %s GiB\n' "Resources" \
     "$(human_mb "${D_RAM_TOTAL:-0}")" \
     "$( [ -n "$D_RAM_AVAIL" ] && echo " ($(human_mb "$D_RAM_AVAIL") avail)" )" \
@@ -560,6 +665,16 @@ doctor() {
     note "and ~/.cargo/config.toml covers bare cargo. To fix it for good:"
     note "  sudo xcode-select --switch /Library/Developer/CommandLineTools"
     DOC_WARN=$((DOC_WARN+1))
+  fi
+
+  if [ "$D_OS" = "linux" ]; then
+    if command -v ld.lld >/dev/null 2>&1; then
+      ok "lld linker present"
+    else
+      warn "lld linker not installed (build linking is significantly slower with GNU ld)"
+      note "fix: sudo apt-get install -y lld"
+      DOC_WARN=$((DOC_WARN+1))
+    fi
   fi
 
   # 3. stray debug server binary.
@@ -719,6 +834,14 @@ doctor() {
     warn "node ${D_NODE:-absent} cannot run the Matter controller: $(node_why_not_matter "${D_NODE:-none}") — Matter will report it and stay off; bash scripts/giap.sh node fixes it, once the pond is restarted"
     DOC_WARN=$((DOC_WARN+1)); fi
 
+  # 8c. Go for the remote-access helper. A pond builds and runs without it, with remote access off.
+  if [ "$D_GO_OK" = true ]; then ok "go $D_GO can build the remote-access helper ($D_GO_DIR)"
+  elif [ -n "$D_GO_NEED" ]; then
+    warn "go ${D_GO:-absent} cannot build the remote-access helper: native/pondnet/go.mod asks for Go $D_GO_NEED, so a build here leaves remote access off"
+    note "fix: bash scripts/giap.sh go   (finds one already installed, or downloads and verifies $D_GO_NEED after asking)"
+    DOC_WARN=$((DOC_WARN+1))
+  fi
+
   # 9. desktop app
   case "$D_DESKTOP" in
     installed*|packaged*) ok "desktop app present ($D_DESKTOP)" ;;
@@ -759,13 +882,13 @@ doctor() {
 
   # 12. remotes (deploy safety)
   if [ "$D_OS" = "macos" ]; then
-    local r missing=""
+    local r unpushed=""
     for r in origin jarida-io; do
       git remote 2>/dev/null | grep -qx "$r" || continue
-      git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || missing="$missing $r"
+      git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || unpushed="$unpushed $r"
     done
-    if [ -n "$missing" ]; then
-      warn "HEAD is not on:$missing — the Jetson pulls from origin, so a deploy would build stale code"
+    if [ -n "$unpushed" ]; then
+      warn "HEAD is not on:$unpushed — the Jetson pulls from origin, so a deploy would build stale code"
       DOC_WARN=$((DOC_WARN+1))
     else
       ok "HEAD is present on the deploy remotes"
@@ -780,21 +903,37 @@ doctor() {
   local sec_file key_file km
   sec_file="$D_DATA_DIR/secrets.json"
   key_file="${POND_SECRET_KEY_FILE:-$D_DATA_DIR/secrets/master.key}"
-  if [ ! -f "$sec_file" ]; then
+  local pond_u run_as=""
+  pond_u="$(connect_pond_user 2>/dev/null)" || pond_u=""
+  if [ -n "$pond_u" ] && [ "$pond_u" != "$(id -un)" ] && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n -u "$pond_u" true 2>/dev/null; then
+      run_as="sudo -n -u $pond_u"
+    fi
+  fi
+  local sec_exists=false key_exists=false is_enc=false
+  if [ -n "$run_as" ]; then
+    $run_as test -f "$sec_file" 2>/dev/null && sec_exists=true
+    $run_as grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    $run_as test -f "$key_file" 2>/dev/null && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$($run_as stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$($run_as stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  else
+    [ -f "$sec_file" ] && sec_exists=true
+    grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null && is_enc=true
+    [ -f "$key_file" ] && key_exists=true
+    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"; else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
+  fi
+  if [ "$sec_exists" = false ]; then
     info "no secret store yet (no API keys or connector tokens saved)"
-  elif ! grep -q 'giap-secret-envelope-v1' "$sec_file" 2>/dev/null; then
+  elif [ "$is_enc" = false ]; then
     bad "secrets.json is PLAINTEXT — API keys and OAuth tokens are readable in the file"
     note "a server built after PAI-2 P4 encrypts it on the next start; this pond is on an older binary"
     DOC_FAIL=$((DOC_FAIL+1))
-  elif [ ! -f "$key_file" ]; then
+  elif [ "$key_exists" = false ]; then
     bad "secrets.json is encrypted but its key is MISSING at $key_file"
     note "every API key and connector token in it is unrecoverable — there is no passphrase"
     note "to start over: move $sec_file aside, restart, re-enter keys, re-authorise connectors"
     DOC_FAIL=$((DOC_FAIL+1))
   else
-    # GNU stat reads -f as a filesystem query and prints a block before failing, so pick by OS.
-    if [ "$D_OS" = "macos" ]; then km="$(stat -f '%Lp' "$key_file" 2>/dev/null)"
-    else km="$(stat -c '%a' "$key_file" 2>/dev/null)"; fi
     km="${km:-?}"
     if [ "$km" = "600" ]; then
       ok "secret store encrypted; key present at $key_file (0600)"
@@ -822,31 +961,25 @@ doctor() {
     DOC_WARN=$((DOC_WARN + CONNECT_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + CONNECT_DOCTOR_UNK))
   fi
 
-  # Remote reach. A Pond with no tailnet is not broken — remote access is simply
-  # a capability it does not have — so absent is a note, not a failure. What is
-  # worth flagging is a daemon that is installed and NOT up, because the operator
-  # believes they have remote access and does not.
-  if command -v tailscale >/dev/null 2>&1; then
-    ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
-    case "$ts_ip" in
-      # 100.64.0.0/10, spelled out because a case glob cannot express a numeric
-      # range. It has to agree with `is_tailnet_v4` in crates/pond-api/src/routes.rs:
-      # a bare `100.*` calls 100.128.0.1 healthy while /api/v1/system/info publishes
-      # `tailnet_address: null` for it, so doctor would contradict the server on
-      # exactly the near-misses the arm below exists to report.
-      100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*)
-             ok "tailnet address $ts_ip — a paired phone can reach this Pond from outside the house" ;;
-      "")    warn "tailscale is installed but this host has no tailnet address"
-             note "remote pairing will fall back to the LAN address, which fails once the phone leaves"
-             note "fix: tailscale up   (add --login-server=<url> for a self-hosted Headscale)"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-      *)     warn "tailscale reported '$ts_ip', which is outside 100.64.0.0/10"
-             DOC_WARN=$((DOC_WARN+1)) ;;
-    esac
-  else
-    note "tailscale not installed — this Pond is reachable on the LAN only"
-    note "see docs/remote-access.md to give a paired phone access from outside the house"
+  # The clock. A Jetson has no working real-time clock, so after a power cut it runs on the last
+  # time it recorded until a time server answers; TLS, certificates and schedules all read it.
+  # A warning, not a failure: a pond that booted without internet is not broken.
+  if [ "$D_OS" = "linux" ]; then
+    timesync_doctor
+    DOC_WARN=$((DOC_WARN + TIMESYNC_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + TIMESYNC_DOCTOR_UNK))
   fi
+
+  # The pond's private data at rest: an encrypted volume, or plain files anyone holding the
+  # storage can read. Closed is a failure: the pond cannot start.
+  if [ "$D_OS" = "linux" ]; then
+    dv_doctor "$D_DATA_DIR"
+    DOC_WARN=$((DOC_WARN + DATA_VOLUME_DOCTOR_WARN)); DOC_FAIL=$((DOC_FAIL + DATA_VOLUME_DOCTOR_FAIL))
+  fi
+
+  # Remote reach: the Pond's built-in network, or the host's own tailscale. Absent is a note;
+  # turned on and not up is a warning. See scripts/lib/remote-access.sh.
+  remote_doctor "$D_DATA_DIR" "$D_PORT" "$D_HEALTH"
+  DOC_WARN=$((DOC_WARN + REMOTE_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + REMOTE_DOCTOR_UNK))
 
   # 14. LiteRT-LM library, which goose's litert backend loads into the server process for
   # .litertlm models. Having none is a note; one that fails its manifest is a FAIL.
@@ -866,6 +999,9 @@ doctor() {
 
   # 19. KV snapshots: what a cold turn after a restart can reuse. Information only.
   doctor_kv
+
+  # 20. Swap memory configuration: verify Linux swap is around the ~6 GB target.
+  doctor_swap
 
   printf '\n  %sVerdict: %s FAIL · %s WARN · %s UNKNOWN%s\n' \
     "$C_B" "$DOC_FAIL" "$DOC_WARN" "$DOC_UNK" "$C_RST"
@@ -1040,14 +1176,35 @@ doctor_kv() {
   return 0
 }
 
-# ── build actions ────────────────────────────────────────────────────────────
-cargo_bin() { command -v cargo >/dev/null 2>&1 && { echo cargo; return; }; echo "$HOME/.cargo/bin/cargo"; }
+doctor_swap() {
+  [ "$D_OS" = "linux" ] || return 0
+  local total_kb=0 total_mb=0 zram_mb=0 file_mb=0
+  if [ -r /proc/meminfo ]; then
+    total_kb="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    total_mb=$(( total_kb / 1024 ))
+  fi
+  if [ -r /proc/swaps ]; then
+    zram_mb="$(awk '$1 ~ /^\/dev\/zram/ {sum += $3} END {print int(sum/1024)}' /proc/swaps 2>/dev/null || echo 0)"
+    file_mb="$(awk '$1 !~ /^\/dev\/zram/ && NR>1 {sum += $3} END {print int(sum/1024)}' /proc/swaps 2>/dev/null || echo 0)"
+  fi
+  if [ "$total_mb" -ge 5500 ] && [ "$total_mb" -le 6600 ]; then
+    ok "swap: ${total_mb} MB (~6 GB total: ZRAM ${zram_mb} MB + file ${file_mb} MB)"
+  elif [ "$total_mb" -eq 0 ]; then
+    warn "swap: 0 MB (no swap configured; runs out of memory under load; run: bash scripts/giap.sh swap setup)"
+    DOC_WARN=$((DOC_WARN+1))
+  elif [ "$total_mb" -lt 5000 ]; then
+    warn "swap: ${total_mb} MB (less than recommended ~6 GB; risk of build or inference OOM; run: bash scripts/giap.sh swap setup)"
+    DOC_WARN=$((DOC_WARN+1))
+  else
+    note "swap: ${total_mb} MB (larger than recommended ~6 GB: ZRAM ${zram_mb} MB + file ${file_mb} MB)"
+  fi
+  return 0
+}
 
+# ── build actions ────────────────────────────────────────────────────────────
 server_features() {
-  # The one canonical feature string per platform. Three of the repo's older
-  # build paths omit at least one of these and none of the omissions error.
   if [ "$D_IS_JETSON" = true ] && [ "$D_CUDA_STATE" = "usable" ]; then
-    echo "pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
+    echo "$RELEASE_BUILD_CUDA_FEATURES"
   else
     echo ""
   fi
@@ -1056,11 +1213,8 @@ server_features() {
 write_build_stamp() {
   [ "$DRY_RUN" = true ] && return 0
   mkdir -p target/release 2>/dev/null
-  {
-    printf 'features=%s cuda_arch=%s rustflags=%s git=%s goose=%s ui=%s built=%s\n' \
-      "$(server_features)" "${CMAKE_CUDA_ARCHITECTURES:-unset}" "${RUSTFLAGS-inherited}" \
-      "$D_SHA" "${D_SUB_HEAD:-?}" "$D_UI_STATE" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } > target/release/.giap-build-stamp 2>/dev/null || true
+  release_build_stamp "$(server_features)" "$D_SHA" "${D_SUB_HEAD:-?}" "$D_UI_STATE" \
+    > target/release/.giap-build-stamp 2>/dev/null || true
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
@@ -1174,6 +1328,41 @@ action_wifi_grant() { # $1 = "" | remove | status
   esac
 }
 
+# `giap.sh data-encrypt [finish|unlock|undo|status]`: the pond's private data in an encrypted
+# volume (scripts/lib/data-volume.sh). Asking for it is the consent; sudo asks for the password,
+# and --dry-run prints every step.
+action_data_encrypt() { # $1 = "" | finish | unlock | undo | status
+  head1 "Encrypted data volume"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: on a Mac, FileVault encrypts the disk"
+    return 0
+  fi
+  case "${1:-}" in
+    "")     dv_encrypt "$D_DATA_DIR" "$D_SVC_SCOPE" "$(id -un)" ;;
+    finish) dv_finish "$D_DATA_DIR" ;;
+    unlock) dv_unlock "$D_DATA_DIR" ;;
+    undo)   dv_decrypt "$D_DATA_DIR" ;;
+    status) dv_doctor "$D_DATA_DIR" ;;
+    *)      bad "unknown data-encrypt action: $1 (finish, unlock, undo or status)"; return 2 ;;
+  esac
+}
+
+# `giap.sh time-sync [remove|status]`, and menu item 19: the time servers systemd-timesyncd asks.
+# Asking for it is the consent; sudo asks for the password, and --dry-run prints the change.
+action_time_sync() { # $1 = "" | remove | status
+  head1 "Time servers for the clock"
+  if [ "$D_OS" != "linux" ]; then
+    info "only a Linux pond needs it: macOS keeps its own time"
+    return 0
+  fi
+  case "${1:-}" in
+    ""|set) timesync_install ;;
+    remove) timesync_remove ;;
+    status) timesync_doctor ;;
+    *)      bad "unknown time-sync action: $1 (set, remove or status)"; return 2 ;;
+  esac
+}
+
 # Get a Node that can build the UI: one already installed somewhere, else (after asking) a verified
 # download. Puts it on PATH for this run and re-detects. Returns 0 only if the UI can now be built.
 ensure_node_for_ui() {
@@ -1184,6 +1373,16 @@ ensure_node_for_ui() {
 }
 
 # `giap.sh node`, and menu item 9: report, or find/download the Node this repo runs on.
+action_go() {
+  head1 "Go for the remote-access helper  (go.mod asks for ${D_GO_NEED:-?})"
+  if [ "$CHECK_ONLY" = true ]; then
+    if [ "$D_GO_OK" = true ]; then ok "go $D_GO in $D_GO_DIR"; return 0; fi
+    warn "go ${D_GO:-absent} is below ${D_GO_NEED:-the pin}"; return 1
+  fi
+  go_ensure || return 1
+  detect_toolchain
+}
+
 action_node() {
   head1 "Node for this repo  (needs $NODE_RANGE_TEXT)"
   case "$NODE_MAJOR" in ''|[0-9]*) ;; *) bad "--major must be a number"; return 2 ;; esac
@@ -1239,27 +1438,35 @@ action_build_server() {
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
   fi
-  local cb; cb="$(cargo_bin)"
-  if [ -n "$feats" ]; then
-    export CMAKE_CUDA_ARCHITECTURES=87
-    export CUDA_COMPUTE_CAP=87
-    run_sh "PATH=\$HOME/.cargo/bin:/usr/local/cuda/bin:\$PATH SQLX_OFFLINE=true CMAKE_CUDA_ARCHITECTURES=87 CUDA_COMPUTE_CAP=87 \
-      $cb build -p pond-server --bin pond-server --features $feats --release"
-  else
-    run_sh "SQLX_OFFLINE=true $cb build -p pond-server --bin pond-server --release"
+  # The linker writes an 800 MB binary at the very end; on a full disk it dies with "signal 7 [Bus
+  # error]", which reads like a toolchain fault, after the half hour the build took to get there.
+  detect_resources
+  if [ "${D_DISK_FREE:-0}" -lt "$BUILD_DISK_FLOOR_GIB" ] 2>/dev/null; then
+    bad "only ${D_DISK_FREE} GiB free here; the release link needs about $BUILD_DISK_FLOOR_GIB GiB and would fail at the end"
+    note "menu 4 reclaims build artifacts; old binaries and models beside the pond are worth a look too"
+    if ! confirm "Build anyway?"; then
+      [ "${RESTART_SVC_AFTER:-false}" = true ] && { svc_ctl start; RESTART_SVC_AFTER=false; }
+      return 1
+    fi
   fi
+  # The remote-access helper is Go; asked for before the long build so the answer is not waited on.
+  local have_go=false
+  if go_use_repo >/dev/null 2>&1 || { go_ensure && go_use_repo >/dev/null 2>&1; }; then have_go=true; fi
+  run_sh "$(release_build_cmd "$feats")"
   local rc=$?
-  # The remote-access helper is Go; a host without Go still gets a working pond, just without it.
-  if [ $rc -eq 0 ] && command -v go >/dev/null 2>&1; then
+  # A host without Go still gets a working pond, just with remote access off.
+  if [ $rc -eq 0 ] && [ "$have_go" = true ]; then
     run bash "$REPO_ROOT/scripts/build-network-helper.sh" "$REPO_ROOT/target/release"
     rc=$?
   elif [ $rc -eq 0 ]; then
-    warn "no Go on this host: the remote-access helper (pondnet) was not built, so remote access stays off here"
-    note "install Go (go.mod pins the toolchain), then run this build again"
+    warn "no Go ${D_GO_NEED:-} here: the remote-access helper (pondnet) was not built, so remote access stays off here"
+    note "fix: bash scripts/giap.sh go, then run this build again"
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
+  # `update` reads this, so it does not restart a pond this build has already started.
+  BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
-    svc_ctl start; RESTART_SVC_AFTER=false
+    svc_ctl start; RESTART_SVC_AFTER=false; BUILD_STARTED_SVC=true
   fi
   detect_binaries
   return $rc
@@ -1369,6 +1576,523 @@ action_litert_menu() {
   return 0
 }
 
+# Normalize a single KV cache type token (bash 3.2 safe).
+kv_normalize_one() {
+  local t
+  t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+  case "$t" in
+    q8|q8_0)       printf 'q8_0' ;;
+    q4|q4_0)       printf 'q4_0' ;;
+    q4_1)          printf 'q4_1' ;;
+    iq4|iq4_nl)    printf 'iq4_nl' ;;
+    q5|q5_0)       printf 'q5_0' ;;
+    q5_1)          printf 'q5_1' ;;
+    f16|fp16)      printf 'f16' ;;
+    bf16)          printf 'bf16' ;;
+    f32|fp32)      printf 'f32' ;;
+    *)             return 1 ;;
+  esac
+}
+
+# Normalize a KV cache spec ($1 = sub, $2 = optional second token) into KV_SPEC ("k,v" or "auto").
+kv_normalize_spec() {
+  KV_SPEC=""
+  local raw="${1:-}" arg2="${2:-}"
+  [ -n "$arg2" ] && raw="$raw,$arg2"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' ',' | tr -d ' ')"
+  case "$raw" in
+    auto|default|reset|none) KV_SPEC="auto"; return 0 ;;
+    q8_q4) raw="q8_0,q4_0" ;;
+    q8_q8) raw="q8_0,q8_0" ;;
+    q4_q4) raw="q4_0,q4_0" ;;
+  esac
+  local k_raw v_raw k v
+  case "$raw" in
+    *,*) k_raw="${raw%%,*}"; v_raw="${raw#*,}" ;;
+    *)   k_raw="$raw";       v_raw="$raw" ;;
+  esac
+  k="$(kv_normalize_one "$k_raw")" || {
+    bad "unknown KV cache type for K: '$k_raw' (expected q8_0, q4_0, f16, bf16, auto)"
+    return 2
+  }
+  v="$(kv_normalize_one "$v_raw")" || {
+    bad "unknown KV cache type for V: '$v_raw' (expected q8_0, q4_0, f16, bf16, auto)"
+    return 2
+  }
+  if [ "$D_IS_JETSON" = true ] || [ "$D_CUDA_STATE" = "usable" ]; then
+    case "$k,$v" in
+      q8_0,q8_0|q8_0,q4_0|q4_0,q4_0|f16,f16|bf16,bf16) ;;
+      *)
+        bad "CUDA FlashAttention on Jetson does not support K=$k, V=$v"
+        note "compiled GGML_CUDA_FA_QUANTS combinations: q8_0,q8_0 · q8_0,q4_0 · q4_0,q4_0 · f16,f16 · bf16,bf16"
+        return 2 ;;
+    esac
+  fi
+  KV_SPEC="$k,$v"
+  return 0
+}
+
+# Ensure systemd drop-in loads $D_DATA_DIR/kv.env and has no conflicting hardcoded POND_KV_TYPE.
+kv_ensure_systemd_dropin() {
+  [ "$D_OS" = "linux" ] || return 0
+  local dropin="" use_sudo=false
+  case "$D_SVC_SCOPE" in
+    system) dropin="/etc/systemd/system/$SERVICE_NAME.d/override.conf"; use_sudo=true ;;
+    user)   dropin="$HOME/.config/systemd/user/$SERVICE_NAME.d/override.conf" ;;
+    *)      return 0 ;;
+  esac
+  local env_file_line="EnvironmentFile=-$D_DATA_DIR/kv.env"
+  if [ -r "$dropin" ] \
+    && grep -Fqx "$env_file_line" "$dropin" 2>/dev/null \
+    && ! grep -Eq '^Environment="?(POND_KV_TYPE|POND_CONTEXT_SIZE)=' "$dropin" 2>/dev/null; then
+    return 0
+  fi
+  info "wiring $dropin -> $env_file_line"
+  [ "$DRY_RUN" = true ] && return 0
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/giap-kv-dropin.XXXXXX")" || return 1
+  if [ -r "$dropin" ]; then
+    grep -Ev '^Environment="?(POND_KV_TYPE|POND_CONTEXT_SIZE)=|^EnvironmentFile=.*kv\.env' "$dropin" > "$tmp" || true
+    grep -Fq '[Service]' "$tmp" 2>/dev/null || printf '[Service]\n' > "$tmp"
+  else
+    printf '[Service]\n' > "$tmp"
+  fi
+  printf '%s\n' "$env_file_line" >> "$tmp"
+  if [ "$use_sudo" = true ]; then
+    sudo mkdir -p "$(dirname "$dropin")" && sudo install -m 0644 "$tmp" "$dropin" && sudo systemctl daemon-reload
+  else
+    mkdir -p "$(dirname "$dropin")" && install -m 0644 "$tmp" "$dropin" && systemctl --user daemon-reload
+  fi
+  local rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# Set or remove a key ($1) in $D_DATA_DIR/kv.env and .env.override, preserving other keys.
+kv_env_set() {
+  local key="$1" val="${2:-}"
+  local kv_file="$D_DATA_DIR/kv.env" env_ovr="$REPO_ROOT/.env.override"
+  [ "$DRY_RUN" = true ] && return 0
+  local tmp_k
+  tmp_k="$(mktemp "${TMPDIR:-/tmp}/giap-kv.XXXXXX")" || return 1
+  if pond_data_run test -f "$kv_file" 2>/dev/null; then
+    pond_data_run grep -Ev "^${key}=" "$kv_file" > "$tmp_k" 2>/dev/null || true
+  fi
+  [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$tmp_k"
+  if [ -s "$tmp_k" ]; then
+    chmod 0644 "$tmp_k" 2>/dev/null || true
+    pond_data_run mkdir -p "$D_DATA_DIR" 2>/dev/null || true
+    pond_data_run cp "$tmp_k" "$kv_file" || { rm -f "$tmp_k"; bad "could not write $kv_file"; return 1; }
+  else
+    pond_data_run rm -f "$kv_file" 2>/dev/null || rm -f "$kv_file" 2>/dev/null || true
+  fi
+  rm -f "$tmp_k"
+  if [ -f "$env_ovr" ]; then
+    local tmp_o
+    tmp_o="$(mktemp "${TMPDIR:-/tmp}/giap-env.XXXXXX")" && {
+      grep -Ev "^${key}=" "$env_ovr" > "$tmp_o" || true
+      [ -n "$val" ] && printf '%s=%s\n' "$key" "$val" >> "$tmp_o"
+      mv "$tmp_o" "$env_ovr"
+    }
+  fi
+  return 0
+}
+
+# `giap.sh kv [status|q8|q8,q4|q4|f16|bf16|auto|K,V]`: inspect or switch KV cache quantization.
+action_kv() {
+  local sub="${1:-status}" arg2="${2:-}"
+  if [ "$sub" = "status" ] && [ -z "$arg2" ]; then
+    detect_kv
+    head1 "KV cache quantization  (POND_KV_TYPE)"
+    local model provider
+    provider="$(sqlite_setting chat_provider || true)"
+    model="$(sqlite_setting chat_model || true)"
+    info "Active model:     ${model:-none}${provider:+ (provider: $provider)}"
+    if [ -n "$D_KV_CFG" ]; then
+      ok "Configured:       $D_KV_CFG  (from $D_KV_SRC)"
+    else
+      info "Configured:       default (q8_0,q8_0 — no override set)"
+    fi
+    [ -n "$D_KV_REG" ] && info "Registry stamp:   $D_KV_REG  ($D_DATA_DIR/engine/data/models/registry.json)"
+    local lf; lf="$(log_file_today)"
+    if [ -f "$lf" ]; then
+      local last_ctx
+      last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      if [ -n "$last_ctx" ]; then
+        local kib slmb nctx bud free_m
+        kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+        slmb="$(printf '%s' "$last_ctx" | sed -n 's/.*sliding_kv_mb=\([0-9]*\).*/\1/p')"
+        nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+        bud="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_budget_mb=\([0-9]*\).*/\1/p')"
+        free_m="$(printf '%s' "$last_ctx" | sed -n 's/.*free_mb=\([0-9]*\).*/\1/p')"
+        info "Last model load:  ${kib:-?} KiB/tok · sliding ${slmb:-?} MiB · n_ctx=${nctx:-?} · budget ${bud:-?} MiB (${free_m:-?} MiB free)"
+      fi
+    fi
+    say ""
+    info "Presets (CLI: bash scripts/giap.sh kv <preset>):"
+    note "q8     -> q8_0,q8_0   symmetric 8-bit KV (default; 8 KiB/tok on E4B, full tool/reasoning accuracy)"
+    note "q8,q4  -> q8_0,q4_0   asymmetric K=Q8_0, V=Q4_0 (6 KiB/tok on E4B; 8-bit keys, 4-bit values)"
+    note "q4     -> q4_0,q4_0   symmetric 4-bit KV (4 KiB/tok on E4B; lowest KV memory footprint)"
+    note "f16    -> f16,f16     unquantized FP16 KV (16 KiB/tok on E4B)"
+    note "bf16   -> bf16,bf16   unquantized BF16 KV (16 KiB/tok on E4B)"
+    note "auto   -> reset       remove override and use binary default (q8_0,q8_0)"
+    return 0
+  fi
+
+  kv_normalize_spec "$sub" "$arg2" || return $?
+  head1 "Set KV cache quantization -> $KV_SPEC"
+  local kv_file="$D_DATA_DIR/kv.env"
+  if [ "$KV_SPEC" = "auto" ]; then
+    info "removing POND_KV_TYPE from $kv_file (falling back to binary default q8_0,q8_0)"
+    kv_env_set POND_KV_TYPE "" || return 1
+  else
+    info "writing POND_KV_TYPE=$KV_SPEC to $kv_file"
+    kv_env_set POND_KV_TYPE "$KV_SPEC" || return 1
+  fi
+
+  kv_ensure_systemd_dropin || warn "could not update systemd drop-in; $kv_file was still written"
+  detect_kv
+  ok "configured KV cache quantization: ${D_KV_CFG:-default (q8_0,q8_0)}"
+
+  if [ "$D_SVC_ACTIVE" = "active" ]; then
+    if confirm "Restart $SERVICE_NAME now to apply KV cache quantization ($KV_SPEC)?"; then
+      svc_ctl restart || return 1
+      await_health || return 1
+      detect_all
+      action_kv status
+    else
+      note "restart later with: bash scripts/giap.sh kv $sub -y   (or menu 23)"
+    fi
+  else
+    note "the service is not running; the next start will use ${D_KV_CFG:-default (q8_0,q8_0)}"
+  fi
+  return 0
+}
+
+action_kv_menu() {
+  action_kv status
+  [ -t 0 ] || return 0
+  say ""
+  say "  1) q8_0,q8_0 (default)   2) q8_0,q4_0 (K=Q8, V=Q4)   3) q4_0,q4_0 (Q4)   4) f16,f16   5) bf16,bf16   a) auto   return) back"
+  local c=""; printf '  > '; read -r c
+  case "$c" in
+    1|q8)    action_kv q8_0,q8_0 ;;
+    2|q8,q4) action_kv q8_0,q4_0 ;;
+    3|q4)    action_kv q4_0,q4_0 ;;
+    4|f16)   action_kv f16,f16 ;;
+    5|bf16)  action_kv bf16,bf16 ;;
+    a|A|auto) action_kv auto ;;
+    "") ;;
+    *) action_kv "$c" ;;
+  esac
+  return 0
+}
+
+# Normalize a context size token ($1) into CTX_SPEC (integer tokens or "auto").
+ctx_normalize_spec() {
+  CTX_SPEC=""
+  local raw
+  raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d ' ,_')"
+  case "$raw" in
+    auto|default|reset|none) CTX_SPEC="auto"; return 0 ;;
+    4k)   CTX_SPEC=4096; return 0 ;;
+    6k)   CTX_SPEC=6144; return 0 ;;
+    8k)   CTX_SPEC=8192; return 0 ;;
+    12k)  CTX_SPEC=12288; return 0 ;;
+    16k)  CTX_SPEC=16384; return 0 ;;
+    24k)  CTX_SPEC=24576; return 0 ;;
+    32k)  CTX_SPEC=32768; return 0 ;;
+    48k)  CTX_SPEC=49152; return 0 ;;
+    64k)  CTX_SPEC=65536; return 0 ;;
+    96k)  CTX_SPEC=98304; return 0 ;;
+    100k) CTX_SPEC=102400; return 0 ;;
+    128k) CTX_SPEC=131072; return 0 ;;
+    *[0-9]k)
+      local base="${raw%k}"
+      case "$base" in *[!0-9]*) ;; *) CTX_SPEC=$((base * 1024)); return 0 ;; esac ;;
+  esac
+  case "$raw" in
+    ''|*[!0-9]*)
+      bad "unknown context size: '$1' (expected 8k, 16k, 24k, 32k, 48k, 64k, auto, or a token count >= 2048)"
+      return 2 ;;
+  esac
+  if [ "$raw" -lt 2048 ] || [ "$raw" -gt 262144 ]; then
+    bad "context size $raw is out of range (2048..262144)"
+    return 2
+  fi
+  CTX_SPEC="$raw"
+  return 0
+}
+
+fmt_tok() {
+  awk -v t="${1:-0}" 'BEGIN {
+    if (t >= 1000000) printf "%.1fM", t / 1000000
+    else if (t >= 1000) printf "%.1fk", t / 1000
+    else printf "%d", t
+  }'
+}
+
+# `giap.sh ctx [status|breakdown|8k|16k|24k|32k|48k|64k|auto|N]`: inspect or configure n_ctx (POND_CONTEXT_SIZE).
+action_ctx() {
+  local sub="${1:-status}"
+  if [ "$sub" = "status" ] || [ "$sub" = "breakdown" ]; then
+    detect_kv
+    head1 "Context window n_ctx  (POND_CONTEXT_SIZE)"
+    local model provider
+    provider="$(sqlite_setting chat_provider || true)"
+    model="$(sqlite_setting chat_model || true)"
+    info "Active model:     ${model:-none}${provider:+ (provider: $provider)}"
+    if [ -n "$D_CTX_CFG" ]; then
+      ok "Configured:       $D_CTX_CFG tokens  (from $D_CTX_SRC)"
+    else
+      info "Configured:       auto (device_window sizer — 16384 default on Orin Nano)"
+    fi
+    local lf; lf="$(log_file_today)"
+    local kib=4 slmb=11 nctx="" req="" rsn="" bud="" free_m="" used=""
+    if [ -f "$lf" ]; then
+      local last_ctx last_inf
+      last_ctx="$(grep -a 'kind="context_sized"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      last_inf="$(grep -aE 'kind="(inference|turn_end)"' "$lf" 2>/dev/null | tail -1 | tr -d '\000' || true)"
+      if [ -n "$last_ctx" ]; then
+        kib="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_kib_per_token=\([0-9]*\).*/\1/p')"
+        slmb="$(printf '%s' "$last_ctx" | sed -n 's/.*sliding_kv_mb=\([0-9]*\).*/\1/p')"
+        nctx="$(printf '%s' "$last_ctx" | sed -n 's/.*n_ctx=\([0-9]*\).*/\1/p')"
+        req="$(printf '%s' "$last_ctx" | sed -n 's/.*requested=\([0-9]*\).*/\1/p')"
+        rsn="$(printf '%s' "$last_ctx" | sed -n 's/.*reason="\([^"]*\)".*/\1/p')"
+        bud="$(printf '%s' "$last_ctx" | sed -n 's/.*kv_budget_mb=\([0-9]*\).*/\1/p')"
+        free_m="$(printf '%s' "$last_ctx" | sed -n 's/.*free_mb=\([0-9]*\).*/\1/p')"
+      fi
+      if [ -n "$last_inf" ]; then
+        local pt ct
+        pt="$(printf '%s' "$last_inf" | sed -n 's/.*prompt_tokens=\([0-9]*\).*/\1/p')"
+        ct="$(printf '%s' "$last_inf" | sed -n 's/.*completion_tokens=\([0-9]*\).*/\1/p')"
+        [ -n "$ct" ] || ct="$(printf '%s' "$last_inf" | sed -n 's/.*output_tokens=\([0-9]*\).*/\1/p')"
+        used=$(( ${pt:-0} + ${ct:-0} ))
+      fi
+    fi
+
+    [ -n "$nctx" ] && [ "$nctx" -gt 0 ] || nctx="${D_CTX_CFG:-65536}"
+    case "$nctx" in ''|*[!0-9]*) nctx=65536 ;; esac
+    [ -n "$used" ] || used=0
+    local pct=0
+    [ "$nctx" -gt 0 ] && pct=$(( (100 * used + nctx / 2) / nctx ))
+    local alloc_mb=$(( ${slmb:-11} + (${nctx:-65536} * ${kib:-4} + 512) / 1024 ))
+    local used_mb=0
+    [ "$used" -gt 0 ] && used_mb=$(( ${slmb:-11} + (used * ${kib:-4} + 512) / 1024 ))
+
+    local s_id="" s_msgs=0 s_chars=0 mems_cnt=0 skills_cnt=0 mcp_cnt=1
+    if command -v sqlite3 >/dev/null 2>&1 && [ -f "$D_DATA_DIR/pond_system.db" ]; then
+      local s_stats=""
+      s_stats="$(sqlite3 "$D_DATA_DIR/pond_system.db" "
+        SELECT
+          coalesce((SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1), ''),
+          coalesce((SELECT count(*) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+          coalesce((SELECT sum(length(content)) FROM session_messages WHERE session_id = (SELECT session_id FROM session_messages ORDER BY created_at DESC LIMIT 1)), 0),
+          coalesce((SELECT count(*) FROM memory_fragments WHERE lifecycle = 'active'), 0),
+          coalesce((SELECT count(*) FROM user_skills WHERE active = 1), 0),
+          coalesce((SELECT count(*) FROM mcp_servers WHERE enabled = 1), 0);
+      " 2>/dev/null || true)"
+      if [ -n "$s_stats" ]; then
+        IFS='|' read -r s_id s_msgs s_chars mems_cnt skills_cnt mcp_cnt <<< "$s_stats"
+      fi
+    fi
+
+    local tok_sys=1100
+    local tok_tools=$(( 3040 + ${mcp_cnt:-1} * 350 ))
+    local tok_mem=0
+    if [ "${mems_cnt:-0}" -gt 0 ]; then
+      tok_mem=$(( 250 + mems_cnt * 10 ))
+      [ "$tok_mem" -gt 800 ] && tok_mem=800
+    fi
+    local tok_msgs=0
+    if [ "$used" -gt $(( tok_sys + tok_tools + tok_mem )) ]; then
+      tok_msgs=$(( used - tok_sys - tok_tools - tok_mem ))
+    elif [ "$used" -gt 0 ]; then
+      tok_msgs=$(( ${s_chars:-0} / 4 ))
+    fi
+    local tok_free=$(( nctx - used ))
+    [ "$tok_free" -lt 0 ] && tok_free=0
+    local compact_thresh=$(( nctx * 8 / 10 ))
+    local tok_compact=$(( compact_thresh - used ))
+    [ "$tok_compact" -lt 0 ] && tok_compact=0
+
+    say ""
+    info "Context Window Fill: $pct% used ($(fmt_tok "$used") / $(fmt_tok "$nctx") tokens) · active KV ~${used_mb} MiB"
+    [ -n "$rsn" ] && note "Last sizer decision: n_ctx=$nctx (reason: $rsn, requested: ${req:-$nctx})"
+
+    local bar_w=54
+    local bar_str
+    bar_str="$(awk -v tot="$nctx" -v w="$bar_w" \
+                  -v m="$tok_msgs" -v tl="$tok_tools" -v s="$tok_sys" \
+                  -v mem="$tok_mem" -v f="$tok_free" '
+      BEGIN {
+        if (tot <= 0) tot = 1
+        wm   = int(w * m / tot + 0.5)
+        wtl  = int(w * tl / tot + 0.5)
+        ws   = int(w * s / tot + 0.5)
+        wmem = int(w * mem / tot + 0.5)
+        rem = w - (wm + wtl + ws + wmem)
+        if (rem < 0) rem = 0
+        wf = rem
+        out = ""
+        for (i = 0; i < wm; i++) out = out "█"
+        for (i = 0; i < wtl; i++) out = out "▓"
+        for (i = 0; i < ws; i++) out = out "▒"
+        for (i = 0; i < wmem; i++) out = out "░"
+        for (i = 0; i < wf; i++) out = out "·"
+        while (length(out) < w) out = out "·"
+        print out
+      }')"
+    say "  [$bar_str]"
+    say "  ${C_B}█${C_RST} Messages  ${C_B}▓${C_RST} MCP Tools  ${C_B}▒${C_RST} System Prompt  ${C_B}░${C_RST} Memories  ${C_B}·${C_RST} Free Space"
+    say ""
+
+    say "  COMPONENT                 TOKENS    % WINDOW   ROLE & DETAILS"
+    say "  ────────────────────────────────────────────────────────────────────────"
+    if [ "$tok_msgs" -gt 0 ]; then
+      printf '  %-24s %7s tok   %6.1f%%   %d msgs in session (%d%% of prompt)\n' \
+        "Messages (Chat History)" "$(fmt_tok "$tok_msgs")" \
+        "$(awk -v p="$tok_msgs" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+        "${s_msgs:-0}" \
+        "$(awk -v p="$tok_msgs" -v u="$used" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
+    fi
+    printf '  %-24s %7s tok   %6.1f%%   %d MCP extensions (%d%% of prompt)\n' \
+      "MCP Tool Declarations" "$(fmt_tok "$tok_tools")" \
+      "$(awk -v p="$tok_tools" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+      "$(( 8 + ${mcp_cnt:-1} ))" \
+      "$(awk -v p="$tok_tools" -v u="$used" 'BEGIN { printf "%d", (u>0? 100*p/u + 0.5 : 0) }')"
+    printf '  %-24s %7s tok   %6.1f%%   Persona & rules (KV prefix cached)\n' \
+      "System Prompt" "$(fmt_tok "$tok_sys")" \
+      "$(awk -v p="$tok_sys" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')"
+    if [ "$tok_mem" -gt 0 ]; then
+      printf '  %-24s %7s tok   %6.1f%%   <system-context> (%d active fragments)\n' \
+        "Memory Files & Context" "$(fmt_tok "$tok_mem")" \
+        "$(awk -v p="$tok_mem" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*p/t : 0) }')" \
+        "${mems_cnt:-0}"
+    fi
+    say "  ────────────────────────────────────────────────────────────────────────"
+    printf '  %-24s %7s tok   %6.1f%%   KV alloc: %d MiB (%s)\n' \
+      "Context Used" "$(fmt_tok "$used")" \
+      "$(awk -v u="$used" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*u/t : 0) }')" \
+      "$alloc_mb" "${D_KV_CFG:-q8_0,q8_0}"
+    printf '  %-24s %7s tok   %6.1f%%   80%% target (%s until auto-compact)\n' \
+      "Autocompact Buffer" "$(fmt_tok "$tok_compact")" \
+      "$(awk -v b="$tok_compact" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*b/t : 0) }')" \
+      "$(fmt_tok "$tok_compact")"
+    printf '  %-24s %7s tok   %6.1f%%   Remaining before window limit\n' \
+      "Free Space" "$(fmt_tok "$tok_free")" \
+      "$(awk -v f="$tok_free" -v t="$nctx" 'BEGIN { printf "%.1f", (t>0? 100*f/t : 0) }')"
+    say "  ────────────────────────────────────────────────────────────────────────"
+    printf '  %-24s %7s tok   100.0%%   n_ctx (KV: %s KiB/tok + %s MiB sliding)\n' \
+      "Total Context Window" "$(fmt_tok "$nctx")" "${kib:-4}" "${slmb:-11}"
+    say ""
+
+    say "  ${C_B}Details & System Entities${C_RST}"
+    say "  > MCP tools:        $(( 8 + ${mcp_cnt:-1} )) registered extensions (toolkit, vision, memory, knowledge...)"
+    say "  > Memory fragments: ${mems_cnt:-0} active fragments in vector/system database"
+    say "  > Custom skills:    ${skills_cnt:-0} active user skills"
+    if [ -n "$s_id" ]; then
+      say "  > Active session:   $s_id (${s_msgs:-0} messages, ${s_chars:-0} chars)"
+    fi
+    say "  > Compaction:       Hybrid compaction active · $(fmt_tok "$tok_compact") tokens until auto-compact"
+    say ""
+
+    info "Estimated KV cache RAM at ${kib:-4} KiB/tok + ${slmb:-11} MiB sliding (${D_KV_CFG:-q8_0,q8_0}):"
+    local r r_tok r_mb fit_note
+    for r in "8k:8192" "16k:16384" "24k:24576" "32k:32768" "48k:49152" "64k:65536"; do
+      r_tok="${r#*:}"; r_mb=$(( ${slmb:-11} + (r_tok * ${kib:-4} + 512) / 1024 ))
+      fit_note=""
+      if [ -n "$bud" ]; then
+        [ "$r_mb" -le "$bud" ] && fit_note=" (fits ${bud} MiB budget)" || fit_note=" (exceeds ${bud} MiB budget; engine steps down if tight)"
+      fi
+      note "$(printf '%-4s -> %6s tok   ~%3s MiB KV%s' "${r%%:*}" "$r_tok" "$r_mb" "$fit_note")"
+    done
+    note "auto -> reset        remove override and use device_window sizer"
+    return 0
+  fi
+
+  ctx_normalize_spec "$sub" || return $?
+  head1 "Set context window n_ctx -> $CTX_SPEC"
+  local kv_file="$D_DATA_DIR/kv.env"
+  if [ "$CTX_SPEC" = "auto" ]; then
+    info "removing POND_CONTEXT_SIZE from $kv_file (using device_window sizer)"
+    kv_env_set POND_CONTEXT_SIZE "" || return 1
+  else
+    info "writing POND_CONTEXT_SIZE=$CTX_SPEC to $kv_file"
+    kv_env_set POND_CONTEXT_SIZE "$CTX_SPEC" || return 1
+  fi
+
+  kv_ensure_systemd_dropin || warn "could not update systemd drop-in; $kv_file was still written"
+  detect_kv
+  ok "configured context window: ${D_CTX_CFG:-auto (device_window sizer)}"
+
+  if [ "$D_SVC_ACTIVE" = "active" ]; then
+    if confirm "Restart $SERVICE_NAME now to apply n_ctx ($CTX_SPEC)?"; then
+      svc_ctl restart || return 1
+      await_health || return 1
+      detect_all
+      action_ctx status
+    else
+      note "restart later with: bash scripts/giap.sh ctx $sub -y   (or menu 23)"
+    fi
+  else
+    note "the service is not running; the next start will use ${D_CTX_CFG:-auto}"
+  fi
+  return 0
+}
+
+action_ctx_menu() {
+  action_ctx status
+  [ -t 0 ] || return 0
+  say ""
+  say "  1) 8k (8192)   2) 16k (16384)   3) 24k (24576)   4) 32k (32768)   5) 48k (49152)   6) 64k (65536)   a) auto   return) back"
+  local c=""; printf '  > '; read -r c
+  case "$c" in
+    1) action_ctx 8k ;;
+    2) action_ctx 16k ;;
+    3) action_ctx 24k ;;
+    4) action_ctx 32k ;;
+    5) action_ctx 48k ;;
+    6) action_ctx 64k ;;
+    a|A|auto) action_ctx auto ;;
+    "") ;;
+    *) action_ctx "$c" ;;
+  esac
+  return 0
+}
+
+action_swap() { # $1 = "" | status | setup | <size_mb>
+  head1 "Swap memory configuration"
+  if [ "$D_OS" != "linux" ]; then
+    note "Swap memory is managed dynamically by macOS; nothing to configure."
+    return 0
+  fi
+  local sub="${1:-status}"
+  case "$sub" in
+    setup)
+      local target="${2:-6144}"
+      source "$REPO_ROOT/scripts/lib/install-deps.sh"
+      ensure_swap_size "$target"
+      ;;
+    status)
+      doctor_swap
+      if [ -r /proc/swaps ]; then
+        say ""
+        info "Active swap partitions (/proc/swaps):"
+        cat /proc/swaps | sed 's/^/  /'
+      fi
+      ;;
+    *)
+      if [[ "$sub" =~ ^[0-9]+$ ]]; then
+        source "$REPO_ROOT/scripts/lib/install-deps.sh"
+        ensure_swap_size "$sub"
+      else
+        warn "unknown swap command: $sub (expected status, setup, or size in MB)"
+      fi
+      ;;
+  esac
+}
+
 # ── service actions ──────────────────────────────────────────────────────────
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
@@ -1437,7 +2161,15 @@ action_serve_foreground() {
   local port="${D_PORT:-8080}"
   if [ -t 0 ]; then printf '  port [%s]: ' "$port"; local p=""; read -r p; [ -n "$p" ] && port="$p"; fi
   note "always pass --port explicitly: the real fallback is 4000..4009, not 80/8080/4000/5000"
-  run ./target/release/pond-server serve --port "$port"
+  local fg_env=""
+  [ -n "$D_KV_CFG" ]  && fg_env="${fg_env:+$fg_env }POND_KV_TYPE=$D_KV_CFG"
+  [ -n "$D_CTX_CFG" ] && fg_env="${fg_env:+$fg_env }POND_CONTEXT_SIZE=$D_CTX_CFG"
+  if [ -n "$fg_env" ]; then
+    # shellcheck disable=SC2086
+    run env $fg_env ./target/release/pond-server serve --port "$port"
+  else
+    run ./target/release/pond-server serve --port "$port"
+  fi
 }
 
 action_launch_gui() {
@@ -1557,11 +2289,13 @@ action_update() {
   fi
   if [ "$D_NODE_OK" = true ]; then ok "node $D_NODE"; else warn "no Node in range: the web UI cannot be rebuilt here"; fi
 
-  # The stamp names the commit the binary was built from, so an unchanged pond skips the long build.
+  # The stamp names the commit and flags the binary was built with, so an unchanged pond skips the long build.
   detect_ui; detect_binaries
-  local built_from rebuilt=false
-  built_from="$(printf '%s' "$D_STAMP" | sed -n 's/.* git=\([^ ]*\).*/\1/p')"
-  if [ -n "$built_from" ] && [ "$built_from" = "$D_SHA" ] && [ "$D_UI_STATE" = "built" ]; then
+  local built_from built_flags rebuilt=false
+  built_from="$(release_build_stamp_field "$D_STAMP" git)"
+  built_flags="$(release_build_stamp_field "$D_STAMP" rustflags)"
+  if [ -n "$built_from" ] && [ "$built_from" = "$D_SHA" ] && [ "$D_UI_STATE" = "built" ] \
+    && [ "$built_flags" = "$(release_build_stamp_rustflags)" ]; then
     ok "pond-server is already built from $D_SHA"
   else
     if [ "$D_NODE_OK" = true ]; then action_build_ui || return 1; fi
@@ -1573,7 +2307,7 @@ action_update() {
   case "$D_SVC_SCOPE" in
     user|system)
       # A build that stopped the pond has already started it on the new binary.
-      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "$BUILD_STARTED_SVC" != true ]; }; then
+      if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "${BUILD_STARTED_SVC:-false}" != true ]; }; then
         svc_ctl restart || return 1
       fi
       await_health
@@ -1592,6 +2326,10 @@ action_update() {
       fi
     fi
   fi
+  if [ "$D_OS" = "linux" ] && timesync_uses_timesyncd && [ "$(timesync_dropin_state)" != present ]; then
+    info "after a power cut this pond's clock waits on the public NTP pool; named time servers answer sooner (sudo)"
+    if confirm "Set them now?"; then timesync_install; fi
+  fi
 
   detect_all
   doctor
@@ -1603,13 +2341,13 @@ action_deploy() {
     bad "you are ON the Jetson — deploy runs from the dev machine. Use menu 12 to build here."
     return 1
   fi
-  local missing="" r
+  local unpushed="" r
   for r in origin jarida-io; do
     git remote 2>/dev/null | grep -qx "$r" || continue
-    git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || missing="$missing $r"
+    git branch -r --contains HEAD 2>/dev/null | grep -q "$r/" || unpushed="$unpushed $r"
   done
-  if [ -n "$missing" ]; then
-    bad "HEAD is not on:$missing"
+  if [ -n "$unpushed" ]; then
+    bad "HEAD is not on:$unpushed"
     note "the Jetson resets to origin/<branch>; deploying now builds stale code and reports success"
     confirm "Deploy anyway?" || return 1
   fi
@@ -1622,9 +2360,48 @@ action_deploy() {
 # My Pond's admin card, made as the account that runs the pond (docs/architecture/pond-administrator.md).
 action_admin_card() {
   head1 "Admin card (My Pond)"
-  local user
+  local user bin data
   user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
-  admin_card_run "${1:-}" "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$user"
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  data="$D_DATA_DIR"
+  if [ -z "${1:-}" ] && [ -t 0 ]; then
+    admin_card_doctor "$bin" "$data" "$user"
+    say ""
+    say "  s) Print sealed admin card    r) Rotate (generate new card)    return) back"
+    local c=""; printf '  > '; read -r c
+    case "$c" in
+      s|S) admin_card_run show "$bin" "$data" "$user" ;;
+      r|R) confirm "Generate a new admin card (invalidates the existing one)?" && admin_card_run rotate "$bin" "$data" "$user" ;;
+    esac
+    return 0
+  fi
+  admin_card_run "${1:-}" "$bin" "$data" "$user"
+}
+
+# `giap.sh test-pond [on|off|status]`: whether a paired phone may turn on developer mode's debug
+# switch, which shows household content in the logs. Only a Jarida test Pond should say on.
+action_test_pond() { # $1 = "" | on | off | status
+  head1 "Test Pond (developer mode)"
+  local sub="${1:-status}" user bin
+  case "$sub" in
+    on|off|status) ;;
+    *) bad "test-pond takes on, off or status, not: $sub"; return 2 ;;
+  esac
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    bad "no pond-server binary yet; build it first (bash scripts/giap.sh build)"; return 1
+  fi
+  if [ "$sub" = on ]; then
+    confirm "Mark this pond as a test Pond? A paired phone may then make its logs show what the household says." || return 1
+  fi
+  if [ "$DRY_RUN" = true ] && [ "$sub" != status ]; then info "dry run: nothing changed"; return 0; fi
+  # The mark lives in the data directory, so it is written as the account that owns it.
+  if [ "$user" = "$(id -un)" ]; then
+    POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  else
+    sudo -u "$user" env POND_DATA_DIR="$D_DATA_DIR" "$bin" test-pond "$sub"
+  fi
 }
 
 # `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
@@ -1719,38 +2496,45 @@ action_jetson_power() {
 # ── menu ─────────────────────────────────────────────────────────────────────
 show_menu() {
   head1 "Actions"
-  say "  ${C_B}Diagnose${C_RST}"
+  say "  ${C_B}Diagnose & repair${C_RST}"
   say "   1) Doctor — full health check (read-only)"
-  say "   3) Repair the goose submodule"
-  say "   4) Reclaim disk (target/debug only)"
-  say "   5) Stop stray pond-server / desktop app processes"
+  say "   3) Repair the goose submodule (align with pin)"
+  say "   4) Reclaim disk space (target/debug only)"
+  say "   5) Stop stray pond-server / desktop processes"
   say ""
-  say "  ${C_B}Install & build${C_RST}"
-  say "   9) Set up Node (find the right version, or download it)"
+  say "  ${C_B}Install & update${C_RST}"
   say "  10) Install GIAP on this host (first-time setup)"
-  say "  11) Build the web UI"
-  say "  12) Build pond-server (release, correct features for this host)"
-  say "  13) Build both (UI then server)"
-  say "  17) Update this pond (newest code, build, restart, grants, doctor)"
+  say "  17) Update this pond (pull, build, restart, doctor)"
   [ "$D_IS_JETSON" = false ] && say "  14) Deploy to the Jetson (from this dev machine)"
-  say "  15) LiteRT-LM library — status, and building it (for .litertlm models)"
-  [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime for the GPU — status, and building it (vision and faces on TensorRT)"
-  [ "$D_OS" = "linux" ] && say "  16) Let the pond join Wi-Fi from the BLE setup channel (polkit grant, sudo)"
   say ""
-  say "  ${C_B}Service${C_RST}"
+  say "  ${C_B}Build & runtimes${C_RST}"
+  say "   9) Set up Node (find the right version, or download it)"
+  say "  11) Build the web UI (pond-desktop/dist)"
+  say "  12) Build pond-server (release binary for this host)"
+  say "  13) Build both (UI then server)"
+  say "  15) LiteRT-LM library — status and building (.litertlm models)"
+  [ "$D_IS_JETSON" = true ] && say "  18) ONNX Runtime GPU — status and building (TensorRT)"
+  say "  30) KV cache quantization — status and switching (q8_0, q8_0/q4_0, q4_0, f16)"
+  say "  28) Context window (n_ctx) — status and sizing (8k, 16k, 32k, 48k, 64k, auto)"
+  [ "$D_OS" = "linux" ] && say "  29) Swap memory — status and setup (~6 GB target)"
+  say ""
+  say "  ${C_B}Service & administration${C_RST}"
   say "  20) Install the service"
-  say "  21) Start / 22) Stop / 23) Restart"
+  say "  21) Start  /  22) Stop  /  23) Restart"
   say "  24) Remove the service"
   say "  25) Run the server in the foreground"
-  [ "$D_OS" = "linux" ] && say "  26) Run the pond as its own locked account ($AGAMEMNON), or move it back"
+  [ "$D_OS" = "linux" ] && say "  26) Run as locked service account ($AGAMEMNON), or move back"
+  [ "$D_OS" = "linux" ] && say "  16) Wi-Fi BLE setup grant (NetworkManager polkit rule)"
+  [ "$D_OS" = "linux" ] && say "  19) Clock after a power cut — named time servers for timesyncd (sudo)"
+  say "  27) Admin card — view status, seal or rotate (My Pond)"
   say ""
-  say "  ${C_B}Desktop${C_RST}"
+  say "  ${C_B}Desktop client${C_RST}"
   say "  31) Build the desktop app (macOS only)"
   say "  32) Launch the GUI on this machine's display"
   say ""
-  say "  ${C_B}Observe${C_RST}"
-  say "  40) Logs"
-  say "  41) Live console: stats, charts and logs for this machine and the Jetson"
+  say "  ${C_B}Observe & monitor${C_RST}"
+  say "  40) Logs (tail live pond log)"
+  say "  41) Live console — stats, charts and logs"
   [ "$D_IS_JETSON" = true ] && say "  50) Jetson power, thermals and over-current"
   say ""
   say "   r) Re-run detection    d) Toggle dry-run (now: $DRY_RUN)    0) Quit"
@@ -1773,11 +2557,15 @@ menu_loop() {
       11) action_build_ui; pause ;;
       12) action_build_server; pause ;;
       13) action_build_ui && action_build_server; pause ;;
-      17) action_update; pause ;;
       14) action_deploy; pause ;;
       15) action_litert_menu; pause ;;
-      18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
       16) action_wifi_grant; pause ;;
+      17) action_update; pause ;;
+      18) action_onnxruntime status; [ -t 0 ] && confirm "Build it now in the background?" && action_onnxruntime build; pause ;;
+      19) action_time_sync; pause ;;
+      28) action_ctx_menu; pause ;;
+      29) [ "$D_OS" = "linux" ] && action_swap status; pause ;;
+      30) action_kv_menu; pause ;;
       20) action_service_install; pause ;;
       21) svc_ctl start;   detect_service; detect_runtime; pause ;;
       22) svc_ctl stop;    detect_service; detect_runtime; pause ;;
@@ -1785,6 +2573,7 @@ menu_loop() {
       24) action_service_remove; pause ;;
       25) action_serve_foreground; pause ;;
       26) if [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then action_service_account undo; else action_service_account; fi; pause ;;
+      27) action_admin_card; pause ;;
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
@@ -1794,7 +2583,7 @@ menu_loop() {
       d|D) [ "$DRY_RUN" = true ] && DRY_RUN=false || DRY_RUN=true ;;
       0|q|Q) break ;;
       "") ;;
-      *) warn "unknown choice: $choice" ;;
+      *) warn "unknown choice: $choice"; sleep 1 ;;
     esac
   done
   say "bye."
@@ -1807,8 +2596,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime`, `wifi-grant`, `admin-card`, `service-account` (a subcommand) and `console` (a host)
-# take more.
+# `onnxruntime`, `wifi-grant`, `time-sync`, `data-encrypt`, `admin-card`, `test-pond`,
+# `service-account` (a subcommand) and `console` (a host) take more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1832,8 +2621,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$CMD" in
-  litert) ;;
-  models|wifi-grant|onnxruntime|console|admin-card|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  litert|kv|swap) ;;
+  ctx|context|n_ctx|models|wifi-grant|time-sync|data-encrypt|onnxruntime|console|admin-card|test-pond|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1852,19 +2641,26 @@ case "$CMD" in
   "")        menu_loop ;;
   status)    banner ;;
   doctor)    banner; doctor; [ "$DOC_FAIL" -gt 0 ] && exit 1 || exit 0 ;;
-  install)   action_install ;;
+  install|setup) action_install ;;
   build)     action_build_ui; action_build_server ;;
   update)    action_update ;;
   build-ui)  action_build_ui ;;
+  go)        action_go ;;
   build-desktop) action_build_desktop ;;
   deploy)    action_deploy ;;
   logs)      action_logs ;;
   gui)       action_launch_gui ;;
   litert)    action_litert "$CMD_SUB" "$CMD_ARG" ;;
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
+  kv)        action_kv "$CMD_SUB" "$CMD_ARG" ;;
+  ctx|context|n_ctx) action_ctx "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
+  time-sync) action_time_sync "$CMD_SUB" ;;
+  data-encrypt) action_data_encrypt "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
+  test-pond) action_test_pond "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
+  swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac

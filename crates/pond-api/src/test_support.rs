@@ -107,6 +107,7 @@ pub async fn app_state() -> TestState {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel::<Notification>(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(crate::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -148,8 +149,10 @@ pub async fn app_state() -> TestState {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
         data_wipe: None,
+        developer: Default::default(),
     };
     TestState {
         state,

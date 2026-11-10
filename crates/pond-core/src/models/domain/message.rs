@@ -19,6 +19,34 @@ pub struct ImageAttachment {
     pub mime_type: String,
 }
 
+/// A recording for a model that hears it; the pond passes it to the engine and never stores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioAttachment {
+    /// Base64: WAV, M4A/AAC, MP3, FLAC or Ogg Vorbis as sent; 16 kHz mono WAV once prepared.
+    pub data: String,
+    /// MIME type, e.g. "audio/wav" or "audio/mp4".
+    pub mime_type: String,
+    /// The file's name, when it was a file rather than a held-mic note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What the room's speech recogniser made of a recording the model hears. Never the turn's
+    /// words: it steers memory recall and tool choice, which need text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heard_as: Option<String>,
+}
+
+/// A PDF whose text the pond reads into the turn; the file itself is never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentAttachment {
+    /// Base64-encoded PDF.
+    pub data: String,
+    /// MIME type: "application/pdf".
+    pub mime_type: String,
+    /// The file's name, which the model and the saved row see.
+    #[serde(default)]
+    pub name: String,
+}
+
 /// A tool call in an assistant message, replayed via `tool_calls` so the model sees its history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRecord {

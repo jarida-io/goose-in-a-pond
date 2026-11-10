@@ -422,6 +422,23 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { text: "hello from transcription" } }),
   );
 
+  // The notification centre's live feed: a household with no notices yet, and a stream that
+  // sends nothing. Unmocked, every hub page logged two refused connections to the pinned base.
+  // `history/read` is registered after `history**`, so it wins (last registered wins).
+  await page.route("**/api/v1/notifications/history**", (route) =>
+    route.fulfill({ json: { device_id: "e2e-device", notifications: [] } }),
+  );
+  await page.route("**/api/v1/notifications/history/read", (route) =>
+    route.fulfill({ json: {} }),
+  );
+  await page.route("**/api/v1/notifications/stream**", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+      body: "",
+    }),
+  );
+
   await page.route("**/api/v1/chat/stream", (route) =>
     route.fulfill({
       status: 200,

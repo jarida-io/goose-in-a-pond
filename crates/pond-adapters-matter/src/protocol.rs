@@ -3,6 +3,9 @@
 
 use crate::client::ControllerCode;
 use chrono::{DateTime, Utc};
+use pond_core::user_data::domain::device::{
+    DeviceId, DeviceStateChanged, DeviceStateValue, POWER_KEY,
+};
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::ports::device_commissioning::{DiscoveredAddress, DiscoveredDevice};
 use pond_core::user_data::ports::device_control::{
@@ -203,6 +206,34 @@ impl WireReading {
     }
 }
 
+/// One value of a device's state that changed, worded as the `state` op words it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireStateChange {
+    pub device_id: String,
+    pub name: String,
+    pub value: String,
+    /// RFC 3339, as for a reading.
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl WireStateChange {
+    /// Power becomes the boolean the app reads; every other value keeps the controller's words.
+    pub fn to_change(&self) -> DeviceStateChanged {
+        let value = match (self.name.as_str(), self.value.as_str()) {
+            (POWER_KEY, "on") => DeviceStateValue::Bool(true),
+            (POWER_KEY, "off") => DeviceStateValue::Bool(false),
+            _ => DeviceStateValue::Text(self.value.clone()),
+        };
+        DeviceStateChanged {
+            device_id: DeviceId::new(&self.device_id),
+            key: self.name.clone(),
+            value,
+            changed_at: self.at.unwrap_or_else(Utc::now),
+        }
+    }
+}
+
 /// The `subscribe` result: the whole fabric.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Snapshot {
@@ -229,6 +260,14 @@ pub struct DescribeResult {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StateResult {
     pub state: DeviceState,
+}
+
+/// The `state_patch` result: `state`'s own reading, typed instead of worded, for undo to replay
+/// a reversed command against.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StatePatchResult {
+    #[serde(default)]
+    pub patch: DeviceStatePatch,
 }
 
 /// The `commission` result.
@@ -732,5 +771,42 @@ mod tests {
         assert_eq!(result.applied.on, Some(true));
         assert_eq!(result.applied.brightness, Some(40));
         assert_eq!(result.applied.position, None);
+    }
+
+    #[test]
+    fn a_state_change_types_power_and_keeps_other_words() {
+        let change = |name: &str, value: &str| {
+            serde_json::from_value::<WireStateChange>(json!({
+                "device_id": "matter-7", "name": name, "value": value,
+                "at": "2026-11-03T08:00:00Z",
+            }))
+            .unwrap()
+            .to_change()
+        };
+        let on = change("power", "on");
+        assert_eq!(on.device_id.as_str(), "matter-7");
+        assert_eq!(on.key, "power");
+        assert_eq!(on.value, DeviceStateValue::Bool(true));
+        assert_eq!(on.changed_at.to_rfc3339(), "2026-11-03T08:00:00+00:00");
+        assert_eq!(change("power", "off").value, DeviceStateValue::Bool(false));
+        assert_eq!(
+            change("brightness", "40%").value,
+            DeviceStateValue::Text("40%".into())
+        );
+    }
+
+    #[test]
+    fn the_state_patch_deserialises_straight_into_the_core_type() {
+        let result: StatePatchResult =
+            serde_json::from_value(json!({ "patch": { "locked": true, "valve": false } })).unwrap();
+        assert_eq!(result.patch.locked, Some(true));
+        assert_eq!(result.patch.valve, Some(false));
+        assert_eq!(result.patch.on, None);
+    }
+
+    #[test]
+    fn a_device_with_nothing_to_report_deserialises_to_an_empty_patch() {
+        let result: StatePatchResult = serde_json::from_value(json!({ "patch": {} })).unwrap();
+        assert_eq!(result.patch, DeviceStatePatch::default());
     }
 }

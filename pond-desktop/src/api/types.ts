@@ -465,6 +465,31 @@ export interface ScheduleRunNotification {
   recipe: string | null;
 }
 
+/**
+ * One household notice from the Pond (`GET /notifications/history`, or live from
+ * `/notifications/stream`), always under its household id: a device's own queued copy carries
+ * `"{id}:{device}"`, which `historyId` maps back.
+ */
+export interface HouseholdNotice {
+  id: string;
+  /** `info`, `alert` or `action_required`; anything else renders as `info`. */
+  category: string;
+  title: string;
+  body: string;
+  /** RFC 3339, as the Pond stamped it. */
+  timestamp: string;
+  /** The payload: `open` names the screen a tap opens; `kind` names a system notice. */
+  data: Record<string, unknown> | null;
+  /** Whether this device marked it read. */
+  read: boolean;
+}
+
+/** `GET /notifications/history`: the caller's own device id and what it may read, newest first. */
+export interface NotificationHistoryResponse {
+  device_id: string;
+  notifications: HouseholdNotice[];
+}
+
 /** Context passed when navigating to Canvas to view a schedule debrief. */
 export interface DebriefContext {
   type: "debrief";
@@ -812,6 +837,32 @@ export interface ModelEntry {
   available?: boolean;
   /** Why `available` is false. */
   unavailable_reason?: ModelUnavailableReason;
+  /** The jobs the pond says this row is doing now, read from its settings. Absent on older ponds. */
+  roles?: ModelUse[];
+  /** The section the pond lists this row under. Absent on older ponds. */
+  section?: ModelSection;
+}
+
+/** A job a model on the pond is doing: the first five held by a catalogue row, the rest by a model
+ *  that works beside one (`pictures`, `drafter`) or by a camera model with no row. */
+export type ModelUse =
+  | "chat" | "tool" | "asr" | "tts" | "embedding" | "pictures" | "drafter" | "camera" | "faces";
+
+/** The sections the Models page lists, in this order. */
+export const MODEL_SECTIONS = [
+  "conversation", "listening", "speaking", "memory", "pictures", "other",
+] as const;
+export type ModelSection = (typeof MODEL_SECTIONS)[number];
+
+/** A model the pond has in use that is not a catalogue row: `helpers` of `GET /models/active-roles`. */
+export interface HelperModel {
+  id: string;
+  /** Null when the pond has no name for it but the job's. */
+  title: string | null;
+  uses: ModelUse[];
+  section: ModelSection;
+  /** The catalogue row it works for, as `{category}/{name}`. */
+  serves: string | null;
 }
 
 /** GET /api/v1/warmup — the boot/model-change prefix warm-up (see Agent::prewarm). */
@@ -852,6 +903,9 @@ export interface ModelMemoryStatus {
   /** The most this pond lets the models take: a desktop's memory less what it keeps for itself, or
    *  a budgeted device's own figure. `available_for_llm_mb` is what is left of it now. */
   budget_mb?: number;
+  /** The room a Memory model has beside the conversation model, counting what the one in use gives
+   *  back on a switch; null where the pond read nothing, absent from an older server. */
+  embedder_room_mb?: number | null;
 }
 
 export interface ModelCapabilities {
@@ -1051,6 +1105,10 @@ export interface LongTask {
   result_artifact_id: string | null;
   /** Where an open task waits; `null` once it has ended, and absent from an older pond. */
   queue?: LongTaskQueuePlace | null;
+  /** A step is running but a person's turn has the model; it resumes after. Absent from an older pond. */
+  paused_for_turn?: boolean;
+  /** When the task answers with what it has found; `null` for a task with no time limit, absent from an older pond. */
+  deadline?: string | null;
 }
 
 /** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */
@@ -1081,6 +1139,154 @@ export interface LongTaskReport {
   sources: LongTaskSource[];
   /** How many dated events it holds; a calendar file is offered only above 0. */
   calendar_events: number;
+  /** The choices a compare step wrote as `## Option N:` sections. */
+  options: ReportOption[];
+  /** Pictures from the cited pages, kept and served by the pond. */
+  images: ReportImage[];
+}
+
+/** One choice a task found, such as a car or a flat. `fields` keeps the step's order. */
+export interface ReportOption {
+  title: string;
+  price?: string;
+  link?: string;
+  why?: string;
+  fields: Array<[string, string]>;
+  sources: LongTaskSource[];
+}
+
+/** A picture from a cited page. `src` is a pond path that needs the bearer token. */
+export interface ReportImage {
+  src: string;
+  /** The line under the picture: its author and licence, or the site it came from. */
+  credit: string;
+  page: string;
+  licence?: string;
+  caption?: string;
+  file_page?: string;
+}
+
+// ── Web watches and saved cards ───────────────────────────────
+
+export interface WebWatchFilters {
+  words?: string[];
+  max_price?: number;
+  min_year?: number;
+  max_mileage?: number;
+}
+
+export interface WebWatchItem {
+  title: string;
+  price?: string;
+  currency?: string;
+  mileage?: string;
+  year?: string;
+  link?: string;
+  image?: string;
+}
+
+/** A watch as `GET /web-watches` lists it. */
+export interface WebWatch {
+  id: string;
+  title: string;
+  address: string;
+  looking_for: string;
+  filters: WebWatchFilters;
+  /** The filters in words, such as "subaru forester, up to 1,500,000". */
+  filters_words: string;
+  interval_hours: number;
+  paused: boolean;
+  items_count: number;
+  matching_count: number;
+  /** Failed checks in a row. */
+  failures: number;
+  last_checked_at: string | null;
+  next_check_at: string;
+  created_at: string;
+  session_id: string | null;
+}
+
+export type WebWatchChange = {
+  id: number;
+  found_at: string;
+  /** The change as one line: "Price down: 2017 Subaru Forester, KES 1,500,000 to KES 1,450,000". */
+  line: string;
+  /** What the member asked for, and so pushed at once rather than kept for the digest. */
+  matched: boolean;
+  item: WebWatchItem;
+} & ({ kind: "new" } | { kind: "gone" } | { kind: "price_changed"; from: string; to: string });
+
+/** One watch with what its last good check found and its newest changes. */
+export interface WebWatchDetail extends WebWatch {
+  items: WebWatchItem[];
+  changes: WebWatchChange[];
+}
+
+/** `filters` replaces the whole set; `interval_hours` is held to 1 to 168 by the pond. */
+export interface WebWatchEdit {
+  looking_for?: string;
+  filters?: WebWatchFilters;
+  interval_hours?: number;
+  paused?: boolean;
+}
+
+export type SavedFields =
+  | { kind: "recipe"; servings?: string; time?: string; ingredients?: string[]; steps?: string[] }
+  | {
+      kind: "listing";
+      price?: string;
+      currency?: string;
+      mileage?: string;
+      year?: string;
+      location?: string;
+      link?: string;
+      photos?: string[];
+    }
+  | { kind: "place"; address?: string; hours?: string; link?: string }
+  | { kind: "report"; task_id?: string }
+  | { kind: "note" };
+
+export type SavedKind = SavedFields["kind"];
+
+export interface SavedSource {
+  title: string;
+  url: string;
+}
+
+/** A kept card; `mine` says whether this member may change it, which only its owner may. */
+export type SavedItem = SavedFields & {
+  id: string;
+  owner: string;
+  title: string;
+  body: string;
+  collection?: string;
+  shared: boolean;
+  sources?: SavedSource[];
+  session_id?: string;
+  created_at: string;
+  updated_at: string;
+  mine: boolean;
+};
+
+export interface SavedCollection {
+  name: string;
+  count: number;
+}
+
+export type NewSavedItem = SavedFields & {
+  title: string;
+  body?: string;
+  collection?: string;
+  sources?: SavedSource[];
+  session_id?: string;
+};
+
+/** `collection: null` takes the card out of its collection; leaving it out keeps it. */
+export interface SavedItemEdit {
+  title?: string;
+  body?: string;
+  collection?: string | null;
+  shared?: boolean;
 }
 
 export type LongTaskExportFormat = "markdown" | "html" | "ics";
@@ -1108,6 +1314,14 @@ export interface ImageAttachment {
   mime_type: string;
 }
 
+/** A recording sent with a turn; raw base64, no `data:` prefix. `heard_as` is the client's own
+ *  transcript, which the pond uses in place of Whisper's when the model cannot hear the clip. */
+export interface AudioAttachment {
+  data: string;
+  mime_type: string;
+  heard_as?: string;
+}
+
 /** Request body for POST /api/v1/chat/stream */
 export interface ChatStreamRequest {
   message: string;
@@ -1115,6 +1329,7 @@ export interface ChatStreamRequest {
   canvas_mode?: boolean;
   voice_mode?: boolean;
   images?: ImageAttachment[];
+  audio?: AudioAttachment[];
   /** Ask the server to keep this turn running if the connection drops. */
   resumable?: boolean;
   /** The message is a research question: the pond starts deep research on it. */
@@ -1224,6 +1439,8 @@ export interface ChatEvent {
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
   result?: unknown;         // for "tool_call" events
+  /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
+  working_notes?: string;
   error?: string;           // for "error" events
   /** Optional MCP-APP UI rendering hint from backend */
   ui?: {
@@ -1356,6 +1573,8 @@ export interface ModelActiveRoles {
   asr:        ModelRoleAssignment | null;
   tts:        ModelRoleAssignment | null;
   embedding:  ModelRoleAssignment | null;
+  /** Models in use beside the catalogue rows. Absent on older ponds. */
+  helpers?:   HelperModel[];
 }
 
 // ── Sessions ──────────────────────────────────────────────────
@@ -1563,6 +1782,12 @@ export interface SecretRequirement {
   host_only?: boolean;
 }
 
+/**
+ * The built-in web search as `GET /api/v1/marketplace` reports it: `on` with Knowledge on and a
+ * Brave key stored, `needs_key` with no key, `knowledge_off` with the Knowledge extension off.
+ */
+export type BuiltInSearchState = "on" | "needs_key" | "knowledge_off";
+
 export interface MarketplaceExtension {
   id: string;
   name: string;
@@ -1575,6 +1800,10 @@ export interface MarketplaceExtension {
   author: string;
   tools: string[];
   featured: boolean;
+  /** A capability the Pond ships itself that already does this extension's job. */
+  built_in?: "web_search" | null;
+  /** That capability's state on this Pond; present only with `built_in`. */
+  built_in_state?: BuiltInSearchState;
   required_secrets: SecretRequirement[];
 }
 

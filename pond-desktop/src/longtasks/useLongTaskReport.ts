@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/PondApiClient";
-import type { LongTask, LongTaskSource } from "../api/types";
+import type { LongTask, LongTaskSource, ReportImage, ReportOption } from "../api/types";
 import { resultOf } from "./longTaskWords";
 
 export interface ReportView {
@@ -12,6 +12,8 @@ export interface ReportView {
   sources: LongTaskSource[];
   /** Dated events the report holds; a calendar file is offered only above 0. */
   calendarEvents: number;
+  options: ReportOption[];
+  images: ReportImage[];
   /** An older pond has no report route, so this is only the Result and the pond cannot save or print it. */
   summaryOnly: boolean;
 }
@@ -44,13 +46,24 @@ async function fetchReport(task: Source): Promise<ReportView> {
       sections: report.sections,
       sources: report.sources,
       calendarEvents: report.calendar_events,
+      options: report.options ?? [],
+      images: report.images ?? [],
       summaryOnly: false,
     };
   }
   const result = resultOf(task);
   if (!result) throw new Error("This task has no result to open.");
   const body = await api.getLongTaskArtifact(task.id, result.id);
-  return { title: body.title, markdown: body.body, sections: 0, sources: [], calendarEvents: 0, summaryOnly: true };
+  return {
+    title: body.title,
+    markdown: body.body,
+    sections: 0,
+    sources: [],
+    calendarEvents: 0,
+    options: [],
+    images: [],
+    summaryOnly: true,
+  };
 }
 
 export function useLongTaskReport(task: Source): LongTaskReportHandle {

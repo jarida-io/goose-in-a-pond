@@ -413,6 +413,7 @@ pub struct RunSupervisor {
     quiet_passes: crate::quiet_pass::QuietPasses,
     /// The Voice agent's background compiles, which wait for quiet like the passes do.
     pub(crate) voice_prefill: crate::voice_agent::VoicePrefillQueue,
+    preempt_hook: Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>,
 }
 
 /// A turn being answered, counted until it drops; see [`RunSupervisor::turn_started`].
@@ -434,12 +435,26 @@ impl RunSupervisor {
             turns_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             quiet_passes: crate::quiet_pass::QuietPasses::default(),
             voice_prefill: crate::voice_agent::VoicePrefillQueue::default(),
+            preempt_hook: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Sets the hook called whenever an interactive turn starts or requests preemption.
+    pub fn set_preempt_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+        let _ = self.preempt_hook.set(Box::new(hook));
+    }
+
+    /// Preempts active background model work immediately.
+    pub fn preempt(&self) {
+        if let Some(hook) = self.preempt_hook.get() {
+            hook();
         }
     }
 
     /// Counts a turn as being answered until the guard drops, a panic or a cancelled stream
     /// included. Every turn path holds one, whether or not its run is registered.
     pub fn turn_started(&self) -> TurnInFlight {
+        self.preempt();
         self.turns_in_flight
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         TurnInFlight(self.turns_in_flight.clone())
@@ -486,6 +501,25 @@ mod tests {
         assert!(runs.turn_in_flight(), "one turn is enough");
         drop(second);
         assert!(!runs.turn_in_flight());
+    }
+
+    #[test]
+    fn turn_started_fires_the_preempt_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = RunSupervisor::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        runs.set_preempt_hook(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let turn = runs.turn_started();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(turn);
+
+        runs.preempt();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

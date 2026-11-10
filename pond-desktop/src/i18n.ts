@@ -48,15 +48,46 @@ void i18n.use(initReactI18next).init({
       litert_library_missing: 'Needs the LiteRT-LM library, which this Pond does not have yet',
       other: 'This pond cannot run this model',
     },
+    section: {
+      conversation: 'Conversation', listening: 'Listening', speaking: 'Speaking', memory: 'Memory',
+      pictures: 'Camera and faces', other: 'Other',
+    },
+    use: {
+      chat: 'Conversation', tool: 'Tool calls', asr: 'Listening', tts: 'Speaking', embedding: 'Memory',
+      pictures: 'Pictures', drafter: 'Faster answers', camera: 'Camera', faces: 'Faces',
+    },
+    included: { pictures: 'Pictures included', drafter: 'Faster answers' },
+    helperAbout: {
+      pictures: 'Lets the conversation model read the pictures you send it.',
+      drafter: 'A small model that guesses ahead, so the conversation model answers faster.',
+      camera: "Spots people, animals and things in your cameras' pictures.",
+      faces: 'Recognises the faces of the people your household has named.',
+    },
   }, extensions: {
     noTools: 'Running, no assistant tools here',
     noToolsGeneric: 'This extension is running, but it gives the assistant nothing to use on this Pond.',
+    builtIn: 'Built in',
+    builtInOn: 'Web search is built in and already uses your Brave key.',
+    builtInNeedsKey: 'Web search is built in. Add your Brave key to it instead; no extension is needed.',
+    builtInKnowledgeOff: 'Web search is built in. Turn on Knowledge in Settings to use it; no extension is needed.',
+    turnOnWebSearch: 'Turn on web search',
+    hideWebSearch: 'Hide web search',
+    redundant: 'Not needed',
+    redundantReason: 'Web search is built in and already uses your Brave key, so this extension only adds tools to every prompt.',
+    remove: 'Remove',
+    removeNamed: 'Remove {{name}}',
+    removeConfirm: 'Remove {{name}}? It cannot be installed again while built-in web search is on.',
+    removeConfirmTitle: 'Remove extension',
+    removed: '{{name}} removed.',
+    removeFailed: 'Could not remove {{name}}: {{error}}',
   }, memory: {
     kept: 'Kept',
     segment: {
       identity: 'About you', preference: 'Preference', correction: 'Correction', relationship: 'People',
       project: 'Project', routine: 'Habit', knowledge: 'Knowledge', context: 'Right now',
     },
+  }, chat: {
+    steps: 'Steps',
   }, faces: {
     downloading: 'Face recognition is getting ready. The Pond is downloading its face models, which can take a while on a slow connection. It switches on by itself when they arrive; there is no need to restart anything.',
     downloadingProgress: '{{file}}: {{done}} of {{total}} MB',
@@ -75,6 +106,22 @@ void i18n.use(initReactI18next).init({
     onceAt: 'Runs once on {{date}} at {{time}}',
     oncePast: 'That date and time has already passed. Pick a moment in the future.',
     unchanged: 'Nothing changed, so the schedule was left as it was.',
+  }, notifications: {
+    title: 'Notifications',
+    unread_one: '{{count}} unread', unread_other: '{{count}} unread',
+    caughtUp: "You're all caught up",
+    markAllRead: 'Mark all read',
+    markReadFailed: 'Could not save that these were read. They may show as unread again after a reload.',
+    feedFailed: 'Notices from the Pond could not be loaded. Retrying.',
+    offline: 'Connect to Goose server to see schedule and routine history',
+    emptyTitle: 'Nothing here yet',
+    emptyBody: 'Notifications from Goose, your devices, and schedules will appear here.',
+    category: { alert: 'Alert', action_required: 'Action needed', info: 'Info' },
+    open: {
+      schedules: 'Open schedules', devices: 'Open devices', chat: 'Open chat',
+      models: 'Open models', extensions: 'Open extensions', pairing: 'Open remote access',
+      watches: 'Open the watch',
+    },
   }, pairing: {
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',
     fingerprint: 'Public-key fingerprint', address: 'HTTPS address',
@@ -84,6 +131,8 @@ void i18n.use(initReactI18next).init({
     boundTo: 'A device that pairs with this code becomes {{name}}\'s, and the Pond knows it is {{name}} speaking. A phone that is already paired is linked by pairing it again with this code.',
     boundToNobody: 'A device that pairs with this code belongs to nobody. The Pond cannot tell who is speaking on it, and once the household has more than one member it treats them as a guest: nothing is remembered for them and nothing addressed to a member reaches it.',
     membersFailed: 'The household members could not be read, so this code can only be bound as the Pond decides. Reload this page to try again.',
+  }, devices: {
+    open: 'Open', notOpen: 'Not open',
   } } } },
 });
 export default i18n;

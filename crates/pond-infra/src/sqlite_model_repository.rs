@@ -234,6 +234,56 @@ impl ModelRepository for SqliteModelRepository {
 
         Ok(())
     }
+
+    async fn note_working(&self, role: &str, model_id: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO model_role_history (role, last_working_model_id, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(role) DO UPDATE SET
+                last_working_model_id = excluded.last_working_model_id,
+                updated_at            = datetime('now')
+            "#,
+        )
+        .bind(role)
+        .bind(model_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn arm_rollback(&self, role: &str, new_model_id: &str) -> Result<()> {
+        // No row means nothing has answered yet, so there is nothing to go back to.
+        sqlx::query(
+            r#"
+            UPDATE model_role_history SET
+                rollback_model_id = CASE
+                    WHEN last_working_model_id IS NOT NULL AND last_working_model_id <> ?
+                    THEN last_working_model_id
+                    ELSE NULL
+                END,
+                updated_at = datetime('now')
+            WHERE role = ?
+            "#,
+        )
+        .bind(new_model_id)
+        .bind(role)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn rollback_target(&self, role: &str) -> Result<Option<String>> {
+        let target: Option<Option<String>> =
+            sqlx::query_scalar("SELECT rollback_model_id FROM model_role_history WHERE role = ?")
+                .bind(role)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(target.flatten())
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -413,6 +463,66 @@ mod tests {
         repo.clear_assignment("think").await.unwrap();
         let a = repo.get_assignment("think").await.unwrap();
         assert!(a.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_switch_can_be_rolled_back_to_the_model_that_last_answered() {
+        let (repo, _dir) = make_repo().await;
+        repo.note_working("chat", "gguf/llama-3b").await.unwrap();
+
+        repo.arm_rollback("chat", "gguf/gemma-2b").await.unwrap();
+
+        assert_eq!(
+            repo.rollback_target("chat").await.unwrap().as_deref(),
+            Some("gguf/llama-3b")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_way_back_survives_the_new_model_answering() {
+        let (repo, _dir) = make_repo().await;
+        repo.note_working("chat", "gguf/llama-3b").await.unwrap();
+        repo.arm_rollback("chat", "gguf/gemma-2b").await.unwrap();
+
+        // An answer, even a poor one, is not a reason to lose the way back.
+        repo.note_working("chat", "gguf/gemma-2b").await.unwrap();
+
+        assert_eq!(
+            repo.rollback_target("chat").await.unwrap().as_deref(),
+            Some("gguf/llama-3b")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_switch_before_any_answer_still_returns_to_the_last_working_one() {
+        let (repo, _dir) = make_repo().await;
+        repo.note_working("chat", "gguf/llama-3b").await.unwrap();
+        repo.arm_rollback("chat", "gguf/gemma-2b").await.unwrap();
+
+        repo.arm_rollback("chat", "gguf/qwen-4b").await.unwrap();
+
+        assert_eq!(
+            repo.rollback_target("chat").await.unwrap().as_deref(),
+            Some("gguf/llama-3b")
+        );
+    }
+
+    #[tokio::test]
+    async fn returning_to_the_last_working_model_leaves_nothing_to_roll_back() {
+        let (repo, _dir) = make_repo().await;
+        repo.note_working("chat", "gguf/llama-3b").await.unwrap();
+        repo.arm_rollback("chat", "gguf/gemma-2b").await.unwrap();
+
+        repo.arm_rollback("chat", "gguf/llama-3b").await.unwrap();
+
+        assert_eq!(repo.rollback_target("chat").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn nothing_to_roll_back_to_before_any_model_has_answered() {
+        let (repo, _dir) = make_repo().await;
+        repo.arm_rollback("chat", "gguf/gemma-2b").await.unwrap();
+        assert_eq!(repo.rollback_target("chat").await.unwrap(), None);
     }
 
     #[tokio::test]

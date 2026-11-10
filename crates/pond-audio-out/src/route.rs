@@ -12,8 +12,8 @@ static ROUTE: RwLock<Option<String>> = RwLock::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// The device playback last saw stop taking audio, for the device supervisor to collect.
 static STALLED: Mutex<Option<String>> = Mutex::new(None);
-/// Devices a [`crate::Speaker`] or [`crate::AudioKeeper`] holds open, so a probe can read one
-/// as working instead of opening it a second time (ALSA `hw` refuses that).
+/// Devices the audio bus holds open, so a probe can read one as working instead of opening it a
+/// second time (ALSA `hw` refuses that).
 static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The routed device, found once: on ALSA finding a named device opens every node to list them,
 /// which would otherwise happen each time the thinking tone or the wake ping starts.
@@ -78,9 +78,12 @@ impl Drop for Hold {
 }
 
 pub fn default_output_name() -> Option<String> {
-    rodio::cpal::default_host()
-        .default_output_device()
-        .and_then(|d| d.name().ok())
+    // ALSA reads the environment from C while it resolves the default; see process_env.
+    pond_core::shared::services::process_env::reading(|| {
+        rodio::cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.name().ok())
+    })
 }
 
 /// Find an output device by name. ALSA's `default` is not worth listing every node for.
@@ -90,15 +93,16 @@ pub fn find_output(name: &str) -> Option<rodio::cpal::Device> {
             return Some(device.clone());
         }
     }
-    let host = rodio::cpal::default_host();
-    let found = host
-        .default_output_device()
-        .filter(|d| d.name().ok().as_deref() == Some(name))
-        .or_else(|| {
-            host.output_devices()
-                .ok()?
-                .find(|d| d.name().ok().as_deref() == Some(name))
-        })?;
+    let found = pond_core::shared::services::process_env::reading(|| {
+        let host = rodio::cpal::default_host();
+        host.default_output_device()
+            .filter(|d| d.name().ok().as_deref() == Some(name))
+            .or_else(|| {
+                host.output_devices()
+                    .ok()?
+                    .find(|d| d.name().ok().as_deref() == Some(name))
+            })
+    })?;
     *RESOLVED.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), found.clone()));
     Some(found)
 }
@@ -114,7 +118,11 @@ pub fn open_output(
     device: Option<&str>,
 ) -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
     if let Some(want) = device {
-        match find_output(want).map(|d| rodio::OutputStream::try_from_device(&d)) {
+        match find_output(want).map(|d| {
+            pond_core::shared::services::process_env::reading(|| {
+                rodio::OutputStream::try_from_device(&d)
+            })
+        }) {
             Some(Ok((stream, handle))) => return Ok((stream, handle, want.to_string())),
             Some(Err(e)) => {
                 forget_devices();
@@ -123,13 +131,14 @@ pub fn open_output(
             None => tracing::warn!(device = %want, "speaker not found; using the default"),
         }
     }
-    let (stream, handle) = rodio::OutputStream::try_default()
-        .map_err(|e| anyhow!("audio output device unavailable: {e}"))?;
+    let (stream, handle) =
+        pond_core::shared::services::process_env::reading(rodio::OutputStream::try_default)
+            .map_err(|e| anyhow!("audio output device unavailable: {e}"))?;
     Ok((stream, handle, default_output_name().unwrap_or_default()))
 }
 
 /// [`open_output`] on the current route.
-pub fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
+pub(crate) fn open_routed() -> Result<(rodio::OutputStream, rodio::OutputStreamHandle, String)> {
     open_output(output_device().as_deref())
 }
 
@@ -235,36 +244,52 @@ pub fn chime_samples(rate: u32) -> Vec<f32> {
     final_out
 }
 
-/// Play [`chime_samples`] on `device`, and wait for it to finish.
-pub fn play_chime(device: Option<&str>) -> Result<()> {
+/// Play [`chime_samples`] on `device` while `floor` holds the bus, and wait for it to finish.
+pub fn play_chime(floor: &crate::Floor, device: Option<&str>) -> Result<()> {
     let rate = 44_100;
-    play_samples_exactly(device, chime_samples(rate), rate, 0.5)
+    play_samples_exactly(floor, device, chime_samples(rate), rate, 0.5)
 }
 
 /// Play mono `samples` on exactly `device` and wait for them to finish. Unlike [`open_output`]
 /// this never falls back to the default: a sound test of one speaker must not sound on another.
+/// It needs the bus held, like every sound, and plays on the bus's own stream when that is open on
+/// `device`, which ALSA `hw` would not open twice.
 pub fn play_samples_exactly(
+    floor: &crate::Floor,
     device: Option<&str>,
     samples: Vec<f32>,
     rate: u32,
     volume: f32,
 ) -> Result<()> {
+    if crate::bus().plays_on(device) {
+        return floor.play(samples, rate, volume);
+    }
     let (_stream, handle) = match device {
         Some(name) => {
             let found = find_output(name).ok_or_else(|| anyhow!("speaker '{name}' not found"))?;
-            rodio::OutputStream::try_from_device(&found).map_err(|e| {
+            pond_core::shared::services::process_env::reading(|| {
+                rodio::OutputStream::try_from_device(&found)
+            })
+            .map_err(|e| {
                 forget_devices();
                 anyhow!("speaker '{name}' failed to open: {e}")
             })?
         }
-        None => rodio::OutputStream::try_default()
+        None => pond_core::shared::services::process_env::reading(rodio::OutputStream::try_default)
             .map_err(|e| anyhow!("audio output device unavailable: {e}"))?,
     };
     let sink = rodio::Sink::try_new(&handle).map_err(|e| anyhow!("no sink: {e}"))?;
     use rodio::Source;
     let samples = rodio::buffer::SamplesBuffer::new(1, rate, samples).amplify(volume);
     sink.append(crate::tap::tapped(samples));
-    sink.sleep_until_end();
+    let mut stall = crate::bus::Stall::new(&sink);
+    while !sink.empty() {
+        if stall.stuck(&sink) {
+            sink.stop();
+            anyhow::bail!("the speaker took no audio");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     Ok(())
 }
 

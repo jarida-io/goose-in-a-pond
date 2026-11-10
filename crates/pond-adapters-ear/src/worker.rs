@@ -2,7 +2,7 @@
 //! so every rule about wakes, turns and interrupts is decided here, in sample order.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pond_audio::{MicHandle, MicReader, MicState};
@@ -56,6 +56,8 @@ pub(crate) struct Woke {
     pub pcm: Vec<f32>,
     pub speaker: Option<VoiceSpeaker>,
     pub transcript: Option<String>,
+    /// The segment cap ended the wake's segment with speech going on: the request runs past it.
+    pub cut: bool,
 }
 
 pub(crate) enum ListenFrom {
@@ -69,6 +71,7 @@ pub(crate) struct Segment {
     pub start: usize,
     pub end: usize,
     pub pcm: Vec<f32>,
+    pub cut: bool,
 }
 
 pub(crate) struct RefChunk {
@@ -93,6 +96,9 @@ pub(crate) enum Cmd {
     SegmentWake(Woke),
     /// The pond is about to say this.
     Spoken(String),
+    /// Hear no wake and start nothing until then; `None` ends a pause.
+    Pause(Option<Instant>),
+    Speaker(Box<pond_ear::ear::parts::SpeakerNet>),
     Household(Household),
     Shutdown,
 }
@@ -134,13 +140,15 @@ pub(crate) struct WorkerState {
     quiet_listening: bool,
     quiet_renewed: Instant,
     /// What the pond said lately, to tell its echo from a person.
-    spoken: Spoken,
+    spoken: Arc<Mutex<Spoken>>,
     /// When the turn under way began thinking; what it says is kept for the whole turn.
     turn_began: Option<Instant>,
+    /// Deaf to wakes and new requests until then, as while a member teaches it their voice.
+    paused_until: Option<Instant>,
 }
 
 impl WorkerState {
-    pub fn new() -> WorkerState {
+    pub fn new(spoken: Arc<Mutex<Spoken>>) -> WorkerState {
         let now = Instant::now();
         WorkerState {
             reference: Reference::new(),
@@ -160,8 +168,9 @@ impl WorkerState {
             dropped: 0,
             quiet_listening: false,
             quiet_renewed: now,
-            spoken: Spoken::default(),
+            spoken,
             turn_began: None,
+            paused_until: None,
         }
     }
 }
@@ -254,7 +263,25 @@ impl Worker {
         }
     }
 
+    fn paused(&self) -> bool {
+        self.state
+            .paused_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
     fn event(&mut self, event: Event) {
+        // A paused ear still cancels echo and keeps its clock; it only hears nothing new.
+        if self.paused()
+            && matches!(
+                event,
+                Event::Wake { .. }
+                    | Event::Segment { .. }
+                    | Event::Utterance { .. }
+                    | Event::BargeIn { .. }
+            )
+        {
+            return;
+        }
         match event {
             Event::Wake { start, who, .. } => {
                 let speaker = speaker_named(self.hearing.household(), who);
@@ -281,7 +308,9 @@ impl Worker {
                 });
             }
             Event::Silence { .. } => self.heard(Heard::Silence),
-            Event::Segment { start, end, .. } => {
+            Event::Segment {
+                start, end, cut, ..
+            } => {
                 let mut pcm = Vec::new();
                 self.hearing.audio(start, end, &mut pcm);
                 if let Some(segments) = &self.segments {
@@ -290,19 +319,22 @@ impl Worker {
                         start,
                         end,
                         pcm: pcm.clone(),
+                        cut,
                     });
                 }
-                let speaker = self.speaker_of(start, end);
-                self.state.stash = Some((
-                    start,
-                    Heard::Utterance {
+                if self.state.host != WorkflowState::Speak {
+                    let speaker = self.speaker_of(start, end);
+                    self.state.stash = Some((
                         start,
-                        end,
-                        pcm,
-                        transcript: None,
-                        speaker,
-                    },
-                ));
+                        Heard::Utterance {
+                            start,
+                            end,
+                            pcm,
+                            transcript: None,
+                            speaker,
+                        },
+                    ));
+                }
             }
             Event::BargeIn {
                 start,
@@ -391,6 +423,7 @@ impl Worker {
                     pcm,
                     speaker,
                     transcript: None,
+                    cut: false,
                 });
             }
             return;
@@ -417,14 +450,21 @@ impl Worker {
         match cmd {
             Cmd::Loop(state) => self.follow(state),
             Cmd::Listen { from, reply } => {
+                const REVERB_MARGIN_SAMPLES: usize = 3_200;
+                let tap_floor = self
+                    .state
+                    .reference
+                    .cursor()
+                    .map(|c| c + REVERB_MARGIN_SAMPLES)
+                    .unwrap_or(0);
                 let start = match from {
-                    ListenFrom::Now => self.hearing.samples(),
-                    ListenFrom::At(sample) => sample,
-                    ListenFrom::Since(instant) => self.sample_of(instant),
+                    ListenFrom::Now => self.hearing.samples().max(tap_floor),
+                    ListenFrom::At(sample) => sample.max(tap_floor),
+                    ListenFrom::Since(instant) => self.sample_of(instant).max(tap_floor),
                 };
                 self.state.interrupted = false;
                 if let Some((began, _)) = &self.state.stash {
-                    if began + STASH_TOLERANCE >= start {
+                    if *began >= tap_floor && began + STASH_TOLERANCE >= start {
                         if let Some((_, heard)) = self.state.stash.take() {
                             let _ = reply.send(heard);
                         }
@@ -466,13 +506,20 @@ impl Worker {
                     _ => self.state.interrupts.push(reply),
                 }
             }
+            Cmd::SegmentWake(_) if self.paused() => {
+                tracing::debug!("ear: a wake while paused ignored");
+            }
             Cmd::SegmentWake(woke) => {
                 let now = Instant::now();
-                self.state.spoken.forget_old(now, self.state.turn_began);
+                self.state
+                    .spoken
+                    .lock()
+                    .unwrap()
+                    .forget_old(now, self.state.turn_began);
                 let echo = woke
                     .transcript
                     .as_deref()
-                    .and_then(|heard| self.state.spoken.echo_of(heard));
+                    .and_then(|heard| self.state.spoken.lock().unwrap().echo_of(heard));
                 if let Some(share) = echo {
                     tracing::info!(
                         heard = woke.transcript.as_deref().unwrap_or_default(),
@@ -488,6 +535,19 @@ impl Worker {
                 self.cue();
                 linger(QUIET_UNTIL_THE_TURN);
                 self.state.quiet_listening = false;
+                if woke.cut {
+                    // The rest of the request is still being said: endpoint it whole from the wake.
+                    self.state.stash = None;
+                    self.hearing.listen(woke.start);
+                    self.state.turn_start = woke.start;
+                    match self.state.host {
+                        WorkflowState::Thinking | WorkflowState::Speak => {
+                            self.interrupt(woke.start, InterruptReason::WakeWord)
+                        }
+                        _ => self.woke(woke),
+                    }
+                    return true;
+                }
                 match self.state.host {
                     WorkflowState::Thinking | WorkflowState::Speak => {
                         let start = woke.start;
@@ -508,10 +568,23 @@ impl Worker {
             }
             Cmd::Spoken(text) => {
                 let now = Instant::now();
-                self.state.spoken.forget_old(now, self.state.turn_began);
-                self.state.spoken.say(&text, now);
+                let mut spoken = self.state.spoken.lock().unwrap();
+                spoken.forget_old(now, self.state.turn_began);
+                spoken.say(&text, now);
             }
             Cmd::Household(household) => self.hearing.set_household(household),
+            Cmd::Speaker(speaker) => self.hearing.set_speaker(*speaker),
+            Cmd::Pause(until) => {
+                self.state.paused_until = until;
+                if self.paused() {
+                    self.state.wake_turn = None;
+                    self.state.pending_woke = None;
+                    // A follow-up waiting now would take the next taught sentence for a request.
+                    if let Some(waiter) = self.state.listen.take() {
+                        let _ = waiter.send(Heard::Silence);
+                    }
+                }
+            }
             Cmd::Shutdown => return false,
         }
         true

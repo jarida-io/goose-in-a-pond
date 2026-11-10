@@ -10,6 +10,7 @@ import {
   type ChatEvent,
   type ChatStreamRequest,
   type ResearchAnswer,
+  type AudioAttachment,
   type CleanupResponse,
   type CompactionReport,
   type ContextIndexHealth,
@@ -49,6 +50,16 @@ import {
   type LongTaskExportFormat,
   type LongTaskReport,
   type LongTaskSource,
+  type NewSavedItem,
+  type ReportImage,
+  type ReportOption,
+  type SavedCollection,
+  type SavedItem,
+  type SavedItemEdit,
+  type SavedKind,
+  type WebWatch,
+  type WebWatchDetail,
+  type WebWatchEdit,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
@@ -63,6 +74,7 @@ import {
   type RetitleResult,
   type Schedule,
   type ScheduleRun,
+  type NotificationHistoryResponse,
   type SecretRequirement,
   type SessionMessage,
   type SessionMessageToolCall,
@@ -163,7 +175,62 @@ function readReport(answer: unknown, id: string): LongTaskReport | null {
     sections: typeof r.sections === "number" ? r.sections : 0,
     sources: Array.isArray(r.sources) ? r.sources.filter(isSource) : [],
     calendar_events: typeof r.calendar_events === "number" ? r.calendar_events : 0,
+    options: Array.isArray(r.options) ? r.options.flatMap(readOption) : [],
+    images: Array.isArray(r.images) ? r.images.flatMap(readImage) : [],
   };
+}
+
+const nonBlank = (v: unknown): string | undefined => (typeof v === "string" && v.trim() !== "" ? v : undefined);
+
+function readOption(value: unknown): ReportOption[] {
+  if (typeof value !== "object" || value === null) return [];
+  const o = value as Record<string, unknown>;
+  const title = nonBlank(o.title);
+  if (!title) return [];
+  const fields = Array.isArray(o.fields)
+    ? o.fields.filter((f): f is [string, string] => Array.isArray(f) && f.length === 2 && f.every((x) => typeof x === "string"))
+    : [];
+  return [{
+    title,
+    price: nonBlank(o.price),
+    link: nonBlank(o.link),
+    why: nonBlank(o.why),
+    fields,
+    sources: Array.isArray(o.sources) ? o.sources.filter(isSource) : [],
+  }];
+}
+
+/** The only pictures a report may draw are the pond's own copies. */
+const REPORT_IMAGE_PATH = /^\/api\/v1\/report-images\/[0-9a-fA-F]{16,64}$/;
+
+export function isReportImagePath(src: string): boolean {
+  return REPORT_IMAGE_PATH.test(src);
+}
+
+function readImage(value: unknown): ReportImage[] {
+  if (typeof value !== "object" || value === null) return [];
+  const i = value as Record<string, unknown>;
+  const src = nonBlank(i.src);
+  const credit = nonBlank(i.credit);
+  if (!src || !credit || !isReportImagePath(src)) return [];
+  return [{
+    src,
+    credit,
+    page: nonBlank(i.page) ?? "",
+    licence: nonBlank(i.licence),
+    caption: nonBlank(i.caption),
+    file_page: nonBlank(i.file_page),
+  }];
+}
+
+/** A refusal body's text and code: its sentence where it has one beside the code (the onboarding
+ *  guard's `{error: "onboarding_required", message}`), else its `error`. */
+function refusalOf(body: unknown, fallback: string): { msg: string; code?: string } {
+  const b = (body ?? {}) as { error?: unknown; message?: unknown; code?: unknown };
+  const error = typeof b.error === "string" ? b.error : undefined;
+  const message = typeof b.message === "string" ? b.message : undefined;
+  const code = typeof b.code === "string" ? b.code : undefined;
+  return { msg: message ?? error ?? fallback, code: code ?? (message !== undefined ? error : undefined) };
 }
 
 export class PondApiClient {
@@ -320,8 +387,10 @@ export class PondApiClient {
     }
   }
 
-  /** How this client introduces itself when it pairs, and so how the devices list names it. */
-  private deviceName = "Pond Desktop";
+  /** How this client introduces itself when it pairs, and so how the devices list names it.
+   *  The browser dashboard and the desktop app share `client_type: "desktop"`, so only the
+   *  name tells them apart. */
+  private deviceName = isDesktopShell() ? "Pond Desktop" : "Pond dashboard";
 
   setDeviceName(name: string): void {
     this.deviceName = name;
@@ -422,9 +491,7 @@ export class PondApiClient {
         let body: unknown;
         try {
           body = await res.json();
-          const b = body as { error?: string; code?: string };
-          msg = b.error ?? msg;
-          code = b.code;
+          ({ msg, code } = refusalOf(body, msg));
         } catch {
           /* ignore */
         }
@@ -580,7 +647,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -1451,6 +1518,8 @@ export class PondApiClient {
             recommended:
               (item.recommended as ModelEntry["recommended"] | null | undefined) ?? undefined,
             companions: (item.companions as ModelEntry["companions"] | undefined) ?? [],
+            roles: item.roles as ModelEntry["roles"],
+            section: item.section as ModelEntry["section"],
           });
         }
       }
@@ -1775,6 +1844,64 @@ export class PondApiClient {
     return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
   }
 
+  /** A report picture's bytes. Fetched here because the route needs the bearer token, which an `<img>` can't send. */
+  async getReportImage(src: string): Promise<Blob> {
+    if (!isReportImagePath(src)) throw new Error("Not a picture the pond keeps.");
+    const res = await this.send("GET", src);
+    return res.blob();
+  }
+
+  /** The caller's own watches; an empty list for a device that is not a household member's. */
+  listWebWatches(): Promise<WebWatch[]> {
+    return this.get("/api/v1/web-watches");
+  }
+
+  /** One watch with its items and its 50 newest changes. 404 for one that is not the caller's. */
+  getWebWatch(id: string): Promise<WebWatchDetail> {
+    return this.get(`/api/v1/web-watches/${encodeURIComponent(id)}`);
+  }
+
+  /** Answers the watch as it now is. */
+  editWebWatch(id: string, edit: WebWatchEdit): Promise<WebWatch> {
+    return this.patch(`/api/v1/web-watches/${encodeURIComponent(id)}`, edit);
+  }
+
+  async deleteWebWatch(id: string): Promise<void> {
+    await this.del(`/api/v1/web-watches/${encodeURIComponent(id)}`);
+  }
+
+  /** The caller's cards and the household's shared ones. */
+  listSavedItems(filter: { collection?: string; kind?: SavedKind } = {}): Promise<SavedItem[]> {
+    const query = new URLSearchParams();
+    if (filter.collection) query.set("collection", filter.collection);
+    if (filter.kind) query.set("kind", filter.kind);
+    const qs = query.toString();
+    return this.get(`/api/v1/saved-items${qs ? `?${qs}` : ""}`);
+  }
+
+  listSavedCollections(): Promise<SavedCollection[]> {
+    return this.get("/api/v1/saved-items/collections");
+  }
+
+  /** 409 once the member keeps the most cards they may. */
+  createSavedItem(card: NewSavedItem): Promise<SavedItem> {
+    return this.post("/api/v1/saved-items", card);
+  }
+
+  /** 404 for a card that is not the caller's: only its owner changes it. */
+  editSavedItem(id: string, edit: SavedItemEdit): Promise<SavedItem> {
+    return this.patch(`/api/v1/saved-items/${encodeURIComponent(id)}`, edit);
+  }
+
+  async deleteSavedItem(id: string): Promise<void> {
+    await this.del(`/api/v1/saved-items/${encodeURIComponent(id)}`);
+  }
+
+  /** "Watch price": a watch on a saved listing's or place's link, or the one already on it. */
+  watchSavedItem(id: string, body: { max_price?: number; every_hours?: number } = {}): Promise<WebWatch> {
+    return this.post(`/api/v1/saved-items/${encodeURIComponent(id)}/watch`, body);
+  }
+
   /** An artifact's whole body, for "Read the result". */
   getLongTaskArtifact(id: string, artifactId: string): Promise<LongTaskArtifactBody> {
     return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`);
@@ -1783,6 +1910,11 @@ export class PondApiClient {
   /** Stops a task; a step already under way finishes first. 409 if it has already ended. */
   async cancelLongTask(id: string): Promise<void> {
     await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
+  }
+
+  /** Gives a running task more time (15 minutes unless told). 409 if it has already ended. */
+  async extendLongTask(id: string, minutes?: number): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/extend`, minutes === undefined ? {} : { minutes });
   }
 
   /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */
@@ -1839,6 +1971,7 @@ export class PondApiClient {
     resumable?: boolean,
     deepResearch?: boolean,
     deepResearchAnswer?: ResearchAnswer,
+    audio?: AudioAttachment[],
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1846,6 +1979,7 @@ export class PondApiClient {
       canvas_mode: canvasMode ?? false,
       // Only when non-empty, so text-only bodies stay unchanged.
       ...(images && images.length > 0 ? { images } : {}),
+      ...(audio && audio.length > 0 ? { audio } : {}),
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
       ...(deepResearch ? { deep_research: true } : {}),
@@ -2005,9 +2139,7 @@ export class PondApiClient {
       let body: unknown;
       try {
         body = await res.json();
-        const b = body as { error?: string; code?: string };
-        msg = b.error ?? msg;
-        code = b.code;
+        ({ msg, code } = refusalOf(body, msg));
       } catch {
         /* ignore */
       }
@@ -2497,7 +2629,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -2527,7 +2659,7 @@ export class PondApiClient {
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        msg = (await res.json()).error ?? msg;
+        msg = refusalOf(await res.json(), msg).msg;
       } catch {
         /* ignore */
       }
@@ -2540,6 +2672,17 @@ export class PondApiClient {
   /** Clear all calibration data. Detector reverts to raw wake-word phrase. */
   async resetWakeWordCalibration(): Promise<void> {
     await this.del("/api/v1/voice/calibrate");
+  }
+
+  /**
+   * Forget one way of hearing the wake phrase, the one a take just added, and keep the rest.
+   * Resolves to the variants left.
+   */
+  async removeWakeWordVariant(variant: string): Promise<string[]> {
+    const res = await this.del<{ all_variants?: string[] }>(
+      `/api/v1/voice/calibrate?variant=${encodeURIComponent(variant)}`,
+    );
+    return res?.all_variants ?? [];
   }
 
   // ── OAuth PKCE ──────────────────────────────────────────────
@@ -2570,16 +2713,17 @@ export class PondApiClient {
   // ── Music player bridge ───────────────────────────────────
 
   /**
-   * The player page's command stream. Long-lived by design, so unlike `streamSse` it has no
-   * timeout: it ends when the server closes it or `signal` aborts. `EventSource` cannot carry the
-   * Authorization header the server requires, hence fetch.
+   * A long-lived server-sent event stream on `path`. No timeout: it ends when the server closes
+   * it or `signal` aborts. `EventSource` cannot carry the Authorization header the server
+   * requires, hence fetch; a refused token re-pairs once, as every other request does.
    */
-  async *streamPlayerEvents(
-    service: string,
+  private async *streamEvents(
+    path: string,
     signal: AbortSignal,
+    what: string,
   ): AsyncGenerator<SseFrame> {
     await this.ensureTokenFresh();
-    const url = `${this.base}/api/v1/player/events?service=${encodeURIComponent(service)}`;
+    const url = `${this.base}${path}`;
     const open = (token: string | null) =>
       fetch(url, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -2593,12 +2737,45 @@ export class PondApiClient {
       if (fresh) res = await open(fresh);
     }
     if (!res.ok || !res.body) {
-      throw new ApiError(
-        res.status,
-        res.statusText || "The player stream did not open",
-      );
+      throw new ApiError(res.status, res.statusText || `The ${what} did not open`);
     }
     yield* parseSse(res.body, signal);
+  }
+
+  /** The player page's command stream. */
+  streamPlayerEvents(service: string, signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents(
+      `/api/v1/player/events?service=${encodeURIComponent(service)}`,
+      signal,
+      "player stream",
+    );
+  }
+
+  /** Schedule and rule runs as they start and finish (`ScheduleResultEvent` JSON per frame). */
+  streamScheduleEvents(signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents("/api/v1/schedules/events", signal, "schedule stream");
+  }
+
+  /**
+   * This device's notices as the Pond raises them (`Notification` JSON per frame). `deviceId`
+   * must be this client's own device, as `notificationHistory` names it.
+   */
+  streamNotifications(deviceId: string, signal: AbortSignal): AsyncGenerator<SseFrame> {
+    return this.streamEvents(
+      `/api/v1/notifications/stream?device_id=${encodeURIComponent(deviceId)}`,
+      signal,
+      "notification stream",
+    );
+  }
+
+  /** The household's notices this device may read, newest first, with its own read state. */
+  notificationHistory(limit = 100): Promise<NotificationHistoryResponse> {
+    return this.get(`/api/v1/notifications/history?limit=${limit}`);
+  }
+
+  /** Mark these history notices read for this device only. */
+  markNotificationsRead(ids: string[]): Promise<{ marked: number }> {
+    return this.post("/api/v1/notifications/history/read", { ids });
   }
 
   playerReply(reply: PlayerReply): Promise<unknown> {

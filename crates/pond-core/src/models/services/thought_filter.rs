@@ -4,11 +4,17 @@
 /// Paired tags dropped with their contents; shared with `pond_api::thought_filter`'s SSE filter.
 pub const PAIRED_TAGS: &[(&str, &str)] = &[
     ("<|channel>thought", "<channel|>"),
+    ("<|channel>thought", "<|channel|>"),
+    ("<|channel|>thought", "<|channel|>"),
+    ("<|channel|>thought", "<channel|>"),
     ("<|tool_call>", "<tool_call|>"),
+    ("<tool_call>", "</tool_call>"),
     ("<think>", "</think>"),
-    // Disjoint from `<think>` (the `>`), so order is free; without it voice speaks the reasoning.
     ("<thinking>", "</thinking>"),
     ("<thought>", "</thought>"),
+    ("<|thought>", "</thought>"),
+    ("<|thought>", "<|thought|>"),
+    ("<reasoning>", "</reasoning>"),
 ];
 
 /// The tags some models wrap a whole reply in; not markup anyone should hear or read.
@@ -23,6 +29,11 @@ pub const STANDALONE_SENTINELS: &[&str] = &[
     "</think>",
     "</thinking>",
     "</thought>",
+    "</reasoning>",
+    "<channel|>",
+    "<|channel|>",
+    "<tool_call|>",
+    "</tool_call>",
     ANSWER_OPEN,
     ANSWER_CLOSE,
 ];
@@ -32,13 +43,44 @@ pub fn has_answer_tag(s: &str) -> bool {
     s.contains(ANSWER_OPEN) || s.contains(ANSWER_CLOSE)
 }
 
-/// The reply inside an `<answer>` wrapper, for text that is not streamed; `None` when unwrapped.
-pub fn unwrap_answer(text: &str) -> Option<&str> {
-    let inner = text
-        .trim()
-        .strip_prefix(ANSWER_OPEN)?
-        .strip_suffix(ANSWER_CLOSE)?;
-    (!inner.contains(ANSWER_OPEN) && !inner.contains(ANSWER_CLOSE)).then(|| inner.trim())
+/// Strip reasoning blocks, orphaned preambles, and standalone sentinels from non-streaming text.
+pub fn strip_reasoning(text: &str) -> String {
+    let mut s = text.to_string();
+
+    for &(open, close) in PAIRED_TAGS {
+        s = strip_block(&s, open, close);
+    }
+
+    for sentinel in STANDALONE_SENTINELS {
+        if s.contains(sentinel) {
+            s = s.replace(sentinel, "");
+        }
+    }
+
+    s.trim().to_string()
+}
+
+fn strip_block(text: &str, open: &str, close: &str) -> String {
+    let mut s = text.to_string();
+
+    while let Some(c) = s.find(close) {
+        if s.find(open).is_some_and(|o| o < c) {
+            break;
+        }
+        s.replace_range(..c + close.len(), "");
+    }
+
+    while let Some(start) = s.find(open) {
+        let body = start + open.len();
+        match s[body..].find(close) {
+            Some(rel) => s.replace_range(start..body + rel + close.len(), ""),
+            None => {
+                s.truncate(start);
+                break;
+            }
+        }
+    }
+    s
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +299,10 @@ mod tests {
             ("<think>", "</think>"),
             ("<thinking>", "</thinking>"),
             ("<thought>", "</thought>"),
+            ("<|thought>", "</thought>"),
+            ("<|channel|>thought", "<|channel|>"),
+            ("<|channel>thought", "<channel|>"),
+            ("<reasoning>", "</reasoning>"),
         ] {
             let raw = format!("{open}step by step{close}The answer is 7.");
             assert_eq!(
@@ -287,12 +333,6 @@ mod tests {
             "It is 21 degrees."
         );
         assert_eq!(run(&["<ans", "wer>Hi.</an", "swer>"]), "Hi.");
-        assert_eq!(unwrap_answer(" <answer> Hi. </answer>\n"), Some("Hi."));
-        assert_eq!(unwrap_answer("Hi."), None);
-        assert_eq!(
-            unwrap_answer("<answer>a</answer> and <answer>b</answer>"),
-            None
-        );
     }
     // ── Holdback behaviour ─────────────────────────────────────────────────
     // A fixed-size holdback would make text trail generation and freeze mid-word on slowdowns.
@@ -358,5 +398,37 @@ mod tests {
         for sentinel in STANDALONE_SENTINELS {
             assert!(sentinel.is_ascii(), "non-ASCII sentinel: {sentinel}");
         }
+    }
+
+    #[test]
+    fn strip_reasoning_removes_paired_and_orphaned_blocks() {
+        assert_eq!(
+            strip_reasoning(r#"r1</think><think>r2</think>{"memories":[]}"#),
+            r#"{"memories":[]}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"a<channel|><|channel>thought b<channel|>{"x":1}"#),
+            r#"{"x":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"let me think</think>{"a":1}"#),
+            r#"{"a":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"<|channel|>thought reasoning<|channel|>Hello!"#),
+            "Hello!"
+        );
+        assert_eq!(
+            strip_reasoning(r#"reasoning preamble<|channel|>{"a":1}"#),
+            r#"{"a":1}"#
+        );
+        assert_eq!(
+            strip_reasoning(r#"<|tool_call>call:x{}<tool_call|>Done"#),
+            "Done"
+        );
+        assert_eq!(
+            strip_reasoning(r#"{"a":1}<think>cut off mid-"#),
+            r#"{"a":1}"#
+        );
     }
 }

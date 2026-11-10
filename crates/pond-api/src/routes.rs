@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use pond_core::mcp::domain::marketplace::BuiltInCapability;
 use pond_core::mcp::ports::extension_manager::ExtensionInfo;
 use pond_core::mesh::domain::millisats::Millisats;
 use pond_core::mesh::domain::peer_id::PeerId as MeshPeerId;
@@ -198,6 +199,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        // The household's notice history, scoped to the caller's device and with its read state.
+        .route("/notifications/history", get(notifications_history))
+        .route(
+            "/notifications/history/read",
+            post(mark_notification_history_read),
+        )
         .route("/models/download/control", post(download_control))
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
@@ -212,6 +219,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/voice/room/events", get(crate::room_voice::events))
         .route("/voice/room/interrupt", post(crate::room_voice::interrupt))
+        .route("/voice/room/pause", post(crate::room_voice::pause))
+        .route("/voice/room/resume", post(crate::room_voice::resume))
         // Which microphone and speaker are in use and why; a test opens real devices.
         .route("/audio/devices", get(crate::audio_devices::status))
         .route("/audio/devices/test", post(crate::audio_devices::test))
@@ -257,6 +266,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/usage/summary", get(usage_summary))
         .route("/devices", get(list_devices).post(register_device))
+        .route("/devices/events", get(device_events_stream))
         .route("/devices/commission", post(commission_device))
         .route("/devices/discovered", get(discover_devices))
         .route("/matter/status", get(matter_status))
@@ -291,6 +301,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/models/vision-status", get(get_vision_status))
         .route("/models/memory-status", get(get_memory_status))
         .route("/models/active-roles", get(get_active_roles))
+        .route("/models/rollback", post(rollback_model))
         .route("/models/registry/refresh", post(refresh_model_registry))
         .route("/models/ollama", get(list_ollama_models))
         .route("/models/ollama/pull", post(pull_ollama_model))
@@ -442,6 +453,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rides/{id}/confirm", post(crate::rides::confirm))
         .route("/rides/{id}/decline", post(crate::rides::decline))
         .route("/rides/{id}/cancel", post(crate::rides::cancel))
+        .route("/web-forms/{id}", get(crate::web_forms::get))
+        .route("/web-forms/{id}/confirm", post(crate::web_forms::confirm))
+        .route("/web-forms/{id}/decline", post(crate::web_forms::decline))
         .route("/uber/accounts", get(crate::uber_accounts::list))
         .route(
             "/uber/accounts/connect",
@@ -504,7 +518,12 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── MCP App Resources ────────────────────────────────────────────────
         .route("/mcp/resources", get(mcp_read_resource))
         .route("/mcp/tools/call", post(mcp_call_tool))
-        .route("/tools/invoke", post(invoke_tool))
+        .route(
+            "/tools/invoke",
+            post(invoke_tool).layer(axum::Extension(Arc::new(
+                crate::idempotency::IdempotentReplies::default(),
+            ))),
+        )
         // ── System Prompt Extras ───────────────────────────────────────────────
         .route(
             "/agent/extras",
@@ -530,7 +549,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/telemetry/summary", get(get_telemetry_summary))
         // ── Event log / telemetry ─────────────────────────────────────────────
         .route("/logs", get(list_logs))
+        .route("/logs/stream", get(stream_logs))
         .route("/logs/export", get(export_logs_csv))
+        // A test Pond's debug switch, which decides what the logs above may show.
+        .route(
+            "/developer/debug",
+            get(crate::developer::status).put(crate::developer::set_debug),
+        )
         // ── Memories ──────────────────────────────────────────────────────────
         .route("/memories", get(list_memories).post(save_memory))
         // Before the `{id}` route, or axum matches "extraction-status" as an id.
@@ -565,11 +590,40 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route(
+            "/saved-items",
+            get(crate::saved_items::list).post(crate::saved_items::create),
+        )
+        .route(
+            "/saved-items/collections",
+            get(crate::saved_items::collections),
+        )
+        .route(
+            "/saved-items/{id}",
+            get(crate::saved_items::get)
+                .patch(crate::saved_items::edit)
+                .delete(crate::saved_items::delete),
+        )
+        .route("/saved-items/{id}/watch", post(crate::saved_items::watch))
+        .route("/report-images/{key}", get(report_image))
+        .route("/report-images/for-pages", post(pictures_for_pages))
+        .route("/web-watches", get(crate::web_watches::list))
+        .route(
+            "/web-watches/spoken-alerts",
+            get(crate::web_watches::spoken_alerts).put(crate::web_watches::set_spoken_alerts),
+        )
+        .route(
+            "/web-watches/{id}",
+            get(crate::web_watches::get)
+                .patch(crate::web_watches::edit)
+                .delete(crate::web_watches::delete),
+        )
         .route("/long-tasks", get(list_long_tasks))
         .route("/long-tasks/deep-research", get(deep_research_availability))
         .route("/long-tasks/queue", get(long_task_queue))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route("/long-tasks/{id}/extend", post(extend_long_task))
         .route(
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
@@ -580,6 +634,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/status", get(crate::pond_admin::status))
         .route("/admin/unlock", post(crate::pond_admin::unlock))
         .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/enroll", post(crate::pond_admin::enroll))
+        .route("/admin/key", delete(crate::pond_admin::forget_key))
         .route("/admin/overview", get(crate::pond_admin::overview))
         .route(
             "/admin/files",
@@ -631,6 +687,18 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         // ── Voice Match: one enrolment flow teaches the wake word and the voice ──
         .route("/voice/takes", post(crate::voice_match::post_take))
+        // A household phone's fix, from the home network only (see home_location.rs).
+        .route(
+            "/location/device",
+            put(crate::home_location::set_from_device),
+        )
+        // A phone listening for a phrase other than "hey goose" asks whether a segment held it.
+        .route(
+            "/voice/wake/check",
+            post(crate::wake_check::check_wake).layer(axum::extract::DefaultBodyLimit::max(
+                crate::wake_check::WAKE_CHECK_BODY_LIMIT,
+            )),
+        )
         .route("/voice/prints", get(crate::voice_match::get_prints))
         .route("/voice/prints/model", post(crate::voice_match::fetch_model))
         .route(
@@ -1534,6 +1602,7 @@ async fn start_onboarding(
 /// Marks onboarding complete (public), lifting the onboarding guard on protected routes.
 async fn complete_onboarding(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // A half-set-up assistant must not lift the guard: it would land in a broken dashboard.
     let settings = state.settings_repo.get().await.map_err(|e| {
@@ -1566,6 +1635,8 @@ async fn complete_onboarding(
         ));
     }
 
+    // Only the call that completes setup may hand out the first key; an unreadable state is "done".
+    let completing = !state.onboarding_repo.is_complete().await.unwrap_or(true);
     state
         .onboarding_repo
         .save_step(OnboardingStep::Completed)
@@ -1577,10 +1648,17 @@ async fn complete_onboarding(
             )
         })?;
     attribute_claimant_to_owner(&state, settings.primary_profile_id.as_deref()).await;
-    Ok(Json(json!({
+    let mut body = json!({
         "status": "completed",
         "interview": owner_interview_offer(&state, settings.primary_profile_id.as_deref()).await,
-    })))
+    });
+    if completing {
+        if let Some(key) = crate::pond_admin::first_activation_key(&state, principal.as_ref()).await
+        {
+            body["admin_key"] = json!(key);
+        }
+    }
+    Ok(Json(body))
 }
 
 /// The owner's setup interview, offered once setup completes: where it stands and how to start it.
@@ -1898,10 +1976,21 @@ async fn factory_reset(
 #[derive(Deserialize)]
 struct ChatRequest {
     session_id: Option<String>,
+    /// Required, and may be empty when the turn carries a voice note.
     message: String,
     /// Optional image attachments for multimodal models (base64-encoded).
     #[serde(default)]
     images: Vec<pond_core::models::domain::message::ImageAttachment>,
+    /// One recording the model hears as sound (WAV, M4A/AAC, MP3, FLAC or Ogg Vorbis), refused
+    /// with 409 unless `GET /models/capabilities` reports `voice_notes: "ready"`.
+    #[serde(default)]
+    audio: Vec<pond_core::models::domain::message::AudioAttachment>,
+    /// PDFs whose text the model reads after the typed message.
+    #[serde(default)]
+    documents: Vec<pond_core::models::domain::message::DocumentAttachment>,
+    /// `documents`' text, read by `prepare_turn_documents` before anything is saved.
+    #[serde(skip)]
+    document_texts: Vec<pond_core::models::domain::document_input::DocumentText>,
     /// When true, disable thinking and use voice-friendly responses.
     #[serde(default)]
     voice_mode: bool,
@@ -1928,6 +2017,10 @@ struct ChatRequest {
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
+    /// Where the asking phone is now, as its app named it, only while the person has turned on
+    /// telling Goose where the phone is. A place name, never coordinates; rides this turn only.
+    #[serde(default)]
+    device_place: Option<String>,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -1950,9 +2043,27 @@ async fn chat(
             Json(json!({"error": format!("Invalid request: {}", e)})),
         )
     })?;
-    refuse_without_a_model(&state).await?;
-
+    if !req.audio.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Voice notes are sent through /api/v1/chat/stream",
+                "code": "audio_wrong_route",
+            })),
+        ));
+    }
+    if !req.documents.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Documents are sent through /api/v1/chat/stream",
+                "code": "document_wrong_route",
+            })),
+        ));
+    }
     let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    refuse_without_a_model(&state).await?;
     let storage = &state.session_storage;
 
     if storage.get_session(&session_id).await.is_err() {
@@ -2147,7 +2258,7 @@ struct TtsRequest {
 /// A browser plays what `/tts` returns as soon as it has it, so other audio is paused before it goes
 /// out and stays paused for as long as it plays (Spotify's Developer Policy III.7).
 async fn quiet_while_a_browser_plays(wav: &[u8]) {
-    use pond_core::models::services::voice::{quiet, quiet_voice_output::WAIT_FOR_QUIET};
+    use pond_core::models::services::voice::quiet::{self, WAIT_FOR_QUIET};
     /// From the reply leaving here to the browser playing it, plus the pond's usual grace.
     const SLACK: std::time::Duration = std::time::Duration::from_secs(3);
     /// For audio whose length this cannot read: longer than any one sentence.
@@ -2352,10 +2463,25 @@ async fn chat_stream(
         )
     })?;
 
+    if let Some(session_id) = req.session_id.as_deref() {
+        refuse_another_members_session(&state, principal.as_ref(), session_id).await?;
+    }
+
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
     refuse_without_a_model(&state).await?;
     image_limit_response(&req.images)?;
+    audio_limit_response(&req.audio)?;
+    document_limit_response(&req.documents)?;
     req.deep_research_for = None;
+    if req.deep_research && !req.audio.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Deep research needs the question as text, not a voice note",
+                "code": "audio_deep_research",
+            })),
+        ));
+    }
     if req.deep_research {
         let member = long_task_caller(
             &state,
@@ -2373,6 +2499,9 @@ async fn chat_stream(
 
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
+    req.audio =
+        prepare_turn_audio(&state, std::mem::take(&mut req.audio), &mut req.message).await?;
+    req.document_texts = prepare_turn_documents(&req.documents).await?;
 
     if !req.resumable {
         // Ends with its last reader. Unregistered: it must not consume the detached-run cap.
@@ -2449,6 +2578,303 @@ fn image_limit_response(
             Err((status, Json(json!({"error": e.to_string()}))))
         }
     }
+}
+
+/// Maps a voice-note limit violation onto 413, 415 or 400.
+fn audio_limit_response(
+    audio: &[pond_core::models::domain::message::AudioAttachment],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    pond_core::models::domain::audio_input::validate_turn_audio(audio).map_err(audio_limit_status)
+}
+
+fn audio_limit_status(
+    e: pond_core::models::domain::audio_input::AudioLimitError,
+) -> (StatusCode, Json<Value>) {
+    let status = if e.is_too_large() {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else if e.is_unsupported_media() {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (
+        status,
+        Json(json!({"error": e.to_string(), "code": e.code()})),
+    )
+}
+
+/// Pre-stream recording checks for both chat handlers, before anything is saved: it must decode,
+/// within the time limit, to the engine's WAV (400, 413, 415). A recording the model cannot hear,
+/// or has no memory to hear this turn, goes as words instead: the client's own transcript
+/// (`heard_as`), else Whisper's, added to `message`. With no Whisper either, it is refused (409).
+async fn prepare_turn_audio(
+    state: &Arc<AppState>,
+    audio: Vec<pond_core::models::domain::message::AudioAttachment>,
+    message: &mut String,
+) -> Result<Vec<pond_core::models::domain::message::AudioAttachment>, (StatusCode, Json<Value>)> {
+    use base64::Engine as _;
+    use pond_core::models::domain::audio_input::{
+        audio_refusal_for, AudioLimitError, MAX_AUDIO_MS,
+    };
+
+    if audio.is_empty() {
+        return Ok(audio);
+    }
+    audio_limit_response(&audio)?;
+    // Unreadable settings name no model, which reads as one that cannot hear.
+    let (provider, model) = match state.settings_repo.get().await {
+        Ok(s) => (s.chat_provider, s.chat_model),
+        Err(_) => (String::new(), String::new()),
+    };
+    let reported = read_audio_state(state, &provider, &model).await;
+    let as_words = match audio_refusal_for(reported.as_ref()) {
+        None => words_instead_of_hearing(state, &provider, &model).await,
+        Some(refusal) => match state.transcribe_audio.clone() {
+            Some(transcribe) => {
+                tracing::info!(
+                    target: "giap::audio",
+                    kind = "voice_note_as_words",
+                    model = %model,
+                    code = refusal.code.as_str(),
+                    "the model cannot hear this recording; it goes as words"
+                );
+                Some(transcribe)
+            }
+            None => {
+                audio_refusal_response(reported.as_ref(), &provider, &model)?;
+                None
+            }
+        },
+    };
+
+    let mut checked = Vec::with_capacity(audio.len());
+    let mut words = Vec::new();
+    for clip in audio {
+        let data: String = clip
+            .data
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .map_err(|_| audio_limit_status(AudioLimitError::NotBase64))?;
+        let mime = clip.mime_type.clone();
+        let normalized = tokio::task::spawn_blocking(move || {
+            crate::audio_normalize::normalize(&bytes, &mime, MAX_AUDIO_MS)
+        })
+        .await
+        .map_err(|_| {
+            audio_limit_status(AudioLimitError::Undecodable {
+                message: pond_core::models::domain::audio_input::AUDIO_UNREADABLE_MESSAGE,
+            })
+        })?
+        .map_err(audio_limit_status)?;
+        let heard_as = clip
+            .heard_as
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string);
+        if let Some(transcribe) = as_words.clone() {
+            words.push(match heard_as {
+                Some(heard) => heard,
+                None => transcribe_voice_note(transcribe, normalized.wav).await?,
+            });
+            continue;
+        }
+        tracing::info!(
+            target: "giap::audio",
+            model = %model,
+            duration_ms = normalized.duration_ms,
+            source = %normalized.source,
+            "accepted a recording for the model to hear"
+        );
+        checked.push(pond_core::models::domain::message::AudioAttachment {
+            data: base64::engine::general_purpose::STANDARD.encode(&normalized.wav),
+            mime_type: "audio/wav".to_string(),
+            name: clip.name,
+            heard_as,
+        });
+    }
+    if as_words.is_some() {
+        let words = words.join(" ");
+        if words.trim().is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "The pond could not make out any words in this voice note. Try \
+                              again in a moment.",
+                    "code": "voice_note_no_words",
+                })),
+            ));
+        }
+        *message = if message.trim().is_empty() {
+            words
+        } else {
+            format!("{message}\n\n{words}")
+        };
+    }
+    Ok(checked)
+}
+
+type Transcriber = Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>;
+
+/// Whisper, when memory is too short to load the encoder that would hear a voice note.
+async fn words_instead_of_hearing(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+) -> Option<Transcriber> {
+    use pond_core::models::domain::audio_input::HearingRoom;
+    let transcribe = state.transcribe_audio.clone()?;
+    let agent = state.agent.clone();
+    let (provider, model) = (provider.to_string(), model.to_string());
+    let room = tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
+        .await
+        .unwrap_or(HearingRoom::Unknown);
+    let HearingRoom::Short {
+        available_mb,
+        needed_mb,
+    } = room
+    else {
+        return None;
+    };
+    tracing::info!(
+        target: "giap::audio",
+        kind = "voice_note_as_words",
+        available_mb,
+        needed_mb,
+        "too little memory to load the encoder; the voice note goes as words"
+    );
+    Some(transcribe)
+}
+
+async fn transcribe_voice_note(
+    transcribe: Transcriber,
+    wav: Vec<u8>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let refused = |detail: String| {
+        tracing::warn!(target: "giap::audio", error = %detail, "a voice note could not be transcribed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "The pond could not listen to this voice note or transcribe it. Try \
+                          again in a moment.",
+                "code": "voice_note_untranscribed",
+            })),
+        )
+    };
+    tokio::task::spawn_blocking(move || transcribe(wav))
+        .await
+        .map_err(|e| refused(e.to_string()))?
+        .map_err(|e| refused(format!("{e:#}")))
+}
+
+/// Maps a document refusal onto 413, 422 or 400, with the household sentence and the code.
+fn document_error_status(
+    e: pond_core::models::domain::document_input::DocumentError,
+) -> (StatusCode, Json<Value>) {
+    let status = match e.code() {
+        "document_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        "document_no_text" => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (
+        status,
+        Json(json!({"error": e.to_string(), "code": e.code()})),
+    )
+}
+
+fn document_limit_response(
+    documents: &[pond_core::models::domain::message::DocumentAttachment],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    pond_core::models::domain::document_input::validate_turn_documents(documents)
+        .map_err(document_error_status)
+}
+
+/// Reads every PDF's text before anything is saved, then fits it to the per-turn text budget.
+async fn prepare_turn_documents(
+    documents: &[pond_core::models::domain::message::DocumentAttachment],
+) -> Result<Vec<pond_core::models::domain::document_input::DocumentText>, (StatusCode, Json<Value>)>
+{
+    use base64::Engine as _;
+    use pond_core::models::domain::document_input::{display_name, fit_to_budget, DocumentError};
+
+    if documents.is_empty() {
+        return Ok(Vec::new());
+    }
+    document_limit_response(documents)?;
+    let mut extracted = Vec::with_capacity(documents.len());
+    for doc in documents {
+        let name = display_name(&doc.name);
+        let data: String = doc
+            .data
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&data)
+            .map_err(|_| document_error_status(DocumentError::Unreadable { name: name.clone() }))?;
+        let for_extract = name.clone();
+        let text = tokio::task::spawn_blocking(move || {
+            crate::document_extract::extract_text(&bytes, &for_extract)
+        })
+        .await
+        .map_err(|_| document_error_status(DocumentError::Unreadable { name: name.clone() }))?
+        .map_err(document_error_status)?;
+        tracing::info!(
+            target: "giap::documents",
+            name = %name,
+            text_bytes = text.len(),
+            "read a document's text for the model"
+        );
+        extracted.push((name, text));
+    }
+    Ok(fit_to_budget(extracted))
+}
+
+/// The agent's voice-note state for `model`; a join failure reads as unknown, which refuses.
+/// Runs on the blocking pool, since the first read of an encoder opens its header.
+async fn read_audio_state(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+) -> Option<pond_core::models::domain::vision_encoder::EncoderState> {
+    let agent = state.agent.clone();
+    let (provider, model) = (provider.to_string(), model.to_string());
+    tokio::task::spawn_blocking(move || agent.audio_input_state(&provider, &model))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Ready passes; anything else is a 409 with the household copy, the code and the state.
+fn audio_refusal_response(
+    reported: Option<&pond_core::models::domain::vision_encoder::EncoderState>,
+    provider: &str,
+    model: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::models::domain::audio_input::audio_refusal_for;
+
+    let Some(refusal) = audio_refusal_for(reported) else {
+        return Ok(());
+    };
+    tracing::info!(
+        target: "giap::audio",
+        provider,
+        model,
+        code = refusal.code.as_str(),
+        state = reported.map(|s| s.kind()).unwrap_or("unknown"),
+        "refused a voice-note turn before anything was saved"
+    );
+    Err((
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": refusal.message,
+            "code": refusal.code.as_str(),
+            "state": reported,
+        })),
+    ))
 }
 
 /// A turn with no conversation model chosen is refused before anything is saved; nothing is
@@ -2758,7 +3184,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
 struct TurnAccumulator {
     /// Strips (and captures) Harmony thought channels and `<think>` blocks from visible text.
     thought: crate::thought_filter::ThoughtFilter,
-    /// The assistant's visible answer, as persisted.
+    /// The assistant's visible answer, as persisted: the text written after the turn's last tool
+    /// call. Text before a tool call is working notes and leaves it (see `absorb`).
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
@@ -2816,10 +3243,25 @@ impl TurnAccumulator {
                         .map(|v| v.to_string())
                         .unwrap_or_else(|| "{}".to_string()),
                 );
-                StreamStep::Frame(
-                    json!({"type": "tool_call", "tool": tool, "id": id, "input": input})
-                        .to_string(),
-                )
+                let mut frame = json!({"type": "tool_call", "tool": tool, "id": id, "input": input});
+                // Text written before a tool call is the model at work ("let me check the
+                // weather"), not the answer: it leaves `full_text`, and the frame tells the client
+                // to move that trailing text out of the answer into the turn's steps. What the
+                // filter still holds back was never shown and belongs to the notes too: it must
+                // not surface at the head of the answer when the turn ends.
+                let notes = std::mem::take(&mut self.full_text);
+                let _unshown = self.thought.flush();
+                if !notes.trim().is_empty() {
+                    tracing::debug!(
+                        target: "giap::trace",
+                        kind = "working_notes",
+                        tool = %tool,
+                        chars = notes.len(),
+                        "text before a tool call moved out of the answer",
+                    );
+                    frame["working_notes"] = json!(notes);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::ToolResult {
                 tool,
@@ -3038,7 +3480,14 @@ async fn drive_turn(
     // Images persist with the message so later turns still see them after a trim or restart.
     // The id is kept for the repair below: this row lands before inference starts.
     let user_message_id = match chat_service
-        .persist_user_message_with_images(&req.message, req.images.clone())
+        .persist_user_message_with_images(
+            &pond_core::models::domain::document_input::persisted_text(
+                &req.message,
+                &req.audio,
+                &req.documents,
+            ),
+            req.images.clone(),
+        )
         .await
     {
         Ok(id) => id,
@@ -3158,10 +3607,14 @@ async fn drive_turn(
     };
 
     let agent_req = AgentRequest {
-        message: req.message.clone(),
+        message: pond_core::models::domain::document_input::compose_for_model(
+            &req.message,
+            &req.document_texts,
+        ),
         session_id: session_id.clone(),
         model_role: model_role.to_string(),
         images: req.images.clone(),
+        audio: req.audio.clone(),
         voice_mode: req.voice_mode,
         canvas_mode: req.canvas_mode,
         profile_scope: turn_scope.clone(),
@@ -3171,6 +3624,7 @@ async fn drive_turn(
         suggestion_context: req.suggestion_context.clone(),
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
+        device_place: req.device_place.clone(),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -3448,6 +3902,18 @@ async fn drive_turn(
         }
         None => None,
     };
+
+    // A real answer makes this the model a rollback returns to after the next switch.
+    let answered = usage_completion_tokens > 0 || !turn.full_text.trim().is_empty();
+    if let (true, Some(repo)) = (answered, &state.model_repo) {
+        let id = ModelRecord::id_for(
+            &ModelCategory::for_chat_model(&settings.chat_provider, &settings.chat_model),
+            &settings.chat_model,
+        );
+        if let Err(e) = repo.note_working("chat", &id).await {
+            tracing::warn!(error = %e, "could not record the model that answered");
+        }
+    }
 
     let turn_context_limit = ContextGovernor::resolve(&ContextInputs {
         provider: &settings.chat_provider,
@@ -3912,19 +4378,59 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
-/// List all sessions, ordered by most recently updated first.
+/// List the household's conversations, most recently updated first. Sessions the pond opened for
+/// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
+/// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let sessions = state.session_storage.list_sessions().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to list sessions: {}", e)})),
-        )
-    })?;
+    use pond_core::user_data::domain::session::SessionIdentity;
+
+    let caller =
+        read_only_caller_scope(&state, principal.as_ref().map(|axum::Extension(p)| p), None).await;
+    // Another member's conversation is left out by the rule its messages are read by.
+    let sessions: Vec<_> = state
+        .session_storage
+        .list_sessions()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to list sessions: {}", e)})),
+            )
+        })?
+        .into_iter()
+        .filter(|s| {
+            SessionIdentity {
+                profile_id: s.profile_id.clone(),
+                ..SessionIdentity::unknown()
+            }
+            .readable_by(&caller)
+        })
+        .collect();
 
     let mut session_list: Vec<Value> = Vec::with_capacity(sessions.len());
-    for s in &sessions {
+    // The scheduler opens a `sched-` session per run for the engine; it holds no conversation,
+    // so listing it showed every run as an empty "Untitled" chat. Its result is in the run log.
+    let machine = sessions
+        .iter()
+        .filter(|s| {
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        })
+        .count();
+    if machine > 0 {
+        tracing::debug!(
+            target: "giap::trace",
+            kind = "machine_sessions_unlisted",
+            count = machine,
+            "sessions the pond opened for its own work left out of the conversation list",
+        );
+    }
+    let mut list_fetches = 0usize;
+    for s in sessions.iter().filter(|s| {
+        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+    }) {
         let message_count = state
             .session_storage
             .count_messages(&s.id)
@@ -3955,10 +4461,13 @@ async fn list_sessions(
             .map(session_preview)
             .filter(|p| !p.is_empty());
 
+        let picture = session_picture(&state, &s.id, &mut list_fetches).await;
+
         session_list.push(json!({
             "id": s.id,
             "title": effective_title,
             "preview": preview,
+            "picture": picture,
             "message_count": message_count,
             "total_prompt_tokens": s.total_prompt_tokens,
             "total_completion_tokens": s.total_completion_tokens,
@@ -3969,6 +4478,61 @@ async fn list_sessions(
     }
 
     Ok(Json(json!({ "sessions": session_list })))
+}
+
+/// Pages a conversation card's picture is looked for among.
+const CARD_PICTURE_PAGES: usize = 3;
+/// Pictures one list may set fetching in the background; the rest wait for a later list.
+const CARD_PICTURE_FETCHES: usize = 3;
+
+/// A conversation's picture: the first one sent in it, else one kept for the first page it cited
+/// or read. A list never waits on a site: a page with none kept yet is fetched in the background
+/// for the next list.
+async fn session_picture(state: &AppState, session_id: &str, fetches: &mut usize) -> Option<Value> {
+    use pond_core::shared::services::report_images::{first_list_fetch, installed, pages_named};
+    let sent = state
+        .session_storage
+        .list_session_attachments(session_id)
+        .await
+        .ok()
+        .and_then(|atts| atts.into_iter().find(|a| a.mime_type.starts_with("image/")));
+    if let Some(sent) = sent {
+        return Some(json!({
+            "kind": "sent",
+            "src": format!(
+                "/api/v1/sessions/{}/attachments/{}",
+                urlencoding_lite(&sent.session_id),
+                urlencoding_lite(&sent.id),
+            ),
+        }));
+    }
+    let images = installed()?;
+    let message = state
+        .session_storage
+        .first_web_message(session_id)
+        .await
+        .ok()
+        .flatten()?;
+    let pages = pages_named(&message, CARD_PICTURE_PAGES);
+    if let Some(image) = images.kept(&pages).await {
+        return Some(json!({
+            "kind": "page",
+            "key": image.key,
+            "src": format!("/api/v1/report-images/{}", image.key),
+            "page": image.page,
+            "credit": image.credit,
+            "caption": image.caption,
+        }));
+    }
+    if *fetches < CARD_PICTURE_FETCHES {
+        if pages.first().is_some_and(|p| first_list_fetch(p)) {
+            *fetches += 1;
+            tokio::spawn(async move {
+                images.for_pages(&pages, 1).await;
+            });
+        }
+    }
+    None
 }
 
 /// Short label from a session's first user message, for the untitled-session fallback.
@@ -3984,11 +4548,24 @@ fn derived_session_label(text: &str) -> String {
     }
 }
 
-/// The pond's first answer, for a history card (the title already carries the question).
-/// Capped past any card's width so the client fades the overflow instead of an ellipsis.
+/// The pond's first answer, for a history card (the title already carries the question), as
+/// plain words: a reply written in Markdown showed its `**`, `###` and list bullets in every
+/// conversation list. Capped past any card's width so the client fades the overflow instead of an
+/// ellipsis.
 fn session_preview(text: &str) -> String {
+    use pond_voice::text::{is_hr, strip_inline_md, strip_line_prefix};
     const MAX_CHARS: usize = 240;
-    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let plain: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_hr(line) && !line.starts_with("```"))
+        .map(|line| strip_inline_md(strip_line_prefix(line)))
+        .collect();
+    let cleaned = plain
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let cleaned = cleaned.trim();
     if cleaned.chars().count() <= MAX_CHARS {
         return cleaned.to_string();
@@ -4154,9 +4731,19 @@ async fn rename_session(
 /// Deletes a session and its messages; idempotent (a missing session also gets 204).
 async fn delete_session(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
     use pond_core::user_data::ports::session_storage::SessionStorageError;
+
+    // Another member's conversation reads as a missing one, as it does for its messages.
+    if !caller_may_read_session(&state, principal.as_ref(), &session_id).await {
+        let missing = SessionStorageError::SessionNotFound(session_id);
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("{}", missing)})),
+        ));
+    }
 
     // Must run before the row delete: that cascades away the engine pairing, orphaning the
     // engine-side session for good.
@@ -4245,6 +4832,33 @@ async fn set_message_feedback_handler(
 /// Whether the caller may read this conversation: their own member's, or nobody's.
 /// The caller is resolved from their device alone; resolving from the session asked for would
 /// make every unattributed caller that session's member.
+/// Refuses a turn on another member's conversation, which the turn would replay to the model. The
+/// session counts towards who calls, so a kiosk a face identified keeps its own conversation.
+async fn refuse_another_members_session(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let caller = read_only_caller_scope(
+        state,
+        principal.map(|axum::Extension(p)| p),
+        Some(session_id),
+    )
+    .await;
+    let readable = state
+        .session_storage
+        .get_session_identity(session_id)
+        .await
+        .is_ok_and(|identity| identity.readable_by(&caller));
+    if readable {
+        return Ok(());
+    }
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": format!("Session not found: {session_id}")})),
+    ))
+}
+
 async fn caller_may_read_session(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -4565,15 +5179,19 @@ async fn retitle_session(
     let service = SessionTitleService::new(provider, state.session_storage.clone());
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let outcome = service
-        .retitle_now(&session_id, &cancel)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("{e}") })),
-            )
-        })?;
+    // A person asked for it, so it waits behind no task step or chore.
+    use pond_core::models::domain::inference_bus::{running_under, InferenceClaim, InferenceHold};
+    let outcome = running_under(
+        InferenceHold::Lane(InferenceClaim::Turn),
+        service.retitle_now(&session_id, &cancel),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("{e}") })),
+        )
+    })?;
 
     let body = match outcome {
         RetitleOutcome::Retitled { title, .. } => {
@@ -5234,7 +5852,7 @@ async fn device_self(
                 StatusCode::OK,
                 Json(json!({
                     "device_id": device_id,
-                    "profile": {"id": member.id, "display_name": member.display_name},
+                    "profile": {"display_name": member.display_name, "id": member.id},
                 })),
             ),
             // A member deleted mid-read (ON DELETE SET NULL): the device is now unclaimed.
@@ -6282,17 +6900,60 @@ async fn update_settings(
     ) {
         let geocoder = pond_adapters_weather::Geocoder::new(state.http_client.clone());
         match geocoder.geocode(&name).await {
+            // A new spelling of the place a phone or a person pinned keeps the pin: replacing it
+            // with the town's centre is how a Find my location away from home undid a phone's fix.
+            Ok(geo) if current.precise_location_is_near(geo.latitude, geo.longitude) => {
+                merged.weather_latitude = current.weather_latitude;
+                merged.weather_longitude = current.weather_longitude;
+                merged.weather_location_source = current.weather_location_source.clone();
+                tracing::info!(
+                    kind = "home_location",
+                    change = "renamed",
+                    source = %current.weather_location_source,
+                    place = %name,
+                    "the home location's name changed; its precise position is kept"
+                );
+            }
             Ok(geo) => {
                 merged.weather_latitude = geo.latitude;
                 merged.weather_longitude = geo.longitude;
+                // A town's centre: a phone on the home network may replace it with a real fix.
+                merged.weather_location_source =
+                    pond_core::user_data::domain::settings::WEATHER_LOCATION_GEOCODED.to_string();
                 write_keys.insert("weather_latitude".to_string());
                 write_keys.insert("weather_longitude".to_string());
+                write_keys.insert("weather_location_source".to_string());
+                tracing::info!(
+                    kind = "home_location",
+                    change = "geocoded",
+                    previous_source = %current.weather_location_source,
+                    place = %name,
+                    "the home location is now a looked-up place's centre"
+                );
             }
             Err(e) => tracing::warn!(
                 error = %e,
                 location = %name,
                 "geocode-on-save failed; keeping provided coordinates"
             ),
+        }
+    }
+
+    // Coordinates entered as coordinates are a position someone chose: a phone does not replace
+    // them unasked.
+    if let (Some(lat), Some(lon)) = (patch_lat, patch_lon) {
+        if (lat != current.weather_latitude || lon != current.weather_longitude)
+            && (lat != 0.0 || lon != 0.0)
+        {
+            merged.weather_location_source =
+                pond_core::user_data::domain::settings::WEATHER_LOCATION_MANUAL.to_string();
+            write_keys.insert("weather_location_source".to_string());
+            tracing::info!(
+                kind = "home_location",
+                change = "manual",
+                previous_source = %current.weather_location_source,
+                "the home location was set as coordinates"
+            );
         }
     }
 
@@ -6435,6 +7096,10 @@ async fn update_settings(
     // Idempotent, so every save may call it: only a changed choice drops and reloads the model.
     crate::apply_embedding_choice(&state, &merged).await;
 
+    if current.active_whisper_model != merged.active_whisper_model {
+        crate::speech_model::switch_soon(&merged.active_whisper_model);
+    }
+
     // The warmed prefix is now stale; re-warm in the background so the save doesn't wait.
     if save_needs_prewarm(&current, &merged) {
         crate::spawn_prefix_prewarm(state.clone(), false);
@@ -6498,7 +7163,16 @@ async fn get_weather(
     };
 
     // `{e:#}` keeps the whole anyhow chain, where an egress refusal's reason, mode and host live.
-    let current = provider.current().await.map_err(|e| {
+    let current = match provider.current().await {
+        Err(e)
+            if e.downcast_ref::<pond_adapters_weather::WeatherOff>()
+                .is_some() =>
+        {
+            return Ok(Json(json!({ "enabled": false })));
+        }
+        other => other,
+    }
+    .map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("Failed to fetch weather: {e:#}")})),
@@ -6546,28 +7220,43 @@ async fn get_weather(
         "wind": current.wind_speed_kmh.round() as i64,
         "sunrise": current.sunrise,
         "sunset": current.sunset,
+        // Whether it is day where the Pond is, from the weather service, so a client draws a
+        // clear night as the moon without working out the sun's times in the Pond's time zone.
+        "is_day": current.is_day,
         "forecast": upcoming,
     })))
 }
 
-/// Maps a WMO description to one of the dashboard widget's icon keys.
+/// Maps a WMO description (`pond-adapters-weather`'s `wmo.rs`) to one of the dashboard widget's
+/// icon keys, so the icon shows the condition the text names.
+///
+/// Storm and snow come first: "Thunderstorm" is not rain to look at, and "Snow showers" carries
+/// "shower" too. Snow, a storm and fog showed the rain cloud or a plain cloud before
+/// (2026-11-08). The widget swaps `sun` and `cloudSun` for the moon after dark; the Pond does not
+/// know the dashboard's hour, so the key names the sky only.
 fn weather_icon_key(description: &str) -> &'static str {
     let d = description.to_lowercase();
-    if d.contains("rain")
-        || d.contains("drizzle")
-        || d.contains("shower")
-        || d.contains("snow")
-        || d.contains("thunder")
-    {
+    if d.contains("thunder") {
+        "storm"
+    } else if d.contains("snow") {
+        "snow"
+    } else if d.contains("drizzle") {
+        // Lighter than rain, and drawn so, as the phone's cards draw it.
+        "drizzle"
+    } else if d.contains("rain") || d.contains("shower") {
         "rain"
-    } else if d.contains("clear sky") {
+    } else if d.contains("fog") {
+        "fog"
+    } else if d.contains("clear") {
+        // "Mainly clear" too: the sun, as both apps' chat cards draw it.
         "sun"
-    } else if d.contains("clear") || d.contains("partly") {
+    } else if d.contains("partly") {
         "cloudSun"
     } else {
         "cloud"
     }
 }
+
 
 fn weather_short_weekday(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
@@ -6710,23 +7399,79 @@ async fn rebuild_llm_provider(state: &Arc<AppState>, settings: &Settings) {
 // ── Model registry handlers ───────────────────────────────────────────────────
 
 /// GET /api/v1/models/capabilities — returns the active model's runtime capabilities.
+/// `audio_input` and `voice_notes_heard` are read live, so they turn true once the encoder hears.
 async fn get_model_capabilities(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let caps = state.agent.capabilities();
-    Json(serde_json::to_value(caps).unwrap_or_default())
+    use pond_core::models::domain::audio_input::voice_notes_status;
+
+    let mut caps = state.agent.capabilities();
+    let audio = match state.settings_repo.get().await {
+        Ok(s) => read_audio_state(&state, &s.chat_provider, &s.chat_model).await,
+        Err(_) => None,
+    };
+    caps.audio_input = audio.as_ref().is_some_and(|reported| reported.is_ready());
+    let mut body = serde_json::to_value(caps).unwrap_or_default();
+    // A note the model cannot hear still goes, as Whisper's words.
+    let heard = voice_notes_status(audio.as_ref());
+    let taken = match state.transcribe_audio.is_some() {
+        true => "ready",
+        false => heard,
+    };
+    body["voice_notes"] = json!(taken);
+    body["voice_notes_heard"] = json!(heard == "ready");
+    body["attachments"] = attachment_limits();
+    Json(body)
+}
+
+/// The limits `/chat/stream` enforces, from the same constants, so a client can check first.
+fn attachment_limits() -> Value {
+    use pond_core::models::domain::{audio_input as audio, document_input as documents};
+    json!({
+        "audio": {
+            "formats": audio::SUPPORTED_AUDIO_MIME_TYPES,
+            "max_bytes": audio::MAX_AUDIO_BYTES,
+            "max_seconds": audio::MAX_AUDIO_MS / 1000,
+        },
+        "documents": {
+            "formats": documents::SUPPORTED_DOCUMENT_MIME_TYPES,
+            "max_bytes": documents::MAX_DOCUMENT_BYTES,
+            "max_per_turn": documents::MAX_DOCUMENTS_PER_TURN,
+            "max_text_bytes": documents::MAX_DOCUMENT_TEXT_BYTES,
+        },
+    })
 }
 
 /// GET /api/v1/models/active-roles — per-role model, from `model_role_assignments` + settings.
+///
+/// `holders` names the catalogue row doing each job as `model_use::RoleHolders` reads it from
+/// settings, the same truth `GET /models` puts on each row as `roles`. `helpers` lists the
+/// models in use that are no catalogue row of their own: the conversation model's picture
+/// encoder and drafter, the camera detector and face recognition.
 async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let assignments: std::collections::HashMap<String, String> = state
-        .model_repo
-        .as_ref()
-        .and_then(|r| {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(r.list_assignments())
-            })
-            .ok()
-        })
-        .unwrap_or_default()
+    let (records, assignment_rows) = match state.model_repo.as_ref() {
+        Some(repo) => {
+            let records = repo.list_all().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_catalogue_unreadable",
+                    error = %e,
+                    "catalogue could not be read"
+                );
+                Vec::new()
+            });
+            let assignments = repo.list_assignments().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    kind = "model_roles_assignments_unreadable",
+                    error = %e,
+                    "role assignments could not be read"
+                );
+                Vec::new()
+            });
+            (records, assignments)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let holders = crate::model_views::role_holders(&state, &records, &assignment_rows).await;
+    let helpers = crate::model_views::helper_models(&state, &holders).await;
+    let assignments: std::collections::HashMap<String, String> = assignment_rows
         .into_iter()
         .map(|a| (a.role, a.model_id))
         .collect();
@@ -6735,11 +7480,26 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
     let chat_provider = settings.chat_provider.clone();
     let chat_model = settings.chat_model.clone();
 
+    // What `POST /models/rollback` would return to; null when there is no way back.
+    let chat_rollback = match state.model_repo.as_ref() {
+        Some(repo) => match repo.rollback_target("chat").await.ok().flatten() {
+            Some(id) => repo
+                .get_by_id(&id)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| json!({ "model_id": m.id, "model": m.name })),
+            None => None,
+        },
+        None => None,
+    };
+
     Json(json!({
         "chat":  {
             "provider": chat_provider,
             "model":    chat_model,
             "model_id": assignments.get("chat"),
+            "rollback": chat_rollback,
         },
         "tool": {
             "model": settings.tool_model,
@@ -6751,6 +7511,14 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
             "model": settings.active_embedding_model,
             "provider": settings.embedding_provider,
         },
+        "holders": {
+            "chat": holders.chat,
+            "tool": holders.tool,
+            "asr": holders.asr,
+            "tts": holders.tts,
+            "embedding": holders.embedding,
+        },
+        "helpers": helpers,
         "router_name": state.llm_provider.read().await
             .as_ref()
             .map(|p| p.model_name())
@@ -6761,7 +7529,8 @@ async fn get_active_roles(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// GET /api/v1/models/memory-status — returns current LLM memory budget snapshot: the board's on
 /// a budgeted device, the machine's own elsewhere. `budget_mb` is the most the LLM slot may ever
 /// hold here; `reclaimable_mb` is what switching away from the model in use would free, so a fit
-/// check can count it.
+/// check can count it. `embedder_room_mb` is the Memory model's room beside the conversation
+/// model, null where nothing was read.
 async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let status = state
         .model_scheduler
@@ -6776,6 +7545,7 @@ async fn get_memory_status(State(state): State<Arc<AppState>>) -> Json<Value> {
         "budget_mb":            status.budget_mb,
         "loaded_model":         status.loaded_model,
         "reclaimable_mb":       reclaimable_mb,
+        "embedder_room_mb":     crate::model_views::MemoryFooting::read(&state, &status).room_mb(),
     }))
 }
 
@@ -7262,6 +8032,7 @@ async fn list_models(
         )
     })?;
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
 
     let vision = crate::model_views::gguf_vision_batch(&state, &records).await;
     let fetching_pictures: std::collections::HashSet<String> = state
@@ -7282,8 +8053,16 @@ async fn list_models(
     let mut ollama = vec![];
     let mut embedding = vec![];
 
+    let memory = state
+        .model_scheduler
+        .as_ref()
+        .map(|s| s.memory_status())
+        .unwrap_or_default();
+    let footing = crate::model_views::MemoryFooting::read(&state, &memory);
+
     for m in &records {
-        let mut dto = record_to_dto(m, &assignments, state.engine_availability);
+        let mut dto = record_to_dto(m, &assignments, &holders, state.engine_availability);
+        footing.weigh(&mut dto);
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
@@ -7327,11 +8106,19 @@ async fn scan_models(State(state): State<Arc<AppState>>) -> Json<Value> {
 
     let count = extras.len();
     let assignments = model_repo.list_assignments().await.unwrap_or_default();
+    // Over the whole catalogue: a job's holder is found by name among every row.
+    let records = model_repo.list_all().await.unwrap_or_default();
+    let holders = crate::model_views::role_holders(&state, &records, &assignments).await;
     let entries: Vec<Value> = extras
         .iter()
         .map(|m| {
-            serde_json::to_value(record_to_dto(m, &assignments, state.engine_availability))
-                .unwrap_or_default()
+            serde_json::to_value(record_to_dto(
+                m,
+                &assignments,
+                &holders,
+                state.engine_availability,
+            ))
+            .unwrap_or_default()
         })
         .collect();
 
@@ -7739,6 +8526,66 @@ async fn activate_model(
         )
     })?;
 
+    assign_role(&state, model_repo, cat, name, role).await
+}
+
+/// POST /api/v1/models/rollback — return a role to the model that last answered before the
+/// latest switch. Only the chat role keeps that history: its turns are what prove a model works.
+async fn rollback_model(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(model_repo) = state.model_repo.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "registry not available"})),
+        ));
+    };
+    let Json(body) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid JSON: {e}")})),
+        )
+    })?;
+    let role = body["role"].as_str().unwrap_or("chat").to_string();
+
+    let internal = |e: anyhow::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    };
+    let nothing = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "nothing_to_roll_back", "role": role})),
+        )
+    };
+    let target = model_repo
+        .rollback_target(&role)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+    // Removed from the catalog since: there is no longer anything to return to.
+    let record = model_repo
+        .get_by_id(&target)
+        .await
+        .map_err(internal)?
+        .ok_or_else(nothing)?;
+
+    assign_role(&state, model_repo, record.category, record.name, role).await
+}
+
+/// Assign `name` to `role` and bring the running engine in line, as a switch from the Models
+/// tab does. A rollback takes the same path, so it rebuilds and warms the same way.
+async fn assign_role(
+    state: &Arc<AppState>,
+    model_repo: Arc<dyn pond_core::models::ports::model_repository::ModelRepository + Send + Sync>,
+    cat: ModelCategory,
+    name: String,
+    role: String,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let category = cat.as_str().to_string();
     if !ModelRoleAssignment::category_matches_role(&cat, &role) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -7768,7 +8615,7 @@ async fn activate_model(
             )
         })?;
     // Accepted, it would only fail on the first turn.
-    refuse_unavailable_engine(&state, &record, "activate")?;
+    refuse_unavailable_engine(state, &record, "activate")?;
     // The found record's id: a forgiving TTS lookup may resolve another category.
     let model_id = record.id.clone();
 
@@ -7783,6 +8630,14 @@ async fn activate_model(
         ModelCategory::TtsHttp => "tts",
         ModelCategory::Embedding => "embedding",
     };
+
+    // Only a real change moves the way back; picking the current model again keeps it.
+    let current = model_repo.get_assignment(&role).await.ok().flatten();
+    if current.is_some_and(|a| a.model_id != model_id) {
+        if let Err(e) = model_repo.arm_rollback(&role, &model_id).await {
+            tracing::warn!(error = %e, role = %role, "could not keep the way back to the last model");
+        }
+    }
 
     model_repo
         .set_assignment(&role, &model_id)
@@ -7821,6 +8676,7 @@ async fn activate_model(
             let _ = settings_repo
                 .set_key("active_whisper_model", name.clone())
                 .await;
+            crate::speech_model::switch_soon(&name);
         }
         "tts" => {
             let _ = settings_repo
@@ -7838,7 +8694,7 @@ async fn activate_model(
                 .await;
             // The model brings its own engine; `embedding_provider` stays the on/off switch.
             if let Ok(settings) = settings_repo.get().await {
-                crate::apply_embedding_choice(&state, &settings).await;
+                crate::apply_embedding_choice(state, &settings).await;
             }
         }
         _ => {}
@@ -7846,10 +8702,10 @@ async fn activate_model(
 
     if matches!(role.as_str(), "chat" | "think" | "task") {
         // Log-only; Jetson's fail-closed residency check belongs in the local-inference loader.
-        warn_if_model_spills(&state, &record).await;
+        warn_if_model_spills(state, &record).await;
 
         let settings = state.settings_repo.get().await.unwrap_or_default();
-        rebuild_llm_provider(&state, &settings).await;
+        rebuild_llm_provider(state, &settings).await;
     }
 
     // As in PUT /settings: warm the prefix now, in the background. Nothing is fetched.
@@ -7860,6 +8716,14 @@ async fn activate_model(
         }
     }
 
+    // So a live log viewer sees the swap it is timing against.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "model_activated",
+        role = %role,
+        model_id = %model_id,
+        "a model was assigned to a role"
+    );
     Ok(Json(json!({"role": role, "model_id": model_id})))
 }
 
@@ -9983,9 +10847,20 @@ async fn calibrate_wake_word(
     })))
 }
 
+/// `?variant=` on `DELETE /api/v1/voice/calibrate`: the one way of hearing the phrase to forget.
+#[derive(Debug, Deserialize)]
+struct CalibrationRemoval {
+    variant: Option<String>,
+}
+
 /// `DELETE /api/v1/voice/calibrate` — always safe: the detector falls back to the wake word.
+///
+/// With `?variant=gus` only that variant is forgotten, so a take that heard the phrase wrongly can
+/// be taken back without starting the calibration over; the response then lists what is left.
+/// Without it every variant is cleared.
 async fn reset_wake_word_calibration(
     State(state): State<Arc<AppState>>,
+    Query(removal): Query<CalibrationRemoval>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut settings = state.settings_repo.get().await.map_err(|e| {
         (
@@ -9994,7 +10869,16 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    settings.voice_wake_word_transcriptions.clear();
+    let variant = removal
+        .variant
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    match &variant {
+        Some(v) => settings.voice_wake_word_transcriptions.retain(|t| t != v),
+        None => settings.voice_wake_word_transcriptions.clear(),
+    }
 
     state.settings_repo.update(&settings).await.map_err(|e| {
         (
@@ -10003,9 +10887,24 @@ async fn reset_wake_word_calibration(
         )
     })?;
 
-    Ok(Json(
-        json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
-    ))
+    tracing::info!(
+        kind = "wake_calibration_removed",
+        one_variant = variant.is_some(),
+        remaining = settings.voice_wake_word_transcriptions.len(),
+        "wake-word calibration: {}",
+        if variant.is_some() {
+            "one variant forgotten"
+        } else {
+            "cleared"
+        }
+    );
+    Ok(Json(match variant {
+        Some(v) => json!({
+            "removed": v,
+            "all_variants": settings.voice_wake_word_transcriptions,
+        }),
+        None => json!({"cleared": true, "message": "Wake-word calibration data cleared"}),
+    }))
 }
 
 // ── Service connectivity test ─────────────────────────────────────────────────
@@ -11777,6 +12676,87 @@ fn require_own_device(
 }
 
 #[derive(serde::Deserialize)]
+struct DeviceEventsParams {
+    after_seq: Option<u64>,
+}
+
+fn device_event(frame: &crate::device_events::Frame) -> Event {
+    Event::default()
+        .event("device_state")
+        .data(frame.data.to_string())
+}
+
+fn resync_event() -> Event {
+    Event::default().event("resync").data("{}")
+}
+
+/// `GET /api/v1/devices/events?after_seq=N` — device state changes as devices report them. With
+/// `after_seq`, first what followed it, or `resync` when that is no longer kept (see
+/// `crate::device_events`).
+async fn device_events_stream(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<DeviceEventsParams>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    use crate::device_events::Since;
+    // A phone holds this open while its Devices screen is in front, as it holds notifications.
+    let permit = state
+        .notification_sse_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let events = state.device_events.clone();
+    let (since, mut live) = events.open(params.after_seq);
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut last = 0;
+        match since {
+            Since::Resync => yield Ok(resync_event()),
+            Since::Frames(frames) => {
+                last = params.after_seq.unwrap_or(0);
+                for frame in frames {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+            }
+        }
+        loop {
+            match live.recv().await {
+                Ok(frame) if frame.seq > last => {
+                    last = frame.seq;
+                    yield Ok(device_event(&frame));
+                }
+                Ok(_) => {}
+                // What it missed is still in the ring, which outlasts the live queue.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let (since, again) = events.open(Some(last));
+                    live = again;
+                    match since {
+                        Since::Resync => {
+                            last = 0;
+                            yield Ok(resync_event());
+                        }
+                        Since::Frames(frames) => {
+                            for frame in frames {
+                                last = frame.seq;
+                                yield Ok(device_event(&frame));
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[derive(serde::Deserialize)]
 struct NotificationStreamParams {
     device_id: Option<String>,
 }
@@ -12051,6 +13031,152 @@ async fn acknowledge_notification(
     }
 }
 
+/// The calling device's id, from its pairing token only, plus the history it reads.
+type CallerHistory = (
+    String,
+    Arc<dyn pond_core::mcp::ports::notification_history::NotificationHistory>,
+);
+
+/// The calling device and the notification history, or the refusal. Like [`caller_queue`]: the
+/// device comes from the token, so a caller reads only what its own device may read.
+fn caller_history(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    operation: &'static str,
+) -> Result<CallerHistory, (StatusCode, Json<Value>)> {
+    let Some(device_id) = proven_device(principal).id().map(str::to_owned) else {
+        tracing::warn!(
+            kind = "notification_history_refused",
+            operation,
+            reason = "no_device",
+            "notifications: history request did not come from a paired device"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this request did not come from a paired device"})),
+        ));
+    };
+    let Some(history) = state.notification_history.clone() else {
+        tracing::warn!(
+            kind = "notification_history_unavailable",
+            operation,
+            "notifications: no history wired"
+        );
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "notification history not available"})),
+        ));
+    };
+    Ok((device_id, history))
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationHistoryParams {
+    limit: Option<usize>,
+}
+
+/// How many notices `GET /notifications/history` returns when the caller does not say.
+const NOTIFICATION_HISTORY_DEFAULT_LIMIT: usize = 100;
+
+/// `GET /api/v1/notifications/history?limit=N` — the household's durable notices the calling
+/// device may read, newest first, each with that device's read state:
+/// `{"device_id": "...", "notifications": [{id, category, title, body, timestamp, data, read}]}`.
+///
+/// `device_id` is the caller's own device, from its token: the id its notification stream must
+/// name, and the suffix its own queued copies carry (`per_device_notification_id`), so a client
+/// can map a copy's id back to the history id. A member's notice is listed only to the devices it
+/// was queued for; live-only status is never listed. `limit` defaults to 100, at most 200.
+async fn notifications_history(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Query(params): axum::extract::Query<NotificationHistoryParams>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "notifications_history") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let limit = params
+        .limit
+        .unwrap_or(NOTIFICATION_HISTORY_DEFAULT_LIMIT)
+        .clamp(
+            1,
+            pond_core::mcp::domain::notification_history::HISTORY_LIST_MAX,
+        );
+    match history.list_for_device(&device_id, limit).await {
+        Ok(entries) => {
+            tracing::debug!(
+                kind = "notification_history_served",
+                count = entries.len(),
+                limit,
+                "notifications: history served"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({ "device_id": device_id, "notifications": entries })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_failed", error = %e, "notifications: history query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not read the notification history"})),
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct MarkHistoryReadRequest {
+    ids: Vec<String>,
+}
+
+/// `POST /api/v1/notifications/history/read` with `{"ids": [...]}` — mark these history notices
+/// read for the calling device only. An id the device may not read, or that does not exist, is
+/// skipped silently, so the answer never tells a caller which ids exist. `{"marked": n}` counts
+/// the newly marked; at most 500 ids per request (`400` beyond).
+async fn mark_notification_history_read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Json(request): Json<MarkHistoryReadRequest>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, history) =
+        match caller_history(&state, principal.as_ref(), "mark_notification_history_read") {
+            Ok(found) => found,
+            Err(refusal) => return refusal,
+        };
+    let max = pond_core::mcp::domain::notification_history::HISTORY_MARK_READ_MAX;
+    if request.ids.len() > max {
+        tracing::info!(
+            kind = "notification_history_read_refused",
+            count = request.ids.len(),
+            "notifications: too many ids in one mark-read request"
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("at most {max} ids per request")})),
+        );
+    }
+    match history.mark_read(&device_id, &request.ids).await {
+        Ok(marked) => {
+            tracing::info!(
+                kind = "notification_history_marked_read",
+                requested = request.ids.len(),
+                marked,
+                "notifications: history marked read"
+            );
+            (StatusCode::OK, Json(json!({ "marked": marked })))
+        }
+        Err(e) => {
+            tracing::warn!(kind = "notification_history_read_failed", error = %e, "notifications: mark read failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not mark the notifications read"})),
+            )
+        }
+    }
+}
+
 // ── Agent tools handler ───────────────────────────────────────────────────────
 
 /// Tools whose listing gets `_meta.ui.resourceUri` pointing at their MCP App resource.
@@ -12228,6 +13354,9 @@ async fn dispatch_tool_direct(
 /// `POST /api/v1/tools/invoke` — run an MCP tool directly, bypassing the LLM.
 async fn invoke_tool(
     State(state): State<Arc<AppState>>,
+    axum::Extension(replies): axum::Extension<Arc<crate::idempotency::IdempotentReplies>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    headers: axum::http::HeaderMap,
     body: Result<Json<InvokeToolRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -12243,7 +13372,42 @@ async fn invoke_tool(
         ));
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
-    dispatch_tool_direct(&state, &qualified, req.args).await
+    let Some(key) = headers.get(crate::idempotency::HEADER) else {
+        return dispatch_tool_direct(&state, &qualified, req.args).await;
+    };
+    let key = key
+        .to_str()
+        .ok()
+        .filter(|key| crate::idempotency::valid_key(key))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_idempotency_key" })),
+            )
+        })?;
+    let caller = proven_device(principal.as_ref());
+    let slot = replies.slot(caller.id().unwrap_or_default(), key);
+    let mut outcome = slot.lock().await;
+    let request = json!({ "tool": qualified, "args": req.args });
+    if let Some(first) = &outcome.request {
+        if *first != request {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "idempotency_key_reused" })),
+            ));
+        }
+    }
+    if let Some(reply) = &outcome.reply {
+        return Ok(Json(reply.clone()));
+    }
+    outcome.request = Some(request);
+    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    reply["idempotency_key"] = json!(key);
+    // A failure is not kept: nothing ran, or the device refused and a resend may try it again.
+    if reply["success"] == json!(true) {
+        outcome.reply = Some(reply.clone());
+    }
+    Ok(Json(reply))
 }
 
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
@@ -12316,15 +13480,65 @@ async fn agent_chat_stream(
         .get("images")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    // A malformed `audio` is refused instead: ignoring it would answer a turn with no question.
+    let audio: Vec<pond_core::models::domain::message::AudioAttachment> =
+        match body.get("audio").filter(|v| !v.is_null()) {
+            None => Vec::new(),
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(audio) => audio,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("audio: {e}"), "code": "audio_invalid"})),
+                    )
+                        .into_response();
+                }
+            },
+        };
+    let documents: Vec<pond_core::models::domain::message::DocumentAttachment> = match body
+        .get("documents")
+        .filter(|v| !v.is_null())
+    {
+        None => Vec::new(),
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(documents) => documents,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("documents: {e}"), "code": "document_invalid"})),
+                )
+                    .into_response();
+            }
+        },
+    };
+    if let Err(resp) = refuse_another_members_session(&state, principal.as_ref(), &session_id).await
+    {
+        return resp.into_response();
+    }
     if let Err(resp) = refuse_without_a_model(&state).await {
         return resp.into_response();
     }
     if let Err(resp) = image_limit_response(&images) {
         return resp.into_response();
     }
+    if let Err(resp) = audio_limit_response(&audio) {
+        return resp.into_response();
+    }
+    if let Err(resp) = document_limit_response(&documents) {
+        return resp.into_response();
+    }
     // Before `stream!`, which persists the user message, as in `/chat/stream`.
     let images = match prepare_turn_images(&state, images).await {
         Ok(images) => images,
+        Err(resp) => return resp.into_response(),
+    };
+    let mut message = message;
+    let audio = match prepare_turn_audio(&state, audio, &mut message).await {
+        Ok(audio) => audio,
+        Err(resp) => return resp.into_response(),
+    };
+    let document_texts = match prepare_turn_documents(&documents).await {
+        Ok(texts) => texts,
         Err(resp) => return resp.into_response(),
     };
 
@@ -12368,7 +13582,12 @@ async fn agent_chat_stream(
             chat_service = chat_service.with_event_log(event_log);
         }
 
-        if let Err(e) = chat_service.persist_user_message_with_images(&message, images.clone()).await {
+        let saved_text = pond_core::models::domain::document_input::persisted_text(
+            &message,
+            &audio,
+            &documents,
+        );
+        if let Err(e) = chat_service.persist_user_message_with_images(&saved_text, images.clone()).await {
             yield Ok(Event::default().data(json!({"error": format!("Failed to persist user message: {}", e)}).to_string()));
             return;
         }
@@ -12384,10 +13603,14 @@ async fn agent_chat_stream(
         // Shared with `/chat/stream` so both routes fold engine events into a turn identically.
         let mut turn = TurnAccumulator::new(crate::thought_filter::ThoughtFilter::new());
         let request = AgentRequest {
-            message,
+            message: pond_core::models::domain::document_input::compose_for_model(
+                &message,
+                &document_texts,
+            ),
             session_id: session_id.clone(),
             model_role: "task".to_string(),
             images,
+            audio,
             voice_mode: false,
             canvas_mode: false,
             profile_scope: turn_scope.clone(),
@@ -12397,6 +13620,7 @@ async fn agent_chat_stream(
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -12528,6 +13752,71 @@ async fn list_logs(
         )
             .into_response(),
     }
+}
+
+/// Live log viewers held open at once: a developer's tool, not something every phone keeps open.
+const LIVE_LOG_STREAMS: usize = 4;
+
+fn live_log_streams() -> &'static Arc<tokio::sync::Semaphore> {
+    static STREAMS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    STREAMS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(LIVE_LOG_STREAMS)))
+}
+
+/// `GET /api/v1/logs/stream` — the Logs viewer, live: a `status` event naming the running chat
+/// model, then each line as `/logs` stores it, scrubbed the same way. `level` filters as there;
+/// a viewer that falls behind gets a `skipped` count instead of the lines it missed.
+async fn stream_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
+{
+    let Some(mut rx) = state
+        .operational_log
+        .as_ref()
+        .and_then(|repo| repo.subscribe())
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "live logs not available" })),
+        ));
+    };
+    let permit = live_log_streams()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "Too many concurrent streams" })),
+            )
+        })?;
+    let level = params.get("level").cloned();
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let status = json!({
+        "chat_provider": settings.chat_provider,
+        "chat_model": settings.chat_model,
+    });
+
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        yield Ok(Event::default().event("status").data(status.to_string()));
+        loop {
+            match rx.recv().await {
+                Ok(entry) => {
+                    if level.as_deref().is_some_and(|wanted| wanted != entry.level) {
+                        continue;
+                    }
+                    let data = serde_json::to_string(&entry).unwrap_or_default();
+                    yield Ok(Event::default().event("log").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    let data = json!({ "count": count }).to_string();
+                    yield Ok(Event::default().event("skipped").data(data));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// `GET /api/v1/logs/export` — download the event log as a CSV file.
@@ -12789,7 +14078,15 @@ async fn toggle_extension_handler(
 
 // ── Extension Marketplace ────────────────────────────────────────────────────
 
-/// `GET /api/v1/marketplace` — list available extensions from the curated registry.
+/// What the install route answers for a catalogue entry the built-in web search already covers.
+pub const BUILT_IN_SEARCH_ON: &str = "Web search is built in and already uses your Brave key.";
+
+/// The `reason` beside [`BUILT_IN_SEARCH_ON`], for a client to match instead of the sentence.
+pub const BUILT_IN_SEARCH_ON_REASON: &str = "built_in_web_search_on";
+
+/// `GET /api/v1/marketplace` — list available extensions from the curated registry. An entry that
+/// duplicates a built-in capability also carries `built_in_state`: `on`, `needs_key` or
+/// `knowledge_off`, from [`crate::web_search::built_in_state`].
 async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let Some(mp) = &state.marketplace else {
@@ -12800,7 +14097,26 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
             .into_response();
     };
     match mp.list_available().await {
-        Ok(exts) => Json(json!({"extensions": exts})).into_response(),
+        Ok(exts) => {
+            let search = if exts.iter().any(|e| e.built_in.is_some()) {
+                Some(crate::web_search::built_in_state(&state).await)
+            } else {
+                None
+            };
+            let listed: Vec<serde_json::Value> = exts
+                .iter()
+                .map(|ext| {
+                    let mut entry = json!(ext);
+                    if let (Some(BuiltInCapability::WebSearch), Some(search)) =
+                        (ext.built_in, search)
+                    {
+                        entry["built_in_state"] = json!(search.as_str());
+                    }
+                    entry
+                })
+                .collect();
+            Json(json!({"extensions": listed})).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -12810,6 +14126,7 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
 }
 
 /// `POST /api/v1/marketplace/{id}/install` — optional `{ "secrets": {…} }`; 428 lists missing ones.
+/// 409 refuses an entry the built-in web search covers while that search is on.
 async fn install_marketplace_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -12848,6 +14165,24 @@ async fn install_marketplace_handler(
                 .into_response();
         }
     };
+
+    if ext.built_in == Some(BuiltInCapability::WebSearch)
+        && crate::web_search::built_in_state(&state).await
+            == pond_core::mcp::domain::web_search::BuiltInSearchState::On
+    {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "extension_install_refused",
+            extension = %ext.id,
+            reason = BUILT_IN_SEARCH_ON_REASON,
+            "marketplace install refused: the built-in web search already covers it"
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": BUILT_IN_SEARCH_ON, "reason": BUILT_IN_SEARCH_ON_REASON})),
+        )
+            .into_response();
+    }
 
     let secrets: std::collections::HashMap<String, String> = body
         .and_then(|b| {
@@ -14888,12 +16223,43 @@ async fn delete_prompt_extra(
 
 // ── Memories ──────────────────────────────────────────────────────────────────
 
-async fn list_memories(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
-    match state
-        .memory_repo
-        .search_recent(&ProfileScope::Household, 50)
-        .await
-    {
+/// The memory routes' reach: a member's own and the household's, nothing for a guest.
+async fn memory_caller_scope(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> ProfileScope {
+    read_only_caller_scope(state, principal.map(|axum::Extension(p)| p), None).await
+}
+
+/// A memory the caller may change, or the response that refuses it; another member's reads as
+/// missing, so an id can't be probed.
+async fn memory_in_reach(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    id: &str,
+) -> Result<(), axum::response::Response> {
+    let scope = memory_caller_scope(state, principal).await;
+    match state.memory_repo.get_in_scope(id, &scope).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("memory not found: {id}")})),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+async fn list_memories(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> impl axum::response::IntoResponse {
+    let scope = memory_caller_scope(&state, principal.as_ref()).await;
+    match state.memory_repo.search_recent(&scope, 50).await {
         Ok(memories) => Json(json!(memories)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -14916,6 +16282,9 @@ struct SaveMemoryRequest {
     importance: Option<f32>,
     #[serde(default)]
     tier: Option<pond_core::user_data::domain::memory::MemoryTier>,
+    /// Shared with the whole household rather than kept as the caller's own.
+    #[serde(default)]
+    shared: bool,
 }
 fn default_source() -> String {
     "api".to_string()
@@ -14939,8 +16308,10 @@ async fn embed_memory_text(state: &AppState, text: &str) -> Option<Vec<f32>> {
 }
 
 /// Embedded at write: semantic recall skips a row with no vector until the idle sweep fills it.
+/// The caller's own unless `shared` asks for the household; a guest saves nothing.
 async fn save_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<SaveMemoryRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let Json(req) = match body {
@@ -14952,6 +16323,15 @@ async fn save_memory(
             )
                 .into_response()
         }
+    };
+    let owner = match memory_caller_scope(&state, principal.as_ref()).await {
+        ProfileScope::Guest => return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "this device belongs to no member, so it cannot save memories"})),
+        )
+            .into_response(),
+        ProfileScope::Owner(member) if !req.shared => Some(member),
+        ProfileScope::Owner(_) | ProfileScope::Household => None,
     };
     let decay_rate = req
         .tier
@@ -14972,7 +16352,7 @@ async fn save_memory(
 
     let fragment = MemoryFragment {
         id: Uuid::new_v4().to_string(),
-        profile_id: None,
+        profile_id: owner,
         session_id: None,
         content: req.content,
         embedding,
@@ -15011,6 +16391,7 @@ struct UpdateMemoryRequest {
 /// new words are re-embedded. A field left out is left as it is; a body with neither is refused.
 async fn update_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateMemoryRequest>,
 ) -> impl axum::response::IntoResponse {
@@ -15022,6 +16403,9 @@ async fn update_memory(
     }
     if content == Some("") {
         return bad_request("a memory cannot be blank -- delete it instead");
+    }
+    if let Err(refused) = memory_in_reach(&state, principal.as_ref(), &id).await {
+        return refused;
     }
 
     let mut result = Ok(());
@@ -15212,8 +16596,12 @@ async fn run_lane_job(
 
 async fn delete_memory(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> impl axum::response::IntoResponse {
+    if let Err(refused) = memory_in_reach(&state, principal.as_ref(), &id).await {
+        return refused;
+    }
     match state.memory_repo.delete(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
@@ -15990,6 +17378,7 @@ fn recipe_extension_to_tool_group(name: &str) -> Option<&'static str> {
         "device" | "developer" => Some("giap-device"),
         // Not `giap-matter`: that's the matter.js websocket protocol, not a tool group.
         "matter" | "home" => Some("giap-device-control"),
+        "vision" => Some("giap-vision"),
         _ => None,
     }
 }
@@ -16196,16 +17585,8 @@ async fn pond_capabilities(
                 .collect()
         })
         .unwrap_or_default();
-    let web_search = settings.ext_knowledge_enabled
-        && match &state.secret_repo {
-            Some(repo) => repo
-                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|key| !key.trim().is_empty()),
-            None => false,
-        };
+    let web_search = crate::web_search::built_in_state(state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
     PondCapabilities {
         presence,
         identified_member: member.is_some(),
@@ -16218,7 +17599,7 @@ async fn pond_capabilities(
 
 /// The caller of a long-task route, as a member's scope: a paired member's device, or the
 /// desktop on this host acting for the primary member. Nobody identified reaches no task.
-async fn long_task_caller(
+pub(crate) async fn long_task_caller(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     peer: Result<
@@ -16311,8 +17692,9 @@ async fn long_task_view(
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
     let artifacts = repo.list_artifacts(task.id()).await?;
-    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
-        .map(|a| a.id.clone());
+    let result =
+        pond_core::shared::services::long_task_runner::answer_artifact(task, &steps, &artifacts)
+            .map(|a| a.id.clone());
     // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
     let answer_text = match (&result, task.answer()) {
         (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {
@@ -16335,6 +17717,8 @@ async fn long_task_view(
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
+        // The card's "12 of 30 min" and its extend button; none for a task without a time limit.
+        "deadline": task.budget().deadline(),
         "updated_at": task.updated_at(),
         "finished_at": task.finished_at(),
         "steps": steps.iter().map(|step| json!({
@@ -16348,6 +17732,11 @@ async fn long_task_view(
         "artifacts": artifacts,
         "result_artifact_id": result,
         "queue": queue,
+        // A step's helper gives the model up while a person's turn has it, and resumes after.
+        "paused_for_turn": steps.iter().any(|step| {
+            step.state() == pond_core::shared::domain::long_task::StepState::Running
+        })
+            && pond_core::models::domain::inference_bus::turn_has_the_model(),
     }))
 }
 
@@ -16781,20 +18170,25 @@ async fn get_long_task_report(
         Err(response) => return response,
     };
     match long_task_report(&state, &task).await {
-        Ok((markdown, events, sections)) => Json(json!({
-            "id": task.id(),
-            "title": report::assembled_title(&markdown),
-            "state": task.state(),
-            "kind": task.kind(),
-            "markdown": markdown,
-            "sections": sections,
-            "sources": report::sources(&markdown)
-                .into_iter()
-                .map(|s| json!({"title": s.title, "url": s.url}))
-                .collect::<Vec<_>>(),
-            "calendar_events": events.len(),
-        }))
-        .into_response(),
+        Ok((markdown, events, sections)) => {
+            let images = report_images_for(&markdown).await;
+            Json(json!({
+                "id": task.id(),
+                "title": report::assembled_title(&markdown),
+                "state": task.state(),
+                "kind": task.kind(),
+                "markdown": markdown,
+                "sections": sections,
+                "sources": report::sources(&markdown)
+                    .into_iter()
+                    .map(|s| json!({"title": s.title, "url": s.url}))
+                    .collect::<Vec<_>>(),
+                "calendar_events": events.len(),
+                "options": pond_core::shared::services::task_options::options_in(&markdown),
+                "images": images,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -17000,6 +18394,165 @@ async fn cancel_long_task(
     {
         Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtendBody {
+    minutes: Option<i64>,
+}
+
+/// Gives a running task more time, counted from its deadline or from now if that has passed,
+/// within the most a task may have.
+async fn extend_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    body: Option<Json<ExtendBody>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::{extended_deadline, EXTEND_MINUTES};
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    let minutes = body
+        .and_then(|Json(b)| b.minutes)
+        .unwrap_or(EXTEND_MINUTES)
+        .clamp(1, 60);
+    let now = chrono::Utc::now();
+    let deadline = extended_deadline(task.budget().deadline(), task.created_at(), minutes, now);
+    match long_task_repo(&state)
+        .set_deadline(&id, Some(deadline))
+        .await
+    {
+        Ok(true) => Json(json!({"id": id, "deadline": deadline})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Pictures a report shows: up to three, from the pages it cites, each served by the pond.
+const REPORT_IMAGES: usize = 3;
+
+async fn report_images_for(markdown: &str) -> Vec<Value> {
+    use pond_core::shared::services::report_images::installed;
+    let Some(images) = installed() else {
+        return Vec::new();
+    };
+    let pages: Vec<String> = pond_core::shared::services::research_report::sources(markdown)
+        .into_iter()
+        .map(|s| s.url)
+        .collect();
+    images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect()
+}
+
+/// Pages one ask may name; a chat answer cites a handful.
+const PICTURE_PAGES: usize = 6;
+
+#[derive(Debug, Deserialize)]
+struct PicturePages {
+    pages: Vec<String>,
+}
+
+/// Pictures for pages a chat answer cites or read, as a report has for its own: kept and served
+/// by the pond, so the phone never reaches the sites. Web addresses only.
+async fn pictures_for_pages(Json(body): Json<PicturePages>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::installed;
+    let pages: Vec<String> = body
+        .pages
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| p.len() <= 2_048 && (p.starts_with("https://") || p.starts_with("http://")))
+        .take(PICTURE_PAGES)
+        .collect();
+    let Some(images) = installed() else {
+        return Json(json!([])).into_response();
+    };
+    let found: Vec<Value> = images
+        .for_pages(&pages, REPORT_IMAGES)
+        .await
+        .into_iter()
+        .map(|image| {
+            let mut view = serde_json::to_value(&image).unwrap_or(Value::Null);
+            view["src"] = json!(format!("/api/v1/report-images/{}", image.key));
+            view
+        })
+        .collect();
+    Json(Value::Array(found)).into_response()
+}
+
+/// A report picture the pond kept, for the screens to draw without reaching the site.
+async fn report_image(Path(key): Path<String>) -> Response<axum::body::Body> {
+    use pond_core::shared::services::report_images::{installed, is_key};
+    if !is_key(&key) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(images) = installed() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match images.read(&key).await {
+        Some((bytes, content_type)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, content_type),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=86400".to_string(),
+                ),
+                (
+                    axum::http::header::HeaderName::from_static("x-content-type-options"),
+                    "nosniff".to_string(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -17627,6 +19180,9 @@ async fn run_recipe(
         session_id: body.session_id,
         message: prompt,
         images: Vec::new(),
+        audio: Vec::new(),
+        documents: Vec::new(),
+        document_texts: Vec::new(),
         voice_mode: body.voice_mode,
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
@@ -17634,6 +19190,7 @@ async fn run_recipe(
         deep_research: false,
         deep_research_answer: None,
         deep_research_for: None,
+        device_place: None,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))
@@ -19302,12 +20859,19 @@ async fn resolve_turn_identity(
                 .claim_session_identity(session_id, &proposed)
                 .await
             {
-                tracing::warn!(
-                    error = %e,
-                    session_id,
-                    "could not record which household member this turn's device belongs to; \
-                     batch extraction will read this conversation as unattributed"
-                );
+                if matches!(e, SessionStorageError::SessionNotFound(_)) {
+                    tracing::debug!(
+                        session_id,
+                        "session does not exist in storage; skipping identity claim"
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        session_id,
+                        "could not record which household member this turn's device belongs to; \
+                         batch extraction will read this conversation as unattributed"
+                    );
+                }
             }
         }
         DeviceRung::NoDevice | DeviceRung::Unattributed => {}
@@ -20063,7 +21627,7 @@ async fn profile_context_for(
     };
 
     let profile = state.profile_repo.get(&profile_id).await.ok().flatten()?;
-    let mut context = particulars_for(attributed, &profile.preferences);
+    let mut context = particulars_for(attributed, &profile.display_name, &profile.preferences);
     // A member's notes are theirs; in a household of one, an unattributed turn can only be them.
     let notes_are_theirs = attributed
         || crate::member_notes::sole_member(state).await.as_deref() == Some(profile_id.as_str());
@@ -20105,20 +21669,19 @@ async fn interview_turn_for(
     }
 }
 
-/// The pure half of [`profile_context_for`]: what the prompt may state from these preferences.
+/// The pure half of [`profile_context_for`]: what the prompt may state about this member.
 /// Keys are the contract with `PATCH /api/v1/profiles/{id}`; a camelCase key is ignored.
 fn particulars_for(
     attributed: bool,
+    display_name: &str,
     prefs: &std::collections::HashMap<String, String>,
 ) -> ProfileContext {
     if attributed {
-        return ProfileContext::of_member(prefs, Vec::new());
+        return ProfileContext::of_member(display_name, prefs, Vec::new());
     }
     ProfileContext {
-        // Owner-scoped: stated only when the turn is attributed to this person.
-        preferred_name: attributed
-            .then(|| prefs.get("preferred_name").cloned())
-            .flatten(),
+        // Owner-scoped: never stated on a turn that is not this person's own.
+        speaker_name: None,
         birthday: attributed.then(|| prefs.get("birthday").cloned()).flatten(),
         language: attributed.then(|| prefs.get("language").cloned()).flatten(),
         // Household-safe: an accommodation, not a disclosure.
@@ -21459,6 +23022,51 @@ mod tests {
         );
     }
 
+    /// "Let me check the weather" is the model at work: the answer is what follows the last call.
+    #[test]
+    fn text_before_a_tool_call_leaves_the_answer_as_working_notes() {
+        let mut turn = accumulator();
+        let narration = frame_of(turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        }));
+        let shown = narration["content"]
+            .as_str()
+            .expect("content is a string")
+            .to_string();
+
+        let call = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_weather".to_string(),
+            id: "call-1".to_string(),
+            input: None,
+        }));
+        assert_eq!(
+            call["working_notes"], shown,
+            "the client strips exactly what it was shown, so the notes must be that text"
+        );
+        assert!(turn.full_text.is_empty(), "notes are not the answer");
+
+        let second = frame_of(turn.absorb(AgentStreamEvent::ToolCall {
+            tool: "giap-weather__get_forecast".to_string(),
+            id: "call-2".to_string(),
+            input: None,
+        }));
+        assert!(
+            second.get("working_notes").is_none(),
+            "a call with no text before it carries no notes, not an empty string"
+        );
+
+        turn.absorb(AgentStreamEvent::Text {
+            content: SENTENCE.to_string(),
+        });
+        let tail = turn.thought.flush();
+        assert_eq!(
+            format!("{}{tail}", turn.full_text),
+            SENTENCE,
+            "the answer is the text after the last call, whole: none of the held-back \
+             narration may lead it"
+        );
+    }
+
     /// `TurnMetrics` timing is gathered only here, and its consumers have no test in this crate.
     #[test]
     fn a_tool_call_and_its_result_time_the_turn() {
@@ -21800,8 +23408,12 @@ mod tests {
 
     #[test]
     fn an_owner_scoped_turn_states_the_members_particulars() {
-        let ctx = particulars_for(true, &full_prefs());
-        assert_eq!(ctx.preferred_name.as_deref(), Some("Cap"));
+        let ctx = particulars_for(true, "Captain Amina", &full_prefs());
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Cap"),
+            "a preferred name is what the member asked to be called, so it wins"
+        );
         assert_eq!(ctx.birthday.as_deref(), Some("1990-04-02"));
         assert_eq!(ctx.language.as_deref(), Some("sw"));
         assert!(ctx.atypical_speech);
@@ -21810,10 +23422,10 @@ mod tests {
     /// `Household` uses `primary_profile_id`, which may not be the person speaking.
     #[test]
     fn a_household_turn_states_no_ones_particulars() {
-        let ctx = particulars_for(false, &full_prefs());
+        let ctx = particulars_for(false, "Jerry Ochieng", &full_prefs());
         assert_eq!(
-            ctx.preferred_name, None,
-            "an unattributed turn stated the primary member's preferred name"
+            ctx.speaker_name, None,
+            "an unattributed turn named the primary member as the speaker"
         );
         assert_eq!(
             ctx.birthday, None,
@@ -21831,7 +23443,7 @@ mod tests {
     #[test]
     fn the_speech_accommodation_survives_an_unattributed_turn() {
         assert!(
-            particulars_for(false, &full_prefs()).atypical_speech,
+            particulars_for(false, "Jerry Ochieng", &full_prefs()).atypical_speech,
             "the speech accommodation was dropped for unattributed turns; it is not a \
              disclosure and dropping it makes the pond less patient with the household it was \
              configured for"
@@ -21840,12 +23452,47 @@ mod tests {
 
     /// Absent, not `Some("")`: the prompt builder would render "The user's birthday is ."
     #[test]
-    fn a_profile_with_no_preferences_yields_nothing_to_state() {
-        let ctx = particulars_for(true, &std::collections::HashMap::new());
-        assert_eq!(ctx.preferred_name, None);
+    fn a_profile_with_no_preferences_yields_nothing_to_state_but_the_name() {
+        let ctx = particulars_for(true, "Amina", &std::collections::HashMap::new());
+        assert_eq!(ctx.speaker_name.as_deref(), Some("Amina"));
         assert_eq!(ctx.birthday, None);
         assert_eq!(ctx.language, None);
         assert!(!ctx.atypical_speech);
+    }
+
+    /// The owner's phone on the Orin, 2026-11-02: linked, `preferences` `{}`, and "who am I"
+    /// answered "nothing is stored about you", because the speaker's name came only from
+    /// `preferred_name`. Nothing else named the speaker; `{{user_name}}` names whose pond it is.
+    #[test]
+    fn a_linked_member_with_no_preferred_name_is_named_by_their_display_name() {
+        let ctx = particulars_for(
+            true,
+            "Emmanuel Charles Oyugi",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(
+            ctx.speaker_name.as_deref(),
+            Some("Emmanuel Charles Oyugi"),
+            "a member who never set a preferred name reaches the model unnamed again"
+        );
+    }
+
+    /// A blank preferred name is a cleared field, not a name: the display name still applies.
+    #[test]
+    fn a_blank_preferred_name_falls_back_to_the_display_name() {
+        let blank: std::collections::HashMap<String, String> =
+            [("preferred_name".to_string(), "  ".to_string())].into();
+        assert_eq!(
+            particulars_for(true, "Amina", &blank)
+                .speaker_name
+                .as_deref(),
+            Some("Amina")
+        );
+        assert_eq!(
+            particulars_for(true, " ", &blank).speaker_name,
+            None,
+            "a member with no usable name rendered a speaker line with an empty name"
+        );
     }
 
     /// The desktop's `preferredName`/`atypicalSpeech` spellings, if stored, are silently ignored.
@@ -21856,9 +23503,10 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect();
-        let ctx = particulars_for(true, &camel);
+        let ctx = particulars_for(true, "Amina", &camel);
         assert_eq!(
-            ctx.preferred_name, None,
+            ctx.speaker_name.as_deref(),
+            Some("Amina"),
             "camelCase keys are now read, so the two spellings have silently become \
              equivalent and the writer contract is no longer pinned by anything"
         );
@@ -21878,6 +23526,7 @@ mod tests {
             "developer",
             "matter",
             "home",
+            "vision",
         ];
 
         let mut mapped = 0usize;
@@ -22111,6 +23760,68 @@ mod tests {
             other.assistant_name = "Heron".into();
             other.mic_enabled = !current.mic_enabled;
             assert!(!save_needs_prewarm(&current, &other));
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_preview_tests {
+    use super::session_preview;
+
+    /// The Jetson's "System information" card read "**Operating System and Hardware:** * **OS:**
+    /// Ubuntu 22.04 * **Kernel:** ..." on both the dashboard and the phone.
+    #[test]
+    fn a_markdown_reply_previews_as_plain_words() {
+        let reply = "Here is the current system information for this pond:\n\n\
+                     ### Operating System and Hardware\n\
+                     * **OS:** Ubuntu 22.04\n\
+                     * **Kernel:** 5.15.148-tegra\n\
+                     ---\n\
+                     See [the docs](https://example.org) for more.";
+        assert_eq!(
+            session_preview(reply),
+            "Here is the current system information for this pond: Operating System and \
+             Hardware OS: Ubuntu 22.04 Kernel: 5.15.148-tegra See the docs for more."
+        );
+    }
+
+    #[test]
+    fn a_plain_reply_is_unchanged_and_a_long_one_is_capped() {
+        assert_eq!(session_preview("It will be sunny."), "It will be sunny.");
+        let long = "word ".repeat(100);
+        let preview = session_preview(&long);
+        assert!(
+            preview.ends_with('…') && preview.chars().count() <= 241,
+            "{preview}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod weather_icon_tests {
+    use super::weather_icon_key;
+
+    #[test]
+    fn every_wmo_description_gets_the_icon_of_its_own_condition() {
+        for (description, icon) in [
+            ("Clear sky", "sun"),
+            ("Mainly clear", "sun"),
+            ("Partly cloudy", "cloudSun"),
+            ("Overcast", "cloud"),
+            ("Fog", "fog"),
+            ("Light drizzle", "drizzle"),
+            ("Freezing drizzle", "drizzle"),
+            ("Moderate rain", "rain"),
+            ("Freezing rain", "rain"),
+            ("Violent showers", "rain"),
+            ("Slight snow", "snow"),
+            ("Snow grains", "snow"),
+            ("Snow showers", "snow"),
+            ("Thunderstorm", "storm"),
+            ("Thunderstorm with hail", "storm"),
+            ("Unknown", "cloud"),
+        ] {
+            assert_eq!(weather_icon_key(description), icon, "{description}");
         }
     }
 }

@@ -263,6 +263,7 @@ async fn make_app_with_provider(
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -301,7 +302,9 @@ async fn make_app_with_provider(
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     (
         build_router(state, std::path::PathBuf::from("pond-desktop/dist")),
@@ -623,6 +626,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -661,7 +665,9 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 
@@ -757,6 +763,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         push_token_repo: None,
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
+        notification_history: None,
         notification_sender: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
@@ -795,7 +802,9 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
     let app = build_router(state, std::path::PathBuf::from("pond-desktop/dist"));
 

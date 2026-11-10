@@ -10,6 +10,8 @@ fixture is how they are set: labelled cases, scored by the pond's own providers 
   including across Swahili and English), `related` (the same subject, a different fact) or `fresh`.
   Fictional, in English, Swahili and Sheng.
 - `analyse.py`: tool-selection recall and surplus per floor, and dedup drops per band.
+- `closest.py`: the `closest_memory` floor, from the P0 harness's saved query and memory vectors
+  (`scripts/jetson/embed-p0`), which carry the same query and document prompts as the pond.
 
 ```text
 cargo run --release -p pond-server --features local-inference --example embed-scores -- \
@@ -53,3 +55,48 @@ on both scales. `reinforce` is 0.97.
 **What this does not show.** 66 needed groups and 34 pairs are few, and the cases are written, not
 taken from a household. The tool-selection floor matters only under `tool_selection_mode =
 "relevant"`; the default keeps every group.
+
+**Since this run** `giap-knowledge` is a core group (2026-11-02, `small-model-tools.md` D1), so
+`embed-scores` no longer scores it and `analyse.py` leaves its seven needs out: a core group is
+loaded whatever the floor. The figures above were measured with it scored and were not re-run.
+
+## 2026-11-06, the closest memory, EmbeddingGemma 2 and MiniLM
+
+A turn keeps five memories, ranked `0.5 similarity + 0.3 importance + 0.2 recency` with a 14-day
+half-life. On the nano, the owner asked "Which phone do I use?". The answer was a 17-day-old identity
+memory, which ranked 44th of 49 on importance and recency. Five memories written the day before
+filled the turn, and E4B said it did not know. `recall_memories`, which ranks on similarity alone,
+returned that memory first.
+
+EmbeddingGemma 2's cosines are too narrow for the blend to recover. On P0's 90 questions (the
+memory-reachability facts, 403 household items and the Swahili and Sheng set, at the pond's 256
+dimensions), the answer scores a median 0.79. A memory that is not the answer scores 0.61, and the
+closest non-answer per question 0.76. No floor tells an answer from its neighbours, but rank does:
+the closest memory is an answer for 60% of questions (MiniLM, 44%). So a turn gives its closest
+memory a seat when that memory clears a floor (`select_for_turn`). The floor is set where the closest
+memory stays on the question's subject in another household's store, where nothing answers. Above
+it, "Is the greenhouse finished?" finds the tomato blight. Below it, "when is the dentist" finds the
+dog's vet visit, and "Is the water tank leaking?" a preference about the network.
+
+```text
+python3 fixtures/embedding-floors/closest.py ~/p0-embed
+```
+
+| Model | Floor | Seat holds an answer | Seat holds another memory | Seat fires, nothing in the store | Recall@5, answer 17 days old among day-old memories |
+|---|---|---|---|---|---|
+| EmbeddingGemma 2 | 0.77 | 49% | 16% | 16% | 0.00 today, 0.49 with the seat |
+| all-MiniLM-L6-v2 | 0.55 | 22% | 18% | 7% | 0.21 today, 0.30 with the seat |
+
+"Another memory" is mostly the same subject, often a restatement of the answer, because P0 labels
+one answer per fact. "Nothing in the store" puts each set's questions to the other two stores. Those
+households share subjects (rent, school fees, a plumber), so some of those firings are answers too.
+The seat displaces the blend's fifth memory and never adds a sixth. An unmeasured model gets no seat.
+
+**On the nano's store.** The same day, on two copies of the live store, the live build left the
+iPhone memory out and E4B said it did not know, twice. With the seat, that memory scored 0.795
+against the question, took the seat, and E4B answered "You use an iPhone.", twice. Two questions with
+no answer in the store ("Which car do I drive?", a favourite football team) found nothing closer than
+0.61 and 0.62, so no seat was given and E4B said it did not know.
+
+**What this does not show.** The table is P0's vectors (Orin, GPU, Q8_0); the live store gave one
+answered question and two unanswered ones, not a rate.

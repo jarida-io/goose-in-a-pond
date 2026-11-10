@@ -259,6 +259,42 @@ async fn a_members_edit_is_kept_out_of_recipes_compiles_and_resets() {
     panic!("the reset never recompiled the shipped voice shape");
 }
 
+/// Shipped, a spoken turn thinks as a typed one does (`auto`); a member may turn it on or off.
+#[tokio::test]
+async fn the_voice_agent_thinks_as_the_household_chooses() {
+    let pond = pond(true).await;
+    let (_, body) = send(&pond, Method::GET, "/api/v1/agents/voice", None).await;
+    assert_eq!(body["thinking"], "auto");
+    let (status, body) = send(
+        &pond,
+        Method::PUT,
+        "/api/v1/agents/voice",
+        Some(json!({"thinking": "on"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["thinking"], "on");
+    assert_eq!(body["edited"], true);
+    let (status, body) = send(
+        &pond,
+        Method::PUT,
+        "/api/v1/agents/voice",
+        Some(json!({"thinking": "sometimes"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["errors"][0]["path"], "thinking");
+    let (_, body) = send(
+        &pond,
+        Method::PUT,
+        "/api/v1/agents/voice",
+        Some(json!({"thinking": null})),
+    )
+    .await;
+    assert_eq!(body["thinking"], "auto");
+    assert_eq!(body["edited"], false);
+}
+
 #[tokio::test]
 async fn a_bad_edit_names_every_field_and_changes_nothing() {
     let pond = pond(true).await;

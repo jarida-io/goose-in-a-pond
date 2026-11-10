@@ -16,7 +16,7 @@ source "$(dirname "$0")/lib/common.sh"
 require_jetson
 sudo_prime
 
-APT_PKGS=(build-essential ninja-build ccache libcurl4-openssl-dev cmake git pkg-config libssl-dev python3-pip)
+APT_PKGS=(build-essential ninja-build ccache libcurl4-openssl-dev cmake git pkg-config libssl-dev python3-pip lld)
 
 hdr "APT build dependencies"
 wait_for_apt_lock 900 || die "Could not acquire apt lock (another upgrade running?)."

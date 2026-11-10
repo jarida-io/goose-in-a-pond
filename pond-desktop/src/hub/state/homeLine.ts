@@ -86,11 +86,11 @@ function skyLine(weather: WeatherData, hour: number, user: string): string {
   const wet = /rain|drizzle|shower|storm/.test(cond);
   const clear = /clear|sun/.test(cond);
 
-  if (hour < 6) return `It is ${weather.temp}° out, ${user}. The house is quiet.`;
-  if (wet) return `${weather.cond} out, and ${weather.temp}°.`;
-  if (clear && hour < 12) return `Clear and ${weather.temp}° this morning.`;
-  if (clear) return `Clear and ${weather.temp}° out.`;
-  return `${weather.cond}, ${weather.temp}° out.`;
+  if (hour < 6) return `It is ${weather.temp}°C out, ${user}. The house is quiet.`;
+  if (wet) return `${weather.cond} out, and ${weather.temp}°C.`;
+  if (clear && hour < 12) return `Clear and ${weather.temp}°C this morning.`;
+  if (clear) return `Clear and ${weather.temp}°C out.`;
+  return `${weather.cond}, ${weather.temp}°C out.`;
 }
 
 /** The fallback when the pond knows nothing: a greeting claims nothing about the house. */

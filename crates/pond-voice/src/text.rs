@@ -123,11 +123,6 @@ pub fn estimate_tokens(text: &str) -> usize {
     (text.chars().count() * 11).div_ceil(10)
 }
 
-/// The first unit of a reply is cut here when no mark has come by [`FIRST_UNIT_LOOKAHEAD_WORDS`]:
-/// synthesis takes about real time, so the first sound waits on the length of the first unit.
-pub const FIRST_UNIT_MAX_WORDS: usize = 6;
-/// How far a first unit may run while waiting for a mark to end on, before the cut above is used.
-pub const FIRST_UNIT_LOOKAHEAD_WORDS: usize = 10;
 /// A unit is cut before it passes this many estimated tokens; Kokoro is most even at 100-200.
 pub const UNIT_TOKEN_BUDGET: usize = 200;
 /// A clause mark ends a unit only after this many words, so "Sure," stays with its sentence.
@@ -329,7 +324,6 @@ fn next_cut(text: &str, first: bool, pace: Pace, settled: bool) -> Option<Cut> {
     let at_end = settled;
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let (mut words, mut in_word) = (0usize, false);
-    let mut sixth_word_end = None;
     let mut line_start = 0usize;
     let mut last_clause: Option<usize> = None;
     let mut last_space: Option<usize> = None;
@@ -340,24 +334,12 @@ fn next_cut(text: &str, first: bool, pace: Pace, settled: bool) -> Option<Cut> {
             if in_word {
                 in_word = false;
                 words += 1;
-                if words == FIRST_UNIT_MAX_WORDS {
-                    sixth_word_end = Some(i);
-                }
             }
             last_space = Some(i);
         } else {
             in_word = true;
         }
 
-        if first && words >= FIRST_UNIT_LOOKAHEAD_WORDS {
-            if let Some(cap) = sixth_word_end {
-                return Some(Cut {
-                    end: cap,
-                    resume: cap,
-                    boundary: Boundary::Word,
-                });
-            }
-        }
         if estimate_tokens(&text[..i]) > UNIT_TOKEN_BUDGET {
             let (end, boundary) = match last_clause {
                 Some(end) => (end, Boundary::Clause),
@@ -516,6 +498,7 @@ pub fn strip_markup_for_speech(text: &str) -> String {
     for tag in SCAFFOLD_TAGS {
         s = drop_closed_blocks(&s, &format!("<{tag}>"), &format!("</{tag}>"));
     }
+    s = drop_snake_case_blocks(&s);
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -527,6 +510,36 @@ pub fn strip_markup_for_speech(text: &str) -> String {
         out.push(chars[i]);
         i += 1;
     }
+    out
+}
+
+/// Closed `<snake_case>` blocks with their bodies: models invent them for tool syntax and turn
+/// records, and no HTML or markdown tag has an underscore.
+fn drop_snake_case_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(i) = rest.find('<') {
+        let after = &rest[i + 1..];
+        if let Some(end) = after.find('>') {
+            let name = &after[..end];
+            let snake = name.contains('_')
+                && name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if snake {
+                let close = format!("</{name}>");
+                if let Some(len) = after[end + 1..].find(&close) {
+                    out.push_str(&rest[..i]);
+                    rest = &after[end + 1 + len + close.len()..];
+                    continue 'scan;
+                }
+            }
+        }
+        out.push_str(&rest[..=i]);
+        rest = after;
+    }
+    out.push_str(rest);
     out
 }
 
@@ -1772,19 +1785,18 @@ mod tests {
     }
 
     #[test]
-    fn the_first_unit_waits_up_to_ten_words_for_a_mark() {
+    fn the_first_unit_keeps_whole_sentences_without_midphrase_cuts() {
         let reply =
             "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon. Then";
         let units = stream(reply, Pace::UNHURRIED);
         assert_eq!(
             texts(&units),
             [
-                "The weather in Nairobi today is",
-                "expected to be warm and mostly sunny all afternoon.",
+                "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon.",
                 "Then"
             ]
         );
-        assert_eq!(units[0].boundary, Boundary::Word);
+        assert_eq!(units[0].boundary, Boundary::Sentence);
         assert_eq!(
             texts(&stream(
                 "Here is a simple chapati recipe for about eight pieces. More.",
@@ -1794,7 +1806,7 @@ mod tests {
                 "Here is a simple chapati recipe for about eight pieces.",
                 "More."
             ],
-            "a mark by the tenth word ends the first unit instead of the six-word cut"
+            "a mark ends the first unit naturally"
         );
     }
 
@@ -1968,15 +1980,10 @@ mod tests {
     #[test]
     fn wake_triggers_put_the_phrase_first_and_reduce_calibrated_sentences_to_the_phrase() {
         let t = wake_triggers("Hey Goose", &["Hey goos, good morning".to_string()]);
-        assert_eq!(t[0], "hey goose");
-        assert!(t.contains(&"hey goos".to_string()), "{t:?}");
-        assert!(!t.iter().any(|v| v.contains("morning")), "{t:?}");
-        assert!(
-            t.contains(&"hey gus".to_string()),
-            "built-in mishearings ride along"
-        );
-        let custom = wake_triggers("Jarvis", &[]);
-        assert_eq!(custom, vec!["jarvis"]);
+        assert_eq!(t, vec!["hey goose", "goose"]);
+        let custom = wake_triggers("Jarvis", &["Hey Jarv, good morning".to_string()]);
+        assert_eq!(custom[0], "jarvis");
+        assert!(custom.contains(&"jarv".to_string()), "{custom:?}");
     }
 
     #[test]
@@ -1984,6 +1991,7 @@ mod tests {
         let t = wake_triggers("goose", &[]);
         assert!(heard_wake("Goose, what's the time?", &t));
         assert!(heard_wake("um... hey Goose!", &t));
+        assert!(!heard_wake("I saw a goose fly past", &t));
         assert!(!heard_wake("a mongoose ran past", &t));
         assert!(!heard_wake("", &t));
     }
@@ -2003,6 +2011,20 @@ mod tests {
             strip_markdown_for_speech("The **quick** fox"),
             "The quick fox"
         );
+    }
+
+    #[test]
+    fn echo_transcript_matches_speech() {
+        let said = "The forecast in Nairobi today calls for warm weather and mostly sunny skies.";
+        assert!(is_echo_transcript("warm weather", said));
+        assert!(is_echo_transcript("mostly sunny skies", said));
+        assert!(is_echo_transcript(
+            "calls for warm weather and sunny skies",
+            said
+        ));
+        assert!(!is_echo_transcript("what is the time", said));
+        assert!(!is_echo_transcript("hey goose", said));
+        assert!(!is_echo_transcript("weather", said));
     }
 
     #[test]
@@ -2105,6 +2127,26 @@ mod tests {
         );
         let echoed = "<user-message>\nWhat is a crocodile?\n</user-message>\nA large reptile.";
         assert_eq!(strip_markdown_for_speech(echoed), "A large reptile.");
+    }
+
+    #[test]
+    fn an_invented_snake_case_block_is_never_spoken() {
+        assert_eq!(
+            strip_markdown_for_speech(
+                "<search_web>What is the story of how the Great Rift Valley formed</search_web>"
+            ),
+            ""
+        );
+        assert_eq!(
+            strip_markdown_for_speech(
+                "<turn_plan>Search, then answer.</turn_plan> It formed slowly."
+            ),
+            "It formed slowly."
+        );
+        assert_eq!(
+            strip_markup_for_speech("Use snake_case names."),
+            "Use snake_case names."
+        );
     }
 
     #[test]
@@ -2473,29 +2515,54 @@ pub fn contains_trigger(haystack: &str, trigger: &str) -> bool {
     find_trigger_words(haystack, trigger).is_some()
 }
 
+/// How many of `heard`'s words `said` holds in the same order, gaps allowed, as a share of `heard`.
+pub fn in_order_share(heard: &[&str], said: &[&str]) -> f32 {
+    if heard.is_empty() {
+        return 0.0;
+    }
+    let mut row = vec![0usize; heard.len() + 1];
+    for word in said {
+        let mut diagonal = 0;
+        for j in 1..=heard.len() {
+            let above = row[j];
+            row[j] = if heard[j - 1] == *word {
+                diagonal + 1
+            } else {
+                row[j].max(row[j - 1])
+            };
+            diagonal = above;
+        }
+    }
+    row[heard.len()] as f32 / heard.len() as f32
+}
+
+/// Whether `heard` is likely an echo of what the pond `said`.
+pub fn is_echo_transcript(heard: &str, said: &str) -> bool {
+    let norm_heard = normalize_transcript(heard);
+    let norm_said = normalize_transcript(said);
+    let heard_words: Vec<&str> = norm_heard.split_whitespace().collect();
+    let said_words: Vec<&str> = norm_said.split_whitespace().collect();
+    if heard_words.len() < 2 || said_words.is_empty() {
+        return false;
+    }
+    in_order_share(&heard_words, &said_words) >= 0.6
+}
+
 /// Common Whisper mishearings of the shipped wake phrases (worst on the tiny and base models).
 fn builtin_wake_variants(wake_word: &str) -> &'static [&'static str] {
     match wake_word {
-        "goose" => &[
-            "goose",
-            "goos",
-            "gooes",
-            "gus",
-            "gooch",
-            "hey goose",
-            "a goose",
-            "the goose",
-        ],
-        "hey goose" => &["hey goose", "hey goos", "hey gus", "a goose", "hey gooch"],
+        "goose" | "hey goose" => &["hey goose", "goose"],
         _ => &[],
     }
 }
 
-/// Everything a transcript may contain for the wake phrase to count as said, normalized, the phrase
-/// itself first: the phrase, each calibrated take reduced to the phrase as heard (older
-/// calibrations stored whole sentences), and Whisper's usual mishearings of the shipped phrases.
+/// Everything a transcript may contain for the wake phrase to count as said, normalized.
+/// Shipped phrases stay strictly ["hey goose", "goose"].
 pub fn wake_triggers(wake_word: &str, calibrated: &[String]) -> Vec<String> {
     let wake_word = normalize_transcript(wake_word);
+    if matches!(wake_word.as_str(), "hey goose" | "goose") {
+        return vec!["hey goose".to_string(), "goose".to_string()];
+    }
     let mut triggers = vec![wake_word.clone()];
     let heard = calibrated
         .iter()
@@ -2511,15 +2578,19 @@ pub fn wake_triggers(wake_word: &str, calibrated: &[String]) -> Vec<String> {
     triggers
 }
 
-/// Whether `transcript` contains any of `triggers` as whole words, so "goose" never fires on
-/// "mongoose".
-pub fn heard_wake(transcript: &str, triggers: &[String]) -> bool {
-    let heard = normalize_transcript(transcript);
-    triggers.iter().any(|t| contains_trigger(&heard, t))
-}
-
 /// Filler that may precede a leading wake word; a content word here could erase a command.
 const RUN_UP_WORDS: &[&str] = &["um", "uh", "er", "hey", "hi", "hello", "ok", "okay", "so"];
+
+/// Whether `transcript` opens with any of `triggers` as whole words, preceded only by filler.
+pub fn heard_wake(transcript: &str, triggers: &[String]) -> bool {
+    let heard = normalize_transcript(transcript);
+    let words: Vec<&str> = heard.split_whitespace().collect();
+    triggers.iter().any(|t| {
+        find_trigger_words(&heard, t)
+            .map(|(start, _)| words[..start].iter().all(|w| RUN_UP_WORDS.contains(w)))
+            .unwrap_or(false)
+    })
+}
 
 /// Strip one leading wake word, plus any filler before it; the rest is returned as heard.
 pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String {
@@ -2565,6 +2636,32 @@ pub fn strip_leading_wake_word(transcript: &str, triggers: &[String]) -> String 
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim()
         .to_string()
+}
+
+/// Whether `transcript` holds nothing but the wake phrase and filler, however many times over:
+/// Whisper repeats a short wake ("Hey goose. Hey goose. Hey goose.") on a clip with no request.
+pub fn only_wake_words(transcript: &str, triggers: &[String]) -> bool {
+    let mut rest = transcript.trim().to_string();
+    while heard_wake(&rest, triggers) {
+        let next = strip_leading_wake_word(&rest, triggers);
+        if next.len() >= rest.len() {
+            break;
+        }
+        rest = next;
+    }
+    normalize_transcript(&rest)
+        .split_whitespace()
+        .all(|w| RUN_UP_WORDS.contains(&w))
+}
+
+/// Whether a reply ends by asking the person something. Only then is what the room says next
+/// taken for an answer without the wake word; otherwise it is talk not meant for the pond.
+pub fn asks_for_an_answer(reply: &str) -> bool {
+    reply
+        .trim_end_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '*' | '_' | '”' | '’' | '»')
+        })
+        .ends_with(['?', '？'])
 }
 
 /// The sentences the calibration screen asks for, each containing `phrase`.
@@ -2824,6 +2921,31 @@ mod wake_word_tests {
     }
 
     #[test]
+    fn a_wake_whisper_repeated_is_still_only_the_wake() {
+        let t = triggers(&["hey goose", "goose"]);
+        assert!(only_wake_words("Hey goose. Hey goose. Hey goose.", &t));
+        assert!(only_wake_words("Hey goose. Goose. Hey", &t));
+        assert!(only_wake_words("", &t));
+        assert!(!only_wake_words("Hey goose. What time is it?", &t));
+        assert!(
+            !only_wake_words("goose eggs for breakfast", &t),
+            "a request that opens with the word is a request"
+        );
+    }
+
+    #[test]
+    fn only_a_reply_that_asks_waits_for_an_answer() {
+        assert!(asks_for_an_answer("Which room do you mean?"));
+        assert!(asks_for_an_answer("Shall I set it for **seven**?** \n"));
+        assert!(asks_for_an_answer(
+            "Do you want the long version (it takes a minute)?)"
+        ));
+        assert!(!asks_for_an_answer("It is sunny and 24 degrees."));
+        assert!(!asks_for_an_answer("Did you know? Geese mate for life."));
+        assert!(!asks_for_an_answer(""));
+    }
+
+    #[test]
     fn a_clip_holding_only_the_wake_word_yields_no_command() {
         let t = triggers(&["goose"]);
         assert_eq!(strip_leading_wake_word("Goose.", &t), "");
@@ -2975,7 +3097,9 @@ pub fn strip_whisper_artifacts(text: &str) -> String {
 
     // Reject common Whisper hallucinations on silence / noise.
     let lower = cleaned.to_lowercase();
+    let trimmed_lower = lower.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
     const EXACT_HALLUCINATIONS: &[&str] = &[
+        "",
         ".",
         "..",
         "...",
@@ -2983,16 +3107,20 @@ pub fn strip_whisper_artifacts(text: &str) -> String {
         "!",
         "?",
         "thank you",
+        "thank you very much",
         "thanks for watching",
         "thanks for listening",
         "thanks",
         "you",
         "bye",
         "bye bye",
+        "goodbye",
         "okay",
         "the end",
         "subtitles by",
         "subtitle",
+        "until next time",
+        "see you next time",
         "so",
         "um",
         "uh",
@@ -3005,20 +3133,61 @@ pub fn strip_whisper_artifacts(text: &str) -> String {
         "please subscribe",
         "like and subscribe",
     ];
-    if EXACT_HALLUCINATIONS.iter().any(|h| lower == *h) {
+    if EXACT_HALLUCINATIONS.iter().any(|h| trimmed_lower == *h) {
         return String::new();
     }
 
+    // Strip known hallucinated trailing tails on a real utterance.
+    const TRAILING_TAILS: &[&str] = &[
+        "until next time",
+        "thanks for watching",
+        "thank you for watching",
+        "please subscribe",
+        "like and subscribe",
+    ];
+    let mut result = cleaned;
+    for tail in TRAILING_TAILS {
+        let tail_with_space = format!(" {tail}");
+        let lower_res = result.to_lowercase();
+        let stripped_lower =
+            lower_res.trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
+        if let Some(pos) = stripped_lower.rfind(&tail_with_space) {
+            result = result[..pos].trim_end_matches(|c: char| c.is_whitespace());
+            break;
+        }
+    }
+
     // Reject very short transcripts (1-2 chars) — almost always noise artifacts.
-    if cleaned.len() <= 2 {
+    if result.len() <= 2 {
         return String::new();
     }
 
     // Reject if the transcript is just the same word/syllable repeated.
-    let words: Vec<&str> = lower.split_whitespace().collect();
+    let lower_result = result.to_lowercase();
+    let words: Vec<&str> = lower_result.split_whitespace().collect();
     if words.len() >= 2 && words.iter().all(|w| *w == words[0]) {
         return String::new();
     }
 
-    cleaned.to_string()
+    result.to_string()
+}
+
+#[cfg(test)]
+mod artifact_tests {
+    use super::*;
+
+    #[test]
+    fn whisper_artifacts_strip_hallucinations_and_tails() {
+        assert_eq!(strip_whisper_artifacts("Thank you."), "");
+        assert_eq!(strip_whisper_artifacts("  Thanks for watching!  "), "");
+        assert_eq!(strip_whisper_artifacts("Until next time."), "");
+        assert_eq!(
+            strip_whisper_artifacts("Hey goose, what's on my camera? Until next time."),
+            "Hey goose, what's on my camera?"
+        );
+        assert_eq!(
+            strip_whisper_artifacts("Turn off the kitchen light. Thanks for watching!"),
+            "Turn off the kitchen light."
+        );
+    }
 }

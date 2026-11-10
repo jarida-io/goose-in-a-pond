@@ -39,6 +39,8 @@ const REPORT = {
   sections: 3,
   sources: [{ title: "KRA", url: "https://www.kra.go.ke/" }],
   calendar_events: 2,
+  options: [],
+  images: [],
 };
 
 describe("getLongTaskReport()", () => {
@@ -68,6 +70,8 @@ describe("getLongTaskReport()", () => {
       sections: 0,
       sources: [{ title: "ok", url: "https://a.co" }],
       calendar_events: 0,
+      options: [],
+      images: [],
     });
   });
 

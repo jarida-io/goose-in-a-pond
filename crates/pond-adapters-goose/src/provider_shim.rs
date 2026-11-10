@@ -8,9 +8,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use goose::conversation::message::Message;
 use goose::providers::base::{MessageStream, Provider};
+use goose::providers::local_inference::load_error::ModelLoadError;
 use goose_providers::errors::ProviderError;
 use goose_providers::model::ModelConfig;
 use pond_core::models::domain::gpu_gate::{gpu_gate, ComputeLease};
+use pond_core::models::domain::inference_bus::{
+    current_hold, hold_for_call, CallHold, InferenceClaim, InferenceHold,
+};
 use rmcp::model::Tool;
 
 /// Found in Goose's default prompt and fallback; on the chat path it means GIAP's was lost.
@@ -38,6 +42,13 @@ pub struct SessionControls {
     /// Goose answers a failed call with prose in the reply ("Ran into this error: ..."), so this
     /// is the only structured sign that a turn ended on an engine failure rather than a reply.
     provider_failure: Mutex<Option<String>>,
+    /// How many of this session's calls failed because the model ran out of GPU memory. Goose
+    /// rewrites the typed error into "Ran into this error" prose; the adapter compares this across
+    /// a turn to replace that prose with a line the household can act on.
+    gpu_memory_failures: AtomicU32,
+    /// What this session's engine calls run under on the inference bus: its turn's floor, or the
+    /// run it is a helper of. `None` makes each call claim the bus for itself.
+    inference_hold: Mutex<Option<InferenceHold>>,
 }
 
 // `pictures_readable` values. Zero, the default, is "no turn has said", which promotes.
@@ -45,6 +56,20 @@ const PICTURES_READABLE: u8 = 1;
 const PICTURES_UNREADABLE: u8 = 2;
 
 impl SessionControls {
+    pub fn set_inference_hold(&self, hold: Option<InferenceHold>) {
+        *self
+            .inference_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hold;
+    }
+
+    pub fn inference_hold(&self) -> Option<InferenceHold> {
+        self.inference_hold
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn set_turn_appendix(&self, appendix: Option<String>) {
         *self.turn_appendix.lock().unwrap_or_else(|e| e.into_inner()) = appendix;
     }
@@ -135,6 +160,16 @@ impl SessionControls {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Record that the model could not load or start for lack of GPU memory.
+    pub fn note_gpu_memory_failure(&self) {
+        self.gpu_memory_failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Out-of-GPU-memory count; compared across a turn like [`Self::image_failures`].
+    pub fn gpu_memory_failures(&self) -> u32 {
+        self.gpu_memory_failures.load(Ordering::SeqCst)
     }
 }
 
@@ -312,10 +347,7 @@ fn enforce_system(
     appendices: &[&Option<String>],
 ) -> Option<String> {
     let prefix = prefix.as_ref()?;
-    // Match OUR prompt ignoring trailing whitespace: goose appends after fewer newlines than the
-    // prefix ends with, so a plain `starts_with(prefix)` misses and ~28 KB leaks through.
-    let anchor = prefix.trim_end();
-    let giap_owned = !anchor.is_empty() && incoming.starts_with(anchor);
+    let giap_owned = is_giap_owned(incoming, prefix);
     let goose_default = incoming.contains(GOOSE_DEFAULT_MARKER);
     if !giap_owned && !goose_default {
         return None;
@@ -332,6 +364,35 @@ fn enforce_system(
     } else {
         Some(rebuilt)
     }
+}
+
+/// Whether `incoming` is GIAP's prompt, matched ignoring trailing whitespace: goose appends after
+/// fewer newlines than the prefix ends with, so a plain `starts_with(prefix)` misses and ~28 KB of
+/// goose's extras leak through.
+fn is_giap_owned(incoming: &str, prefix: &str) -> bool {
+    let anchor = prefix.trim_end();
+    !anchor.is_empty() && incoming.starts_with(anchor)
+}
+
+/// Whether a call left this turn's appendix undelivered; only the shim delivers it.
+///
+/// `rebuilt` is whether [`enforce_system`] rewrote the prompt. One it left alone because it was
+/// already GIAP's lost nothing. Neither did one of goose's auxiliary calls: a compaction's summary
+/// (`compact_messages`), a tool pair's summary and a tool-call label run in the session's scope with
+/// a system prompt of their own and offer no tools, and passing them through is right. Only the
+/// agent's own round offers tools, so a prompt there that is not GIAP's is the real loss (a `{{` in
+/// a name that minijinja mangled, for one).
+fn appendix_lost(
+    incoming: &str,
+    prefix: &Option<String>,
+    rebuilt: bool,
+    offers_tools: bool,
+) -> bool {
+    !rebuilt
+        && offers_tools
+        && !prefix
+            .as_deref()
+            .is_some_and(|prefix| is_giap_owned(incoming, prefix))
 }
 
 /// Providers whose format layer already re-hosts tool-result images; promoting would send twice.
@@ -431,9 +492,34 @@ fn carries_image(messages: &[Message]) -> bool {
         .any(|m| crate::goose_agent::image_part_count(m) > 0)
 }
 
-/// Typed engine refusal, as seen before goose rewrites it into "Ran into this error" prose.
+/// Typed engine refusal, as seen before goose rewrites it into "Ran into this error" prose. Running
+/// out of GPU memory is not one: the picture is not what failed, and nothing about it should be
+/// scrubbed or marked could-not-start.
 fn is_engine_refusal(err: &ProviderError) -> bool {
     matches!(err, ProviderError::ExecutionError(_))
+        && ModelLoadError::from_provider_error(err).is_none()
+}
+
+/// Count `err` against `session` when it is the engine running out of GPU memory, logged as
+/// `kind="model_out_of_gpu_memory"`.
+fn note_if_out_of_gpu_memory(session: &SessionControls, err: &ProviderError) {
+    let Some(ModelLoadError::OutOfGpuMemory {
+        stage,
+        needed_mb,
+        free_mb,
+    }) = ModelLoadError::from_provider_error(err)
+    else {
+        return;
+    };
+    session.note_gpu_memory_failure();
+    tracing::warn!(
+        target: "giap::trace",
+        kind = "model_out_of_gpu_memory",
+        stage = ?stage,
+        needed_mb,
+        free_mb,
+        "the model could not load or start: the GPU is out of memory"
+    );
 }
 
 fn note_picture_refusal(session: &SessionControls, err: &ProviderError) {
@@ -478,24 +564,51 @@ fn enforce_tools(tools: &[Tool], allowed: &Option<HashSet<String>>) -> Option<Ve
     )
 }
 
-/// Keeps `lease` until the engine's stream closes, which happens when its decode thread returns.
-fn hold_until_closed(stream: MessageStream, lease: ComputeLease) -> MessageStream {
+/// Keeps `lease` and the call's hold on the inference bus until the engine's stream closes,
+/// which happens when its decode thread returns.
+fn hold_until_closed(
+    stream: MessageStream,
+    lease: ComputeLease,
+    call: Option<CallHold>,
+) -> MessageStream {
     use futures::StreamExt;
 
     Box::pin(futures::stream::unfold(
-        (stream, Some(lease)),
-        |(mut stream, mut lease)| async move {
+        (stream, Some(lease), call),
+        |(mut stream, mut lease, mut call)| async move {
             match stream.next().await {
-                Some(item) => Some((item, (stream, lease))),
+                Some(item) => Some((item, (stream, lease, call))),
                 None => {
                     if let Some(lease) = lease.take() {
                         lease.finished();
                     }
+                    drop(call.take());
                     None
                 }
             }
         },
     ))
+}
+
+/// The inference bus's hold for one call through the shim; `None` for a hosted provider, which
+/// has no one context to share. A call with no hold of its own is a helper's or a turn's.
+async fn hold_for_shim_call(
+    provider: &str,
+    session: Option<&Arc<SessionControls>>,
+) -> Option<CallHold> {
+    use pond_core::models::services::context::model_class::{provider_locality, ProviderLocality};
+    if provider_locality(provider) == ProviderLocality::Hosted {
+        return None;
+    }
+    let hold = session
+        .and_then(|s| s.inference_hold())
+        .or_else(current_hold);
+    let fallback = if goose_providers::request_context::is_helper() {
+        InferenceClaim::Task
+    } else {
+        InferenceClaim::Turn
+    };
+    Some(hold_for_call(hold, fallback).await)
 }
 
 /// Write the final payload as an OpenAI chat body into `$GIAP_CAPTURE_PAYLOAD`, via goose's own
@@ -704,15 +817,29 @@ impl Provider for GiapProviderShim {
             None => enforce_system(system, &prefix, &[&turn_apx, &ext_apx]),
         };
 
-        // Only the shim delivers GIAP's appendix, so a dropped one warns (e.g. a `{{` in a name
-        // that minijinja mangled).
-        if enforced_system.is_none() && turn_apx.is_some() && owned_system.is_none() {
-            tracing::warn!(
-                target: "giap::trace",
-                kind = "system_appendix_dropped",
-                "this turn's prompt extras and skills were not delivered: the system prompt \
-                 did not match GIAP's prefix, so the shim passed it through unchanged"
-            );
+        // Only the shim delivers GIAP's appendix, so a dropped one warns (`appendix_lost`).
+        if turn_apx.is_some() && owned_system.is_none() {
+            if appendix_lost(
+                system,
+                &prefix,
+                enforced_system.is_some(),
+                !tools.is_empty(),
+            ) {
+                tracing::warn!(
+                    target: "giap::trace",
+                    kind = "system_appendix_dropped",
+                    "this turn's prompt extras and skills were not delivered: the system prompt \
+                     did not match GIAP's prefix, so the shim passed it through unchanged"
+                );
+            } else if enforced_system.is_none() && tools.is_empty() {
+                tracing::debug!(
+                    target: "giap::trace",
+                    kind = "system_passthrough_auxiliary",
+                    compaction = goose_providers::request_context::replaces_history(),
+                    "goose's own auxiliary call (a compaction or tool summary) kept its system \
+                     prompt; it never carries the turn's appendix"
+                );
+            }
         }
         // Keep goose's `<turn-context>` (time, budget, `todo`/`tom` notes that survive compaction).
         // `strip_turn_context` remains the lever if its KV churn costs more than it returns.
@@ -839,21 +966,44 @@ impl Provider for GiapProviderShim {
             final_tools,
         );
 
-        let lease = gpu_gate().lease().await;
-        let result = match self
-            .inner
-            .stream(
-                model_config,
-                enforced_system.as_deref().unwrap_or(system),
-                final_messages,
-                final_tools,
-            )
-            .await
-        {
-            Ok(stream) => Ok(hold_until_closed(stream, lease)),
-            Err(e) => {
-                lease.finished();
-                Err(e)
+        let final_system = enforced_system.as_deref().unwrap_or(system);
+        let result = loop {
+            let call = hold_for_shim_call(self.inner.get_name(), session.as_ref()).await;
+            let lease = gpu_gate().lease().await;
+            let streamed =
+                self.inner
+                    .stream(model_config, final_system, final_messages, final_tools);
+            let streamed = match &call {
+                Some(call) => {
+                    goose_providers::request_context::stopping_when(call.stop_when(), streamed)
+                        .await
+                }
+                None => streamed.await,
+            };
+            match (streamed, call) {
+                // A call below a person's turn is read whole: nothing watches it token by token,
+                // and one cut for a turn is asked again once it holds the bus anew.
+                (Ok(stream), Some(call)) if call.can_be_cut() => {
+                    use futures::StreamExt;
+                    let items: Vec<_> = stream.collect().await;
+                    lease.finished();
+                    let finished = items.iter().any(|item| matches!(item, Ok((_, Some(_)))));
+                    if call.was_cut() && !finished {
+                        drop(call);
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "inference_call_resumed",
+                            "a call was cut for a turn; it runs again once the turn ends"
+                        );
+                        continue;
+                    }
+                    break Ok(Box::pin(futures::stream::iter(items)) as MessageStream);
+                }
+                (Ok(stream), call) => break Ok(hold_until_closed(stream, lease, call)),
+                (Err(e), _) => {
+                    lease.finished();
+                    break Err(e);
+                }
             }
         };
         if let Some(call) = egress {
@@ -884,6 +1034,7 @@ impl Provider for GiapProviderShim {
         match (result, session) {
             (Err(e), Some(s)) => {
                 s.note_provider_outcome(Some(&e));
+                note_if_out_of_gpu_memory(&s, &e);
                 Err(e)
             }
             (Ok(stream), Some(s)) => {
@@ -892,6 +1043,7 @@ impl Provider for GiapProviderShim {
                 Ok(Box::pin(stream.inspect(move |item| {
                     if let Err(e) = item {
                         s.note_provider_outcome(Some(e));
+                        note_if_out_of_gpu_memory(&s, e);
                     }
                 })))
             }
@@ -1027,6 +1179,41 @@ mod tests {
     #[test]
     fn no_prefix_configured_means_pass_through() {
         assert_eq!(enforce_system("anything", &None, &[&None, &None]), None);
+    }
+
+    /// The Jetson's Daily Brief, 2026-10-28: three `system_appendix_dropped` warnings, each 0.2 s
+    /// after a round of 5,052 to 5,449 prompt tokens in a 6,144-token window, then a ~20 s pause
+    /// and a prompt 1,400 to 1,900 tokens smaller. Each was goose compacting the turn: its summary
+    /// call runs in the session's scope with goose's own prompt and no tools. Nothing was lost.
+    #[test]
+    fn a_compaction_summary_call_is_not_a_dropped_appendix() {
+        let compaction_prompt = "You are good at summarizing conversations.";
+        assert!(!appendix_lost(
+            compaction_prompt,
+            &some(PREFIX),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn the_agents_own_round_with_a_foreign_prompt_has_lost_the_appendix() {
+        let mangled = "<identity>\nYou are Goose, a home assistant (mangled).";
+        assert!(appendix_lost(mangled, &some(PREFIX), false, true));
+        // Before any turn set a prefix, nothing could deliver the appendix either.
+        assert!(appendix_lost(PREFIX, &None, false, true));
+    }
+
+    #[test]
+    fn a_prompt_that_was_rebuilt_or_already_giaps_lost_nothing() {
+        assert!(!appendix_lost(
+            "anything goose sent",
+            &some(PREFIX),
+            true,
+            true
+        ));
+        let already = format!("{PREFIX}\n\n<extension-notes>skills</extension-notes>");
+        assert!(!appendix_lost(&already, &some(PREFIX), false, true));
     }
 
     // ── Tool-result image promotion ──────────────────────────────────────
@@ -1831,6 +2018,7 @@ mod tests {
         None,
         AtSetup,
         AsAStreamItem,
+        OutOfGpuMemory,
     }
 
     #[async_trait]
@@ -1852,6 +2040,14 @@ mod tests {
                 Refusal::None => Ok(Box::pin(futures::stream::empty())),
                 Refusal::AtSetup => Err(refused()),
                 Refusal::AsAStreamItem => Ok(Box::pin(futures::stream::iter(vec![Err(refused())]))),
+                Refusal::OutOfGpuMemory => Ok(Box::pin(futures::stream::iter(vec![Err(
+                    ModelLoadError::OutOfGpuMemory {
+                        stage: goose::providers::local_inference::load_error::LoadStage::Context,
+                        needed_mb: 542,
+                        free_mb: 251,
+                    }
+                    .into(),
+                )]))),
             }
         }
     }
@@ -1890,10 +2086,131 @@ mod tests {
         .await;
     }
 
+    // ── A helper's call cut for a turn runs again after it ───────────────────
+
+    /// Fake engine that, on its first call, decodes until the bus asks it to stop and ends cut.
+    struct Cutting {
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Provider for Cutting {
+        fn get_name(&self) -> &str {
+            "local"
+        }
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            _: &[Message],
+            _: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            use goose::providers::base::{ProviderUsage, Usage};
+            let stop =
+                goose_providers::request_context::stop_when().expect("the door installs a stop");
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                while !stop() {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                let partial = Message::assistant().with_text("half a rep");
+                return Ok(Box::pin(futures::stream::iter(vec![Ok((
+                    Some(partial),
+                    None,
+                ))])));
+            }
+            let whole = Message::assistant().with_text("the whole reply");
+            let usage = ProviderUsage::new("m".into(), Usage::default());
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok((Some(whole), None)),
+                Ok((None, Some(usage))),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_helpers_call_cut_for_a_turn_runs_again_after_it_and_goose_sees_one_whole_reply() {
+        use futures::StreamExt;
+        use pond_core::models::domain::inference_bus::{
+            inference_bus, running_under, InferenceHeldFloor,
+        };
+        let calls = Arc::new(AtomicU32::new(0));
+        let shim = GiapProviderShim::new(
+            Arc::new(Cutting {
+                calls: calls.clone(),
+            }),
+            Arc::new(ShimControls::default()),
+            None,
+        );
+        let step = InferenceHeldFloor::new(inference_bus(), InferenceClaim::Task);
+        let reply = tokio::spawn(running_under(InferenceHold::Held(step), async move {
+            let stream = shim
+                .stream(
+                    &ModelConfig::new("m"),
+                    "sys",
+                    &[Message::user().with_text("go")],
+                    &[],
+                )
+                .await
+                .expect("the call streams");
+            stream.collect::<Vec<_>>().await
+        }));
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let turn = inference_bus()
+            .claim(
+                InferenceClaim::Turn,
+                Some(std::time::Duration::from_secs(5)),
+                || true,
+            )
+            .await
+            .expect("the helper gives the model up for a turn");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !reply.is_finished(),
+            "the cut call waits for the turn to end"
+        );
+        drop(turn);
+
+        let items = tokio::time::timeout(std::time::Duration::from_secs(5), reply)
+            .await
+            .expect("the call ran again once the turn ended")
+            .unwrap();
+        let texts: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.as_ref().ok()?.0.as_ref().map(Message::as_concat_text))
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["the whole reply".to_string()],
+            "goose never sees the cut"
+        );
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+    }
+
     fn picture(text: &str) -> Message {
         Message::user()
             .with_text(text)
             .with_image("AAAA", "image/png")
+    }
+
+    /// The Jetson's E4B turns of 2026-10-27: the context could not allocate. The session counts it,
+    /// the picture is not blamed, and an ordinary refusal is not counted as memory.
+    #[tokio::test]
+    async fn running_out_of_gpu_memory_is_counted_and_not_blamed_on_the_picture() {
+        let (shim, controls, _) = engine(Refusal::OutOfGpuMemory);
+        let session = controls.session("s1");
+        call(&shim, "s1", &[picture("what is this?")]).await;
+        call(&shim, "s1", &[Message::user().with_text("hello")]).await;
+        assert_eq!(session.gpu_memory_failures(), 2);
+        assert_eq!(session.image_failures(), 0, "the picture did not fail");
+
+        let (shim, controls, _) = engine(Refusal::AsAStreamItem);
+        let session = controls.session("s2");
+        call(&shim, "s2", &[picture("what is this?")]).await;
+        assert_eq!(session.gpu_memory_failures(), 0);
+        assert_eq!(session.image_failures(), 1);
     }
 
     #[tokio::test]

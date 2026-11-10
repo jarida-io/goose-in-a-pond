@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ReplySplitter, splitText, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech } from "./webAudioUtils";
+import { ReplySplitter, splitText, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech, encodeWav, spokenClip } from "./webAudioUtils";
 import type { SpeechUnit } from "./webAudioUtils";
 
 const texts = (units: SpeechUnit[]) => units.map((u) => u.text);
@@ -73,14 +73,13 @@ describe("ReplySplitter", () => {
     expect(texts(s.finish())).toEqual(["It is"]);
   });
 
-  it("waits up to ten words for a mark before the six-word cut", () => {
+  it("keeps the first unit whole when no clause mark precedes the sentence end", () => {
     const units = stream("The weather in Nairobi today is expected to be warm and mostly sunny all afternoon. Then");
     expect(texts(units)).toEqual([
-      "The weather in Nairobi today is",
-      "expected to be warm and mostly sunny all afternoon.",
+      "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon.",
       "Then",
     ]);
-    expect(units[0].boundary).toBe("word");
+    expect(units[0].boundary).toBe("sentence");
     expect(texts(stream("Here is a simple chapati recipe for about eight pieces. More."))).toEqual([
       "Here is a simple chapati recipe for about eight pieces.",
       "More.",
@@ -180,9 +179,25 @@ describe("stripMarkupForSpeech", () => {
     ).toBe("The sky scatters blue light.");
   });
 
+  it("drops an invented snake_case block with its body", () => {
+    expect(stripMarkdown("<search_web>What is the story of the Rift Valley</search_web>")).toBe("");
+    expect(stripMarkdown("<turn_plan>Search first.</turn_plan> It formed slowly.")).toBe("It formed slowly.");
+  });
+
   it("leaves comparisons and dunder names alone", () => {
     expect(stripMarkupForSpeech("3 < 5 and 7 > 2")).toBe("3 < 5 and 7 > 2");
     expect(stripMarkupForSpeech("The __init__ method runs first.")).toBe("The __init__ method runs first.");
     expect(stripMarkupForSpeech("I <3 tea.")).toBe("I <3 tea.");
+  });
+});
+
+describe("spokenClip", () => {
+  it("carries the recording as raw base64 with the words heard in it", () => {
+    const wav = encodeWav(new Float32Array(48_000).fill(0.25), 16_000);
+    const clip = spokenClip("what time is it", wav);
+    expect(clip.mime_type).toBe("audio/wav");
+    expect(clip.heard_as).toBe("what time is it");
+    expect(clip.data.startsWith("data:")).toBe(false);
+    expect(Buffer.from(clip.data, "base64").equals(Buffer.from(wav))).toBe(true);
   });
 });

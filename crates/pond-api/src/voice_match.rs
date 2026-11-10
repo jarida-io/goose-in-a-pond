@@ -128,6 +128,13 @@ pub(crate) async fn post_take(
     State(state): State<Arc<AppState>>,
     multipart: Multipart,
 ) -> Result<Json<Value>, Refusal> {
+    // Every sentence starts with the wake phrase: the room must not take the next one for a wake,
+    // even from a phone that does not pause it.
+    if let Some(room) = &state.room_voice {
+        room.pause(std::time::Duration::from_secs(
+            pond_core::models::domain::room_voice::PAUSE_AFTER_TAKE_SECONDS,
+        ));
+    }
     let take = read_take(multipart).await?;
     if take.voice_match && take.profile_id.is_none() {
         return Err(refuse(

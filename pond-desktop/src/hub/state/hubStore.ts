@@ -74,7 +74,7 @@ function getSnapshot(): Record<string, DeviceState> {
 
 /**
  * Optimistic actuation via `POST /api/v1/tools/invoke` (no LLM), reverted on failure. Patches with
- * nothing actuatable stay local. False only when the backend call failed.
+ * nothing actuatable stay local. False when the backend call failed or the device refused.
  */
 export async function controlDevice(id: string, patch: DevicePatch): Promise<boolean> {
   const prev = getDevice(id);
@@ -90,11 +90,15 @@ export async function controlDevice(id: string, patch: DevicePatch): Promise<boo
   if (Object.keys(args).length === 1) return true;
 
   try {
-    await api.invokeTool({
+    const result = await api.invokeTool({
       server: "giap-device-control",
       tool: "set_device_state",
       args,
     });
+    if (result?.success === false) {
+      setDevice(id, prev); // the device did not take it
+      return false;
+    }
     return true;
   } catch {
     setDevice(id, prev); // revert on failure

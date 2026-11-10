@@ -3,7 +3,9 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use pond_audio_out::{play_wav_on, start_thinking_tone_thread, Speaker, TONE_OFF};
+use pond_audio_out::{
+    bus, play_turn_wav, play_wav, start_thinking_tone_thread, Claim, Floor, TurnFloor, TONE_OFF,
+};
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
@@ -11,6 +13,7 @@ use pond_voice::text::{split_text, Boundary, SpeechUnit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 pub mod engine;
@@ -54,7 +57,7 @@ pub struct KokoroConfig {
 const ESPEAKNG_DATA_DIRECTORY: &str = "PIPER_ESPEAKNG_DATA_DIRECTORY";
 
 /// ONNX session load deadline: a cold load takes seconds, but a broken ORT blocks forever.
-const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct KokoroOutput {
     config: KokoroConfig,
@@ -70,29 +73,30 @@ pub struct KokoroOutput {
     /// Pace, as `f32::to_bits` so it can live in an atomic.
     speed_bits: AtomicU64,
 
-    // ── turn / interrupt state, identical in meaning to the Piper adapter ──
     thinking_for: Arc<AtomicU64>,
     utterance: Arc<AtomicU64>,
     speech_interrupted: Arc<AtomicBool>,
     /// Playbacks in flight; zero between sentences, e.g. while a tool runs.
     playing: Arc<std::sync::atomic::AtomicUsize>,
-    /// Follows the household's speaker choice, so a new route takes effect on the next sentence.
-    speaker: Speaker,
+    /// The audio bus, held from `begin_utterance` to `end_utterance` so nothing plays inside a turn.
+    turn: TurnFloor,
+    /// Between `begin_utterance` and `end_utterance`: what plays then is the turn's.
+    in_turn: AtomicBool,
     audio_level_sink: Option<Arc<ThrottledAudioLevelSink>>,
     /// Sample rate of the most recent synthesis, for diagnostics.
     last_sample_rate: Mutex<Option<u32>>,
 }
 
 impl KokoroOutput {
-    /// Reads the vocab but not the model; fails only on a bad `tokenizer.json` or no audio device.
+    /// Reads the vocab but not the model; fails only on a bad `tokenizer.json`.
     pub fn new(config: KokoroConfig) -> Result<Self> {
         if let Some(dir) = &config.espeak_data {
-            std::env::set_var(ESPEAKNG_DATA_DIRECTORY, dir);
+            pond_core::shared::services::process_env::set(ESPEAKNG_DATA_DIRECTORY, dir);
         }
         let vocab = Vocab::load(&config.tokenizer_path)?;
         tracing::info!(symbols = vocab.len(), "Kokoro vocab loaded");
+        bus().open_early();
 
-        let speaker = Speaker::try_new("kokoro-audio-keeper")?;
         Ok(Self {
             model_path: RwLock::new(config.model_path.clone()),
             config,
@@ -105,7 +109,8 @@ impl KokoroOutput {
             utterance: Arc::new(AtomicU64::new(1)),
             speech_interrupted: Arc::new(AtomicBool::new(false)),
             playing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            speaker,
+            turn: TurnFloor::default(),
+            in_turn: AtomicBool::new(false),
             audio_level_sink: None,
             last_sample_rate: Mutex::new(None),
         })
@@ -272,17 +277,18 @@ impl KokoroOutput {
             };
             let mut samples = Vec::new();
             for (k, chunk) in chunks.iter().enumerate() {
-                let style_row = style.style_for(chunk.tokens.len());
-                let audio = engine.synthesize(chunk, style_row, speed)?;
                 let end = match chunks.get(k + 1) {
                     Some(_) => Boundary::from_text_end(&chunk.phonemes),
                     None => after,
                 };
-                push_paced(&mut samples, &audio, end, speed);
+                push_checked(&mut samples, chunk, end, speed, |part| {
+                    engine.synthesize(part, style.style_for(part.tokens.len()), speed)
+                })?;
             }
             Ok(samples)
         })
         .await?;
+        hand_back_heap();
         *self.last_sample_rate.lock().unwrap() = Some(SAMPLE_RATE);
         Ok(samples)
     }
@@ -311,24 +317,59 @@ impl KokoroOutput {
     }
 }
 
-#[async_trait]
-impl VoiceOutput for KokoroOutput {
-    async fn speak(&self, text: &str) -> Result<()> {
-        self.begin_utterance();
-        let all_units = split_text(text);
-        if all_units.is_empty() {
-            return Ok(());
+/// The longest words said outside a turn queue for the speaker before they are dropped.
+const SPEECH_WAITS_AT_MOST: Duration = Duration::from_secs(120);
+/// The longest a voice sample queues for the speaker: past that, nobody is still waiting for it.
+const SAMPLE_WAITS_AT_MOST: Duration = Duration::from_secs(30);
+
+/// Where a playback holds the audio bus.
+#[derive(Clone)]
+enum Hold {
+    /// The turn's own hold, from `begin_utterance` to `end_utterance`.
+    Turn(TurnFloor),
+    /// A claim of its own, for sound outside any turn.
+    Own(Arc<Floor>),
+}
+
+impl Hold {
+    fn play(
+        &self,
+        wav: Vec<u8>,
+        interrupted: &AtomicBool,
+        utterance: &AtomicU64,
+        sink: Option<&ThrottledAudioLevelSink>,
+    ) -> Result<()> {
+        match self {
+            Hold::Turn(turn) => play_turn_wav(wav, turn, interrupted, utterance, sink),
+            Hold::Own(floor) => play_wav(wav, floor, interrupted, utterance, sink),
         }
-        if all_units.len() == 1 {
-            let wav = self.synth_wav(&all_units[0]).await?;
+    }
+}
+
+impl KokoroOutput {
+    /// Queues for the bus on a blocking thread; `None` when it stayed taken or is no longer wanted.
+    async fn claim(
+        &self,
+        claim: Claim,
+        most: Duration,
+        still_wanted: impl Fn() -> bool + Send + 'static,
+    ) -> Result<Option<Floor>> {
+        tokio::task::spawn_blocking(move || bus().claim(claim, Some(most), still_wanted))
+            .await
+            .context("a Kokoro bus claim panicked")
+    }
+
+    /// Plays `units` where `hold` holds the bus, synthesising each while the one before it plays.
+    async fn say_units(&self, units: Vec<SpeechUnit>, hold: Hold) -> Result<()> {
+        if let [unit] = units.as_slice() {
+            let wav = self.synth_wav(unit).await?;
             if !wav.is_empty() {
-                self.play_audio(wav).await?;
+                self.play_held(wav, hold).await?;
             }
             return Ok(());
         }
 
         let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let speaker = self.speaker.clone();
         let interrupted = self.speech_interrupted.clone();
         let utterance = self.utterance.clone();
         let sink = self.audio_level_sink.clone();
@@ -342,14 +383,14 @@ impl VoiceOutput for KokoroOutput {
                 if interrupted.load(Ordering::Relaxed) {
                     break;
                 }
-                let speaker = speaker.clone();
+                let hold = hold.clone();
                 let interrupted = interrupted.clone();
                 let utterance = utterance.clone();
                 let sink = sink.clone();
                 let playing = Playing::start(&playing);
                 let res = tokio::task::spawn_blocking(move || {
                     let _playing = playing;
-                    play_wav_on(audio, &speaker, &interrupted, &utterance, sink.as_deref())
+                    hold.play(audio, &interrupted, &utterance, sink.as_deref())
                 })
                 .await;
                 if res.is_err() {
@@ -358,20 +399,59 @@ impl VoiceOutput for KokoroOutput {
             }
         });
 
-        for unit in all_units {
+        for unit in units {
             if self.speech_interrupted.load(Ordering::Relaxed) {
                 break;
             }
             let wav = self.synth_wav(&unit).await?;
-            if !wav.is_empty() {
-                if audio_tx.send(wav).await.is_err() {
-                    break;
-                }
+            if !wav.is_empty() && audio_tx.send(wav).await.is_err() {
+                break;
             }
         }
         drop(audio_tx);
         let _ = playback_handle.await;
         Ok(())
+    }
+
+    async fn play_held(&self, audio: Vec<u8>, hold: Hold) -> Result<()> {
+        let interrupted = self.speech_interrupted.clone();
+        let utterance = self.utterance.clone();
+        let sink = self.audio_level_sink.clone();
+        let playing = Playing::start(&self.playing);
+        tokio::task::spawn_blocking(move || {
+            let _playing = playing;
+            hold.play(audio, &interrupted, &utterance, sink.as_deref())
+        })
+        .await
+        .context("Kokoro playback task panicked")?
+    }
+}
+
+#[async_trait]
+impl VoiceOutput for KokoroOutput {
+    /// Inside a turn, more of the turn; outside one, words said whole that queue for the bus as
+    /// [`Claim::Speech`] and give way to a turn that begins meanwhile.
+    async fn speak(&self, text: &str) -> Result<()> {
+        let units = split_text(text);
+        if units.is_empty() {
+            return Ok(());
+        }
+        if self.in_turn.load(Ordering::SeqCst) {
+            return self.say_units(units, Hold::Turn(self.turn.clone())).await;
+        }
+        let mine = self.utterance.load(Ordering::SeqCst);
+        let utterance = self.utterance.clone();
+        let wanted = move || utterance.load(Ordering::Relaxed) == mine;
+        let Some(floor) = self
+            .claim(Claim::Speech, SPEECH_WAITS_AT_MOST, wanted)
+            .await?
+        else {
+            tracing::debug!("Kokoro: words outside a turn gave way to a turn or a busy speaker");
+            return Ok(());
+        };
+        // A barge-in on an earlier turn is no reason to cut these short.
+        self.speech_interrupted.store(false, Ordering::SeqCst);
+        self.say_units(units, Hold::Own(Arc::new(floor))).await
     }
 
     async fn synthesize(&self, text: &str) -> Result<Option<Vec<u8>>> {
@@ -383,18 +463,24 @@ impl VoiceOutput for KokoroOutput {
         Ok((!wav.is_empty()).then_some(wav))
     }
 
+    /// Inside a turn, the turn's next sound; outside one, a [`Claim::Sample`] that a turn takes
+    /// the bus from.
     async fn play_audio(&self, audio: Vec<u8>) -> Result<()> {
         if audio.is_empty() {
             return Ok(());
         }
-        let speaker = self.speaker.clone();
-        let interrupted = self.speech_interrupted.clone();
-        let utterance = self.utterance.clone();
+        if self.in_turn.load(Ordering::SeqCst) {
+            return self.play_held(audio, Hold::Turn(self.turn.clone())).await;
+        }
+        let floor = self
+            .claim(Claim::Sample, SAMPLE_WAITS_AT_MOST, || true)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the speaker stayed busy"))?;
+        // Its own flags: only the bus, wanted back by a turn, cuts it short.
+        let (interrupted, utterance) = (AtomicBool::new(false), AtomicU64::new(0));
         let sink = self.audio_level_sink.clone();
-        let playing = Playing::start(&self.playing);
         tokio::task::spawn_blocking(move || {
-            let _playing = playing;
-            play_wav_on(audio, &speaker, &interrupted, &utterance, sink.as_deref())
+            play_wav(audio, &floor, &interrupted, &utterance, sink.as_deref())
         })
         .await
         .context("Kokoro playback task panicked")?
@@ -404,14 +490,27 @@ impl VoiceOutput for KokoroOutput {
         Some(self.playing.load(Ordering::SeqCst) > 0)
     }
 
+    /// Queues the turn for the bus now, so it holds it through its thinking as well as its words.
     fn begin_utterance(&self) {
         // Generation first, then clear the interrupt, so stale audio never sees a cleared flag.
-        self.utterance.fetch_add(1, Ordering::SeqCst);
+        let mine = self.utterance.fetch_add(1, Ordering::SeqCst) + 1;
         self.speech_interrupted.store(false, Ordering::SeqCst);
+        self.turn.release();
+        self.in_turn.store(true, Ordering::SeqCst);
+        let (utterance, interrupted) = (self.utterance.clone(), self.speech_interrupted.clone());
+        self.turn.begin(move || {
+            utterance.load(Ordering::Relaxed) == mine && !interrupted.load(Ordering::Relaxed)
+        });
+    }
+
+    fn end_utterance(&self) {
+        self.in_turn.store(false, Ordering::SeqCst);
+        self.turn.release();
     }
 
     fn stop_speaking(&self) {
         self.speech_interrupted.store(true, Ordering::SeqCst);
+        self.turn.release();
     }
 
     fn start_thinking_tone(&self) {
@@ -420,7 +519,7 @@ impl VoiceOutput for KokoroOutput {
         if self.thinking_for.swap(mine, Ordering::SeqCst) == mine {
             return;
         }
-        start_thinking_tone_thread(self.thinking_for.clone(), mine);
+        start_thinking_tone_thread(self.thinking_for.clone(), mine, self.turn.clone());
     }
 
     fn stop_thinking_tone(&self) {
@@ -576,6 +675,79 @@ mod tests {
             last.len() < out.len(),
             "nothing is added after the last unit"
         );
+    }
+
+    fn chunk_of(phonemes: &str) -> tokenizer::Chunk {
+        tokenizer::Chunk {
+            text: "Goose, remind me to water the plants at six.".into(),
+            phonemes: phonemes.into(),
+            tokens: phonemes.chars().map(|c| c as i64).collect(),
+        }
+    }
+
+    const GOOSE: &str = "ɡˈuːs, ɹᵻmˈaɪnd mˌiː tə wˈɔːɾɚ ðə plˈænts æt sˈɪks.";
+
+    #[test]
+    fn a_pass_of_nan_or_silence_is_said_again_in_halves() {
+        for broken in [vec![f32::NAN; 24_000], vec![0.0; 24_000]] {
+            let whole = chunk_of(GOOSE);
+            let mut asked = Vec::new();
+            let mut out = Vec::new();
+            let pass = push_checked(&mut out, &whole, Boundary::Sentence, 1.0, |part| {
+                asked.push(part.phonemes.clone());
+                Ok(if part.tokens.len() == whole.tokens.len() {
+                    broken.clone()
+                } else {
+                    forward_pass(1.0)
+                })
+            })
+            .unwrap();
+            assert_eq!(pass, Pass::Rescued);
+            assert_eq!(asked.len(), 3, "{asked:?}");
+            assert_eq!(
+                asked[1], "ɡˈuːs, ɹᵻmˈaɪnd mˌiː tə",
+                "cut at the space nearest the middle"
+            );
+            assert!(out.iter().all(|v| v.is_finite()));
+            assert!(
+                secs(out.len()) > 2.0,
+                "both halves were said: {}",
+                secs(out.len())
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_that_fails_again_is_logged_as_lost_not_hidden() {
+        let mut out = Vec::new();
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+            Ok(vec![f32::NAN; 24_000])
+        })
+        .unwrap();
+        assert_eq!(pass, Pass::Lost);
+        assert!(out.iter().all(|v| *v == 0.0), "no NaN reaches the speaker");
+        let mut out = Vec::new();
+        let pass = push_checked(
+            &mut out,
+            &chunk_of("ˈoʊkˌeɪ."),
+            Boundary::End,
+            1.0,
+            |_| Ok(vec![0.0; 24_000]),
+        )
+        .unwrap();
+        assert_eq!(pass, Pass::Lost, "a one-word unit cannot be split");
+    }
+
+    #[test]
+    fn a_good_pass_is_said_once() {
+        let mut calls = 0;
+        let mut out = Vec::new();
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+            calls += 1;
+            Ok(forward_pass(1.0))
+        })
+        .unwrap();
+        assert_eq!((pass, calls), (Pass::Clean, 1));
     }
 
     #[test]
@@ -751,6 +923,92 @@ fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
     }
     let pause = (end.pause_secs() / speed.max(MIN_SPEED) * SAMPLE_RATE as f32) as usize;
     out.resize(out.len() + pause, 0.0);
+}
+
+/// Why a forward pass's audio cannot be used. On the Orin's ONNX Runtime about one q4f16 pass in
+/// ten came back silent for a whole sentence, more often the longer the unit.
+fn unusable(audio: &[f32]) -> Option<&'static str> {
+    if audio.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite samples");
+    }
+    if speech_bounds(audio, SAMPLE_RATE, 0.0, 0.0).is_none() {
+        return Some("no speech");
+    }
+    None
+}
+
+/// How a chunk came out of [`push_checked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Clean,
+    /// The whole chunk failed and both halves were said instead.
+    Rescued,
+    /// Some of it could not be said; what was lost is logged.
+    Lost,
+}
+
+/// [`push_paced`] for one chunk, checking the model's audio first. A failed pass is retried once
+/// as two halves, each its own shorter pass: on the Orin a shorter unit failed far less often
+/// (2% of clauses against 10% of 100-200-token units) and a different style row rescued every
+/// failed unit it was tried on, and each half takes the row of its own length.
+fn push_checked(
+    out: &mut Vec<f32>,
+    chunk: &tokenizer::Chunk,
+    end: Boundary,
+    speed: f32,
+    mut synth: impl FnMut(&tokenizer::Chunk) -> Result<Vec<f32>>,
+) -> Result<Pass> {
+    let audio = synth(chunk)?;
+    let Some(why) = unusable(&audio) else {
+        push_paced(out, &audio, end, speed);
+        return Ok(Pass::Clean);
+    };
+    let Some((first, second)) = tokenizer::halves(chunk) else {
+        // Counts, not the words: the reply is the household's.
+        tracing::error!(
+            why,
+            tokens = chunk.tokens.len(),
+            "Kokoro gave no usable audio for a unit too short to split; it is not said"
+        );
+        push_paced(out, &[], end, speed);
+        return Ok(Pass::Lost);
+    };
+    tracing::warn!(
+        why,
+        tokens = chunk.tokens.len(),
+        "Kokoro gave no usable audio for a unit; saying it again in two halves"
+    );
+    let mut pass = Pass::Rescued;
+    let mid = Boundary::from_text_end(&first.phonemes);
+    for (part, part_end) in [(&first, mid), (&second, end)] {
+        let audio = synth(part)?;
+        match unusable(&audio) {
+            None => push_paced(out, &audio, part_end, speed),
+            Some(why) => {
+                tracing::error!(
+                    why,
+                    tokens = part.tokens.len(),
+                    "half of a Kokoro unit gave no usable audio again; that half is not said"
+                );
+                push_paced(out, &[], part_end, speed);
+                pass = Pass::Lost;
+            }
+        }
+    }
+    Ok(pass)
+}
+
+/// A unit's tensors are freed into the malloc arena of whichever thread ran it, and glibc keeps
+/// them there: on the Orin that held 150-900 MB a unit until the turn ended.
+fn hand_back_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::task::spawn_blocking(|| {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // SAFETY: glibc's malloc_trim takes the padding to keep and touches nothing of ours.
+        unsafe { malloc_trim(0) };
+    });
 }
 
 /// Phonemizing and synthesis take about real time; on a runtime worker they stall every task

@@ -1,5 +1,7 @@
-//! Per-session choice of which `giap-*` groups' schemas reach the prompt. Once per session, as
-//! per-turn churn rewrites the tools JSON and kills KV prefix reuse. Every failure path widens.
+//! Per-session choice of which `giap-*` groups' schemas reach the prompt. The opening message
+//! picks the set; each later message may only ADD to it, since dropping a group strands tool
+//! results the history refers to and every change rewrites the tools JSON (the KV prefix) from
+//! the first changed tool on. Every failure path widens.
 
 use crate::mcp::domain::tool_group::{
     core_group_names, find_group, group_of_tool, is_catalog_extension, TOOLKIT_EXTENSION,
@@ -50,27 +52,73 @@ impl ToolSelection {
 /// Upper bound on any single embedded signal. Embedding models truncate anyway.
 const MAX_SIGNAL_CHARS: usize = 2000;
 
+/// Most list items of one message scored on their own; each is one more embedding call.
+const MAX_LISTED_TOPICS: usize = 8;
+
 /// A session's topic texts (question, standing context, skills), scored SEPARATELY and merged
 /// with `max`: concatenated, a kilobyte of memories dominates a short question's vector.
+///
+/// A message that lists several things ("a briefing on weather, calendar, top news and the
+/// exchange rate") also contributes each item as a signal of its own. Its whole-message vector
+/// sits between its topics, so only the one that dominates clears the floor and a topic named in
+/// a single word is lost: the Daily Brief got web results for the weather this way. The embedder
+/// still decides what each item is about; the split only stops one topic drowning the rest.
 pub fn selection_signals(first_message: &str, memories: &str, skills: &str) -> Vec<String> {
-    [first_message, memories, skills]
+    let mut signals: Vec<String> = [first_message, memories, skills]
         .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| {
-            if s.len() <= MAX_SIGNAL_CHARS {
-                return s.to_string();
-            }
-            // Truncate on a char boundary — the signal is user text.
-            let cut = s
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|i| *i <= MAX_SIGNAL_CHARS)
-                .last()
-                .unwrap_or(0);
-            s[..cut].to_string()
-        })
-        .collect()
+        .map(bounded)
+        .collect();
+    signals.extend(listed_topics(first_message).into_iter().map(bounded));
+    signals
+}
+
+/// Truncated to [`MAX_SIGNAL_CHARS`] on a char boundary: the signal is user text.
+fn bounded(s: &str) -> String {
+    if s.len() <= MAX_SIGNAL_CHARS {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= MAX_SIGNAL_CHARS)
+        .last()
+        .unwrap_or(0);
+    s[..cut].to_string()
+}
+
+/// The items of a message that lists several, split at commas, semicolons, line breaks and
+/// sentence ends; empty when it names only one. Fragments with no letter ("1,000") are not items.
+fn listed_topics(message: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut prev = None;
+    let mut chars = message.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|(_, n)| *n);
+        let next_is_space = next.is_none_or(char::is_whitespace);
+        let in_number = prev.is_some_and(|p: char| p.is_ascii_digit())
+            && next.is_some_and(|n| n.is_ascii_digit());
+        prev = Some(c);
+        let ends = matches!(c, ';' | '\n')
+            || (c == ',' && !in_number)
+            || (matches!(c, '.' | '?' | '!') && next_is_space);
+        if ends {
+            parts.push(&message[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    parts.push(&message[start..]);
+    let topics: Vec<&str> = parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|p| p.chars().any(char::is_alphabetic))
+        .collect();
+    if topics.len() < 2 {
+        return Vec::new();
+    }
+    topics.into_iter().take(MAX_LISTED_TOPICS).collect()
 }
 
 /// Best score per group across signals: they are alternative topic texts, so a mean dilutes.
@@ -102,13 +150,51 @@ pub fn relevance_floor(provider: &dyn EmbeddingProvider) -> Option<f32> {
     provider.similarity_floors().map(|f| f.tool_relevance)
 }
 
-/// Groups for a session. No floor, or no scores (no embedder, or scoring failed), means every
-/// available group; else registered core groups, every group at or above `floor`, and the top
+/// Groups for a session's opening message. No floor, or no scores (no embedder, or scoring
+/// failed), means every available group; else registered core groups, every group at or above
+/// `floor`, and the top
 /// non-core scorer.
 pub fn select_groups(
     available: &[String],
     scores: Option<&[GroupScore]>,
     floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, true)
+}
+
+/// Groups a later message of the session asks for, to be merged with [`union_groups`]. As
+/// [`select_groups`] without the top-scorer rescue: the rescue fires on every message, so it would
+/// grow the set by one group per small-talk turn and move the KV prefix each time. A later miss
+/// costs one `enable_tool_group` call, which the opening message has no history to make.
+pub fn select_groups_for_later_message(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+) -> ToolSelection {
+    pick_groups(available, scores, floor, false)
+}
+
+/// `held` with every group of `picked` it lacks, sorted and deduped, and the groups that were
+/// added. Never removes a held group, whatever `picked` says.
+pub fn union_groups(held: &[String], picked: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut added: Vec<String> = picked
+        .iter()
+        .filter(|p| !held.iter().any(|h| h == *p))
+        .cloned()
+        .collect();
+    added.sort();
+    added.dedup();
+    let mut groups: Vec<String> = held.iter().chain(added.iter()).cloned().collect();
+    groups.sort();
+    groups.dedup();
+    (groups, added)
+}
+
+fn pick_groups(
+    available: &[String],
+    scores: Option<&[GroupScore]>,
+    floor: Option<f32>,
+    rescue_top: bool,
 ) -> ToolSelection {
     if available.is_empty() {
         return ToolSelection::all(available, SelectionBasis::ModeAll);
@@ -140,13 +226,15 @@ pub fn select_groups(
     }
 
     // Rescue the top scorer regardless of the threshold.
-    if let Some(best) = scores
-        .iter()
-        .filter(|s| available.iter().any(|a| a == &s.extension))
-        .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
-        .max_by(|a, b| a.score.total_cmp(&b.score))
-    {
-        chosen.push(best.extension.clone());
+    if rescue_top {
+        if let Some(best) = scores
+            .iter()
+            .filter(|s| available.iter().any(|a| a == &s.extension))
+            .filter(|s| find_group(&s.extension).is_some_and(|g| !g.core))
+            .max_by(|a, b| a.score.total_cmp(&b.score))
+        {
+            chosen.push(best.extension.clone());
+        }
     }
 
     chosen.sort();
@@ -450,7 +538,7 @@ mod tests {
         assert_eq!(clamp_to_permitted(held.clone(), &permitted), held);
     }
 
-    /// Not even the core set: that alone is 778 tokens, 9.5% of the local prompt budget.
+    /// Not even the core set: with knowledge in it, 879 tokens keyless (o200k, 2026-11-02).
     #[test]
     fn minimal_offers_the_hatch_and_nothing_else() {
         let available = vec![
@@ -551,7 +639,7 @@ mod tests {
         let avail = available();
         let scores = vec![
             score("giap-weather", 0.19),
-            score("giap-knowledge", 0.11),
+            score("giap-schedule", 0.11),
             score("giap-sensors", 0.03),
         ];
         let sel = select_groups(&avail, Some(&scores), MINILM);
@@ -559,7 +647,123 @@ mod tests {
             sel.groups.contains(&"giap-weather".to_string()),
             "top scorer should be rescued"
         );
+        assert!(!sel.groups.contains(&"giap-schedule".to_string()));
+    }
+
+    /// The 2026-10-28 Jetson log: "What has happened to China's stock market?" scored no group
+    /// near the threshold, so the session had no `search_web` and the model said it had no tool.
+    #[test]
+    fn web_search_is_loaded_whatever_the_message_scores() {
+        let avail = available();
+        let scores: Vec<GroupScore> = scorable_groups(&avail)
+            .iter()
+            .map(|(e, _)| score(e, 0.0))
+            .collect();
+        assert!(
+            !scores.iter().any(|s| s.extension == "giap-knowledge"),
+            "giap-knowledge is core, so it is never scored"
+        );
+        for sel in [
+            select_groups(&avail, Some(&scores), MINILM),
+            select_groups_for_later_message(&avail, Some(&scores), MINILM),
+        ] {
+            assert!(
+                sel.groups.contains(&"giap-knowledge".to_string()),
+                "{:?}",
+                sel.groups
+            );
+        }
+    }
+
+    /// Core is not a permission: a scope whose ceiling lacks the group does not get it back.
+    #[test]
+    fn web_search_still_respects_the_permitted_set() {
+        let permitted = vec!["giap-toolkit".to_string(), "giap-weather".to_string()];
+        let scores = vec![score("giap-weather", 0.5)];
+        let sel = select_groups(&permitted, Some(&scores), MINILM);
         assert!(!sel.groups.contains(&"giap-knowledge".to_string()));
+        assert_eq!(
+            sel.groups,
+            vec!["giap-toolkit".to_string(), "giap-weather".to_string()]
+        );
+    }
+
+    /// A guest keeps web search: it reads no household data.
+    #[test]
+    fn a_guest_is_offered_web_search() {
+        use crate::user_data::domain::profile::ProfileScope;
+
+        let permitted = permitted_groups(&available(), &ProfileScope::Guest);
+        let sel = select_groups(&permitted, Some(&[]), MINILM);
+        assert!(
+            sel.groups.contains(&"giap-knowledge".to_string()),
+            "{:?}",
+            sel.groups
+        );
+    }
+
+    // ── Later messages ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_later_message_adds_the_groups_it_reaches_the_threshold_on() {
+        let avail = available();
+        let scores = vec![score("giap-schedule", 0.47), score("giap-weather", 0.05)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        assert_eq!(sel.basis, SelectionBasis::Scored);
+        assert!(sel.groups.contains(&"giap-schedule".to_string()));
+        assert!(!sel.groups.contains(&"giap-weather".to_string()));
+    }
+
+    /// Small talk must not grow the set: every later message would move the KV prefix.
+    #[test]
+    fn a_later_message_rescues_no_top_scorer() {
+        let avail = available();
+        let scores = vec![score("giap-weather", 0.19), score("giap-schedule", 0.11)];
+        let sel = select_groups_for_later_message(&avail, Some(&scores), MINILM);
+        let mut core: Vec<String> = core_group_names().into_iter().map(str::to_string).collect();
+        core.sort();
+        assert_eq!(sel.groups, core, "only the core set, nothing rescued");
+    }
+
+    /// Scoring failed on a later message: widen, as at the opening.
+    #[test]
+    fn a_later_message_with_no_scores_widens_to_everything() {
+        let avail = available();
+        let sel = select_groups_for_later_message(&avail, None, MINILM);
+        assert_eq!(sel.basis, SelectionBasis::NoEmbedder);
+        assert_eq!(sel.groups.len(), avail.len());
+    }
+
+    #[test]
+    fn the_union_never_drops_a_held_group() {
+        let held = vec![
+            "giap-device-control".to_string(),
+            "giap-memory".to_string(),
+            "giap-weather".to_string(),
+        ];
+        let picked = vec!["giap-memory".to_string(), "giap-schedule".to_string()];
+        let (groups, added) = union_groups(&held, &picked);
+        assert_eq!(
+            groups,
+            vec![
+                "giap-device-control".to_string(),
+                "giap-memory".to_string(),
+                "giap-schedule".to_string(),
+                "giap-weather".to_string(),
+            ]
+        );
+        assert_eq!(added, vec!["giap-schedule".to_string()]);
+    }
+
+    #[test]
+    fn a_union_that_adds_nothing_reports_nothing() {
+        let held = vec!["giap-memory".to_string(), "giap-weather".to_string()];
+        let (groups, added) = union_groups(&held, &["giap-weather".to_string()]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
+        let (groups, added) = union_groups(&held, &[]);
+        assert_eq!(groups, held);
+        assert!(added.is_empty());
     }
 
     #[test]
@@ -761,6 +965,46 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert!(sigs[1].len() <= 2001);
         assert!(sigs[1].chars().count() > 0);
+    }
+
+    #[test]
+    fn each_listed_topic_is_a_signal_of_its_own() {
+        let brief = "Get me a briefing on weather, calendar, top news(Kenya and The World), \
+                     the exchange rate of dollar to ksh.";
+        let sigs = selection_signals(brief, "", "");
+        assert_eq!(sigs[0], brief, "the whole message still comes first");
+        assert_eq!(
+            &sigs[1..],
+            [
+                "Get me a briefing on weather",
+                "calendar",
+                "top news(Kenya and The World)",
+                "the exchange rate of dollar to ksh",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_message_naming_one_thing_is_not_split() {
+        assert_eq!(
+            selection_signals("What's the weather tomorrow?", "", ""),
+            vec!["What's the weather tomorrow?".to_string()]
+        );
+        // Neither a decimal point nor a thousands separator ends an item.
+        assert_eq!(
+            selection_signals("Set the heat to 21.5 for 1,000 minutes", "", "").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn listed_topics_are_capped() {
+        let many = (0..20)
+            .map(|i| format!("topic {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sigs = selection_signals(&many, "", "");
+        assert_eq!(sigs.len(), 1 + MAX_LISTED_TOPICS);
     }
 
     #[test]

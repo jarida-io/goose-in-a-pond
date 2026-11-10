@@ -307,8 +307,9 @@ that member's particulars and notes. That is all a voice match buys:
   never a session), so a voice session cannot approve a ride offer.
 - `claim_session_identity` never moves a session to another member, so a different voice's wake
   starts a session of its own, and so does an unrecognised voice after a member's turns.
-- A follow-up after a recognised wake must be the same voice; an unrecognised wake keeps the
-  follow-ups it had.
+- After a recognised wake, a follow-up in another enrolled member's voice is dropped; one Voice
+  Match does not recognise continues the conversation, and an unrecognised wake keeps every
+  follow-up.
 
 Without an enrolled member nothing changes: a voice session resolves to `Household` on a pond of
 one and `Guest` otherwise.
@@ -848,6 +849,116 @@ have read less than the turn already injected, or the other member's memories.
   live path.
 
 ---
+
+## 4e. A turn says who is speaking (2026-11-02)
+
+Found from the owner's phone on the Orin: linked to their member (the session row carried
+`profile_id` with source `paired_device`, and the log showed presence `arrived`), yet "Who am I?"
+answered "I do not have any personal information stored about you" and "What is my name?" that no
+name was saved, while the Daily Brief on the same pond greeted the owner by name.
+
+### What reached the model
+
+Nothing named the speaker. `particulars_for` stated a name only from `preferences.preferred_name`,
+and this member's `preferences` were `{}`: only the onboarding flows (the desktop wizard and the
+phone's owner setup) write that key, and only when a preferred name is typed. The only name in the prompt was `{{user_name}}` in the template's identity
+sentence, "You are Goose, {user_name}'s personal agentic assistant", which says whose pond it is,
+not who is talking. The model called `recall_memories`, found nothing, and said so.
+
+Nothing regressed between `4b559ed7` and `ffe2ef23`: `profile_context_for` and `particulars_for`
+are the same apart from member notes, and the templates are unchanged. Until 11:32 that day
+`user_name` was a short nickname, and "Who am I" was answered "I am Goose, {nickname}'s personal
+agentic assistant", the model describing itself with the identity sentence, never naming the user.
+After `user_name` became the owner's full name, it stopped echoing even that.
+
+The repeated `could not record which household member this turn's device belongs to ... Session not
+found: context-setup` warning is unrelated. `context-setup` is the placeholder session id the
+desktop's Context screen and Connections panel read with (`Collected.tsx`, `ConnectionsPanel.tsx`);
+no such session exists, so `claim_session_identity` fails on those read routes. Chat sessions record
+their member as before.
+
+### What changed
+
+* `ProfileContext.preferred_name` is now `speaker_name`: the member's preferred name, else their
+  display name, set only when the turn is attributed (`Owner`). `Household` and `Guest` turns name
+  nobody, as P10 requires.
+* `profile_context_lines` renders it as one line in the dynamic suffix, so the KV prefix is
+  untouched and a change of speaker re-prefills nothing: `You are talking with {name}; "I" means
+  them.` It replaces "The user prefers to be called {name}.", and is stated even when the name
+  equals `user_name`. About 15 tokens per turn with a three-word name, counted by hand; Voice
+  Match's member turns get the same line through `ProfileContext::of_member`.
+* Pinned by `a_linked_member_with_no_preferred_name_is_named_by_their_display_name` (the Orin's
+  case), the prompt-assembly tests in `prompt_builder.rs` (a linked member, an unlinked device's
+  `Household` context, a guest, a speaker change leaving `prefix_hash` alone), and
+  `a_turn_names_the_member_whose_phone_it_came_from_and_nobody_else` through `/chat/stream` with
+  two linked phones and one paired to nobody.
+
+### Not verified
+
+The model's answer on the Orin. The line reaches the request (pinned through the route); that E4B
+then answers "who am I" from it, rather than calling `recall_memories` and reporting nothing, has
+not been run on hardware.
+
+---
+
+## 4f. Consolidation, the memory routes and unidentified turns follow the owner (2026-11-05)
+
+A survey of every store that holds what the pond knows, made before the context space's item store,
+found four paths that 4d had not reached.
+
+### What the pond did
+
+- **Consolidation**, on by default and daily, read every member's memories as one `Household` batch
+  and wrote each merge and split with no owner (`MemoryFragment::from_extraction`). A member's facts
+  became the whole household's, and two members' facts could be merged into one row. On the nano,
+  16 of the 17 rows it had written came from the one member's memories.
+- **`/memories`.** `GET` read at `Household`, `POST` saved every memory as the household's, and
+  `PUT` and `DELETE` changed any memory by id.
+- **`GET /sessions`** listed every conversation's title and first answer, `DELETE /sessions/{id}`
+  deleted any, and `POST /chat`, `/chat/stream` and `/agent/chat/stream` added a turn to any,
+  replaying it to the model.
+- **Unidentified turns.** Room voice and the desktop's voice child never set the loop's scope, so a
+  voice Voice Match did not recognise ran at `Household`, which filters nothing. Scheduled tasks
+  ran at `Household` too, and can answer aloud.
+
+### What changed
+
+- `select_owner_batches` gives each owner a batch of their own, the household's shared memories
+  among them. `apply_actions` refuses a merge across owners and any action naming a memory outside
+  its batch, and what it writes keeps its sources' owner.
+- Migration `0081` traces every ownerless row consolidation wrote back to its original memories,
+  through later merges and through split pieces, which link only their first piece. One member's
+  facts, alone or with the household's, become that member's. A row holding two members' facts is
+  archived, so neither reads the other's half. Nothing is deleted.
+- The memory and session routes resolve the caller as 4d's session reads do. Another member's row
+  or conversation reads as missing. A device paired to nobody on a pond of two members saves no
+  memory, and a memory is saved as the caller's own unless the request sets `shared`.
+- `identity_resolution::scope_without_evidence` is the rule for a turn nothing identifies, as 3.8
+  states it: the household on a pond of one member, else a guest, with members counted each turn.
+  Room voice and the voice child ask it for every unrecognised voice; scheduled tasks ask it for
+  every run.
+
+### Tests
+
+| Where | Asserts |
+|---|---|
+| `memory_consolidation.rs` | no batch holds two owners' memories; a merge and a split keep their sources' owner; a merge across members, and a prune, recategorisation or merge naming a memory outside the batch, are refused |
+| `sqlite_memory.rs` | `0081` gives a member's merges back to her through a later merge, follows a split to every piece, archives a merge of two members' facts, and leaves memories it did not write |
+| `pond-api` `member_memory_and_session_scope.rs` | through the router: a member's phone lists her memories and the household's only, cannot change or delete another's, saves as her own unless shared; a phone paired to nobody saves nothing and sees nothing; another member's conversation is neither listed, deleted nor continued on any of the three chat routes |
+| `chat.rs` | a voice nobody recognises is a guest on a pond of two, the household on a pond of one, a guest when members cannot be counted; such a voice turn runs at that scope, not the loop's |
+
+On a copy of the nano's store, made and deleted on the nano, `0081` gave 16 of 17 consolidated rows
+back to their member and left the one household-only merge shared; active ownerless memories fell
+from 13 to 4.
+
+### Still open
+
+- A conversation with no owner is readable by any device, a guest's included (`readable_by`). Telling
+  a guest's own conversation from one a deleted member left needs a session's device recorded.
+- Schedules have no owner. Until they do, a schedule on a pond of two members runs without personal
+  memories.
+- A member's `forget`, and a long task's step, which holds the whole `giap-memory` group, can delete
+  a household memory. Whether any member may is a decision, not a bug.
 
 ## 5. Invariants
 

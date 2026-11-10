@@ -114,13 +114,56 @@ the turn's reply. The executor took that as the answer, so the Jetson recorded s
 `completed` and notified the household with goose's prose. The provider shim now records the
 typed `ProviderError` of each session's latest provider call (`SessionControls::provider_failure`,
 cleared when a later call starts, as after a compaction and retry), and the adapter's `chat()`
-turns a reply whose turn ended on one into an `Err` ("The model could not run: <error>"), logged
-as `kind="turn_engine_failed"`. The scheduler records the run `failed` with that error, so its
-notification says it failed; the executor logs `kind="schedule_prompt_failed"`. The streaming
-chat path is unchanged: there the user still sees goose's text. A run that speaks its reply
-(`voice_mode`, added on main after this change) streams it into the audio bus, and that path
-does not see the provider failure yet: such a run is still recorded `completed`, and the error
-text is spoken.
+turns a reply whose turn ended on one into an `Err`, logged as `kind="turn_engine_failed"`. The
+scheduler records the run `failed` with that error, so its notification says it failed; the
+executor logs `kind="schedule_prompt_failed"`. The streaming
+chat path is unchanged: there the user still sees goose's text.
+
+**A spoken run is checked before it is spoken (2026-11-02).** A run that speaks its reply
+(`voice_mode`) used to stream the turn's tokens straight into the audio bus, bypassing `chat()`
+and so every check above. On the Orin the Daily Brief was recorded `completed` with an empty
+result on 2026-10-29 (twice), -30 and -31, the first after goose's "Context limit exceeded after
+compaction", and on 2026-11-02 with goose's "Ran into this error: Execution error: speculative
+decode: Decode Error 1: NoKvCacheSlot." as its result, which was also spoken aloud. (That decode
+error came from a goose build before the fork's `f110ef44d`, which carries on without drafting
+when the verify batch finds no cache slot; the provider shim records any such mid-stream error
+typed, `SessionControls::provider_failure`.) Every `AgentPrompt` run now goes through `chat()`,
+and a spoken one is spoken (`Announcer::speak_text`, queued for the audio bus behind any turn, and picked up again
+at the cut sentence if a turn takes the bus from it) once
+it has an answer; a failed turn is a failed run and says nothing aloud. The tool calls take most
+of a run, so the first word comes only seconds later than it did when streamed.
+
+`chat()` also judges the reply by its visible text: the turn's text goes through pond-core's
+`ThoughtFilter`, as the streaming path's does before display, so a reply that is only a
+`<think>`-style block, an empty `<answer></answer>` or whitespace is a `NoReply` or
+`NoReplyAfterTools` failure, and a reply's reasoning blocks and `<answer>` tags never reach the
+run's result (`kind="reply_markup_stripped"`).
+
+**A failed run's error is a plain sentence (2026-11-02).** The run's error is shown as written on
+the dashboard's Schedules history, the Canvas brief card and the phone's Recent runs, and it was
+engineer text: "The model could not run: Execution error: null result from llama cpp", or "The
+model made 13 tool call(s) (giap-toolkit__enable_tool_group, ...) but finished without writing a
+reply." The adapter's `chat()` now fails a turn with a typed
+`pond_core::shared::domain::turn_failure::TurnFailure`, whose text is its `user_message()`:
+
+| Failure | When | Stored as the run's error |
+|---|---|---|
+| `ModelUnavailable` | the model could not load or start (out of GPU or system memory, a failed load) | Goose could not start its model, most likely because the Pond ran out of memory. It will try again next time; if this keeps happening, choose a smaller model on the Models page. |
+| `NoReplyAfterTools` | the model called tools, then wrote no answer | Goose looked things up but stopped before writing the answer. Try again, or reword the request. |
+| `NoReply` | no tool call and no answer | Goose did not write an answer this time. Try again, or reword the request. |
+| `Engine` | any other engine error | Goose's model stopped with an error. Try again; the Pond's logs have the details. |
+
+Callers tell the kind with `error.downcast_ref::<TurnFailure>()`, never by matching the text. The
+engine's own error, the tools called and their count stay in the logs, on the failure edge:
+`kind="turn_without_reply"` (with `tools` and `tool_calls`) and `kind="turn_engine_failed"` (with
+`error`), both with `failure`, and the executor's `kind="schedule_prompt_failed"` adds `failure`
+beside `task_id`. The adapter decides `ModelUnavailable` from the engine's error text
+(`MODEL_UNAVAILABLE_MARKERS` in `goose_agent.rs`): llama-cpp-2's "null result from llama cpp" is
+`LlamaModelLoadError::NullResult`, the load itself returning nothing; on the Orin on 2026-10-27 the
+log line before it was llama.cpp's `unable to allocate CUDA0 buffer`. `POST /api/v1/chat` goes
+through the same `chat()` and so now answers with the same sentences. Runs recorded before this
+keep the text they were stored with: run history is `schedule_runs.json`, not a database table,
+and nothing rewrites it.
 
 ## Missed runs
 
@@ -197,6 +240,17 @@ recoveries in the stream decide whether it gets an answer:
   and, on the `local` / `gguf` engines, reasoning is switched off, then restored. It is logged as
   `kind="final_reply_asked"` and `kind="final_reply_result"`. The user's Thinking setting is not
   changed.
+- When a guard stops the turn before it replied and after it gathered at least one tool result
+  (the repetition guard on an identical tool call, the completeness-check re-arm cap, or goose's
+  `max_turns` cap), the same final reply is asked once more, with tools off as well: for that call
+  the session's allow-set is emptied, so the provider shim offers no tools and the call that
+  tripped the guard cannot recur, then it is put back. It runs on a fresh cancellation token,
+  since the guard cancelled the turn's own. Both log lines carry `reason` (`identical_tool_call`,
+  `goal_recheck`, `turn_limit`, or `reasoned_without_reply` for the case above) and `tools_off`.
+  One final reply a turn, whichever asks first. Goose's turn-cap notice is held until then: a
+  final reply that writes text answers in its place, and otherwise the notice streams as before.
+  Seen on the Jetson on 2026-10-28, when a scheduled brief made thirteen calls, lost its early
+  results to three compactions, fetched the weather a fourth time and was stopped with no reply.
 
 A turn that still has no text fails the run with an error naming the tools it called, logged as
 `kind="turn_without_reply"`.

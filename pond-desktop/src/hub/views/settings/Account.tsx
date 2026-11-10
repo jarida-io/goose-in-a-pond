@@ -3,6 +3,7 @@ import { DetailShell } from "./DetailShell";
 import { Card, Row } from "./controls";
 import { HubIco } from "../../primitives/HubIco";
 import { api } from "../../../api/PondApiClient";
+import { openExternal } from "../../../api/followSignIn";
 import { useAppDispatch } from "../../../state/useAppContext";
 import type { Settings } from "../../../api/types";
 import type { Device } from "../../../api/types";
@@ -173,6 +174,8 @@ interface AccountDetailProps {
   go: (route: string) => void;
 }
 
+const ISSUES_URL = "https://github.com/jarida-io/goose-in-a-pond/issues";
+
 export function AccountDetail({ go }: AccountDetailProps) {
   const dispatch = useAppDispatch();
   const [settings, setSettings] = useState<Partial<Settings>>({});
@@ -181,6 +184,7 @@ export function AccountDetail({ go }: AccountDetailProps) {
   const [signingOut, setSigningOut] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showFlash(text: string, ok = true) {
@@ -203,6 +207,10 @@ export function AccountDetail({ go }: AccountDetailProps) {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    api.getSystemInfo().then((info) => setVersion(info.version), () => {});
   }, []);
 
   useEffect(() => {
@@ -339,15 +347,12 @@ export function AccountDetail({ go }: AccountDetailProps) {
       <Card title="About">
         <Row
           label="Goose In A Pond"
-          sub="Version 2.0 · on-device build"
-          control={<span className="set-row__badge">Up to date</span>}
+          sub={version ? `Version ${version}` : undefined}
         />
         <Row
-          label="Help &amp; feedback"
+          label="Help & feedback"
           control={<HubIco d={CHEVR_PATH} size={16} color="var(--color-text-tertiary,#566178)" />}
-          onClick={() => {
-            /* TODO: open help/feedback modal */
-          }}
+          onClick={() => void openExternal(ISSUES_URL)}
         />
         <Row
           label="Restart onboarding"

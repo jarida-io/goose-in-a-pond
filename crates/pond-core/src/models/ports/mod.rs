@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod announce;
 pub mod answer_reviewer;
 pub mod audio_devices;
 pub mod audio_focus;
@@ -14,6 +15,7 @@ pub mod model_storage;
 pub mod provider;
 pub mod room_voice;
 pub mod speech_energy;
+pub mod speech_model;
 pub mod token_counter;
 pub mod tts_control;
 pub mod voice_input;

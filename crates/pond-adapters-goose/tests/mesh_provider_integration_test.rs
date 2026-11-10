@@ -77,6 +77,7 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
         session_id: "mesh-test-session".to_string(),
         model_role: "chat".to_string(),
         images: Vec::new(),
+        audio: Vec::new(),
         voice_mode: false,
         canvas_mode: false,
         profile_scope: ProfileScope::Household,
@@ -87,6 +88,7 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
         suggestion_context: None,
         deep_research_task: None,
         interview: None,
+        device_place: None,
     };
 
     let mut stream = adapter.chat_stream(request).await.unwrap();

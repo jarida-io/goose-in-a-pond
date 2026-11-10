@@ -110,6 +110,27 @@ describe("ChatHubView — history images", () => {
   });
 });
 
+describe("ChatHubView — a reply's formatting", () => {
+  it("renders a reply's Markdown as headings, lists and bold, never as raw asterisks", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ session_id: "sess-hub", content: "the weather?" }),
+      assistantRow({
+        session_id: "sess-hub",
+        tool_calls: undefined,
+        content: "### Nairobi now\n\n* **Temperature:** 22.8 C\n* **Humidity:** 52%",
+      }),
+    ] as never);
+
+    await openSession("sess-hub");
+    render(<ChatHubView />);
+
+    expect(await screen.findByRole("heading", { name: "Nairobi now" })).toBeTruthy();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByText("Temperature:").tagName).toBe("STRONG");
+    expect(document.querySelector(".ch-bubble--goose")?.textContent).not.toContain("**");
+  });
+});
+
 /** The paperclip is never vision-gated, so these test the real gate: attaching works, sending is refused. */
 describe("ChatHubView — picture support", () => {
   async function attachOneImage() {

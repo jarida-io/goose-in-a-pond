@@ -56,7 +56,7 @@ build_server() {
   # Determine cargo features
   local features=""
   if [ "$MODE" = "jetson" ] && [ "$HAS_CUDA" = true ]; then
-    features="--features pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda"
+    features="--features $RELEASE_BUILD_CUDA_FEATURES"
     log "CUDA detected -- enabling GPU acceleration"
   fi
 
@@ -84,7 +84,12 @@ build_server() {
 
   if [ "$FULL_BUILD" != true ]; then
     log "Building server crates..."
-    if eval "$env_prefix cargo build -p pond-core -p pond-infra -p pond-api -p pond-server $release_flag $features" 2>&1 | tail -5; then
+    local server_build="$env_prefix cargo build -p pond-core -p pond-infra -p pond-api -p pond-server $release_flag $features"
+    # The release build giap.sh and the Jetson deploy run, so a later update reuses this one's work.
+    if [ -n "$release_flag" ]; then
+      server_build="$(release_build_cmd "${features#--features }")"
+    fi
+    if eval "$server_build" 2>&1 | tail -5; then
       success "pond-server built (${BUILD_PROFILE})"
       S_BUILD="ok"
     else

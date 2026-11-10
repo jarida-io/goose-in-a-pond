@@ -86,8 +86,10 @@ are RFC 3339.
 
 | Route | Answer |
 |---|---|
-| `GET /status` | `{card: "present"\|"missing", unlocked, expires_at, idle_minutes, retry_after}` |
-| `POST /unlock {password}` | `200 {unlocked: true, expires_at}`; `403 admin_password_rejected`; `400 admin_password_malformed`; `409 admin_card_missing`; `429 admin_cooling` with `retry_after` and `Retry-After` |
+| `GET /status` | `{card: "present"\|"missing", key, unlocked, expires_at, idle_minutes, retry_after}`; `key` is whether this phone holds a live key |
+| `POST /unlock {password}` or `{key}` | `200 {unlocked: true, expires_at}`; `403 admin_password_rejected`; `403 admin_key_rejected`; `400 admin_password_malformed`; `409 admin_card_missing` (a password with no card); `429 admin_cooling` with `retry_after` and `Retry-After` |
+| `POST /enroll` | Unlocked only. `200 {key}`: this phone's own key, replacing any it had. Shown once |
+| `DELETE /key` | `204`: this phone's key is revoked and the phone locked |
 | `POST /lock` | `204` |
 | `GET /overview` | `{disk: {total_bytes, free_bytes}, data_dir_bytes, areas: [{id, bytes}], databases: [{name, bytes}], counts: {sessions, messages, memories, long_tasks, artifacts, models}}` |
 | `GET /files?path=` | `{path, entries: [{name, path, kind: "file"\|"directory"\|"symlink", bytes, modified_at, deletable, reason}]}`, largest first |
@@ -123,6 +125,28 @@ are RFC 3339.
   `nvpmodel -m [0-9]` and `systemctl reboot`, installed only after `visudo -c` passes it. A mode
   change reports `reboot_required` when `nvpmodel` asks for one; the phone then offers a restart.
 
+## Each phone's own key
+
+Decided by Jerry on 2026-10-29: a phone keeps My Pond open behind its own Face ID or fingerprint,
+without the household's card on it. `expo-secure-store`'s biometric items do not fall back to the
+passcode, so a phone without biometrics enrolled keeps no key and uses the card.
+
+- **What the phone keeps.** The Pond issues each phone its own key: 32 random bytes, shown once. The
+  Pond keeps only its SHA-256, bound to that device. The phone keeps the key in the Keychain or
+  Keystore behind its biometrics, on that phone only, and unlocks with `POST /unlock {key}`.
+- **The first activation user.** When owner setup completes on the phone that claimed the Pond (the
+  setup record's `claimed_by`, just attributed to the primary member), the `POST /onboard/complete`
+  answer carries `admin_key` for that phone. That happens only on the call that completes onboarding,
+  so a stolen token cannot mint one later. That phone never types the card.
+- **Everyone else** unlocks with the card once and then enrolls (`POST /admin/enroll`).
+- **Revoking.** A phone's key goes when the phone is removed or revoked, when it forgets My Pond
+  (`DELETE /admin/key`), and for every phone at once when the card is rotated. A wrong or revoked key
+  counts as a wrong guess, as a wrong card does.
+- **Without a card.** A pond whose card was never made can still be administered by its first
+  activation user's key; `giap.sh admin-card` later adds the card without revoking that key.
+- **Why not in the setup QR.** The setup card is printed and photographable, and it stops working
+  once the Pond is claimed. As an admin credential it would last forever for anyone who saw it.
+
 ## The service account
 
 `scripts/install.sh` offers it on a new pond (default yes); `bash scripts/giap.sh service-account`
@@ -131,9 +155,9 @@ moves an existing one, and `service-account undo` moves it back. Both live in
 
 | Piece | Decision |
 |---|---|
-| Account | `useradd --system --user-group`, locked, shell `/usr/sbin/nologin`, home `/var/lib/goose-in-a-pond`, in whichever of `video`, `render`, `audio`, `i2c` and `gpio` the host has |
-| Sound | `loginctl enable-linger agamemnon`: its user manager starts at boot and runs the board's own per-user sound server for it, as it would for any login (PulseAudio on JetPack 6; a PipeWire board should behave the same, untested). The unit sets `XDG_RUNTIME_DIR=/run/user/<uid>` and starts after `user@<uid>.service`, so ALSA's `default` device and `pactl` reach it. Chosen over PulseAudio's system mode, which replaces every login's audio on the board, and over sharing a login's socket through `PULSE_SERVER`, which ties the service to a login that may log out |
-| Binary | stays in the login's checkout, which `giap.sh update` rebuilds. An ACL (`u:agamemnon:--x`) lets it traverse the login's `0750` home without listing it; the unit names the checkout and the login's LiteRT and Node records (`GIAP_ASSET_ROOT`, `GIAP_LITERT_HOME`, `GIAP_NODE_HOME`) |
+| Account | `useradd --system --user-group`, locked, shell `/usr/sbin/nologin`, home `/var/lib/goose-in-a-pond`, in whichever of `video`, `render`, `audio`, `i2c`, `gpio`, `dialout`, `plugdev`, `input` and `spi` the host has |
+| Sound | `loginctl enable-linger agamemnon`: its user manager starts at boot (and is started immediately on take-over) and runs the board's own per-user sound server for it, as it would for any login (PulseAudio on JetPack 6; a PipeWire board should behave the same, untested). The unit sets `XDG_RUNTIME_DIR=/run/user/<uid>` and starts after `user@<uid>.service`, so ALSA's `default` device and `pactl` reach it. Chosen over PulseAudio's system mode, which replaces every login's audio on the board, and over sharing a login's socket through `PULSE_SERVER`, which ties the service to a login that may log out |
+| Binary | stays in the login's checkout, which `giap.sh update` rebuilds. An ACL (`u:agamemnon:--x`) lets it traverse the login's `0750` home without listing it; ACLs (`u:agamemnon:rX` with default inheritance) grant read and execute on the checkout and `$home/.giap`; the unit names the checkout and the login's LiteRT and Node records (`GIAP_ASSET_ROOT`, `GIAP_LITERT_HOME`, `GIAP_NODE_HOME`) |
 | Data | moved to `/var/lib/goose-in-a-pond` (`0750`, `agamemnon`), with a link at the old path for the tools that look there. The login keeps read access through an ACL, inherited by new files. `setfacl -n` keeps each file's own mask, so what the pond creates with a private mode stays private (`setup/`, `secrets/`, `tls/`, `.runtime_host_credential`); a file it creates under the default umask is readable by the login, as it was when the login owned it |
 | Unit | a system unit, `User=agamemnon`, `POND_DATA_DIR=/var/lib/goose-in-a-pond` |
 | Power and Wi-Fi | the power drop-in and the Wi-Fi polkit grant name `agamemnon`; `connect_pond_user` reads it from the unit's `User=` |

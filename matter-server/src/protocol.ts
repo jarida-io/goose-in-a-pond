@@ -168,6 +168,7 @@ export type OpName =
   | "control"
   | "describe"
   | "state"
+  | "state_patch"
   | "ping";
 
 export interface Request {
@@ -220,6 +221,13 @@ export interface DeviceState {
   values: StateValue[];
 }
 
+/** One value of a device's state that changed, worded as `state` words it. */
+export interface StateChange extends StateValue {
+  device_id: string;
+  /** RFC 3339. */
+  at: string;
+}
+
 /** An error carrying a wire code, so the dispatcher does not have to guess one. */
 export class OpError extends Error {
   readonly code: ErrorCode;
@@ -243,6 +251,7 @@ export type EventName =
   | "device_removed"
   | "device_availability"
   | "reading"
+  | "device_state"
   | "log";
 
 export interface Event {

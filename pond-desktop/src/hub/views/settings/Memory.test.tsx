@@ -201,7 +201,7 @@ describe("Hub Memory: what the pond says while it switches", () => {
     );
     await renderMemory();
     const alert = await within(semanticCard()).findByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model");
     expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
     expect(within(alert).queryByText("loading x.gguf on the Gpu: out of memory")).toBeNull();
     fireEvent.click(within(alert).getByRole("button", { name: "Details" }));

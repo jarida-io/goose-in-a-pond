@@ -49,6 +49,12 @@ hostname = { workspace = true }
 # (`image_normalize.rs`). The workspace pin is jpeg/png/webp only, and CI's fast pass already
 # builds it through pond-adapters-vision.
 image = { workspace = true }
+# Phone recordings (M4A/AAC, MP3, FLAC, Ogg Vorbis, WAV) to the 16 kHz mono WAV the audio encoder
+# takes (`audio_normalize.rs`), in pure Rust so the nano needs no ffmpeg. Goose already builds both.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "wav", "pcm"] }
+rubato = { version = "0.16", default-features = false }
+# PDF text for `documents` (`document_extract.rs`); goose-mcp already builds it.
+lopdf = { version = "0.42", default-features = false }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

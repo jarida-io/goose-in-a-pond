@@ -173,6 +173,9 @@ admin_card_run() {
     admin_card_power_dropin "$user"
     return 0
   fi
+  # The encrypted data volume opens with the card, so the old one is read before it is replaced.
+  local old_card=""
+  [ "$sub" = rotate ] && old_card="$(admin_card_unseal 2>/dev/null)"
   # The card belongs to the data directory's owner, so it is made as the service's account.
   if [ "$user" = "$(id -un)" ]; then
     out="$(POND_DATA_DIR="$data" "$bin" admin-card --json ${sub:+--rotate})"
@@ -190,7 +193,10 @@ admin_card_run() {
   else
     warn "admin card made, but no recovery copy could be kept: write it down now"
   fi
-  [ "$sub" = rotate ] && note "every phone unlocked with the old card is locked again"
+  if [ "$sub" = rotate ] && command -v dv_rekey_card >/dev/null 2>&1; then
+    dv_rekey_card "$old_card" "$password"
+  fi
+  [ "$sub" = rotate ] && note "every phone unlocked with the old card is locked again, and every phone's own key is revoked"
   admin_card_print "$password"
   admin_card_power_dropin "$user"
   return 0

@@ -9,7 +9,7 @@
     "test": "tsx --test src/*.test.ts src/providers/*.test.ts src/providers/apple/*.test.ts src/providers/player/*.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }

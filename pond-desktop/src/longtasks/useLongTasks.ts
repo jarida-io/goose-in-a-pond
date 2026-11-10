@@ -20,6 +20,9 @@ export interface LongTasksState {
   stopErrors: Readonly<Record<string, string>>;
   stop: (id: string) => Promise<void>;
   retry: (id: string) => void;
+  /** Gives a running task 15 more minutes; absent where the card cannot extend. */
+  extend?: (id: string) => Promise<void>;
+  extending?: Readonly<Record<string, true>>;
 }
 
 function reasonOf(e: unknown): string {
@@ -53,6 +56,7 @@ export function useLongTasks(sessionId: string | null, anchored: readonly string
   const [gone, setGone] = useState<Record<string, true>>({});
   const [unreadable, setUnreadable] = useState<Record<string, string>>({});
   const [stopping, setStopping] = useState<Record<string, true>>({});
+  const [extending, setExtending] = useState<Record<string, true>>({});
   const [stopErrors, setStopErrors] = useState<Record<string, string>>({});
   const [round, setRound] = useState(0);
   const asked = useRef(new Set<string>());
@@ -172,5 +176,22 @@ export function useLongTasks(sessionId: string | null, anchored: readonly string
     [load],
   );
 
-  return { tasks, supported, gone, unreadable, stopping, stopErrors, stop, retry };
+  const extend = useCallback(
+    async (id: string): Promise<void> => {
+      setExtending((all) => ({ ...all, [id]: true }));
+      setStopErrors((all) => without(all, id));
+      try {
+        await api.extendLongTask(id);
+        await load(id);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) await load(id);
+        else setStopErrors((all) => ({ ...all, [id]: `Could not give it more time. ${reasonOf(e)}` }));
+      } finally {
+        setExtending((all) => without(all, id));
+      }
+    },
+    [load],
+  );
+
+  return { tasks, supported, gone, unreadable, stopping, stopErrors, stop, retry, extend, extending };
 }

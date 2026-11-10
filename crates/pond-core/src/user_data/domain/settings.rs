@@ -1,5 +1,6 @@
 //! GIAP settings; each field is a key in the flat `settings` SQLite table, defaulted when absent.
 
+use super::factory_defaults;
 use serde::{Deserialize, Serialize};
 
 /// Where GIAP's Matter controller listens; the path names its protocol so stale URLs fail loudly.
@@ -146,6 +147,16 @@ pub const DEFAULT_ADOPTIONS: &[DefaultAdoption] = &[
         migration: "0076",
     },
 ];
+
+/// How far a looked-up place's centre may be from a precise location and still be the same place:
+/// a town's centre and a home in it are a few kilometres apart, a neighbouring town is further.
+pub const SAME_PLACE_KM: f64 = 15.0;
+/// `weather_location_source`: the coordinates are a place name's, looked up.
+pub const WEATHER_LOCATION_GEOCODED: &str = "geocoded";
+/// `weather_location_source`: the coordinates were entered as coordinates.
+pub const WEATHER_LOCATION_MANUAL: &str = "manual";
+/// `weather_location_source`: the coordinates are a household phone's fix, sent over the LAN.
+pub const WEATHER_LOCATION_DEVICE: &str = "device";
 
 /// All configurable settings for GIAP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +339,15 @@ pub struct Settings {
     /// Human-readable location name shown in context and API responses.
     #[serde(default = "Settings::default_weather_location_name")]
     pub weather_location_name: String,
+
+    /// Where `weather_latitude`/`weather_longitude` came from, which decides whether a phone on
+    /// the household network may set them (`PUT /location/device`):
+    /// [`WEATHER_LOCATION_GEOCODED`] (a place name looked up: a town centre, a guess),
+    /// [`WEATHER_LOCATION_MANUAL`] (coordinates someone entered) or [`WEATHER_LOCATION_DEVICE`]
+    /// (a phone's fix, on the home network). Empty on a Pond set up before it existed, which
+    /// counts as a guess.
+    #[serde(default)]
+    pub weather_location_source: String,
 
     // ── Vision ─────────────────────────────────────────────────────────────
     /// On-device camera capture + motion detection; needs a camera and ffmpeg.
@@ -862,6 +882,7 @@ impl Default for Settings {
             weather_latitude: Self::default_weather_latitude(),
             weather_longitude: Self::default_weather_longitude(),
             weather_location_name: Self::default_weather_location_name(),
+            weather_location_source: String::new(),
             vision_enabled: Self::default_vision_enabled(),
             vision_camera_url: Self::default_vision_camera_url(),
             vision_camera_id: Self::default_vision_camera_id(),
@@ -983,116 +1004,136 @@ impl Default for Settings {
 
 impl Settings {
     fn default_prompt_style() -> String {
-        "balanced".to_string()
+        factory_defaults::str("prompt_style", "balanced")
     }
     fn default_prompt_addendum() -> String {
-        "".to_string()
+        factory_defaults::str("prompt_addendum", "")
     }
     fn default_assistant_name() -> String {
-        "Goose".to_string()
+        factory_defaults::str("assistant_name", "Goose")
     }
     fn default_assistant_personality() -> String {
-        "friendly and concise".to_string()
+        factory_defaults::str("assistant_personality", "friendly and concise")
     }
     fn default_user_name() -> String {
-        "Friend".to_string()
+        factory_defaults::str("user_name", "Friend")
     }
     fn default_timezone() -> String {
-        "UTC".to_string()
+        factory_defaults::str("timezone", "UTC")
     }
     fn default_home_name() -> String {
-        "".to_string()
+        factory_defaults::str("home_name", "")
     }
     // Harmony models (Gemma 4, gpt-oss) spend hundreds of tokens before the visible reply.
     fn default_max_tokens() -> u32 {
-        4096
+        factory_defaults::u32("max_tokens", 4096)
     }
     fn default_temperature() -> f32 {
-        0.7
+        factory_defaults::f32("temperature", 0.7)
     }
     fn default_llm_provider() -> String {
-        "".to_string()
+        factory_defaults::str("llm_provider", "")
     }
     /// Two words: "goose" alone is said in passing, and the ear's CNN knows only this phrase.
     fn default_wake_word() -> String {
-        "hey goose".to_string()
+        factory_defaults::str("wake_word", "hey goose")
     }
     /// On: the pond is a room device first, and it runs only where a mic and speaker pair works.
     fn default_voice_room_enabled() -> bool {
-        true
+        factory_defaults::boolean("voice_room_enabled", true)
     }
     fn default_kws_energy_threshold() -> f32 {
-        0.003
+        factory_defaults::f32("kws_energy_threshold", 0.003)
     }
     fn default_kws_post_trigger_silence_ms() -> u64 {
-        400
+        factory_defaults::u64("kws_post_trigger_silence_ms", 400)
     }
     fn default_kws_cooldown_ms() -> u64 {
-        2000
+        factory_defaults::u64("kws_cooldown_ms", 2000)
     }
     fn default_tts_voice() -> String {
-        "".to_string()
+        factory_defaults::str("tts_voice", "")
     }
     fn default_tts_speed() -> f32 {
-        1.0
+        factory_defaults::f32("tts_speed", 1.0)
     }
     fn default_tts_quality() -> String {
-        "q8f16".to_string()
+        factory_defaults::str("tts_quality", "q8f16")
     }
     /// The calibration decides: the CNN missed most real voices it was not trained on.
     fn default_wake_detector() -> String {
-        "auto".to_string()
+        factory_defaults::str("wake_detector", "auto")
     }
     /// A one-time 2 MB download beats shipping a detector that can't tell a fridge from a voice.
     fn default_vad_backend() -> String {
-        "silero".to_string()
+        factory_defaults::str("vad_backend", "silero")
     }
     fn default_voice_thinking_tone_enabled() -> bool {
-        true
+        factory_defaults::boolean("voice_thinking_tone_enabled", true)
     }
     /// On: a speaker that takes audio and makes no sound is only caught by listening for it.
     fn default_audio_sound_test() -> bool {
-        true
+        factory_defaults::boolean("audio_sound_test", true)
     }
     /// On: a board has no volume keys or sound menu, so nobody else will fix them.
     fn default_audio_manage_system() -> bool {
-        true
+        factory_defaults::boolean("audio_manage_system", true)
     }
     fn default_recording_duration() -> u32 {
-        3
+        factory_defaults::u32("recording_duration", 3)
     }
     fn default_whisper_url() -> String {
-        "http://127.0.0.1:9000".to_string()
+        factory_defaults::str("whisper_url", "http://127.0.0.1:9000")
     }
     fn default_active_llm_model() -> String {
-        "".to_string()
+        factory_defaults::str("active_llm_model", "")
     }
     fn default_active_whisper_model() -> String {
-        "".to_string()
+        factory_defaults::str("active_whisper_model", "")
     }
     fn default_active_tts_model() -> String {
-        "".to_string()
+        factory_defaults::str("active_tts_model", "")
     }
     fn default_embedding_provider() -> String {
-        "fastembed".to_string()
+        factory_defaults::str("embedding_provider", "fastembed")
     }
     fn default_weather_enabled() -> bool {
-        false
+        factory_defaults::boolean("weather_enabled", false)
     }
     fn default_weather_latitude() -> f64 {
-        0.0
+        factory_defaults::f64("weather_latitude", 0.0)
     }
     fn default_weather_longitude() -> f64 {
-        0.0
+        factory_defaults::f64("weather_longitude", 0.0)
     }
     fn default_weather_location_name() -> String {
-        "".to_string()
+        factory_defaults::str("weather_location_name", "")
+    }
+
+    /// Whether the weather coordinates are a real position rather than a town centre or nothing:
+    /// typed in, or a phone's fix. Only then does a phone's fix wait to be asked for.
+    pub fn weather_location_is_precise(&self) -> bool {
+        matches!(
+            self.weather_location_source.as_str(),
+            WEATHER_LOCATION_MANUAL | WEATHER_LOCATION_DEVICE
+        ) && (self.weather_latitude != 0.0 || self.weather_longitude != 0.0)
+    }
+
+    /// Whether looked-up coordinates `(lat, lon)` name the place this precise location is in, so
+    /// a new spelling of its name ("Ndenderu, Kenya" for "Ndenderu, Kiambu County") keeps the
+    /// fix rather than replacing it with the town's centre. False when the location is a guess.
+    pub fn precise_location_is_near(&self, lat: f64, lon: f64) -> bool {
+        self.weather_location_is_precise()
+            && crate::user_data::services::nearby::distance_km(
+                (self.weather_latitude, self.weather_longitude),
+                (lat, lon),
+            ) <= SAME_PLACE_KM
     }
     fn default_vision_enabled() -> bool {
-        false
+        factory_defaults::boolean("vision_enabled", false)
     }
     fn default_vision_camera_url() -> String {
-        "".to_string()
+        factory_defaults::str("vision_camera_url", "")
     }
     fn default_vision_camera_id() -> String {
         super::vision::DEFAULT_CAMERA_ID.to_string()
@@ -1104,7 +1145,7 @@ impl Settings {
         super::vision::DEFAULT_MOTION_THRESHOLD
     }
     fn default_vision_classifier_model() -> String {
-        "".to_string()
+        factory_defaults::str("vision_classifier_model", "")
     }
     fn default_vision_event_cooldown_secs() -> u64 {
         super::vision::DEFAULT_EVENT_COOLDOWN_SECS
@@ -1113,10 +1154,10 @@ impl Settings {
         super::vision::DEFAULT_CLASSIFIER_CONFIDENCE
     }
     fn default_vision_face_recognition_enabled() -> bool {
-        true
+        factory_defaults::boolean("vision_face_recognition_enabled", true)
     }
     fn default_vision_face_on_motion() -> bool {
-        true
+        factory_defaults::boolean("vision_face_on_motion", true)
     }
     fn default_vision_event_types() -> Vec<String> {
         super::vision::EVENT_TYPES
@@ -1125,67 +1166,67 @@ impl Settings {
             .collect()
     }
     fn default_picture_support_download_enabled() -> bool {
-        false
+        factory_defaults::boolean("picture_support_download_enabled", false)
     }
     fn default_matter_ws_url() -> String {
-        DEFAULT_MATTER_WS_URL.to_string()
+        factory_defaults::str("matter_ws_url", DEFAULT_MATTER_WS_URL)
     }
     fn default_matter_ble_enabled() -> bool {
-        false
+        factory_defaults::boolean("matter_ble_enabled", false)
     }
     fn default_mesh_enabled() -> bool {
-        false
+        factory_defaults::boolean("mesh_enabled", false)
     }
     fn default_lightning_enabled() -> bool {
-        false
+        factory_defaults::boolean("lightning_enabled", false)
     }
     fn default_mesh_settlement_millisats_per_token() -> u64 {
-        0
+        factory_defaults::u64("mesh_settlement_millisats_per_token", 0)
     }
     fn default_mesh_lend_token_ceiling() -> u64 {
-        0
+        factory_defaults::u64("mesh_lend_token_ceiling", 0)
     }
     fn default_mic_enabled() -> bool {
-        true
+        factory_defaults::boolean("mic_enabled", true)
     }
     fn default_cameras_enabled() -> bool {
-        true
+        factory_defaults::boolean("cameras_enabled", true)
     }
     fn default_cloud_fallback_enabled() -> bool {
-        false
+        factory_defaults::boolean("cloud_fallback_enabled", false)
     }
     fn default_event_log_days() -> u32 {
-        30
+        factory_defaults::u32("event_log_days", 30)
     }
     fn default_sensor_days() -> u32 {
-        7
+        factory_defaults::u32("sensor_days", 7)
     }
     fn default_session_messages_keep() -> u32 {
-        500
+        factory_defaults::u32("session_messages_keep", 500)
     }
     fn default_events_days() -> u32 {
-        30
+        factory_defaults::u32("events_days", 30)
     }
     fn default_sensitive_days() -> u32 {
-        7
+        factory_defaults::u32("sensitive_days", 7)
     }
     fn default_thinking_mode() -> String {
-        "auto".to_string()
+        factory_defaults::str("thinking_mode", "auto")
     }
     fn default_reasoning_effort() -> String {
-        "brief".to_string()
+        factory_defaults::str("reasoning_effort", "brief")
     }
     fn default_review_mode() -> String {
-        "off".to_string()
+        factory_defaults::str("review_mode", "off")
     }
     fn default_review_max_rounds() -> u32 {
-        1
+        factory_defaults::u32("review_max_rounds", 1)
     }
     fn default_review_pass_threshold() -> u8 {
-        3
+        factory_defaults::u8("review_pass_threshold", 3)
     }
     fn default_summary_idle_secs() -> u32 {
-        120
+        factory_defaults::u32("summary_idle_secs", 120)
     }
 
     fn default_compaction_verbatim_days() -> u32 {
@@ -1193,7 +1234,7 @@ impl Settings {
     }
 
     fn default_hybrid_compaction_enabled() -> bool {
-        true
+        factory_defaults::boolean("hybrid_compaction_enabled", true)
     }
 
     // /// True: speculative decoding was automatic before this switch existed, so an install that
@@ -1204,18 +1245,18 @@ impl Settings {
     // }
 
     fn default_agent_backend() -> String {
-        "goose".to_string()
+        factory_defaults::str("agent_backend", "goose")
     }
     fn default_agent_goose_mode() -> String {
-        "auto".to_string()
+        factory_defaults::str("agent_goose_mode", "auto")
     }
     /// Room for multi-step requests; cancellation, timeout and context abort are the real rails.
     fn default_agent_max_turns() -> u32 {
-        50
+        factory_defaults::u32("agent_max_turns", 50)
     }
     /// No voice cap: idle timeout, thinking tone and barge-in bound the wait better than steps.
     fn default_voice_max_turns() -> u32 {
-        0
+        factory_defaults::u32("voice_max_turns", 0)
     }
 
     /// Turn cap for a request; a non-zero voice cap binds even when text is uncapped.
@@ -1253,176 +1294,175 @@ impl Settings {
         self.tool_selection_is_relevant() || self.tool_selection_is_minimal()
     }
     fn default_agent_timeout_secs() -> u64 {
-        300
+        factory_defaults::u64("agent_timeout_secs", 300)
     }
     fn default_tool_selection_mode() -> String {
-        // "all" so existing installs see no change.
-        TOOL_SELECTION_MODE_ALL.to_string()
+        factory_defaults::str("tool_selection_mode", TOOL_SELECTION_MODE_ALL)
     }
     fn default_security_policy_mode() -> String {
-        SECURITY_POLICY_MODE_AUDIT.to_string()
+        factory_defaults::str("security_policy_mode", SECURITY_POLICY_MODE_AUDIT)
     }
     fn default_network_mode() -> String {
-        NETWORK_MODE_OPEN.to_string()
+        factory_defaults::str("network_mode", NETWORK_MODE_OPEN)
     }
     fn default_prefix_cache_prompt() -> bool {
-        true
+        factory_defaults::boolean("prefix_cache_prompt", true)
     }
     fn default_agent_memory_inject() -> bool {
-        true
+        factory_defaults::boolean("agent_memory_inject", true)
     }
     fn default_agent_memory_limit() -> u32 {
-        5
+        factory_defaults::u32("agent_memory_limit", 5)
     }
     fn default_schedule_result_notify() -> bool {
-        true
+        factory_defaults::boolean("schedule_result_notify", true)
     }
     fn default_system_notices_enabled() -> bool {
-        true
+        factory_defaults::boolean("system_notices_enabled", true)
     }
     fn default_memory_decay_base_half_life_days() -> f32 {
-        11.25
+        factory_defaults::f32("memory_decay_base_half_life_days", 11.25)
     }
     fn default_memory_decay_beta() -> f32 {
-        0.8
+        factory_defaults::f32("memory_decay_beta", 0.8)
     }
     fn default_memory_prune_threshold() -> f32 {
-        0.05
+        factory_defaults::f32("memory_prune_threshold", 0.05)
     }
     fn default_memory_archive_threshold() -> f32 {
-        0.15
+        factory_defaults::f32("memory_archive_threshold", 0.15)
     }
     fn default_tool_output_compaction() -> bool {
-        true
+        factory_defaults::boolean("tool_output_compaction", true)
     }
     /// On: one model call per idle period, versus the same three template questions forever.
     fn default_suggestion_generation_enabled() -> bool {
-        true
+        factory_defaults::boolean("suggestion_generation_enabled", true)
     }
     fn default_memory_extraction_enabled() -> bool {
-        true
+        factory_defaults::boolean("memory_extraction_enabled", true)
     }
     fn default_memory_cleanup_enabled() -> bool {
-        true
+        factory_defaults::boolean("memory_cleanup_enabled", true)
     }
     fn default_memory_consolidation_enabled() -> bool {
-        true
+        factory_defaults::boolean("memory_consolidation_enabled", true)
     }
     fn default_session_titling_enabled() -> bool {
-        true
+        factory_defaults::boolean("session_titling_enabled", true)
     }
     fn default_memory_consolidation_mode() -> String {
-        "single".to_string()
+        factory_defaults::str("memory_consolidation_mode", "single")
     }
     fn default_memory_cleanup_interval_hours() -> u32 {
-        6
+        factory_defaults::u32("memory_cleanup_interval_hours", 6)
     }
     fn default_memory_consolidation_interval_hours() -> u32 {
-        24
+        factory_defaults::u32("memory_consolidation_interval_hours", 24)
     }
     fn default_memory_consolidation_batch_size() -> u32 {
-        50
+        factory_defaults::u32("memory_consolidation_batch_size", 50)
     }
     fn default_memory_extraction_max_facts() -> u32 {
-        3
+        factory_defaults::u32("memory_extraction_max_facts", 3)
     }
     /// The lane's tick (60 s), so this floor between batch passes only ever makes them rarer.
     fn default_memory_extraction_interval_secs() -> u32 {
-        60
+        factory_defaults::u32("memory_extraction_interval_secs", 60)
     }
     fn default_memory_extraction_sessions_per_pass() -> u32 {
-        3
+        factory_defaults::u32("memory_extraction_sessions_per_pass", 3)
     }
     fn default_memory_extraction_window_messages() -> u32 {
-        20
+        factory_defaults::u32("memory_extraction_window_messages", 20)
     }
     fn default_memory_extraction_idle_secs() -> u32 {
-        900
+        factory_defaults::u32("memory_extraction_idle_secs", 900)
     }
     fn default_memory_reinforce_threshold() -> f32 {
-        0.94
+        factory_defaults::f32("memory_reinforce_threshold", 0.94)
     }
     fn default_memory_relate_threshold() -> f32 {
-        0.78
+        factory_defaults::f32("memory_relate_threshold", 0.78)
     }
     fn default_memory_date_proposals_enabled() -> bool {
-        true
+        factory_defaults::boolean("memory_date_proposals_enabled", true)
     }
     /// `write`: nothing else extracts, so a `shadow` default would never remember anything.
     fn default_memory_extraction_mode() -> String {
-        "write".to_string()
+        factory_defaults::str("memory_extraction_mode", "write")
     }
     fn default_memory_extraction_first_pass_at() -> String {
-        String::new()
+        factory_defaults::str("memory_extraction_first_pass_at", "")
     }
     fn default_schedule_max_concurrent() -> u32 {
-        2
+        factory_defaults::u32("schedule_max_concurrent", 2)
     }
     fn default_schedule_max_runs_per_task() -> u32 {
-        50
+        factory_defaults::u32("schedule_max_runs_per_task", 50)
     }
     fn default_goal_check_enabled() -> bool {
-        true
+        factory_defaults::boolean("goal_check_enabled", true)
     }
     fn default_context_monitor_enabled() -> bool {
-        true
+        factory_defaults::boolean("context_monitor_enabled", true)
     }
     fn default_cloud_input_price_per_million() -> f64 {
-        2.50
+        factory_defaults::f64("cloud_input_price_per_million", 2.50)
     }
     fn default_cloud_output_price_per_million() -> f64 {
-        10.00
+        factory_defaults::f64("cloud_output_price_per_million", 10.00)
     }
     fn default_telemetry_enabled() -> bool {
-        true
+        factory_defaults::boolean("telemetry_enabled", true)
     }
     fn default_tool_call_validation() -> bool {
-        true
+        factory_defaults::boolean("tool_call_validation", true)
     }
     fn default_tool_request_detection() -> bool {
-        true
+        factory_defaults::boolean("tool_request_detection", true)
     }
     fn default_ext_enabled() -> bool {
-        true
+        factory_defaults::boolean("ext_enabled", true)
     }
 
     /// Deliberately not [`Self::default_ext_enabled`]; named so a test can assert it is `false`.
     fn default_ext_orchestrator_enabled() -> bool {
-        false
+        factory_defaults::boolean("ext_orchestrator_enabled", false)
     }
 
     fn default_ext_travel_enabled() -> bool {
-        false
+        factory_defaults::boolean("ext_travel_enabled", false)
     }
 
     fn default_unprompted_speech_enabled() -> bool {
-        false
+        factory_defaults::boolean("unprompted_speech_enabled", false)
     }
 
     /// Set by default, so switching speech on does not also require remembering quiet hours.
     fn default_quiet_hours_start() -> String {
-        "22:00".to_string()
+        factory_defaults::str("quiet_hours_start", "22:00")
     }
 
     fn default_quiet_hours_end() -> String {
-        "07:00".to_string()
+        factory_defaults::str("quiet_hours_end", "07:00")
     }
 
     /// Not `info`: it carries every completed scheduled task, i.e. the pond's own cron log.
     fn default_unprompted_speech_categories() -> String {
-        "alert".to_string()
+        factory_defaults::str("unprompted_speech_categories", "alert")
     }
 
     fn default_proactive_review_enabled() -> bool {
-        false
+        factory_defaults::boolean("proactive_review_enabled", false)
     }
 
     fn default_long_tasks_enabled() -> bool {
-        true
+        factory_defaults::boolean("long_tasks_enabled", true)
     }
 
     fn default_agent_activations_enabled() -> bool {
-        true
+        factory_defaults::boolean("agent_activations_enabled", true)
     }
 
     fn default_agent_prefill_retention_days() -> u32 {
@@ -1430,19 +1470,19 @@ impl Settings {
     }
 
     fn default_context_ingest_enabled() -> bool {
-        false
+        factory_defaults::boolean("context_ingest_enabled", false)
     }
 
     fn default_spoken_pairing_codes() -> bool {
-        true
+        factory_defaults::boolean("spoken_pairing_codes", true)
     }
 
     fn default_ble_setup_enabled() -> bool {
-        true
+        factory_defaults::boolean("ble_setup_enabled", true)
     }
 
     fn default_ext_context_enabled() -> bool {
-        false
+        factory_defaults::boolean("ext_context_enabled", false)
     }
 }
 
@@ -1502,6 +1542,41 @@ mod tests {
         }
 
         problems
+    }
+
+    fn at(source: &str, lat: f64, lon: f64) -> Settings {
+        Settings {
+            weather_location_source: source.to_string(),
+            weather_latitude: lat,
+            weather_longitude: lon,
+            ..Settings::default()
+        }
+    }
+
+    // A phone's fix in Ndenderu, and the centre a lookup of "Ndenderu, Kenya" returns.
+    const HOME: (f64, f64) = (-1.215, 36.741);
+    const NDENDERU_CENTRE: (f64, f64) = (-1.19376, 36.74625);
+    const MOMBASA: (f64, f64) = (-4.0435, 39.6682);
+
+    #[test]
+    fn a_new_name_for_the_same_place_keeps_a_precise_location() {
+        for source in [WEATHER_LOCATION_DEVICE, WEATHER_LOCATION_MANUAL] {
+            let s = at(source, HOME.0, HOME.1);
+            assert!(
+                s.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_town_or_a_guess_does_not_keep_the_location() {
+        let device = at(WEATHER_LOCATION_DEVICE, HOME.0, HOME.1);
+        assert!(!device.precise_location_is_near(MOMBASA.0, MOMBASA.1));
+        let guess = at(WEATHER_LOCATION_GEOCODED, HOME.0, HOME.1);
+        assert!(!guess.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1));
+        let older_pond = at("", HOME.0, HOME.1);
+        assert!(!older_pond.precise_location_is_near(NDENDERU_CENTRE.0, NDENDERU_CENTRE.1));
     }
 
     #[test]
@@ -2228,6 +2303,8 @@ mod tests {
             "weather_enabled",
             "weather_latitude",
             "weather_location_name",
+            // Written by the server only: geocode-on-save, explicit coordinates, a phone's fix.
+            "weather_location_source",
             "weather_longitude",
             // No UI row while its only reader, `search_web`, is unregistered; the value persists.
             "searxng_url",

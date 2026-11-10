@@ -22,9 +22,13 @@ interface NavRow {
 
 /** Voice takes `micEl`: `HP_PATHS.mic` is a compound-icon sentinel and draws nothing as a path. */
 const POND_ROWS: Array<{ label: string; icon: string | React.ReactNode; nav: DrawerNav }> = [
-  { label: "Chat",  icon: HP_PATHS.chat, nav: { kind: "section", section: "chat" } },
-  { label: "Voice", icon: micEl,         nav: { kind: "voice" } },
+  { label: "Chat",    icon: HP_PATHS.chat,     nav: { kind: "section", section: "chat" } },
+  { label: "Voice",   icon: micEl,             nav: { kind: "voice" } },
+  { label: "Saved",   icon: HP_PATHS.bookmark, nav: { kind: "section", section: "saved" } },
+  { label: "Watches", icon: HP_PATHS.eye,      nav: { kind: "section", section: "watches" } },
 ];
+
+const POND_SECTIONS = new Set<GuiSection>(["chat", "saved", "watches"]);
 
 /** The design's order (most-touched first), not alphabetical; keep it in step with the design. */
 const MANAGE_ROWS: Array<{ label: string; section: GuiSection }> = [
@@ -125,7 +129,7 @@ export function HubDrawer({ open, onClose, active, onNavigate }: HubDrawerProps)
               label="Pond"
               icon={HP_PATHS.goose}
               open={pondOpen}
-              holdsActive={active === "chat"}
+              holdsActive={POND_SECTIONS.has(active)}
               onToggle={() => setPondOpen((v) => !v)}
             >
               <div className="hdrawer__sub">

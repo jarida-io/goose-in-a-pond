@@ -12,6 +12,9 @@ pub struct MemoryStatus {
     pub budget_mb: u64,
     /// Name of the model currently loaded in the LLM slot, if any.
     pub loaded_model: Option<String>,
+    /// What the host could hand a new program now (MB), not held to the LLM slot's budget: the
+    /// Memory model lives outside it. `None` where nothing was read.
+    pub available_mb: Option<u64>,
 }
 
 /// Memory-aware model loading and eviction; a no-op for backends that manage their own memory.

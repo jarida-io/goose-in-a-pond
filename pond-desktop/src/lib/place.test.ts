@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { api } from "../api/PondApiClient";
-import { allZones, deviceZone, detectPlace, placeFromZone, __resetZoneCache } from "./place";
+import { allZones, deviceZone, detectPlace, placeFromZone, placeNote, __resetZoneCache } from "./place";
 
 vi.mock("../api/PondApiClient", () => ({
   api: { listTimeZones: vi.fn(), detectLocation: vi.fn() },
@@ -114,5 +114,18 @@ describe("detectPlace", () => {
     mockApi.detectLocation.mockResolvedValue({ name: "Kisumu, Kenya", has_coordinates: true });
     await detectPlace("  Kisumu  ");
     expect(mockApi.detectLocation.mock.calls[0][0].typed_name).toBe("Kisumu");
+  });
+});
+
+describe("Find my location in Settings", () => {
+  it("says only a browser fix is the place, and points a guess or a town centre to the phone", () => {
+    const guess = { name: "Nairobi", certain: false, source: "timezone" } as Parameters<typeof placeNote>[0];
+    expect(placeNote(guess)).toMatch(/^Guessed Nairobi from your time zone\./);
+    expect(placeNote(guess)).toContain("Goose On The Go at home");
+    const town = placeNote({ ...guess, certain: true, source: "geocoded", name: "Nairobi, Kenya" });
+    expect(town).toMatch(/^Found Nairobi, Kenya\. That is the town's centre\./);
+    expect(town).toContain("Goose On The Go at home");
+    expect(placeNote({ ...guess, certain: true, source: "device", name: "Ndenderu" })).toBe("Found Ndenderu");
+    expect(placeNote({ ...guess, note: "A note from the Pond" })).toBe("A note from the Pond");
   });
 });

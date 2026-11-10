@@ -1083,6 +1083,26 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(content)
     }
 
+    async fn first_web_message(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, SessionStorageError> {
+        let content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM session_messages \
+             WHERE session_id = ? AND ( \
+               (role = 'assistant' AND content LIKE '%](http%') \
+               OR (role = 'tool' AND (content LIKE '%Address: http%' \
+                 OR content LIKE '%Source: http%' OR content LIKE '%\"source_url\":\"http%'))) \
+             ORDER BY created_at ASC, rowid ASC \
+             LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        Ok(content)
+    }
+
     // ── Image attachments ───────────────────────────────────────────────────
 
     async fn list_session_attachments(
@@ -1908,6 +1928,59 @@ mod tests {
         // An anchor belonging to a different conversation is not this one's.
         s.create_session("sess-2".to_string()).await.unwrap();
         assert_eq!(s.messages_after("sess-2", "m0").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn first_web_message_finds_the_first_cited_or_read_page() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-w".to_string()).await.unwrap();
+        assert_eq!(s.first_web_message("sess-w").await.unwrap(), None);
+
+        let rows = [
+            (
+                "m0",
+                ChatMessage::user("see [this](https://user.example/pasted)"),
+            ),
+            ("m1", ChatMessage::assistant("No pages yet.")),
+            (
+                "m2",
+                ChatMessage::tool_result(
+                    "Page: Fares\nAddress: https://example.com/p\nlines",
+                    "c1",
+                ),
+            ),
+            (
+                "m3",
+                ChatMessage::assistant("Per [Fares](https://example.com/p)."),
+            ),
+        ];
+        for (id, msg) in rows {
+            s.add_message(
+                "sess-w".to_string(),
+                SessionMessage::new(id.to_string(), "sess-w".to_string(), msg),
+            )
+            .await
+            .unwrap();
+        }
+        let first = s.first_web_message("sess-w").await.unwrap().unwrap();
+        assert!(first.starts_with("Page: Fares"), "took {first:?}");
+
+        // A lookup names its page on its last line.
+        s.create_session("sess-s".to_string()).await.unwrap();
+        s.add_message(
+            "sess-s".to_string(),
+            SessionMessage::new(
+                "s0".to_string(),
+                "sess-s".to_string(),
+                ChatMessage::tool_result(
+                    "An actor.\n\nSource: https://en.wikipedia.org/wiki/X",
+                    "c2",
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(s.first_web_message("sess-s").await.unwrap().is_some());
     }
 
     #[tokio::test]

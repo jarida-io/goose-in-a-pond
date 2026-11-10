@@ -79,8 +79,8 @@ giap_role:
     1. Read only what your step needs. artifact_read pages through a long artifact; ask for the
        next part rather than all of it.
     2. Do the step with your tools. search_web finds web pages; read_web_page reads one, by a
-       source's domain from search_web or a link the brief gives, and returns the lines that
-       answer your question, or a part by its number.
+       source's domain from search_web, a link the brief gives, or a link or search form a page
+       you read lists, and returns the lines that answer your question, or a part by its number.
     3. Save what later steps need with artifact_write: a short title, a one-line summary, and the
        body. On your last save, when the step is done, set finish to true: that also reports the
        step completed, and you are done.

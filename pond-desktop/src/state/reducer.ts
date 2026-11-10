@@ -4,9 +4,15 @@ import {
   normalizeDesktopMode,
   normalizeGuiSection,
 } from "../desktopState";
-import type { ScheduleRunNotification, DebriefContext } from "../api/types";
+import type {
+  ScheduleRunNotification,
+  DebriefContext,
+  HouseholdNotice,
+} from "../api/types";
+import { mergeNotices } from "./householdNotices";
 import { defaultServerUrl } from "../api/PondApiClient";
 import { isDesktopShell } from "../shell";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 
 export type VoiceState =
   "idle" | "wait" | "recording" | "thinking" | "speaking" | "error";
@@ -69,8 +75,20 @@ export interface AppState {
   /** Persistent schedule run notifications (survives page navigation, unlike toasts). */
   scheduleRuns: ScheduleRunNotification[];
   unreadRunCount: number;
+  /** The Pond's household notices for this device: its history plus the live stream, by id. */
+  householdNotices: HouseholdNotice[];
+  /** The last attempt to read the notice history failed; the feed is retrying. */
+  noticeFeedFailed: boolean;
   /** When set, Canvas should render a debrief card for this run. */
   debriefContext: DebriefContext | null;
+  /**
+   * A conversation a notification asked to open. The chat screen takes it once (clearing it) and
+   * opens it if the Pond has it; `sessionId` alone cannot ask this, since the chat opens on the
+   * wall even mid-conversation.
+   */
+  requestedConversation: string | null;
+  /** A web watch a notification asked to open; the watches screen takes it once. */
+  requestedWatch: string | null;
 }
 
 export type AppAction =
@@ -112,7 +130,15 @@ export type AppAction =
     }
   | { type: "MARK_RUN_READ"; payload: string }
   | { type: "MARK_ALL_RUNS_READ" }
+  /** History or live notices, already under their household ids; merged by id. */
+  | { type: "MERGE_HOUSEHOLD_NOTICES"; payload: HouseholdNotice[] }
+  | { type: "MARK_NOTICES_READ"; payload: string[] }
+  | { type: "SET_NOTICE_FEED_FAILED"; payload: boolean }
   | { type: "SET_DEBRIEF_CONTEXT"; payload: DebriefContext | null }
+  | { type: "REQUEST_CONVERSATION"; payload: string }
+  | { type: "TAKE_CONVERSATION_REQUEST" }
+  | { type: "REQUEST_WATCH"; payload: string }
+  | { type: "TAKE_WATCH_REQUEST" }
   | { type: "CLEAR_DEBRIEF_CONTEXT" };
 
 let _transcriptIdCounter = 0;
@@ -160,7 +186,11 @@ export function buildInitialState(): AppState {
     latestScheduleResult: null,
     scheduleRuns: [],
     unreadRunCount: 0,
+    householdNotices: [],
+    noticeFeedFailed: false,
     debriefContext: null,
+    requestedConversation: null,
+    requestedWatch: null,
   };
 }
 
@@ -345,7 +375,7 @@ export function reducer(state: AppState, action: AppAction): AppState {
               status,
               result: result ?? r.result,
               error: error ?? r.error,
-              excerpt: (result ?? r.result ?? error ?? "").slice(0, 80),
+              excerpt: markdownToPlainText(result ?? r.result ?? error ?? "").slice(0, 80),
             }
           : r,
       );
@@ -375,11 +405,46 @@ export function reducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    case "MERGE_HOUSEHOLD_NOTICES":
+      return {
+        ...state,
+        householdNotices: mergeNotices(state.householdNotices, action.payload),
+      };
+
+    case "MARK_NOTICES_READ": {
+      const ids = new Set(action.payload);
+      return {
+        ...state,
+        householdNotices: state.householdNotices.map((n) =>
+          ids.has(n.id) ? { ...n, read: true } : n,
+        ),
+      };
+    }
+
+    case "SET_NOTICE_FEED_FAILED":
+      return state.noticeFeedFailed === action.payload
+        ? state
+        : { ...state, noticeFeedFailed: action.payload };
+
     case "SET_DEBRIEF_CONTEXT":
       return { ...state, debriefContext: action.payload };
 
     case "CLEAR_DEBRIEF_CONTEXT":
       return { ...state, debriefContext: null };
+
+    case "REQUEST_CONVERSATION":
+      return { ...state, requestedConversation: action.payload };
+
+    case "TAKE_CONVERSATION_REQUEST":
+      return state.requestedConversation === null
+        ? state
+        : { ...state, requestedConversation: null };
+
+    case "REQUEST_WATCH":
+      return { ...state, requestedWatch: action.payload };
+
+    case "TAKE_WATCH_REQUEST":
+      return state.requestedWatch === null ? state : { ...state, requestedWatch: null };
 
     default:
       return state;

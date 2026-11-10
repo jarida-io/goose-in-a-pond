@@ -419,6 +419,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/node-setup.test.sh
 
+  # The Go setup (`giap.sh go`, and the release build) can download a Go toolchain, so it is tested
+  # the same way: the pin from go.mod, the checksum check and its refusals, against a fake download site.
+  go-setup:
+    name: Go setup script - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/go-setup.test.sh
+
   # scripts/jetson/deploy.sh reaches the Jetson through scripts/lib/jetson-remote.sh: one pinned
   # address per deploy, a detached build it follows, and retries on a lost connection.
   jetson-remote:
@@ -491,6 +502,40 @@ jobs:
       - name: Tests
         run: bash scripts/lib/connect-setup.test.sh
 
+  # The clock's host side (scripts/lib/time-sync.sh): the doctor's synchronisation and pool-only
+  # lines, and the timesyncd drop-in's write, idempotence, dry run, failed restart and removal,
+  # against a scratch root and fake timedatectl and systemctl.
+  time-sync:
+    name: Clock host scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/time-sync.test.sh
+
+  # The encrypted data volume (scripts/lib/data-volume.sh): refusals, the order of the move, the
+  # boot helper and unit, card rotation, against fakes of every root tool. No root, TPM or LUKS.
+  data-volume-scripts:
+    name: Data volume scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/data-volume.test.sh
+
+  # What giap.sh doctor says about remote access (scripts/lib/remote-access.sh): the Pond's
+  # built-in network or the host's tailscale, against a fake Pond answer and a fake CLI.
+  remote-access-scripts:
+    name: Remote access doctor - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/remote-access.test.sh
+
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.
   pond-health:
@@ -534,6 +579,17 @@ jobs:
 
       - name: Tests
         run: bash scripts/lib/local-checks.test.sh
+
+  # The release build of pond-server (scripts/lib/release-build.sh): giap.sh, install.sh, build-native.sh
+  # and the Jetson deploy share its flags, which keep target-cpu=native, against fakes of the host.
+  release-build:
+    name: Release build flags - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/release-build.test.sh
 
   # Every shell script outside the goose/ submodule. Most of them run on the Jetson or a server and
   # no test can exercise them here, so this is the only check they get. A warning fails the job; a

@@ -26,7 +26,7 @@ import { ApiError } from "../../../api/types";
 import type { ContextIndexHealth, DownloadEntry, EmbedderHealth, ModelEntry, ModelMemoryStatus } from "../../../api/types";
 import {
   DESKTOP_MEMORY, E4B_ORIN, e2b, e4b, entry, eg2, foundOnDisk, litertE2b, litertE4b, llamafile, memoryRoles,
-  miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, rolesWith, voice, whisper,
+  miniLm, nomicEmbed, NO_ROLES, ollama, ORIN_MEMORY, ORIN_MEMORY_SERVING, rolesWith, voice, whisper,
 } from "../../../sections/models/fixtures";
 
 const HERE = { downloaded: true };
@@ -491,7 +491,7 @@ describe("Hub Models: Memory", () => {
     renderHub();
     const memory = await card("Memory");
     const alert = await within(memory).findByRole("alert");
-    expect(alert.textContent).toContain("There is not enough free memory to load EmbeddingGemma 2");
+    expect(alert.textContent).toContain("This pond does not have room to load EmbeddingGemma 2 beside the conversation model");
     expect(alert.textContent).toContain("all-MiniLM-L6-v2 (23 MB)");
     expect(within(alert).queryByText(/on the Gpu/)).toBeNull();
     fireEvent.click(within(alert).getByRole("button", { name: "Details" }));
@@ -509,6 +509,45 @@ describe("Hub Models: Memory", () => {
     const memory = await card("Memory");
     expect(await within(memory).findByText("Chosen, not loaded")).toBeTruthy();
     expect(within(memory).queryByText("In use")).toBeNull();
+  });
+
+  it("keeps the lighter model the error names in front of the fold, one press away", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("embeddinggemma-2") });
+    vi.mocked(api.getContextIndexHealth).mockResolvedValue(
+      memoryHealth({ state: "failed", reason: "loading embeddinggemma-2-Q8_0.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    );
+    renderHub();
+    const memory = await card("Memory");
+    await within(memory).findByRole("alert");
+    const rows = within(memory).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[1]).getByText("all-MiniLM-L6-v2")).toBeTruthy();
+    expect(within(rows[1]).getByRole("button", { name: "Use all-MiniLM-L6-v2 for memory" })).toBeTruthy();
+    expect(within(memory).getByRole("button", { name: "Other Memory models (1)" })).toBeTruthy();
+  });
+
+  it("says what each model needs while it runs, and whether this pond has room for it", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("", "fastembed"), memory: { ...ORIN_MEMORY_SERVING, embedder_room_mb: 200 } });
+    renderHub();
+    const memory = await card("Memory");
+    fireEvent.click(within(memory).getByRole("button", { name: "Other Memory models (1)" }));
+    const [recommended, inUse, other] = within(memory).getAllByRole("listitem");
+    await waitFor(() => expect(within(recommended).getByText("Tight on this pond")).toBeTruthy());
+    expect(within(recommended).getByText("Needs about 368 MB while it runs")).toBeTruthy();
+    expect(within(other).getByText("Fits")).toBeTruthy();
+    // The model in use says how it is doing instead.
+    expect(within(inUse).getByText("Needs about 50 MB while it runs")).toBeTruthy();
+    expect(within(inUse).queryByText("Fits")).toBeNull();
+  });
+
+  it("names no fit where the pond reports no room", async () => {
+    setup({ models: ROWS(), roles: memoryRoles("", "fastembed"), memory: ORIN_MEMORY });
+    renderHub();
+    const memory = await card("Memory");
+    const rows = within(memory).getAllByRole("listitem");
+    expect(within(rows[0]).getByText("Needs about 368 MB while it runs")).toBeTruthy();
+    expect(within(memory).queryByText("Fits")).toBeNull();
+    expect(within(memory).queryByText("Tight on this pond")).toBeNull();
   });
 });
 

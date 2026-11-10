@@ -3,7 +3,7 @@ use crate::models::ports::agent::Agent;
 use crate::models::ports::interrupt::InterruptWatch;
 use crate::models::ports::provider::LlmProvider;
 use crate::models::ports::speech_energy::{MicHold, SpeechEnergy};
-use crate::models::ports::voice_input::{SpeculativeSignal, VoiceInput};
+use crate::models::ports::voice_input::{ModelHears, SpeculativeSignal, VoiceInput};
 use crate::models::ports::voice_output::VoiceOutput;
 use crate::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use crate::models::services::instant_activation::InstantActivation;
@@ -134,6 +134,10 @@ pub enum SpeechRefusal {
     NotAddressedToAMember,
     /// The member it is for is not present; anyone who hears it is the wrong person.
     MemberNotPresent,
+    /// The member it is for has not asked to hear this kind of thing aloud.
+    NotOptedIn,
+    /// Inside the member's own quiet hours.
+    MemberQuietHours,
     NothingToSay,
 }
 
@@ -150,6 +154,8 @@ impl SpeechRefusal {
             Self::GuestSession => "guest_session",
             Self::NotAddressedToAMember => "not_addressed_to_a_member",
             Self::MemberNotPresent => "member_not_present",
+            Self::NotOptedIn => "not_opted_in",
+            Self::MemberQuietHours => "member_quiet_hours",
             Self::NothingToSay => "nothing_to_say",
         }
     }
@@ -180,7 +186,7 @@ pub struct UnpromptedUtterance<'a> {
 
 /// Whether `now` is inside the `[start, end)` quiet window, which may wrap midnight.
 /// `None` if a bound isn't `HH:MM`. Equal bounds (compared parsed: `9:00` = `09:00`) are all day.
-fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
+pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> Option<bool> {
     let parse = |s: &str| {
         let t = chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()?;
         LocalTimeOfDay::new(chrono::Timelike::hour(&t), chrono::Timelike::minute(&t))
@@ -389,6 +395,10 @@ pub struct ChatService {
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
     waker: Arc<std::sync::Mutex<Option<VoiceSpeaker>>>,
+    /// An unrecognised speaker's scope, in place of `profile_scope`, when the loop knows how.
+    unrecognised_scope: Option<UnrecognisedScope>,
+    /// When the model hears, a voice turn carries its recording beside the transcript.
+    model_hearing: Option<Arc<dyn ModelHears>>,
 }
 
 /// A member's context for a turn they spoke, as the routes build it for a typed one.
@@ -397,6 +407,28 @@ pub type SpeakerContext = Arc<
         + Send
         + Sync,
 >;
+
+/// The scope of a turn no voice was recognised for, asked each turn, since members come and go
+/// while a room runs.
+pub type UnrecognisedScope =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, ProfileScope> + Send + Sync>;
+
+/// A shared microphone's rule for a voice it does not recognise:
+/// [`scope_without_evidence`](crate::user_data::services::identity_resolution::scope_without_evidence),
+/// asked each turn.
+pub fn unrecognised_voice_scope(
+    profiles: Option<Arc<dyn crate::user_data::ports::profile::ProfileRepository + Send + Sync>>,
+) -> UnrecognisedScope {
+    Arc::new(move || {
+        let profiles = profiles.clone();
+        Box::pin(async move {
+            crate::user_data::services::identity_resolution::scope_without_evidence(
+                profiles.as_deref(),
+            )
+            .await
+        })
+    })
+}
 
 /// Hears each `WorkflowState` the loop enters, synchronously, from `emit_event`.
 pub type StateObserver = Arc<dyn Fn(WorkflowState) + Send + Sync>;
@@ -498,6 +530,8 @@ impl ChatService {
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
+            unrecognised_scope: None,
+            model_hearing: None,
         }
     }
 
@@ -755,14 +789,66 @@ impl ChatService {
         self.emit_event(WorkflowEvent::Ready { session_id: fresh });
     }
 
+    /// A shared microphone's rule for a voice it does not recognise: asked each turn, in place
+    /// of the loop's fixed scope.
+    pub fn with_unrecognised_scope(mut self, scope: UnrecognisedScope) -> Self {
+        self.unrecognised_scope = Some(scope);
+        self
+    }
+
+    /// Let the model hear each voice turn's recording whenever `hearing` says it can.
+    pub fn with_model_hearing(mut self, hearing: Arc<dyn ModelHears>) -> Self {
+        self.model_hearing = Some(hearing);
+        self
+    }
+
+    /// The turn's recording, for a model that hears it. The model goes by what it hears, so the
+    /// transcript rides along only as `heard_as`, for memory recall and tool choice.
+    async fn heard_audio_for_turn(
+        &self,
+        wav: Option<Vec<u8>>,
+        transcript: &str,
+    ) -> Vec<crate::models::domain::message::AudioAttachment> {
+        use base64::Engine as _;
+        let (Some(wav), Some(hearing)) = (wav, &self.model_hearing) else {
+            return Vec::new();
+        };
+        if !hearing.model_hears().await || !hearing.room_to_hear().await {
+            return Vec::new();
+        }
+        tracing::info!(
+            target: "giap::trace",
+            kind = "voice_turn_heard",
+            seconds = wav.len().saturating_sub(44) as f64 / 32_000.0,
+            "the model hears this voice turn's recording"
+        );
+        vec![crate::models::domain::message::AudioAttachment {
+            data: base64::engine::general_purpose::STANDARD.encode(&wav),
+            mime_type: "audio/wav".to_string(),
+            name: None,
+            // Words the transcriber could not make are no query for memory recall or tool choice.
+            heard_as: Some(match transcript {
+                crate::models::ports::voice_input::UNWORDED_SPEECH => String::new(),
+                words => words.to_string(),
+            }),
+        }]
+    }
+
+    async fn unrecognised_turn_scope(&self) -> ProfileScope {
+        match &self.unrecognised_scope {
+            Some(scope) => scope().await,
+            None => self.profile_scope.clone(),
+        }
+    }
+
     /// The turn's scope and context: the recognised speaker's, else the loop's own.
     async fn turn_speaker(&self) -> (ProfileScope, Option<crate::prompts::ProfileContext>) {
         let Some(context) = &self.voice_identity else {
-            return (self.profile_scope.clone(), None);
+            return (self.unrecognised_turn_scope().await, None);
         };
         let who = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(who) = who else {
-            return (self.profile_scope.clone(), None);
+            return (self.unrecognised_turn_scope().await, None);
         };
         let identity = crate::user_data::domain::session::SessionIdentity {
             profile_id: Some(who.profile_id.clone()),
@@ -902,6 +988,7 @@ impl ChatService {
             session_id: self.session_id(),
             model_role: resolve_voice_role(&message),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             // From the builder: this serves both REST /chat and the voice loop.
@@ -913,6 +1000,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -1271,14 +1359,30 @@ impl ChatService {
         message: String,
         fired_at: std::time::Instant,
     ) -> Result<TurnOutcome> {
+        self.stream_response_heard(message, Vec::new(), fired_at)
+            .await
+    }
+
+    /// [`Self::stream_response_inner`] with the turn's recording for a model that hears it.
+    async fn stream_response_heard(
+        &self,
+        message: String,
+        audio: Vec<crate::models::domain::message::AudioAttachment>,
+        fired_at: std::time::Instant,
+    ) -> Result<TurnOutcome> {
         self.ensure_session().await;
         let (profile_scope, profile_context) = self.turn_speaker().await;
         // Only the voice loop reaches this, hence `voice_mode: true` (TTS-friendly prompt).
         let request = AgentRequest {
-            message: message.clone(),
+            // A heard turn's words are the recording; Whisper's guess at them stays out of the turn.
+            message: match audio.is_empty() {
+                true => message.clone(),
+                false => String::new(),
+            },
             session_id: self.session_id(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio,
             voice_mode: true,
             canvas_mode: false,
             // The recognised speaker's, else the builder's (`Household` for voice).
@@ -1289,6 +1393,7 @@ impl ChatService {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
@@ -1296,8 +1401,20 @@ impl ChatService {
         let _turn = TurnEnds(self.voice_output.clone());
 
         // ── Working tone ──────────────────────────────────────────────────
-        // Plays from before inference until the first speakable sentence.
-        let mut tone = WorkingTone::start(self.voice_output.clone(), self.thinking_tone);
+        // Plays from before inference until speech audio begins playback.
+        let tone = Arc::new(std::sync::Mutex::new(WorkingTone::start(
+            self.voice_output.clone(),
+            self.thinking_tone,
+        )));
+        struct ToneStopper(Arc<std::sync::Mutex<WorkingTone>>);
+        impl Drop for ToneStopper {
+            fn drop(&mut self) {
+                if let Ok(mut tone) = self.0.lock() {
+                    tone.stop();
+                }
+            }
+        }
+        let _tone_stopper = ToneStopper(tone.clone());
 
         let mut stream = self.agent.chat_stream(request).await?;
         let mut turn_usage: Option<crate::models::ports::provider::UsageStats> = None;
@@ -1319,9 +1436,13 @@ impl ChatService {
         };
         let mut thought_filter = crate::models::services::thought_filter::ThoughtFilter::new();
         // Dropped with `speaking` on a barge-in, which stops synthesis and playback with it.
+        let tone_for_start = tone.clone();
         let mut pipeline = SpeechPipeline::start(
             self.voice_output.clone(),
             self.spoken_observer.clone(),
+            Some(Box::new(move || {
+                tone_for_start.lock().unwrap().stop();
+            })),
             None,
         );
 
@@ -1337,7 +1458,6 @@ impl ChatService {
                         Err(_) => {
                             // Stalled: say the sentences already whole rather than wait for more.
                             for unit in splitter.pause(pipeline.pace()) {
-                                tone.stop();
                                 if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                                     barge_in = self.watch_for_barge_in(tx);
                                 }
@@ -1431,7 +1551,6 @@ impl ChatService {
                 }
             }
                 for unit in units {
-                    tone.stop();
                     if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                         barge_in = self.watch_for_barge_in(tx);
                     }
@@ -1461,7 +1580,6 @@ impl ChatService {
             }
             units.extend(splitter.finish());
             for unit in units {
-                tone.stop();
                 if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
                     barge_in = self.watch_for_barge_in(tx);
                 }
@@ -1471,7 +1589,7 @@ impl ChatService {
             pipeline.finish().await;
 
             // A turn that produced no speakable text still has to stop the tone.
-            tone.stop();
+            tone.lock().unwrap().stop();
 
             // Explicit drop: stop the barge-in watch now that TTS is done, after the tone.
             drop(barge_in.take());
@@ -1774,6 +1892,9 @@ impl ChatService {
         // Text captured by a wake-word interrupt; the next iteration skips listening for it.
         let mut pending_input: Option<String> = None;
 
+        // The assistant's last spoken reply; used to ignore its own echo if heard back.
+        let mut last_spoken: Option<String> = None;
+
         // Human-facing stdout; suppressed in `--json-events` mode, where stdout is NDJSON only.
         macro_rules! diag {
             ($($arg:tt)*) => {
@@ -1920,7 +2041,26 @@ impl ChatService {
                     first_turn = true;
                     continue;
                 }
-                Some(text) => text,
+                Some(text) => {
+                    // A turn opened by the wake word is a new request, however its words compare.
+                    let echo_of = last_spoken.as_ref().filter(|_| !first_turn);
+                    if let Some(spoken) = echo_of {
+                        if pond_voice::text::is_echo_transcript(&text, spoken) {
+                            tracing::info!(
+                                input = %text,
+                                spoken = %spoken,
+                                "chat: input is an echo of the assistant's previous reply, ignored"
+                            );
+                            abort_speculative(speculative);
+                            if !first_turn {
+                                diag!("  nothing heard");
+                            }
+                            first_turn = true;
+                            continue;
+                        }
+                    }
+                    text
+                }
             };
 
             // ── Voice-loop control (dismissal / exit) — single source of truth ──
@@ -1931,6 +2071,7 @@ impl ChatService {
                     let farewell = "Until next time. Just say my name when you need me.";
                     diag!("  {}", farewell);
                     self.report_spoken(farewell);
+                    last_spoken = Some(farewell.to_string());
                     if let Err(e) = self.voice_output.speak(farewell).await {
                         tracing::warn!("TTS farewell failed: {}", e);
                     }
@@ -1995,11 +2136,16 @@ impl ChatService {
             }
 
             let input_for_task = input.clone();
+            // Taken every turn, so a recording never rides a later turn than its own.
+            let heard_audio = self.voice_input.take_heard_audio();
             let chat_handle = reusable_speculative.unwrap_or_else(|| {
                 let svc = self.clone();
                 let msg = input_for_task;
                 let fired_at = std::time::Instant::now();
-                tokio::spawn(async move { svc.stream_response_inner(msg, fired_at).await })
+                tokio::spawn(async move {
+                    let audio = svc.heard_audio_for_turn(heard_audio, &msg).await;
+                    svc.stream_response_heard(msg, audio, fired_at).await
+                })
             });
 
             // ── InstantActivation race guard ─────────────────────────────────
@@ -2072,9 +2218,20 @@ impl ChatService {
                     }
                 }
                 Raced::Turn(chat_result) => {
-                    if !self.finalize_confirmed_turn(chat_result, &input).await {
-                        first_turn = true;
+                    let mut asked = false;
+                    if let Ok(Ok(outcome)) = &chat_result {
+                        last_spoken = Some(outcome.text.clone());
+                        asked = pond_voice::text::asks_for_an_answer(&outcome.text);
                     }
+                    let kept = self.finalize_confirmed_turn(chat_result, &input).await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "voice_follow_up",
+                        listening = kept && asked,
+                        "after a reply, the next listen needs the wake word unless the reply asked"
+                    );
+                    // A room keeps talking after a reply; only an asked question expects an answer.
+                    first_turn = !(kept && asked);
                 }
                 Raced::Stop(reason) => {
                     self.abandon_turn(&chat_handle);
@@ -2818,8 +2975,8 @@ mod tests {
         }
     }
 
-    /// Other audio is paused for a turn (`QuietVoiceOutput`) until the turn ends, so a turn that
-    /// fails partway must still end, or the music never comes back.
+    /// A turn holds the audio bus, and other audio stays paused, until it ends, so a turn that
+    /// fails partway must still end, or the speaker and the music never come back.
     #[tokio::test]
     async fn every_turn_begun_is_ended_even_one_that_fails() {
         let storage = Arc::new(InMemorySessionStorage::new());
@@ -3460,6 +3617,146 @@ mod tests {
         );
     }
 
+    /// Hears scripted lines and hands over one recording, as the ear does after a request.
+    struct HeardInput {
+        lines: ScriptedListenInput,
+        wav: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl VoiceInput for HeardInput {
+        async fn listen(&self) -> Result<Option<String>> {
+            self.lines.listen().await
+        }
+
+        fn take_heard_audio(&self) -> Option<Vec<u8>> {
+            self.wav.lock().unwrap().take()
+        }
+    }
+
+    /// Whether the model hears, and whether its encoder has room this turn.
+    struct Hears(bool, bool);
+
+    #[async_trait::async_trait]
+    impl ModelHears for Hears {
+        async fn model_hears(&self) -> bool {
+            self.0
+        }
+
+        async fn room_to_hear(&self) -> bool {
+            self.1
+        }
+    }
+
+    async fn voice_turn_request(hears: Hears, wav: &[u8]) -> AgentRequest {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("heard".to_string()).await.unwrap();
+        let input = Arc::new(HeardInput {
+            lines: ScriptedListenInput::new(["what time is it"]),
+            wav: std::sync::Mutex::new(Some(wav.to_vec())),
+        });
+        ChatService::new(agent.clone(), "heard".to_string(), storage)
+            .with_voice_input(input)
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_model_hearing(Arc::new(hears))
+            .run_loop()
+            .await
+            .unwrap();
+        agent.last_request().expect("the turn reached the agent")
+    }
+
+    /// The echo check guards a follow-up against the pond hearing itself; a turn the wake word
+    /// opened is someone asking, even when the words match the last reply.
+    #[tokio::test]
+    async fn a_wake_word_turn_is_never_dropped_as_an_echo_of_the_last_reply() {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("echo".to_string()).await.unwrap();
+        // The reply asks nothing, so the next listen waits for the wake; it hears nothing, and the
+        // third is woken again.
+        let input = Arc::new(ScriptedListenInput::new(["hello", "", "Echo: hello"]));
+        ChatService::new(agent.clone(), "echo".to_string(), storage)
+            .with_voice_input(input)
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .run_loop()
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.last_request().unwrap().message,
+            "Echo: hello",
+            "the words of the last reply, asked after the wake word, still reach the model"
+        );
+    }
+
+    /// The mock replies "Echo: <input>", so an input ending in a question gives a reply that asks.
+    #[tokio::test]
+    async fn only_a_reply_that_asked_listens_on_without_the_wake_word() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("asked".to_string()).await.unwrap();
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(MockAgent::new()), "asked".to_string(), storage)
+            .with_voice_input(Arc::new(ScriptedListenInput::new([
+                "shall we go?",
+                "yes",
+                "hello",
+            ])))
+            .with_voice_output(Arc::new(CapturingSpeak::default()))
+            .with_event_sink(collector.sink());
+        run_bounded(&svc).await.unwrap();
+        let marks: Vec<String> = collector
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                WorkflowEvent::StateChanged {
+                    state: WorkflowState::Wait,
+                } => Some("wait".to_string()),
+                WorkflowEvent::Transcript { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            ["wait", "shall we go?", "yes", "wait", "hello", "wait"],
+            "the answer to a question needs no wake; what follows a statement does"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_carries_its_recording_only_to_a_model_that_hears() {
+        use base64::Engine as _;
+        let wav = b"RIFF\x24\x00\x00\x00WAVE".to_vec();
+
+        let heard = voice_turn_request(Hears(true, true), &wav).await;
+        assert_eq!(heard.message, "", "the model goes by the recording");
+        assert_eq!(heard.message_or_heard(), "what time is it");
+        assert_eq!(heard.audio.len(), 1);
+        assert_eq!(heard.audio[0].heard_as.as_deref(), Some("what time is it"));
+        assert_eq!(heard.audio[0].mime_type, "audio/wav");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&heard.audio[0].data)
+                .unwrap(),
+            wav
+        );
+
+        let unheard = voice_turn_request(Hears(false, true), &wav).await;
+        assert_eq!(unheard.message, "what time is it");
+        assert!(
+            unheard.audio.is_empty(),
+            "a model that cannot hear gets the text alone"
+        );
+
+        let no_room = voice_turn_request(Hears(true, false), &wav).await;
+        assert_eq!(no_room.message, "what time is it");
+        assert!(
+            no_room.audio.is_empty(),
+            "a turn the encoder has no memory for goes as words"
+        );
+    }
+
     #[tokio::test]
     async fn run_loop_persists_exactly_one_turn_under_instant_activation() {
         let agent = Arc::new(MockAgent::new());
@@ -3898,6 +4195,76 @@ mod tests {
             };
             Ok(stream.boxed())
         }
+    }
+
+    /// A voice turn that reasons: reasoning frames, a think block in its text, then the answer.
+    struct ReasonsAloud;
+
+    #[async_trait::async_trait]
+    impl crate::models::ports::agent::Agent for ReasonsAloud {
+        async fn chat(
+            &self,
+            _request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<crate::models::ports::agent::AgentResponse> {
+            anyhow::bail!("voice uses chat_stream")
+        }
+
+        async fn chat_stream(
+            &self,
+            request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<crate::models::ports::agent::AgentStreamEvent>,
+            >,
+        > {
+            use crate::models::ports::agent::AgentStreamEvent as E;
+            use futures::StreamExt;
+            let (session_id, model_role) = (request.session_id, request.model_role);
+            let stream = async_stream::stream! {
+                yield Ok(E::Thinking { content: "SECRET plan: check the forecast first.".into() });
+                yield Ok(E::Text { content: "<think>SECRET weighing it".into() });
+                yield Ok(E::Text { content: " up</think>Tomorrow is sunny. ".into() });
+                yield Ok(E::Text { content: "Take a hat.".into() });
+                yield Ok(E::Done { session_id, model_role, usage: None, stats: None });
+            };
+            Ok(stream.boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_that_thinks_speaks_and_shows_none_of_its_reasoning() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("thinks".to_string()).await.unwrap();
+        let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let output = Arc::new(CapturingSpeak::default());
+        let collector = EventCollector::default();
+        let svc = ChatService::new(Arc::new(ReasonsAloud), "thinks".into(), storage.clone())
+            .with_voice_input(Arc::new(ScriptedListenInput::new(["weather tomorrow?"])))
+            .with_voice_output(output.clone())
+            .with_event_sink(collector.sink())
+            .with_spoken_observer({
+                let said = said.clone();
+                Arc::new(move |text: &str| said.lock().unwrap().push(text.to_string()))
+            });
+
+        run_bounded(&svc).await.unwrap();
+
+        let said = said.lock().unwrap().join(" ");
+        assert!(
+            said.contains("Tomorrow is sunny") && said.contains("Take a hat"),
+            "{said}"
+        );
+        assert!(!said.contains("SECRET"), "reasoning reached speech: {said}");
+        let spoken = output.spoken.lock().unwrap().join(" ");
+        assert!(!spoken.contains("SECRET"), "reasoning was played: {spoken}");
+        let shown = format!("{:?}", collector.events.lock().unwrap());
+        assert!(
+            !shown.contains("SECRET"),
+            "reasoning reached a screen: {shown}"
+        );
+        let kept = storage.get_messages("thinks").await.unwrap();
+        assert!(kept.iter().all(|m| !m.message.content.contains("SECRET")));
     }
 
     /// One `listen()`: the onset it was primed with, and the state of things when it ran.
@@ -4382,7 +4749,7 @@ mod tests {
         let context: SpeakerContext = Arc::new(|id: String| {
             Box::pin(async move {
                 Some(crate::prompts::ProfileContext {
-                    preferred_name: Some(format!("{id} herself")),
+                    speaker_name: Some(format!("{id} herself")),
                     birthday: None,
                     language: None,
                     atypical_speech: false,
@@ -4416,9 +4783,7 @@ mod tests {
         assert_eq!(last.session_id, moved);
         assert_eq!(last.profile_scope, ProfileScope::Owner("zawadi".into()));
         assert_eq!(
-            last.profile_context
-                .and_then(|c| c.preferred_name)
-                .as_deref(),
+            last.profile_context.and_then(|c| c.speaker_name).as_deref(),
             Some("zawadi herself")
         );
         let events = collector.events.lock().unwrap().clone();
@@ -5521,5 +5886,64 @@ mod tests {
             UnpromptedSpeech::Spoken
         );
         assert_eq!(*output.spoken.lock().unwrap(), vec![allowed.text.clone()]);
+    }
+
+    async fn members(
+        count: usize,
+    ) -> Arc<dyn crate::user_data::ports::profile::ProfileRepository + Send + Sync> {
+        use crate::user_data::ports::profile::ProfileRepository as _;
+        let profiles =
+            Arc::new(crate::user_data::mocks::mock_profile::MockProfileRepository::new());
+        for i in 0..count {
+            profiles
+                .create(crate::user_data::domain::profile::CreateProfileRequest {
+                    display_name: format!("member {i}"),
+                    avatar_emoji: "duck".into(),
+                })
+                .await
+                .unwrap();
+        }
+        profiles
+    }
+
+    #[tokio::test]
+    async fn a_voice_nobody_recognises_is_a_guest_once_two_members_live_here() {
+        assert_eq!(
+            unrecognised_voice_scope(Some(members(1).await))().await,
+            ProfileScope::Household,
+            "a pond of one: refusing would forget its only member"
+        );
+        assert_eq!(
+            unrecognised_voice_scope(Some(members(2).await))().await,
+            ProfileScope::Guest
+        );
+        assert_eq!(
+            unrecognised_voice_scope(None)().await,
+            ProfileScope::Guest,
+            "members that cannot be counted narrow"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_voice_turn_runs_at_the_rooms_rule_not_the_loops_scope() {
+        let agent = Arc::new(MockAgent::new());
+        let svc = ChatService::new(
+            agent.clone(),
+            "room".into(),
+            Arc::new(InMemorySessionStorage::new()),
+        )
+        .with_voice_input(Arc::new(ScriptedListenInput::new([
+            "what does amina like?",
+        ])))
+        .with_voice_output(Arc::new(CapturingSpeak::default()))
+        .with_unrecognised_scope(unrecognised_voice_scope(Some(members(2).await)));
+
+        run_bounded(&svc).await.unwrap();
+
+        assert_eq!(
+            agent.last_request().unwrap().profile_scope,
+            ProfileScope::Guest,
+            "the loop's own scope is Household, which reads every member's memories"
+        );
     }
 }

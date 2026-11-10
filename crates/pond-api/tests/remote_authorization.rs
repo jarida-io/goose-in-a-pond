@@ -120,6 +120,7 @@ async fn make_app() -> Harness {
         notification_queue: Some(Arc::new(
             pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(pool.clone()),
         )),
+        notification_history: None,
         notification_sender: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -161,7 +162,9 @@ async fn make_app() -> Harness {
         setup_claims: None,
         spoken_codes: Default::default(),
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: None,
+        developer: Default::default(),
     });
 
     let dist = std::path::PathBuf::from("pond-desktop/dist");

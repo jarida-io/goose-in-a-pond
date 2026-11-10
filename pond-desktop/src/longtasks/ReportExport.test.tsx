@@ -32,6 +32,8 @@ function report(over: Partial<ReportView> = {}): ReportView {
     sections: 2,
     sources: [],
     calendarEvents: 0,
+    options: [],
+    images: [],
     summaryOnly: false,
     ...over,
   };

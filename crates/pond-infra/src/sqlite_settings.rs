@@ -178,6 +178,7 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!("weather_latitude", settings.weather_latitude.to_string());
         upsert!("weather_longitude", settings.weather_longitude.to_string());
         upsert!("weather_location_name", &settings.weather_location_name);
+        upsert!("weather_location_source", &settings.weather_location_source);
         // Vision
         upsert!(
             "vision_enabled",
@@ -990,6 +991,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             }
         }
         "weather_location_name" => s.weather_location_name = value.to_string(),
+        "weather_location_source" => s.weather_location_source = value.to_string(),
         // Vision
         "vision_enabled" => s.vision_enabled = value == "true",
         "vision_camera_url" => s.vision_camera_url = value.to_string(),

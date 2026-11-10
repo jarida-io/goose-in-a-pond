@@ -52,6 +52,9 @@ async fn make_app() -> (axum::Router, Arc<Database>, Arc<MockCreditLedger>, temp
         data_wipe: Some(Arc::new(SystemDataWipe::new(db.clone(), None, None))),
         warmup: Default::default(),
         pond_admin: None,
+        device_events: Default::default(),
+        developer: Default::default(),
+        notification_history: None,
         suggestion_queue: Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),

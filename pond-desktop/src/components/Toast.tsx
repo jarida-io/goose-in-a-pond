@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { CalendarClock, Sparkles, CheckCircle2, XCircle, X } from "lucide-react";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import type { ScheduleToast } from "../state/reducer";
+import { markdownToPlainText } from "../lib/markdownBlocks";
 
 function ToastCard({ toast, onViewNotifications }: { toast: ScheduleToast; onViewNotifications: () => void }) {
   const dispatch = useAppDispatch();
@@ -22,7 +23,7 @@ function ToastCard({ toast, onViewNotifications }: { toast: ScheduleToast; onVie
   const preview = isRunning
     ? null
     : isOk
-      ? (toast.result ?? null)
+      ? (toast.result ? markdownToPlainText(toast.result) : null)
       : (toast.error ?? null);
 
   return (

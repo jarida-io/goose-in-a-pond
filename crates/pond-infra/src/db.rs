@@ -46,6 +46,7 @@ impl Database {
     /// placed deliberately — see `every_system_table_is_classified` below, which fails the build
     /// the moment a table is in neither list.
     const SYSTEM_ERASE_TABLES: &[&str] = &[
+        "admin_device_keys",
         "agent_recipes",
         "agent_suggestion_dismissals",
         "consolidation_runs",
@@ -60,6 +61,7 @@ impl Database {
         "guest_device_access",
         "handshake_challenges",
         "lane_job_runs",
+        "last_device_actions",
         "long_task_artifacts",
         "long_task_steps",
         "long_tasks",
@@ -72,6 +74,12 @@ impl Database {
         "mesh_usage_tally",
         "message_attachments",
         "model_role_assignments",
+        // Kept beside `model_role_assignments`, same category: a role's chosen model is a
+        // household choice, not shipped config.
+        "model_role_history",
+        "notification_history",
+        "notification_history_reads",
+        "notification_history_recipients",
         "notifications",
         "pairing_codes",
         "profile_interviews",
@@ -84,6 +92,7 @@ impl Database {
         "reminders",
         "rides",
         "rooms",
+        "saved_items",
         "session_messages",
         "session_thinking",
         "session_tokens",
@@ -98,6 +107,9 @@ impl Database {
         // Biometric, same as `face_embeddings`/`face_profile_thresholds` above.
         "voice_prints",
         "voice_wake_takes",
+        "web_form_submissions",
+        "web_watch_changes",
+        "web_watches",
     ];
 
     /// Infrastructure/config a factory reset leaves alone — none of it is household-personal.

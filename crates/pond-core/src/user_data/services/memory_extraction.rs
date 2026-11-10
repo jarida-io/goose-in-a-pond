@@ -620,6 +620,11 @@ impl BatchExtractionService {
             && self.health.is_stale()
     }
 
+    /// Whether the embedder's failure budget still allows another pass once it is loaded on demand.
+    pub fn health_is_usable(&self) -> bool {
+        self.health.is_stale()
+    }
+
     /// Run one pass: up to `sessions_per_pass` windows, one per conversation.
     pub async fn run_pass(
         &self,
@@ -2455,6 +2460,7 @@ mod batch_tests {
         // Above every cosine, so a model on this scale calls even an identical vector fresh.
         let own_scale = Some(SimilarityFloors {
             tool_relevance: 0.5,
+            closest_memory: 0.5,
             dedup: Some(DedupBands {
                 reinforce: 1.01,
                 relate: 1.01,

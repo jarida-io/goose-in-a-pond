@@ -97,7 +97,8 @@ impl ReplyFilter {
                         self.inside = inside;
                     }
                     None => {
-                        let safe = safe_emit_len(&self.buf, &OPEN_MARKERS);
+                        let safe = safe_emit_len(&self.buf, &OPEN_MARKERS)
+                            .min(partial_snake_tag_start(&self.buf));
                         let ready = self.buf[..safe].to_string();
                         self.buf.drain(..safe);
                         self.visible(&ready, &mut out);
@@ -146,7 +147,17 @@ impl ReplyFilter {
                 (i, open.to_string(), Inside::Scaffold(close))
             })
         });
-        passthrough.chain(scaffold).min_by_key(|(i, _, _)| *i)
+        let invented = snake_tag(&self.buf).map(|(i, name)| {
+            (
+                i,
+                format!("<{name}>"),
+                Inside::Scaffold(format!("</{name}>")),
+            )
+        });
+        passthrough
+            .chain(scaffold)
+            .chain(invented)
+            .min_by_key(|(i, _, _)| *i)
     }
 
     fn visible(&mut self, text: &str, out: &mut String) {
@@ -220,6 +231,47 @@ static OPEN_MARKERS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLoc
         .chain(SCAFFOLD_OPENS.iter().copied())
         .collect()
 });
+
+/// The first `<snake_case>` opening tag: models invent these for tool syntax and turn records
+/// (`<search_web>`, `<turn_history>`), and no HTML or markdown tag has an underscore.
+fn snake_tag(buf: &str) -> Option<(usize, &str)> {
+    let mut from = 0;
+    while let Some(rel) = buf[from..].find('<') {
+        let i = from + rel;
+        let rest = &buf[i + 1..];
+        if let Some(end) = rest.find('>') {
+            let name = &rest[..end];
+            if is_snake_name(name) {
+                return Some((i, name));
+            }
+        }
+        from = i + 1;
+    }
+    None
+}
+
+fn is_snake_name(name: &str) -> bool {
+    name.contains('_')
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Where a trailing `<snake_ca` that may still become a tag starts; the buffer's end if none.
+fn partial_snake_tag_start(buf: &str) -> usize {
+    match buf.rfind('<') {
+        Some(i)
+            if buf.len() - i <= 48
+                && buf[i + 1..]
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+        {
+            i
+        }
+        _ => buf.len(),
+    }
+}
 
 /// A tag naming a `group__tool`, or the engine's own `call:` form written in plain text.
 fn is_text_call(opening: &str) -> bool {
@@ -342,6 +394,27 @@ mod tests {
         let (out, f) = per_char("<system-context>\nCURRENT CONTEXT: Monday");
         assert_eq!(out, "");
         assert_eq!(f.scaffold_blocks(), 1);
+    }
+
+    /// Verbatim from the nano's clause-gap bench on main 41b4fb48 (2026-11-02).
+    #[test]
+    fn an_invented_snake_case_tag_is_dropped_with_its_body() {
+        let (out, f) = per_char(
+            "<search_web>What is the story of how the Great Rift Valley formed</search_web>",
+        );
+        assert_eq!(out, "");
+        assert_eq!(f.scaffold_blocks(), 1);
+        let (out, _) = per_char(
+            "<turn_history>[{\"turn\":1,\"tool\":\"giap-knowledge__get_wikipedia_article\"}]\
+             </turn_history>\nThe Rift Valley formed as plates pulled apart.",
+        );
+        assert_eq!(out.trim(), "The Rift Valley formed as plates pulled apart.");
+    }
+
+    #[test]
+    fn prose_and_html_keep_their_underscores_and_tags() {
+        let reply = "Use snake_case names, and <b>bold</b> for emphasis; 3 < 5.";
+        assert_eq!(per_char(reply).0, reply);
     }
 
     #[test]

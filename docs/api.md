@@ -39,6 +39,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [Agent, tools, prompts, skills and recipes](#agent-tools-prompts-skills-and-recipes)
 - [Music player](#music-player)
 - [Rides and Uber accounts](#rides-and-uber-accounts)
+- [Web forms and spoken watch alerts](#web-forms-and-spoken-watch-alerts)
 - [My Pond (administration)](#my-pond-administration)
 - [Faces](#faces)
 - [Mesh](#mesh)
@@ -159,7 +160,7 @@ The route summary's "Also" column names these.
   companion routes (4 KiB).
 - **Streams**: chat-like SSE routes share `sse_semaphore`; a full semaphore answers
   `503 {"error":"Too many concurrent streams"}` before the stream opens. `/notifications/stream`
-  has its own semaphore. A resumable chat turn also needs a detached-run slot:
+  and `/devices/events` share their own semaphore. A resumable chat turn also needs a detached-run slot:
   `503 {"error":"Too many agent runs in flight ...","kind":"run_cap"}`.
 - **CORS** (`cors_layer`): origins `app://giap` (the packaged desktop renderer), the Vite dev server
   at `http://localhost:1420` and `http://127.0.0.1:1420` in debug builds, the origin in
@@ -188,6 +189,7 @@ The route summary's "Also" column names these.
 | GET | /warmup | wizard | | Prefix warm-up state for the boot banner |
 | GET | /time/zones | open | | Every IANA zone with today's offset |
 | POST | /location/detect | wizard | | Where this pond is, cheapest source first |
+| PUT | /location/device | token | LAN only | A household phone's fix replaces the Pond's guessed location |
 | GET | /test | host | | Probe whisper, llamafile, Ollama and the chat model |
 | POST | /test/speak | host | cred | Speak text on the host's speaker |
 | GET | /dev/goose | token +onb | | Goose agent status and loaded extensions |
@@ -196,7 +198,19 @@ The route summary's "Also" column names these.
 | GET | /lane | token +onb | | Background jobs and what each waits for |
 | POST | /lane/jobs/{job}/run | token +onb | | Wake one background job |
 
-### Pairing and tokens
+#**Where the Pond is.** A Pond has no GPS. Typed place names are geocoded to the town's centre and
+`weather_location_source` records `geocoded`; coordinates sent as coordinates record `manual`.
+`PUT /location/device` lets a paired phone send its own fix, refused (`403 not_on_home_network`)
+unless the request came from the household LAN: a request over the tailnet carries
+`TailnetMachine` and a peer outside every LAN interface, and is refused either way, so a phone
+away from home never moves the household. It replaces only a guess (no `manual` or `device`
+source) unless `replace` is set by an explicit choice on the phone; the fix must be within 2 km
+and is stored to three decimal places (about 110 m) with the phone's name for the place, and
+`weather_location_source` becomes `device`. The weather follows the settings on every request
+(`LiveWeather`), so a new place applies without a restart. Logs carry the place's name, never its
+coordinates (`kind=location_from_phone`, `kind=weather_place`).
+
+## Pairing and tokens
 
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
@@ -218,7 +232,7 @@ The route summary's "Also" column names these.
 | GET | /onboard/status | open | | Onboarding progress |
 | POST | /onboard | wizard | | Start onboarding, or report where it is |
 | POST | /onboard/step/{name} | wizard | | Record reaching a step |
-| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device |
+| POST | /onboard/complete | wizard | | Finish onboarding; attributes the claiming device and gives it its My Pond key |
 | POST | /onboard/reset | reset | cred if tokenless | Back to `Welcome`; reopens the wizard routes |
 
 ### Connections and setup card
@@ -277,7 +291,8 @@ The route summary's "Also" column names these.
 | POST | /voice/tts/prewarm | token +onb | | Load the speech engine |
 | POST | /voice/tts/unload | token +onb | | Unload the speech engine |
 | POST | /voice/calibrate | wizard | | Add a wake-phrase calibration sample |
-| DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration |
+| DELETE | /voice/calibrate | wizard | | Clear wake-phrase calibration, or with `?variant=` forget one variant |
+| POST | /voice/wake/check | token | | Whether a phone's speech segment opens with the household's wake phrase |
 | POST | /transcribe | token +onb | | Transcribe multipart audio |
 | GET | /voice/room | token +onb | | Room voice: switched on, able to listen or why not, its state, wake detector and last speaker |
 | PUT | /voice/room | token +onb | `{enabled}` | Switch room voice on or off now, saved as `voice_room_enabled` |
@@ -303,6 +318,7 @@ The route summary's "Also" column names these.
 | GET | /models/vision-status | token +onb | | Picture support for the active chat model |
 | GET | /models/memory-status | token +onb | | The LLM memory budget |
 | GET | /models/active-roles | token +onb | | Which model holds each role |
+| POST | /models/rollback | token | | Return a role to the model that last answered |
 | POST | /models/registry/refresh | token +onb | | Refresh the catalog from upstream |
 | POST | /models/scan | token +onb | | Scan the models directory for new files |
 | POST | /models/cleanup | token +onb | | Sweep unreferenced Hugging Face cache blobs |
@@ -343,12 +359,15 @@ The route summary's "Also" column names these.
 | GET | /notifications/stream | token | own device | Notifications for one device (SSE) |
 | GET | /notifications/pending | token | paired device | The caller's unacknowledged notifications |
 | POST | /notifications/{id}/ack | token | paired device | Mark one of the caller's notifications delivered |
+| GET | /notifications/history | token | paired device | The household notices the caller may read, with its read state |
+| POST | /notifications/history/read | token | paired device | Mark history notices read for the caller |
 | GET | /devices | token +onb | | All registered devices |
 | POST | /devices | token +onb | | Register a device |
 | PUT | /devices/{id} | token +onb | own row or cred | Rename, set hostname or room |
 | DELETE | /devices/{id} | token +onb | | Unregister; revokes remote access first |
 | POST | /devices/{id}/heartbeat | token +onb | | Refresh `last_seen` |
 | POST | /devices/{id}/offline | token +onb | | Mark a device off |
+| GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
 
@@ -434,6 +453,8 @@ The route summary's "Also" column names these.
 | GET | /security/policy-report | token +onb | | What the policy would deny under enforcement |
 | GET | /logs | token +onb | | Recent `event_log` rows |
 | GET | /logs/export | token +onb | | The event log as CSV |
+| GET | /developer/debug | token +onb | | Whether this is a test Pond, and its debug switch |
+| PUT | /developer/debug | token +onb | | Turn a test Pond's debug switch on or off |
 | GET | /telemetry/turns | token +onb | | Per-turn metrics for a session |
 | GET | /telemetry/summary | token +onb | | Aggregated metrics for a session |
 
@@ -518,6 +539,16 @@ The route summary's "Also" column names these.
 | POST | /uber/accounts/connect | token +onb | loopback, cred | Start a member's Uber sign-in |
 | DELETE | /uber/accounts/{profile_id} | token +onb | loopback, cred | Forget a member's Uber sign-in |
 
+### Web forms and spoken watch alerts
+
+| Method | Path | Auth | Also | Summary |
+|---|---|---|---|---|
+| GET | /web-forms/{id} | token +onb | member | A POST form waiting for, or answered by, the member's yes |
+| POST | /web-forms/{id}/confirm | token +onb | member | Send the form now |
+| POST | /web-forms/{id}/decline | token +onb | member | Never send it |
+| GET | /web-watches/spoken-alerts | token +onb | member | Whether the caller's watch matches are said aloud |
+| PUT | /web-watches/spoken-alerts | token +onb | member | Turn that on or off, or move their quiet hours |
+
 ### My Pond (administration)
 
 Contract and refusals: [pond administrator](architecture/pond-administrator.md#wire-contract).
@@ -525,8 +556,10 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
-| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card or its own key; wrong ones are slowed |
 | POST | /admin/lock | token +onb | member | End this device's unlock |
+| POST | /admin/enroll | token +onb | unlocked | This device's own key, shown once, replacing any older one |
+| DELETE | /admin/key | token +onb | member | Revoke this device's key and lock it |
 | GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
 | GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
 | DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
@@ -627,7 +660,8 @@ carries `tls_spki_sha256`.
 | `GET /test` | | `{whisper, llamafile, ollama, llm}`; each has `status` (`ok`, `error`, `unavailable` or `not_configured`) |
 | `POST /test/speak` | optional `{text}` | `{status, text, latency_ms}` |
 | `GET /dev/goose` | | `{goose_active, extension_count, extensions: [{name, kind, tools}], tool_count}`, or `{goose_active: false, message}` |
-| `GET /weather` | | `{enabled: false}` without a location, else the current conditions and `forecast` |
+| `PUT /location/device` | `{latitude, longitude, accuracy_m, name?, replace?}` | `{applied, reason?, name, latitude, longitude}`; `403 not_on_home_network`, `422 invalid_coordinates` or `too_imprecise` |
+| `GET /weather` | | `{enabled: false}` when switched off or with no location, else the current conditions and `forecast` |
 | `GET /usage/summary` | | `{total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, counted_reasoning_turns, total_tokens, session_count, cloud_input_price_per_million, cloud_output_price_per_million}` |
 | `GET /lane` | | The lane's jobs: per job `title`, `enabled`, `since_last_run_secs`, `blocked_by`, refusal counters, plus `running` and `observed_secs_ago` |
 | `POST /lane/jobs/{job}/run` | | `{known, lane, job, woken, reason}`; `404` for no such job. The job still waits for the single slot |
@@ -760,7 +794,7 @@ Steps, in order: `Welcome`, `Basics`, `Location`, `Accessibility`, `Personality`
 | `GET /onboard/status` | | `{onboarded, current_step, steps_completed, total_steps}`; `current_step` is `not_started` before the first step |
 | `POST /onboard` | | `{status: "started", ...}`, `{status: "in_progress", current_step, ...}` or `{status: "already_complete"}` |
 | `POST /onboard/step/{name}` | | The status body. Progress only moves forward; an unknown name is `400` with `valid_steps`, and `Completed` is refused in favour of `/onboard/complete` |
-| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
+| `POST /onboard/complete` | | `{status: "completed", interview}`, where `interview` is `{profile_id, status, start}` for the primary member's setup interview, or `null` with no primary member; plus `admin_key`, the phone's own [My Pond key](architecture/pond-administrator.md#each-phones-own-key), when the caller is the device that claimed the pond and this call is the one that completed setup; `400` with `missing_fields` while any of `user_name`, `assistant_name`, `timezone`, `chat_model` is empty |
 | `POST /onboard/reset` | | The status body at `Welcome` |
 
 After completion, if the setup record's `claimed_by` device is still unattributed and
@@ -848,7 +882,13 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 
 ### `POST /chat`
 
-`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?}`.
+`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?}`.
+`device_place` is where the asking phone is now, as its app named it ("Westlands, Nairobi"),
+sent only while the person has turned on telling Goose where the phone is. It is a name, never
+coordinates, and rides that one turn's `<system-context>` (cleaned, at most 80 characters,
+without `<` or `>`). The conversation is saved from the message alone, and the engine's history
+drops a past turn's `<system-context>` when the next turn starts. Home, where the Pond is, stays the tools' answer
+(`get_user_profile`).
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
@@ -863,7 +903,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `status` | `content` | Progress ("Compacting context...", "Model starting...") |
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
-| `tool_call` | `tool, id, input` | A tool call |
+| `tool_call` | `tool, id, input, working_notes?` | A tool call. `working_notes`, when present, is exactly the `text` streamed since the previous `tool_call` (or the turn's start): the model at work ("let me check the weather"), not the answer. Move it out of the answer into the turn's steps. The answer is the text after the last call, and it alone is persisted |
 | `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
@@ -943,7 +983,8 @@ Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 | `GET /voice/tts/status` | | `{available, loaded}` |
 | `POST /voice/tts/prewarm`, `/voice/tts/unload` | | `{status}`; `503` without an engine |
 | `POST /voice/calibrate` | multipart `audio` (WAV), optional `prompt` | `{transcript, normalized, heard, new_variant, all_variants, sample_count, target_count, complete}` |
-| `DELETE /voice/calibrate` | | `{cleared, message}` |
+| `DELETE /voice/calibrate` | optional `?variant=` (one variant as heard, e.g. the one a take just added) | `{cleared, message}`; with `variant`, `{removed, all_variants}` |
+| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
 | `POST /transcribe` | multipart `audio` | `{text}` |
 | `GET /audio/devices` | | `AudioDeviceStatus {input, output, updated_at_ms, source, pid, raised?, sound_server?}` |
 | `POST /audio/devices/test` | empty, or `{chime: bool}` | `AudioDeviceStatus` after a re-test |
@@ -956,6 +997,14 @@ setting: `400` for any other body, `404 unknown_voice` (it never downloads one),
 one, and otherwise post to `voice_whisper_url` (gated by the network-egress policy; `502` if it
 refuses or fails). Wake-phrase calibration is described in
 [wake-word-calibration.md](wake-word-calibration.md).
+
+`/voice/wake/check` is for a phone listening for a phrase other than "hey goose", which only its
+own detector knows: the phone cuts what it hears into speech segments, as the ear does for
+Whisper, and asks here. The transcript is matched with the room's own triggers, the phrase and its
+learned pronunciations as they are at that moment, so a change on the Pond counts from the next
+segment; `phrase` lets the phone notice a return to "hey goose". It needs the in-process
+whisper-rs model. The recording and the transcript are dropped, never logged and never returned:
+a heard wake logs `kind=wake_check heard=true` at info, a miss only at debug.
 
 ## Models
 
@@ -971,6 +1020,16 @@ of `ModelStatusEntry` (`crates/pond-api/src/lib.rs`): `id`, `category`, `name`, 
 `image_support_bytes`, `available` and `unavailable_reason` (for example `litert_library_missing`).
 All three `tts_*` categories are listed under `tts`.
 
+Each row also carries `roles`, the jobs it is doing now, and `section`, where both clients list it
+(`conversation`, `listening`, `speaking`, `memory`, `pictures`, `other`). Both come from
+`pond_core::models::domain::model_use`: settings decide who holds a job (`chat_provider` and
+`chat_model`, `tool_model`, `active_whisper_model`, `voice_tts_voice` then `active_tts_model`,
+and the embedder `EmbedderChoice` resolves), and `model_role_assignments` fills only a job whose
+setting is empty. A setting naming no row leaves the job unheld. `active` is still the
+assignment-table flag. A row doing a job is shown even when `downloaded` is false: a built-in
+memory model has no file of its own. Role names: `chat`, `tool`, `asr`, `tts`, `embedding`, and,
+for helpers, `pictures`, `drafter`, `camera`, `faces`.
+
 | Route | Request | Response |
 |---|---|---|
 | `GET /models/download/progress` | | `{downloads: [...]}`; finished entries are evicted after 5 minutes, paused ones stay |
@@ -984,7 +1043,8 @@ All three `tts_*` categories are listed under `tts`.
 | `GET /models/capabilities` | | `ModelCapabilities {thinking, vision, audio_input, context_window_tokens, structured_output, tool_calling}`; see [architecture/model_capabilities.md](architecture/model_capabilities.md) |
 | `GET /models/vision-status` | | `{state, model, size_bytes, message}`; a pure read, polled |
 | `GET /models/memory-status` | | `{total_mb, available_for_llm_mb, budget_mb, loaded_model, reclaimable_mb}` |
-| `GET /models/active-roles` | | `{chat: {provider, model, model_id}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, router_name}` |
+| `GET /models/active-roles` | | `{chat: {provider, model, model_id, rollback}, tool: {model}, asr: {model_id}, tts: {model_id}, embedding: {model_id, model, provider}, holders: {chat, tool, asr, tts, embedding}, helpers: [{id, title, uses, section, serves}], router_name}`. `holders` names the row holding each job, as the rows' `roles` do. `helpers` lists models in use that are no row of their own: the conversation model's picture encoder (once installed) and MTP drafter (on disk, on a budgeted device), the camera detector (once loaded) and face recognition (once ready). Both clients show a helper whose `serves` names a listed row as part of that row ("Pictures included", "Faster answers"), never as a model of its own; only the camera detector and face recognition are listed alone, under the `pictures` section, which both clients title "Camera and faces". `chat.rollback` is `{model_id, model}` when a rollback would go somewhere, else null |
+| `POST /models/rollback` | `{role}` (default `chat`) | as activate; 404 `nothing_to_roll_back` when no model answered before the last switch. Only `chat` keeps that history |
 | `POST /models/registry/refresh` | | `{status}`; the refresh runs in the background |
 | `POST /models/scan` | | `{found, entries}` |
 | `POST /models/cleanup` | | `{reclaimed_bytes, removed}` |
@@ -1077,14 +1137,25 @@ itself must keep calling the heartbeat.
 | `DELETE /devices/{id}` | | `204`; `409` with `hub_id` for an endpoint bridged by a Matter hub; `502` if the device could not leave the Matter fabric; `503 revocation_unavailable` |
 | `POST /devices/{id}/heartbeat`, `/offline` | | `{status}` |
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
+| `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+
+**`GET /devices/events`** follows device state as devices report it, so a phone need not read
+every device again to see a change. Each `device_state` event's data is
+`{seq, device_id, key, value, changed_at}`: `value` is a boolean for `power` and the device's own
+words otherwise (`"40%"`). A change is sent when the device reports it, so it confirms a command
+rather than echoing it. Without `after_seq` the stream starts from now. With it, the stream first
+sends what followed that `seq`, or a `resync` event (data `{}`) when the Pond no longer keeps that
+far back (512 changes) or the number is from before a restart; the phone then reads every device
+once and carries on from the next `seq`. Numbers start from the boot time in microseconds, so they
+never repeat across restarts. Devices added or removed are not sent yet.
 
 `PUT /devices/{id}` on a paired client's own row (`device_type` `gotg`, `desktop` or `cli`) is
 that device's or the host's to change; a shared row (a Matter device, a sensor, another pond) is
 any authenticated caller's (`pond_core::user_data::services::device_edit`).
 
 How a notice reaches a phone, what the Pond notifies about, and how often, is in
-[architecture/notifications.md](architecture/notifications.md). The three routes below take a paired
+[architecture/notifications.md](architecture/notifications.md). The five routes below take a paired
 device's token in every onboarding state, never answer a tokenless caller, and act only on the
 caller's own device, named by its token.
 
@@ -1099,8 +1170,10 @@ for any other device the stream marks what it sends delivered. Each SSE `data` i
 | Key | Values | Sent by |
 |---|---|---|
 | `action` | `open_url`, `ride_offer`, `ride_update` | travel; see [architecture/rides-and-maps.md](architecture/rides-and-maps.md) |
+| `action` | `form_confirm` (with `id`, `site`, `label`) | a POST form waiting for the member's yes; see [Web forms](#web-forms-and-spoken-watch-alerts) |
 | `open` | `schedule` (with `schedule_id`, `run_id`), `devices`, `chat`, `models`, `extensions`, `remote_access` | schedule runs, pairing outcomes, Matter, proposals, system notices |
 | `kind` | a system notice's catalogue name, e.g. `model_downloaded`; `pond_warmup` for the live-only warm-up status | system notices, warm-up |
+| `transient` | `true` | every live-only status (`publish_live`, the warm-up): never queued, never in the history; a notification centre leaves it out |
 
 `open` is written only through `OpenScreen` (`crates/pond-core/src/mcp/ports/notification.rs`) and
 names the screen a tap opens.
@@ -1116,6 +1189,24 @@ read, `503` when no queue is wired.
 copy of a household notice is `"{notification_id}:{device_id}"`. `404` when no notification by that
 id is the caller's (another device's answers the same, so the route cannot probe someone else's
 queue), `500 notification_ack_failed`, `503` when no queue is wired.
+
+**`GET /notifications/history?limit=N`** (2026-10-28) is the household's record of durable notices,
+which the dashboard's notification centre reads on start and on every reconnect of its stream. It
+answers `{device_id, notifications: [{id, category, title, body, timestamp, data, read}]}`, newest
+first. `device_id` is the caller's own device, from its token: the id its stream must name, and the
+suffix its own queued copies carry. Each notice appears once, under its household id, never a
+per-device copy's `"{id}:{device_id}"`. Only what the caller may read is listed: a household notice
+unless the caller's device caused it (`broadcast_except`), and a member's notice (a proposal, a
+ride link) only to the devices it was queued for. Live-only status is never listed. `read` is the
+caller's own read state. `limit` defaults to 100 and is held to 1..200. `403` when the request did
+not come from a paired device (a loopback caller under `POND_DEV_ALLOW_LOOPBACK` names no device,
+so it is refused rather than shown an unscoped list), `500 notification_history_failed`, `503`
+when no history is wired.
+
+**`POST /notifications/history/read`** with `{ids: [string]}` marks those notices read for the
+caller's device only and answers `{marked: n}`, the count newly marked. An id the caller may not
+read, or that does not exist, is skipped and not counted, so the answer never says which ids
+exist. At most 500 ids per request (`400` beyond); `403`, `500` and `503` as above.
 
 ## Sensors, camera and rules
 
@@ -1284,8 +1375,15 @@ writes are scoped to the member the caller resolves to; a guest cannot create a 
 | `GET /security/policy-report` | `?window=` | `{window, since, events, allow, would_deny, deny, unclassified, scanned, truncated, process: {...}}` |
 | `GET /logs` | `?limit=&level=INFO\|WARN\|ERROR` | recent `event_log` rows |
 | `GET /logs/export` | | `text/csv` |
+| `GET /developer/debug` | | `{test_pond, debug}`; a home Pond answers `test_pond: false` |
+| `PUT /developer/debug` | `{enabled}` | `{test_pond, debug}`; `409 not_a_test_pond` on a home Pond |
 | `GET /telemetry/turns` | `?session_id=` | `{turns: [...]}`; `503` when telemetry is off |
 | `GET /telemetry/summary` | `?session_id=` | an aggregate for the session |
+
+Developer mode is for Jarida test Ponds. Only the host marks one, with `pond-server test-pond on`
+(`<data_dir>/setup/test-pond`); no route can. While a test Pond's debug switch is on, the logs
+above show what the household said and the members' names instead of hiding them. The switch is
+off after every restart, and goes off within a minute of the host taking the mark away.
 
 ## Extensions, marketplace, secrets and sign-in
 
@@ -1322,7 +1420,7 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | Route | Request | Response |
 |---|---|---|
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
-| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}` | the tool's result |
+| `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept, nor one with `success: false` (a device that refused the command), so its resend runs again. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
@@ -1413,6 +1511,38 @@ credential; a refusal is `{error, code}`, with `code` `host_only` off this machi
 | `GET /uber/accounts` | | `{connected: [profile_id]}` |
 | `DELETE /uber/accounts/{profile_id}` | | `204` |
 
+## Web forms and spoken watch alerts
+
+**POST forms.** When the conversation asks `read_web_page` for a POST form a read page carries,
+nothing is sent: the pond keeps the form and pushes a `form_confirm` notice (category
+`action_required`, titled "Send this form to {site}?") to the speaker's own phones. The form is
+sent only on that member's yes, at most once, and lapses unsent after 15 minutes. As with rides,
+the member is the one the phone's pairing names; another member's form answers `404`, and the
+desktop or a phone paired to nobody gets `403`. Every route is `503` on a pond without forms set
+up. See [architecture/web-watch-and-exploration.md](architecture/web-watch-and-exploration.md).
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /web-forms/{id}` | | the form: `{id, site, page, action, fields: [{name, value}], state, asked_at, answer_by, decided_at, result, message}` |
+| `POST /web-forms/{id}/confirm` | | the form, `state: "sent"` with `result: {status, address, title}`; `502` with `state: "failed"` and `message` when it could not be sent or its answer was lost (the message says whether the site may have it); `409` already answered; `410` lapsed |
+| `POST /web-forms/{id}/decline` | | `204`; `409` already answered; `410` lapsed |
+
+`state` is `waiting`, `sending`, `sent`, `declined`, `timed_out` or `failed`. Before sending, the
+pond reads the form's page again, for its fresh hidden values and the site's cookies; a form gone
+from its page, or no longer taking a confirmed value, is not sent.
+
+**Spoken watch alerts.** A member can have their watches' matches said aloud too. It is off until
+they turn it on, and is kept in their `profiles.preferences` (`web_watch_spoken_alerts`,
+`web_watch_quiet_start`, `web_watch_quiet_end`). A match is spoken only while the household
+allows unprompted speech (`unprompted_speech_enabled`), outside the household's quiet hours and
+the member's own, while presence says the member is home, and while no conversation holds the
+model.
+
+| Route | Request | Response |
+|---|---|---|
+| `GET /web-watches/spoken-alerts` | | `{enabled, quiet_start, quiet_end, household_allows_speech, household_quiet_start, household_quiet_end}`; quiet hours default to `22:00` and `07:00` |
+| `PUT /web-watches/spoken-alerts` | `{enabled?, quiet_start?, quiet_end?}` | the same; `400` for a time that is not `HH:MM` |
+
 ## Faces
 
 Face routes answer `503` until recognition is loaded, except `GET /faces` and `GET /faces/models`,
@@ -1471,7 +1601,7 @@ bearer-token middleware applies, with its own 20-a-minute limit and a 4 KiB body
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt}` for a paired device; `403` otherwise |
+| `GET /api/v1/remote-access/configuration` | | `{enabled, controlUrl, state, lapsesAt, enableFrom}` for a paired device; `403` otherwise. While off, `enableFrom` lists where it can be turned on (`["dashboard"]`); `null` while on |
 | `POST /api/v1/remote-access/enrollment` | `{authUrl, nodeKey, machineKey}` (unknown fields refused) | the enrollment; `409` while a revocation is pending |
 | `POST /api/v1/remote-access/recovery` | | `{id}` for the host to approve |
 | `GET/POST/DELETE /api/v1/remote-access/recovery/{id}` | | poll, execute (after approval) or cancel |

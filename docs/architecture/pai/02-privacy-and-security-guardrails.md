@@ -267,9 +267,12 @@ down**, rather than promised. Re-open it when someone is prepared to own the cro
   excludes the key, a support bundle, a database handed to someone for debugging. It does not
   protect a running pond, which must decrypt to hand a token to an extension subprocess. And in the
   default layout it does not protect a stolen Jetson either, because the key is in the same data
-  directory as the ciphertext — `POND_SECRET_KEY_FILE` exists so an operator can separate them, and
-  that is the only configuration in which this beats someone walking off with the board. Anything
-  in the UI that implies more than this is wrong.
+  directory as the ciphertext — `POND_SECRET_KEY_FILE` exists so an operator can separate them.
+  *(2026-11-09: on a Linux pond in its user's session, `giap.sh data-encrypt` puts the whole data
+  directory, key and ciphertext both, in a LUKS2 volume sealed to the fTPM, which covers a copy of
+  the storage; storage moved into another Jetson only on a fused board. See
+  [data-volume-encryption.md](../data-volume-encryption.md).)* Anything in the UI that implies more
+  than this is wrong.
 - **Key generation.** Eager, at repository construction, not lazily on first write. A fresh pond
   therefore has a key to back up from day one, and the first `set` cannot fail for a reason
   unrelated to the secret being set. The key is stored base64-encoded with a trailing newline so a
@@ -315,8 +318,9 @@ down**, rather than promised. Re-open it when someone is prepared to own the cro
   "pulled the SD card" and makes the key-beside-ciphertext default worth stating out loud. Power is
   removed by whoever is nearest the socket, which is why the directory `fsync` after the rename is
   there. The nano does expose an OP-TEE firmware TPM (`/dev/tpmrm0`; see
-  [the pond administrator](../pond-administrator.md)), but this key is not sealed to it yet; the
-  [context space](../context-space.md) section 9 plans that. Write volume is unchanged from the
+  [the pond administrator](../pond-administrator.md)). This key is not sealed to it directly; since
+  2026-11-09 the data directory it sits in can be, as a LUKS2 volume
+  ([data-volume-encryption.md](../data-volume-encryption.md)). Write volume is unchanged from the
   plaintext store (whole file per set), so flash wear is not a new concern.
 
 ### 3.5 Egress becomes enforcement
@@ -1442,6 +1446,33 @@ cannot change class quietly.
   the outcome is unchanged — but the remaining work is one attribution lookup on the way into the
   `Principal`, not a schema. Worth re-checking before anyone plans around it: `grep -n
   "proven_profile_id:" crates --include='*.rs' | grep -v None` returns only the field declaration.
+- **P9 — Pond Keychain. PLANNED 2026-11-09.** Move the secret store behind the platform's own
+  keychain, so that a copy of the data directory no longer opens the secrets. Today P4's master key
+  sits at `<data_dir>/secrets/master.key`, beside the `secrets.json` envelope it opens.
+  - **The keychain holds the master key; the envelope stays.** `secrets.json` stays
+    XChaCha20-Poly1305, and only the key moves. That keeps the store's size free of keychain limits
+    and keeps P4's atomic write path.
+  - **Chosen at runtime, no flag:**
+
+    | Platform | Keychain |
+    |---|---|
+    | macOS | The login Keychain |
+    | Linux desktop | The Secret Service |
+    | The nano | A key sealed by the hardware |
+
+    The `keyring` crate covers the first two. For the nano, check NVIDIA's Jetson Linux R36.4
+    security docs (OP-TEE, the EKB, firmware TPM) before choosing. `systemd-creds` needs systemd 250,
+    and JetPack 6 ships 249. The kernel keyring does not survive a reboot.
+  - **Migration:**
+    1. Read the keyfile.
+    2. Store the key in the keychain.
+    3. Prove a decrypt with the stored key.
+    4. Only then remove the keyfile.
+
+    A pond with no usable keychain keeps the keyfile, and `giap.sh doctor` says so and why.
+  - **It gates web sign-in.** Exploring agents may sign in to sites with a member's saved accounts
+    (`docs/architecture/web-watch-and-exploration.md`). That waits for P9. Site passwords and
+    session cookies are stored only behind the Pond Keychain, per member, never under a keyfile.
 - **DEFERRED** SQLCipher for the full database.
 
 ---

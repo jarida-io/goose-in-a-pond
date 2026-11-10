@@ -28,9 +28,21 @@ pub struct MarketplaceExtension {
     pub tools: Vec<String>,
     #[serde(default)]
     pub featured: bool,
+    /// A built-in capability that already does this extension's job. While it is on, the
+    /// extension only adds tools to every prompt and a process, so the install route refuses it.
+    #[serde(default)]
+    pub built_in: Option<BuiltInCapability>,
     /// Secrets (API keys, tokens) this extension needs to function.
     #[serde(default)]
     pub required_secrets: Vec<SecretRequirement>,
+}
+
+/// A capability the pond ships itself, which a catalogue entry can duplicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltInCapability {
+    /// `giap-knowledge__search_web`, backed by the household's Brave key.
+    WebSearch,
 }
 
 impl MarketplaceExtension {

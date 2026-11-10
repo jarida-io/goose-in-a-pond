@@ -17,6 +17,7 @@ import {
   strayTasks,
   taskKindLabel,
   taskWords,
+  timeWords,
 } from "./longTaskWords";
 import { artifactOf, doneTask, OTHER_ID, STARTED_TEXT, stepOf, TASK_ID, taskOf } from "./longTaskFixtures";
 
@@ -113,6 +114,11 @@ describe("a task in plain words", () => {
     expect(taskWords(taskOf({ steps: [] }))).toBe("Working");
   });
 
+  it("says a running task is paused while a person's turn has the model", () => {
+    expect(taskWords(taskOf({ paused_for_turn: true }))).toBe("Paused for your conversation");
+    expect(taskWords(taskOf({ paused_for_turn: false }))).toBe("Working: step 2 of 4");
+  });
+
   it("moves on to the first step not finished when none is running", () => {
     const steps = [stepOf("a", { state: "completed" }), stepOf("b", { state: "pending" }), stepOf("c")];
     expect(currentStep(steps)).toBe(2);
@@ -205,5 +211,27 @@ describe("a task waiting its turn", () => {
     expect(aheadWords([mine])).toBe("Ahead of this one: 1 of your tasks.");
     expect(aheadWords([mine, { another_member: true }, mine])).toBe("Ahead of this one: 2 of your tasks and 1 for another member.");
     expect(aheadWords([{ another_member: true }, { another_member: true }])).toBe("Ahead of this one: 2 for other members.");
+  });
+});
+
+describe("a task's time", () => {
+  const started = "2026-11-09T10:00:00Z";
+  const at = (minutes: number) => new Date(Date.parse(started) + minutes * 60_000);
+
+  it("counts the minutes used of the minutes given", () => {
+    const task = { state: "running" as const, created_at: started, deadline: "2026-11-09T10:30:00Z" };
+    expect(timeWords(task, at(12))).toBe("12 of 30 min");
+    expect(timeWords({ ...task, deadline: "2026-11-09T10:45:00Z" }, at(31))).toBe("31 of 45 min");
+  });
+
+  it("says it is answering with what it found once the time is up", () => {
+    const task = { state: "running" as const, created_at: started, deadline: "2026-11-09T10:30:00Z" };
+    expect(timeWords(task, at(30))).toBe("Time's up: answering with what it found");
+  });
+
+  it("says nothing for a task without a limit, an ended one, or one from an older pond", () => {
+    expect(timeWords({ state: "running", created_at: started, deadline: null }, at(5))).toBeNull();
+    expect(timeWords({ state: "running", created_at: started }, at(5))).toBeNull();
+    expect(timeWords({ state: "completed", created_at: started, deadline: "2026-11-09T10:30:00Z" }, at(5))).toBeNull();
   });
 });

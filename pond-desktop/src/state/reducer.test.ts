@@ -52,7 +52,11 @@ const BASE: AppState = {
   latestScheduleResult: null,
   scheduleRuns: [],
   unreadRunCount: 0,
+  householdNotices: [],
+  noticeFeedFailed: false,
   debriefContext: null,
+  requestedConversation: null,
+  requestedWatch: null,
 };
 
 function msg(overrides?: Partial<TranscriptMessage>): TranscriptMessage {

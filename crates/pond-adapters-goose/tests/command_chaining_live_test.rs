@@ -228,6 +228,9 @@ fn recorders() -> &'static Recorders {
             Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
             Arc::new(pond_core::user_data::mocks::mock_skill::MockSkillRepository::default()),
             device_control.clone(),
+            Arc::new(
+                pond_core::user_data::mocks::mock_last_action::MockLastActionRepository::default(),
+            ),
             None,
         )
         .expect("register giap extensions for the chaining harness");
@@ -270,6 +273,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         session_id: session_id.to_string(),
         model_role: "task".to_string(),
         images: Vec::new(),
+        audio: Vec::new(),
         // A VOICE request, so the loop runs under the tuned `voice_max_turns` cap.
         voice_mode: true,
         canvas_mode: false,
@@ -281,6 +285,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         suggestion_context: None,
         deep_research_task: None,
         interview: None,
+        device_place: None,
     };
 
     let started = Instant::now();

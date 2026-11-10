@@ -6,9 +6,12 @@ import { Hub } from "../hub/Hub";
 import { HubDrawer, type DrawerNav } from "../hub/HubDrawer";
 import { ShellBar } from "../hub/ShellBar";
 import { HubOverlay } from "../hub/overlays/HubOverlay";
+import { centreUnreadCount } from "../state/householdNotices";
 
 import { Dashboard } from "../sections/Dashboard";
 import { Chat } from "../sections/Chat";
+import { Saved } from "../sections/Saved";
+import { Watches } from "../sections/Watches";
 import { Devices } from "../sections/Devices";
 import { Mesh } from "../sections/Mesh";
 import { Pairing } from "../sections/Pairing";
@@ -30,6 +33,8 @@ function SectionContent({ section }: { section: GuiSection }) {
   switch (section) {
     case "dashboard": return <Dashboard />;
     case "chat":      return <Chat />;
+    case "saved":     return <Saved />;
+    case "watches":   return <Watches />;
     case "devices":   return <Devices />;
     case "mesh":      return <Mesh />;
     case "pairing":   return <Pairing />;
@@ -74,7 +79,7 @@ export function GuiMode() {
         <ShellBar
           onMenu={() => setMenuOpen(true)}
           onBell={() => dispatch({ type: "SET_SECTION", payload: "notifications" })}
-          unread={state.unreadRunCount}
+          unread={centreUnreadCount(state.scheduleRuns, state.householdNotices)}
         />
         <main className="app-content">
           <SectionContent section={state.section} />

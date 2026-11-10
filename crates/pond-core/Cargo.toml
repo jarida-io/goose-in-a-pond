@@ -14,7 +14,10 @@ test-mocks = []
 [dependencies]
 # Leaf crate — voice text/DSP primitives. See crates/pond-voice.
 pond-voice = { path = "../pond-voice" }
+# Leaf crate — the bus every shared device is reached through.
+pond-bus = { path = "../pond-bus" }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -32,6 +35,8 @@ serde_yaml = { workspace = true }
 # Already in this crate's graph through tera; used for the passage ranker's answer types.
 regex = { workspace = true }
 tera = { workspace = true }
+# Parses the embedded factory-defaults config; see `user_data::domain::factory_defaults`.
+toml = { workspace = true }
 thiserror = "1.0"
 tokio = { workspace = true }
 tokio-util = { workspace = true }

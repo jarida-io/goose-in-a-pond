@@ -6,10 +6,13 @@ import {
 } from "lucide-react";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import { api } from "../api/PondApiClient";
+import { spokenClip } from "../modes/voice/webAudioUtils";
 import { nextCardId } from "../state/reducer";
 import type { ChatEvent } from "../api/types";
+import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 import { ScheduleDebriefCard } from "../components/ScheduleDebriefCard";
 import { GooseAvatar } from "../hub/views/chat/GooseAvatar";
+import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
 import { HubIco } from "../hub/primitives/HubIco";
 import { HP_PATHS, micEl } from "../hub/primitives/icons";
 import "../hub/views/chat.css";
@@ -37,6 +40,7 @@ import {
 
 // Trigger MCP-UI card registrations
 import "../mcp-ui";
+import { MarkdownText } from "../components/MarkdownText";
 import {
   findCardRenderer,
   findCardByHint,
@@ -62,9 +66,8 @@ interface CanvasCard {
   appResourceUri?: string;
 }
 
-interface ChatMessage {
+interface ChatMessage extends StepsCarrier {
   role: "user" | "assistant" | "tool";
-  text: string;
   tool?: string;
   status?: "running" | "ok";
   /** An error bubble: later text starts a new bubble instead of appending to it. */
@@ -182,11 +185,12 @@ export function Canvas() {
       if (!wavBlob || voiceCancelledRef.current) { setVoiceRecState("idle"); return; }
 
       setVoiceRecState("transcribing");
-      const result = await api.transcribe(await wavBlob.arrayBuffer());
+      const wav = await wavBlob.arrayBuffer();
+      const result = await api.transcribe(wav);
       const text = result.text?.trim();
       setVoiceRecState("idle");
 
-      if (text) sendPrompt(text);
+      if (text) sendPrompt(text, wav);
     } catch (err) {
       closeMic();
       setVoiceRecState("idle");
@@ -269,7 +273,8 @@ export function Canvas() {
     setCards((c) => c.filter((card) => card.id !== id));
   }
 
-  async function sendPrompt(prompt: string) {
+  /** `spoken`: the recording `prompt` was heard in, sent beside it for a model that hears. */
+  async function sendPrompt(prompt: string, spoken?: ArrayBuffer) {
     const text = prompt.trim();
     if (!text || streaming || !state.serverOnline) return;
     setDraft("");
@@ -283,16 +288,19 @@ export function Canvas() {
 
     try {
       // The client's own session: another tab may have rotated the one this tab loaded with.
-      for await (const event of api.chatStream(text, sessionIdRef.current, undefined, true)) {
+      const turn = spoken
+        ? api.chatStream("", sessionIdRef.current, undefined, true, undefined, undefined, undefined, undefined, [spokenClip(text, spoken)])
+        : api.chatStream(text, sessionIdRef.current, undefined, true);
+      for await (const event of turn) {
         const ev = event as ChatEvent;
 
         if (ev.type === "text" && (ev.content ?? ev.token)) {
           const raw = ev.content ?? ev.token ?? "";
           setThread((t) => {
             const last = t[t.length - 1];
-            if (!last || last.role !== "assistant") return t;
-            // See Chat.tsx: the error arm overwrites `text`, this one appends.
-            if (last.error) return [...t, { role: "assistant" as const, text: raw }];
+            if (!last || last.role === "user") return t;
+            // See Chat.tsx: the error arm overwrites `text`, this one appends. Text after a tool is its answer.
+            if (last.error || last.role === "tool") return [...t, { role: "assistant" as const, text: raw }];
             return [...t.slice(0, -1), { ...last, text: last.text + raw }];
           });
 
@@ -304,7 +312,13 @@ export function Canvas() {
           });
 
         } else if (ev.type === "tool_call" && ev.tool) {
-          setThread((t) => [...t, { role: "tool", text: "", tool: ev.tool!, status: "running" }]);
+          setThread((t) => {
+            const last = t[t.length - 1];
+            const settled = last?.role === "assistant" && !last.error
+              ? [...t.slice(0, -1), foldToolCall(last, ev.working_notes)]
+              : t;
+            return [...settled, { role: "tool", text: "", tool: ev.tool!, status: "running" }];
+          });
 
           const cardId = nextCardId();
           const toolName = ev.tool;
@@ -590,11 +604,16 @@ export function Canvas() {
                     <div key={i} className={`ch-row ${m.role === "user" ? "ch-row--user" : "ch-row--goose"}`}>
                       {m.role === "assistant" && <GooseAvatar />}
                       <div className="ch-bubble-wrap">
-                        <div className={`ch-bubble ${m.role === "user" ? "ch-bubble--user" : "ch-bubble--goose"}`}>
-                          {m.text || (streaming && i === thread.length - 1
-                            ? <span className="stream-dots"><span /><span /><span /></span>
-                            : "")}
-                        </div>
+                        {m.steps && <StepsDisclosure steps={m.steps} />}
+                        {(m.text || !m.steps) && (
+                          <div className={`ch-bubble ${m.role === "user" ? "ch-bubble--user" : "ch-bubble--goose"}`}>
+                            {m.role === "assistant" && m.text && !m.error
+                              ? <MarkdownText source={m.text} />
+                              : m.text || (streaming && i === thread.length - 1
+                              ? <span className="stream-dots"><span /><span /><span /></span>
+                              : "")}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

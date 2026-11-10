@@ -12,10 +12,14 @@ pub const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Max decoded size of ALL images in a turn, so four max-size images can't make a 16 MiB spike.
 pub const MAX_TOTAL_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Chat-route body ceiling, above every image limit after base64's 4/3 so each rejection in
-/// [`validate_turn_images`] is reachable; the ~22 MiB transient is bounded by the SSE semaphore.
-pub const MAX_CHAT_BODY_BYTES: usize =
-    (MAX_IMAGES_PER_TURN * MAX_IMAGE_BYTES) * 4 / 3 + 1024 * 1024;
+/// Chat-route body ceiling: a full turn of pictures, one recording and every document, after
+/// base64's 4/3, so each policy rejection is reachable. About 42 MiB, bounded by the SSE semaphore.
+pub const MAX_CHAT_BODY_BYTES: usize = (MAX_TOTAL_IMAGE_BYTES
+    + super::audio_input::MAX_AUDIO_BYTES
+    + super::document_input::MAX_DOCUMENTS_PER_TURN * super::document_input::MAX_DOCUMENT_BYTES)
+    * 4
+    / 3
+    + 1024 * 1024;
 
 // The body ceiling must exceed every policy limit, or Axum rejects before the policy runs.
 const _: () = assert!(MAX_CHAT_BODY_BYTES > MAX_TOTAL_IMAGE_BYTES * 4 / 3);

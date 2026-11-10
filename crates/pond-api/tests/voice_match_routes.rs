@@ -71,6 +71,7 @@ struct Pond {
     heard: Arc<Mutex<VecDeque<String>>>,
     prints: SqliteVoiceRecognition,
     settings: Arc<pond_infra::sqlite_settings::SqliteSettingsRepository>,
+    room: Arc<pond_core::models::mocks::mock_room_voice::MockRoomVoice>,
     _dir: tempfile::TempDir,
 }
 
@@ -117,6 +118,8 @@ async fn pond(ready: bool) -> Pond {
         Arc::new(move |_wav: Vec<u8>| Ok(heard.lock().unwrap().pop_front().unwrap_or_default()))
     });
     let prints = SqliteVoiceRecognition::new(state.db.system.clone());
+    let room = Arc::new(pond_core::models::mocks::mock_room_voice::MockRoomVoice::default());
+    state.room_voice = Some(room.clone());
     Pond {
         router: build_router(
             Arc::new(state),
@@ -127,6 +130,7 @@ async fn pond(ready: bool) -> Pond {
         heard,
         prints,
         settings,
+        room,
         _dir: built.dir,
     }
 }
@@ -404,5 +408,63 @@ async fn a_new_wake_phrase_forgets_what_was_learned_of_the_old_one() {
         .wake_takes("hey goose")
         .await
         .unwrap()
+        .is_empty());
+}
+
+/// A phone that does not pause the room still never wakes it with the next sentence.
+#[tokio::test]
+async fn a_take_deafens_the_room_for_twenty_seconds() {
+    use pond_core::models::ports::room_voice::RoomVoiceControl as _;
+    let pond = pond(true).await;
+    let (status, _) = take(&pond, SAID, Some(&pond.amina), true).await;
+    assert_eq!(status, StatusCode::OK);
+    let status = pond.room.status();
+    assert_eq!(
+        status.state,
+        pond_core::models::domain::room_voice::RoomState::Paused
+    );
+    let until = chrono::DateTime::parse_from_rfc3339(status.paused_until.as_deref().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(until - chrono::Utc::now() <= chrono::Duration::seconds(20));
+}
+
+/// A take the dashboard's calibration heard wrongly is taken back on its own, not with the rest.
+#[tokio::test]
+async fn one_wake_variant_is_forgotten_without_the_others() {
+    use pond_core::user_data::ports::settings::SettingsRepository as _;
+    let pond = pond(true).await;
+    let mut settings = pond.settings.get().await.unwrap();
+    settings.voice_wake_word_transcriptions = vec!["goose".into(), "gus".into(), "juice".into()];
+    pond.settings.update(&settings).await.unwrap();
+
+    let (status, body) = call(
+        &pond,
+        Method::DELETE,
+        "/api/v1/voice/calibrate?variant=juice",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], "juice");
+    assert_eq!(body["all_variants"], json!(["goose", "gus"]));
+    assert_eq!(
+        pond.settings
+            .get()
+            .await
+            .unwrap()
+            .voice_wake_word_transcriptions,
+        vec!["goose".to_string(), "gus".to_string()]
+    );
+
+    let (status, body) = call(&pond, Method::DELETE, "/api/v1/voice/calibrate", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cleared"], true);
+    assert!(pond
+        .settings
+        .get()
+        .await
+        .unwrap()
+        .voice_wake_word_transcriptions
         .is_empty());
 }

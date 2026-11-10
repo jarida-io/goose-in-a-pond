@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod in_process;
-pub use in_process::WhisperRsInput;
+pub mod wake_model;
+pub use in_process::{TranscribeOpts, WhisperRsInput};
 
 /// How long other audio stays paused while the words after a wake word are captured, renewed as
 /// capture goes on, and how long after capture for the reply's turn to take over.
@@ -621,7 +622,7 @@ fn detection_loop(
                 }
             };
             keep_quiet(QUIET_WHILE_LISTENING);
-            pond_audio_out::play_wake_ping(quiet.clone());
+            pond_audio_out::play_wake_ping();
 
             // Capture until `post_trigger_silence_ms` of silence or the `post_trigger_ms` ceiling.
             let poll_ms = 50u64;
@@ -820,10 +821,10 @@ mod tests {
 
     #[test]
     fn a_calibrated_sentence_triggers_on_the_phrase_not_the_whole_sentence() {
-        let d = WhisperKeywordDetector::new(Arc::new(DeafBackend), "goose", test_mic())
+        let d = WhisperKeywordDetector::new(Arc::new(DeafBackend), "jarvis", test_mic())
             .with_transcriptions(vec![
-                "ok goose what time is it".into(),
-                "hey gus good morning".into(),
+                "ok jarvis what time is it".into(),
+                "hey jarv good morning".into(),
             ]);
         let t = d.triggers();
         assert!(
@@ -831,7 +832,7 @@ mod tests {
             "no sentence survives: {t:?}"
         );
         assert!(
-            t.iter().any(|x| x == "gus"),
+            t.iter().any(|x| x == "jarv"),
             "the mishearing is kept: {t:?}"
         );
     }
@@ -855,12 +856,11 @@ mod tests {
     }
 
     #[test]
-    fn calibrated_variants_and_builtin_mishearings_both_survive() {
+    fn goose_wake_triggers_are_exactly_hey_goose_and_goose() {
         let d = WhisperKeywordDetector::new(Arc::new(DeafBackend), "goose", test_mic())
             .with_transcriptions(vec!["goose".into(), "Hey, Goose.".into()]);
         let t = d.triggers();
-        assert!(t.iter().any(|x| x == "hey goose"), "calibrated: {t:?}");
-        assert!(t.iter().any(|x| x == "goos"), "built-in mishearing: {t:?}");
+        assert_eq!(t, vec!["hey goose", "goose"]);
     }
 
     #[test]

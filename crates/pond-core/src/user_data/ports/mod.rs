@@ -15,6 +15,7 @@ pub mod guest_device_access;
 pub mod guest_room_access;
 pub mod lane_control;
 pub mod lane_run_log;
+pub mod last_action;
 pub mod matter_runtime;
 pub mod memory_consolidator;
 pub mod memory_repository;

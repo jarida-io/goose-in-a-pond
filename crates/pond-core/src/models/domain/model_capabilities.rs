@@ -9,7 +9,8 @@ pub struct ModelCapabilities {
     /// Model accepts image content in messages (multimodal vision).
     pub vision: bool,
 
-    /// Model accepts raw audio input (skip Whisper ASR).
+    /// A voice note sent as sound reaches the model. Never from the name: the capabilities
+    /// route fills it from `Agent::audio_input_state`, which reads the loaded encoder's header.
     pub audio_input: bool,
 
     /// Maximum context window in tokens.
@@ -98,13 +99,6 @@ impl ModelCapabilities {
         // Deliberately narrow: only this flag puts a claim about the model's senses in its prompt.
         caps.vision = Self::name_implies_vision(name);
 
-        // Audio-capable (Gemma 4 E2B/E4B only)
-        if (lower.contains("gemma-4") || lower.contains("gemma4") || lower.contains("gemma_4"))
-            && (lower.contains("e2b") || lower.contains("e4b"))
-        {
-            caps.audio_input = true;
-        }
-
         // Context window heuristics
         if lower.contains("gemma-4") || lower.contains("gemma4") || lower.contains("gemma_4") {
             // Gemma 4 E2B/E4B: 128K, 26B/31B: 256K
@@ -165,7 +159,10 @@ mod tests {
         let caps = ModelCapabilities::from_model_name("gemma-4-E2B-it-Q4_K_M.gguf");
         assert!(caps.thinking);
         assert!(caps.vision);
-        assert!(caps.audio_input);
+        assert!(
+            !caps.audio_input,
+            "a name cannot say whether the encoder on disk hears"
+        );
         assert_eq!(caps.context_window_tokens, 128_000);
         assert!(caps.structured_output);
     }

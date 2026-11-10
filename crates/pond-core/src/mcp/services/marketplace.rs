@@ -166,6 +166,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn brave_search_is_marked_built_in_and_not_featured() {
+        use crate::mcp::domain::marketplace::BuiltInCapability;
+        let brave = BundledMarketplace::new()
+            .get_by_id("brave-search")
+            .await
+            .unwrap()
+            .expect("brave-search entry");
+        assert!(
+            !brave.featured,
+            "the built-in search does its job, so it is not promoted"
+        );
+        assert_eq!(brave.built_in, Some(BuiltInCapability::WebSearch));
+        let others = BundledMarketplace::new().list_available().await.unwrap();
+        assert!(
+            others
+                .iter()
+                .filter(|e| e.id != "brave-search")
+                .all(|e| e.built_in.is_none()),
+            "no other entry duplicates a built-in capability"
+        );
+    }
+
+    #[tokio::test]
     async fn with_asset_root_makes_extension_paths_absolute() {
         let mp = BundledMarketplace::with_asset_root("/opt/giap");
         let music = mp.get_by_id("music").await.unwrap().expect("music entry");

@@ -2,7 +2,7 @@
 //!
 //! Replays a synthetic household history through the real gate and checks every metric
 //! against `fixtures/memory-reachability/baseline.json`. Real: the batch engine (via
-//! `run_pass`), `rank_by_relevance`, `CompactionProfile`. Stand-ins: the model
+//! `run_pass`), `select_for_turn`, `CompactionProfile`. Stand-ins: the model
 //! (`replies.jsonl`), the embedder ([`HashEmbedder`]) and a copy of
 //! `GooseAgent::topical_memories` (the adapter needs Goose). The parser is not measured: the
 //! fixtures keep the old schema and [`as_window_extraction`] translates them. Never edit
@@ -40,7 +40,7 @@ use pond_core::user_data::services::memory_extraction::{
     BatchExtractionConfig, BatchExtractionService,
 };
 use pond_core::user_data::services::memory_relevance::{
-    content_tokens, is_duplicate_content, rank_by_relevance,
+    content_tokens, is_duplicate_content, select_for_turn,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -1111,6 +1111,7 @@ async fn the_write_gate_baseline() {
 
     // ── recall@5 ─────────────────────────────────────────────────────────
     let qs = queries();
+    let closest_floor = embedder.similarity_floors().map(|f| f.closest_memory);
     let mut hits = 0usize;
     let mut answerable = 0usize;
     println!("\n-- recall@{INJECTION_LIMIT} ---------------------------------------------");
@@ -1128,13 +1129,9 @@ async fn the_write_gate_baseline() {
             continue;
         }
         answerable += 1;
-        let mut pool = candidates_for(&q.query, fragments, &embedder).await;
-        rank_by_relevance(&mut pool, now);
-        let top: BTreeSet<&str> = pool
-            .iter()
-            .take(INJECTION_LIMIT)
-            .map(|(f, _)| f.id.as_str())
-            .collect();
+        let pool = candidates_for(&q.query, fragments, &embedder).await;
+        let pool = select_for_turn(pool, INJECTION_LIMIT, closest_floor, now);
+        let top: BTreeSet<&str> = pool.iter().map(|(f, _)| f.id.as_str()).collect();
         let hit = reachable
             .iter()
             .any(|k| top.contains(corpus.stored_ids[*k].as_str()));
@@ -1173,8 +1170,8 @@ async fn the_write_gate_baseline() {
                 continue;
             }
             scored += 1;
-            let mut pool = candidates_for(&q.query, fragments, &embedder).await;
-            rank_by_relevance(&mut pool, now);
+            let pool = candidates_for(&q.query, fragments, &embedder).await;
+            let pool = select_for_turn(pool, profile.max_memory_fragments, closest_floor, now);
             let kept = within_budget(&pool, window);
             widths.push(kept.len());
             let ids: BTreeSet<&str> = kept.iter().map(|f| f.id.as_str()).collect();

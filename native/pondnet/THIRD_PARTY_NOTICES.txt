@@ -1,6 +1,6 @@
 Embedded networking third-party notices
 Generated using github.com/google/go-licenses/v2@v2.0.1.
-go.sum SHA-256: 7ef6222642c6e531e604607c635869fd7e922a859ab936366c086a9f1e3528eb
+go.sum SHA-256: 9f2104ff2acd86c48163c79585f0027754fdae2069b711d8b916f280dd4f677e
 Coverage: macOS, Linux ARM64, Android ARM64 and iOS ARM64.
 The first-party module is excluded; its third-party dependencies are included.
 Dependency versions and checksums are pinned in go.mod and go.sum.

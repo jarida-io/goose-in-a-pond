@@ -14,129 +14,6 @@ import {
 
 // ── Weather icons ───────────────────────────────────────────────────────────
 
-function SunIcon({ size = 32 }: { size?: number }) {
-  const scale = size / 24;
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      style={{ flexShrink: 0 }}
-    >
-      <circle cx="12" cy="12" r="4" fill="#FCD34D" stroke="#FBBF24" strokeWidth={1.5 / scale} />
-      {/* 8 ray lines at 45-degree intervals */}
-      {[0, 45, 90, 135, 180, 225, 270, 315].map((angle) => {
-        const rad = (angle * Math.PI) / 180;
-        const x1 = 12 + Math.cos(rad) * 6.5;
-        const y1 = 12 + Math.sin(rad) * 6.5;
-        const x2 = 12 + Math.cos(rad) * 9.5;
-        const y2 = 12 + Math.sin(rad) * 9.5;
-        return (
-          <line
-            key={angle}
-            x1={x1}
-            y1={y1}
-            x2={x2}
-            y2={y2}
-            stroke="#FBBF24"
-            strokeWidth="1.75"
-            strokeLinecap="round"
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-function CloudIcon({ size = 32 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      style={{ flexShrink: 0 }}
-    >
-      <path
-        d="M6.5 19a4.5 4.5 0 0 1-.42-8.98A7 7 0 0 1 19.5 12a4.5 4.5 0 0 1-1 8.98H6.5Z"
-        fill="#CBD5E1"
-        stroke="var(--color-text-tertiary)"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function RainIcon({ size = 32 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      style={{ flexShrink: 0 }}
-    >
-      <path
-        d="M6.5 16a4.5 4.5 0 0 1-.42-8.98A7 7 0 0 1 19.5 9a4.5 4.5 0 0 1-1 8.98H6.5Z"
-        fill="#CBD5E1"
-        stroke="var(--color-text-tertiary)"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      {/* Rain drops */}
-      <line x1="8" y1="19" x2="7" y2="21.5" stroke="#60A5FA" strokeWidth="1.5" strokeLinecap="round" />
-      <line x1="12" y1="19" x2="11" y2="21.5" stroke="#60A5FA" strokeWidth="1.5" strokeLinecap="round" />
-      <line x1="16" y1="19" x2="15" y2="21.5" stroke="#60A5FA" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function SnowIcon({ size = 32 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      style={{ flexShrink: 0 }}
-    >
-      <path
-        d="M6.5 16a4.5 4.5 0 0 1-.42-8.98A7 7 0 0 1 19.5 9a4.5 4.5 0 0 1-1 8.98H6.5Z"
-        fill="#CBD5E1"
-        stroke="var(--color-text-tertiary)"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      <circle cx="8" cy="20" r="1" fill="#93C5FD" />
-      <circle cx="12" cy="19" r="1" fill="#93C5FD" />
-      <circle cx="16" cy="20.5" r="1" fill="#93C5FD" />
-    </svg>
-  );
-}
-
-function StormIcon({ size = 32 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      style={{ flexShrink: 0 }}
-    >
-      <path
-        d="M6.5 16a4.5 4.5 0 0 1-.42-8.98A7 7 0 0 1 19.5 9a4.5 4.5 0 0 1-1 8.98H6.5Z"
-        fill="var(--color-text-tertiary)"
-        stroke="#64748B"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      <path d="M13 16l-2 4h3l-2 4" stroke="#FBBF24" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function DropletIcon({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
@@ -163,17 +40,6 @@ function WindIcon({ size = 13 }: { size?: number }) {
       />
     </svg>
   );
-}
-
-// ── Weather icon resolver ───────────────────────────────────────────────────
-
-function weatherIcon(condition: string, size = 32) {
-  const c = (condition || "").toLowerCase();
-  if (c.includes("thunder") || c.includes("storm")) return <StormIcon size={size} />;
-  if (c.includes("rain") || c.includes("drizzle") || c.includes("shower")) return <RainIcon size={size} />;
-  if (c.includes("snow") || c.includes("sleet") || c.includes("ice")) return <SnowIcon size={size} />;
-  if (c.includes("cloud") || c.includes("overcast") || c.includes("fog") || c.includes("mist")) return <CloudIcon size={size} />;
-  return <SunIcon size={size} />;
 }
 
 // ── Styles ──────────────────────────────────────────────────────────────────
@@ -304,14 +170,16 @@ const degrees = (v: number | null) => (v === null ? "" : `${Math.round(v)}°`);
 // ── Component ───────────────────────────────────────────────────────────────
 
 function CurrentWeatherCard({ weather, isCompact }: { weather: CurrentWeather; isCompact: boolean }) {
-  const { location, temperature, condition, humidity, wind } = weather;
+  const { location, temperature, condition, humidity, wind, isDay } = weather;
+  // The same icons as the forecast's rows, so one card never draws a condition two ways.
+  const Sky = conditionIcon(condition, isDay);
   const tempDisplay = temperature !== null ? String(Math.round(temperature)) : "--";
 
   return (
     <div style={styles.card}>
       {/* Hero section */}
       <div style={isCompact ? styles.heroCompact : styles.hero}>
-        {weatherIcon(condition, isCompact ? 28 : 40)}
+        <Sky size={isCompact ? 28 : 40} strokeWidth={1.75} aria-hidden />
 
         <div style={styles.tempRow}>
           <span style={isCompact ? styles.tempCompact : styles.temp}>{tempDisplay}</span>

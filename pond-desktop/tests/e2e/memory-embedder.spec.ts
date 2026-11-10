@@ -5,7 +5,9 @@ import AxeBuilder from "@axe-core/playwright";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { contrastOf, fillContrastOf } from "./helpers/contrast";
 import { navigateTo } from "./helpers/nav";
-import { memoryHealth, memoryRows, mockModels, typicalModels, type ModelMocks } from "./helpers/model-mocks";
+import {
+  memoryHealth, memoryRows, mockModels, ORIN_SERVING_MEMORY, typicalModels, type ModelMocks,
+} from "./helpers/model-mocks";
 
 const ROLES = (embedding: Record<string, unknown>) => ({
   chat: { provider: "local", model: "gemma-4-E2B-it-qat-UD-Q4_K_XL", model_id: "gguf/gemma-4-E2B-it-qat-UD-Q4_K_XL" },
@@ -207,7 +209,7 @@ test.describe("Memory, classic Models page", () => {
     });
     const memory = await openClassicModels(page);
     const alert = memory.getByRole("alert");
-    await expect(alert).toContainText("There is not enough free memory to load EmbeddingGemma 2, so Memory is searching by keyword.");
+    await expect(alert).toContainText("This pond does not have room to load EmbeddingGemma 2 beside the conversation model, so Memory is searching by keyword.");
     await expect(alert).toContainText("Choose the lighter all-MiniLM-L6-v2 (23 MB), or try again.");
     // The pond's own words wait behind Details, and the row does not claim the model runs.
     await expect(alert).not.toContainText("on the Gpu");
@@ -277,6 +279,18 @@ test.describe("Memory, classic Models page", () => {
     await expect(memory.getByText("In use")).toHaveCount(0);
     await memory.getByRole("button", { name: "Turn on" }).click();
     await expect.poll(() => seen.saved).toContainEqual({ embedding_provider: "auto" });
+  });
+
+  test("says what each model needs while it runs, and whether this pond has room for it", async ({ page }) => {
+    await setup(page, { section: "models", memory: ORIN_SERVING_MEMORY });
+    const memory = await openClassicModels(page);
+    const row = (name: string) => memory.getByRole("listitem").filter({ hasText: name });
+    await expect(row("EmbeddingGemma 2")).toContainText("Needs about 368 MB while it runs");
+    await expect(row("EmbeddingGemma 2")).toContainText("Tight on this pond");
+    await expect(row("Nomic Embed Text v1.5")).toContainText("Fits");
+    // The model in use says how it is doing, not whether it would fit.
+    await expect(row("all-MiniLM-L6-v2")).toContainText("Needs about 50 MB while it runs");
+    await expect(row("all-MiniLM-L6-v2")).not.toContainText("Fits");
   });
 
   test("keeps the four bands the page always had", async ({ page }) => {
@@ -361,7 +375,7 @@ test.describe("Memory, hub", () => {
       health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
     });
     const card = await openHubModels(page);
-    await expect(card.getByRole("alert")).toContainText("not enough free memory");
+    await expect(card.getByRole("alert")).toContainText("does not have room to load");
     await expect(card.getByRole("listitem").first()).toContainText("Chosen, not loaded");
     await expect(page.locator(".hm-tile", { hasText: "Memory" })).toContainText("Chosen, not loaded");
     await card.getByRole("button", { name: "Details" }).click();
@@ -370,6 +384,22 @@ test.describe("Memory, hub", () => {
       const box = await button.boundingBox();
       expect(box?.height ?? 0, await button.innerText()).toBeGreaterThanOrEqual(44);
     }
+  });
+
+  test("after an out-of-memory failure the lighter model stays in front of the fold", async ({ page }) => {
+    await setup(page, {
+      section: "hub", size: [800, 480], roles: ROLES(ON_EG2), memory: ORIN_SERVING_MEMORY,
+      health: memoryHealth({ state: "failed", reason: "loading x.gguf on the Gpu: out of memory" }, { matching: 0 }),
+    });
+    const card = await openHubModels(page);
+    await expect(card.getByRole("alert")).toContainText("all-MiniLM-L6-v2");
+    const rows = card.getByRole("listitem");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(1)).toContainText("all-MiniLM-L6-v2");
+    await expect(rows.nth(1)).toContainText("Fits");
+    const use = rows.nth(1).getByRole("button", { name: "Use all-MiniLM-L6-v2 for memory" });
+    await expect(use).toBeVisible();
+    expect((await use.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   });
 
   test("claims nothing about the chosen model before the pond's first answer", async ({ page }) => {
@@ -484,6 +514,17 @@ for (const scheme of ["Light", "Dark"] as const) {
       expect(await contrastOf(page.getByRole("region", { name: "Memory models" }).getByText("Loading", { exact: true })), "Loading").toBeGreaterThanOrEqual(4.5);
     });
 
+    test("the need and the fit word, measured", async ({ page }) => {
+      await setup(page, { section: "models", scheme, memory: ORIN_SERVING_MEMORY });
+      const memory = await openClassicModels(page);
+      expect(await contrastOf(memory.getByText("Tight on this pond")), "Tight").toBeGreaterThanOrEqual(4.5);
+      expect(await contrastOf(memory.getByText("Fits").first()), "Fits").toBeGreaterThanOrEqual(4.5);
+      expect(
+        await contrastOf(memory.getByText("Needs about 368 MB while it runs")), "the need",
+      ).toBeGreaterThanOrEqual(4.5);
+      await scan(page, "#mdl-memory", "classic Memory models, with a fit reading");
+    });
+
     test("the offline note, measured", async ({ page }) => {
       await setup(page, { section: "models", scheme, networkMode: "offline" });
       const memory = await openClassicModels(page);
@@ -523,7 +564,7 @@ for (const scheme of ["Light", "Dark"] as const) {
       }, scheme === "Dark");
       const hubSwitch = page.getByRole("button", { name: "Search by meaning" });
       await expect(hubSwitch).toHaveCSS("background-color", accent);
-      await expect(page.getByRole("alert").filter({ hasText: "not enough free memory" })).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: "does not have room to load" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
       await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");

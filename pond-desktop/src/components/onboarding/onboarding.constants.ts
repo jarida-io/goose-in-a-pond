@@ -108,12 +108,14 @@ export const DEFAULT_DRAFT: OnboardingDraft = {
   longitude: 0,
   enableWeather: false,
   promptStyle: "balanced",
-  personality: "friendly and helpful",
+  // Matches `Settings::default_assistant_personality` (settings.rs).
+  personality: "friendly and concise",
   assistantName: "Goose",
   ttsVoice: "af_heart",
   // Percent of natural pace, as on the settings screen.
   ttsRate: 100,
-  wakeWord: "goose",
+  // Matches `Settings::default_wake_word` (settings.rs).
+  wakeWord: "hey goose",
   wakeWordCustom: "",
   enableMcpMemory: true,
   enableHomeAssistant: false,

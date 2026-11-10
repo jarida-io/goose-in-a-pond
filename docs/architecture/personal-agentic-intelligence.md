@@ -327,6 +327,14 @@ takes `ReusePrefix` (verified — 17 tools on both turns, prefill 3 258 ms then 
 **Status (2026-10-23):** `tool_selection_mode` still defaults to `all`
 (`Settings::default_tool_selection_mode`); a third mode, `minimal`, now exists beside `relevant`.
 
+**Status (2026-11-02):** `relevant` no longer chooses from the first message alone. Every later
+message is scored the same way and the groups it reaches the embedder model's floor on are added to the
+session's set; nothing held is ever removed (`tool_selection::union_groups`), so the prefix moves
+only on a turn that adds a group, from the first added tool on. `giap-knowledge` is now core, so
+web search is offered from the first turn. Found on the Orin on 2026-10-28: "What has happened to
+China's stock market?" loaded no knowledge group, the model said it had no tool, and the
+follow-up "Look it up?" reused the same set and produced an empty turn.
+
 **The reason it is not already the default is a real objection, and sharper than "it sometimes
 mis-scores".** The set is chosen from the FIRST message, i.e. at the least informed moment of the
 conversation, and the failure is silent: a session that opens with "what's the weather?" may never be

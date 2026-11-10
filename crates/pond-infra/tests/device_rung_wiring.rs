@@ -466,7 +466,9 @@ fn no_request_dto_on_a_turn_route_has_a_device_field() {
         let end = rest
             .find("\n}")
             .unwrap_or_else(|| panic!("{dto} has no closing brace at column 0"));
-        let body = &rest[..end];
+        // `device_place` is where the phone says it is, a place name for the turn's context
+        // (capped and cleaned by `device_place_note`), never which device is asking.
+        let body = &rest[..end].replace("device_place", "phone_place");
         assert!(
             !body.contains("device"),
             "{dto} has grown a device field:\n{body}\nA device id in a request body is the \

@@ -452,6 +452,10 @@ pub struct GgufLayout {
     pub vision_projector_type: Option<String>,
     /// `clip.vision.projection_dim`; must equal the chat model's `embedding_length`.
     pub vision_projection_dim: Option<u32>,
+    /// `clip.has_audio_encoder`: Gemma 4 E2B/E4B encoders carry a tower that hears.
+    pub has_audio_encoder: Option<bool>,
+    /// `clip.audio.projector_type`, the tower mtmd builds for the audio.
+    pub audio_projector_type: Option<String>,
     pub tensor_count: u64,
     /// `general.alignment`, or the format's default of 32.
     pub alignment: u64,
@@ -528,7 +532,10 @@ fn walk_layout<S: GgufSource>(src: S) -> Option<GgufLayout> {
         };
         let want_string = matches!(
             key.as_str(),
-            "general.architecture" | "clip.vision.projector_type" | "clip.projector_type"
+            "general.architecture"
+                | "clip.vision.projector_type"
+                | "clip.projector_type"
+                | "clip.audio.projector_type"
         );
         let Some(value) = read_value(&mut r, kind, want_string) else {
             kvs_complete = false;
@@ -541,6 +548,8 @@ fn walk_layout<S: GgufSource>(src: S) -> Option<GgufLayout> {
             ("clip.vision.projector_type", Value::Str(s)) => out.vision_projector_type = Some(s),
             ("clip.projector_type", Value::Str(s)) => legacy_projector = Some(s),
             ("clip.vision.projection_dim", Value::U32(v)) => out.vision_projection_dim = Some(v),
+            ("clip.has_audio_encoder", Value::Bool(b)) => out.has_audio_encoder = Some(b),
+            ("clip.audio.projector_type", Value::Str(s)) => out.audio_projector_type = Some(s),
             _ => {}
         }
     }
@@ -1150,6 +1159,8 @@ mod tests {
             "the audio projector type must not overwrite the vision one"
         );
         assert_eq!(layout.vision_projection_dim, Some(1536));
+        assert_eq!(layout.has_audio_encoder, Some(true));
+        assert_eq!(layout.audio_projector_type.as_deref(), Some("gemma4a"));
         assert_eq!(layout.tensor_count, 3);
         assert_eq!(layout.alignment, 32);
     }

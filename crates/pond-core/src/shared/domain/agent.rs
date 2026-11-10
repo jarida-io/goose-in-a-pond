@@ -26,6 +26,9 @@ pub struct AgentRequest {
     /// Optional image attachments for multimodal models.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::models::domain::message::ImageAttachment>,
+    /// A voice note the model hears as sound; only an adapter whose audio state is ready takes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<crate::models::domain::message::AudioAttachment>,
     /// From voice mode: the agent disables thinking and keeps replies short and unformatted.
     #[serde(default)]
     pub voice_mode: bool,
@@ -58,6 +61,25 @@ pub struct AgentRequest {
     /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interview: Option<String>,
+    /// Where the asking phone is now, as the person's app named it ("Westlands, Nairobi"), sent
+    /// only while they have turned on telling Goose where the phone is. A place name, never
+    /// coordinates; `None` from every other caller, and from the app with the switch off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_place: Option<String>,
+}
+
+impl AgentRequest {
+    /// The words the turn is about: the message, or for a room turn the model hears, the room's
+    /// transcript of the recording.
+    pub fn message_or_heard(&self) -> &str {
+        if !self.message.is_empty() {
+            return &self.message;
+        }
+        self.audio
+            .iter()
+            .find_map(|clip| clip.heard_as.as_deref())
+            .unwrap_or("")
+    }
 }
 
 /// A research task started for this turn, and where it waits when others are ahead of it.
@@ -565,6 +587,7 @@ mod agent_request_scope_tests {
             session_id: "s1".to_string(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: scope,
@@ -574,6 +597,7 @@ mod agent_request_scope_tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         }
     }
 

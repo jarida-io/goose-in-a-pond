@@ -127,6 +127,8 @@ pub struct PictureSupport {
     /// clear a stamp an ensure just wrote.
     stamp_lock: Mutex<()>,
     warmup: Arc<WarmupGate>,
+    /// Whether each pinned encoder hears, by sha256: a verified file's header never changes.
+    hears: Mutex<HashMap<&'static str, bool>>,
 }
 
 impl Default for PictureSupport {
@@ -148,6 +150,7 @@ impl PictureSupport {
             dirs: Mutex::new(HashMap::new()),
             stamp_lock: Mutex::new(()),
             warmup: Arc::new(WarmupGate::default()),
+            hears: Mutex::new(HashMap::new()),
         }
     }
 
@@ -205,6 +208,54 @@ impl PictureSupport {
             Some(spec) => self.state_of(data_dir, spec),
             None => EncoderState::NotDeclared,
         }
+    }
+
+    /// Where voice notes stand for `chat_model`: the picture encoder's state while it is not
+    /// ready, then whether its header declares an audio tower the engine runs.
+    pub fn audio_state(&self, data_dir: &Path, chat_model: &str) -> EncoderState {
+        let declared = declaration(Some(data_dir), chat_model);
+        if let Some(undeclared) = declared.undeclared_state() {
+            return undeclared;
+        }
+        let Some(spec) = declared.spec() else {
+            return EncoderState::NotDeclared;
+        };
+        let state = self.state_of(data_dir, spec);
+        if !state.is_ready() || self.encoder_hears(&encoder_file(data_dir, spec), spec) {
+            state
+        } else {
+            EncoderState::NotDeclared
+        }
+    }
+
+    /// The encoder file that hears `chat_model`'s recordings, once it is ready.
+    pub fn hearing_file(&self, data_dir: &Path, chat_model: &str) -> Option<PathBuf> {
+        let declared = declaration(Some(data_dir), chat_model);
+        let spec = declared.spec()?;
+        self.audio_state(data_dir, chat_model)
+            .is_ready()
+            .then(|| encoder_file(data_dir, spec))
+    }
+
+    /// Reads the header once per pinned file (~85 KB); an unreadable one is retried next time.
+    fn encoder_hears(&self, file: &Path, spec: &EncoderSpec) -> bool {
+        if let Some(known) = self
+            .hears
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(spec.sha256)
+        {
+            return *known;
+        }
+        let Some(layout) = pond_core::models::domain::gguf::parse_gguf_layout_file(file) else {
+            return false;
+        };
+        let hears = pond_core::models::domain::audio_input::encoder_hears(&layout);
+        self.hears
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(spec.sha256, hears);
+        hears
     }
 
     /// [`Self::state`] for a declared encoder.
@@ -660,6 +711,17 @@ mod tests {
 
     /// A GGUF encoder header with one F32 tensor ending at `size`, kept sparse via `set_len`.
     fn write_encoder(path: &Path, projector: &str, projection_dim: u32, size: u64) {
+        write_encoder_with(path, projector, projection_dim, size, None);
+    }
+
+    /// `audio`: the `clip.audio.projector_type` of a tower the file declares, if any.
+    fn write_encoder_with(
+        path: &Path,
+        projector: &str,
+        projection_dim: u32,
+        size: u64,
+        audio: Option<&str>,
+    ) {
         fn raw_string(out: &mut Vec<u8>, s: &str) {
             out.extend_from_slice(&(s.len() as u64).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
@@ -678,7 +740,14 @@ mod tests {
         raw_string(&mut kvs, "clip.vision.projection_dim");
         kvs.extend_from_slice(&4u32.to_le_bytes());
         kvs.extend_from_slice(&projection_dim.to_le_bytes());
-        let kv_count = 4u64;
+        let mut kv_count = 4u64;
+        if let Some(audio) = audio {
+            raw_string(&mut kvs, "clip.has_audio_encoder");
+            kvs.extend_from_slice(&7u32.to_le_bytes());
+            kvs.push(1);
+            kv_str(&mut kvs, "clip.audio.projector_type", audio);
+            kv_count += 2;
+        }
 
         let header_len = |elements: u64| {
             let mut out = Vec::new();
@@ -784,6 +853,68 @@ mod tests {
             EncoderState::Ready {
                 bytes: Some(e2b.size_bytes)
             }
+        );
+    }
+
+    #[test]
+    fn a_voice_note_waits_for_the_encoder_then_needs_its_audio_tower() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pictures = PictureSupport::with_rows(Arc::new(MemoryRows::default()));
+        let model = "gemma-4-E2B-it-Q4_K_M";
+        assert_eq!(
+            pictures.audio_state(tmp.path(), "Llama-3.2-3B-Instruct-Q4_K_M"),
+            EncoderState::NotDeclared
+        );
+        if budgeted() {
+            assert_eq!(
+                pictures.audio_state(tmp.path(), model),
+                EncoderState::NotOnThisDevice
+            );
+            return;
+        }
+        assert_eq!(
+            pictures.audio_state(tmp.path(), model),
+            EncoderState::Absent
+        );
+
+        let e2b = spec("gemma-4-e2b-it");
+        let file = domain::encoder_path(tmp.path(), &e2b);
+        write_encoder_with(
+            &file,
+            e2b.projector,
+            e2b.projection_dim,
+            e2b.size_bytes,
+            Some("gemma4a"),
+        );
+        assert_eq!(
+            pictures.audio_state(tmp.path(), model),
+            EncoderState::Verifying
+        );
+        vouch(&file, &e2b);
+        assert_eq!(
+            pictures.audio_state(tmp.path(), model),
+            EncoderState::Ready {
+                bytes: Some(e2b.size_bytes)
+            }
+        );
+    }
+
+    #[test]
+    fn a_ready_encoder_with_no_audio_tower_never_hears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pictures = PictureSupport::with_rows(Arc::new(MemoryRows::default()));
+        let model = "gemma-4-E2B-it-Q4_K_M";
+        if budgeted() {
+            return;
+        }
+        let e2b = spec("gemma-4-e2b-it");
+        let file = write_valid_encoder(tmp.path(), &e2b);
+        vouch(&file, &e2b);
+        assert!(pictures.state(tmp.path(), model).is_ready());
+        assert_eq!(
+            pictures.audio_state(tmp.path(), model),
+            EncoderState::NotDeclared,
+            "pictures work, but the header declares nothing that hears"
         );
     }
 

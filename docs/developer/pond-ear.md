@@ -96,11 +96,14 @@ audio stays with the owners of the original videos. Whatever ships it must carry
 ## Segments for a host-side wake detector
 
 With `Config.segments` on, the wake CNN never runs. Outside Listen the ear instead reports each
-stretch of speech on the echo-cancelled signal as `Event::Segment { start, end }`, for the host to
-transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
-hysteresis, 800 ms of quiet, at most 30 s), reaches 200 ms back before Silero's onset and is
-dropped under 250 ms of voiced time. Listening cancels the segment in progress, since its audio
-belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
+stretch of speech on the echo-cancelled signal as `Event::Segment { start, end, cut }`, for the host
+to transcribe and match against a custom phrase. A segment uses the endpointer's rule (Silero's
+hysteresis, 800 ms of quiet), reaches 200 ms back before Silero's onset and is dropped under 250 ms
+of voiced time. It is cut at `Endpoint::segment_max_ms` (8 s) with `cut` set while the speech goes
+on: the host reads only a segment's opening, and a television or a room of talk otherwise ran a
+segment to 30 s and hid a wake past its opening. A wake in a cut segment listens from the wake's
+start, so the request is endpointed whole. Listening cancels the segment in progress, since its
+audio belongs to the turn. `tests/replay.rs` checks segments come out bit for bit the same for any
 chunking and never while listening.
 
 ## Echo canceller
@@ -197,11 +200,11 @@ recording of a person is in the repository.
 | Step | Status | Where |
 |---|---|---|
 | **pond-adapters-ear** runs one `Ear` on its own thread with a permanent mic claim, read through `MicReader`. It serves `ChatService` as its `StreamingWakeWordDetector` (the activation is the endpointed request from `Ear::audio`, so nothing is recorded twice), its `VoiceInput` (`listen(start)`, then `Utterance` or `Silence`) and its `InterruptWatch`. The interrupt rule lives there: the wake word, or a `BargeIn` with an enrolled `who` | built | `crates/pond-adapters-ear/src/worker.rs` |
-| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (the accurate profile Whisper prepared at load) and matched against `wake_triggers`; a match is the wake and its transcript the request | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear` |
+| **Whisper as the wake detector**: with `Config.segments`, each `Segment`'s first 6 s is transcribed (`Transcriber::scan`: the accurate profile without temperature retries) and matched against `wake_triggers`; a match is the wake and its transcript the request. Room Whisper reads the wake phrase and the members' names as its prompt (`speech_prompt::room_prompt`), and a transcript that is only that prompt said back counts as nothing | built | `match_segments` and `wake_in` in `crates/pond-adapters-ear`, `WhisperTranscriber` in `crates/pond-server/src/voice_rig.rs` |
 | **pond-audio-out playback tap**: every played source copies what the mixer pulls to a process-wide tap; the ear resamples it to 16 kHz, stamps it with the mic's clock plus 10 ms, and passes it to `Ear::play` before the mic samples it overlaps | built | `crates/pond-audio-out/src/tap.rs`, `crates/pond-adapters-ear/src/reference.rs` |
 | **The host** moves the ear through `Think` and `Speak` and back to `Wait` from `ChatService`'s state observer, and calls `listen(start)` after an interrupt | built | `EarRig::state_hook`, `ChatService::with_state_observer` |
 | **Room voice in serve**, sharing serve's model, Whisper and Kokoro; the desktop attaches to it | built | `crates/pond-server/src/room_voice.rs`, `pond-desktop/electron/main/voice/roomClient.ts` |
 | **Models**: Silero as `.vmw` through `ensure_vmw` (`load_vad`); ResNet34 fetched by default to `models/voice-match/` (pinned revision and SHA-256) and converted once (`load_speaker`) | built | `crates/pond-server/src/voice_match.rs`, `pond_core::models::domain::voice_match_model` |
 | **Enrolment**: one flow of five takes teaches the wake word and Voice Match (`POST /voice/takes`): Whisper records the phrase as heard, an ear of its own (`TakeEar`) scores the take with the CNN and embeds up to 12 s with `Ear::embed`; the audio is never kept | built | `crates/pond-adapters-ear/src/enrol.rs`, `crates/pond-api/src/voice_match.rs` |
-| **Recognition in the room**: the room's ear loads ResNet34 once someone has five prints, gets `set_household` at start and on every change, and names the waker on CNN wakes and Whisper segment wakes alike; a follow-up after a recognised wake must be the same voice | built | `crates/pond-server/src/room_voice.rs`, `EarRig::listen`, `Worker::speaker_of` |
+| **Recognition in the room**: the room's ear loads ResNet34 once someone has five prints, gets `set_household` at start and on every change, and names the waker on CNN wakes and Whisper segment wakes alike; after a recognised wake, a follow-up in another enrolled member's voice is dropped, and one Voice Match does not recognise continues | built | `crates/pond-server/src/room_voice.rs`, `EarRig::listen`, `Worker::speaker_of` |
 | **Echo**: a Whisper segment wake whose words are mostly, in order, what the pond said this turn or in the last 10 s is dropped (`ear: own echo ignored`) | built | `crates/pond-adapters-ear/src/echo.rs` |

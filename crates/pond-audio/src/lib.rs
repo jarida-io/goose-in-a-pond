@@ -6,7 +6,7 @@ pub mod owner;
 pub mod ring;
 pub mod testing;
 
-pub use cpal_device::{input_device_names, CpalCapture};
+pub use cpal_device::CpalCapture;
 pub use energy::MicEnergy;
 pub use owner::{
     spawn, CaptureDevice, ExclusiveJob, MicCommand, MicHandle, MicReader, MicShared, MicState,

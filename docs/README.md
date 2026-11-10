@@ -39,6 +39,7 @@ bash scripts/giap.sh doctor   # health check; exits 1 on any FAIL
 | [Model capabilities](architecture/model_capabilities.md) | Thinking, vision and context detection |
 | [Token tracking](architecture/token_tracking.md) | Usage accounting per session |
 | [MCP compliance](architecture/mcp-compliance.md) | What of the MCP spec GIAP implements |
+| [Web watches and exploration](architecture/web-watch-and-exploration.md) | Watching pages for changes, exploring sites, saved items, report images and source chips (design, 2026-11-09) |
 | [Changes, 28 and 29 October 2026](architecture/changes-2026-10-28-29.md) | Long tasks, deep research, the queue, pace, the MTP drafter, My Pond and `agamemnon`, and their security controls |
 
 ## Personal Agentic Intelligence (PAI)
@@ -118,6 +119,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [Music player](architecture/music-player.md) | Apple Music and Spotify ([extension](../extensions/music/README.md)) |
 | [Rides and maps](architecture/rides-and-maps.md) | Uber on the household's own account |
 | [Calendar and mail](guides/connect-calendar-and-mail.html) | Connecting CalDAV and IMAP |
+| [Schedules and recipes](schedules-and-recipes.md) | What each is, how they differ, which tools each can use |
 
 ## Extending GIAP
 

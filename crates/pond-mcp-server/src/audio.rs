@@ -186,7 +186,8 @@ mod tests {
     use pond_core::models::domain::audio_device::{choose, DeviceKind, ProbeOutcome, ProbedDevice};
 
     fn dev(id: &str, label: &str) -> AudioDevice {
-        let mut d = AudioDevice::new(id, false, DeviceKind::Hardware);
+        let plugged = id.contains("CARD=Device");
+        let mut d = AudioDevice::new(id, plugged, DeviceKind::Hardware);
         d.label = label.to_string();
         d
     }

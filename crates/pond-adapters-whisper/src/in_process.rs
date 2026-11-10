@@ -24,8 +24,9 @@ use crate::{
 enum SpeechCapture {
     /// No speech detected within the onset wait — nothing to transcribe.
     Empty,
-    /// A matching speculative transcript was already computed; use it, skip re-inference.
-    Transcript(String),
+    /// A matching speculative transcript was already computed; use it, skip re-inference. The
+    /// 16 kHz samples ride along for a model that hears them.
+    Transcript(String, Vec<f32>),
     /// No usable speculative transcript (e.g. hit the hard cap first); transcribe normally.
     Samples(Vec<f32>),
 }
@@ -61,12 +62,11 @@ struct Engine {
 }
 
 impl Engine {
-    /// Wrap `context` and prepare the accurate profile's state now, at load, with one decode of
-    /// a second of silence. The wake-word state is made on its first use instead: only local
-    /// voice mode uses it, and an instance that serves the transcribe route never would.
+    /// Wrap `context` and prepare `prepare`'s state now, at load, with one decode of a second of
+    /// silence. The other profile's state is made on its first use, if it ever comes.
     ///
     /// A failure here is logged and leaves the state to be made on first use, as before.
-    fn new(context: WhisperContext) -> Self {
+    fn new(context: WhisperContext, prepare: TranscribeOpts) -> Self {
         let engine = Self {
             context: Arc::new(context),
             accurate: Mutex::new(None),
@@ -74,7 +74,7 @@ impl Engine {
             created: AtomicUsize::new(0),
         };
         let started = std::time::Instant::now();
-        match WhisperRsInput::transcribe_samples(&engine, vec![0.0; 16_000]) {
+        match WhisperRsInput::transcribe_samples_with(&engine, vec![0.0; 16_000], prepare) {
             Ok(_) => tracing::info!(
                 kind = "whisper_state_prepared",
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -110,6 +110,8 @@ pub struct WhisperRsInput {
     silence_ms: u64,
     /// Pre-captured WAV bytes from the wake-word detector (one-breath path).
     captured: Mutex<Option<Vec<u8>>>,
+    /// The 16 kHz samples behind the last `listen()` that returned words.
+    heard: Mutex<Option<Vec<f32>>>,
     /// When speech that barged in over a reply began; the next capture starts there.
     onset: Mutex<Option<std::time::Instant>>,
     /// Normalized wake words, stripped because the capture reaches back past the trigger.
@@ -137,6 +139,14 @@ impl WhisperRsInput {
 
     /// Load the ggml model at `model_path`. A whisper-rs panic during load becomes `Err`.
     pub fn new(model_path: PathBuf, mic: pond_audio::MicHandle) -> Result<Self> {
+        Self::prepared(model_path, mic, TranscribeOpts::accurate())
+    }
+
+    fn prepared(
+        model_path: PathBuf,
+        mic: pond_audio::MicHandle,
+        prepare: TranscribeOpts,
+    ) -> Result<Self> {
         if !model_path.exists() {
             return Err(anyhow!(
                 "Whisper model file not found: {}",
@@ -149,11 +159,12 @@ impl WhisperRsInput {
             model_path.display()
         );
         Ok(Self {
-            engine: RwLock::new(Arc::new(Engine::new(context))),
+            engine: RwLock::new(Arc::new(Engine::new(context, prepare))),
             model_path: RwLock::new(model_path),
             duration_secs: DEFAULT_DURATION_SECS,
             silence_ms: DEFAULT_SILENCE_MS,
             captured: Mutex::new(None),
+            heard: Mutex::new(None),
             onset: Mutex::new(None),
             wake_words: std::sync::RwLock::new(Vec::new()),
             audio_level_sink: None,
@@ -201,7 +212,7 @@ impl WhisperRsInput {
         }
         let new_engine = tokio::task::spawn_blocking({
             let p = new_model_path.clone();
-            move || load_context(&p).map(Engine::new)
+            move || load_context(&p).map(|c| Engine::new(c, TranscribeOpts::accurate()))
         })
         .await
         .map_err(|e| anyhow!("model load join error: {}", e))??;
@@ -254,8 +265,28 @@ impl WhisperRsInput {
     /// 16 kHz mono PCM through the accurate profile, the wake word left in. Blocking: call it
     /// from a blocking thread, where `blocking_read` is safe.
     pub fn transcribe_pcm(&self, samples: &[f32]) -> Result<String> {
+        self.transcribe_pcm_prompted(samples, None)
+    }
+
+    /// As [`Self::transcribe_pcm`], with `prompt` read by Whisper as the text before the audio.
+    pub fn transcribe_pcm_prompted(&self, samples: &[f32], prompt: Option<&str>) -> Result<String> {
+        self.transcribe_pcm_with(samples, TranscribeOpts::accurate(), prompt)
+    }
+
+    /// As [`Self::transcribe_pcm_prompted`], through `opts`.
+    pub fn transcribe_pcm_with(
+        &self,
+        samples: &[f32],
+        opts: TranscribeOpts,
+        prompt: Option<&str>,
+    ) -> Result<String> {
         let engine = self.engine.blocking_read().clone();
-        Self::transcribe_samples(&engine, samples.to_vec())
+        let text =
+            Self::transcribe_unless_abandoned(&engine, samples.to_vec(), opts, None, prompt)?;
+        Ok(match prompt {
+            Some(prompt) if is_prompt_echo(&text, prompt) => String::new(),
+            _ => text,
+        })
     }
 
     /// Transcribe 16 kHz mono PCM (artifacts stripped); empty → `Ok("")`, panic → `Err`.
@@ -272,7 +303,7 @@ impl WhisperRsInput {
         samples: Vec<f32>,
         opts: TranscribeOpts,
     ) -> Result<String> {
-        Self::transcribe_unless_abandoned(engine, samples, opts, None)
+        Self::transcribe_unless_abandoned(engine, samples, opts, None, None)
     }
 
     /// As [`Self::transcribe_samples_with`], giving up once `abandoned` is raised: before
@@ -282,14 +313,26 @@ impl WhisperRsInput {
         samples: Vec<f32>,
         opts: TranscribeOpts,
         abandoned: Option<&AtomicBool>,
+        prompt: Option<&str>,
     ) -> Result<String> {
         let is_abandoned = || abandoned.is_some_and(|flag| flag.load(Ordering::SeqCst));
         if samples.is_empty() {
             return Ok(String::new());
         }
+        let mut samples = samples;
+        let peak = samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        if peak > 0.005 && peak < 0.25 {
+            let scale = (0.25 / peak).min(8.0);
+            for s in &mut samples {
+                *s *= scale;
+            }
+        }
         let n_threads = opts.n_threads.unwrap_or_else(default_threads);
         let sample_count = samples.len();
-        let audio_ctx = opts.fit_audio_ctx.then(|| audio_ctx_for(sample_count));
+        // whisper.cpp refuses an `audio_ctx` above the model's own, which the wake model lowers.
+        let audio_ctx = opts
+            .fit_audio_ctx
+            .then(|| audio_ctx_for(sample_count).min(engine.context.model_n_audio_ctx()));
 
         let (slot, profile) = engine.slot(&opts);
         // A panic mid-decode leaves the state in an unknown condition, so it is replaced.
@@ -334,7 +377,18 @@ impl WhisperRsInput {
                 },
                 None => SamplingStrategy::Greedy { best_of: 1 },
             };
+            // Tokenised per call and borrowed: `set_initial_prompt` leaks its string every call.
+            let prompt_tokens = match prompt {
+                Some(text) => engine
+                    .context
+                    .tokenize(text, MAX_PROMPT_TOKENS)
+                    .context("whisper-rs: the prompt did not tokenize")?,
+                None => Vec::new(),
+            };
             let mut params = FullParams::new(strategy);
+            if !prompt_tokens.is_empty() {
+                params.set_tokens(&prompt_tokens);
+            }
             params.set_print_progress(false);
             params.set_print_special(false);
             params.set_print_realtime(false);
@@ -373,6 +427,14 @@ impl WhisperRsInput {
             let mut out = String::new();
             for i in 0..n_segments {
                 if let Some(seg) = state.get_segment(i) {
+                    if seg.no_speech_probability() > 0.6 {
+                        tracing::debug!(
+                            segment = i,
+                            no_speech_prob = seg.no_speech_probability(),
+                            "whisper: dropping segment with high no_speech_probability"
+                        );
+                        continue;
+                    }
                     if let Ok(text) = seg.to_str() {
                         out.push_str(text);
                     }
@@ -413,6 +475,32 @@ impl WhisperRsInput {
 }
 
 const ABANDONED: &str = "transcription abandoned";
+
+/// Over noise Whisper can say its prompt back, once or over and over, the last copy cut short, or
+/// loop just its opening ("Hey goose. Hey goose. Hey goose."); nobody says it that way.
+fn is_prompt_echo(text: &str, prompt: &str) -> bool {
+    let heard = pond_voice::text::normalize_transcript(text);
+    let prompt = pond_voice::text::normalize_transcript(prompt);
+    let (heard, prompt): (Vec<&str>, Vec<&str>) = (
+        heard.split_whitespace().collect(),
+        prompt.split_whitespace().collect(),
+    );
+    let said_over = |words: usize, copies: usize| {
+        heard.len() >= words * copies
+            && heard
+                .iter()
+                .enumerate()
+                .all(|(i, w)| *w == prompt[i % words])
+    };
+    !prompt.is_empty()
+        && (said_over(prompt.len(), 1)
+            || (1..prompt.len()).any(|words| said_over(words, LOOPED_OPENING)))
+}
+
+/// Copies of the prompt's opening that make a loop: a person may call the pond twice in a breath.
+const LOOPED_OPENING: usize = 3;
+/// Whisper keeps only the last half of its 448-token text context as the prompt.
+const MAX_PROMPT_TOKENS: usize = 224;
 
 /// whisper.cpp's abort hook, checked after the encoder and after each decode step.
 unsafe extern "C" fn abort_when_raised(flag: *mut std::ffi::c_void) -> bool {
@@ -511,7 +599,16 @@ impl TranscribeOpts {
             fit_audio_ctx: false,
             beam_size: Some(5),
             suppress_non_speech: true,
-            temperature_step: 0.2,
+            temperature_step: 0.0,
+        }
+    }
+
+    /// A room segment's opening: the accurate decode without its retries, which over noise cost up
+    /// to five more decodes for a transcript that comes out empty anyway.
+    pub fn segment_scan() -> Self {
+        Self {
+            temperature_step: 0.0,
+            ..Self::accurate()
         }
     }
 
@@ -621,6 +718,7 @@ impl WhisperRsInput {
                                 resampled,
                                 TranscribeOpts::accurate(),
                                 Some(&abandoned),
+                                None,
                             )?;
                             // Strip here so speculative and confirmed transcripts stay byte-identical.
                             Ok(strip_wake_words(transcript, &wake_words))
@@ -641,7 +739,10 @@ impl WhisperRsInput {
                     return Ok(SpeechCapture::Empty);
                 }
                 if let Some(transcript) = speculative_transcript {
-                    return Ok(SpeechCapture::Transcript(transcript));
+                    return Ok(SpeechCapture::Transcript(
+                        transcript,
+                        resample_to_16k(&samples, sample_rate),
+                    ));
                 }
                 Ok(SpeechCapture::Samples(resample_to_16k(
                     &samples,
@@ -652,17 +753,23 @@ impl WhisperRsInput {
         .await
         .map_err(|e| anyhow!("audio capture join error: {}", e))??;
 
+        *self.heard.lock().unwrap() = None;
         let samples_result = match capture_result {
             SpeechCapture::Empty => return Ok(Some(String::new())),
             // Already stripped in the speculative thread.
-            SpeechCapture::Transcript(t) => return Ok(Some(t)),
+            SpeechCapture::Transcript(t, samples) => {
+                *self.heard.lock().unwrap() = Some(samples);
+                return Ok(Some(t));
+            }
             SpeechCapture::Samples(s) => s,
         };
 
+        let kept = samples_result.clone();
         let transcript =
             tokio::task::spawn_blocking(move || Self::transcribe_samples(&engine, samples_result))
                 .await
                 .map_err(|e| anyhow!("inference join error: {}", e))??;
+        *self.heard.lock().unwrap() = Some(kept);
 
         Ok(Some(self.without_wake_word(transcript)))
     }
@@ -705,6 +812,14 @@ impl VoiceInput for WhisperRsInput {
     fn prime_with_onset(&self, onset: std::time::Instant) {
         *self.onset.lock().unwrap() = Some(onset);
     }
+
+    fn take_heard_audio(&self) -> Option<Vec<u8>> {
+        let samples = self.heard.lock().unwrap().take()?;
+        Some(pond_voice::dsp::encode_wav_pcm16(
+            &pond_voice::dsp::f32_to_pcm16(&samples),
+            16_000,
+        ))
+    }
 }
 
 impl WhisperBackend for WhisperRsInput {
@@ -734,6 +849,46 @@ mod tests {
             "the reuse gate compares these directly"
         );
         assert_eq!(speculative, "turn the kitchen lights on.");
+    }
+
+    #[test]
+    fn the_prompt_said_back_is_an_echo_and_a_request_that_starts_like_it_is_not() {
+        let prompt = "Hey goose. Jerry Anyumba.";
+        assert!(is_prompt_echo("Hey goose, Jerry Anyumba.", prompt));
+        assert!(is_prompt_echo(
+            "Hey goose. Jerry Anyumba. Hey goose. Jerry Anyumba. Hey goose.",
+            prompt
+        ));
+        assert!(
+            !is_prompt_echo("Hey goose. Jerry", prompt),
+            "shorter than one copy"
+        );
+        assert!(!is_prompt_echo(
+            "Hey goose, Jerry Anyumba is home, turn the lights on.",
+            prompt
+        ));
+        assert!(!is_prompt_echo("", prompt));
+        assert!(!is_prompt_echo("anything", ""));
+    }
+
+    #[test]
+    fn the_wake_phrase_looped_from_the_prompt_is_an_echo_and_said_once_or_twice_is_not() {
+        let prompt = "Hey goose. Jerry Anyumba.";
+        let looped = "Hey goose. ".repeat(8);
+        assert!(is_prompt_echo(&looped, prompt));
+        assert!(is_prompt_echo(
+            "Hey goose, hey goose, hey goose, hey",
+            prompt
+        ));
+        assert!(!is_prompt_echo("Hey goose.", prompt), "a wake");
+        assert!(
+            !is_prompt_echo("Hey goose. Hey goose.", prompt),
+            "called twice"
+        );
+        assert!(!is_prompt_echo(
+            "Hey goose, hey goose, hey goose, what time is it?",
+            prompt
+        ));
     }
 
     #[test]
@@ -962,6 +1117,7 @@ mod decode_profiles {
         }
         Some(Arc::new(Engine::new(
             load_context(&path).expect("load model"),
+            TranscribeOpts::accurate(),
         )))
     }
 
@@ -1067,6 +1223,7 @@ mod decode_profiles {
                     long,
                     TranscribeOpts::accurate(),
                     Some(&abandoned),
+                    None,
                 )
             }
         });

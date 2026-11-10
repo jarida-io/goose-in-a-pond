@@ -8,6 +8,7 @@
 linker = "aarch64-linux-gnu-gcc"
 
 [build]
+# A RUSTFLAGS variable replaces this list, so scripts/lib/release-build.sh repeats it.
 rustflags = ["-C", "target-cpu=native"]
 
 [net]

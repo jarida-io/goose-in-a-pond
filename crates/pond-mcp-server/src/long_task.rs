@@ -17,7 +17,7 @@ use pond_core::shared::services::child_sessions::{process_child_sessions, ChildS
 use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
 use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
 use pond_core::shared::services::long_task_roles::WORKER_ROLE;
-use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact};
+use pond_core::shared::services::long_task_runner::{answer_artifact, clip_brief};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
@@ -469,8 +469,13 @@ impl TasksMcpServer {
                         .to_string(),
                 )
             })?;
-        let budget = LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)
-            .map_err(|e| Refusal::Rejected(e.to_string()))?;
+        let budget = LongTaskBudget::new(
+            DEFAULT_LONG_TASK_STEPS,
+            Some(pond_core::shared::domain::long_task::default_deadline(
+                Utc::now(),
+            )),
+        )
+        .map_err(|e| Refusal::Rejected(e.to_string()))?;
         let answer = non_blank(params.answer.take())
             .or_else(|| take_alias(&mut params.extra, &ANSWER_ALIASES))
             .and_then(|raw| AnswerShape::read(&raw))
@@ -577,7 +582,7 @@ async fn status_text(
     if let Some(task_id) = task_id {
         let task = reached_task(deps, scope, &task_id).await?;
         let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-        let result = result_of(deps.repo.as_ref(), task.id()).await?;
+        let result = result_of(deps.repo.as_ref(), &task).await?;
         return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
     }
     let tasks = reached_tasks(deps, scope).await?;
@@ -666,10 +671,11 @@ async fn reached_tasks(
 /// The task's answer, by the runner's own rule, so status and the runner never disagree.
 async fn result_of(
     repo: &dyn LongTaskRepository,
-    task_id: &str,
+    task: &LongTask,
 ) -> Result<Option<ArtifactSummary>, Refusal> {
-    let artifacts = repo.list_artifacts(task_id).await.map_err(store)?;
-    Ok(result_artifact(&artifacts).cloned())
+    let steps = repo.list_steps(task.id()).await.map_err(store)?;
+    let artifacts = repo.list_artifacts(task.id()).await.map_err(store)?;
+    Ok(answer_artifact(task, &steps, &artifacts).cloned())
 }
 
 /// What the household is told about one task: state, progress, the step under way, and the
@@ -2513,7 +2519,7 @@ mod tests {
                 &meta,
                 params(serde_json::json!({"steps": [
                     {"key": "a", "role": "r", "instructions": "x"},
-                    {"key": "b", "role": "r", "instructions": 5},
+                    {"key": "b", "role": 5, "instructions": "y"},
                     {"key": "c", "role": "r"},
                 ]})),
             )

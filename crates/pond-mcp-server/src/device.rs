@@ -280,30 +280,6 @@ impl DeviceMcpServer {
         text(audio::outcome(choice, asked.as_ref()))
     }
 
-    #[tool(description = "Get user profile: name, assistant name, timezone, location.")]
-    async fn get_user_profile(
-        &self,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let settings = self.settings_repo.get().await.map_err(|e| {
-            ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Settings error: {}", e),
-                None,
-            )
-        })?;
-        // The location service falls back to the time zone, so this is usually a place.
-        let location = pond_core::user_data::services::location::resolve(&settings)
-            .describe()
-            .unwrap_or("unknown")
-            .to_string();
-        let text = format!(
-            "User: {}\nAssistant name: {}\nTimezone: {}\nLocation: {}",
-            settings.user_name, settings.assistant_name, settings.timezone, location,
-        );
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
-    }
-
     #[tool(
         description = "List active user skills by name and description. Call load_skill to get \
                         a skill's full instructions."
@@ -393,7 +369,7 @@ impl ServerHandler for DeviceMcpServer {
             .with_instructions(
                 "GIAP Device MCP server — device registry, user profile, model configuration, \
                  skills, and agent recipes.\n\n\
-                 Tools: list_registered_devices, get_user_profile (name/timezone/location), \
+                 Tools: list_registered_devices, \
                  get_model_assignments (active LLM config), list_skills (active user skill \
                  names + descriptions), load_skill (a skill's full instructions by name — call \
                  this when a listed skill looks relevant before acting on it), \

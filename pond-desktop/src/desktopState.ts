@@ -3,6 +3,8 @@ export type DesktopMode = "gui" | "voice";
 export type GuiSection =
   | "dashboard"
   | "chat"
+  | "saved"
+  | "watches"
   | "devices"
   | "mesh"
   | "pairing"
@@ -34,6 +36,8 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
     sections: [
       { section: "dashboard", label: "Home", icon: "dashboard" },
       { section: "chat",      label: "Chat",      icon: "chat" },
+      { section: "saved",     label: "Saved",     icon: "saved" },
+      { section: "watches",   label: "Watches",   icon: "watches" },
     ],
   },
   {

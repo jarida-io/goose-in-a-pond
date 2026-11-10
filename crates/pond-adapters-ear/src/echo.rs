@@ -5,6 +5,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+pub use pond_voice::text::in_order_share;
+
 /// Speech said this long ago can still come back: playback runs behind synthesis, and the
 /// segment's transcription behind both.
 pub const ECHO_WINDOW: Duration = Duration::from_secs(10);
@@ -12,7 +14,7 @@ pub const ECHO_WINDOW: Duration = Duration::from_secs(10);
 pub const ECHO_SHARE: f32 = 0.6;
 /// A segment shorter than this is never taken for an echo: a person interrupting may say the
 /// wake phrase and little else.
-pub const ECHO_MIN_WORDS: usize = 3;
+pub const ECHO_MIN_WORDS: usize = 2;
 /// What a long reply may keep, oldest dropped first.
 const MAX_WORDS: usize = 4_000;
 
@@ -71,28 +73,6 @@ impl Spoken {
         let share = in_order_share(&heard, &said);
         (share >= ECHO_SHARE).then_some(share)
     }
-}
-
-/// How many of `heard`'s words `said` holds in the same order, gaps allowed, as a share of `heard`.
-pub(crate) fn in_order_share(heard: &[&str], said: &[&str]) -> f32 {
-    if heard.is_empty() {
-        return 0.0;
-    }
-    // One row of the common-subsequence table: `row[j]` is the match over `heard[..j]`.
-    let mut row = vec![0usize; heard.len() + 1];
-    for word in said {
-        let mut diagonal = 0;
-        for j in 1..=heard.len() {
-            let above = row[j];
-            row[j] = if heard[j - 1] == *word {
-                diagonal + 1
-            } else {
-                row[j].max(row[j - 1])
-            };
-            diagonal = above;
-        }
-    }
-    row[heard.len()] as f32 / heard.len() as f32
 }
 
 #[cfg(test)]

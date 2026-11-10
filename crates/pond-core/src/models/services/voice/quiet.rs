@@ -1,11 +1,12 @@
 //! Keeps other audio paused while the pond makes a sound, for Spotify's Developer Policy III.7
 //! (see [`crate::models::ports::audio_focus`]).
 //!
-//! Whatever is about to make a sound takes a [`QuietHold`] and waits for [`Quiet::until_quiet`]. A
-//! voice turn holds one from start to end, so the music does not come back between sentences;
-//! [`Quiet::linger`] covers a stretch nothing holds, like the words said after a wake word or audio a
-//! browser is playing. Once nothing holds and nothing lingers, what was paused is resumed after the
-//! grace, so two sounds close together do not bring it back in between.
+//! The pond's audio bus says when it is held, and [`Quiet::follow`] keeps a [`QuietHold`] for as
+//! long as it is, so every sound the pond plays, a whole voice turn with the pauses between its
+//! sentences included, keeps the music paused; a sound waits for [`Quiet::until_quiet`] before its
+//! first sample. [`Quiet::linger`] covers a stretch nothing plays, like the words said after a wake
+//! word or audio a browser is playing. Once nothing holds and nothing lingers, what was paused is
+//! resumed after the grace, so two sounds close together do not bring it back in between.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -17,6 +18,8 @@ use crate::models::ports::audio_focus::{AudioFocus, Paused};
 
 /// How long after the last sound the music comes back.
 pub const GRACE: Duration = Duration::from_secs(2);
+/// How long a sound waits for other audio to pause before it plays anyway.
+pub const WAIT_FOR_QUIET: Duration = Duration::from_millis(1500);
 
 enum Event {
     Hold,
@@ -45,6 +48,24 @@ impl Quiet {
         QuietHold {
             events: self.events.clone(),
         }
+    }
+
+    /// Keeps other audio paused while `held` is true: the audio bus publishes it, held from the
+    /// moment a sound takes the bus to the moment it is free. Call from inside a Tokio runtime.
+    pub fn follow(self: &Arc<Self>, mut held: watch::Receiver<bool>) {
+        let quiet = self.clone();
+        tokio::spawn(async move {
+            let mut hold = None;
+            loop {
+                let now = *held.borrow_and_update();
+                if now != hold.is_some() {
+                    hold = now.then(|| quiet.hold());
+                }
+                if held.changed().await.is_err() {
+                    break;
+                }
+            }
+        });
     }
 
     /// Other audio stays paused for `span` from now, with or without a hold.
@@ -268,6 +289,31 @@ mod tests {
         assert_eq!(spotify.done(), ["pause"], "back before the grace was over");
 
         tokio::time::sleep(Duration::from_millis(20)).await;
+        settle().await;
+        assert_eq!(spotify.done(), ["pause", "resume"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn following_the_bus_pauses_while_it_is_held_and_resumes_a_grace_after() {
+        let spotify = FakeService::playing();
+        let quiet = Quiet::start(spotify.clone(), GRACE);
+        let (bus, held) = watch::channel(false);
+        quiet.follow(held);
+
+        bus.send_replace(true);
+        quiet.until_quiet(Duration::from_secs(1)).await;
+        assert_eq!(spotify.done(), ["pause"]);
+        tokio::time::sleep(GRACE * 3).await;
+        settle().await;
+        assert_eq!(
+            spotify.done(),
+            ["pause"],
+            "back while the bus was still held"
+        );
+
+        bus.send_replace(false);
+        settle().await;
+        tokio::time::sleep(GRACE + Duration::from_millis(20)).await;
         settle().await;
         assert_eq!(spotify.done(), ["pause", "resume"]);
     }

@@ -16,6 +16,12 @@ use crate::names;
 use crate::probe;
 use crate::sound;
 use crate::sound_server::{self, SystemPactl};
+use pond_audio_out::Claim;
+
+/// How long a device's chime waits for whatever the pond is playing.
+const CHIME_WAITS_FOR_BUS: Duration = Duration::from_secs(10);
+/// How long a mic and speaker check waits for the speaker: a reply runs to its end first.
+const CHECK_WAITS_FOR_SPEAKER: Duration = Duration::from_secs(120);
 
 /// cpal's only host on Linux is ALSA, whose listing opens every node.
 const ALSA: bool = cfg!(target_os = "linux");
@@ -60,12 +66,15 @@ impl CpalProber {
     }
 
     fn default_name(direction: AudioDirection) -> Option<String> {
-        let host = cpal::default_host();
-        let device = match direction {
-            AudioDirection::Input => host.default_input_device(),
-            AudioDirection::Output => host.default_output_device(),
-        }?;
-        device.name().ok()
+        // ALSA reads the environment from C while it resolves a device; see process_env.
+        pond_core::shared::services::process_env::reading(|| {
+            let host = cpal::default_host();
+            let device = match direction {
+                AudioDirection::Input => host.default_input_device(),
+                AudioDirection::Output => host.default_output_device(),
+            }?;
+            device.name().ok()
+        })
     }
 
     fn open_input(&self) -> Option<String> {
@@ -82,14 +91,18 @@ impl AudioDeviceProber for CpalProber {
     }
 
     fn devices(&self, direction: AudioDirection) -> Result<Vec<AudioDevice>, String> {
-        let host = cpal::default_host();
         let default = Self::default_name(direction);
         let cards = Self::cards();
         let _suspended = ALSA.then(|| sound_server::suspend_active(&SystemPactl, direction));
-        let listed: Vec<cpal::Device> = match direction {
-            AudioDirection::Input => host.input_devices().map_err(|e| e.to_string())?.collect(),
-            AudioDirection::Output => host.output_devices().map_err(|e| e.to_string())?.collect(),
-        };
+        let listed: Vec<cpal::Device> = pond_core::shared::services::process_env::reading(|| {
+            let host = cpal::default_host();
+            Ok::<_, String>(match direction {
+                AudioDirection::Input => host.input_devices().map_err(|e| e.to_string())?.collect(),
+                AudioDirection::Output => {
+                    host.output_devices().map_err(|e| e.to_string())?.collect()
+                }
+            })
+        })?;
         drop(_suspended);
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -141,13 +154,24 @@ impl AudioDeviceProber for CpalProber {
         if !mic_gate::mic_enabled() {
             return off();
         }
+        // One critical section over both buses: the speaker, queued for like any sound and waited
+        // for while a reply plays, then the microphone owner's slot, which so never waits on it.
+        let Some(floor) =
+            pond_audio_out::bus().claim(Claim::Test, Some(CHECK_WAITS_FOR_SPEAKER), || true)
+        else {
+            return PairOutcome::Failed {
+                reason: "the speaker stayed busy".to_string(),
+            };
+        };
+        floor.settle(Duration::from_millis(400));
+        let floor = std::sync::Arc::new(floor);
         let (speaker, mic) = (speaker.id.clone(), mic.id.clone());
         let cards = Self::cards();
         let Some(owner) = &self.mic else {
             let _suspended = ALSA.then(|| {
                 sound_server::suspend_for_devices(&SystemPactl, &cards, Some(&mic), Some(&speaker))
             });
-            return sound::through_mic(&speaker, &mic);
+            return sound::through_mic(&floor, &speaker, &mic);
         };
         // On the owner's thread, so nothing else opens a microphone during the test.
         owner
@@ -163,7 +187,7 @@ impl AudioDeviceProber for CpalProber {
                             Some(&speaker),
                         )
                     });
-                    sound::through_open_mic(&speaker, view.shared)
+                    sound::through_open_mic(&floor, &speaker, view.shared)
                 } else {
                     let _suspended = ALSA.then(|| {
                         sound_server::suspend_for_devices(
@@ -173,7 +197,7 @@ impl AudioDeviceProber for CpalProber {
                             Some(&speaker),
                         )
                     });
-                    sound::through_mic(&speaker, &mic)
+                    sound::through_mic(&floor, &speaker, &mic)
                 }
             })
             .unwrap_or_else(|| PairOutcome::Failed {
@@ -189,10 +213,14 @@ impl AudioDeviceProber for CpalProber {
     ) -> ProbeOutcome {
         let cards = Self::cards();
         if direction == AudioDirection::Output {
+            // Held before the card is suspended: suspending it under a reply would cut the reply.
+            let Some(floor) = pond_audio_out::bus().claim(Claim::Probe, Some(wait), || true) else {
+                return ProbeOutcome::Untested;
+            };
             let _suspended = ALSA.then(|| {
                 sound_server::suspend_for_devices(&SystemPactl, &cards, None, Some(&device.id))
             });
-            return probe::probe_output(&device.id, wait);
+            return probe::probe_output(&floor, &device.id, wait);
         }
         if !mic_gate::mic_enabled() {
             return ProbeOutcome::Untested;
@@ -232,11 +260,12 @@ impl AudioDeviceProber for CpalProber {
                 read("/proc/asound/pcm")
             );
         }
-        let host = cpal::default_host();
-        let mut all: Vec<String> = host
-            .devices()
-            .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default();
+        let mut all: Vec<String> = pond_core::shared::services::process_env::reading(|| {
+            cpal::default_host()
+                .devices()
+                .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
+                .unwrap_or_default()
+        });
         all.sort();
         format!(
             "{}|in={}|out={}",
@@ -247,11 +276,14 @@ impl AudioDeviceProber for CpalProber {
     }
 
     fn chime(&self, device: &AudioDevice) -> Result<(), String> {
+        let floor = pond_audio_out::bus()
+            .claim(Claim::Chime, Some(CHIME_WAITS_FOR_BUS), || true)
+            .ok_or_else(|| "the speaker is busy".to_string())?;
         let cards = Self::cards();
         let _suspended = ALSA.then(|| {
             sound_server::suspend_for_devices(&SystemPactl, &cards, None, Some(&device.id))
         });
-        pond_audio_out::route::play_chime(Some(&device.id)).map_err(|e| e.to_string())
+        pond_audio_out::route::play_chime(&floor, Some(&device.id)).map_err(|e| e.to_string())
     }
 
     // Linux only: on a Mac the person sets the volume and the defaults.

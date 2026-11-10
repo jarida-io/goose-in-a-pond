@@ -19,12 +19,38 @@ pub struct LaneSlot<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     lane: &'a InferenceLane,
     job: LaneJob,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl LaneSlot<'_> {
+    pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancel.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+
+    #[allow(dead_code)]
+    pub fn job(&self) -> LaneJob {
+        self.job
+    }
 }
 
 /// Dropping also records the run, whatever the outcome: a job with no recorded run counts
 /// as infinitely starved in `select_next` and would win every tie forever.
 impl Drop for LaneSlot<'_> {
     fn drop(&mut self) {
+        match self.lane.active_cancel.lock() {
+            Ok(mut cancel) => *cancel = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+
         // Lock order is safe: `acquire` releases `last_run` before it takes the slot.
         let at = Utc::now();
         match self.lane.last_run.lock() {
@@ -122,9 +148,12 @@ pub struct InferenceLane {
     /// Since when the embedding slot has been embedding, while it is. Std, never held across an
     /// await; cleared by [`EmbeddingSlotShown`]'s `Drop`.
     embedding_slot: std::sync::Mutex<Option<Instant>>,
+    active_cancel: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
+    presence: std::sync::OnceLock<PresenceProbe>,
 }
 
 type TurnProbe = Box<dyn Fn() -> bool + Send + Sync>;
+type PresenceProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// Every registered job's state, in declaration order, which `select_next` breaks ties by.
 fn job_states(
@@ -191,6 +220,8 @@ impl InferenceLane {
             tallies: std::sync::Mutex::new(HashMap::new()),
             turns: std::sync::OnceLock::new(),
             embedding_slot: std::sync::Mutex::new(None),
+            active_cancel: std::sync::Mutex::new(None),
+            presence: std::sync::OnceLock::new(),
         })
     }
 
@@ -204,6 +235,28 @@ impl InferenceLane {
 
     fn turn_running(&self) -> bool {
         self.turns.get().is_some_and(|running| running())
+    }
+
+    /// Observes whether a person is physically present in view of the camera.
+    pub fn watch_presence(&self, person_present: impl Fn() -> bool + Send + Sync + 'static) {
+        let _ = self.presence.set(Box::new(person_present));
+    }
+
+    /// Whether a person is present in view of the camera.
+    pub fn person_present(&self) -> bool {
+        self.presence.get().is_some_and(|present| present())
+    }
+
+    /// Preempts whichever background chore currently holds the lane slot.
+    pub fn preempt(&self) {
+        let token = match self.active_cancel.lock() {
+            Ok(c) => c.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(token) = token {
+            tracing::info!("inference lane: preempting active background slot for user turn");
+            token.cancel();
+        }
     }
 
     /// The household's activity as the last tick of any job read it, extrapolated to now. No
@@ -291,9 +344,12 @@ impl InferenceLane {
         saw_activity_since_start: bool,
         idle_for: Duration,
     ) -> Option<LaneSlot<'_>> {
-        // A turn in flight is no quiet at all, however long ago its request arrived; a hand-asked
-        // tick still waives the quiet period, as it always has.
-        let idle_for = if self.turn_running() {
+        // A turn in flight suppresses quiet for every job; a person in view suppresses only
+        // unasked background chores, never a long task or compaction the member is waiting on.
+        let idle_for = if self.turn_running()
+            || (!matches!(job, LaneJob::LongTaskStep | LaneJob::Compaction)
+                && self.person_present())
+        {
             Duration::ZERO
         } else {
             idle_for
@@ -408,10 +464,16 @@ impl InferenceLane {
                 if let Ok(mut holder) = self.holder.lock() {
                     *holder = Some((job, Instant::now()));
                 }
+                let cancel = tokio_util::sync::CancellationToken::new();
+                match self.active_cancel.lock() {
+                    Ok(mut active) => *active = Some(cancel.clone()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(cancel.clone()),
+                }
                 Some(LaneSlot {
                     _guard: guard,
                     lane: self,
                     job,
+                    cancel,
                 })
             }
             Err(_) => {
@@ -1533,5 +1595,69 @@ mod tests {
 
         let registry = lane.registry.lock().await;
         assert!(registry.contains_key(&LaneJob::Titling));
+    }
+
+    #[tokio::test]
+    async fn preempting_the_lane_cancels_the_active_slot_token() {
+        let lane = InferenceLane::new();
+        let slot = ask(&lane, LaneJob::Titling).await.expect("slot acquired");
+        assert!(!slot.is_cancelled());
+
+        lane.preempt();
+        assert!(slot.is_cancelled());
+
+        // Dropping the slot clears the cancellation for the next acquire
+        drop(slot);
+        let next_slot = ask(&lane, LaneJob::Titling).await.expect("slot acquired");
+        assert!(!next_slot.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn person_present_in_view_suppresses_quiet() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let present = Arc::new(AtomicBool::new(true));
+        let lane = InferenceLane::new();
+        let probe = present.clone();
+        lane.watch_presence(move || probe.load(Ordering::Relaxed));
+        let cadence = Cadence::new(Duration::ZERO, IDLE_THRESHOLD, false);
+
+        assert!(lane
+            .acquire(
+                LaneJob::SummaryRefresh,
+                true,
+                cadence,
+                false,
+                true,
+                LONG_IDLE
+            )
+            .await
+            .is_none());
+
+        assert!(
+            lane.acquire(
+                LaneJob::LongTaskStep,
+                true,
+                Cadence::new(Duration::ZERO, Duration::from_secs(2), true),
+                false,
+                true,
+                LONG_IDLE
+            )
+            .await
+            .is_some(),
+            "a member waiting in view of the camera does not hold back their own long task"
+        );
+
+        present.store(false, Ordering::Relaxed);
+        assert!(lane
+            .acquire(
+                LaneJob::SummaryRefresh,
+                true,
+                cadence,
+                false,
+                true,
+                LONG_IDLE
+            )
+            .await
+            .is_some());
     }
 }

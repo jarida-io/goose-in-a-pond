@@ -97,9 +97,10 @@ which sees the final `(system, messages, tools)` of each call:
 - **Added extensions**: `GiapGooseExtensionManager` (`extension_manager.rs`) adds stdio and HTTP
   servers to the `giap-extensions` session. See [Building Extensions](extensions.md).
 - **Selection**: with `tool_selection_mode` `relevant` or `minimal`, `GooseAdapter` picks tool groups
-  per session (`pond_core::mcp::services::tool_selection`) and hands the shim the allow-set;
-  `giap-toolkit__enable_tool_group` widens it for the rest of the session, never beyond what the
-  speaker is permitted.
+  per session (`pond_core::mcp::services::tool_selection`) and hands the shim the allow-set. In
+  `relevant` every later message is scored too and its groups are added (`union_groups`), never
+  removed; `giap-toolkit__enable_tool_group` widens it for the rest of the session. Neither goes
+  beyond what the speaker is permitted.
 - Goose runs in `GooseMode::Auto`: no per-call approval prompts.
 
 ## Other pieces in the adapter crate

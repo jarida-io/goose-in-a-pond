@@ -298,8 +298,13 @@ What follows:
      it, and MiniLM stays the default. Its similarity floors are its own, measured on the Orin
      (`fixtures/embedding-floors`): tool relevance 0.71 against MiniLM's 0.28, and dedup bands of
      0.97 and 0.92 against the dials MiniLM's scale uses.
-- **Not measured:** the cost inside `pond-server`, recall on the household's real store, audio
-  retrieval and video.
+- **Inside `pond-server` on the nano, 2026-11-02**, beside E4B, as MemAvailable (medians of 20
+  reads). EmbeddingGemma 2 on the GPU, placed at boot, gives back 138 MB when turned off, because
+  CUDA keeps its pools (`EG2_CUDA_RETURNS_MB`). all-MiniLM-L6-v2 adds 46 MB of RSS. EmbeddingGemma
+  2 chosen after boot lands on the CPU: 458 MB was available before the switch, under the 800 MB
+  the GPU needs. It added 361 MB of RSS and left 225 MB available, under the margin. The Models
+  page reads this as `embedder_room_mb`.
+- **Not measured:** recall on the household's real store, audio retrieval and video.
 
 ---
 
@@ -579,6 +584,10 @@ content hashes, and dropping one-time codes.
 - The three databases are plain SQLite. Snapshots, face embeddings and the TLS key are plaintext
   files.
 - `secrets.json` is encrypted, under a key file kept beside it.
+- Since 2026-11-09 a pond in its user's session can put its data directory in a LUKS2 volume whose
+  key is sealed to the fTPM with no PCRs, the admin card its recovery keyslot (`giap.sh
+  data-encrypt`; [data-volume-encryption.md](data-volume-encryption.md)). The doctor warns while it
+  is not. The `agamemnon` layout is not covered yet.
 - `agamemnon` keeps the pond's data in `/var/lib/goose-in-a-pond` (`0750`), away from the login.
 - The nano has an OP-TEE firmware TPM with `tpm2-tools`. When the admin card is made, its recovery
   copy is sealed to it under the owner hierarchy, so that copy cannot be opened from the disk on
@@ -600,7 +609,7 @@ content hashes, and dropping one-time codes.
 
 | Threat | Stopped? |
 |---|---|
-| A copy of the disk, or storage pulled from the board | Yes, from P1: the volume key never leaves the fTPM |
+| A copy of the disk, or storage pulled from the board | A copy, yes, once `data-encrypt` has run: the volume key never leaves the fTPM. Storage moved into another Jetson, only on a fused board: an unfused board's fTPM secret is not documented as unique (data-volume-encryption.md) |
 | The whole board taken, on an unfused board | No. Without secure boot, a modified OS can run as root and unseal. Fusing OemK1 closes this (decision 2) |
 | The network | Pinned TLS, and WireGuard off the LAN |
 | Another member | The principal filter (rule 2) |

@@ -10,6 +10,7 @@ use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
 use pond_core::user_data::ports::guest_device_access::GuestDeviceAccess;
 use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
+use pond_core::user_data::ports::last_action::LastActionRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::room_registry::RoomRegistry;
@@ -45,6 +46,7 @@ pub fn register_giap_extensions(
     profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
     device_control: Arc<dyn DeviceControlPort + Send + Sync>,
+    last_action: Arc<dyn LastActionRepository + Send + Sync>,
     tool_caller: Option<Arc<dyn ToolCaller>>,
 ) -> Result<Vec<String>> {
     // `GIAP_NO_TOOLS`: spawn no servers. Only a saving; the provider shim is what guarantees no
@@ -89,7 +91,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_weather_enabled {
-        pond_mcp_server::init_weather_deps(weather);
+        pond_mcp_server::init_weather_deps(weather, settings_repo.clone());
         register_builtin_extension("giap-weather", pond_mcp_server::spawn_weather_server);
         registered.push("giap-weather".into());
     }
@@ -101,6 +103,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_system_enabled {
+        pond_mcp_server::init_system_deps(settings_repo.clone());
         register_builtin_extension("giap-system", pond_mcp_server::spawn_system_server);
         registered.push("giap-system".into());
     }
@@ -123,6 +126,7 @@ pub fn register_giap_extensions(
             guest_room_access,
             guest_device_access,
             profile_repo,
+            last_action,
         );
         register_builtin_extension(
             "giap-device-control",

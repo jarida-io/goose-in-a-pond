@@ -100,6 +100,7 @@ mod tests {
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: crate::user_data::domain::profile::ProfileScope::Household,
@@ -109,6 +110,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let response = agent.chat(request).await.unwrap();
         assert_eq!(response.text, "Echo: Hello, Pond!");
@@ -123,6 +125,7 @@ mod tests {
             session_id: "test-session".to_string(),
             model_role: "chat".to_string(),
             images: Vec::new(),
+            audio: Vec::new(),
             voice_mode: false,
             canvas_mode: false,
             profile_scope: crate::user_data::domain::profile::ProfileScope::Household,
@@ -132,6 +135,7 @@ mod tests {
             suggestion_context: None,
             deep_research_task: None,
             interview: None,
+            device_place: None,
         };
         let mut stream = agent.chat_stream(request).await.unwrap();
 

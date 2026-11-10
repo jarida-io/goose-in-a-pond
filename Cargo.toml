@@ -4,6 +4,8 @@ members = [
     # Leaf crate: voice text/DSP primitives, no framework deps. Kept a leaf by
     # choice now rather than by necessity -- see its Cargo.toml.
     "crates/pond-voice",
+    # Leaf crate: the bus every shared device is reached through (one queued claim, lanes, state).
+    "crates/pond-bus",
     # Single microphone owner (cpal). Depends on pond-voice.
     "crates/pond-audio",
     # Speaker-side counterpart: playback, output device, working tone (rodio).
@@ -108,8 +110,8 @@ tree-sitter-rust = { version = "0.24", default-features = false }
 tree-sitter-swift = { version = "0.7", default-features = false }
 tree-sitter-typescript = { version = "0.23", default-features = false }
 # llama-cpp-2 has breaking changes in patch releases; goose pins it exactly.
-llama-cpp-2 = { version = "=0.1.156", default-features = false, features = ["sampler", "mtmd", "common"] }
-llama-cpp-sys-2 = { version = "=0.1.156", default-features = false }
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["sampler", "mtmd", "common"] }
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false }
 # temporal_rs 0.1 (transitive via PCTX) enables unstable icu features without
 # pinning; goose pins icu to a compatible exact version. Mirrored here.
 icu_calendar = { version = "=2.1.1", default-features = false }
@@ -162,6 +164,8 @@ schemars = { version = "1.0.2", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+# Parses the embedded factory-defaults config (crates/pond-core/config/factory_defaults.toml).
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 tera = { version = "1", default-features = false }
 shellexpand = { version = "3.1", features = ["base-0", "tilde"] }
 tempfile = "3"
@@ -241,6 +245,7 @@ libp2p = { version = "0.57", features = [
 ] }
 
 # Internal workspace crates
+pond-bus               = { path = "crates/pond-bus" }
 pond-core              = { path = "crates/pond-core" }
 pond-mesh-protocol      = { path = "crates/pond-mesh-protocol" }
 pond-adapters-mesh-libp2p = { path = "crates/pond-adapters-mesh-libp2p" }
@@ -326,8 +331,8 @@ cpal = { path = "vendor/cpal" }
 # path this used made the fork unbuildable anywhere but my Mac. Pinned by full SHA so a
 # device build and a laptop build are the same code -- move the rev deliberately, never
 # by pointing at a branch.
-llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c" }
-llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "d8a5e5ced39c243560ac4e4c3f5a079dd2cc5b4c" }
+llama-cpp-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "339f4603cef6d22a199d458b364605d30e272845" }
+llama-cpp-sys-2 = { git = "https://github.com/jarida-io/llama-cpp-rs-giap", rev = "339f4603cef6d22a199d458b364605d30e272845" }
 
 [patch."https://github.com/lightsparkdev/frost"]
 frost-core = { git = "https://github.com/Exile10/frost", rev = "280c861abcc3f00edfae523b393e5dbb3a1eb249" }

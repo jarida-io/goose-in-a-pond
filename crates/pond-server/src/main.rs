@@ -23,6 +23,8 @@ mod ports;
 mod room_memory;
 mod room_voice;
 mod schedule_executors;
+mod serve_whisper;
+mod speech_model;
 mod spoken_code;
 mod system_deps;
 mod three_stage_consolidator;
@@ -39,10 +41,13 @@ use pond_adapters_llamafile::LlamafileProvider;
 #[cfg(feature = "mesh")]
 use pond_adapters_mesh_libp2p::{Libp2pMeshTransport, Libp2pMeshTransportConfig};
 use pond_adapters_ollama::OllamaProvider;
-use pond_adapters_weather::{OpenMeteoWeatherAdapter, WeatherProvider};
+use pond_adapters_weather::{LiveWeather, OpenMeteoWeatherAdapter, WeatherProvider};
 use pond_adapters_whisper::WhisperRsInput;
 use pond_api::{AppState, LlamafileManager};
 use pond_core::mcp::ports::mcp_server::McpServerRepository as _;
+use pond_core::models::domain::inference_bus::{
+    inference_bus, running_under, InferenceClaim, InferenceHeldFloor, InferenceHold,
+};
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::ports::agent::Agent;
 use pond_core::models::ports::model_repository::ModelRepository;
@@ -310,7 +315,8 @@ enum Commands {
     /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
     /// can print again.
     AdminCard {
-        /// Replace the card in force; every phone unlocked with the old card locks
+        /// Replace the card in force; every phone unlocked with the old card locks, and every
+        /// phone's own key is revoked
         #[arg(long)]
         rotate: bool,
 
@@ -321,6 +327,18 @@ enum Commands {
         /// Print only present or missing; never makes a card
         #[arg(long, conflicts_with_all = ["json", "rotate"])]
         status: bool,
+    },
+
+    /// Mark this pond as a Jarida test Pond, or as a home Pond again.
+    ///
+    /// On a test Pond a paired phone may turn on developer mode's debug switch, which lets the
+    /// logs show what the household said and the members' names. Only this host sets the mark;
+    /// the running server sees it without a restart. Run it as the account that owns the pond's
+    /// data: `bash scripts/giap.sh test-pond` does.
+    TestPond {
+        /// on, off, or status
+        #[arg(value_enum, default_value_t = TestPondAction::Status)]
+        action: TestPondAction,
     },
 
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
@@ -577,7 +595,7 @@ fn pin_goose_state_under(data_dir: &std::path::Path) {
         );
         return;
     }
-    std::env::set_var("GOOSE_PATH_ROOT", &engine_root);
+    pond_core::shared::services::process_env::set("GOOSE_PATH_ROOT", &engine_root);
 }
 
 /// The budgeted device's choices that must be in place before an engine loads or a turn compacts:
@@ -688,6 +706,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             json,
             status,
         }) => run_admin_card(rotate, json, status).await,
+        Some(Commands::TestPond { action }) => run_test_pond(action),
         Some(Commands::SetupCode {
             json,
             card,
@@ -1212,11 +1231,6 @@ async fn run_server(
     // After `set_network_mode` (it may download ~100 MB from github.com) and before any
     // ONNX-dependent init (face recognition, embeddings).
     ensure_onnx_runtime();
-    // Vision and face models start on the CPU and move to the GPU after the language model loads.
-    let onnx_gpu_plan = onnx_gpu::plan(&data_dir, ORT_VERSION, on_jetson());
-    if let Some(plan) = &onnx_gpu_plan {
-        tracing::info!(cache = %plan.cache_dir.display(), "onnx: GPU runtime with TensorRT in use");
-    }
     // Before any provider is built: goose reads it when it first loads a `.litertlm` model. What
     // it finds decides whether the catalogue offers LiteRT-LM models at all.
     let litert_library = litert_runtime::ensure_library_dir(&data_dir);
@@ -1301,6 +1315,10 @@ async fn run_server(
     )
     .await;
 
+    let whisper_catalog =
+        voice_models::whisper_catalog(&SqliteModelRepository::new(db.system.clone())).await;
+    // A chosen model still to fetch: another on disk stands in, and the switch fetches it later.
+    let mut fetch_after_start: Option<String> = None;
     let whisper_model_path: Option<std::path::PathBuf> = match voice_models.whisper.as_ref() {
         None => {
             if settings.active_whisper_model.is_empty() {
@@ -1317,24 +1335,38 @@ async fn run_server(
             }
             None
         }
+        Some(w) if w.path.exists() => Some(w.path.clone()),
         Some(w) => {
-            if !w.path.exists() {
-                println!("  📥 STT model not found — downloading...");
-                match w.download.as_ref() {
-                    Some(dl) => {
-                        if let Some(parent) = w.path.parent() {
-                            let _ = tokio::fs::create_dir_all(parent).await;
+            match voice_models::standby_whisper(&w.path, &whisper_catalog, &data_dir.join("models"))
+            {
+                Some(standby) => {
+                    println!(
+                        "  STT: {} is not on disk yet; {} transcribes while it downloads",
+                        settings.active_whisper_model,
+                        standby.display()
+                    );
+                    fetch_after_start = Some(settings.active_whisper_model.clone());
+                    Some(standby)
+                }
+                // Nothing on disk to stand in, as on a first run: fetch it now.
+                None => {
+                    println!("  📥 STT model not found — downloading...");
+                    match w.download.as_ref() {
+                        Some(dl) => {
+                            if let Some(parent) = w.path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
+                            }
+                            if let Err(e) =
+                                model_download::download_file(&dl.url, &w.path, dl.size_mb).await
+                            {
+                                println!("  ⚠  STT model download failed: {}", e);
+                            }
                         }
-                        if let Err(e) =
-                            model_download::download_file(&dl.url, &w.path, dl.size_mb).await
-                        {
-                            println!("  ⚠  STT model download failed: {}", e);
-                        }
+                        None => println!("  ⚠  STT model has no catalog download URL"),
                     }
-                    None => println!("  ⚠  STT model has no catalog download URL"),
+                    Some(w.path.clone())
                 }
             }
-            Some(w.path.clone())
         }
     };
 
@@ -1346,24 +1378,37 @@ async fn run_server(
         settings.voice_whisper_url.clone()
     };
 
-    // One model for `/transcribe` and the room.
-    let serve_whisper: Option<Arc<WhisperRsInput>> = whisper_model_path.as_ref().and_then(|p| {
-        match WhisperRsInput::new(p.clone(), mic_handle.clone()) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
+    // One owner for `/transcribe`, enrolment and the room; nothing loads until one of them asks.
+    let tiny_whisper =
+        voice_models::resolve_whisper("tiny.en", &whisper_catalog, &data_dir.join("models"));
+    let serve_whisper: Option<Arc<serve_whisper::ServeWhisper>> =
+        whisper_model_path.as_ref().map(|p| {
+            serve_whisper::ServeWhisper::new(
+                p.clone(),
+                tiny_whisper.clone(),
+                &data_dir,
+                mic_handle.clone(),
+            )
+        });
+    if let Some(whisper) = serve_whisper.clone() {
+        tokio::spawn(async move { whisper.fetch_tiny().await });
+    }
+    // Loaded now, before the embedder and the chat model start their own CUDA work: whisper.cpp
+    // setting up CUDA beside them crashed the pond on the Jetson.
+    if settings.voice_room_enabled {
+        if let Some(whisper) = &serve_whisper {
+            if let Err(e) = whisper.wake() {
                 tracing::warn!(
-                    "in-process whisper init failed, transcribe route will proxy to external: {e}"
+                    error = format!("{e:#}"),
+                    "the room's wake-only Whisper did not load at startup"
                 );
-                startup_problems.speech_recognition =
-                    Some(format!("the speech model did not load ({e})"));
-                None
             }
         }
-    });
+    }
     // A closure, so AppState holds in-process whisper without depending on pond-adapters-whisper.
     let transcribe_audio: Option<Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>> =
         serve_whisper.clone().map(|w| {
-            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav_bytes(&wav_bytes))
+            Arc::new(move |wav_bytes: Vec<u8>| w.transcribe_wav(&wav_bytes))
                 as Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>
         });
 
@@ -1387,6 +1432,21 @@ async fn run_server(
     let download_tracker: std::sync::Arc<
         tokio::sync::RwLock<std::collections::HashMap<String, pond_api::DownloadEntry>>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // The ASR role now takes effect at once: fetched if need be, swapped in once it loads.
+    if let Some(whisper) = &serve_whisper {
+        let switch = Arc::new(speech_model::ServeSpeechModel::new(
+            whisper.clone(),
+            &data_dir,
+            Arc::new(SqliteModelRepository::new(db.system.clone())),
+            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            download_tracker.clone(),
+        ));
+        pond_api::speech_model::install(switch.clone());
+        if let Some(model) = fetch_after_start.take() {
+            pond_api::speech_model::switch_soon(&model);
+        }
+    }
 
     // ── Kokoro: the TTS engine ──
     // Adopt the host's tier, then resolve a usable one, before fetching: an unusable tier must
@@ -1446,12 +1506,14 @@ async fn run_server(
                         out.speed()
                     );
                     let arc = Arc::new(out);
-                    let prewarm_arc = arc.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = prewarm_arc.prewarm().await {
-                            tracing::debug!("Kokoro background prewarm deferred: {e}");
-                        }
-                    });
+                    if settings.voice_room_enabled {
+                        let prewarm_arc = arc.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = prewarm_arc.prewarm().await {
+                                tracing::debug!("Kokoro background prewarm deferred: {e}");
+                            }
+                        });
+                    }
                     Some(arc)
                 }
                 Err(e) => {
@@ -1467,20 +1529,19 @@ async fn run_server(
     // Spotify's Developer Policy III.7: Spotify pauses while the pond speaks, here and in what
     // browsers play from `/tts`. Its token comes from the secret store, which exists further down.
     let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(true);
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let started = quiet::Quiet::start(spotify_focus.clone(), quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        // Paused for as long as the audio bus is held: every sound, a whole turn included.
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     let tts: Option<Arc<dyn pond_core::models::ports::voice_output::VoiceOutput>> =
         match &kokoro_engine {
             Some(kokoro) => {
-                use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                 println!("  ✅ TTS: kokoro");
-                let voice = QuietVoiceOutput::new(kokoro.clone(), quiet.clone());
-                Some(Arc::new(voice) as Arc<dyn VoiceOutput>)
+                Some(kokoro.clone() as Arc<dyn VoiceOutput>)
             }
             None => {
                 println!("  ⚠  TTS: unavailable — responses will be text-only");
@@ -2027,7 +2088,7 @@ async fn run_server(
                     "idle after user activity — starting memory consolidation"
                 );
 
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = slot.cancellation_token();
                 *inact_cancel.write().await = Some(cancel.clone());
 
                 // Routes cancel directly; the DB poll lets an out-of-process voice turn abort.
@@ -2187,8 +2248,8 @@ async fn run_server(
                         tracing::debug!("summary refresh: stopping at {MAX_PER_PASS} this pass");
                         break;
                     }
-                    // Abort on activity: the serial engine must never make a user turn wait.
-                    let cancel = tokio_util::sync::CancellationToken::new();
+                    // Abort on activity or lane preemption: the serial engine must never make a user turn wait.
+                    let cancel = slot.cancellation_token();
                     let watcher_activity = sum_activity.clone();
                     let watcher_cancel = cancel.clone();
                     let baseline = idle_for;
@@ -2331,8 +2392,8 @@ async fn run_server(
                     }
                 };
 
-                // One token per pass: resumed activity ends the whole sweep.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                // One token per pass: lane preemption or resumed activity ends the whole sweep.
+                let cancel = slot.cancellation_token();
 
                 let watcher_activity = title_activity.clone();
                 let watcher_storage = title_storage.clone();
@@ -2432,19 +2493,10 @@ async fn run_server(
     }
 
     // For the MCP weather tool (giap__get_current_weather), not AppState.
-    let weather: Option<Arc<dyn WeatherProvider>> = {
-        // `Location::weather_target` decides: coordinates, or a name the adapter geocodes.
-        let place = pond_core::user_data::services::location::resolve(&settings);
-        if let (true, Some((lat, lon, loc))) = (settings.weather_enabled, place.weather_target()) {
-            tracing::info!("weather enabled: {} ({}, {})", loc, lat, lon);
-            Some(Arc::new(OpenMeteoWeatherAdapter::new(lat, lon, loc)))
-        } else {
-            tracing::info!(
-                "weather disabled — enable via PUT /api/v1/settings (weather_enabled + lat/lon or location_name)"
-            );
-            None
-        }
-    };
+    // Read from the settings on every call, so a place set later (the dashboard, owner setup, a
+    // phone's fix on the home network) applies at once; off is `WeatherOff`, not a failure.
+    let weather: Option<Arc<dyn WeatherProvider>> =
+        Some(Arc::new(LiveWeather::new(settings_repo.clone())));
 
     // libp2p MeshTransport, gated on `mesh_enabled`; wired into AppState so the
     // /api/v1/mesh/* routes can use it.
@@ -2625,6 +2677,8 @@ async fn run_server(
         let promotion_notices = proposal_notice_tx;
 
         let extraction_embedder = embedder.clone();
+        let extraction_factory = embedder_factory.clone();
+        let extraction_arrived = embedding_arrived.clone();
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
@@ -2708,7 +2762,9 @@ async fn run_server(
                         LaneJob::MemoryExtraction,
                         // Embedder health, never "every row has a vector": unembedded
                         // rows are routine, so that gate would latch shut for good.
-                        settings.memory_extraction_enabled && service.embedder_is_usable(),
+                        settings.memory_extraction_enabled
+                            && !extraction_embedder.model_id().is_empty()
+                            && service.health_is_usable(),
                         cadence,
                         tick.waives(),
                         saw_activity_since_start,
@@ -2716,15 +2772,24 @@ async fn run_server(
                     )
                     .await
                 else {
-                    // Otherwise an off or loading embedder looks like nothing left to extract.
-                    if !extraction_embedder.available() {
+                    if extraction_embedder.model_id().is_empty() || !service.health_is_usable() {
                         status.write().await.blocked_on = Some("no_embedder".to_string());
                     }
                     continue;
                 };
 
-                // Checked before each window: activity costs at most one window's inference.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                if !matches!(
+                    extraction_embedder
+                        .ensure_loaded(extraction_factory.as_ref())
+                        .await,
+                    pond_core::models::services::active_embedder::EmbedderState::Ready { .. }
+                ) {
+                    status.write().await.blocked_on = Some("no_embedder".to_string());
+                    continue;
+                }
+
+                // Preempted immediately by the lane or on activity: activity costs at most one window's inference.
+                let cancel = slot.cancellation_token();
                 let watcher_cancel = cancel.clone();
                 let watcher_activity = extraction_activity.clone();
                 let baseline = in_process_at;
@@ -2745,16 +2810,25 @@ async fn run_server(
                     }
                 });
 
-                let report = service
-                    .run_pass(
+                let report = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::info!("batch-extraction: pass preempted by user activity");
+                        pond_core::user_data::services::memory_extraction::PassReport {
+                            blocked_on: Some("preempted".to_string()),
+                            ..Default::default()
+                        }
+                    }
+                    r = service.run_pass(
                         extraction_storage.as_ref(),
                         extraction_repo.as_ref(),
                         &extractor,
                         &config,
                         &cancel,
-                    )
-                    .await;
+                    ) => r,
+                };
                 watcher.abort();
+                // The slot decides whether a model this pass loaded may stay.
+                extraction_arrived.notify_one();
 
                 status.write().await.record(config.mode, &report);
 
@@ -2875,6 +2949,37 @@ async fn run_server(
     let event_bus: Arc<dyn pond_core::shared::ports::event_bus::EventBus> =
         Arc::new(InProcessEventBus::new());
 
+    // Vision presence tracker: holds background inference chores while a person is in view.
+    {
+        let last_person_seen = Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let probe = last_person_seen.clone();
+        inference_lane.watch_presence(move || {
+            probe
+                .lock()
+                .ok()
+                .and_then(|t| *t)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(90))
+        });
+
+        let mut events = event_bus.subscribe();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use pond_core::shared::ports::event_bus::BusEvent;
+            while let Some(event) = events.next().await {
+                let is_person = match event {
+                    BusEvent::Camera(ref c) => c.event_type == "person",
+                    BusEvent::Presence(_) => true,
+                    _ => false,
+                };
+                if is_person {
+                    if let Ok(mut seen) = last_person_seen.lock() {
+                        *seen = Some(std::time::Instant::now());
+                    }
+                }
+            }
+        });
+    }
+
     // `device_control` is a facade over Matter (when on and reachable) or the logging stub,
     // swapped at runtime behind one long-lived `Arc`.
     type MatterRuntimeHandle =
@@ -2916,6 +3021,12 @@ async fn run_server(
     let (matter_runtime, device_control): (MatterRuntimeHandle, DeviceControl) = (
         None,
         Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+    );
+
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
     );
 
     // After the Matter runtime: `device_control` lets `get_sensor_reading` ask a live device
@@ -3077,6 +3188,7 @@ async fn run_server(
             prompt_template_repo.clone(),
             prompt_extra_repo.clone(),
             device_control.clone(),
+            last_action.clone(),
             Some(session_storage.clone()),
             Some(model_repo.clone()),
             false, // voice_mode — server mode, not voice
@@ -3131,14 +3243,18 @@ async fn run_server(
 
     // ── Fill the deferred schedule executor now that the agent exists ─────────
     {
-        let real_executor = Arc::new(AgentScheduleExecutor::new(
-            agent.clone(),
-            session_storage.clone(),
-            Some(device_control.clone()),
-            settings.schedule_max_concurrent,
-            tts.clone(),
-            Some(settings_repo.clone()),
-        ));
+        let real_executor = Arc::new(
+            AgentScheduleExecutor::new(
+                agent.clone(),
+                session_storage.clone(),
+                Some(device_control.clone()),
+                settings.schedule_max_concurrent,
+                tts.clone(),
+                Some(settings_repo.clone()),
+            )
+            .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone())))
+            .with_device_registry(device_registry.clone()),
+        );
         deferred_executor
             .init(
                 real_executor
@@ -3326,15 +3442,30 @@ async fn run_server(
                             env,
                             uri: srv.uri.clone(),
                         };
-                        match mgr.add_extension(req).await {
-                            Ok(_) => tracing::info!("auto-connected MCP server '{}'", srv.name),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "failed to auto-connect MCP server '{}': {e}",
-                                    srv.name
-                                );
-                                startup_problems.extensions.push(srv.name.clone());
-                            }
+                        let connecting = {
+                            let (mgr, name) = (mgr.clone(), srv.name.clone());
+                            tokio::spawn(async move {
+                                let connected = mgr.add_extension(req).await;
+                                match &connected {
+                                    Ok(_) => tracing::info!("auto-connected MCP server '{name}'"),
+                                    Err(e) => tracing::warn!(
+                                        "failed to auto-connect MCP server '{name}': {e}"
+                                    ),
+                                }
+                                connected.is_ok()
+                            })
+                        };
+                        // An extension launched through npx or uvx fetches from the network and
+                        // hangs offline; past this wait it keeps connecting and serve goes on.
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), connecting)
+                            .await
+                        {
+                            Ok(Ok(true)) => {}
+                            Ok(_) => startup_problems.extensions.push(srv.name.clone()),
+                            Err(_) => tracing::warn!(
+                                extension = %srv.name,
+                                "still connecting after 10 s; startup goes on without waiting"
+                            ),
                         }
                     }
                 }
@@ -3374,17 +3505,29 @@ async fn run_server(
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
     let household_names = tracing_setup::HouseholdNames::default();
+    let debug_switch = pond_core::security::domain::developer_mode::DebugSwitch::default();
+    let developer = Arc::new(pond_api::developer::DeveloperMode::new(
+        Arc::new(pond_infra::file_test_pond::FileTestPondMark::new(&data_dir)),
+        debug_switch.clone(),
+    ));
     let _file_guard = drain_handle.drain_into(
         operational_log.clone(),
-        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+        tracing_setup::LogScrubber::household(
+            redactor.clone(),
+            household_names.clone(),
+            debug_switch,
+        ),
     );
-    // A new or renamed member is hidden from the Logs viewer within a minute.
+    // A new or renamed member is hidden from the Logs viewer within a minute, and so is content
+    // once the host takes the test Pond mark away.
     {
         let profiles = profile_repo.clone();
+        let developer = developer.clone();
         tokio::spawn(async move {
             let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 every_minute.tick().await;
+                developer.current().await;
                 match profiles.list().await {
                     Ok(members) => {
                         household_names.set(members.iter().map(|m| m.display_name.as_str()))
@@ -3500,6 +3643,13 @@ async fn run_server(
         pond_infra::sqlite_notification_queue::SqliteNotificationQueue::new(db.system.clone()),
     );
 
+    // The household's record of durable notices, which the dashboard lists after a reload.
+    let notification_history: Arc<
+        dyn pond_core::mcp::ports::notification_history::NotificationHistory,
+    > = Arc::new(
+        pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(db.system.clone()),
+    );
+
     let push_relay = push_relay(&data_dir, push_token_repo.clone());
     // Required: without it `send_to_profile` silently answers `AttributionUnavailable`.
     let device_attribution: Arc<
@@ -3521,7 +3671,8 @@ async fn run_server(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
             ),
-        )),
+        ))
+        .with_history(notification_history.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -3539,6 +3690,43 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
+    pond_core::shared::services::report_images::install(Arc::new(
+        pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
+    ));
+    // POST forms wait for the member's yes on their phone; the phone's confirm route sends them.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
+    // A match is also said aloud to a member who opted in, while presence says they are home.
+    let spoken_watch_alerts = tts.clone().map(|voice| {
+        Arc::new(
+            pond_core::shared::services::spoken_watch_alerts::SpokenWatchAlerts::new(
+                profile_repo.clone(),
+                settings_repo.clone(),
+                pond_core::shared::services::spoken_watch_alerts::follow_presence(&event_bus),
+                Arc::new(pond_audio_out::Announcer::new(voice)),
+            ),
+        )
+    });
+    // Members' web watches: checked in code, their owners told on their own devices.
+    pond_mcp_server::web_watch_runner::spawn(
+        Arc::new(
+            pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
+                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
+                Arc::new(pond_mcp_server::web_watch_runner::PageReader),
+                Arc::new(
+                    pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+                        targeted_notification_sender.clone(),
+                    )
+                    .with_speech(spoken_watch_alerts),
+                ),
+            ),
+        ),
+        settings_repo.clone(),
+    );
     #[cfg(unix)]
     {
         let runtime = embedded.clone();
@@ -3823,15 +4011,20 @@ async fn run_server(
                     .unwrap_or_default();
                 subjects.push(settings.user_name.clone());
 
-                let outcome = compose_suggestions(
-                    gen_memories.as_ref(),
-                    gen_queue.as_ref(),
-                    gen_provider.clone(),
-                    &subjects,
-                    MEMORY_SCAN,
-                    now,
-                )
-                .await;
+                let outcome = tokio::select! {
+                    _ = slot.cancelled() => {
+                        tracing::info!("[suggestions] pass preempted by user activity");
+                        continue;
+                    }
+                    res = compose_suggestions(
+                        gen_memories.as_ref(),
+                        gen_queue.as_ref(),
+                        gen_provider.clone(),
+                        &subjects,
+                        MEMORY_SCAN,
+                        now,
+                    ) => res,
+                };
 
                 // Logged even when nothing was composed: silent, a no-op looks like a bail.
                 match outcome {
@@ -4152,7 +4345,12 @@ async fn run_server(
         ));
         Arc::new(pond_api::pond_admin::PondAdmin::new(
             pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
-            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+            pond_core::security::services::admin_elevation::AdminElevation::new(
+                cards,
+                Arc::new(pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(
+                    db.system.clone(),
+                )),
+            ),
         ))
     };
 
@@ -4329,6 +4527,7 @@ async fn run_server(
         schedule_result_tx: schedule_result_tx.clone(),
         notification_tx: notification_tx.clone(),
         notification_queue: Some(notification_queue.clone()),
+        notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
         telemetry,
         context_monitor: Arc::new(
@@ -4353,9 +4552,12 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        device_events: Default::default(),
         pond_admin: Some(pond_admin),
         data_wipe,
+        developer: developer.clone(),
     });
+    state.device_events.clone().follow(event_bus.clone());
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
@@ -4549,13 +4751,7 @@ async fn run_server(
             let _ = prewarm_done.send(true);
         });
     }
-    if let Some(plan) = onnx_gpu_plan {
-        let mut prewarmed = prewarmed.clone();
-        tokio::spawn(async move {
-            let _ = prewarmed.wait_for(|done| *done).await;
-            pond_onnx_accel::enable_gpu(plan);
-        });
-    }
+    let embedding_turn_started = Arc::new(tokio::sync::Notify::new());
     // Every lane job: a turn in flight is not quiet, however long it has been answering.
     {
         let runs = state.runs.clone();
@@ -4563,7 +4759,30 @@ async fn run_server(
         inference_lane.watch_turns(move || {
             use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
             runs.turn_in_flight()
+                || pond_core::models::domain::inference_bus::turn_has_the_model()
                 || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
+        let lane = inference_lane.clone();
+        let turn_started = embedding_turn_started.clone();
+        state.runs.set_preempt_hook(move || {
+            lane.preempt();
+            turn_started.notify_one();
+        });
+        // A turn queueing on the bus (a wake, a typed message) stops the chore holding the lane at
+        // once. A long-task step is not cancelled: its helper gives the model up and waits.
+        let lane = inference_lane.clone();
+        let turn_started = embedding_turn_started.clone();
+        tokio::spawn(async move {
+            let mut seen = inference_bus().subscribe();
+            let mut had_turn = false;
+            while seen.changed().await.is_ok() {
+                let has_turn = seen.borrow().has(|c| c == InferenceClaim::Turn);
+                if has_turn && !had_turn {
+                    lane.preempt();
+                    turn_started.notify_one();
+                }
+                had_turn = has_turn;
+            }
         });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
@@ -4585,10 +4804,11 @@ async fn run_server(
     }
 
     // Loads the embedder and keeps every vector current, in counter-phase. After AppState,
-    // through which the factory fetches a missing GGUF.
-    embedder_factory.attach(&state);
+    // through which the factory fetches a missing GGUF; its loads give way to the lane's work.
+    embedder_factory.attach(&state, &inference_lane);
     {
         let warmup = state.warmup.clone();
+        let scheduler = state.model_scheduler.clone();
         tokio::spawn(embedding_slot_runner::run(
             embedding_slot_runner::SlotDeps {
                 embedder: embedder.clone(),
@@ -4601,12 +4821,18 @@ async fn run_server(
                 activity: last_user_activity.clone(),
                 reindex: embedding_reindex,
                 arrived: embedding_arrived,
+                turn_started: embedding_turn_started,
                 chat_model_warming: Box::new(move || {
                     !*prewarmed.borrow()
                         || matches!(
                             warmup.read().unwrap_or_else(|e| e.into_inner()).phase,
                             pond_core::models::ports::agent::WarmupPhase::Warming
                         )
+                }),
+                available_mb: Box::new(move || {
+                    scheduler
+                        .as_ref()
+                        .and_then(|s| s.memory_status().available_mb)
                 }),
             },
         ));
@@ -4710,7 +4936,14 @@ async fn run_server(
     }
 
     tokio::task::spawn_blocking(|| {
-        if let Err(e) = pond_audio_out::route::play_chime(None) {
+        let Some(floor) = pond_audio_out::bus().claim(
+            pond_audio_out::Claim::Chime,
+            Some(std::time::Duration::from_secs(5)),
+            || true,
+        ) else {
+            return;
+        };
+        if let Err(e) = pond_audio_out::route::play_chime(&floor, None) {
             tracing::debug!(error = %e, "startup chime did not play");
         }
     });
@@ -5097,6 +5330,11 @@ async fn run_chat(
 
     let data_dir = default_data_dir();
     let db = Database::init(&data_dir).await?;
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
 
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
@@ -5138,6 +5376,10 @@ async fn run_chat(
         pond_core::shared::services::egress::NetworkMode::parse(&settings.network_mode),
     );
 
+    // A POST form asked for here waits in the shared database; serve's route sends it.
+    pond_mcp_server::web_form::install(Arc::new(
+        pond_infra::sqlite_web_form::SqliteFormSubmissionStore::new(db.system.clone()),
+    ));
     // giap-travel's links and ride offers reach the speaker's phone from this process too: queued
     // in the shared database, which the serve process hands to the phone, and woken by the relay.
     let (member_notification_tx, _) =
@@ -5161,6 +5403,11 @@ async fn run_chat(
         )
         .with_device_attribution(Arc::new(
             pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(db.system.clone()),
+        ))
+        .with_history(Arc::new(
+            pond_infra::sqlite_notification_history::SqliteNotificationHistory::new(
+                db.system.clone(),
+            ),
         )),
     ));
     // Which members connected Uber, for book_ride. The serve process owns the store; this one
@@ -5460,6 +5707,8 @@ async fn run_chat(
         _ => None,
     };
 
+    let hearing_settings = settings_repo_arc.clone();
+
     // ── Build the GooseAdapter (MCP tools + model routing) ───────────────────────
     #[cfg(feature = "goose-agent")]
     let agent: Arc<dyn Agent> = {
@@ -5497,6 +5746,7 @@ async fn run_chat(
             template_repo,
             extras_repo,
             Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+            last_action,
             Some(trim_storage), // powers the trimmer's summary splice
             Some(chat_model_repo.clone()),
             voice_mode,
@@ -5567,6 +5817,17 @@ async fn run_chat(
     let mut chat_service = ChatService::new(agent, session_id.clone(), storage)
         .with_system_prompt(system_prompt)
         .with_thinking_tone(settings.voice_thinking_tone_enabled);
+    // A shared microphone: anyone in the room may speak, unlike a typed turn from the shell.
+    if voice_mode {
+        chat_service = chat_service
+            .with_unrecognised_scope(pond_core::shared::services::chat::unrecognised_voice_scope(
+                Some(Arc::new(SqliteProfileRepository::new(db.system.clone()))),
+            ))
+            .with_model_hearing(room_voice::model_hearing(
+                warm_agent.clone(),
+                hearing_settings,
+            ));
+    }
     if let Some(model_name) = model {
         chat_service = chat_service.with_model_name(model_name);
     }
@@ -5735,6 +5996,13 @@ async fn run_chat(
                 // Voice Match runs in serve's room; this terminal loop recognises nobody.
                 speaker: None,
                 cnn_hears_household: false,
+                whisper_prompt: Some(Arc::new(std::sync::RwLock::new(
+                    voice_rig::household_prompt(
+                        wake_word.unwrap_or(settings.voice_wake_word.as_str()),
+                        Some(&SqliteProfileRepository::new(db.system.clone())),
+                    )
+                    .await,
+                ))),
             })
             .await,
         ),
@@ -5799,7 +6067,7 @@ async fn run_chat(
     // Spotify's Developer Policy III.7: Spotify pauses while this process makes a sound, its wake
     // ping included, so whatever the TTS. The server writes the secret store and refreshes the
     // token; this process only reads the store, and never refreshes.
-    let quiet = {
+    {
         use pond_core::models::services::voice::quiet;
         let spotify_focus = pond_api::spotify_focus::SpotifyFocus::new(false);
         spotify_focus.use_secrets(Arc::new(
@@ -5807,8 +6075,8 @@ async fn run_chat(
         ));
         let started = quiet::Quiet::start(spotify_focus, quiet::GRACE);
         quiet::install(started.clone());
-        started
-    };
+        started.follow(pond_audio_out::bus().subscribe_held());
+    }
 
     // Kokoro opens the speaker as it loads, so let the first choice land before it does.
     if let Some(status) = audio_supervisor
@@ -5887,9 +6155,7 @@ async fn run_chat(
                             Some(sink) => out.with_audio_level_sink(sink.clone()),
                             None => out,
                         };
-                        use pond_core::models::services::voice::quiet_voice_output::QuietVoiceOutput;
                         out!("  Speak    {} @ {:.2}x", out.voice().await, out.speed());
-                        let out = QuietVoiceOutput::new(Arc::new(out), quiet.clone());
                         Arc::new(out) as Arc<dyn VoiceOutput>
                     }
                     Err(e) => {
@@ -6122,38 +6388,8 @@ impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerRev
     }
 }
 
-/// Strips reasoning from model output: Gemma 4 channels, Qwen3/DeepSeek `<think>`, `<thought>`.
 fn strip_thinking_tags(raw: &str) -> String {
-    let mut text = raw.to_string();
-
-    // Gemma 4: everything after last <channel|>
-    if let Some(pos) = text.rfind("<channel|>") {
-        text = text[pos + "<channel|>".len()..].trim().to_string();
-    }
-
-    while let Some(start) = text.find("<think>") {
-        if let Some(end) = text[start..].find("</think>") {
-            let before = &text[..start];
-            let after = &text[start + end + "</think>".len()..];
-            text = format!("{}{}", before, after);
-        } else {
-            text = text[..start].to_string();
-            break;
-        }
-    }
-
-    while let Some(start) = text.find("<thought>") {
-        if let Some(end) = text[start..].find("</thought>") {
-            let before = &text[..start];
-            let after = &text[start + end + "</thought>".len()..];
-            text = format!("{}{}", before, after);
-        } else {
-            text = text[..start].to_string();
-            break;
-        }
-    }
-
-    text.trim().to_string()
+    pond_core::models::services::thought_filter::strip_reasoning(raw)
 }
 
 /// Parses the verdict JSON; unparseable output passes, since review must never block the user.
@@ -6625,6 +6861,16 @@ async fn run_quiet_compaction(
                     }
                     false
                 }
+                _ = slot.cancelled() => {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "quiet_compaction_preempted",
+                        session_id = %session_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "quiet compaction preempted by user activity"
+                    );
+                    true
+                }
                 // No cooldown: the conversation is still due, and a longer quiet tries again.
                 () = someone_back => {
                     tracing::info!(
@@ -6862,7 +7108,7 @@ async fn run_proactive_reviewer(
         );
 
         // The lease revokes on drop, so an ended review can no longer delegate.
-        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel = slot.cancellation_token();
         let lease = authorities.publish(
             &session_id,
             review::review_authority(&audience, &session_id),
@@ -6950,11 +7196,7 @@ async fn run_proactive_reviewer(
             let report = sender
                 .send_to_profile(
                     audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(
-                        proposal.id(),
-                        proposal.summary(),
-                        proposal.rationale(),
-                    ),
+                    pond_server::system_notices::proposal_notification(proposal),
                 )
                 .await;
             tracing::info!(
@@ -6975,6 +7217,23 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
+    pond_mcp_server::saved_items::init_saved_item_deps(
+        pond_mcp_server::saved_items::SavedItemDeps {
+            repo: Arc::new(
+                pond_infra::sqlite_saved_item::SqliteSavedItemRepository::new(pool.clone()),
+            ),
+            sessions: Arc::new(
+                pond_infra::sqlite_session_storage::SqliteSessionStorage::new(pool.clone()),
+            ),
+            authorities: orchestration.authorities(),
+        },
+    );
+    pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
+        repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+            pool.clone(),
+        )),
+        authorities: orchestration.authorities(),
+    });
     let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
         pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool),
     );
@@ -7010,7 +7269,7 @@ async fn run_long_task_runner(
     const POLL_SECS: u64 = 30;
     // Short, unlike the chores': a member asked for this work and is waiting for it. A step the
     // household then interrupts is rerun without spending a try, so a short wait costs little.
-    const QUIET_SECS: u64 = 10;
+    const QUIET_SECS: u64 = 2;
     // No spacing between runs: the loop asks again at once only after a run that did something,
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
@@ -7126,8 +7385,6 @@ async fn run_long_task_runner(
         let helpers = LongTaskHelpers {
             orchestrator: orchestrator.clone(),
             authorities: authorities.clone(),
-            storage: storage.clone(),
-            last_user_activity: last_user_activity.clone(),
             tasks: tasks.clone(),
         };
         if compile_due {
@@ -7182,6 +7439,7 @@ async fn run_long_task_runner(
             )
             .await;
             compiled = Some(roles_print);
+            progressed = candidate.is_some();
             drop(slot);
             continue;
         }
@@ -7215,8 +7473,6 @@ async fn run_long_task_runner(
 struct LongTaskHelpers {
     orchestrator: Arc<dyn pond_core::shared::ports::orchestrator::Orchestrator>,
     authorities: Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
-    storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
-    last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
 }
 
@@ -7276,19 +7532,12 @@ impl LongTaskHelpers {
             .authorities
             .publish(&session_id, authority, cancel.clone());
 
-        // A household turn stops the run: it holds the only GPU that turn needs. So does the run's
-        // own report: the model's turn after "stop here" is reasoning nothing reads.
+        // The run's own report stops it: the model's turn after "stop here" is reasoning nothing
+        // reads. A person's turn does not: the helper gives the model up and resumes after it.
         let watcher = {
-            let activity = self.last_user_activity.clone();
-            let storage = self.storage.clone();
             let cancel = cancel.clone();
             let reported = binding.report_watch();
             tokio::spawn(async move {
-                use pond_core::user_data::services::proactive_review::cancelled_by_activity;
-                let run_started = std::time::Instant::now();
-                let run_started_utc = chrono::Utc::now();
-                let mut tick: u32 = 0;
-                let mut db_seen = None;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if cancel.is_cancelled() {
@@ -7298,25 +7547,16 @@ impl LongTaskHelpers {
                         cancel.cancel();
                         break;
                     }
-                    tick = tick.wrapping_add(1);
-                    if tick % 4 == 0 {
-                        db_seen = newest_session_activity(storage.as_ref()).await;
-                    }
-                    if cancelled_by_activity(
-                        run_started,
-                        *activity.read().await,
-                        run_started_utc,
-                        db_seen,
-                    ) {
-                        tracing::info!("user activity resumed - stopping the long-task step");
-                        cancel.cancel();
-                        break;
-                    }
                 }
             })
         };
-
-        let run = self.orchestrator.spawn(spec).await;
+        let held = InferenceHeldFloor::new(inference_bus(), InferenceClaim::Task);
+        let give_way = tokio::spawn({
+            let held = held.clone();
+            async move { held.give_way().await }
+        });
+        let run = running_under(InferenceHold::Held(held), self.orchestrator.spawn(spec)).await;
+        give_way.abort();
         watcher.abort();
         drop(lease);
         let reported = binding.take_report();
@@ -7484,6 +7724,21 @@ async fn advance_long_task(
 
     match runner::next_run(task, &steps, tries, now) {
         NextRun::Wait => Ok(false),
+        NextRun::SkipForTime(keys) => {
+            // Its time is up: what has not run is skipped, and the last step answers with the rest.
+            for mut step in steps.iter().filter(|s| keys.contains(s.key())).cloned() {
+                if step.skip(now).is_ok() {
+                    tasks.update_step(&step).await?;
+                }
+            }
+            tracing::info!(
+                kind = "long_task_time_up",
+                task = %task.id(),
+                skipped = keys.len(),
+                "the task's time ran out; its last step answers with what was found"
+            );
+            Ok(true)
+        }
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)
@@ -7502,7 +7757,17 @@ async fn advance_long_task(
         }
         NextRun::Finish => {
             let mut artifacts = artifacts;
-            if let Some(result) = runner::summary_as_result(task, &steps, &artifacts, now) {
+            // The last step's output becomes the Result when the model titled it otherwise.
+            let final_body = match runner::final_artifact(&steps, &artifacts) {
+                Some(output) if runner::result_artifact(&artifacts).is_none() => tasks
+                    .get_artifact(task.id(), &output.id)
+                    .await?
+                    .map(|artifact| artifact.body().to_string()),
+                _ => None,
+            };
+            if let Some(result) =
+                runner::result_to_save(task, &steps, &artifacts, final_body.as_deref(), now)
+            {
                 tasks.insert_artifact(&result).await?;
                 artifacts.push(result.summary_view());
             }
@@ -7511,7 +7776,7 @@ async fn advance_long_task(
                 .await?;
             fruitless.remove(task.id());
             // A short answer is the notification itself; anything longer is a line about it.
-            let short = match runner::answer_artifact(task, &artifacts) {
+            let short = match runner::answer_artifact(task, &steps, &artifacts) {
                 Some(result)
                     if task.answer()
                         == pond_core::shared::domain::long_task::AnswerShape::Short =>
@@ -7524,7 +7789,9 @@ async fn advance_long_task(
                 _ => None,
             };
             let body = short
-                .or_else(|| runner::answer_artifact(task, &artifacts).map(|a| a.summary.clone()))
+                .or_else(|| {
+                    runner::answer_artifact(task, &steps, &artifacts).map(|a| a.summary.clone())
+                })
                 .or_else(|| {
                     steps
                         .iter()
@@ -7769,18 +8036,15 @@ async fn notify_long_task_owner(
     let report = sender
         .send_to_profile(
             owner,
-            pond_server::system_notices::long_task_notification(
-                task.id(),
-                task.goal(),
-                finished,
-                body,
-            ),
+            pond_server::system_notices::long_task_notification(task, finished, body),
         )
         .await;
     tracing::info!(
+        kind = "long_task_notice_sent",
         task = %task.id(),
         member = %owner,
         finished,
+        opens_conversation = task.origin_session_id().is_some(),
         queued = report.queued.len(),
         failed = report.failed.len(),
         "long task ended; its owner was told"
@@ -7813,24 +8077,55 @@ async fn run_consolidation_pipeline(
         }
     };
 
-    // Oldest-first: duplicates cluster in time, so a contiguous window catches both halves.
-    let selection = consolidation::select_batch(memories, batch_size);
+    // Oldest-first within each owner: duplicates cluster in time, so a contiguous window catches
+    // both halves, and no batch holds two members' memories.
+    let batches = consolidation::select_owner_batches(memories, batch_size);
+    let largest = batches.iter().map(|s| s.batch.len()).max().unwrap_or(0);
+    let runnable: Vec<_> = batches.into_iter().filter(|s| !s.below_minimum()).collect();
 
-    if selection.below_minimum() {
+    if runnable.is_empty() {
         tracing::debug!(
-            "consolidation: skipped — only {} eligible memories (need >= {})",
-            selection.batch.len(),
+            "consolidation: skipped — at most {largest} eligible memories for one owner (need >= {})",
             MIN_MEMORIES_TO_CONSOLIDATE
         );
         let _ = broadcast_tx.send(ConsolidationEvent::Error {
             message: format!(
                 "Need at least {} memories to consolidate, found {}",
-                MIN_MEMORIES_TO_CONSOLIDATE,
-                selection.batch.len()
+                MIN_MEMORIES_TO_CONSOLIDATE, largest
             ),
         });
         return;
     }
+
+    for selection in runnable {
+        if cancel.is_cancelled() {
+            return;
+        }
+        consolidate_one_batch(
+            repo.as_ref(),
+            provider.clone(),
+            &broadcast_tx,
+            cancel.clone(),
+            mode,
+            selection,
+        )
+        .await;
+    }
+}
+
+/// One owner's batch through the consolidator, then `apply_actions` and an audit row.
+async fn consolidate_one_batch(
+    repo: &(dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync),
+    provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    broadcast_tx: &tokio::sync::broadcast::Sender<
+        pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
+    >,
+    cancel: tokio_util::sync::CancellationToken,
+    mode: &str,
+    selection: pond_core::user_data::services::memory_consolidation::BatchSelection,
+) {
+    use pond_core::user_data::ports::memory_consolidator::ConsolidationEvent;
+    use pond_core::user_data::services::memory_consolidation as consolidation;
 
     if selection.deferred > 0 {
         tracing::info!(
@@ -7875,18 +8170,17 @@ async fn run_consolidation_pipeline(
                 .map(|e| e.proposal.action.clone())
                 .collect();
 
-            let outcome =
-                match consolidation::apply_actions(repo.as_ref(), &selection.batch, accepted).await
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        tracing::warn!("consolidation: applying actions failed: {e}");
-                        let _ = broadcast_tx.send(ConsolidationEvent::Error {
-                            message: e.to_string(),
-                        });
-                        return;
-                    }
-                };
+            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!("consolidation: applying actions failed: {e}");
+                    let _ = broadcast_tx.send(ConsolidationEvent::Error {
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            };
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
@@ -8033,8 +8327,7 @@ fn ensure_onnx_runtime() {
 
     // ── 1b. The Jetson's GPU runtime, once giap.sh has built and installed it ─
     if let Some(lib) = onnx_gpu::installed_runtime(&default_data_dir(), ORT_VERSION, on_jetson()) {
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib) };
+        pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib);
         return;
     }
 
@@ -8055,8 +8348,7 @@ fn ensure_onnx_runtime() {
 
     for p in system_candidates {
         if std::path::Path::new(p).exists() {
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", p) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", p);
             return;
         }
     }
@@ -8071,7 +8363,7 @@ fn ensure_onnx_runtime() {
     // The versioned file is the real binary; the bare name covers a manual install.
     for candidate in [&local_versioned, &local_unversioned] {
         if candidate.exists() {
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", candidate);
             return;
         }
     }
@@ -8101,8 +8393,7 @@ fn ensure_onnx_runtime() {
         Ok(lib_path) => {
             eprintln!("  Setup    ONNX Runtime ready");
             tracing::info!("ONNX Runtime installed to {}", lib_path.display());
-            // SAFETY: single-threaded setup, before any worker spawns.
-            unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib_path) };
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib_path);
         }
         Err(e) => {
             eprintln!("  Setup    FAILED to download ONNX Runtime: {e}");
@@ -8267,16 +8558,15 @@ fn apply_face_recognition_defaults() {
             .join("models")
             .join("face")
             .join("antispoof.onnx");
-        // SAFETY: single-threaded setup, before any worker spawns.
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PATH", default_path) };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PATH", default_path);
     }
 
     // Shipped 3-class Silent-Face export: live is slot 2 and it expects [0, 1] pixels.
     if std::env::var_os("POND_FACE_ANTISPOOF_LIVE_INDEX").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_LIVE_INDEX", "2") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_LIVE_INDEX", "2");
     }
     if std::env::var_os("POND_FACE_ANTISPOOF_PIXEL_SCALE").is_none() {
-        unsafe { std::env::set_var("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit") };
+        pond_core::shared::services::process_env::set("POND_FACE_ANTISPOOF_PIXEL_SCALE", "unit");
     }
 
     // Secondary anti-spoof model is optional and only used if explicitly configured.
@@ -8352,7 +8642,7 @@ async fn run_calibrate(
     // Own mic owner: calibration never runs alongside the wake-word detector. The pinned mic,
     // so the variants are learned through the microphone voice will hear them on.
     let capture = match settings.audio_input_device.trim() {
-        "" => pond_audio::CpalCapture::new(),
+        "" | "auto" => pond_audio::CpalCapture::new(),
         pinned => pond_audio::CpalCapture::with_device(pinned),
     };
     let (mic_handle, _mic_owner_join) =
@@ -9457,6 +9747,9 @@ async fn build_goose_backend(
     device_control: Arc<
         dyn pond_core::user_data::ports::device_control::DeviceControlPort + Send + Sync,
     >,
+    last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    >,
     session_storage: Option<Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>>,
     // Supply it: without the catalog an Ollama model's context window is guessed from its name.
     model_repo: Option<Arc<dyn ModelRepository>>,
@@ -9593,6 +9886,7 @@ async fn build_goose_backend(
         profile_repo.clone(),
         skill_repo.clone(),
         device_control,
+        last_action,
         tool_caller.clone(),
     ) {
         Ok(ext_names) => {
@@ -10172,6 +10466,12 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let db = Database::init(&data_dir).await?;
     litert_runtime::ensure_library_dir(&data_dir);
 
+    let last_action: Arc<
+        dyn pond_core::user_data::ports::last_action::LastActionRepository + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
+    );
+
     let settings_repo: Arc<
         dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
     > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
@@ -10288,6 +10588,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10301,6 +10602,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 session_id: session,
                 model_role,
                 images: Vec::new(),
+                audio: Vec::new(),
                 voice_mode: false,
                 canvas_mode: false,
                 // The CLI user already has shell access, so a narrower scope would be theatre.
@@ -10311,6 +10613,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 suggestion_context: None,
                 deep_research_task: None,
                 interview: None,
+                device_place: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10338,6 +10641,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 Some(session_storage.clone()),
                 Some(cli_model_repo.clone()),
                 false,
@@ -10379,6 +10683,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     session_id: session.clone(),
                     model_role,
                     images: Vec::new(),
+                    audio: Vec::new(),
                     voice_mode: false,
                     canvas_mode: false,
                     // Same as the single-shot arm above.
@@ -10389,6 +10694,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     suggestion_context: None,
                     deep_research_task: None,
                     interview: None,
+                    device_place: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -10416,6 +10722,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 template_repo,
                 extras_repo,
                 Arc::new(pond_infra::logging_device_control::LoggingDeviceControl::new()),
+                last_action.clone(),
                 None, // session_storage — not needed for goose backend
                 Some(cli_model_repo.clone()),
                 false,
@@ -10831,6 +11138,30 @@ fn run_dashboard() -> Result<()> {
 
 /// Works on the data directory directly, so it answers whether or not the server is running;
 /// a running server reads the new card on the next unlock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum TestPondAction {
+    On,
+    Off,
+    Status,
+}
+
+fn run_test_pond(action: TestPondAction) -> Result<()> {
+    let mark = pond_infra::file_test_pond::FileTestPondMark::new(default_data_dir());
+    match action {
+        TestPondAction::On => mark.set(true)?,
+        TestPondAction::Off => mark.set(false)?,
+        TestPondAction::Status => {}
+    }
+    if mark.is_marked()? {
+        println!(
+            "This is a test Pond: a paired phone may turn on debug, which shows household content in the logs."
+        );
+    } else {
+        println!("This is a home Pond: debug stays off and the logs hide household content.");
+    }
+    Ok(())
+}
+
 async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     use pond_core::security::ports::admin_card::AdminCardStore as _;
     let store = pond_infra::file_admin_card::FileAdminCardStore::new(default_data_dir());
@@ -10841,12 +11172,31 @@ async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
     }
     let password = store.issue(rotate)?;
     let card_id = store.current().await?.unwrap_or_default();
+    // A new card is the recovery: every phone's own key goes with the old one.
+    let keys_revoked = if rotate {
+        use pond_core::security::ports::admin_card::AdminDeviceKeys as _;
+        let db = pond_infra::db::Database::init(&default_data_dir()).await?;
+        pond_infra::sqlite_admin_keys::SqliteAdminDeviceKeys::new(db.system.clone())
+            .revoke_all()
+            .await?
+    } else {
+        0
+    };
     if json {
         println!(
             "{}",
-            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+            serde_json::json!({
+                "password": password.grouped(),
+                "card_id": card_id,
+                "keys_revoked": keys_revoked,
+            })
         );
         return Ok(());
+    }
+    if keys_revoked > 0 {
+        println!(
+            "Revoked {keys_revoked} phone key(s): each phone unlocks with this card once more."
+        );
     }
     println!(
         "Admin card for this Pond (administrator: {})\n\n    {}\n\n\

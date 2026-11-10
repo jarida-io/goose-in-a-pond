@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { buildCalibrationPrompts, containsTrigger, estimateSounds, normalizeTranscript, wakePhraseError, wakePhraseWarning } from "./wakePhrase";
+import { asksForAnAnswer, buildCalibrationPrompts, containsTrigger, estimateSounds, normalizeTranscript, wakePhraseError, wakePhraseWarning } from "./wakePhrase";
+
+describe("asksForAnAnswer", () => {
+  it("waits for an answer only after a question", () => {
+    expect(asksForAnAnswer("Which room do you mean?")).toBe(true);
+    expect(asksForAnAnswer("Shall I set it for **seven**?** \n")).toBe(true);
+    expect(asksForAnAnswer("Do you want the long version (it takes a minute)?)")).toBe(true);
+    expect(asksForAnAnswer("It is sunny and 24 degrees.")).toBe(false);
+    expect(asksForAnAnswer("Did you know? Geese mate for life.")).toBe(false);
+    expect(asksForAnAnswer("")).toBe(false);
+  });
+});
 
 const fires = (transcript: string, trigger: string) =>
   containsTrigger(normalizeTranscript(transcript), normalizeTranscript(trigger));

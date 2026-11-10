@@ -1,3 +1,5 @@
+import type { AudioAttachment } from "../../api/types";
+
 // ── WAV Encoding ──────────────────────────────────────────────────
 
 /**
@@ -12,6 +14,22 @@ export const MIC_CONSTRAINTS: MediaStreamConstraints = {
     noiseSuppression: true,
   } as MediaTrackConstraints,
 };
+
+/** Raw base64 of `bytes`, in chunks: a whole recording spread into one call overflows the stack. */
+export function base64OfBytes(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = "";
+  for (let i = 0; i < view.length; i += 0x8000) {
+    binary += String.fromCharCode(...view.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+/** A spoken turn's recording, with what Whisper heard in it: the model hears the clip where it
+ *  can, and the pond uses the words where it cannot. */
+export function spokenClip(words: string, wav: ArrayBuffer): AudioAttachment {
+  return { data: base64OfBytes(wav), mime_type: "audio/wav", heard_as: words };
+}
 
 /** 16-bit mono WAV (44-byte header) of samples in [-1, 1], as pond-server's Whisper endpoint takes. */
 export function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
@@ -283,13 +301,9 @@ export function playPingTone(): void {
 // Port of `ReplySplitter` in `crates/pond-voice/src/text.rs`; keep the two in step.
 
 const ABBREV_WORD_RE = /^(?:dr|mr|mrs|ms|prof|st|jr|sr|vs|etc|approx|dept|govt|inc|ltd|corp|min|max|temp|est|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|e\.g|i\.e|u\.s|a\.m|p\.m)$/i;
-/** The first unit is cut here when no mark has come by `FIRST_UNIT_LOOKAHEAD_WORDS`. */
-export const FIRST_UNIT_MAX_WORDS = 6;
-export const FIRST_UNIT_LOOKAHEAD_WORDS = 10;
 /** A unit is cut before it passes this many estimated Kokoro tokens. */
 export const UNIT_TOKEN_BUDGET = 200;
 const MIN_CLAUSE_WORDS = 3;
-const CLAUSE_LOOKAHEAD_TOKENS = 40;
 const CLOSERS = `"')]\u201d\u2019`;
 const TERMINALS = ".?!\u2026";
 
@@ -342,7 +356,6 @@ function wsEnd(text: string, from: number): number {
 function nextCut(text: string, first: boolean, behind: boolean, settled: boolean): Cut | null {
   let words = 0;
   let inWord = false;
-  let sixthWordEnd: number | null = null;
   let lineStart = 0;
   let lastClause: number | null = null;
   let lastSpace: number | null = null;
@@ -353,16 +366,12 @@ function nextCut(text: string, first: boolean, behind: boolean, settled: boolean
       if (inWord) {
         inWord = false;
         words++;
-        if (words === FIRST_UNIT_MAX_WORDS) sixthWordEnd = i;
       }
       lastSpace = i;
     } else {
       inWord = true;
     }
 
-    if (first && words >= FIRST_UNIT_LOOKAHEAD_WORDS && sixthWordEnd !== null) {
-      return { end: sixthWordEnd, resume: sixthWordEnd, boundary: "word" };
-    }
     if (estimateTokens(text.slice(0, i)) > UNIT_TOKEN_BUDGET) {
       if (lastClause !== null) return { end: lastClause, resume: lastClause, boundary: "clause" };
       if (lastSpace === null) return null;
@@ -512,6 +521,8 @@ export function stripMarkupForSpeech(text: string): string {
   for (const tag of SCAFFOLD_TAGS) {
     out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
   }
+  // Models invent snake_case tags for tool syntax and turn records; no HTML tag has an underscore.
+  out = out.replace(/<([a-z][a-z0-9]*(?:_[a-z0-9]+)+)>[\s\S]*?<\/\1>/g, "");
   const attr = `\\s+[\\w.:-]+(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>/]+))?`;
   // A tool-like name may be cut off unclosed by a clause split; an HTML tag never counts so.
   out = out.replace(new RegExp(`</?[A-Za-z][\\w.:-]*__[\\w.:-]*(?:${attr})*(?:\\s*/?>|[\\s\\S]*$)`, "g"), "");

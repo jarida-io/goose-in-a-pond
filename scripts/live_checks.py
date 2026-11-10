@@ -15,8 +15,10 @@ import json
 import os
 import re
 import sqlite3
+import struct
 import subprocess
 import sys
+import tempfile
 
 # What the egress gate says when it refuses a weather call: an open-meteo host, named as the
 # destination of the refused request.
@@ -739,6 +741,54 @@ def section_audio_devices():
         expect("mic switched back on", code, 200, body)
 
 
+def _post_audio(path, audio):
+    """POST one multipart `audio` field from bytes, as a phone sends a segment."""
+    with tempfile.NamedTemporaryFile(suffix=".wav") as fh:
+        fh.write(audio)
+        fh.flush()
+        url = "http://127.0.0.1:%s%s" % (api_port(), path)
+        cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", "-F",
+               "audio=@%s;type=audio/wav" % fh.name, url]
+        out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    raw, _, code = out.rpartition("\n")
+    try:
+        return int(code), json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        return int(code), raw
+
+
+def _silent_wav(seconds):
+    frames = 16000 * seconds
+    header = (b"RIFF" + struct.pack("<I", 36 + frames * 2) + b"WAVEfmt "
+              + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+              + b"data" + struct.pack("<I", frames * 2))
+    return header + b"\0\0" * frames
+
+
+def section_wake_check():
+    """The phone's wake check on a real server: the route is wired behind its body limit, refuses
+    what is not a WAV, and answers a WAV with a verdict, or says it has no speech recognition. A
+    scratch pond has downloaded no Whisper model, so either is a correct answer here; the verdict's
+    shape is covered by crates/pond-api/tests/wake_check_routes.rs.
+    """
+    print("\n=== wake check ===")
+    code, body = _post_audio("/api/v1/voice/wake/check", b"not a wav")
+    expect("a wake check that is not a WAV is refused", code, 400, body,
+           ("named", isinstance(body, dict) and body.get("error") == "audio_must_be_wav"))
+
+    code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(1))
+    if code == 503:
+        expect("a wake check with no speech recognition says so", code, 503, body,
+               ("named", isinstance(body, dict) and body.get("error") == "speech_recognition_unavailable"))
+    else:
+        expect("a wake check answers a verdict and nothing it heard", code, 200, body,
+               ("only heard and phrase", isinstance(body, dict) and sorted(body) == ["heard", "phrase"]),
+               ("silence is no wake", isinstance(body, dict) and body.get("heard") is False))
+
+    code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(12))
+    expect("a segment longer than the ear cuts is refused", code, 413, body)
+
+
 def section_audio_devices_after_restart():
     """A pin is a setting: a fresh process must start from it, then give it back."""
     print("\n=== audio devices after restart ===")
@@ -1442,6 +1492,47 @@ def section_policy_telemetry():
     )
 
 
+# ── The household's notification history ──────────────────────────────────────
+
+def section_notification_history(label="the notice history", after_pairing=False):
+    """The dashboard's notification centre reads `GET /notifications/history`.
+
+    Under POND_DEV_ALLOW_LOOPBACK the caller is `Principal::loopback()`, which names no device,
+    so the history must refuse it rather than serve an unscoped household list (a member's
+    notices included). The scoped, authorised read is asserted with real paired tokens and the
+    bypass off, in `remote_auth_checks.py`. Here: the route is registered on the real binary,
+    its migration applied to a database on disk, and, on the restart pass (after
+    `setup_code_checks.py pairing` claimed this pond), that pairing's notice survived the restart.
+    """
+    print("\n=== %s ===" % label)
+    code, body = call("GET", "/api/v1/notifications/history")
+    expect(
+        "%s refuses a caller with no device" % label,
+        code,
+        403,
+        body,
+        ("says why", isinstance(body, dict) and "paired device" in body.get("error", "")),
+    )
+    code, body = call("POST", "/api/v1/notifications/history/read", {"ids": []})
+    expect("%s mark-read refuses a caller with no device" % label, code, 403, body)
+
+    con = db()
+    try:
+        applied = con.execute(
+            "SELECT success FROM _sqlx_migrations WHERE description = 'notification history'"
+        ).fetchone()
+        rows = con.execute("SELECT COUNT(*) FROM notification_history").fetchone()[0]
+    finally:
+        con.close()
+    check("%s: its migration applied" % label, applied == (1,), str(applied))
+    if after_pairing:
+        check(
+            "%s: the pairing that claimed this pond is still recorded" % label,
+            rows >= 1,
+            "%s rows" % rows,
+        )
+
+
 # ── The batch memory-extraction engine ───────────────────────────────────────
 
 
@@ -2115,6 +2206,7 @@ def main():
         section_picture_support_after_restart()
         section_memory_vectors_after_restart()
         section_vision_after_restart()
+        section_notification_history("the notice history after a restart", after_pairing=True)
     else:
         section_schema()
         jerry, liz = section_identity()
@@ -2128,6 +2220,7 @@ def main():
         section_music_player()
         section_web_search()
         section_audio_devices()
+        section_wake_check()
         # First pass only. It creates a profile by name, which would collide
         # with the row it left behind, and the process counters it reads are
         # zero on a fresh process by design -- so on the restart pass it would
@@ -2137,6 +2230,7 @@ def main():
         section_inference_lane()
         section_composed_suggestions()
         section_reminders_surface()
+        section_notification_history()
         section_vision()
         # Last: it moves the chat model to a local one for a moment, and puts it back.
         section_picture_support()

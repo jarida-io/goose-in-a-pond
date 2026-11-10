@@ -3368,6 +3368,21 @@
   white-space: nowrap;
 }
 
+/* Built in: the Pond already does this entry's job. Neutral, neither success nor warning. */
+.mkt-card__builtin-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
 /* Description */
 .mkt-card__desc {
   margin: 0;
@@ -6221,3 +6236,14 @@
   /* Notif badge CTA */
   .notif-row__cta { min-height: 32px; padding: 4px 2px; }
 }
+
+/* Schedule or recipe? */
+.sched-or-recipe { padding: 12px 16px; margin-bottom: 16px; }
+.sched-or-recipe summary { cursor: pointer; font-weight: 600; }
+.sched-or-recipe__terms { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 12px 0; }
+.sched-or-recipe__terms dt { font-weight: 600; }
+.sched-or-recipe__terms dd { margin: 0; color: var(--color-text-secondary); }
+.sched-or-recipe__tools { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.sched-or-recipe__tools caption { text-align: left; font-weight: 600; padding-bottom: 6px; }
+.sched-or-recipe__tools th, .sched-or-recipe__tools td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--color-border); }
+.sched-or-recipe__tools th[scope="row"] { font-weight: 400; }

@@ -165,7 +165,7 @@ func main() {
 		if err != nil {
 			status = pondnet.Status{State: "Unavailable", Addresses: []string{}}
 		}
-		if encoder.Encode(status) != nil {
+		if encoder.Encode(report{Status: status, ClockSynchronized: clockSynchronized()}) != nil {
 			return
 		}
 		select {
@@ -180,6 +180,16 @@ func main() {
 		case <-ticker.C:
 		}
 	}
+}
+
+// report is one status line to the Pond: the node's own status and what this host can add to it.
+type report struct {
+	pondnet.Status
+	// ClockSynchronized says whether this host's clock is disciplined by a time source, so the
+	// Pond can tell a node that is down because the clock is wrong (TLS to the coordinator fails
+	// while it is far enough off) from one that is down for any other reason. Absent where the
+	// host cannot say.
+	ClockSynchronized *bool `json:"clockSynchronized,omitempty"`
 }
 
 // registrationDevice is the device certificate to register with. One that exists but cannot

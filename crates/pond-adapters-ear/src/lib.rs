@@ -8,23 +8,27 @@ mod hearing;
 mod reference;
 mod worker;
 
+use echo::Spoken;
+
 pub use enrol::{TakeEar, TakeHeard, ENROL_MAX_SECONDS};
 pub use hearing::Hearing;
 /// What the operating system says this process holds.
-pub use pond_ear::ear::mem::{now as process_memory, Mem as ProcessMemory};
+pub use pond_ear::ear::mem::{
+    now as process_memory, release as release_process_memory, Mem as ProcessMemory,
+};
 pub use pond_ear::score::{Policy, Print};
 pub use pond_ear::{Household, ModelFile};
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use pond_audio::MicHandle;
 use pond_core::models::ports::interrupt::{Interrupt, InterruptWatch};
-use pond_core::models::ports::voice_input::VoiceInput;
+use pond_core::models::ports::voice_input::{VoiceInput, UNWORDED_SPEECH};
 use pond_core::models::ports::wake_word::{StreamingWakeWordDetector, WakeWordActivation};
 use pond_core::shared::domain::agent::{ThrottledAudioLevelSink, WorkflowState};
 use pond_core::shared::services::chat::{SpokenObserver, StateObserver};
@@ -38,6 +42,12 @@ use worker::{Cmd, Heard, ListenFrom, RefChunk, Segment, Woke, Worker, WorkerStat
 pub trait Transcriber: Send + Sync {
     /// 16 kHz mono f32 to text, Whisper's artifacts stripped and the wake phrase left in; blocking.
     fn transcribe(&self, pcm: &[f32]) -> Result<String>;
+
+    /// A segment's opening, read for the wake phrase: most segments are a room's other talk, so
+    /// this may be cheaper than `transcribe`.
+    fn scan(&self, pcm: &[f32]) -> Result<String> {
+        self.transcribe(pcm)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +145,11 @@ pub struct EarRig {
     parts: Mutex<Vec<EarPart>>,
     /// Who Voice Match heard wake the pond; a follow-up must be their voice too.
     waker: Mutex<Option<String>>,
+    spoken: Arc<Mutex<Spoken>>,
+    /// The recording behind the words `listen` last returned, for a model that hears.
+    heard_audio: Mutex<Option<Vec<f32>>>,
+    /// The model hears recordings, so speech the transcriber cannot word still reaches it.
+    forward_unworded: std::sync::atomic::AtomicBool,
 }
 
 impl EarRig {
@@ -200,6 +215,7 @@ impl EarRig {
             }
             WakeMode::HeyGoose => None,
         };
+        let spoken = Arc::new(Mutex::new(Spoken::default()));
         let worker = Worker {
             hearing,
             mic,
@@ -209,7 +225,7 @@ impl EarRig {
             latency: (cfg.output_latency_ms as usize) * reference::RATE as usize / 1000,
             cue: cfg.cue,
             audio_level: cfg.audio_level,
-            state: WorkerState::new(),
+            state: WorkerState::new(spoken.clone()),
         };
         std::thread::Builder::new()
             .name("pond-ear".into())
@@ -225,6 +241,9 @@ impl EarRig {
             primed: Mutex::new(None),
             parts: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
+            spoken,
+            heard_audio: Mutex::new(None),
+            forward_unworded: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -254,8 +273,13 @@ impl EarRig {
     /// pond says, so its echo is not taken for a wake.
     pub fn spoken_hook(&self) -> SpokenObserver {
         let cmds = self.cmds.clone();
+        let spoken = self.spoken.clone();
         Arc::new(move |text: &str| {
             let _ = cmds.send(Cmd::Spoken(text.to_string()));
+            let now = Instant::now();
+            let mut s = spoken.lock().unwrap();
+            s.forget_old(now, None);
+            s.say(text, now);
         })
     }
 
@@ -264,8 +288,50 @@ impl EarRig {
         let _ = self.cmds.send(Cmd::Household(household));
     }
 
+    /// Hear no wake word and start no request until `until`; `None` resumes now.
+    pub fn pause_until(&self, until: Option<Instant>) {
+        let _ = self.cmds.send(Cmd::Pause(until));
+    }
+
+    /// Start recognising voices without a restart: the network is built and warmed here, on the
+    /// caller's thread, so the ear thread only swaps it in. Blocking.
+    pub fn load_speaker(&self, model: ModelFile) -> Result<()> {
+        let mut net = pond_ear::ear::parts::SpeakerNet::new(
+            model,
+            VOICE_MATCH_LABEL,
+            pond_ear::ear::machine::SPEAKER_MAX_SECONDS,
+        )
+        .context("loading the speaker model")?;
+        net.warm_up(pond_ear::Rung::fastest());
+        self.cmds
+            .send(Cmd::Speaker(Box::new(net)))
+            .map_err(|_| anyhow!("the ear has stopped"))
+    }
+
     fn command(&self, raw: &str) -> String {
-        pond_voice::text::strip_leading_wake_word(raw, &self.triggers)
+        let command = pond_voice::text::strip_leading_wake_word(raw, &self.triggers);
+        match pond_voice::text::only_wake_words(&command, &self.triggers) {
+            true => String::new(),
+            false => command,
+        }
+    }
+
+    /// Let speech the transcriber cannot word reach a model that hears it, as [`UNWORDED_SPEECH`].
+    pub fn set_forward_unworded(&self, on: bool) {
+        self.forward_unworded
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn forwards_unworded(&self, pcm: &[f32]) -> bool {
+        self.forward_unworded
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && pcm.len() >= MIN_UNWORDED_SAMPLES
+    }
+
+    /// `command`, with `pcm` kept as the recording it came from.
+    fn kept(&self, command: String, pcm: Vec<f32>) -> Result<Option<String>> {
+        *self.heard_audio.lock().unwrap_or_else(|e| e.into_inner()) = Some(pcm);
+        Ok(Some(command))
     }
 
     async fn transcribe(&self, pcm: Vec<f32>) -> Result<String> {
@@ -290,6 +356,32 @@ impl Drop for EarRig {
     }
 }
 
+/// The wake phrase alone this many times over ends a listen: a second is the person repeating it.
+const WAKE_ALONE_ROUNDS: usize = 2;
+/// How long noise may keep a listen going: the reply's tail, still in the ring when the follow-up
+/// starts, arrives as several blips at once, and none of them is the person.
+const NOISE_PATIENCE: Duration = Duration::from_secs(8);
+/// Shorter speech than this, with no words in it, is taken for noise even when the model hears.
+const MIN_UNWORDED_SAMPLES: usize = reference::RATE as usize * 6 / 10;
+/// Where a recording's loudest sample is brought before the model hears it.
+const HEARD_PEAK: f32 = 0.7;
+/// At most 30 dB: more raises the room's noise floor as much as the voice.
+const MAX_HEARD_GAIN: f32 = 31.6;
+
+/// `pcm` brought up to [`HEARD_PEAK`], with its peak before and the gain given. The room's
+/// microphone can sit near -50 dBFS, and Whisper's path raises quiet audio while the model's did
+/// not, so the model heard near-silence where Whisper heard words.
+fn raised_for_the_model(mut pcm: Vec<f32>) -> (Vec<f32>, f32, f32) {
+    let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
+    if peak < 1e-4 {
+        return (pcm, peak, 1.0);
+    }
+    let gain = (HEARD_PEAK / peak).clamp(1.0, MAX_HEARD_GAIN);
+    pcm.iter_mut()
+        .for_each(|v| *v = (*v * gain).clamp(-1.0, 1.0));
+    (pcm, peak, gain)
+}
+
 /// The wake in `segment`, if its opening holds a trigger; the whole is transcribed only then.
 pub(crate) fn wake_in(
     transcriber: &dyn Transcriber,
@@ -300,7 +392,7 @@ pub(crate) fn wake_in(
         .pcm
         .len()
         .min(WAKE_SCAN_SECONDS * reference::RATE as usize);
-    let opening = transcriber.transcribe(&segment.pcm[..scan])?;
+    let opening = transcriber.scan(&segment.pcm[..scan])?;
     if !pond_voice::text::heard_wake(&opening, triggers) {
         tracing::debug!(heard = %opening, "ear: segment without the wake phrase");
         return Ok(None);
@@ -317,6 +409,7 @@ pub(crate) fn wake_in(
         pcm: segment.pcm,
         speaker: None,
         transcript: Some(transcript),
+        cut: segment.cut,
     }))
 }
 
@@ -359,34 +452,38 @@ impl StreamingWakeWordDetector for EarRig {
 #[async_trait]
 impl VoiceInput for EarRig {
     async fn listen(&self) -> Result<Option<String>> {
+        *self.heard_audio.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let primed = self.primed.lock().unwrap_or_else(|e| e.into_inner()).take();
         // A follow-up with no wake of its own: an identified waker's must be in their voice.
         let follow_up = primed.is_none();
         let mut from = ListenFrom::Now;
         match primed {
+            // The ear is already endpointing the whole request from the wake's start.
+            Some(Primed::Woke(woke)) if woke.cut => from = ListenFrom::At(woke.start),
             Some(Primed::Woke(woke)) => {
                 let raw = match woke.transcript {
                     Some(t) => t,
-                    None => self.transcribe(woke.pcm).await?,
+                    None => self.transcribe(woke.pcm.clone()).await?,
                 };
                 let command = self.command(&raw);
                 if !command.is_empty() {
-                    return Ok(Some(command));
+                    return self.kept(command, woke.pcm);
                 }
                 // The wake phrase alone: the request comes after it.
                 from = ListenFrom::At(woke.end);
             }
             Some(Primed::Audio(pcm)) => {
-                let command = self.command(&self.transcribe(pcm).await?);
+                let command = self.command(&self.transcribe(pcm.clone()).await?);
                 if !command.is_empty() {
-                    return Ok(Some(command));
+                    return self.kept(command, pcm);
                 }
             }
             Some(Primed::Onset(onset)) => from = ListenFrom::Since(onset),
             None => {}
         }
-        // A second round only for an utterance that was the wake phrase and nothing else.
-        for _ in 0..2 {
+        let listening_since = Instant::now();
+        let mut wake_alone = 0;
+        loop {
             let Heard::Utterance {
                 end,
                 pcm,
@@ -398,24 +495,76 @@ impl VoiceInput for EarRig {
                 return Ok(Some(String::new()));
             };
             let waker = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if follow_up && waker.is_some() && speaker != waker {
-                tracing::info!(
-                    heard = ?speaker,
-                    "ear: a follow-up in another voice than the wake's ignored"
-                );
-                return Ok(Some(String::new()));
+            // Only another enrolled member's voice ends it: a short follow-up is often too little
+            // for Voice Match to recognise even the waker.
+            if follow_up {
+                match (&waker, &speaker) {
+                    (Some(waker), Some(who)) if who != waker => {
+                        tracing::info!(
+                            who = %who,
+                            waker = %waker,
+                            "ear: a follow-up in another member's voice ignored"
+                        );
+                        return Ok(Some(String::new()));
+                    }
+                    (Some(waker), None) => tracing::debug!(
+                        waker = %waker,
+                        "ear: a follow-up Voice Match did not recognise continues the conversation"
+                    ),
+                    _ => {}
+                }
             }
             let raw = match transcript {
                 Some(t) => t,
-                None => self.transcribe(pcm).await?,
+                None => self.transcribe(pcm.clone()).await?,
             };
-            let command = self.command(&raw);
-            if !command.is_empty() || !pond_voice::text::heard_wake(&raw, &self.triggers) {
-                return Ok(Some(command));
+            let cleaned = pond_voice::text::strip_whisper_artifacts(&raw);
+            let command = self.command(&cleaned);
+            if command.is_empty()
+                && !pond_voice::text::heard_wake(&raw, &self.triggers)
+                && self.forwards_unworded(&pcm)
+            {
+                tracing::info!(
+                    raw = %raw,
+                    "ear: speech the transcriber could not word goes to the model as a recording"
+                );
+                return self.kept(UNWORDED_SPEECH.to_string(), pcm);
             }
-            from = ListenFrom::At(end);
+            if command.is_empty() {
+                let wake = pond_voice::text::heard_wake(&raw, &self.triggers);
+                if follow_up && wake {
+                    return Ok(Some(String::new()));
+                }
+                if wake {
+                    wake_alone += 1;
+                    if wake_alone >= WAKE_ALONE_ROUNDS {
+                        return Ok(Some(String::new()));
+                    }
+                } else {
+                    // A blip lands as the reply ends or the cue plays; the words come after it.
+                    if listening_since.elapsed() >= NOISE_PATIENCE {
+                        return Ok(Some(String::new()));
+                    }
+                    tracing::info!(
+                        raw = %raw,
+                        "ear: only noise or filler hallucination heard, ignored; still listening"
+                    );
+                }
+                from = ListenFrom::At(end);
+                continue;
+            }
+            let is_echo = self.spoken.lock().unwrap().echo_of(&cleaned).is_some()
+                || self.spoken.lock().unwrap().echo_of(&command).is_some();
+            if is_echo {
+                tracing::info!(
+                    raw = %raw,
+                    command = %command,
+                    "ear: transcript is an echo of the pond's own speech, ignored"
+                );
+                return Ok(Some(String::new()));
+            }
+            return self.kept(command, pcm);
         }
-        Ok(Some(String::new()))
     }
 
     fn prompt(&self) -> &str {
@@ -446,6 +595,23 @@ impl VoiceInput for EarRig {
 
     fn prime_with_onset(&self, onset: Instant) {
         *self.primed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Primed::Onset(onset));
+    }
+
+    fn take_heard_audio(&self) -> Option<Vec<u8>> {
+        let pcm = self
+            .heard_audio
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()?;
+        let (raised, peak, gain) = raised_for_the_model(pcm);
+        tracing::info!(
+            target: "giap::trace",
+            kind = "heard_audio_level",
+            peak_dbfs = 20.0 * peak.max(1e-6).log10(),
+            gain_db = 20.0 * gain.log10(),
+            "the recording's level as the room heard it, and the gain it was given"
+        );
+        Some(pond_ear::wav::encode_wav16(&raised, reference::RATE))
     }
 }
 
