@@ -355,6 +355,9 @@ impl AppState {
         if let Some(cancel) = self.consolidation_cancel.read().await.as_ref() {
             cancel.cancel();
         }
+        if let Some(room) = &self.room_voice {
+            room.note_user_activity();
+        }
     }
 }
 

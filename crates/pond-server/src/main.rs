@@ -1404,6 +1404,8 @@ async fn run_server(
                     error = format!("{e:#}"),
                     "the room's wake-only Whisper did not load at startup"
                 );
+            } else {
+                whisper.release_unheld("startup");
             }
         }
     }
@@ -5983,7 +5985,7 @@ async fn run_chat(
                 settings: &settings,
                 data_dir: &data_dir,
                 mic: &mic_handle,
-                whisper: backend.clone(),
+                whisper: backend.clone().into(),
                 wake_word,
                 no_wake_word,
                 audio_level: audio_level_sink.clone(),
