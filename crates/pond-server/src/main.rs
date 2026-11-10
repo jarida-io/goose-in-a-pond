@@ -2636,20 +2636,20 @@ async fn run_server(
             ..Default::default()
         },
     ));
-    // Reminders the extraction loop turns into proposals, handed to the notification pipeline
+    // Dated mentions the extraction loop offers as to-dos, handed to the notification pipeline
     // once it exists further down.
     let (proposal_notice_tx, proposal_notice_rx) =
-        tokio::sync::mpsc::channel::<pond_core::user_data::domain::proposal::Proposal>(64);
+        tokio::sync::mpsc::channel::<pond_core::user_data::domain::reminder::CapturedReminder>(64);
     {
         use pond_core::models::ports::embedding::EmbeddingProvider as _;
+        use pond_core::shared::services::todo_offers;
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
         use pond_core::user_data::services::memory_extraction::{
             BatchExtractionConfig, BatchExtractionService, HouseholdRoster,
         };
-        use pond_core::user_data::services::reminder_proposal;
 
-        /// Pending reminders per tick; the daily cap lets only a handful become proposals anyway.
+        /// Pending reminders per tick; the daily cap lets only a handful become offers anyway.
         const REMINDER_PROMOTION_LIMIT: usize = 50;
 
         // Where a date the rule refuses as a memory goes; without it the date is lost.
@@ -2823,7 +2823,7 @@ async fn run_server(
                 status.write().await.record(config.mode, &report);
 
                 // After the pass, not inside it, so a proposal failure never costs a stored date.
-                match reminder_proposal::promote_pending_reminders(
+                match todo_offers::offer_pending_reminders(
                     promotion_reminders.as_ref(),
                     promotion_proposals.as_ref(),
                     REMINDER_PROMOTION_LIMIT,
@@ -2832,14 +2832,14 @@ async fn run_server(
                 .await
                 {
                     Ok(promotion) if promotion.considered > 0 => {
-                        for proposal in &promotion.made {
-                            if let Err(e) = promotion_notices.try_send(proposal.clone()) {
+                        for offer in &promotion.offered {
+                            if let Err(e) = promotion_notices.try_send(offer.clone()) {
                                 tracing::warn!(
-                                    kind = "proposal_notice_dropped",
-                                    proposal = %proposal.id(),
+                                    kind = "todo_offer_notice_dropped",
+                                    reminder = %offer.id,
                                     error = %e,
-                                    "a reminder became a proposal, but its member will not be \
-                                     told on their phone; it still waits in the app"
+                                    "a mention was offered as a to-do, but its member will not \
+                                     be told on their phone; it still waits in My Goose"
                                 );
                             }
                         }
@@ -2848,20 +2848,20 @@ async fn run_server(
                             target: "giap::trace",
                             kind = "reminder_promotion",
                             considered = promotion.considered,
-                            proposed = promotion.proposed,
+                            offered = promotion.offered.len(),
                             // Expected on a pond with nobody on file.
                             unaddressable = promotion.unaddressable,
                             capped = promotion.capped,
                             // The only one of the four that is a fault.
                             failed = promotion.failed,
-                            "pending reminders considered for the proposal queue"
+                            "pending reminders considered for to-do offers"
                         );
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        // Dates are kept, but a promotion that never runs never fills the queue.
+                        // Dates are kept, but an offering that never runs never reaches anyone.
                         tracing::warn!(
-                            "[reminders] could not consider pending reminders for proposals: {e}"
+                            "[reminders] could not consider pending reminders for offers: {e}"
                         );
                     }
                 }
@@ -3713,15 +3713,22 @@ async fn run_server(
             system_notices.clone(),
         );
     }
-    // Reminders the extraction loop proposed reach their member's phones, never the household's.
-    pond_server::system_notices::spawn_proposal_notices(
+    // Mentions the extraction loop offered as to-dos reach their member's phones only.
+    pond_server::hooks_runner::spawn_offer_notices(
         proposal_notice_rx,
         targeted_notification_sender.clone(),
+        settings_repo.clone(),
     );
     // Lets the `send_notification` MCP tool reach connected phones too.
     pond_mcp_server::init_notification_sender(notification_sender.clone());
     // Profile-addressed, so a tool's link reaches the speaker's phones and no one else's.
     pond_mcp_server::init_member_notifier(targeted_notification_sender.clone());
+    pond_server::hooks_runner::spawn(
+        db.system.clone(),
+        settings_repo.clone(),
+        targeted_notification_sender.clone(),
+        event_bus.clone(),
+    );
     // Read now, as the extensions were registered: an unreadable row leaves booking off.
     let travel_enabled = settings_repo
         .get()
@@ -7164,6 +7171,9 @@ fn install_long_task_deps(
             authorities: orchestration.authorities(),
         },
     );
+    pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
+        pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
+    ));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),

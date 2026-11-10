@@ -5,6 +5,7 @@ pub mod agent_activations;
 pub mod ble_setup;
 pub mod conversation_extractor;
 pub mod hf_cache_migration;
+pub mod hooks_runner;
 pub mod host_credential;
 pub mod listeners;
 pub mod llm_memory_consolidator;

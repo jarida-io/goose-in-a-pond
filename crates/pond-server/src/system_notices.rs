@@ -4,7 +4,6 @@
 //! `mcp::services::system_notices`); the catalogue is `docs/architecture/notifications.md`.
 //!
 //! - schedule and rule runs: [`spawn_schedule_result_notices`]
-//! - reminders that became proposals: [`spawn_proposal_notices`]
 //! - parts of the Pond that did not start: [`announce_startup_problems`]
 //! - a low disk: [`spawn_disk_watch`]
 //! - remote access stopping, or needing a sign-in: [`spawn_remote_access_watch`]
@@ -289,19 +288,6 @@ pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal)
         ),
     }
     delivery
-}
-
-/// Announce each proposal sent down `proposals` to its member. The channel lets a producer that
-/// starts before the notification pipeline exists (the memory-extraction loop) hand them over.
-pub fn spawn_proposal_notices(
-    mut proposals: tokio::sync::mpsc::Receiver<Proposal>,
-    notifier: Arc<dyn MemberNotifier>,
-) {
-    tokio::spawn(async move {
-        while let Some(proposal) = proposals.recv().await {
-            notify_proposal(notifier.as_ref(), &proposal).await;
-        }
-    });
 }
 
 // Startup
@@ -926,15 +912,6 @@ mod tests {
         let data = sent[0].1.data.as_ref().unwrap();
         assert_eq!(data["open"], "chat");
         assert_eq!(data["proposal_id"], "p-1");
-    }
-
-    #[tokio::test]
-    async fn proposals_sent_down_the_channel_are_announced() {
-        let notifier = Arc::new(MockMemberNotifier::new().with_devices("jerry", &["jerry-phone"]));
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        spawn_proposal_notices(rx, notifier.clone());
-        tx.send(proposal_for("jerry")).await.unwrap();
-        eventually(|| notifier.sent().len() == 1).await;
     }
 
     #[test]
