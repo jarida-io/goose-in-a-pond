@@ -147,6 +147,8 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

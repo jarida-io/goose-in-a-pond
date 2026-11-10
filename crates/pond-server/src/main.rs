@@ -3676,6 +3676,8 @@ async fn run_server(
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
+    let member_notifier: Arc<dyn pond_core::mcp::ports::notification::MemberNotifier> =
+        targeted_notification_sender.clone();
     // Every system notice goes through this one: the household's switch, the wording, the logs.
     let system_notices = Arc::new(
         pond_core::mcp::services::system_notices::SystemNotices::new(
@@ -4529,6 +4531,10 @@ async fn run_server(
         notification_queue: Some(notification_queue.clone()),
         notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
+        member_notifier: Some(member_notifier.clone()),
+        factory_reset_progress: Some(Arc::new(
+            pond_infra::factory_reset_progress::InMemoryFactoryResetProgress::new(),
+        )),
         telemetry,
         context_monitor: Arc::new(
             pond_core::models::services::context_monitor::ContextMonitor::new(),

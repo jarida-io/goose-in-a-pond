@@ -11,14 +11,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::mcp::ports::notification::{Notification, NotificationSender};
+use crate::mcp::ports::notification::{MemberDelivery, MemberNotifier, Notification};
 use crate::models::ports::voice_output::VoiceOutput;
 use crate::network::domain::factory_reset_phrases::factory_reset_notice;
 use crate::network::ports::personal_data_wipe::PersonalDataWipe;
 use crate::network::services::setup_claim::SetupClaimService;
 use crate::security::ports::handshake::Handshake;
 use crate::security::ports::remote_access::RemoteRevocation;
-use crate::user_data::domain::profile::Role;
 use crate::user_data::domain::schedule::Schedule;
 use crate::user_data::ports::device_registry::DeviceRegistry;
 use crate::user_data::ports::onboarding::OnboardingRepository;
@@ -30,6 +29,43 @@ use crate::user_data::services::onboarding::OnboardingService;
 #[derive(Debug, Clone, Default)]
 pub struct FactoryResetExport {
     pub routines: Vec<Schedule>,
+}
+
+/// Where `execute` is, in order. A fixed, known sequence — unlike a download's byte count,
+/// there is no meaningful percentage here, only which of these a caller has reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactoryResetStep {
+    Exporting,
+    NotifyingHousehold,
+    RevokingDevices,
+    ErasingData,
+    SpeakingGoodbye,
+    ReopeningOnboarding,
+}
+
+impl FactoryResetStep {
+    /// Every step in execution order; `position` and the status route's `total_steps` derive
+    /// from it, same as `OnboardingStep::ALL`.
+    pub const ALL: [FactoryResetStep; 6] = [
+        Self::Exporting,
+        Self::NotifyingHousehold,
+        Self::RevokingDevices,
+        Self::ErasingData,
+        Self::SpeakingGoodbye,
+        Self::ReopeningOnboarding,
+    ];
+
+    /// 1-based position within [`FactoryResetStep::ALL`].
+    pub fn position(self) -> usize {
+        Self::ALL.iter().position(|s| *s == self).map(|i| i + 1).unwrap_or(0)
+    }
+}
+
+/// Driven port: where `execute` reports which step it has reached, for a status route to poll.
+/// Best-effort like the rest of `FactoryResetPorts` — a caller that never polls loses nothing.
+pub trait FactoryResetProgress: Send + Sync {
+    fn report(&self, step: FactoryResetStep);
 }
 
 /// Why a reset was refused before anything was touched.
@@ -54,10 +90,13 @@ pub struct FactoryResetPorts {
     pub handshake: Arc<dyn Handshake>,
     pub remote: Option<Arc<dyn RemoteRevocation>>,
     pub profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
-    pub notification_sender: Option<Arc<dyn NotificationSender>>,
+    /// Delivers the household notice to each member's own devices, in their own language —
+    /// never a broadcast, so no member's copy is ever rendered in another's.
+    pub member_notifier: Option<Arc<dyn MemberNotifier>>,
     pub tts: Option<Arc<dyn VoiceOutput>>,
     pub credit_ledger: Arc<dyn crate::mesh::ports::credit_ledger::CreditLedger + Send + Sync>,
     pub data_wipe: Arc<dyn PersonalDataWipe>,
+    pub progress: Option<Arc<dyn FactoryResetProgress>>,
 }
 
 pub struct FactoryResetService;
@@ -85,6 +124,7 @@ impl FactoryResetService {
             return Err(FactoryResetRefusal::PaymentsHeld);
         }
 
+        Self::report(ports, FactoryResetStep::Exporting);
         let routines = match &ports.scheduler {
             Some(scheduler) => scheduler.list_tasks().await.unwrap_or_else(|error| {
                 tracing::warn!(%error, "factory reset: could not export routines");
@@ -93,9 +133,9 @@ impl FactoryResetService {
             None => Vec::new(),
         };
 
-        // Snapshot the owner's language before `profiles` is erased — the household notice is
-        // rendered now, even though it isn't sent until after revocation below.
-        let owner_language = ports
+        // Snapshot every member's own language before `profiles` is erased — the household
+        // notice is rendered now, even though it isn't sent until after revocation below.
+        let household_languages: Vec<(String, String)> = ports
             .profile_repo
             .list()
             .await
@@ -104,16 +144,26 @@ impl FactoryResetService {
                 Vec::new()
             })
             .into_iter()
-            .find(|profile| profile.role == Role::Owner)
-            .and_then(|profile| profile.preferences.get("language").cloned());
+            .map(|profile| {
+                let language = profile.preferences.get("language").cloned().unwrap_or_default();
+                (profile.id, language)
+            })
+            .collect();
 
+        // Notify before revoking: `notify_household` resolves each member's own devices through
+        // `devices_for_profile`, which `revoke_every_device` deletes the rows behind.
+        Self::report(ports, FactoryResetStep::NotifyingHousehold);
+        Self::notify_household(ports, &household_languages).await;
+
+        Self::report(ports, FactoryResetStep::RevokingDevices);
         Self::revoke_every_device(ports).await;
-        Self::notify_household(ports, owner_language.as_deref()).await;
 
+        Self::report(ports, FactoryResetStep::ErasingData);
         if let Err(error) = ports.data_wipe.wipe().await {
             tracing::error!(%error, "factory reset: erasing household data failed");
         }
 
+        Self::report(ports, FactoryResetStep::SpeakingGoodbye);
         if let Some(tts) = &ports.tts {
             if let Err(error) = tts.speak("Goodbye. This Pond has been reset.").await {
                 tracing::warn!(%error, "factory reset: could not speak the goodbye");
@@ -126,6 +176,7 @@ impl FactoryResetService {
             }
         }
 
+        Self::report(ports, FactoryResetStep::ReopeningOnboarding);
         let onboarding = OnboardingService::new(ports.onboarding.clone());
         if let Err(error) = onboarding.reset().await {
             tracing::warn!(%error, "factory reset: could not reset onboarding state");
@@ -135,6 +186,12 @@ impl FactoryResetService {
         }
 
         Ok(FactoryResetExport { routines })
+    }
+
+    fn report(ports: &FactoryResetPorts, step: FactoryResetStep) {
+        if let Some(progress) = &ports.progress {
+            progress.report(step);
+        }
     }
 
     async fn revoke_every_device(ports: &FactoryResetPorts) {
@@ -174,21 +231,31 @@ impl FactoryResetService {
         }
     }
 
-    async fn notify_household(ports: &FactoryResetPorts, owner_language: Option<&str>) {
-        let Some(notify) = &ports.notification_sender else {
+    /// Tells each member their own Pond was reset, in their own language — never everyone at
+    /// once in the same wording, since `(profile_id, language)` differs per member.
+    async fn notify_household(ports: &FactoryResetPorts, household_languages: &[(String, String)]) {
+        let Some(notifier) = &ports.member_notifier else {
             return;
         };
-        let notification = Notification {
-            id: format!("factory-reset-{}", uuid::Uuid::new_v4()),
-            target: String::new(), // overwritten by `broadcast()`
-            category: "alert".to_string(),
-            title: "Pond reset".to_string(),
-            body: factory_reset_notice(owner_language.unwrap_or("")).to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            data: None,
-        };
-        if let Err(error) = notify.broadcast(notification).await {
-            tracing::warn!(%error, "factory reset: could not broadcast the household notice");
+        for (profile_id, language) in household_languages {
+            let notification = Notification {
+                id: format!("factory-reset-{}", uuid::Uuid::new_v4()),
+                target: String::new(), // overwritten by `notify_member()`
+                category: "alert".to_string(),
+                title: "Pond reset".to_string(),
+                body: factory_reset_notice(language).to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: None,
+            };
+            if let MemberDelivery::Failed(reason) =
+                notifier.notify_member(profile_id, notification).await
+            {
+                tracing::warn!(
+                    profile_id = %profile_id,
+                    reason = %reason,
+                    "factory reset: could not notify a member of the reset"
+                );
+            }
         }
     }
 }
@@ -196,7 +263,7 @@ impl FactoryResetService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::mocks::mock_notification_sender::{Delivery, MockNotificationSender};
+    use crate::mcp::mocks::mock_member_notifier::MockMemberNotifier;
     use crate::mesh::domain::millisats::Millisats;
     use crate::mesh::domain::peer_id::PeerId;
     use crate::mesh::mocks::mock_credit_ledger::MockCreditLedger;
@@ -359,6 +426,15 @@ mod tests {
         }
     }
 
+    struct LoggingMemberNotifier(Arc<CallLog>);
+    #[async_trait::async_trait]
+    impl MemberNotifier for LoggingMemberNotifier {
+        async fn notify_member(&self, _: &str, _: Notification) -> MemberDelivery {
+            self.0.record("member_notifier.notify_member");
+            MemberDelivery::NoPhone
+        }
+    }
+
     struct FakeWipe(Arc<CallLog>);
     #[async_trait::async_trait]
     impl PersonalDataWipe for FakeWipe {
@@ -418,10 +494,11 @@ mod tests {
             handshake: Arc::new(FakeHandshake(log.clone())),
             remote: Some(Arc::new(FakeRemote(log.clone(), Vec::new()))),
             profile_repo: Arc::new(profile_repo),
-            notification_sender: Some(Arc::new(MockNotificationSender::new())),
+            member_notifier: Some(Arc::new(MockMemberNotifier::new())),
             tts: Some(Arc::new(FakeVoiceOutput(log.clone()))),
             credit_ledger: Arc::new(MockCreditLedger::new()),
             data_wipe: Arc::new(FakeWipe(log)),
+            progress: None,
         }
     }
 
@@ -485,6 +562,7 @@ mod tests {
             missed_run: None,
         };
         ports.scheduler = Some(Arc::new(FakeScheduler(log.clone(), vec![routine.clone()])));
+        ports.member_notifier = Some(Arc::new(LoggingMemberNotifier(log.clone())));
 
         let export =
             FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
@@ -497,10 +575,15 @@ mod tests {
         let calls = log.calls();
         // Export and the household snapshot happen before anything is revoked or erased.
         let export_idx = calls.iter().position(|c| *c == "scheduler.list_tasks").unwrap();
+        let notify_idx = calls.iter().position(|c| *c == "member_notifier.notify_member").unwrap();
         let revoke_idx = calls.iter().position(|c| *c == "handshake.revoke_device").unwrap();
         let wipe_idx = calls.iter().position(|c| *c == "data_wipe.wipe").unwrap();
         let onboarding_idx = calls.iter().position(|c| *c == "onboarding.reset").unwrap();
         assert!(export_idx < revoke_idx, "routines must be exported before devices are revoked");
+        assert!(
+            notify_idx < revoke_idx,
+            "members must be notified while their devices still resolve, before revocation deletes them"
+        );
         assert!(revoke_idx < wipe_idx, "devices must be revoked before data is erased");
         assert!(wipe_idx < onboarding_idx, "data must be erased before onboarding resets");
         assert!(calls.contains(&"tts.speak"));
@@ -525,7 +608,7 @@ mod tests {
     async fn a_failed_notification_never_fails_the_reset() {
         let log = Arc::new(CallLog::default());
         let mut ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
-        ports.notification_sender = Some(Arc::new(MockNotificationSender::new().failing()));
+        ports.member_notifier = Some(Arc::new(MockMemberNotifier::new().failing_next(1)));
 
         let export =
             FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
@@ -534,19 +617,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_household_notice_is_broadcast_in_the_owners_language() {
+    async fn the_household_notice_reaches_each_member_in_their_own_language() {
         let log = Arc::new(CallLog::default());
-        let sender = Arc::new(MockNotificationSender::new());
+        let notifier = Arc::new(MockMemberNotifier::new());
         let mut ports = happy_ports(log, vec![], Some("sw")).await;
-        ports.notification_sender = Some(sender.clone());
+        let owner = ports
+            .profile_repo
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.role == crate::user_data::domain::profile::Role::Owner)
+            .unwrap();
+        let member = ports
+            .profile_repo
+            .create(CreateProfileRequest {
+                display_name: "Member".to_string(),
+                avatar_emoji: "🦆".to_string(),
+            })
+            .await
+            .unwrap();
+        let mut prefs = std::collections::HashMap::new();
+        prefs.insert("language".to_string(), "fr".to_string());
+        ports
+            .profile_repo
+            .update_preferences(&member.id, prefs)
+            .await
+            .unwrap();
+        ports.member_notifier = Some(notifier.clone());
 
         FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
             .await
             .unwrap();
 
-        let sent = sender.sent();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, Delivery::Broadcast);
-        assert!(sent[0].1.body.contains("kaya"));
+        let sent = notifier.sent();
+        assert_eq!(sent.len(), 2, "each member gets their own copy, not one broadcast");
+        let owner_copy = sent.iter().find(|(id, _)| *id == owner.id).unwrap();
+        let member_copy = sent.iter().find(|(id, _)| *id == member.id).unwrap();
+        assert!(owner_copy.1.body.contains("kaya"), "the owner's copy is in their own language");
+        assert!(member_copy.1.body.contains("foyer"), "the member's copy is in their own language");
+    }
+
+    #[derive(Default)]
+    struct RecordingProgress(Mutex<Vec<FactoryResetStep>>);
+    impl FactoryResetProgress for RecordingProgress {
+        fn report(&self, step: FactoryResetStep) {
+            self.0.lock().unwrap().push(step);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_step_is_reported_once_in_order() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log, vec![device("phone-1")], None).await;
+        let progress = Arc::new(RecordingProgress::default());
+        ports.progress = Some(progress.clone());
+
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+            .await
+            .unwrap();
+
+        assert_eq!(progress.0.lock().unwrap().clone(), FactoryResetStep::ALL.to_vec());
     }
 }

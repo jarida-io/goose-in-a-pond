@@ -410,6 +410,24 @@ export interface MeshSettlementStatus {
   }>;
 }
 
+// ── Factory reset ─────────────────────────────────────────────
+export type FactoryResetStep =
+  | "exporting"
+  | "notifying_household"
+  | "revoking_devices"
+  | "erasing_data"
+  | "speaking_goodbye"
+  | "reopening_onboarding";
+
+export type FactoryResetStatus =
+  | { active: false }
+  | {
+      active: true;
+      current_step: FactoryResetStep;
+      steps_completed: number;
+      total_steps: number;
+    };
+
 // ── Schedules ─────────────────────────────────────────────────
 export interface Schedule {
   id: string;

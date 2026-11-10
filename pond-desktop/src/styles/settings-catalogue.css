@@ -1154,6 +1154,30 @@ select.scat__field--text { width: 264px; }
   width: fit-content;
   user-select: all;
 }
+/* The reset's own checklist, polled while the single POST is still in flight (no percentage:
+ * the steps are a fixed, known sequence, not a byte count). */
+.danger-modal__checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.danger-modal__checklistItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-base);
+}
+.danger-modal__checklistItem--active { color: var(--color-text); font-weight: var(--weight-semibold); }
+.danger-modal__checklistItem--done { color: var(--color-success); }
+.danger-modal__checklistMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  flex-shrink: 0;
+}
+.danger-modal__checklistItem--active .danger-modal__checklistMark { border-color: var(--color-text); }
+.danger-modal__checklistItem--done .danger-modal__checklistMark { border-color: var(--color-success); }
 
 /* ── Folding, for a 7-inch panel ──────────────────────────────────────────
  *

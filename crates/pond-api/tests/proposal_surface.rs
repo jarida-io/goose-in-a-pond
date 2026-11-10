@@ -179,6 +179,8 @@ async fn make_app() -> Harness {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         api_port: 4000,
         weather_provider: None,
         peer_directory: Arc::new(

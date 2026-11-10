@@ -287,6 +287,12 @@ pub struct AppState {
     /// What producers (`send_notification`, the schedule bridge) send through.
     pub notification_sender:
         Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>>,
+    /// Delivers to one member's own devices, never a broadcast; the factory reset notice uses
+    /// this to reach each member in their own language.
+    pub member_notifier: Option<Arc<dyn pond_core::mcp::ports::notification::MemberNotifier>>,
+    /// Which step a factory reset in progress has reached, for `GET /admin/factory-reset/status`
+    /// to poll; `None` outside the one request that runs a reset.
+    pub factory_reset_progress: Option<Arc<pond_infra::factory_reset_progress::InMemoryFactoryResetProgress>>,
     /// Per-turn telemetry recorder. `None` when `telemetry_enabled` is false.
     pub telemetry: Option<Arc<dyn TelemetryPort>>,
     /// Per-session context fill tracking; warns before the "context cliff" where quality drops.

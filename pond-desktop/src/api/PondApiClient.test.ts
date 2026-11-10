@@ -1548,7 +1548,7 @@ describe("the host credential", () => {
     await api.factoryReset("The Kitchen Pond");
     await api.synthesizeSpeech("hello");
     expect(sent("/onboard/reset")).toEqual([credential]);
-    expect(sent("/factory-reset")).toEqual([credential]);
+    expect(sent("/admin/factory-reset")).toEqual([credential]);
     expect(sent("/api/v1/tts")).toEqual([credential]);
   });
 
@@ -1623,7 +1623,7 @@ describe("factoryReset", () => {
     const result = await client().factoryReset("The Kitchen Pond");
     expect(result).toEqual({ routines: [{ id: "r1" }] });
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/api/v1/factory-reset");
+    expect(String(url)).toContain("/api/v1/admin/factory-reset");
     expect(JSON.parse(String(init?.body))).toEqual({ pond_name: "The Kitchen Pond" });
   });
 

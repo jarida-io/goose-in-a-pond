@@ -219,7 +219,13 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     ),
     // Factory reset undoes setup, so unlike `/onboard/reset` it has no pre-onboarding exemption:
     // only an owner's token may ever reach it.
-    (Method::POST, "/factory-reset", Exposure::Authenticated),
+    (Method::POST, "/admin/factory-reset", Exposure::Authenticated),
+    // Read-only progress poll; same gate as the reset it reports on.
+    (
+        Method::GET,
+        "/admin/factory-reset/status",
+        Exposure::Authenticated,
+    ),
     // IANA zones: the same list on every pond, so it reveals nothing; needed before pairing too.
     (Method::GET, "/time/zones", Exposure::Always),
     // Detection geolocates via an outbound call, so it is open only until onboarding finishes.
@@ -1279,6 +1285,7 @@ mod tests {
             // A phone's own device during owner setup; each handler admits only that device.
             "DELETE /devices/{id}/push-token = Authenticated".to_string(),
             "DELETE /voice/calibrate = UntilOnboarded".to_string(),
+            "GET /admin/factory-reset/status = Authenticated".to_string(),
             "GET /connections = Authenticated".to_string(),
             "GET /connections/wifi/networks = Authenticated".to_string(),
             "GET /devices/self = Authenticated".to_string(),
@@ -1300,13 +1307,13 @@ mod tests {
             "GET /test = HostOnly".to_string(),
             "GET /warmup = UntilOnboarded".to_string(),
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
+            // Unlike `/onboard/reset`, no pre-onboarding exemption: only an owner's token reaches it.
+            "POST /admin/factory-reset = Authenticated".to_string(),
             "POST /connections/wifi/join = Authenticated".to_string(),
             "POST /devices/{id}/push-token = Authenticated".to_string(),
             // The music player bridge and extension egress: the handlers check the internal
             // token; HostOnly because no legitimate caller is off the host.
             "POST /extension/egress = HostOnly".to_string(),
-            // Unlike `/onboard/reset`, no pre-onboarding exemption: only an owner's token reaches it.
-            "POST /factory-reset = Authenticated".to_string(),
             // One outbound geocoding call for a place NAME; no household data leaves. Wizard-only.
             "POST /handshake/revoke = Authenticated".to_string(),
             "POST /location/detect = UntilOnboarded".to_string(),

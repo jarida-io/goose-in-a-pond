@@ -242,6 +242,8 @@ async fn pond_with_parts(
         notification_queue: None,
         notification_history: None,
         notification_sender: notifications.map(|n| n as Arc<dyn NotificationSender>),
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

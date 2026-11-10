@@ -133,7 +133,11 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Reset onboarding back to the first step ("Start over" in Settings).
         .route("/onboard/reset", post(reset_onboarding))
         // Wipe the Pond's household data and reopen onboarding ("Factory reset" in Settings).
-        .route("/factory-reset", post(factory_reset))
+        // Under `/admin` to match the other My-Pond routes the mobile client groups it with,
+        // though unlike those it needs no admin-card unlock -- owner role + typed name already
+        // gate it (see `factory_reset` below).
+        .route("/admin/factory-reset", post(factory_reset))
+        .route("/admin/factory-reset/status", get(factory_reset_status))
         // The write is the wizard's; the read needs a token in every state, so the wizard can
         // resume from what it saved without a PUT that answers with the whole record.
         .route("/settings", get(get_settings).put(update_settings))
@@ -1942,6 +1946,10 @@ async fn factory_reset(
         )
     })?;
 
+    if let Some(progress) = &state.factory_reset_progress {
+        progress.clear();
+    }
+
     let ports = FactoryResetPorts {
         onboarding: state.onboarding_repo.clone(),
         setup_claims: state.setup_claims.clone(),
@@ -1950,13 +1958,21 @@ async fn factory_reset(
         handshake: state.handshake.clone(),
         remote: remote.map(|axum::Extension(remote)| remote),
         profile_repo: state.profile_repo.clone(),
-        notification_sender: state.notification_sender.clone(),
+        member_notifier: state.member_notifier.clone(),
         tts: state.tts.clone(),
         credit_ledger: state.credit_ledger.clone(),
         data_wipe,
+        progress: state.factory_reset_progress.clone().map(|p| {
+            p as Arc<dyn pond_core::network::services::factory_reset::FactoryResetProgress>
+        }),
     };
 
-    match FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await {
+    let result = FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await;
+    if let Some(progress) = &state.factory_reset_progress {
+        progress.clear();
+    }
+
+    match result {
         Ok(export) => Ok(Json(json!({ "routines": export.routines }))),
         Err(FactoryResetRefusal::NoPondName) => Err((
             StatusCode::CONFLICT,
@@ -1971,6 +1987,23 @@ async fn factory_reset(
             Json(json!({"error": "payments_held"})),
         )),
     }
+}
+
+/// `GET /api/v1/admin/factory-reset/status` — which step a reset in progress has reached, for
+/// the desktop checklist to poll; `active: false` both before one starts and after it ends.
+async fn factory_reset_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    use pond_core::network::services::factory_reset::FactoryResetStep;
+
+    let step = state.factory_reset_progress.as_ref().and_then(|p| p.current());
+    Json(match step {
+        Some(step) => json!({
+            "active": true,
+            "current_step": step,
+            "steps_completed": step.position(),
+            "total_steps": FactoryResetStep::ALL.len(),
+        }),
+        None => json!({ "active": false }),
+    })
 }
 
 #[derive(Deserialize)]

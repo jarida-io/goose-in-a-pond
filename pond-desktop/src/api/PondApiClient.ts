@@ -28,6 +28,7 @@ import {
   type DownloadStarted,
   type Extension,
   type FaceModelsResponse,
+  type FactoryResetStatus,
   type HandshakeResponse,
   type HealthResponse,
   type HouseholdProfile,
@@ -632,7 +633,12 @@ export class PondApiClient {
    * a held mesh-credit balance refuses with `"payments_held"`.
    */
   factoryReset(pondName: string): Promise<{ routines: Schedule[] }> {
-    return this.hostRequest("POST", "/api/v1/factory-reset", { pond_name: pondName });
+    return this.hostRequest("POST", "/api/v1/admin/factory-reset", { pond_name: pondName });
+  }
+
+  /** Which step a reset in progress has reached; poll this while {@link factoryReset} is in flight. */
+  factoryResetStatus(): Promise<FactoryResetStatus> {
+    return this.hostRequest("GET", "/api/v1/admin/factory-reset/status");
   }
 
   /** WAV bytes for `text`; throws {@link ApiError} (e.g. 503) when no TTS backend runs. */

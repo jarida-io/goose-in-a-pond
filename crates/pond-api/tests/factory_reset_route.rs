@@ -1,4 +1,4 @@
-//! HTTP-level coverage for `POST /api/v1/factory-reset`: owner-only, refused on a name mismatch
+//! HTTP-level coverage for `POST /api/v1/admin/factory-reset`: owner-only, refused on a name mismatch
 //! or a held mesh-credit balance, and otherwise erases the household's SQLite rows and reopens
 //! onboarding. `factory_reset.rs` (pond-core) covers the service's own sequencing; this covers
 //! the route wiring — permission check, request parsing, `AppState` assembly, and status codes.
@@ -117,6 +117,8 @@ async fn make_app() -> (axum::Router, Arc<Database>, Arc<MockCreditLedger>, temp
         notification_tx: tokio::sync::broadcast::channel(16).0,
         notification_queue: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -194,7 +196,7 @@ async fn the_owner_typing_the_real_name_wipes_the_household_and_reopens_onboardi
     let resp = router
         .clone()
         .oneshot(post(
-            "/api/v1/factory-reset",
+            "/api/v1/admin/factory-reset",
             serde_json::json!({"pond_name": POND_NAME}),
         ))
         .await
@@ -233,7 +235,7 @@ async fn an_unnamed_pond_refuses_rather_than_let_an_empty_typed_name_match() {
     let resp = router
         .clone()
         .oneshot(post(
-            "/api/v1/factory-reset",
+            "/api/v1/admin/factory-reset",
             serde_json::json!({"pond_name": ""}),
         ))
         .await
@@ -266,7 +268,7 @@ async fn a_mistyped_name_refuses_with_409_and_touches_nothing() {
     let resp = router
         .clone()
         .oneshot(post(
-            "/api/v1/factory-reset",
+            "/api/v1/admin/factory-reset",
             serde_json::json!({"pond_name": "Not The Right Name"}),
         ))
         .await
@@ -303,7 +305,7 @@ async fn a_held_mesh_credit_balance_refuses_with_409() {
     let resp = router
         .clone()
         .oneshot(post(
-            "/api/v1/factory-reset",
+            "/api/v1/admin/factory-reset",
             serde_json::json!({"pond_name": POND_NAME}),
         ))
         .await

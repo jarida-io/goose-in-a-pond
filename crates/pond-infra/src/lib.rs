@@ -1,5 +1,6 @@
 pub mod broadcast_notification_sender;
 pub mod db;
+pub mod factory_reset_progress;
 pub mod fastembed_embedding;
 pub mod fcm_push_relay;
 pub mod file_admin_card;
