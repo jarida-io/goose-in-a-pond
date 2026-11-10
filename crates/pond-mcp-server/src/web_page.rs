@@ -402,6 +402,19 @@ async fn read_page(address: &str, depth: u8) -> Result<Page, String> {
     Ok(page)
 }
 
+/// A page's final address, title and readable text, for background work that writes from it in
+/// its own words. Read as `read_web_page` reads it, so its preview image is noted for pictures.
+pub async fn read_page_text(address: &str) -> Result<(String, String, String), String> {
+    let page = read_page(address, 0).await?;
+    let text = page
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((page.address.clone(), page.title.clone(), text))
+}
+
 /// Keeps a sent form's answer as a page read at `depth`, so the conversation reads it from the
 /// cache: a POST's answer may not come back to a plain read of its address. Returns its title.
 pub(crate) async fn keep_answer(address: String, html: String, depth: u8) -> String {

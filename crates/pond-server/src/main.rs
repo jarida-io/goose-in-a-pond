@@ -15,6 +15,7 @@ mod kokoro_control;
 mod litert_runtime;
 mod llamafile_process;
 mod llm_memory_consolidator;
+mod my_goose_mind;
 use pond_server::tls_identity;
 mod model_download;
 mod node_path;
@@ -4041,6 +4042,19 @@ async fn run_server(
         );
         let _ = ProfileScope::Household;
     }
+
+    // ── My Goose: each member's portrait and researched ideas, on the lane ──
+    let mind = my_goose_mind::MindDeps {
+        lane: inference_lane.clone(),
+        db: db.clone(),
+        profiles: profile_repo.clone(),
+        memories: memory_repo.clone(),
+        sessions: session_storage.clone(),
+        provider: llm_provider.clone(),
+        last_user_activity: last_user_activity.clone(),
+    };
+    my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
