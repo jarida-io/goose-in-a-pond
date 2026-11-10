@@ -1424,6 +1424,7 @@ async fn handshake_pairing_code(
     credential: Option<axum::Extension<crate::host_guard::HostCredential>>,
     transport: Option<axum::Extension<crate::network::CompanionTransport>>,
     embedded: Option<axum::Extension<crate::network::EmbeddedAddress>>,
+    tunnel: Option<axum::Extension<crate::network::TunnelAddress>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if !peer.ip().is_loopback() {
@@ -1442,7 +1443,7 @@ async fn handshake_pairing_code(
         .current_pairing_code()
         .await
         .map_err(|e| handshake_error("pairing_code_lookup", e))?;
-    let pairing = pairing_material(transport, embedded);
+    let pairing = pairing_material(transport, embedded, tunnel);
     match code {
         Some(pc) => Ok(Json(json!({
             "code": pc.code,
@@ -1477,6 +1478,7 @@ async fn handshake_issue_pairing_code(
     credential: Option<axum::Extension<crate::host_guard::HostCredential>>,
     transport: Option<axum::Extension<crate::network::CompanionTransport>>,
     embedded: Option<axum::Extension<crate::network::EmbeddedAddress>>,
+    tunnel: Option<axum::Extension<crate::network::TunnelAddress>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -1551,7 +1553,7 @@ async fn handshake_issue_pairing_code(
         "code": pc.code,
         "expires_at": pc.expires_at,
         "profile_id": pc.profile_id,
-        "pairing": pairing_material(transport, embedded),
+        "pairing": pairing_material(transport, embedded, tunnel),
     })))
 }
 
@@ -5228,6 +5230,7 @@ async fn system_info(
     State(state): State<Arc<AppState>>,
     transport: Option<axum::Extension<crate::network::CompanionTransport>>,
     embedded: Option<axum::Extension<crate::network::EmbeddedAddress>>,
+    tunnel: Option<axum::Extension<crate::network::TunnelAddress>>,
     insecure_dev: Option<axum::Extension<crate::insecure_dev::InsecureDevLan>>,
     headers: axum::http::HeaderMap,
 ) -> Json<Value> {
@@ -5238,7 +5241,7 @@ async fn system_info(
         }),
         Err(_) => false,
     };
-    let pairing = pairing_material(transport, embedded);
+    let pairing = pairing_material(transport, embedded, tunnel);
     if !authenticated {
         let mut info = json!({
             "https_port": pairing["https_port"],
@@ -5270,6 +5273,7 @@ async fn system_info(
 fn pairing_material(
     transport: Option<axum::Extension<crate::network::CompanionTransport>>,
     embedded: Option<axum::Extension<crate::network::EmbeddedAddress>>,
+    tunnel: Option<axum::Extension<crate::network::TunnelAddress>>,
 ) -> Value {
     let (https_port, tls_spki_sha256) = crate::network::transport_fields(transport);
     let hostname = hostname::get()
@@ -5285,6 +5289,8 @@ fn pairing_material(
         "lan_address": lan_address(),
         // Null off a tailnet; the phone's fallback when the LAN address doesn't answer.
         "tailnet_address": match embedded { Some(e) => e.0.0.read().ok().and_then(|v| v.clone()), None => tailnet_address() },
+        // Null unless a public tunnel runs; `host:port`, served with a certificate naming the host.
+        "tunnel_address": tunnel.and_then(|t| t.0.get()),
         "https_port": https_port,
         "tls_spki_sha256": tls_spki_sha256,
     })

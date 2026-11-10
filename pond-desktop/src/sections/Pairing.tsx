@@ -1,5 +1,5 @@
 import i18n from '../i18n';
-import { RemoteAccess } from './RemoteAccess';
+import { RemoteProvider } from './RemoteProvider';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Chip } from "@heroui/react";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
@@ -246,7 +246,7 @@ export function Pairing() {
               <code style={{ fontSize: 11 }}>_pond._tcp.local.</code> via mDNS.
             </Step>
           </div>
-          <RemoteAccess />
+          <RemoteProvider />
         </div>
       </div>
     </div>

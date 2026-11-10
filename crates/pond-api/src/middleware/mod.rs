@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use pond_core::security::ports::policy::Principal;
-use pond_core::security::ports::remote_access::{RemoteMachines, TailnetMachine};
+use pond_core::security::ports::remote_access::{RemoteMachines, RemoteTunnel, TailnetMachine};
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
 use std::{
     collections::HashMap,
@@ -31,6 +31,10 @@ pub enum AuthError {
     WrongMachine,
     /// The Pond could not learn which machine the token's device enrolled; retrying may work.
     MachineUnverifiable,
+    /// A tunnel request whose device has not been on the household LAN within the presence window.
+    AwayTooLong,
+    /// The Pond could not read when the token's device was last home; retrying may work.
+    PresenceUnverifiable,
 }
 
 impl IntoResponse for AuthError {
@@ -52,6 +56,14 @@ impl IntoResponse for AuthError {
             AuthError::MachineUnverifiable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Could not confirm which machine this device enrolled; try again",
+            ),
+            AuthError::AwayTooLong => (
+                StatusCode::FORBIDDEN,
+                "This device has not been home recently; connect it to the household Wi-Fi once",
+            ),
+            AuthError::PresenceUnverifiable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Could not confirm when this device was last home; try again",
             ),
         };
         let body =
@@ -364,6 +376,22 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     }
 }
 
+/// What a public tunnel (ngrok) answers without a token: liveness, the port and protocol, and a
+/// paired phone renewing its session while away. Pairing, onboarding and sign-in callbacks are
+/// for the household's own network, so over the tunnel they need a token like everything else.
+const TUNNEL_TOKENLESS: &[(Method, &str)] = &[
+    (Method::GET, "/health"),
+    (Method::GET, "/system/info"),
+    (Method::POST, "/handshake/refresh"),
+];
+
+fn tunnel_answers_without_token(method: &Method, path: &str) -> bool {
+    let path = path.strip_prefix("/api/v1").unwrap_or(path);
+    TUNNEL_TOKENLESS
+        .iter()
+        .any(|(m, p)| m == method && *p == path)
+}
+
 /// This request's exposure class, or `None` when the route is not on the allowlist.
 fn route_exposure(method: &Method, path: &str) -> Option<Exposure> {
     // Dashboard and dev pages: tokenless only from loopback, never via a forwarding header.
@@ -550,7 +578,10 @@ pub async fn auth_middleware(
             .map(|ci| ci.0.ip().is_loopback())
             .unwrap_or(false);
 
-    if let Some(exposure) = route_exposure(req.method(), path.path()) {
+    let over_tunnel = req.extensions().get::<RemoteTunnel>().is_some();
+    let exposure = route_exposure(req.method(), path.path())
+        .filter(|_| !over_tunnel || tunnel_answers_without_token(req.method(), path.path()));
+    if let Some(exposure) = exposure {
         // Only the state-dependent classes read pond state; the rest ignore it.
         let state_dependent = matches!(
             exposure,
@@ -644,9 +675,42 @@ pub async fn auth_middleware(
         enrolled_on(machines, &principal_device, &machine).await?;
     }
 
+    // A public tunnel has no machine identity, so a token alone would work from anywhere: the
+    // device must also have been home recently, as remote access over the tailnet requires.
+    if let Some(RemoteTunnel(presence)) = req.extensions().get::<RemoteTunnel>().cloned() {
+        home_recently(presence.as_ref(), &principal_device, chrono::Utc::now()).await?;
+    }
+
     let mut req = req;
     req.extensions_mut().insert(principal);
     Ok(next.run(req).await)
+}
+
+/// Whether `device` was on the household LAN recently enough to be reached over a tunnel.
+/// Refuses a device never seen at home, and when the lookup fails.
+async fn home_recently(
+    presence: &dyn pond_core::security::ports::remote_access::DevicePresence,
+    device: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AuthError> {
+    if device.is_empty() {
+        return Err(AuthError::AwayTooLong);
+    }
+    match presence.lapses_at(device).await {
+        Ok(Some(lapses)) if lapses > now => Ok(()),
+        Ok(_) => {
+            tracing::warn!(
+                kind = "remote_tunnel_away_too_long",
+                device,
+                "refused a tunnel request: the device has not been home within the presence window"
+            );
+            Err(AuthError::AwayTooLong)
+        }
+        Err(error) => {
+            tracing::warn!(%error, device, "could not read when a device was last home");
+            Err(AuthError::PresenceUnverifiable)
+        }
+    }
 }
 
 /// Whether `device` enrolled `machine`. Refuses when the lookup is missing or fails.
@@ -730,6 +794,86 @@ mod tests {
             assert!(matches!(
                 enrolled_on(lookup(Err(anyhow::anyhow!("offline"))), "phone", PHONE).await,
                 Err(AuthError::MachineUnverifiable)
+            ));
+        }
+    }
+
+    mod remote_tunnel {
+        use super::super::{home_recently, tunnel_answers_without_token, AuthError};
+        use axum::http::Method;
+
+        #[test]
+        fn only_liveness_info_and_refresh_skip_the_token_over_a_tunnel() {
+            assert!(tunnel_answers_without_token(&Method::GET, "/api/v1/health"));
+            assert!(tunnel_answers_without_token(
+                &Method::GET,
+                "/api/v1/system/info"
+            ));
+            assert!(tunnel_answers_without_token(
+                &Method::POST,
+                "/api/v1/handshake/refresh"
+            ));
+            for (method, path) in [
+                (Method::POST, "/api/v1/handshake/pake/init"),
+                (Method::POST, "/api/v1/handshake/pairing-code"),
+                (Method::GET, "/api/v1/oauth/callback"),
+                (Method::GET, "/api/v1/onboard/status"),
+                (Method::GET, "/"),
+            ] {
+                assert!(
+                    !tunnel_answers_without_token(&method, path),
+                    "{method} {path}"
+                );
+            }
+        }
+        use chrono::{DateTime, Duration, Utc};
+        use pond_core::security::ports::remote_access::DevicePresence;
+
+        struct Lapses(anyhow::Result<Option<DateTime<Utc>>>);
+
+        #[async_trait::async_trait]
+        impl DevicePresence for Lapses {
+            async fn seen_on_lan(&self, _: &str) {}
+            async fn absent_since(&self, _: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+            async fn lapses_at(&self, _: &str) -> anyhow::Result<Option<DateTime<Utc>>> {
+                match &self.0 {
+                    Ok(at) => Ok(*at),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn only_a_device_home_within_the_window_passes() {
+            let now = Utc::now();
+            let home = Lapses(Ok(Some(now + Duration::days(3))));
+            assert!(home_recently(&home, "phone", now).await.is_ok());
+            let lapsed = Lapses(Ok(Some(now - Duration::seconds(1))));
+            assert!(matches!(
+                home_recently(&lapsed, "phone", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+            let never_home = Lapses(Ok(None));
+            assert!(matches!(
+                home_recently(&never_home, "phone", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+        }
+
+        #[tokio::test]
+        async fn no_device_or_a_failed_lookup_refuses() {
+            let now = Utc::now();
+            let home = Lapses(Ok(Some(now + Duration::days(3))));
+            assert!(matches!(
+                home_recently(&home, "", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+            let broken = Lapses(Err(anyhow::anyhow!("database locked")));
+            assert!(matches!(
+                home_recently(&broken, "phone", now).await,
+                Err(AuthError::PresenceUnverifiable)
             ));
         }
     }

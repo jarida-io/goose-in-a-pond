@@ -3567,6 +3567,8 @@ async fn run_server(
     let (cert, key) = tls_identity.pem();
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key).await?;
     #[cfg(unix)]
+    let tunnel_certifier = tls_identity.tunnel_certifier();
+    #[cfg(unix)]
     let (embedded, embedded_listener) =
         pond_server::embedded_network::Runtime::new(&data_dir, https_port)?;
     std::fs::write(data_dir.join(".runtime_https_port"), https_port.to_string())?;
@@ -4827,6 +4829,12 @@ async fn run_server(
         }
     };
 
+    #[cfg(unix)]
+    let tunnel = Arc::new(pond_server::remote_tunnel::Tunnel::new(
+        &data_dir,
+        state.secret_repo.clone(),
+        tunnel_certifier,
+    ));
     let mut listeners = pond_server::listeners::compose(
         state.clone(),
         static_dir,
@@ -4835,6 +4843,8 @@ async fn run_server(
         insecure_dev.marker(),
         #[cfg(unix)]
         embedded.clone(),
+        #[cfg(unix)]
+        tunnel.clone(),
     );
     if let Some(radios) = ble_radios {
         // `GET /network/status` and `GET /connections` on every listener a household's devices use.
@@ -4842,6 +4852,7 @@ async fn run_server(
         #[cfg(unix)]
         {
             listeners.embedded = listeners.embedded.layer(axum::Extension(radios.clone()));
+            listeners.tunnel = listeners.tunnel.layer(axum::Extension(radios.clone()));
         }
         listeners.companion = listeners.companion.layer(axum::Extension(radios));
     }
@@ -4853,6 +4864,9 @@ async fn run_server(
         listeners.embedded = listeners
             .embedded
             .layer(axum::Extension(connections.clone()));
+        listeners.tunnel = listeners.tunnel.layer(axum::Extension(connections.clone()));
+        tunnel.serve_with(listeners.tunnel.clone());
+        tunnel.start_if_enabled().await;
     }
     listeners.companion = listeners.companion.layer(axum::Extension(connections));
     #[cfg(unix)]
@@ -5038,6 +5052,8 @@ async fn run_server(
     if let Err(error) = embedded.shutdown().await {
         tracing::warn!(%error, "embedded networking shutdown failed");
     }
+    #[cfg(unix)]
+    tunnel.stop().await;
 
     // kill_on_drop doesn't fire on the signal path; kill matter-server here or it orphans.
     if let Some(matter) = &matter_runtime {

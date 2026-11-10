@@ -19,6 +19,8 @@ use tower::ServiceExt;
 
 const LOOPBACK: ([u8; 4], u16) = ([127, 0, 0, 1], 40_000);
 const LAN: ([u8; 4], u16) = ([192, 168, 1, 20], 40_000);
+/// A caller on the internet, as the ngrok tunnel reports one.
+const INTERNET: ([u8; 4], u16) = ([203, 0, 113, 9], 50_000);
 
 /// Accepts one bearer, so a 404 means the route is absent rather than the caller refused.
 /// Pairing codes and CPace pairing come from the real adapter.
@@ -95,6 +97,17 @@ async fn harness_with(insecure: Option<pond_api::insecure_dev::InsecureDevLan>) 
     let web = test.dir.path().join("web");
     std::fs::create_dir_all(&web).unwrap();
     std::fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+    #[cfg(unix)]
+    let tunnel = {
+        let identity =
+            pond_server::tls_identity::TlsIdentity::load(test.dir.path(), &["pond.local".into()])
+                .unwrap();
+        std::sync::Arc::new(pond_server::remote_tunnel::Tunnel::new(
+            test.dir.path(),
+            None,
+            identity.tunnel_certifier(),
+        ))
+    };
     let listeners = compose(
         std::sync::Arc::new(pond_api::AppState {
             handshake: std::sync::Arc::new(PairedPhone(test.handshake)),
@@ -106,6 +119,8 @@ async fn harness_with(insecure: Option<pond_api::insecure_dev::InsecureDevLan>) 
         insecure,
         #[cfg(unix)]
         embedded,
+        #[cfg(unix)]
+        tunnel,
     );
     Harness {
         listeners,
@@ -626,4 +641,76 @@ async fn a_phone_pairs_with_cpace_over_the_plaintext_listener() {
     let (status, body) = pond_api::test_support::pair_phone(&phone, code, "expo-go", pin).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["accepted"], true, "{body}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_tunnel_takes_a_token_only_from_a_device_home_recently_and_never_renews() {
+    let h = harness().await;
+    let (status, body) = get(&h.listeners.tunnel, INTERNET, "/api/v1/devices").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a device never seen at home: {body}"
+    );
+    assert!(
+        h.presence.lapses_at("phone").await.unwrap().is_none(),
+        "a tunnel request counted as being at home"
+    );
+
+    h.presence.seen_on_lan("phone").await;
+    let (status, body) = get(&h.listeners.tunnel, INTERNET, "/api/v1/devices").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_tunnel_answers_only_liveness_info_and_refresh_without_a_token() {
+    let h = harness().await;
+    let anonymous = |path: &str| {
+        Request::get(path)
+            .header("Host", "4.tcp.eu.ngrok.io:12345")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let tunnel = h
+        .listeners
+        .tunnel
+        .clone()
+        .layer(axum::Extension(ConnectInfo(SocketAddr::from(INTERNET))));
+    let (status, body) = send(tunnel.clone(), anonymous("/api/v1/system/info")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("tunnel_address").is_none(),
+        "an anonymous caller learned the tunnel address: {body}"
+    );
+    let (status, _) = send(tunnel.clone(), anonymous("/api/v1/health")).await;
+    assert_eq!(status, StatusCode::OK);
+    for path in ["/api/v1/handshake/pairing-code", "/api/v1/onboard/status"] {
+        let (status, body) = send(tunnel.clone(), anonymous(path)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {body}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ngrok_management_is_served_only_by_the_dashboard() {
+    let h = harness().await;
+    let (dashboard, _) = get(
+        &h.listeners.dashboard,
+        LOOPBACK,
+        "/api/v1/remote-access/ngrok",
+    )
+    .await;
+    assert_ne!(dashboard, StatusCode::NOT_FOUND);
+    for router in [&h.listeners.companion, &h.listeners.tunnel] {
+        let (status, _) = get(router, LAN, "/api/v1/remote-access/ngrok").await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ),
+            "ngrok management answered {status} off the dashboard"
+        );
+    }
 }

@@ -620,6 +620,15 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | POST | /api/v1/remote-access/enrollment | companion | token, LAN | Enroll this phone on the tailnet |
 | POST | /api/v1/remote-access/recovery | companion | token, LAN | Ask to replace this phone's enrollment |
 | GET, POST, DELETE | /api/v1/remote-access/recovery/{id} | companion | token, LAN | Poll, execute or cancel that request |
+| GET | /api/v1/remote-access/ngrok | dashboard | loopback, cred | `{config, tokenSet, status}` of the household's ngrok tunnel |
+| PUT | /api/v1/remote-access/ngrok | dashboard | loopback, cred | Save `{enabled, endpoint: "tcp"\|"tls", domain?, remoteAddr?}` and start or stop the tunnel; `409 no_authtoken` |
+| PUT | /api/v1/remote-access/ngrok/token | dashboard | loopback, cred | `{authtoken}`: opens one ngrok session to check it, then stores it encrypted; `400 authtoken_refused` |
+| DELETE | /api/v1/remote-access/ngrok/token | dashboard | loopback, cred | Stop the tunnel and forget the authtoken |
+
+`status` is `{state: "off" | "starting"}`, `{state: "running", address}` (`host:port`) or
+`{state: "failed", reason}`. While it runs, the pairing material and an authenticated
+`GET /system/info` carry `tunnel_address`; the anonymous `/system/info` never does. The generic
+secret routes refuse the `NGROK_AUTHTOKEN` key.
 
 ### Non-API paths
 

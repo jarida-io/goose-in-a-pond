@@ -232,3 +232,9 @@ futures    = { workspace = true }
 # getuid(), so the voice lock is per-user rather than per-machine.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Remote access through the household's own ngrok account (src/remote_tunnel.rs). The tunnel
+# passes the phone's TLS through untouched; the pond terminates it with its pinned key.
+ngrok = { version = "0.19", default-features = false, features = ["aws-lc-rs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
+tower = { workspace = true, features = ["util"] }
