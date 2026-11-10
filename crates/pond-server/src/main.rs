@@ -8100,16 +8100,22 @@ async fn consolidate_one_batch(
     match result {
         Ok(ref result) => {
             // Collected, not lazy: a borrowing iterator across the await breaks HRTB inference.
-            let accepted: Vec<
+            let accepted: Vec<(
                 pond_core::user_data::ports::memory_consolidator::ConsolidationAction,
-            > = result
+                String,
+            )> = result
                 .exchanges
                 .iter()
                 .filter(|e| e.judgment.accepted)
-                .map(|e| e.proposal.action.clone())
+                .map(|e| (e.proposal.action.clone(), e.proposal.rationale.clone()))
                 .collect();
 
-            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
+            let (outcome, changes) = match consolidation::apply_proposals(
+                repo,
+                &selection.batch,
+                accepted,
+            )
+            .await
             {
                 Ok(o) => o,
                 Err(e) => {
@@ -8134,7 +8140,11 @@ async fn consolidate_one_batch(
                     duration_ms = result.duration_ms,
                     "memory consolidation complete"
                 );
-                let details_json = serde_json::to_string(&result).ok();
+                // What changed, row by row with its text and reason, beside the whole trial.
+                let details_json = Some(consolidation::run_details(
+                    &changes,
+                    serde_json::to_value(result).ok(),
+                ));
                 let _ = repo
                     .log_consolidation_run(
                         mode_label,
