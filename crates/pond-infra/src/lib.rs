@@ -42,6 +42,8 @@ pub mod sqlite_profile;
 pub mod sqlite_profile_interview;
 pub mod sqlite_prompt_extra;
 pub mod sqlite_prompt_template;
+pub mod sqlite_ideas;
+pub mod sqlite_interests;
 pub mod sqlite_proposal;
 pub mod sqlite_push_token;
 pub mod sqlite_recipe;
