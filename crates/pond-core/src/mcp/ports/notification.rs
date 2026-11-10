@@ -62,6 +62,8 @@ pub enum OpenScreen {
     Watch { watch_id: Option<String> },
     /// My Goose's news, at the digest the notice is about.
     News { digest_id: Option<String> },
+    /// One watched link in My Goose's cart.
+    Cart { cart_id: String },
 }
 
 impl OpenScreen {
@@ -127,6 +129,10 @@ impl OpenScreen {
                     fields.insert("digest_id".into(), digest_id.as_str().into());
                 }
                 "news"
+            }
+            Self::Cart { cart_id } => {
+                fields.insert("cart_id".into(), cart_id.as_str().into());
+                "cart"
             }
         };
         fields.insert("open".into(), screen.into());
@@ -217,6 +223,17 @@ mod tests {
             }
             .data(),
             json!({"open": "news", "digest_id": "d1"})
+        );
+    }
+
+    #[test]
+    fn a_cart_hint_names_the_link() {
+        assert_eq!(
+            OpenScreen::Cart {
+                cart_id: "c1".into()
+            }
+            .data(),
+            json!({"open": "cart", "cart_id": "c1"})
         );
     }
 

@@ -1,5 +1,8 @@
 pub mod agent;
 pub mod agent_prefill;
+pub mod cart;
+pub mod catalog;
+pub mod connector;
 pub mod long_task;
 pub mod news;
 pub mod orchestration;
