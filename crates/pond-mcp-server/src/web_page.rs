@@ -1819,7 +1819,7 @@ mod live {
     use super::*;
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network; set PAGE_URL"]
     async fn live_page_reply() {
         let url = std::env::var("PAGE_URL").expect("set PAGE_URL");
         let question = std::env::var("PAGE_QUESTION").unwrap_or_default();
