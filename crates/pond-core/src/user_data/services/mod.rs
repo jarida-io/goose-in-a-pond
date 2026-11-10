@@ -4,6 +4,7 @@ pub mod device_edit;
 pub mod face_recognition_slot;
 pub mod identity_resolution;
 pub mod inference_lane;
+pub mod interest_interview;
 pub mod location;
 pub mod member_attribution;
 pub mod memory_cleanup;
