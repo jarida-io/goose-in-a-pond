@@ -20,6 +20,20 @@ use tower::ServiceExt;
 mod device_handshake;
 use device_handshake::DeviceHandshake;
 
+/// A model that never answers, so a turn stays `thinking` for as long as a test needs.
+struct Silent;
+
+#[async_trait::async_trait]
+impl LlmProvider for Silent {
+    async fn complete(&self, _system: &str, _messages: Vec<ChatMessage>) -> anyhow::Result<ChatMessage> {
+        std::future::pending().await
+    }
+
+    fn model_name(&self) -> String {
+        "silent".to_string()
+    }
+}
+
 /// Answers every interview turn the same way: one note about the last answer and a question.
 struct ScriptedInterviewer;
 
@@ -196,15 +210,6 @@ async fn the_interview_asks_drafts_reviews_and_saves() {
     assert_eq!(thinking["status"], "thinking");
     assert_eq!(thinking["turns"][1]["text"], "Yes. since season one");
 
-    let (status, _) = call(
-        &pond,
-        Method::POST,
-        "/me/interests/interview/answer",
-        json!({"text": "again"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "nothing to answer while thinking");
-
     let second = until_asking(&pond).await;
     assert_eq!(second["asked"], 2);
     assert_eq!(second["draft"][0]["topic"], "The Boys");
@@ -234,6 +239,23 @@ async fn the_interview_asks_drafts_reviews_and_saves() {
 
     let (_, done) = call(&pond, Method::GET, "/me/interests/interview", json!({})).await;
     assert_eq!(done["status"], "done");
+}
+
+#[tokio::test]
+async fn nothing_can_be_answered_while_the_next_question_is_being_written() {
+    let pond = a_pond(Some(Arc::new(Silent))).await;
+    let (_, started) = call(&pond, Method::POST, "/me/interests/interview", json!({})).await;
+    assert_eq!(started["status"], "thinking");
+    let (status, body) = call(
+        &pond,
+        Method::POST,
+        "/me/interests/interview/answer",
+        json!({"text": "Gaming"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, still) = call(&pond, Method::GET, "/me/interests/interview", json!({})).await;
+    assert_eq!(still["status"], "thinking");
 }
 
 #[tokio::test]
