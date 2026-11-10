@@ -17,6 +17,7 @@ mod llamafile_process;
 mod llm_memory_consolidator;
 use pond_server::tls_identity;
 mod model_download;
+mod news_runner;
 mod node_path;
 mod onnx_gpu;
 mod ports;
@@ -4034,6 +4035,21 @@ async fn run_server(
         );
         let _ = ProfileScope::Household;
     }
+
+    news_runner::spawn(news_runner::NewsDeps {
+        db: db.system.clone(),
+        settings: settings_repo.clone(),
+        profiles: profile_repo.clone(),
+        memories: memory_repo.clone(),
+        scheduler: scheduler.clone(),
+        provider: llm_provider.clone(),
+        lane: inference_lane.clone(),
+        last_user_activity: last_user_activity.clone(),
+        sessions: session_storage.clone(),
+        members: targeted_notification_sender.clone(),
+        voice: tts.clone(),
+        data_dir: data_dir.clone(),
+    });
 
     // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus

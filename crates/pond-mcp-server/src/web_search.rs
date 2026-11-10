@@ -330,7 +330,7 @@ async fn local_town_for_search() -> Option<String> {
     }
 }
 
-async fn brave_key() -> Option<String> {
+pub(crate) async fn brave_key() -> Option<String> {
     crate::secrets::secret(BRAVE_SEARCH_API_KEY)
         .await
         .map(|k| k.trim().to_string())
@@ -339,7 +339,7 @@ async fn brave_key() -> Option<String> {
 
 /// One client for Brave's host. It follows no redirect: reqwest strips only its standard credential
 /// headers on one, so the key's header would go wherever it points. `None` if TLS failed.
-fn brave_client() -> Option<&'static reqwest::Client> {
+pub(crate) fn brave_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -1802,7 +1802,7 @@ fn without_urls(text: &str) -> String {
 
 /// Tags out, the common entities decoded, whitespace collapsed: Brave's fields are plain text
 /// with decorations off, and this keeps them so if one slips through.
-fn plain_text(text: &str) -> String {
+pub(crate) fn plain_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_tag = false;
     for c in text.chars() {
