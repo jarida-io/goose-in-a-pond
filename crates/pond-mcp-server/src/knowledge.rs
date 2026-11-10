@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_fetch_exact_title() {
         let server = test_server();
         let text = server.fetch_article_summary("Nairobi").await.unwrap();
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_vague_query_finds_article() {
         let server = test_server();
         let text = server.search_and_fetch_best("black holes").await.unwrap();
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_get_article_auto_resolves_vague_topic() {
         let server = test_server();
         let text = server.search_and_fetch_best("volcanoes").await.unwrap();
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_nonsense_query_returns_not_found() {
         let server = test_server();
         let text = server
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_misspelled_topic_resolved() {
         let server = test_server();
         let text = server
@@ -752,7 +752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_search_books_returns_results() {
         let server = test_server();
         let url = "https://openlibrary.org/search.json?q=Dune+Frank+Herbert&limit=3";
