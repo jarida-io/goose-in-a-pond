@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod sensors;
 pub mod session_meta;
 pub mod system;
+pub mod todo_tools;
 pub mod toolkit;
 pub mod travel;
 pub mod vision;
