@@ -714,3 +714,20 @@ async fn ngrok_management_is_served_only_by_the_dashboard() {
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn system_info_over_the_tunnel_tells_the_household_only_to_a_device_home_recently() {
+    let h = harness().await;
+    let (status, body) = get(&h.listeners.tunnel, INTERNET, "/api/v1/system/info").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("hostname").is_none() && body["tailnet_address"].is_null(),
+        "a token from a device never home learned the household: {body}"
+    );
+
+    h.presence.seen_on_lan("phone").await;
+    let (status, body) = get(&h.listeners.tunnel, INTERNET, "/api/v1/system/info").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("hostname").is_some(), "{body}");
+}

@@ -238,3 +238,4 @@ ngrok = { version = "0.19", default-features = false, features = ["aws-lc-rs"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 tower = { workspace = true, features = ["util"] }
+if-addrs = { version = "0.13", features = ["link-local"] }

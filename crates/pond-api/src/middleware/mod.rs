@@ -688,7 +688,7 @@ pub async fn auth_middleware(
 
 /// Whether `device` was on the household LAN recently enough to be reached over a tunnel.
 /// Refuses a device never seen at home, and when the lookup fails.
-async fn home_recently(
+pub(crate) async fn home_recently(
     presence: &dyn pond_core::security::ports::remote_access::DevicePresence,
     device: &str,
     now: chrono::DateTime<chrono::Utc>,

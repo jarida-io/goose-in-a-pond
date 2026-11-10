@@ -35,6 +35,10 @@ const CONFIG_FILE: &str = "ngrok.json";
 /// ngrok's agent endpoint, which the session dials; checked against the network mode first.
 const NGROK_AGENT: &str = "https://connect.ngrok-agent.com";
 const LONGEST_ERROR: usize = 300;
+/// Connections served at once; more are dropped, so scanners cannot exhaust an 8 GB board.
+const MAX_CONNECTIONS: usize = 64;
+/// How long a caller has to finish the TLS handshake, and to send a request's headers.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 type Secrets = Arc<dyn SecretRepository + Send + Sync>;
 
@@ -195,7 +199,10 @@ impl Tunnel {
 
     /// Replace any running session with one for `config`. A failure is recorded in the status.
     pub async fn start(self: &Arc<Self>, config: Config) {
-        self.stop().await;
+        // Held from stopping the old session to storing the new one, so two overlapping starts
+        // cannot both spawn and leave one running that no handle can stop.
+        let mut running = self.running.lock().await;
+        Self::abort(&mut running).await;
         self.set_status(Status::Starting);
         let token = match self.authtoken().await {
             Ok(Some(token)) => token,
@@ -211,16 +218,21 @@ impl Tunnel {
                 tunnel.fail(redact(&format!("{error:#}"), &token));
             }
         });
-        *self.running.lock().await = Some(task);
+        *running = Some(task);
     }
 
     pub async fn stop(&self) {
-        if let Some(task) = self.running.lock().await.take() {
+        Self::abort(&mut *self.running.lock().await).await;
+        self.set_status(Status::Off);
+    }
+
+    /// Aborting the session task also drops its connection set, which aborts every connection.
+    async fn abort(running: &mut Option<tokio::task::JoinHandle<()>>) {
+        if let Some(task) = running.take() {
             task.abort();
             let _ = task.await;
             tracing::info!(target: "giap::trace", kind = "remote_tunnel_stopped", "ngrok tunnel stopped");
         }
-        self.set_status(Status::Off);
     }
 
     fn fail(&self, reason: String) {
@@ -278,15 +290,22 @@ impl Tunnel {
             "ngrok tunnel is up"
         );
         self.set_status(Status::Running { address });
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        // Dropped with this task when the tunnel stops, which aborts every open connection.
+        let mut connections = tokio::task::JoinSet::new();
         while let Some(conn) = tunnel.next().await {
             let conn = conn.map_err(|e| anyhow!("ngrok stopped accepting connections: {e}"))?;
-            let peer = public_peer(conn.remote_addr());
-            tokio::spawn(serve_connection(
-                conn,
-                peer,
-                acceptor.clone(),
-                router.clone(),
-            ));
+            while connections.try_join_next().is_some() {}
+            let Ok(slot) = slots.clone().try_acquire_owned() else {
+                tracing::debug!("tunnel connection dropped: {MAX_CONNECTIONS} already open");
+                continue;
+            };
+            let peer = public_peer(conn.remote_addr(), &lan_interfaces());
+            let (acceptor, router) = (acceptor.clone(), router.clone());
+            connections.spawn(async move {
+                serve_connection(conn, peer, acceptor, router).await;
+                drop(slot);
+            });
         }
         bail!("ngrok closed the tunnel")
     }
@@ -336,10 +355,14 @@ async fn serve_connection<C>(
 ) where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let stream = match acceptor.accept(conn).await {
-        Ok(stream) => stream,
-        Err(error) => {
+    let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(conn)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
             tracing::debug!(%error, "tunnel TLS handshake failed");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!("tunnel TLS handshake timed out");
             return;
         }
     };
@@ -347,7 +370,13 @@ async fn serve_connection<C>(
         request.extensions_mut().insert(ConnectInfo(peer));
         request
     });
-    let served = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HANDSHAKE_TIMEOUT);
+    let served = builder
         .serve_connection(
             hyper_util::rt::TokioIo::new(stream),
             hyper_util::service::TowerToHyperService::new(service),
@@ -358,10 +387,16 @@ async fn serve_connection<C>(
     }
 }
 
-/// The caller's address as ngrok reports it, kept only when it is a public one. Anything else
-/// becomes `0.0.0.0`, which is never loopback, LAN or tailnet: a tunnel caller must never pass
-/// for the host or for the household's own network.
-fn public_peer(reported: SocketAddr) -> SocketAddr {
+/// The pond's interfaces, for [`public_peer`]; none when they cannot be read.
+fn lan_interfaces() -> Vec<if_addrs::Interface> {
+    pond_api::network::interfaces().unwrap_or_default()
+}
+
+/// The caller's address as ngrok reports it, kept only when it is public and outside every
+/// subnet the pond is on. Anything else becomes `0.0.0.0`, which is never loopback, LAN or
+/// tailnet: a tunnel caller must never pass for the host or for the household's own network,
+/// including a pond on a public subnet.
+fn public_peer(reported: SocketAddr, interfaces: &[if_addrs::Interface]) -> SocketAddr {
     let ip = match reported.ip() {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         ip => ip,
@@ -386,7 +421,7 @@ fn public_peer(reported: SocketAddr) -> SocketAddr {
                 || first & 0xffc0 == 0xfe80)
         }
     };
-    if public {
+    if public && !pond_api::network::is_lan_peer(ip, interfaces) {
         SocketAddr::new(ip, reported.port())
     } else {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
@@ -597,7 +632,7 @@ mod tests {
     #[test]
     fn only_a_public_caller_keeps_its_address() {
         let public: SocketAddr = "203.0.113.9:5000".parse().unwrap();
-        assert_eq!(public_peer(public), public);
+        assert_eq!(public_peer(public, &[]), public);
         for hidden in [
             "127.0.0.1:5000",
             "192.168.1.20:5000",
@@ -610,9 +645,28 @@ mod tests {
             "[fe80::1]:5000",
             "[::ffff:192.168.1.20]:5000",
         ] {
-            let peer = public_peer(hidden.parse().unwrap());
+            let peer = public_peer(hidden.parse().unwrap(), &[]);
             assert!(peer.ip().is_unspecified(), "{hidden} kept as {peer}");
         }
+    }
+
+    /// A pond on a public subnet: a caller inside it must not pass for the LAN.
+    #[test]
+    fn a_caller_on_the_ponds_own_public_subnet_is_hidden() {
+        let interfaces = [if_addrs::Interface {
+            name: "en0".into(),
+            addr: if_addrs::IfAddr::V4(if_addrs::Ifv4Addr {
+                ip: "203.0.113.2".parse().unwrap(),
+                netmask: "255.255.255.0".parse().unwrap(),
+                prefixlen: 24,
+                broadcast: Some("203.0.113.255".parse().unwrap()),
+            }),
+            index: Some(1),
+        }];
+        let neighbour = public_peer("203.0.113.9:5000".parse().unwrap(), &interfaces);
+        assert!(neighbour.ip().is_unspecified(), "kept as {neighbour}");
+        let far: SocketAddr = "198.51.100.7:5000".parse().unwrap();
+        assert_eq!(public_peer(far, &interfaces), far);
     }
 
     #[test]
