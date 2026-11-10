@@ -4,6 +4,7 @@ use pond_core::models::domain::audio_device::{
     AudioDevice, AudioDeviceStatus, AudioDirection, ChoiceBasis,
 };
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
 use rmcp::{
@@ -83,6 +84,11 @@ impl DeviceMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         match self.device_registry.list_devices().await {
             Ok(devices) => {
+                // The model answers in room names, so it is never handed an id to read out.
+                let rooms = room_names().await;
+                let room_of = |d: &pond_core::user_data::ports::device_registry::Device| {
+                    room_name(d.room_id.as_deref(), &rooms)
+                };
                 let text = if devices.is_empty() {
                     "No devices registered.".to_string()
                 } else {
@@ -96,9 +102,10 @@ impl DeviceMcpServer {
                                 format!(" — {}", d.capabilities.join(", "))
                             };
                             format!(
-                                "- {} ({}): {}{can}",
+                                "- {} ({}) in {}: {}{can}",
                                 d.name,
                                 d.device_type,
+                                room_of(d),
                                 if d.is_online { "online" } else { "offline" }
                             )
                         })
@@ -114,7 +121,7 @@ impl DeviceMcpServer {
                                 "name": d.name,
                                 "is_online": d.is_online,
                                 "device_type": d.device_type,
-                                "room_id": d.room_id.clone().unwrap_or_default(),
+                                "room": room_of(d),
                             })
                         })
                         .collect();
@@ -338,6 +345,38 @@ struct DeviceDeps {
 
 static DEVICE_DEPS: OnceLock<DeviceDeps> = OnceLock::new();
 
+/// What a device in no room is placed in, as the app and the dashboard name it.
+const UNASSIGNED: &str = "Unassigned";
+
+static ROOMS: OnceLock<Arc<dyn RoomRegistry + Send + Sync>> = OnceLock::new();
+
+/// Give the device server the household's rooms, so it names a device's room rather than its id.
+pub fn init_device_rooms(rooms: Arc<dyn RoomRegistry + Send + Sync>) {
+    let _ = ROOMS.set(rooms);
+}
+
+/// The name of the room `room_id` names, or "Unassigned" for none or one not found: never the id.
+fn room_name(room_id: Option<&str>, rooms: &std::collections::HashMap<String, String>) -> String {
+    room_id
+        .and_then(|id| rooms.get(id).cloned())
+        .unwrap_or_else(|| UNASSIGNED.to_string())
+}
+
+/// Room names by id. Empty without the registry or when it fails, which names every room
+/// "Unassigned" rather than showing an id; the failure is logged.
+async fn room_names() -> std::collections::HashMap<String, String> {
+    let Some(rooms) = ROOMS.get() else {
+        return Default::default();
+    };
+    match rooms.list_rooms().await {
+        Ok(list) => list.into_iter().map(|r| (r.id, r.name)).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "list_registered_devices: could not read the rooms");
+            Default::default()
+        }
+    }
+}
+
 /// Initialize device server dependencies. Call once at startup.
 pub fn init_device_deps(
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
@@ -373,6 +412,20 @@ pub fn spawn_device_server(reader: DuplexStream, writer: DuplexStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_is_placed_by_its_rooms_name_never_its_id() {
+        let rooms: std::collections::HashMap<String, String> =
+            [("469a80eb-1e60".to_string(), "Living Room".to_string())].into();
+        assert_eq!(room_name(Some("469a80eb-1e60"), &rooms), "Living Room");
+        assert_eq!(room_name(None, &rooms), "Unassigned");
+        // A room deleted, or rooms that could not be read: still not the id.
+        assert_eq!(room_name(Some("gone"), &rooms), "Unassigned");
+        assert_eq!(
+            room_name(Some("469a80eb-1e60"), &Default::default()),
+            "Unassigned"
+        );
+    }
     use async_trait::async_trait;
     use pond_core::user_data::domain::settings::Settings;
     use pond_core::user_data::domain::skill::UserSkill;
