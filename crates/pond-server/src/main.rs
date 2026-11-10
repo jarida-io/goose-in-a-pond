@@ -3920,6 +3920,9 @@ async fn run_server(
         let gen_lane = inference_lane.clone();
         let gen_profiles = profile_repo.clone();
         let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
+        let gen_interests = pond_infra::sqlite_interests::SqliteInterestRepository::new(
+            db.system.clone(),
+        );
         let gen_queue: Arc<
             dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
         > = Arc::new(
@@ -3995,6 +3998,7 @@ async fn run_server(
                     }
                     res = compose_suggestions(
                         gen_memories.as_ref(),
+                        &gen_interests,
                         gen_queue.as_ref(),
                         gen_provider.clone(),
                         &subjects,
@@ -6535,6 +6539,7 @@ struct ComposeReport {
 /// Early returns still spend the lane's interval: the caller holds the slot guard.
 async fn compose_suggestions(
     memories: &dyn pond_core::user_data::ports::memory_repository::MemoryRepository,
+    interests: &dyn pond_core::user_data::ports::interests::InterestRepository,
     queue: &dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
     provider: Arc<
         tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>,
@@ -6568,6 +6573,10 @@ async fn compose_suggestions(
         .filter(|m| !already.contains(&m.id))
         // Too short to carry a question; asking would spend a slot to learn that.
         .filter(|m| m.content.trim().chars().count() >= 20)
+        // A trait made of one question asked is curiosity: nothing to build a question on.
+        .filter(|m| {
+            !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
+        })
         .collect();
 
     // Which twelve matters most: habits and preferences before trivia, recency within each rank.
@@ -6584,7 +6593,15 @@ async fn compose_suggestions(
         return Ok(empty);
     };
 
-    let user = gen::build_user_prompt(&candidates);
+    // The owner's portrait and confirmed interests, so each question is worth looking up for them.
+    let about = match candidates.first().and_then(|m| m.profile_id.as_deref()) {
+        Some(owner) => pond_core::user_data::services::member_portrait::about_member(
+            interests.portrait(owner).await.ok().flatten().as_ref(),
+            &interests.list(owner).await.unwrap_or_default(),
+        ),
+        None => None,
+    };
+    let user = gen::build_user_prompt(&candidates, about.as_deref());
     let reply = provider
         .complete(gen::SYSTEM, vec![ChatMessage::user(user)])
         .await?;
