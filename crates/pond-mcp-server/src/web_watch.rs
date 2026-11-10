@@ -150,14 +150,15 @@ pub fn watch_item(item: Item) -> WatchItem {
         year: item.year,
         link: item.link,
         image: item.image,
+        snippet: item.snippet,
     }
 }
 
 #[tool_router(router = web_watch_tool_router, vis = "pub")]
 impl KnowledgeMcpServer {
     #[tool(description = "\
-Keep checking a page of listings the person or read_web_page gave, and tell the person when a \
-match appears or drops in price.")]
+Keep checking any web page (listings, blogs, news feeds, release notes, announcement boards, or \
+content pages) and tell the person when new articles appear, content updates, or prices drop.")]
     async fn web_watch(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -236,15 +237,14 @@ async fn start(
         Ok(page) => page,
         Err(failure) => return Ok(format_dead_end(what, &unreadable(&failure))),
     };
-    // One product's page lists nothing to compare, but its price can be watched.
+    // One product's page with no items or sections can be price-watched.
     if page.items.is_empty() && cart_watch::installed().is_some() {
         return watch_price(owner, params).await;
     }
     if page.items.is_empty() {
         return Ok(format_dead_end(
             what,
-            "That page lists nothing the pond can compare from one check to the next. Watch a \
-             page of listings or search results instead.",
+            "That page has no readable content to compare from one check to the next.",
         ));
     }
     let filters = params.filters();
@@ -279,22 +279,33 @@ async fn start(
     deps.repo.create(&watch).await?;
     tracing::info!(target: "giap::trace", kind = "web_watch_started", items = items.len(), interval);
     let matching: Vec<&WatchItem> = items.iter().filter(|i| filters.matches(i)).collect();
-    let mut out = format!(
-        "Watching {title} every {interval} hours for {}. It lists {} items now; {} match. The \
-         person will be told on their phone when a new match appears or one drops in price, and \
-         gets a daily summary of other changes.",
-        filters.words_for_people(),
-        items.len(),
-        matching.len()
-    );
+    let has_prices = items.iter().any(|i| i.price.is_some());
+    let mut out = if has_prices {
+        format!(
+            "Watching {title} every {interval} hours for {}. It lists {} items now; {} match. The \
+             person will be told on their phone when a new match appears or one drops in price, and \
+             gets a daily summary of other changes.",
+            filters.words_for_people(),
+            items.len(),
+            matching.len()
+        )
+    } else {
+        format!(
+            "Watching {title} every {interval} hours for {}. It tracks {} sections/articles now; {} match. The \
+             person will be told on their phone when new content or an update appears, and \
+             gets a daily summary of other changes.",
+            filters.words_for_people(),
+            items.len(),
+            matching.len()
+        )
+    };
     for item in matching.iter().take(SHOWN_MATCHES) {
-        out.push_str(&format!(
-            "\n- {}{}",
-            item.title,
-            item.price_words()
-                .map(|p| format!(", {p}"))
-                .unwrap_or_default()
-        ));
+        let detail = item
+            .price_words()
+            .map(|p| format!(", {p}"))
+            .or_else(|| item.snippet.as_ref().map(|s| format!(": {s}")))
+            .unwrap_or_default();
+        out.push_str(&format!("\n- {}{}", item.title, detail));
     }
     Ok(out)
 }

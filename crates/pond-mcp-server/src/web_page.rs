@@ -514,14 +514,30 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
         .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
     let (final_address, body) = fetch_page(client, address).await?;
     let parsing = tokio::task::spawn_blocking(move || {
-        let (title, _, data) = match body {
+        let (title, lines, data) = match body {
             Body::Html(html) => parse_html(&html, &final_address),
-            Body::Text(_) => (String::new(), Vec::new(), PageData::default()),
+            Body::Text(text) => (
+                String::new(),
+                text.lines()
+                    .map(|l| Line {
+                        text: l.trim().to_string(),
+                        section: None,
+                        heading: false,
+                    })
+                    .filter(|l| !l.text.is_empty())
+                    .collect(),
+                PageData::default(),
+            ),
+        };
+        let items = if !data.items.is_empty() {
+            data.items
+        } else {
+            items_from_sections(&title, &final_address, &lines)
         };
         WatchedPage {
             address: final_address,
             title,
-            items: data.items,
+            items,
         }
     });
     match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
@@ -530,6 +546,63 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
             "the page was too large to read in time".into(),
         )),
     }
+}
+
+fn items_from_sections(page_title: &str, address: &str, lines: &[Line]) -> Vec<page_data::Item> {
+    let mut items = Vec::new();
+    let mut current_heading: Option<String> = None;
+    let mut current_snippet: Vec<String> = Vec::new();
+
+    let flush =
+        |items: &mut Vec<page_data::Item>, heading: Option<String>, snippet: Vec<String>| {
+            let title = heading.unwrap_or_else(|| {
+                if page_title.trim().is_empty() {
+                    web_search::domain_of(address)
+                } else {
+                    page_title.to_string()
+                }
+            });
+            let snippet_text = snippet.join(" ");
+            let snippet = (!snippet_text.is_empty()).then(|| {
+                web_search::defang(&snippet_text)
+                    .chars()
+                    .take(300)
+                    .collect()
+            });
+            items.push(page_data::Item {
+                title,
+                link: Some(address.to_string()),
+                snippet,
+                ..Default::default()
+            });
+        };
+
+    for line in lines {
+        if line.heading {
+            if current_heading.is_some() || !current_snippet.is_empty() {
+                flush(
+                    &mut items,
+                    current_heading.take(),
+                    std::mem::take(&mut current_snippet),
+                );
+            }
+            current_heading = Some(line.text.clone());
+        } else if current_snippet.len() < 3 {
+            current_snippet.push(line.text.clone());
+        }
+    }
+    if current_heading.is_some() || !current_snippet.is_empty() {
+        flush(&mut items, current_heading, current_snippet);
+    }
+    if items.is_empty() && !page_title.trim().is_empty() {
+        items.push(page_data::Item {
+            title: page_title.to_string(),
+            link: Some(address.to_string()),
+            ..Default::default()
+        });
+    }
+    items.truncate(page_data::MAX_ITEMS);
+    items
 }
 
 /// A page as the news reads it: where it ended, its title, its text as lines, and what its head
