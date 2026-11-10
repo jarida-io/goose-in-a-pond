@@ -788,9 +788,11 @@ async fn run_once(
             let inner = Arc::downgrade(inner);
             let speech = speech.clone();
             Arc::new(move || {
-                let skip = hears && inner.upgrade().is_some_and(|inner| inner.app_active());
+                let skip = inner
+                    .upgrade()
+                    .is_some_and(|inner| inner.whisper_busy_or_active());
                 if skip {
-                    speech.release_unheld("user_active");
+                    speech.release_unheld("busy");
                 }
                 skip
             })

@@ -19,7 +19,7 @@ pub const SEEDS_PER_RUN: usize = 2;
 /// Pages read per seed.
 pub const PAGES_PER_SEED: usize = 3;
 /// Characters of each page the idea prompt shows.
-pub const PAGE_CHARS: usize = 2_000;
+pub const PAGE_CHARS: usize = 4_000;
 /// Below this self-score an idea is not worth the member's time.
 const MIN_SCORE: f64 = 0.3;
 const MAX_TITLE_CHARS: usize = 90;
@@ -159,14 +159,19 @@ pub fn pick_seeds(
 const QUERY_SYSTEM: &str = "\
 You write one web search for {name}. Using the portrait of {name} and the \
 seed below, write the search most likely to find something new, specific and \
-useful that {name} could act on this week about the seed: a price movement, a \
-release, an event, a technique, an opening, a deadline.
+useful that {name} could act on this week about the seed: a software release, a \
+tool or library, an open-source repo, a hardware build, a tutorial, an event, a \
+technique, or a concrete guide.
+
+Do NOT search for generic academic papers, theoretical surveys, textbook definitions, \
+or broad science abstracts. Focus on practical tools, project repositories, concrete \
+announcements, and hands-on implementations.
 
 Reply with JSON only, exactly this shape:
 {\"query\":\"...\",\"private\":false}
 
-- query: 4 to 10 words, specific and technical: the exact names, models, \
-places, versions or terms that narrow it, with {name}'s city or country where \
+- query: 4 to 10 words, specific and technical: the exact names, libraries, \
+hardware models, versions or terms that narrow it, with {name}'s city or country where \
 it matters. No question mark, no quotes.
 - private: true when the seed is a private matter the public web cannot \
 answer, such as {name}'s own company finances, staff or health records; the \
@@ -215,16 +220,18 @@ pub struct ReadPage {
 }
 
 const IDEA_SYSTEM: &str = "\
-You write one idea for {name} from pages the Pond just read for them.
+You write one practical, high-utility idea for {name} from pages the Pond just read for them.
 
 Use only these sources, given below: the portrait of {name}, the seed (what the \
 idea builds on), and the text of the numbered pages. Every fact in the idea \
 must come from the pages.
 
 A good idea is:
+- actionable and tangible: propose building, testing, integrating, installing, configuring, or trying a real tool, library, device, or script.
+- NEVER suggest merely reading an article, studying a paper, or learning abstract theory.
 - new to {name}: not something the portrait shows they already know;
 - specific to {name}: tied to the seed and to their details in the portrait \
-(their places, budgets, dates, names);
+(their places, tech stack, hardware, dates, names);
 - sourced: built on what the pages say;
 - doable: something {name} or the Pond can act on soon. Never a question.
 
@@ -233,18 +240,18 @@ Reply with JSON only, exactly this shape:
 \"you_can\":[\"...\"],\"goose_can\":{\"kind\":\"research\",\"label\":\"...\",\
 \"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
 
-- title: the idea as a concrete suggestion, under 80 characters, not a question.
-- pitch: two or three sentences: what the pages say, with the specific \
-numbers, names and dates, and what {name} could do with it.
+- title: the idea as a concrete suggestion or project, under 80 characters, not a question.
+- pitch: two or three sentences: what the pages say, with specific tools, versions, \
+benchmarks, or numbers, and what practical task {name} could accomplish with it.
 - why: one line to {name}, starting \"You\", naming the specific thing about \
-them it builds on.
+them or their interests it builds on.
 - sources: the numbers of the pages it rests on.
-- you_can: two to four steps {name} could take, each a short imperative under \
-80 characters.
+- you_can: two to four actionable steps {name} could take (e.g., clone, install, \
+wire, configure, deploy), each a short imperative under 80 characters.
 - goose_can: what the Pond could do for {name}, or null.
-  - kind: \"research\" (a deeper report), \"watch\" (keep checking a page of \
-listings), \"schedule\" (look this up again each week), \"todo\" (put the \
-first step on their list) or \"chat\" (talk it through).
+  - kind: \"research\" (a deeper report or setup guide), \"watch\" (keep checking a page of \
+listings or releases), \"schedule\" (look this up again each week), \"todo\" (put the \
+first actionable step on their list) or \"chat\" (talk it through).
   - label: the button's words, under 30 characters.
   - prompt: for research or schedule, what the Pond should look up; else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \
