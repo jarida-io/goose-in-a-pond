@@ -770,7 +770,7 @@ mod tests {
     /// Regenerates the fixture the pond-api parser test keeps a copy of:
     /// `cargo test -p pond-mcp-server print_a_real_rendered_result -- --ignored --nocapture`
     #[test]
-    #[ignore]
+    #[ignore = "a tool that prints a fixture, not a check"]
     fn print_a_real_rendered_result() {
         let body = json!({"queryresult": {
             "pods": [
