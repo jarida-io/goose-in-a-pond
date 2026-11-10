@@ -86,6 +86,61 @@ impl ReminderRepository for MockReminderRepository {
             None => Ok(false),
         }
     }
+
+    async fn offer(&self, id: &str, _at: DateTime<Utc>) -> Result<bool> {
+        let mut rows = self.rows.lock().unwrap();
+        match rows
+            .iter_mut()
+            .find(|row| row.id == id && row.disposition == ReminderDisposition::Pending)
+        {
+            Some(row) => {
+                row.disposition = ReminderDisposition::Offered;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn offered_to(&self, profile_id: &str) -> Result<Vec<CapturedReminder>> {
+        let mut offered: Vec<CapturedReminder> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.disposition == ReminderDisposition::Offered
+                    && row.profile_id.as_deref() == Some(profile_id)
+            })
+            .cloned()
+            .collect();
+        offered.sort_by(|a, b| b.said_at.cmp(&a.said_at));
+        Ok(offered)
+    }
+
+    async fn settle_offer(
+        &self,
+        profile_id: &str,
+        id: &str,
+        accepted: bool,
+        _at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut rows = self.rows.lock().unwrap();
+        match rows.iter_mut().find(|row| {
+            row.id == id
+                && row.disposition == ReminderDisposition::Offered
+                && row.profile_id.as_deref() == Some(profile_id)
+        }) {
+            Some(row) => {
+                row.disposition = if accepted {
+                    ReminderDisposition::Accepted
+                } else {
+                    ReminderDisposition::Dismissed
+                };
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 /// A reminder store that cannot write; the engine must count the failure and say so.

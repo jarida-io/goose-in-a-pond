@@ -26,6 +26,7 @@ pub mod stdin_input;
 pub mod step_bindings;
 pub mod task_options;
 pub mod todo_hooks;
+pub mod todo_offers;
 pub mod turn_authority;
 pub mod voice_agent;
 pub mod voice_control;
