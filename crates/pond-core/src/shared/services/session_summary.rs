@@ -17,6 +17,27 @@ const KEEP_RECENT_MESSAGES: usize = 6;
 /// Don't bother refreshing for fewer than this many new messages.
 const MIN_UNSUMMARIZED_MESSAGES: usize = 4;
 
+/// The summary rides every later turn's context, so the system prompt asks for accuracy first.
+/// Its opening must differ from every chat prompt's, or a reused KV prefix is overwritten.
+pub const SUMMARY_SYSTEM: &str = "You keep the running summary of one conversation. The \
+assistant reads it before every reply as the record of what came before, so every sentence in \
+it must be true to the turns.";
+
+/// What the summary must carry. A standing instruction the user reversed is dropped, never kept
+/// beside its reversal: the summary of "no web search" then "web search it" once kept the first.
+pub const SUMMARY_INSTRUCTIONS: &str = "Rewrite the summary of this conversation so far, folding \
+the newer turns into the existing summary.
+
+In plain prose, at most five sentences, say:
+- what the conversation is about;
+- what was decided or found, with the names and numbers that matter;
+- what is still open or was asked and not yet answered;
+- any standing instruction the user gave about how to answer (a tool to use or not use, a \
+format, a language, a length). When a later turn changes an earlier instruction, keep only the \
+later one, and never repeat one the user has since reversed.
+
+Write only what the turns say. No preamble, no headings, no lists.";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// Summary refreshed and persisted; covers through the given message id.
@@ -100,13 +121,9 @@ impl SessionSummaryService {
         }
 
         let prompt = vec![ChatMessage::user(format!(
-            "Merge the existing summary (if any) and the newer turns below into ONE \
-             accurate summary of the conversation so far. Preserve important facts, \
-             names, decisions, and open questions. Write 3-5 sentences maximum, \
-             plain prose, no preamble.\n\n{transcript}"
+            "{SUMMARY_INSTRUCTIONS}\n\n{transcript}"
         ))];
-        let system =
-            "You summarise conversations accurately and concisely for use as model context.";
+        let system = SUMMARY_SYSTEM;
 
         // Race cancellation so a new turn reclaims the serial on-device engine at once.
         let response = tokio::select! {
@@ -118,7 +135,10 @@ impl SessionSummaryService {
             return Ok(RefreshOutcome::Cancelled);
         }
 
-        let summary = response.content.trim().to_string();
+        let summary =
+            crate::models::services::thought_filter::strip_reasoning(&response.content)
+                .trim()
+                .to_string();
         if summary.is_empty() {
             return Ok(RefreshOutcome::NothingToDo);
         }
@@ -233,6 +253,29 @@ mod tests {
         let sent = provider.calls.lock().unwrap();
         assert!(sent[0].contains("Earlier: ducks were discussed."));
         assert!(sent[0].contains("question 4"));
+    }
+
+    #[test]
+    fn the_prompt_asks_for_the_topic_the_findings_what_is_open_and_the_latest_instruction() {
+        assert!(SUMMARY_INSTRUCTIONS.contains("what the conversation is about"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("what was decided or found"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("what is still open"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("keep only the"));
+        assert!(SUMMARY_INSTRUCTIONS.contains("at most five sentences"));
+    }
+
+    #[tokio::test]
+    async fn a_reasoning_block_never_reaches_the_stored_summary() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        seed(&storage, "s", 12).await;
+        let provider = Arc::new(StubProvider {
+            reply: "<think>what did they say</think>They compared two cars.".to_string(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let svc = SessionSummaryService::new(provider, storage.clone());
+        svc.refresh("s", &CancellationToken::new()).await.unwrap();
+        let (summary, _) = storage.get_rolling_summary("s").await.unwrap();
+        assert_eq!(summary.as_deref(), Some("They compared two cars."));
     }
 
     #[tokio::test]
