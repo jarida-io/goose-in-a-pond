@@ -42,6 +42,8 @@ impl MatterDeviceControl {
         value: Value,
     ) -> Result<DeviceControlOutcome> {
         let client = self.client.read().await.clone();
+        // What the device was told, so a log reader sees `power` `true` as on, not just `power`.
+        let shown = value.to_string();
         let started = Instant::now();
 
         let outcome = client
@@ -62,6 +64,7 @@ impl MatterDeviceControl {
                     kind = "matter_device_command",
                     device = %device_id,
                     verb,
+                    value = %shown,
                     duration_ms = elapsed,
                     "drove a Matter device"
                 );
@@ -73,6 +76,7 @@ impl MatterDeviceControl {
                     kind = "matter_device_command",
                     device = %device_id,
                     verb,
+                    value = %shown,
                     duration_ms = elapsed,
                     error_code = code_of(&e).unwrap_or("none"),
                     error = %describe(&e),
