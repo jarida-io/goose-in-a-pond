@@ -9,6 +9,7 @@
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
 #   bash scripts/giap.sh console [HOST] # live stats, charts and logs for this machine, the Jetson (nano) and HOST
 #   bash scripts/giap.sh build        # non-interactive: build UI + server for THIS host
+#   bash scripts/giap.sh install-binaries  # Linux: put the built pond-server and pondnet where the service runs them, out of target/
 #   bash scripts/giap.sh update       # bring this pond to its branch's newest code: pull, Node, build, restart, grants, doctor
 #   bash scripts/giap.sh update -y    # ... answering yes to each step (downloads, a service stop for the build)
 #   bash scripts/giap.sh node         # find, or download and verify, the Node this repo needs
@@ -93,6 +94,8 @@ source "$HERE/lib/data-volume.sh"
 source "$HERE/lib/remote-access.sh"
 # shellcheck source=lib/release-build.sh
 source "$HERE/lib/release-build.sh"
+# shellcheck source=lib/pond-binaries.sh
+source "$HERE/lib/pond-binaries.sh"
 # The agamemnon_* functions: the pond's own locked account.
 # shellcheck source=lib/install-systemd.sh
 source "$HERE/lib/install-systemd.sh"
@@ -692,6 +695,25 @@ doctor() {
     fi
   else
     ok "no stray debug server binary"
+  fi
+
+  # 3b. What the service runs: a binary inside target/ dies with the next cargo clean.
+  local svc_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_NAME" svc_bin
+  [ "$D_SVC_SCOPE" = "system" ] && svc_unit="/etc/systemd/system/$SERVICE_NAME"
+  if [ "$D_OS" = "linux" ] && [ -f "$svc_unit" ]; then
+    svc_bin="$(pond_unit_exec_bin "$svc_unit")"
+    if [ -n "$svc_bin" ] && [ ! -f "$svc_bin" ]; then
+      bad "the service runs $svc_bin, which does not exist: it will not start"
+      note "fix: bash scripts/giap.sh build (or install-binaries, if target/release still has one)"
+      DOC_FAIL=$((DOC_FAIL+1))
+    elif pond_unit_runs_from_build "$svc_unit"; then
+      warn "the service runs $svc_bin, inside the build: cargo clean stops the pond from starting"
+      note "fix: bash scripts/giap.sh install-binaries"
+      DOC_WARN=$((DOC_WARN+1))
+    else
+      ok "the service runs an installed binary ($svc_bin)"
+      [ -f "$(dirname "$svc_bin")/pondnet" ] || { warn "no pondnet beside it: remote access cannot start"; note "fix: bash scripts/giap.sh go, then build"; DOC_WARN=$((DOC_WARN+1)); }
+    fi
   fi
 
   # 4. CUDA build correctness on a Jetson
@@ -1463,6 +1485,10 @@ action_build_server() {
     note "fix: bash scripts/giap.sh go, then run this build again"
   fi
   if [ $rc -eq 0 ]; then write_build_stamp; ok "pond-server built"; else bad "build failed (exit $rc)"; fi
+  # The service runs installed copies, so a cleaned target/ cannot leave it nothing to start.
+  if [ $rc -eq 0 ] && [ "$D_OS" = "linux" ]; then
+    action_install_binaries || rc=$?
+  fi
   # `update` reads this, so it does not restart a pond this build has already started.
   BUILD_STARTED_SVC=false
   if [ "${RESTART_SVC_AFTER:-false}" = true ]; then
@@ -2104,6 +2130,16 @@ svc_ctl() { # $1 = start|stop|restart|status
   esac
 }
 
+# The built pond-server and pondnet, copied where the service runs them (scripts/lib/pond-binaries.sh).
+action_install_binaries() {
+  head1 "Install the built binaries"
+  if [ "$D_OS" != "linux" ]; then bad "the service binaries are installed on Linux only; a Mac runs the app or target/"; return 1; fi
+  [ -f target/release/pond-server ] || { bad "no release binary — build first (menu 12)"; return 1; }
+  info "target/release -> $(pond_bin_dir)"
+  run bash "$REPO_ROOT/scripts/install-pond-binaries.sh" "$REPO_ROOT/target/release" || { bad "install failed"; return 1; }
+  ok "installed; the running pond keeps its binary until it restarts"
+}
+
 action_service_install() {
   head1 "Install the service (user unit)"
   if [ "$D_OS" != "linux" ]; then bad "systemd services are Linux-only; macOS has no launchd unit in this repo."; return 1; fi
@@ -2113,15 +2149,17 @@ action_service_install() {
     return 1
   fi
   [ -f target/release/pond-server ] || { bad "no release binary — build first (menu 12)"; return 1; }
-  local port="8080" unit="$HOME/.config/systemd/user/$SERVICE_NAME"
+  local port="8080" unit="$HOME/.config/systemd/user/$SERVICE_NAME" bin
+  bin="$(pond_bin_dir)/pond-server"
   if [ -t 0 ]; then
     printf '  port [%s]: ' "$port"; local p=""; read -r p; [ -n "$p" ] && port="$p"
   fi
-  info "writing $unit (ExecStart -> $REPO_ROOT/target/release/pond-server serve --port $port)"
+  info "writing $unit (ExecStart -> $bin serve --port $port)"
   confirm "Proceed?" || return 1
   if [ "$DRY_RUN" != true ]; then
+    action_install_binaries || return 1
     mkdir -p "$(dirname "$unit")"
-    agamemnon_user_unit_text "$REPO_ROOT/target/release/pond-server serve --port $port" "$REPO_ROOT" > "$unit"
+    agamemnon_user_unit_text "$bin serve --port $port" "$REPO_ROOT" > "$unit"
   fi
   run systemctl --user daemon-reload
   run systemctl --user enable --now "$SERVICE_NAME"
@@ -2210,13 +2248,13 @@ action_repair_submodule() {
 action_reclaim_disk() {
   head1 "Reclaim disk"
   info "target/debug   ${D_TGT_DBG:-0} GiB   (build cache — safe to delete)"
-  info "target/release ${D_TGT_REL:-0} GiB   (contains the binary the service runs)"
+  info "target/release ${D_TGT_REL:-0} GiB   (the release build; the service runs installed copies, see install-binaries)"
   if [ "${D_TGT_DBG:-0}" = "0" ]; then info "nothing obvious to reclaim."; return 0; fi
   confirm "Delete target/debug only?" || return 1
   run rm -rf target/debug
   detect_resources; detect_binaries
   ok "reclaimed — ${D_DISK_FREE} GiB free"
-  note "target/release is never touched here: the systemd ExecStart points into it"
+  note "target/release is never touched here: deleting it costs a full rebuild (~35 min on an Orin)"
 }
 
 action_kill_strays() {
@@ -2643,6 +2681,7 @@ case "$CMD" in
   doctor)    banner; doctor; [ "$DOC_FAIL" -gt 0 ] && exit 1 || exit 0 ;;
   install|setup) action_install ;;
   build)     action_build_ui; action_build_server ;;
+  install-binaries) action_install_binaries ;;
   update)    action_update ;;
   build-ui)  action_build_ui ;;
   go)        action_go ;;
