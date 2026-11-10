@@ -18,7 +18,9 @@ use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::services::consolidation_schedule as sched;
-use pond_core::user_data::services::idea_generation::{self as ideas, IdeaSeed, ReadPage, SeedFrom};
+use pond_core::user_data::services::idea_generation::{
+    self as ideas, IdeaSeed, ReadPage, SeedFrom,
+};
 use pond_core::user_data::services::inference_lane::LaneJob;
 use pond_core::user_data::services::member_portrait as portrait;
 
@@ -67,12 +69,8 @@ impl MindDeps {
     ) -> (bool, Duration) {
         let db_activity = crate::newest_session_activity(self.sessions.as_ref()).await;
         let in_process_at = *self.last_user_activity.read().await;
-        let saw = sched::saw_activity_since_start(
-            started_at,
-            in_process_at,
-            started_at_utc,
-            db_activity,
-        );
+        let saw =
+            sched::saw_activity_since_start(started_at, in_process_at, started_at_utc, db_activity);
         (
             saw,
             sched::combined_idle_for(in_process_at, db_activity, Utc::now()),
@@ -320,7 +318,10 @@ async fn wikipedia_page(topic: &str) -> Option<String> {
 fn site_of(address: &str) -> String {
     reqwest::Url::parse(address)
         .ok()
-        .and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string()))
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_start_matches("www.").to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -478,7 +479,11 @@ async fn idea_from(
         match pond_mcp_server::web_page::read_page_text(&hit.url).await {
             Ok((url, title, text)) if text.chars().count() >= 200 => pages.push(ReadPage {
                 site: site_of(&url),
-                title: if title.is_empty() { hit.title.clone() } else { title },
+                title: if title.is_empty() {
+                    hit.title.clone()
+                } else {
+                    title
+                },
                 url,
                 text,
             }),

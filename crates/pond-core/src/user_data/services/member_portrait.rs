@@ -248,7 +248,10 @@ mod tests {
         let now = Utc::now();
         assert!(portrait_is_due(None, None, now));
         let fresh = portrait_at(now - Duration::minutes(10));
-        assert!(!portrait_is_due(Some(&fresh), Some(now), now), "the floor holds");
+        assert!(
+            !portrait_is_due(Some(&fresh), Some(now), now),
+            "the floor holds"
+        );
         let hour_old = portrait_at(now - Duration::minutes(90));
         assert!(portrait_is_due(Some(&hour_old), Some(now), now));
         assert!(!portrait_is_due(
@@ -306,7 +309,10 @@ mod tests {
         )
         .unwrap();
         assert!(about.contains("Confirmed interests: The Boys"));
-        assert!(!about.contains("Primetime"), "one conversation is curiosity");
+        assert!(
+            !about.contains("Primetime"),
+            "one conversation is curiosity"
+        );
         assert!(about.contains("Never raise: Celebrity gossip"));
         assert_eq!(about_member(None, &[]), None);
     }

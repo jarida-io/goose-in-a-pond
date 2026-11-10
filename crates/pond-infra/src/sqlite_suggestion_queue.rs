@@ -19,7 +19,15 @@ const QUEUE_COLUMNS: &str = "q.id, q.profile_id, q.prompt, q.reason, q.source_me
      m.content, q.created_at";
 
 /// `(id, profile_id, prompt, reason, source_memory_id, fact, created_at)`.
-type QueueRow = (String, Option<String>, String, String, String, String, String);
+type QueueRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 /// `sqlite_memory`'s liveness predicate, copied verbatim so one grep finds both.
 const MEMORY_IS_LIVE: &str = "(m.lifecycle IS NULL OR m.lifecycle = 'active')";

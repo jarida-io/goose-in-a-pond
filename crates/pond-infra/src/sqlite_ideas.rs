@@ -248,7 +248,12 @@ impl IdeaRepository for SqliteIdeaRepository {
             .collect())
     }
 
-    async fn mark_seed_used(&self, profile_id: &str, seed_id: &str, at: DateTime<Utc>) -> Result<()> {
+    async fn mark_seed_used(
+        &self,
+        profile_id: &str,
+        seed_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
         sqlx::query("UPDATE member_topics SET used_at = ? WHERE profile_id = ? AND id = ?")
             .bind(stamp(at))
             .bind(profile_id)
@@ -350,7 +355,9 @@ mod tests {
     #[tokio::test]
     async fn an_idea_round_trips_and_stays_its_owners() {
         let repo = SqliteIdeaRepository::new(pool().await);
-        repo.add(&idea("i1", "jerry", "Toyota Fielder")).await.unwrap();
+        repo.add(&idea("i1", "jerry", "Toyota Fielder"))
+            .await
+            .unwrap();
         let back = repo.get("jerry", "i1").await.unwrap().unwrap();
         assert_eq!(
             back.goose_plan.listing_url.as_deref(),
@@ -401,7 +408,10 @@ mod tests {
         let pool = pool().await;
         let repo = SqliteIdeaRepository::new(pool.clone());
         assert!(
-            repo.research_seeds("jerry", Utc::now()).await.unwrap().is_empty(),
+            repo.research_seeds("jerry", Utc::now())
+                .await
+                .unwrap()
+                .is_empty(),
             "no topic map yet is no seeds, not an error"
         );
         sqlx::query(MEMBER_TOPICS).execute(&pool).await.unwrap();
@@ -435,7 +445,9 @@ mod tests {
             seeds.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
             vec!["t2", "t1"]
         );
-        repo.mark_seed_used("jerry", "t2", Utc::now()).await.unwrap();
+        repo.mark_seed_used("jerry", "t2", Utc::now())
+            .await
+            .unwrap();
         let seeds = repo.research_seeds("jerry", week_ago).await.unwrap();
         assert_eq!(seeds.len(), 1);
     }
@@ -449,13 +461,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(todo.text, "Compare three listings");
-        let (source, source_ref, state, ask): (String, String, String, i64) = sqlx::query_as(
-            "SELECT source, source_ref, state, ask FROM todos WHERE id = ?",
-        )
-        .bind(&todo.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (source, source_ref, state, ask): (String, String, String, i64) =
+            sqlx::query_as("SELECT source, source_ref, state, ask FROM todos WHERE id = ?")
+                .bind(&todo.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             (source.as_str(), source_ref.as_str(), state.as_str(), ask),
             ("idea", "i1", "open", 1)

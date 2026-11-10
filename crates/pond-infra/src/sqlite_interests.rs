@@ -9,7 +9,7 @@ use sqlx::{Pool, Row, Sqlite};
 
 use pond_core::user_data::domain::interest::{
     category_of, clean_facets, clean_topic, merge_facets, picture_path, topic_key, Depth, Interest,
-    InterestInput, InterestPatch, MemberPortrait, NewsMode, ObservedInterest, Observed, Origin,
+    InterestInput, InterestPatch, MemberPortrait, NewsMode, Observed, ObservedInterest, Origin,
     STRONG_AT,
 };
 use pond_core::user_data::domain::interest_interview::{InterestInterview, InterviewStatus};
@@ -548,7 +548,10 @@ mod tests {
         assert!(!rows[0].confirmed);
         assert_eq!(rows[0].origin, Origin::Chat);
         assert_eq!(rows[0].facets, vec!["Kilimall", "Autochek"]);
-        assert!(repo.list("liz").await.unwrap().is_empty(), "never another member's");
+        assert!(
+            repo.list("liz").await.unwrap().is_empty(),
+            "never another member's"
+        );
     }
 
     #[tokio::test]
@@ -635,10 +638,15 @@ mod tests {
         repo.observe("jerry", "s1", &seen("Toyota Fielder", &[]))
             .await
             .unwrap();
-        repo.observe("jerry", "s1", &seen("Snacks", &[])).await.unwrap();
+        repo.observe("jerry", "s1", &seen("Snacks", &[]))
+            .await
+            .unwrap();
         let missing = repo.without_picture("jerry", 10).await.unwrap();
         assert_eq!(missing.len(), 2);
-        let fielder = missing.iter().find(|r| r.topic == "Toyota Fielder").unwrap();
+        let fielder = missing
+            .iter()
+            .find(|r| r.topic == "Toyota Fielder")
+            .unwrap();
         let snacks = missing.iter().find(|r| r.topic == "Snacks").unwrap();
         repo.set_picture("jerry", &fielder.id, Some("abc123"))
             .await
@@ -652,7 +660,10 @@ mod tests {
             Some("/api/v1/report-images/abc123")
         );
         let snacks = rows.iter().find(|r| r.topic == "Snacks").unwrap();
-        assert_eq!(snacks.picture, None, "nothing found is null, not an empty path");
+        assert_eq!(
+            snacks.picture, None,
+            "nothing found is null, not an empty path"
+        );
     }
 
     #[tokio::test]

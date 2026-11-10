@@ -9,6 +9,7 @@
 use crate::models::domain::message::Role;
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::shared::domain::session_activity::SessionOrigin;
+use crate::user_data::domain::interest::Observed;
 use crate::user_data::domain::memory::{
     cosine_similarity, fact_defect, names_subject, normalise_fact_content, reminder_covers_note,
     FactDefect, MemoryEventKind, MemoryFragment, MemorySegment,
@@ -23,7 +24,6 @@ use crate::user_data::ports::conversation_extractor::{
     ConversationExtractor, ExtractionError, ExtractionWindow, KnownMemory, WindowExtraction,
     WindowMessage, WindowSubject,
 };
-use crate::user_data::domain::interest::Observed;
 use crate::user_data::ports::interests::InterestRepository;
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::ports::reminder_repository::ReminderRepository;
@@ -1428,9 +1428,10 @@ impl BatchExtractionService {
         session_id: &str,
         outcome: &mut WindowOutcome,
     ) {
-        let (Some(repository), Some(profile_id)) =
-            (self.interest_repository.as_ref(), subject.profile_id.as_deref())
-        else {
+        let (Some(repository), Some(profile_id)) = (
+            self.interest_repository.as_ref(),
+            subject.profile_id.as_deref(),
+        ) else {
             return;
         };
         if !config.mode.writes() {
@@ -2380,11 +2381,17 @@ mod batch_tests {
                 .run_pass(&storage, &repo, &extractor, &config, &cancel)
                 .await;
         }
-        assert!(extractor.calls() >= 3, "both windows of sess-1 and sess-2 were read");
+        assert!(
+            extractor.calls() >= 3,
+            "both windows of sess-1 and sess-2 were read"
+        );
         let rows = interests.all();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].profile_id, "p-jerry");
-        assert_eq!(rows[0].evidence, 2, "two conversations, however many windows");
+        assert_eq!(
+            rows[0].evidence, 2,
+            "two conversations, however many windows"
+        );
         assert!(!rows[0].confirmed);
     }
 
@@ -2403,10 +2410,19 @@ mod batch_tests {
         let mut config = config();
         config.mode = ExtractionMode::Write;
         let report = service
-            .run_pass(&storage, &repo, &extractor, &config, &CancellationToken::new())
+            .run_pass(
+                &storage,
+                &repo,
+                &extractor,
+                &config,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(report.interests_offered, 1);
-        assert_eq!(report.interests_noted, 0, "an unattributed subject owns no rows");
+        assert_eq!(
+            report.interests_noted, 0,
+            "an unattributed subject owns no rows"
+        );
         assert!(interests.all().is_empty());
     }
 
@@ -2425,7 +2441,13 @@ mod batch_tests {
         let mut config = config();
         config.mode = ExtractionMode::Write;
         let report = service()
-            .run_pass(&storage, &repo, &extractor, &config, &CancellationToken::new())
+            .run_pass(
+                &storage,
+                &repo,
+                &extractor,
+                &config,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(report.memories_written, 1);
         assert_eq!(report.memories_refused, 1);

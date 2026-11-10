@@ -29,9 +29,8 @@ impl IdeaRun {
     /// What the phone is told: thinking while a run is pending, but not past a couple of hours,
     /// so a Pond with no model to run it never shows a spinner for good.
     pub fn is_thinking(&self, now: DateTime<Utc>) -> bool {
-        let recent = |at: Option<DateTime<Utc>>| {
-            at.is_some_and(|at| now - at < chrono::Duration::hours(2))
-        };
+        let recent =
+            |at: Option<DateTime<Utc>>| at.is_some_and(|at| now - at < chrono::Duration::hours(2));
         self.is_pending() && (recent(self.requested_at) || recent(self.started_at))
     }
 }
@@ -93,8 +92,12 @@ pub trait IdeaRepository: Send + Sync {
         unused_since: DateTime<Utc>,
     ) -> Result<Vec<TopicSeed>>;
 
-    async fn mark_seed_used(&self, profile_id: &str, seed_id: &str, at: DateTime<Utc>)
-        -> Result<()>;
+    async fn mark_seed_used(
+        &self,
+        profile_id: &str,
+        seed_id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()>;
 
     /// One open to-do on the member's list, from an idea's step.
     async fn add_todo(&self, profile_id: &str, idea_id: &str, text: &str) -> Result<IdeaTodo>;

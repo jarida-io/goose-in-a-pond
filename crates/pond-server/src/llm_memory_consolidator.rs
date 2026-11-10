@@ -110,7 +110,10 @@ impl MemoryConsolidator for LlmMemoryConsolidator {
 
 impl LlmMemoryConsolidator {
     /// The actions with the model's reason for each, which the run's details record.
-    async fn propose(&self, memories: &[MemoryFragment]) -> Result<Vec<(ConsolidationAction, String)>> {
+    async fn propose(
+        &self,
+        memories: &[MemoryFragment],
+    ) -> Result<Vec<(ConsolidationAction, String)>> {
         let provider = {
             let guard = self.live_provider.read().await;
             guard
@@ -127,7 +130,13 @@ impl LlmMemoryConsolidator {
                     .as_ref()
                     .map(|s| format!("{:?}", s).to_lowercase())
                     .unwrap_or_else(|| "unknown".to_string());
-                format!("[{}] ({}, {:.1}) {}", m.id, seg, m.importance.unwrap_or(0.5), m.content)
+                format!(
+                    "[{}] ({}, {:.1}) {}",
+                    m.id,
+                    seg,
+                    m.importance.unwrap_or(0.5),
+                    m.content
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -343,7 +352,14 @@ mod tests {
 
     #[test]
     fn the_prompt_defines_every_field_and_prunes_single_question_traits() {
-        for field in ["- action:", "- ids, id:", "- merged:", "- segment:", "- importance:", "- reason:"] {
+        for field in [
+            "- action:",
+            "- ids, id:",
+            "- merged:",
+            "- segment:",
+            "- importance:",
+            "- reason:",
+        ] {
             assert!(CONSOLIDATION_PROMPT.contains(field), "{field}");
         }
         assert!(CONSOLIDATION_PROMPT.contains("PRUNE a trait built from a single question"));

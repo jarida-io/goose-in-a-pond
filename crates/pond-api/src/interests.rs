@@ -229,7 +229,10 @@ async fn finish(
     let _held = INTERVIEW_LOCK.lock().await;
     let existing = current(&state, &member).await?;
     if existing.status == InterviewStatus::NotStarted {
-        return Err(failure(StatusCode::CONFLICT, "the interview has not started"));
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "the interview has not started",
+        ));
     }
     let reviewed = interview::finish(existing);
     repo(&state)

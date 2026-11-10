@@ -243,7 +243,9 @@ pub fn parse_response(
     let mut items = items;
     items.sort_by(|a, b| {
         let score = |v: &serde_json::Value| v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.5);
-        score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
+        score(b)
+            .partial_cmp(&score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut outcome = GenerationOutcome::default();

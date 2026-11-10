@@ -10,8 +10,7 @@ use chrono::{DateTime, Utc};
 
 use crate::user_data::domain::interest::{
     category_of, clean_facets, clean_topic, merge_facets, picture_path, topic_key, Interest,
-    InterestInput,
-    InterestPatch, MemberPortrait, ObservedInterest, Observed, Origin, STRONG_AT,
+    InterestInput, InterestPatch, MemberPortrait, Observed, ObservedInterest, Origin, STRONG_AT,
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
 use crate::user_data::ports::interests::InterestRepository;
@@ -127,13 +126,7 @@ impl InterestRepository for InMemoryInterestRepository {
         let topic = clean_topic(&input.topic).ok_or_else(|| anyhow::anyhow!("empty topic"))?;
         let key = topic_key(&topic);
         let now = Utc::now();
-        let facets = clean_facets(
-            input
-                .facets
-                .iter()
-                .flatten()
-                .map(String::as_str),
-        );
+        let facets = clean_facets(input.facets.iter().flatten().map(String::as_str));
         let mut rows = self.rows.lock().unwrap();
         if let Some(row) = rows
             .iter_mut()

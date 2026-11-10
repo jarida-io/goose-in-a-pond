@@ -135,10 +135,9 @@ impl SessionSummaryService {
             return Ok(RefreshOutcome::Cancelled);
         }
 
-        let summary =
-            crate::models::services::thought_filter::strip_reasoning(&response.content)
-                .trim()
-                .to_string();
+        let summary = crate::models::services::thought_filter::strip_reasoning(&response.content)
+            .trim()
+            .to_string();
         if summary.is_empty() {
             return Ok(RefreshOutcome::NothingToDo);
         }
@@ -290,37 +289,6 @@ mod tests {
         let outcome = svc.refresh("s", &CancellationToken::new()).await.unwrap();
         assert_eq!(outcome, RefreshOutcome::NothingToDo);
         assert!(provider.calls.lock().unwrap().is_empty());
-    }
-
-    // -- Large-tier fixtures and cancellation --------------------------------
-
-    use crate::models::services::context::context_budget::CompactionProfile;
-    use crate::models::services::context::model_class::ModelClass;
-    use crate::models::services::context::token_counting::HeuristicTokenCounter;
-
-    /// The large tier's smallest window, so budgets under test are the tightest it gets.
-    fn large_profile() -> CompactionProfile {
-        CompactionProfile::from_context_window(65_536)
-    }
-
-    /// Seeds `n` messages of about `chars` chars each, enough to cross the history budget.
-    async fn seed_bulky(storage: &InMemorySessionStorage, session: &str, n: usize, chars: usize) {
-        storage.create_session(session.to_string()).await.unwrap();
-        for i in 0..n {
-            let body = "lorem ipsum ".repeat(chars / 12);
-            let msg = if i % 2 == 0 {
-                ChatMessage::user(format!("question {i}: {body}"))
-            } else {
-                ChatMessage::assistant(format!("answer {i}: {body}"))
-            };
-            storage
-                .add_message(
-                    session.to_string(),
-                    SessionMessage::new(format!("m{i}"), session.to_string(), msg),
-                )
-                .await
-                .unwrap();
-        }
     }
 
     #[tokio::test]

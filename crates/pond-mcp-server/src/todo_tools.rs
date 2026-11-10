@@ -243,7 +243,10 @@ fn repeat_spec(repeat: &Value, when: Option<&str>) -> Result<Value, String> {
                 "week"
             } else if lower.contains("month") {
                 "month"
-            } else if lower.contains("day") || lower.contains("daily") || lower.contains("night") {
+            } else if lower
+                .split(|c: char| !c.is_alphabetic())
+                .any(|w| matches!(w, "day" | "days" | "daily" | "night" | "nightly"))
+            {
                 "day"
             } else {
                 return Err(format!(

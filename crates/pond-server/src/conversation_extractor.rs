@@ -531,9 +531,7 @@ fn parse_interests(items: &[serde_json::Value], subject_names: &[&str]) -> Vec<O
                         .unwrap_or("other"),
                 ),
                 facets,
-                signal: Signal::parse(
-                    item.get("signal").and_then(|s| s.as_str()).unwrap_or(""),
-                ),
+                signal: Signal::parse(item.get("signal").and_then(|s| s.as_str()).unwrap_or("")),
             })
         })
         .take(MAX_INTERESTS)
@@ -693,7 +691,8 @@ mod tests {
     #[test]
     fn a_reply_cut_off_inside_its_reminders_keeps_the_finished_one() {
         let raw = r#"{"memories":[{"note":"Jerry sees a dentist in Kisumu.","kind":"context"}],"reminders":[{"about":"the dentist","when":"next Tuesday"},{"about":"collect the tract"#;
-        let out = parse_window_response(raw, 5, true, &[]).expect("finished items are worth keeping");
+        let out =
+            parse_window_response(raw, 5, true, &[]).expect("finished items are worth keeping");
         assert_eq!(
             out.memories.len(),
             1,
@@ -706,8 +705,8 @@ mod tests {
     #[test]
     fn a_null_memories_value_does_not_read_the_reminders_as_memories() {
         let raw = r#"{"memories":null,"reminders":[{"about":"the clinic","when":"on the 14th"},{"about":"the bi"#;
-        let out =
-            parse_window_response(raw, 5, true, &[]).expect("the finished reminder is worth keeping");
+        let out = parse_window_response(raw, 5, true, &[])
+            .expect("the finished reminder is worth keeping");
         assert!(
             out.memories.is_empty(),
             "no reminder was misread as a memory"
@@ -890,8 +889,12 @@ mod tests {
     #[test]
     fn the_prompt_asks_for_interests_before_memories() {
         let prompt = rendered();
-        let interests = prompt.find("{\"interests\":[").expect("interests in the skeleton");
-        let memories = prompt.find("\"memories\":[").expect("memories in the skeleton");
+        let interests = prompt
+            .find("{\"interests\":[")
+            .expect("interests in the skeleton");
+        let memories = prompt
+            .find("\"memories\":[")
+            .expect("memories in the skeleton");
         assert!(interests < memories);
     }
 
@@ -989,7 +992,8 @@ mod tests {
 
     #[test]
     fn an_unreadable_reply_is_not_an_empty_one() {
-        let empty = parse_window_response(r#"{"memories":[],"reminders":[]}"#, 3, true, &[]).unwrap();
+        let empty =
+            parse_window_response(r#"{"memories":[],"reminders":[]}"#, 3, true, &[]).unwrap();
         assert!(empty.is_empty());
 
         let err = parse_window_response("Sure! I had a look and nothing stood out.", 3, true, &[])
@@ -1028,7 +1032,10 @@ mod tests {
 
         // Vacuity control: the same reply yields a reminder when one was asked for.
         assert_eq!(
-            parse_window_response(raw, 3, true, &[]).unwrap().reminders.len(),
+            parse_window_response(raw, 3, true, &[])
+                .unwrap()
+                .reminders
+                .len(),
             1
         );
     }
@@ -1042,7 +1049,10 @@ mod tests {
             {"note":"Jerry runs the standup.","kind":"routine"}
         ]}"#;
         assert_eq!(
-            parse_window_response(raw, 2, true, &[]).unwrap().memories.len(),
+            parse_window_response(raw, 2, true, &[])
+                .unwrap()
+                .memories
+                .len(),
             2
         );
     }
@@ -1061,7 +1071,10 @@ mod tests {
         assert_eq!(out.interests[0].signal, Signal::Does);
         assert_eq!(out.interests[1].category, "film_tv");
         assert_eq!(out.interests[1].signal, Signal::Asked);
-        assert!(!out.is_empty(), "a window with only interests still yielded something");
+        assert!(
+            !out.is_empty(),
+            "a window with only interests still yielded something"
+        );
     }
 
     #[test]

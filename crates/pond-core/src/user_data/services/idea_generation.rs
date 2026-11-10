@@ -197,7 +197,10 @@ pub fn parse_query(raw: &str) -> Option<String> {
         return None;
     }
     let query = text_of(&map, "query")?;
-    let query = query.trim_matches(|c: char| c == '"' || c == '?').trim().to_string();
+    let query = query
+        .trim_matches(|c: char| c == '"' || c == '?')
+        .trim()
+        .to_string();
     let words = query.split_whitespace().count();
     (2..=16).contains(&words).then_some(query)
 }
@@ -283,7 +286,11 @@ pub fn build_idea_message(
 }
 
 fn clipped(text: &str, max: usize) -> String {
-    text.chars().take(max).collect::<String>().trim().to_string()
+    text.chars()
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// The idea the reply describes, or `None` when the model found nothing, wrote a question, or
@@ -305,8 +312,7 @@ pub fn parse_idea(
     if score < MIN_SCORE {
         return None;
     }
-    let why = text_of(&map, "why")
-        .unwrap_or_else(|| format!("You follow {}.", seed.label));
+    let why = text_of(&map, "why").unwrap_or_else(|| format!("You follow {}.", seed.label));
 
     let named: Vec<usize> = map
         .get("sources")
@@ -386,8 +392,8 @@ fn goose_part(
         .map(|l| clipped(&l, 40))
         .unwrap_or_default();
     let prompt = text_of(part, "prompt").map(|p| clipped(&p, 400));
-    let listing_url = text_of(part, "listing_url")
-        .filter(|url| pages.iter().any(|p| &p.url == url));
+    let listing_url =
+        text_of(part, "listing_url").filter(|url| pages.iter().any(|p| &p.url == url));
     if kind == GooseKind::Watch && listing_url.is_none() {
         kind = GooseKind::Research;
         label = "Research it for me".to_string();
@@ -468,14 +474,20 @@ mod tests {
     #[test]
     fn the_topic_map_leads_with_what_the_member_is_working_on_beside_it() {
         let seeds = pick_seeds(
-            &[topic("t1", "Toyota Fielder", 0.9), topic("t2", "P vs NP", 0.8)],
+            &[
+                topic("t1", "Toyota Fielder", 0.9),
+                topic("t2", "P vs NP", 0.8),
+            ],
             &[interest("i1", "GTA V", true, 1)],
             Some(&portrait(&["MCP Dev Summit Nairobi talk"])),
             &[],
         );
         assert_eq!(seeds.len(), 2);
         assert_eq!(seeds[0].from, SeedFrom::TopicMap("t1".into()));
-        assert_eq!(seeds[0].query.as_deref(), Some("Toyota Fielder prices Nairobi"));
+        assert_eq!(
+            seeds[0].query.as_deref(),
+            Some("Toyota Fielder prices Nairobi")
+        );
         assert_eq!(seeds[1].from, SeedFrom::WorkingOn);
     }
 
@@ -491,7 +503,10 @@ mod tests {
             &[],
         );
         let labels: Vec<&str> = seeds.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(labels, vec!["MCP Dev Summit Nairobi talk", "Toyota Fielder"]);
+        assert_eq!(
+            labels,
+            vec!["MCP Dev Summit Nairobi talk", "Toyota Fielder"]
+        );
         assert!(
             !labels.contains(&"Primetime"),
             "one conversation is curiosity, never a seed"
@@ -582,7 +597,10 @@ mod tests {
             r#"{"title":"A thing","pitch":"x","score":0.1}"#,
             "no json",
         ] {
-            assert!(parse_idea(raw, "p", &seed(), &pages(), Utc::now()).is_none(), "{raw}");
+            assert!(
+                parse_idea(raw, "p", &seed(), &pages(), Utc::now()).is_none(),
+                "{raw}"
+            );
         }
     }
 
@@ -599,7 +617,15 @@ mod tests {
     fn the_prompts_name_their_sources_and_define_every_field() {
         let idea = render_idea_system("Jerry");
         assert!(idea.contains("Use only these sources"));
-        for field in ["title:", "pitch:", "why:", "sources:", "you_can:", "goose_can:", "score:"] {
+        for field in [
+            "title:",
+            "pitch:",
+            "why:",
+            "sources:",
+            "you_can:",
+            "goose_can:",
+            "score:",
+        ] {
             assert!(idea.contains(field), "{field}");
         }
         let query = render_query_system("Jerry");

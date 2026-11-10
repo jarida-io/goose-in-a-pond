@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::user_data::domain::interest::{
-    Interest, InterestInput, InterestPatch, MemberPortrait, ObservedInterest, Observed, Origin,
+    Interest, InterestInput, InterestPatch, MemberPortrait, Observed, ObservedInterest, Origin,
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
 

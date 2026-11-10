@@ -95,13 +95,20 @@ fn interest_line(interest: &Interest) -> String {
     } else if interest.confirmed {
         line.push_str(&format!("; {}", interest.depth.as_str()));
     } else {
-        line.push_str(&format!("; a guess from {} conversations", interest.evidence));
+        line.push_str(&format!(
+            "; a guess from {} conversations",
+            interest.evidence
+        ));
     }
     line.push(')');
     line
 }
 
-pub fn build_user_message(name: &str, known: &KnownAboutMember, interview: &InterestInterview) -> String {
+pub fn build_user_message(
+    name: &str,
+    known: &KnownAboutMember,
+    interview: &InterestInterview,
+) -> String {
     let mut out = String::from("Already known:\n");
     let mut said_anything = false;
     if let Some(portrait) = &known.portrait {
@@ -206,7 +213,11 @@ pub fn parse_reply(raw: &str) -> Option<InterviewReply> {
                 allow_free: allow_free || choices.len() < 2,
                 multi: map.get("multi").and_then(|m| m.as_bool()).unwrap_or(false)
                     && choices.len() >= 2,
-                choices: if choices.len() >= 2 { choices } else { Vec::new() },
+                choices: if choices.len() >= 2 {
+                    choices
+                } else {
+                    Vec::new()
+                },
             }
         });
     Some(InterviewReply { notes, question })
@@ -223,7 +234,14 @@ fn broad_questions() -> Vec<Question> {
     vec![
         q(
             "What do you enjoy doing when you have a free evening?",
-            &["Watching shows", "Gaming", "Reading", "Sport", "Music", "Going out"],
+            &[
+                "Watching shows",
+                "Gaming",
+                "Reading",
+                "Sport",
+                "Music",
+                "Going out",
+            ],
             true,
         ),
         q(
@@ -559,8 +577,17 @@ mod tests {
         let prompt = render_system("Jerry", 10);
         assert!(prompt.contains("Use these sources"));
         for field in [
-            "notes:", "topic:", "category:", "facets:", "depth:", "news:", "avoid:", "text:",
-            "choices:", "multi:", "allow_free:",
+            "notes:",
+            "topic:",
+            "category:",
+            "facets:",
+            "depth:",
+            "news:",
+            "avoid:",
+            "text:",
+            "choices:",
+            "multi:",
+            "allow_free:",
         ] {
             assert!(prompt.contains(field), "{field} is read and never defined");
         }

@@ -25,7 +25,11 @@ struct Silent;
 
 #[async_trait::async_trait]
 impl LlmProvider for Silent {
-    async fn complete(&self, _system: &str, _messages: Vec<ChatMessage>) -> anyhow::Result<ChatMessage> {
+    async fn complete(
+        &self,
+        _system: &str,
+        _messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<ChatMessage> {
         std::future::pending().await
     }
 
@@ -39,7 +43,11 @@ struct ScriptedInterviewer;
 
 #[async_trait::async_trait]
 impl LlmProvider for ScriptedInterviewer {
-    async fn complete(&self, _system: &str, messages: Vec<ChatMessage>) -> anyhow::Result<ChatMessage> {
+    async fn complete(
+        &self,
+        _system: &str,
+        messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<ChatMessage> {
         let asked = messages
             .first()
             .map(|m| m.content.matches("\nPond: ").count())
@@ -180,9 +188,21 @@ async fn an_interest_is_added_listed_changed_and_removed() {
     let (status, _) = call(&pond, Method::POST, "/me/interests", json!({"topic": "  "})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let (status, _) = call(&pond, Method::DELETE, &format!("/me/interests/{id}"), json!({})).await;
+    let (status, _) = call(
+        &pond,
+        Method::DELETE,
+        &format!("/me/interests/{id}"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(&pond, Method::DELETE, &format!("/me/interests/{id}"), json!({})).await;
+    let (status, _) = call(
+        &pond,
+        Method::DELETE,
+        &format!("/me/interests/{id}"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -215,8 +235,13 @@ async fn the_interview_asks_drafts_reviews_and_saves() {
     assert_eq!(second["draft"][0]["topic"], "The Boys");
     assert_eq!(second["draft"][0]["id"], "d1");
 
-    let (status, review) =
-        call(&pond, Method::POST, "/me/interests/interview/finish", json!({})).await;
+    let (status, review) = call(
+        &pond,
+        Method::POST,
+        "/me/interests/interview/finish",
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(review["status"], "review");
 

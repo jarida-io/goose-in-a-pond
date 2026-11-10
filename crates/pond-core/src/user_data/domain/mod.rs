@@ -1,10 +1,10 @@
 pub mod device;
 pub mod draft;
 pub mod face_recognition;
+mod factory_defaults;
 pub mod idea;
 pub mod interest;
 pub mod interest_interview;
-mod factory_defaults;
 pub mod memory;
 pub mod onboarding;
 pub mod profile;

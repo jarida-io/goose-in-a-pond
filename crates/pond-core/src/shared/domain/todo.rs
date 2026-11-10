@@ -1365,7 +1365,7 @@ fn connector_sentence(id: &str, name: &str, event: &str, filter: Option<&str>) -
 
 /// An id as a name: `camera-1` is "Camera 1".
 fn plain_name(id: &str) -> String {
-    capitalised(&id.replace(['-', '_'], " ").trim().to_string())
+    capitalised(id.replace(['-', '_'], " ").trim())
 }
 
 fn capitalised(text: &str) -> String {

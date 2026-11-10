@@ -3936,9 +3936,8 @@ async fn run_server(
         let gen_lane = inference_lane.clone();
         let gen_profiles = profile_repo.clone();
         let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
-        let gen_interests = pond_infra::sqlite_interests::SqliteInterestRepository::new(
-            db.system.clone(),
-        );
+        let gen_interests =
+            pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone());
         let gen_queue: Arc<
             dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
         > = Arc::new(
@@ -8182,22 +8181,17 @@ async fn consolidate_one_batch(
                 .map(|e| (e.proposal.action.clone(), e.proposal.rationale.clone()))
                 .collect();
 
-            let (outcome, changes) = match consolidation::apply_proposals(
-                repo,
-                &selection.batch,
-                accepted,
-            )
-            .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!("consolidation: applying actions failed: {e}");
-                    let _ = broadcast_tx.send(ConsolidationEvent::Error {
-                        message: e.to_string(),
-                    });
-                    return;
-                }
-            };
+            let (outcome, changes) =
+                match consolidation::apply_proposals(repo, &selection.batch, accepted).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::warn!("consolidation: applying actions failed: {e}");
+                        let _ = broadcast_tx.send(ConsolidationEvent::Error {
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                };
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
