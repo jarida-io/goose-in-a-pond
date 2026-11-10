@@ -1,10 +1,10 @@
 //! Travel MCP server: directions, ride-app links, and ride offers sent to the speaker's own phone.
 //! Nothing here books a ride: the member gets the fare and confirms on their phone.
 
+use crate::Dep;
 use pond_core::mcp::ports::notification::{MemberDelivery, MemberNotifier, Notification};
 use pond_core::rides::ports::RideAccounts;
 use pond_core::security::ports::draft_authority::DraftAuthority;
-use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::place_lookup::{PlaceFix, PlaceLookup};
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::services::location::{self, Location};
@@ -492,32 +492,6 @@ impl Matched {
     }
 }
 
-/// A dependency of the server: given at construction, or read from its process-wide slot each
-/// time a tool runs. Goose keeps the first server it spawns for the life of the process, and that
-/// can be before startup has installed the slots.
-enum Dep<T: ?Sized> {
-    Fixed(Option<Arc<T>>),
-    Installed(fn() -> Option<Arc<T>>),
-}
-
-impl<T: ?Sized> Dep<T> {
-    fn get(&self) -> Option<Arc<T>> {
-        match self {
-            Self::Fixed(dep) => dep.clone(),
-            Self::Installed(read) => read(),
-        }
-    }
-}
-
-impl<T: ?Sized> Clone for Dep<T> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Fixed(dep) => Self::Fixed(dep.clone()),
-            Self::Installed(read) => Self::Installed(*read),
-        }
-    }
-}
-
 fn describe(point: &RidePoint) -> String {
     match point {
         RidePoint::MyLocation => "the phone's current location".to_string(),
@@ -656,23 +630,8 @@ impl TravelMcpServer {
         })
     }
 
-    /// The household member speaking in this call, or why there is none. An unidentified
-    /// speaker in a one-member household can only be that member; a guest is nobody's.
     async fn speaker(&self, meta: &Meta) -> Result<String, &'static str> {
-        const NOT_ONE_MEMBER: &str = "the speaker is not identified as one household member";
-        let authority = self
-            .authority
-            .get()
-            .ok_or("this pond cannot tell who is speaking")?;
-        let session =
-            crate::session_meta::session_from_meta(meta).ok_or("this call carries no session")?;
-        match authority.actor_for_engine_session(&session).await {
-            Some((ProfileScope::Owner(id), _)) => Ok(id),
-            Some((ProfileScope::Household, _)) => {
-                authority.sole_member().await.ok_or(NOT_ONE_MEMBER)
-            }
-            _ => Err(NOT_ONE_MEMBER),
-        }
+        crate::session_meta::speaking_member(self.authority.get(), meta).await
     }
 
     /// The body of `book_ride`, apart from the rmcp wrapper so tests can call it.
@@ -1216,44 +1175,9 @@ mod delivery_tests {
     //! Pushing the link to the speaker's own phone: a named member only, never a broadcast.
 
     use super::*;
-    use async_trait::async_trait;
+    use crate::session_meta::fakes::{meta, FixedSpeaker};
     use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
-    use pond_core::security::ports::policy::{PolicyDecision, PolicyMode};
-    use pond_core::user_data::domain::session::IdentificationSource;
-
-    /// Resolves every session to `scope`; `sole` is the household's only member, if it has one.
-    struct FixedSpeaker {
-        scope: Option<ProfileScope>,
-        sole: Option<&'static str>,
-    }
-
-    #[async_trait]
-    impl DraftAuthority for FixedSpeaker {
-        async fn policy_mode(&self) -> PolicyMode {
-            PolicyMode::Audit
-        }
-        async fn actor_for_engine_session(
-            &self,
-            _engine_session_id: &str,
-        ) -> Option<(ProfileScope, IdentificationSource)> {
-            self.scope
-                .clone()
-                .map(|scope| (scope, IdentificationSource::Explicit))
-        }
-        async fn sole_member(&self) -> Option<String> {
-            self.sole.map(str::to_string)
-        }
-        async fn audit(&self, _s: &str, _a: &str, _d: &PolicyDecision) {}
-    }
-
-    fn meta() -> Meta {
-        let mut m = Meta::new();
-        m.0.insert(
-            crate::session_meta::SESSION_ID_META_KEY.to_string(),
-            serde_json::json!("engine-1"),
-        );
-        m
-    }
+    use pond_core::user_data::domain::profile::ProfileScope;
 
     fn server(speaker: Option<ProfileScope>, notifier: Arc<MockMemberNotifier>) -> TravelMcpServer {
         in_household(speaker, None, notifier)
@@ -1475,6 +1399,7 @@ mod booking_tests {
     use async_trait::async_trait;
     use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
     use pond_core::security::ports::policy::{PolicyDecision, PolicyMode};
+    use pond_core::user_data::domain::profile::ProfileScope;
     use pond_core::user_data::domain::session::IdentificationSource;
 
     /// Resolves every session to its scope, in a household of several unless `.1` names the

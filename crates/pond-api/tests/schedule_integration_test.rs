@@ -1011,3 +1011,109 @@ async fn a_routine_with_no_actions_or_an_assistant_prompt_is_a_bad_request() {
         assert_eq!(put.status(), StatusCode::BAD_REQUEST, "{kind}");
     }
 }
+
+#[tokio::test]
+async fn a_private_reminder_cannot_be_created_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    let body = serde_json::json!({
+        "name": "Evening",
+        "cron": "0 0 20 * * *",
+        "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+    });
+    let resp = app
+        .oneshot(auth_post("/api/v1/schedules", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn editing_a_private_reminders_prompt_keeps_it_the_members() {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "r".into(),
+            label: "Evening".into(),
+            cron: "0 0 20 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            ask_if_missed: false,
+            kind: TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the tablets".into(),
+            },
+        })
+        .await
+        .unwrap();
+    let (app, _tmp) = make_app_with(scheduler.clone()).await;
+
+    let resp = app
+        .oneshot(auth_put(
+            "/api/v1/schedules/r",
+            serde_json::json!({"prompt": "Take the blue tablets"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(!json_body(resp).await.to_string().contains("tablets"));
+    assert_eq!(
+        scheduler.list_tasks().await.unwrap()[0].kind,
+        TaskKind::MemberReminder {
+            profile_id: "grace".into(),
+            prompt: "Take the blue tablets".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn listings_show_a_private_reminder_without_what_it_says() {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "r".into(),
+            label: "Evening".into(),
+            cron: "0 0 20 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            ask_if_missed: false,
+            kind: TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "Take the tablets".into(),
+            },
+        })
+        .await
+        .unwrap();
+    let (app, _tmp) = make_app_with(scheduler).await;
+
+    for uri in ["/api/v1/schedules", "/api/v1/schedules/upcoming"] {
+        let resp = app.clone().oneshot(auth_get(uri)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let listed = json_body(resp).await.to_string();
+        assert!(listed.contains("Evening"), "{uri}: {listed}");
+        assert!(!listed.contains("tablets"), "{uri}: {listed}");
+    }
+}
+
+#[tokio::test]
+async fn a_schedule_cannot_be_turned_into_a_private_reminder_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    app.clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules",
+            serde_json::json!({"id": "evening", "name": "Evening", "cron": "0 0 20 * * *", "prompt": "hi"}),
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(auth_put(
+            "/api/v1/schedules/evening",
+            serde_json::json!({
+                "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

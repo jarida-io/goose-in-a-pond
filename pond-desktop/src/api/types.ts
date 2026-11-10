@@ -424,7 +424,8 @@ export interface Schedule {
   kind?:
     | { type: "agent_prompt"; prompt: string }
     | { type: "webhook"; webhook_url: string }
-    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> }
+    | { type: "member_reminder"; profile_id: string; prompt: string };
   last_run?: string;
   next_run?: string;
   created_at?: string;

@@ -1299,8 +1299,11 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
-`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger`,
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`), or
+`member_reminder {profile_id, prompt}`. A `member_reminder` is listed with an empty `prompt`, since
+these routes can't tell who is asking; see
+[A member's reminder](architecture/scheduling.md#a-members-reminder).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
@@ -1316,13 +1319,15 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
 | `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
 | `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
-| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
+| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms, for_member?}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
 `sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
-`agent_prompt` action, is `400`, on create and on update.
+`agent_prompt` action, is `400`, on create and on update. A `member_reminder` kind is `400` on create
+and on update: a private reminder is set by its member, by voice. Changing a `member_reminder`'s
+`prompt` keeps it the member's.
 
 ## Memory, reminders, suggestions and proposals
 
