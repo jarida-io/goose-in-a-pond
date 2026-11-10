@@ -91,7 +91,7 @@ are RFC 3339.
 | `POST /enroll` | Unlocked only. `200 {key}`: this phone's own key, replacing any it had. Shown once |
 | `DELETE /key` | `204`: this phone's key is revoked and the phone locked |
 | `POST /lock` | `204` |
-| `GET /overview` | `{disk: {total_bytes, free_bytes}, data_dir_bytes, areas: [{id, bytes}], databases: [{name, bytes}], counts: {sessions, messages, memories, long_tasks, artifacts, models}}` |
+| `GET /overview` | `{disk: {total_bytes, free_bytes}, volume: {total_bytes, free_bytes}\|null, data_dir_bytes, areas: [{id, bytes}], databases: [{name, bytes}], counts: {sessions, messages, memories, long_tasks, artifacts, models}}` |
 | `GET /files?path=` | `{path, entries: [{name, path, kind: "file"\|"directory"\|"symlink", bytes, modified_at, deletable, reason}]}`, largest first |
 | `DELETE /files?path=` | `200 {freed_bytes}`; `400 invalid_path`; `403 protected_path` with `reason`; `404 not_found` |
 | `GET /caches` | `{caches: [{id, bytes, files}]}` |
@@ -99,13 +99,19 @@ are RFC 3339.
 | `GET /tasks` | `{tasks: [{id, goal, another_member, state, kind, created_at, finished_at, has_report, artifacts: [{id, title, kind, tokens, created_at}]}]}` |
 | `DELETE /tasks/{id}` | `200 {deleted: true}`; `404 not_found`; `409 task_active` |
 | `DELETE /tasks/{id}/artifacts/{artifact_id}` | as above |
-| `GET /health` | `{version, uptime_secs, host: {hostname, os, arch, cpus, uptime_secs, load}, memory: {total_bytes, available_bytes, swap_total_bytes, swap_free_bytes}, disk, temperatures: [{zone, celsius}], process: {rss_bytes}, checks: [{id, status: "ok"\|"warning"\|"critical"}]}` |
+| `GET /health` | `{version, uptime_secs, host: {hostname, os, arch, cpus, uptime_secs, load}, memory: {total_bytes, available_bytes, swap_total_bytes, swap_free_bytes}, disk, volume, temperatures: [{zone, celsius}], process: {rss_bytes}, checks: [{id, status: "ok"\|"warning"\|"critical"}]}` |
 | `GET /power` | `{control: "nvpmodel"\|"none", mode: {id, name}\|null, default_mode_id, modes: [{id, name}], can_change, supply: {millivolts, milliamps, milliwatts}\|null, battery: {percent, charging}\|null}` |
 | `PUT /power/mode {id}` | `200 {mode, reboot_required}`; `400 unknown_power_mode`; `503 power_control_unavailable` |
 | `POST /power/restart {force?}` | `202 {restarting: true}`; `409 long_task_running` unless `force`; `503 power_control_unavailable` |
 
 - **Areas** (`overview.areas[].id`): `models` (`models/` and `hf_cache/`), `conversations` (the
   databases), `kv_snapshots`, `engine_caches`, `attachments`, `camera`, `logs`, `other`.
+- **An encrypted data volume.** When the data directory is its own mounted file system (the LUKS2
+  volume `giap.sh data-encrypt` makes), `disk` is the disk that holds it and the downloads, and
+  `volume` is the volume itself; otherwise `volume` is null. The `disk_space` health check takes
+  the fuller of the two. Downloads then live in `<data dir>-public`, linked back at their old
+  paths: the overview counts them in their areas and in `data_dir_bytes`, following a link only
+  into that sibling, never anywhere else.
 - **Files.** Paths are relative to the data directory and must stay inside it. `..`, absolute
   paths and symlinks out are refused. `setup/`, `tls/`, `secrets/`, `secrets.json`,
   `embedded-network/` and the `.runtime_*` files are never listed. The live databases are listed
