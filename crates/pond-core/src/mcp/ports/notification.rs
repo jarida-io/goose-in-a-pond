@@ -36,9 +36,9 @@ pub struct Notification {
 /// still opens the right screen, and one that cannot open the id (unknown, deleted, another
 /// member's) falls back to that screen too.
 ///
-/// `models`, `extensions` and `remote_access` (2026-10-27) and `my_pond` (2026-11-08) are newer
-/// than the app's allow-list: an app that does not know one opens where it was, exactly as for a
-/// notice with no hint.
+/// `models`, `extensions` and `remote_access` (2026-10-27), `my_pond` (2026-11-08) and `todos` are
+/// newer than the app's allow-list: an app that does not know one opens where it was, exactly as
+/// for a notice with no hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenScreen {
     /// The schedules list, with the schedule and the run the notification reports on.
@@ -64,6 +64,8 @@ pub enum OpenScreen {
     News { digest_id: Option<String> },
     /// One watched link in My Goose's cart.
     Cart { cart_id: String },
+    /// My Goose's to-dos, at one to-do when there is an id.
+    Todos { todo_id: Option<String> },
 }
 
 impl OpenScreen {
@@ -133,6 +135,12 @@ impl OpenScreen {
             Self::Cart { cart_id } => {
                 fields.insert("cart_id".into(), cart_id.as_str().into());
                 "cart"
+            }
+            Self::Todos { todo_id } => {
+                if let Some(todo_id) = todo_id {
+                    fields.insert("todo_id".into(), todo_id.as_str().into());
+                }
+                "todos"
             }
         };
         fields.insert("open".into(), screen.into());

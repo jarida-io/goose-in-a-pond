@@ -2,7 +2,7 @@
 //! at the digest hour, household time, each owner gets one summary of the changes that did not
 //! match. No check takes the model.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::web_page::{read_watched, FetchFailure};
@@ -11,7 +11,9 @@ use chrono::{Timelike, Utc};
 use pond_core::mcp::ports::notification::{
     MemberDelivery, MemberNotifier, Notification, OpenScreen,
 };
+use pond_core::shared::domain::todo::HookEvent;
 use pond_core::shared::domain::web_watch::{WatchItem, DIGEST_HOUR};
+use pond_core::shared::ports::todo::HookEventQueue;
 use pond_core::shared::ports::web_watch::{
     NoticeKind, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
 };
@@ -24,6 +26,14 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 const PASS_EVERY: Duration = Duration::from_secs(5 * 60);
 /// The first pass waits for startup's own work to settle.
 const FIRST_PASS_AFTER: Duration = Duration::from_secs(90);
+
+/// Where a match is also queued for the member's to-do hooks; unset, a match is only told.
+static HOOK_EVENTS: OnceLock<Arc<dyn HookEventQueue>> = OnceLock::new();
+
+/// Install the hook queue once, at startup; later calls are ignored.
+pub fn install_hook_events(queue: Arc<dyn HookEventQueue>) {
+    let _ = HOOK_EVENTS.set(queue);
+}
 
 /// Reads a watched page through the page tool's own reader.
 pub struct PageReader;
@@ -78,6 +88,21 @@ impl WatchNotifier for MemberWatchNotifier {
             tokio::spawn(async move {
                 speech.speak(&owner, &title, &body, now).await;
             });
+        }
+        if let (NoticeKind::Match, Some(watch_id), Some(queue)) =
+            (notice.kind, notice.watch_id.as_deref(), HOOK_EVENTS.get())
+        {
+            let event = HookEvent::new(
+                Some(&notice.owner),
+                "web_watch",
+                watch_id,
+                "match",
+                serde_json::json!({"title": notice.title}),
+                now,
+            );
+            if let Err(e) = queue.raise(&event).await {
+                tracing::warn!(target: "giap::trace", kind = "web_watch_hook_event_failed", error = %e);
+            }
         }
         let notification = Notification {
             id: format!(
@@ -148,4 +173,37 @@ pub fn spawn(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
+    use pond_core::shared::domain::todo::EventKey;
+    use pond_core::shared::mocks::mock_todo::MockTodoRepository;
+
+    fn notice(kind: NoticeKind) -> WatchNotice {
+        WatchNotice {
+            owner: "jerry".into(),
+            kind,
+            title: "A match on Jiji".into(),
+            body: "Toyota Fielder 2016, KSh 1,150,000".into(),
+            watch_id: Some("w1".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_match_is_queued_for_the_owners_todo_hooks_and_trouble_is_not() {
+        let queue = Arc::new(MockTodoRepository::new());
+        install_hook_events(queue.clone());
+        let notifier = MemberWatchNotifier::new(Arc::new(
+            MockMemberNotifier::new().with_devices("jerry", &["p"]),
+        ));
+        notifier.notify(notice(NoticeKind::Trouble)).await.unwrap();
+        notifier.notify(notice(NoticeKind::Match)).await.unwrap();
+        let raised = queue.events();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].0.key(), EventKey::new("web_watch", "w1", "match"));
+        assert_eq!(raised[0].0.profile_id.as_deref(), Some("jerry"));
+    }
 }
