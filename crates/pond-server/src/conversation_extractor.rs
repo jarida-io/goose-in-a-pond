@@ -19,7 +19,8 @@ use tokio::sync::RwLock;
 const EXTRACTION_PROMPT: &str = "\
 You are reading one conversation between {subject} and {assistant}. Two
 jobs: notice what {subject} cares about, and keep the rare fact about who
-{subject} is that will still be true in six months.
+{subject} is that will still be true in six months. Keep your thinking
+concise and focused on extracting exact facts from the conversation.
 
 Reply with JSON and nothing else:
 {skeleton}

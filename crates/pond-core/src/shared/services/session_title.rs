@@ -144,8 +144,11 @@ pub fn should_retitle(inputs: TitleGateInputs<'_>) -> TitleDecision {
 
 /// Strips the quotes, "Title:" labels and full stops models add; refuses prose outright.
 pub fn normalise_title(raw: &str) -> Option<String> {
-    // Only the first non-empty line; the rest is the model explaining itself.
-    let first_line = raw.lines().find(|l| !l.trim().is_empty())?;
+    let stripped = crate::models::services::thought_filter::strip_reasoning(raw);
+    let first_line = stripped
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .or_else(|| raw.lines().find(|l| !l.trim().is_empty()))?;
 
     let mut cleaned = first_line.trim();
 

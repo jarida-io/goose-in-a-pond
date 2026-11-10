@@ -112,7 +112,7 @@ Never:
 - a question only they could answer.
 
 The question is in their own words: \"I\", \"my\", never their name, never \
-opening by addressing anyone.
+opening by addressing anyone. Keep your thinking concise and focused on high practical utility.
 
 Reply with JSON and nothing else:
 
@@ -397,7 +397,12 @@ fn echoes(question: &str, memory: &str) -> bool {
 /// actually runs. A bare array is accepted because a model told to answer with
 /// a list often answers with a list.
 fn extract_items(raw: &str) -> Option<Vec<serde_json::Value>> {
+    let stripped = crate::models::services::thought_filter::strip_reasoning(raw);
     let candidates = [
+        stripped.trim(),
+        strip_fence(&stripped),
+        slice_braces(&stripped),
+        slice_array(&stripped),
         raw.trim(),
         strip_fence(raw),
         slice_braces(raw),

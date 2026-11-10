@@ -91,7 +91,8 @@ Use only these sources, given below: {name}'s confirmed interests, the \
 interests their conversations keep showing (with how many conversations show \
 each), their memories (most important first), and summaries of their recent \
 conversations. One question asked once is curiosity, not an interest: never \
-build on something only one conversation shows.
+build on something only one conversation shows. Keep your thinking concise, grounded, \
+and focused on synthesizing {name}'s real habits, projects, and tastes.
 
 Reply with JSON only, exactly this shape:
 {\"summary\":\"...\",\"into\":[{\"item\":\"...\",\"score\":0.0}],\

@@ -788,6 +788,10 @@ async fn run_once(
             let inner = Arc::downgrade(inner);
             let speech = speech.clone();
             Arc::new(move || {
+                if hears {
+                    speech.release_unheld("model_hears");
+                    return true;
+                }
                 let skip = inner
                     .upgrade()
                     .is_some_and(|inner| inner.whisper_busy_or_active());

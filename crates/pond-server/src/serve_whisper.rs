@@ -18,8 +18,8 @@ use crate::speech_model::SpeechEngine;
 use crate::voice_models::WhisperModel;
 
 /// How long a model nobody holds stays loaded after its last use.
-const IDLE: Duration = Duration::from_secs(30);
-const REAP_EVERY: Duration = Duration::from_secs(10);
+const IDLE: Duration = Duration::from_secs(5);
+const REAP_EVERY: Duration = Duration::from_secs(2);
 /// The full model (about 330 MB on the Jetson) loads only with this much available; below it, a
 /// transcription uses the wake-only copy instead. Loading it beside a room conversation, the
 /// encoder and Kokoro ran the 8 GB board out of memory.

@@ -234,6 +234,7 @@ A good idea is:
 (their places, tech stack, hardware, dates, names);
 - sourced: built on what the pages say;
 - doable: something {name} or the Pond can act on soon. Never a question.
+Keep your thinking concise, practical, and focused on tangible utility.
 
 Reply with JSON only, exactly this shape:
 {\"title\":\"...\",\"pitch\":\"...\",\"why\":\"...\",\"sources\":[1],\
