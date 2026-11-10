@@ -35,6 +35,10 @@ pub enum LaneJob {
     NewsTiles,
     /// Write a member's daily digest from the day's stories, ready by their digest time.
     NewsDigest,
+    /// Rewrite each member's portrait from their interests, memories and recent conversations.
+    Portrait,
+    /// Research an idea for a member from what they are into or working on.
+    Ideas,
 }
 
 impl LaneJob {
@@ -50,6 +54,8 @@ impl LaneJob {
         LaneJob::SuggestionGeneration,
         LaneJob::NewsTiles,
         LaneJob::NewsDigest,
+        LaneJob::Portrait,
+        LaneJob::Ideas,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -65,6 +71,8 @@ impl LaneJob {
             LaneJob::SuggestionGeneration => "suggestion_generation",
             LaneJob::NewsTiles => "news_tiles",
             LaneJob::NewsDigest => "news_digest",
+            LaneJob::Portrait => "portrait",
+            LaneJob::Ideas => "ideas",
         }
     }
 
@@ -81,6 +89,8 @@ impl LaneJob {
             LaneJob::SuggestionGeneration => "Think of things to suggest",
             LaneJob::NewsTiles => "Write members' news",
             LaneJob::NewsDigest => "Write members' daily digests",
+            LaneJob::Portrait => "Keep a portrait of each member",
+            LaneJob::Ideas => "Research ideas for members",
         }
     }
 
@@ -417,6 +427,8 @@ mod tests {
             LaneJob::SuggestionGeneration,
             LaneJob::NewsTiles,
             LaneJob::NewsDigest,
+            LaneJob::Portrait,
+            LaneJob::Ideas,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),

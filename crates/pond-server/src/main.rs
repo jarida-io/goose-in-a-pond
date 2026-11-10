@@ -15,6 +15,7 @@ mod kokoro_control;
 mod litert_runtime;
 mod llamafile_process;
 mod llm_memory_consolidator;
+mod my_goose_mind;
 use pond_server::tls_identity;
 mod model_download;
 mod news_runner;
@@ -2673,7 +2674,10 @@ async fn run_server(
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
-                .with_reminder_repository(reminder_repo),
+                .with_reminder_repository(reminder_repo)
+                .with_interest_repository(Arc::new(
+                    pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone()),
+                )),
         );
         let extraction_storage = session_storage.clone();
         let extraction_repo = memory_repo.clone();
@@ -3925,6 +3929,9 @@ async fn run_server(
         let gen_lane = inference_lane.clone();
         let gen_profiles = profile_repo.clone();
         let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
+        let gen_interests = pond_infra::sqlite_interests::SqliteInterestRepository::new(
+            db.system.clone(),
+        );
         let gen_queue: Arc<
             dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
         > = Arc::new(
@@ -4000,6 +4007,7 @@ async fn run_server(
                     }
                     res = compose_suggestions(
                         gen_memories.as_ref(),
+                        &gen_interests,
                         gen_queue.as_ref(),
                         gen_provider.clone(),
                         &subjects,
@@ -4057,6 +4065,17 @@ async fn run_server(
         voice: tts.clone(),
         data_dir: data_dir.clone(),
     });
+    let mind = my_goose_mind::MindDeps {
+        lane: inference_lane.clone(),
+        db: db.clone(),
+        profiles: profile_repo.clone(),
+        memories: memory_repo.clone(),
+        sessions: session_storage.clone(),
+        provider: llm_provider.clone(),
+        last_user_activity: last_user_activity.clone(),
+    };
+    my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
@@ -6565,6 +6584,7 @@ struct ComposeReport {
 /// Early returns still spend the lane's interval: the caller holds the slot guard.
 async fn compose_suggestions(
     memories: &dyn pond_core::user_data::ports::memory_repository::MemoryRepository,
+    interests: &dyn pond_core::user_data::ports::interests::InterestRepository,
     queue: &dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
     provider: Arc<
         tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>,
@@ -6598,6 +6618,10 @@ async fn compose_suggestions(
         .filter(|m| !already.contains(&m.id))
         // Too short to carry a question; asking would spend a slot to learn that.
         .filter(|m| m.content.trim().chars().count() >= 20)
+        // A trait made of one question asked is curiosity: nothing to build a question on.
+        .filter(|m| {
+            !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
+        })
         .collect();
 
     // Which twelve matters most: habits and preferences before trivia, recency within each rank.
@@ -6614,7 +6638,15 @@ async fn compose_suggestions(
         return Ok(empty);
     };
 
-    let user = gen::build_user_prompt(&candidates);
+    // The owner's portrait and confirmed interests, so each question is worth looking up for them.
+    let about = match candidates.first().and_then(|m| m.profile_id.as_deref()) {
+        Some(owner) => pond_core::user_data::services::member_portrait::about_member(
+            interests.portrait(owner).await.ok().flatten().as_ref(),
+            &interests.list(owner).await.unwrap_or_default(),
+        ),
+        None => None,
+    };
+    let user = gen::build_user_prompt(&candidates, about.as_deref());
     let reply = provider
         .complete(gen::SYSTEM, vec![ChatMessage::user(user)])
         .await?;
@@ -8130,16 +8162,22 @@ async fn consolidate_one_batch(
     match result {
         Ok(ref result) => {
             // Collected, not lazy: a borrowing iterator across the await breaks HRTB inference.
-            let accepted: Vec<
+            let accepted: Vec<(
                 pond_core::user_data::ports::memory_consolidator::ConsolidationAction,
-            > = result
+                String,
+            )> = result
                 .exchanges
                 .iter()
                 .filter(|e| e.judgment.accepted)
-                .map(|e| e.proposal.action.clone())
+                .map(|e| (e.proposal.action.clone(), e.proposal.rationale.clone()))
                 .collect();
 
-            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
+            let (outcome, changes) = match consolidation::apply_proposals(
+                repo,
+                &selection.batch,
+                accepted,
+            )
+            .await
             {
                 Ok(o) => o,
                 Err(e) => {
@@ -8164,7 +8202,11 @@ async fn consolidate_one_batch(
                     duration_ms = result.duration_ms,
                     "memory consolidation complete"
                 );
-                let details_json = serde_json::to_string(&result).ok();
+                // What changed, row by row with its text and reason, beside the whole trial.
+                let details_json = Some(consolidation::run_details(
+                    &changes,
+                    serde_json::to_value(result).ok(),
+                ));
                 let _ = repo
                     .log_consolidation_run(
                         mode_label,

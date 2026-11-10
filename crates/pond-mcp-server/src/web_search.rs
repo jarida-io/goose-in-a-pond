@@ -314,6 +314,25 @@ news, opening hours, prices, products, businesses, recent results.")]
     }
 }
 
+/// Brave's results for background work that writes from them in its own words and keeps none
+/// of them: the same key, client, town and key-status record as `search_web`.
+pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {
+    let key = brave_key().await.ok_or_else(key_removed)?;
+    let brave =
+        brave_client().ok_or_else(|| search_failed("the search client could not be built"))?;
+    let town = local_town_for_search().await;
+    WebSearch {
+        brave_base: BRAVE_API_BASE,
+        brave,
+        pages: page_client(),
+        board: web_search_status::global(),
+        town: town.as_deref(),
+        context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+    }
+    .search(&key, question)
+    .await
+}
+
 /// The town this search may send: only with local places on, read at each call so the switch
 /// takes effect on the next search.
 async fn local_town_for_search() -> Option<String> {

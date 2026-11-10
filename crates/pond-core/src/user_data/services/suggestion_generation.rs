@@ -1,8 +1,9 @@
 //! Composing a question out of one of the household's own memories: the prompt and the parse.
 //!
-//! The model writes only the question; [`GeneratedSuggestion::reason`] comes from the memory's
-//! own columns ([`reason_for`]), so the offer stays falsifiable. The model answers with a memory
-//! NUMBER, never an echoed id or category: small models mangle echoes, and a number is checkable.
+//! The model writes the question and the line under it, a specific "because" about the member;
+//! the line falls back to one built from the memory's own columns ([`reason_for`]) when the model
+//! writes none worth showing. The model answers with a memory NUMBER, never an echoed id or
+//! category: small models mangle echoes, and a number is checkable.
 
 use crate::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use crate::user_data::domain::suggestion::SuggestionContext;
@@ -21,6 +22,10 @@ const MIN_QUESTION_CHARS: usize = 16;
 /// Longest question: the card fits about three 30-char lines at 800x480.
 const MAX_QUESTION_CHARS: usize = 96;
 
+/// Shortest and longest "because" worth showing; outside them the pond's own line is shown.
+const MIN_BECAUSE_CHARS: usize = 12;
+const MAX_BECAUSE_CHARS: usize = 110;
+
 /// A question the pond composed, with the memory it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedSuggestion {
@@ -30,8 +35,10 @@ pub struct GeneratedSuggestion {
     pub profile_id: Option<String>,
     /// The sentence the household reads AND the prompt sent when they tap it.
     pub prompt: String,
-    /// The fact underneath, written by the pond. Never by the model.
+    /// The line under the question: the model's specific "because", else [`reason_for`]'s.
     pub reason: String,
+    /// The memory's own text, which grounds the chat model's answer when the card is tapped.
+    pub fact: String,
 }
 
 impl GeneratedSuggestion {
@@ -39,7 +46,7 @@ impl GeneratedSuggestion {
     pub fn context(&self) -> SuggestionContext {
         SuggestionContext::PersonalMemory {
             source_memory_id: self.source_memory_id.clone(),
-            fact: self.reason.clone(),
+            fact: self.fact.clone(),
         }
     }
 }
@@ -85,28 +92,40 @@ pub struct GenerationOutcome {
 }
 
 /// The system prompt, fixed so it stays in the KV prefix. It names both ends of the message
-/// first (the household is asking the pond, which must be able to answer) and has no worked
+/// first (the member is asking the pond, which must be able to answer) and has no worked
 /// example, which models echo back; its copyable placeholders fail on `Refusal::Length`.
 pub const SYSTEM: &str = "\
-Each note below is something this household has told the pond, or something it \
-learned about how they live. You are writing the message they would send the \
-pond next, in their own words.
+You suggest what one member of this household could ask the pond next: a \
+question the pond can usefully look up, check or work out FOR them, which they \
+tap to send as their own message.
 
-It is sent TO the pond, so write only what the pond could answer for them: \
-something to look up, check, work out or remember. Two kinds are wrong - one \
-only they could answer, and one the note already answers.
+Use these sources: what is known about them, under \"About\" (their portrait \
+and confirmed interests), and the numbered notes. Build each question on one \
+note, aimed at what they are into or working on: a price to check, news to \
+look up, a plan to work out, options to compare. Prioritise what \"About\" \
+says they are working on now, then what they follow closely.
 
-Never open by addressing anyone. The person in a note is \"I\" and their things \
-are \"mine\"; carry the place and the thing forward, never the name.
+Never:
+- trivia about the note itself, or a question the note already answers;
+- anything about the pond, the assistant or how it works;
+- the life story or career of a famous person, or of anyone else;
+- a question only they could answer.
 
-You are given numbered notes. Reply with JSON and nothing else:
+The question is in their own words: \"I\", \"my\", never their name, never \
+opening by addressing anyone.
 
-{\"suggestions\": [{\"memory\": <number>, \"question\": \"<question>\"}]}
+Reply with JSON and nothing else:
+
+{\"suggestions\": [{\"memory\": <number>, \"question\": \"<question>\", \"because\": \"<line>\", \"score\": <0 to 1>}]}
 
 - At most 3. Pick the notes the pond could be most useful about; ignore the rest.
 - \"memory\": one of the numbers you were given.
 - \"question\": what they would type, at least five words, under 90 characters, \
 ending in \"?\".
+- \"because\": one line to them, starting \"You\", saying the specific thing \
+about them this builds on, under 90 characters.
+- \"score\": 0 to 1, how useful the answer would be to them now. Sort by \
+score, highest first.
 - No explanation, no preamble.";
 
 /// Which notes are worth a pass, lowest first: habits lead, knowledge (usually trivia the pond
@@ -143,8 +162,13 @@ pub fn one_owners_candidates(ordered: Vec<MemoryFragment>) -> Vec<MemoryFragment
 }
 
 /// Number the memories by position (1-based, never an id), so an answer can reach only these.
-pub fn build_user_prompt(memories: &[MemoryFragment]) -> String {
-    let mut out = String::from("Notes:\n");
+/// `about` is what the pond knows of the notes' owner: their portrait and confirmed interests.
+pub fn build_user_prompt(memories: &[MemoryFragment], about: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(about) = about.map(str::trim).filter(|a| !a.is_empty()) {
+        out.push_str(&format!("About:\n{about}\n\n"));
+    }
+    out.push_str("Notes:\n");
     for (i, m) in memories.iter().enumerate() {
         // Content only: any extra field costs tokens and may be echoed instead of the number.
         out.push_str(&format!("{}. {}\n", i + 1, m.content.trim()));
@@ -215,6 +239,13 @@ pub fn parse_response(
         };
     };
 
+    // Highest score first, whatever order the model wrote them in; unscored keep their place.
+    let mut items = items;
+    items.sort_by(|a, b| {
+        let score = |v: &serde_json::Value| v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.5);
+        score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let mut outcome = GenerationOutcome::default();
     for item in items {
         if outcome.accepted.len() >= MAX_PER_PASS {
@@ -251,14 +282,33 @@ pub fn parse_response(
             continue;
         }
 
+        let because = item
+            .get("because")
+            .and_then(serde_json::Value::as_str)
+            .and_then(usable_because)
+            .unwrap_or_else(|| reason_for(memory, now));
         outcome.accepted.push(GeneratedSuggestion {
             source_memory_id: memory.id.clone(),
             profile_id: memory.profile_id.clone(),
             prompt: question.to_string(),
-            reason: reason_for(memory, now),
+            reason: because,
+            fact: memory.content.trim().to_string(),
         });
     }
     outcome
+}
+
+/// The model's "because", when it is a line worth showing: one line, the right length, a
+/// statement, and not the placeholder or the pond's own canned sentence.
+fn usable_because(raw: &str) -> Option<String> {
+    let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let line = line.trim_matches('"').trim();
+    let chars = line.chars().count();
+    let usable = (MIN_BECAUSE_CHARS..=MAX_BECAUSE_CHARS).contains(&chars)
+        && !line.ends_with('?')
+        && !line.contains("<line>")
+        && !line.starts_with("From something");
+    usable.then(|| line.to_string())
 }
 
 /// Everything wrong with one question, in the order worth reporting.
@@ -535,11 +585,30 @@ mod tests {
 
     #[test]
     fn the_prompt_numbers_from_one_and_carries_only_the_note() {
-        let prompt = build_user_prompt(&three());
+        let prompt = build_user_prompt(&three(), None);
+        assert!(prompt.starts_with("Notes:"), "no empty About block");
         assert!(prompt.contains("1. swims each Saturday morning at the club"));
         assert!(prompt.contains("3. brother Manu lives in Kisumu"));
         assert!(!prompt.contains("m1"), "the prompt must not carry ids");
         assert!(!prompt.contains("extraction"), "nor the source");
+    }
+
+    #[test]
+    fn the_prompt_leads_with_what_is_known_about_the_member() {
+        let prompt = build_user_prompt(
+            &three(),
+            Some("Runs a small software company.\nInto: Formula 1 (Ferrari)"),
+        );
+        assert!(prompt.starts_with("About:\nRuns a small software company."));
+        assert!(prompt.find("About:").unwrap() < prompt.find("Notes:").unwrap());
+    }
+
+    #[test]
+    fn the_rules_forbid_trivia_the_assistant_and_biographies() {
+        assert!(SYSTEM.contains("trivia about the note itself"));
+        assert!(SYSTEM.contains("anything about the pond, the assistant"));
+        assert!(SYSTEM.contains("life story or career of a famous person"));
+        assert!(SYSTEM.contains("\"because\""));
     }
 
     // ── Which notes a pass spends itself on ──────────────────────────────
@@ -623,11 +692,72 @@ mod tests {
         assert_eq!(out.accepted.len(), 2);
         assert_eq!(out.accepted[0].source_memory_id, "m1");
         assert_eq!(out.accepted[1].source_memory_id, "m3");
-        // The reason is the pond's, not the model's.
+        // No "because" from the model: the pond's own line is shown.
         assert_eq!(
             out.accepted[0].reason,
             "From something you told me, saved 3 days ago."
         );
+    }
+
+    #[test]
+    fn the_highest_scored_suggestions_take_the_slots() {
+        let mems = three();
+        let raw = r#"{"suggestions":[
+            {"memory":1,"question":"What time does the club pool open on Saturday?","score":0.2},
+            {"memory":2,"question":"What temperature should I bake rye bread at?","score":0.9},
+            {"memory":3,"question":"What is the fastest bus to Kisumu?","score":0.7},
+            {"memory":1,"question":"Is the club pool heated in winter?","score":0.8}
+        ]}"#;
+        let out = parse_response(raw, &mems, &[], now());
+        let ids: Vec<&str> = out
+            .accepted
+            .iter()
+            .map(|a| a.source_memory_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["m2", "m1", "m3"]);
+        assert_eq!(out.accepted[1].prompt, "Is the club pool heated in winter?");
+    }
+
+    #[test]
+    fn the_models_because_is_shown_when_it_is_a_line_worth_showing() {
+        let mems = three();
+        let raw = r#"{"suggestions":[
+            {"memory":1,"question":"What time does the club pool open on Saturday?","because":"You swim at the club every Saturday morning"},
+            {"memory":2,"question":"What temperature should I bake rye bread at?","because":"<line>"},
+            {"memory":3,"question":"What is the fastest bus to Kisumu?","because":"Is Manu in Kisumu?"}
+        ]}"#;
+        let out = parse_response(raw, &mems, &[], now());
+        assert_eq!(out.accepted.len(), 3);
+        assert_eq!(
+            out.accepted[0].reason,
+            "You swim at the club every Saturday morning"
+        );
+        assert!(
+            out.accepted[1].reason.starts_with("From "),
+            "the placeholder falls back to the pond's line"
+        );
+        assert!(
+            out.accepted[2].reason.starts_with("From "),
+            "a question is not a reason"
+        );
+    }
+
+    /// Tapping the card grounds the answer in what the member said, not in the line under it.
+    #[test]
+    fn the_grounding_fact_is_the_memorys_own_text() {
+        let mems = three();
+        let out = parse_response(
+            r#"{"suggestions":[{"memory":3,"question":"What is the fastest bus to Kisumu?","because":"You have a brother in Kisumu"}]}"#,
+            &mems,
+            &[],
+            now(),
+        );
+        match out.accepted[0].context() {
+            SuggestionContext::PersonalMemory { fact, .. } => {
+                assert_eq!(fact, "brother Manu lives in Kisumu")
+            }
+            other => panic!("expected a memory context, got {other:?}"),
+        }
     }
 
     #[test]
@@ -894,6 +1024,7 @@ mod tests {
 
     // ── The reason ───────────────────────────────────────────────────────
 
+    /// The pond's fallback line, which is all a card shows when the model wrote no "because".
     #[test]
     fn the_reason_never_quotes_the_note() {
         let mems = three();

@@ -16,10 +16,10 @@ use sqlx::{Pool, Sqlite};
 
 /// Shared by every row read, so no query drifts from `QueueRow`'s field order.
 const QUEUE_COLUMNS: &str = "q.id, q.profile_id, q.prompt, q.reason, q.source_memory_id, \
-     q.created_at";
+     m.content, q.created_at";
 
-/// `(id, profile_id, prompt, reason, source_memory_id, created_at)`.
-type QueueRow = (String, Option<String>, String, String, String, String);
+/// `(id, profile_id, prompt, reason, source_memory_id, fact, created_at)`.
+type QueueRow = (String, Option<String>, String, String, String, String, String);
 
 /// `sqlite_memory`'s liveness predicate, copied verbatim so one grep finds both.
 const MEMORY_IS_LIVE: &str = "(m.lifecycle IS NULL OR m.lifecycle = 'active')";
@@ -61,13 +61,14 @@ fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
 }
 
 fn row_to_suggestion(row: QueueRow) -> Result<QueuedSuggestion> {
-    let (id, profile_id, prompt, reason, source_memory_id, created_at) = row;
+    let (id, profile_id, prompt, reason, source_memory_id, fact, created_at) = row;
     Ok(QueuedSuggestion {
         id,
         profile_id,
         prompt,
         reason,
         source_memory_id,
+        fact,
         created_at: parse_ts(&created_at)?,
     })
 }
@@ -184,6 +185,7 @@ mod tests {
             profile_id: profile_id.map(str::to_string),
             prompt: prompt.to_string(),
             reason: "From something you told me, saved 3 days ago.".to_string(),
+            fact: "a note".to_string(),
         }
     }
 
