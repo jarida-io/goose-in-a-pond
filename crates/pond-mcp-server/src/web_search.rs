@@ -3616,7 +3616,7 @@ mod tests {
     /// Functional only: Brave's terms (3(b)(xiii)) forbid scoring a model on its results, and
     /// nothing here is written to disk.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network and a Brave key; set BRAVE_SEARCH_API_KEY"]
     async fn live_brave_search_answers_a_local_question() {
         let key = std::env::var(BRAVE_SEARCH_API_KEY).expect("set BRAVE_SEARCH_API_KEY");
         let brave = crate::build_http_client();
@@ -3792,7 +3792,7 @@ mod tests {
     /// the offline port in `kt/copies.py` can be checked against this code:
     /// `FIXTURES=<dir> COPIES_TO=<file> cargo test -p pond-mcp-server fixture_copies -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "needs frozen fixtures; set FIXTURES and COPIES_TO"]
     fn fixture_copies() {
         let dir = std::path::PathBuf::from(std::env::var("FIXTURES").expect("set FIXTURES"));
         let mut copies = serde_json::Map::new();
@@ -3812,7 +3812,7 @@ mod tests {
     /// Freeze each live page's extracted blocks as a JSON fixture, so selection can be compared
     /// offline: `FREEZE_TO=<dir> cargo test -p pond-mcp-server freeze_pages -- --ignored`.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network; set FREEZE_TO"]
     async fn freeze_pages_for_offline_ranking() {
         let dir = std::path::PathBuf::from(std::env::var("FREEZE_TO").expect("set FREEZE_TO"));
         let fetched = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -3856,7 +3856,7 @@ mod tests {
     /// frozen blocks the shipped selection answers; for the rest a miss is printed, and
     /// `REQUIRE_ANSWERS=1` turns it into a failure.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network"]
     async fn live_pages_are_read_extracted_and_ranked() {
         let client = page_client().expect("page client builds");
 
