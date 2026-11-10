@@ -15,14 +15,38 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 const CONSOLIDATION_PROMPT: &str = "\
-Review these memories and find problems. Output a JSON array of actions:
-- To merge duplicates: {\"action\":\"merge\",\"ids\":[\"id1\",\"id2\"],\"merged\":\"combined fact\",\"segment\":\"...\",\"importance\":0.0-1.0}
-- To prune: {\"action\":\"prune\",\"id\":\"id1\"}
-- If nothing to change: []
-MERGE truly duplicate facts. Keep distinct facts separate.
-PRUNE: empty content, general knowledge (weather, Wikipedia facts), info already available in the system prompt (assistant name, timezone, personality), speculative/unverified claims, vague statements, conversational filler, anything the assistant said rather than a user fact.
-Only keep memories personally relevant to the user that would be lost if forgotten.
-Output ONLY the JSON array.";
+Using the memories below, which the Pond keeps about one household member, \
+decide what to change so the store holds only facts that help the assistant \
+serve that member.
+
+Reply with JSON only: an array of action objects, most important first. Each \
+object is exactly one of these:
+{\"action\":\"merge\",\"ids\":[\"id1\",\"id2\"],\"merged\":\"...\",\"segment\":\"...\",\"importance\":0.0,\"reason\":\"...\"}
+{\"action\":\"prune\",\"id\":\"id1\",\"reason\":\"...\"}
+- action: \"merge\" folds duplicates and near-duplicates into one sentence that \
+keeps every detail; \"prune\" archives a memory that does not help.
+- ids, id: memory ids copied exactly from the square brackets.
+- merged: the one sentence that replaces them, never empty.
+- segment: identity, preference, correction, relationship, routine, project, \
+knowledge or context.
+- importance: 0 to 1, how much the fact matters to serving the member.
+- reason: one line naming what is duplicated or why it does not help.
+
+PRUNE: empty content, general knowledge (weather, Wikipedia facts), info already \
+available in the system prompt (assistant name, timezone, personality), \
+speculative or unverified claims, vague statements, conversational filler, \
+anything the assistant said rather than a fact about the member.
+PRUNE a trait built from a single question: asking about something once is \
+curiosity, not who the member is. Any memory that says the member inquires \
+about, tracks, researches or is working through a film, show, book, game or \
+public figure came from one question. For example \"<member> inquires about the \
+new thriller Primetime\", \"<member> tracks the biographies of public figures \
+such as Willem Dafoe\", \"<member> is working through an assignment named \
+Avengers Doomsday\" (a film they asked about). PRUNE nonsense one exchange \
+produced, such as \"<member> repeatedly offers apologies to <member>\".
+Go through every memory in turn and decide: keep, merge or prune. Keep \
+distinct facts separate. Never prune a correction.
+If nothing should change, reply [].";
 
 /// Parse a model-written segment label; `None` keeps the row's current segment.
 /// Accepts every stored segment, unlike the batch extractor's closed five-value parser.
@@ -84,6 +108,44 @@ impl MemoryConsolidator for LlmMemoryConsolidator {
     }
 }
 
+impl LlmMemoryConsolidator {
+    /// The actions with the model's reason for each, which the run's details record.
+    async fn propose(
+        &self,
+        memories: &[MemoryFragment],
+    ) -> Result<Vec<(ConsolidationAction, String)>> {
+        let provider = {
+            let guard = self.live_provider.read().await;
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow!("no LLM provider"))?
+        };
+        let formatted = memories
+            .iter()
+            .take(20)
+            .map(|m| {
+                let seg = m
+                    .segment
+                    .as_ref()
+                    .map(|s| format!("{:?}", s).to_lowercase())
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!(
+                    "[{}] ({}, {:.1}) {}",
+                    m.id,
+                    seg,
+                    m.importance.unwrap_or(0.5),
+                    m.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let messages = vec![ChatMessage::user(format!("Memories:\n{formatted}"))];
+        let response = provider.complete(CONSOLIDATION_PROMPT, messages).await?;
+        Ok(parse_reasoned_actions(&response.content))
+    }
+}
+
 /// The `"single"` `memory_consolidation_mode`: one LLM call, three-stage result shape.
 /// Every proposal is recorded as accepted, with a rationale saying no review happened.
 pub async fn run_single_pass(
@@ -124,7 +186,7 @@ pub async fn run_single_pass(
     .await;
 
     let actions = LlmMemoryConsolidator::new(provider)
-        .consolidate(memories)
+        .propose(memories)
         .await?;
 
     // Cancelled mid-call: drop the proposals rather than apply interrupted work.
@@ -135,10 +197,14 @@ pub async fn run_single_pass(
 
     let exchanges: Vec<TrialExchange> = actions
         .into_iter()
-        .map(|action| TrialExchange {
+        .map(|(action, reason)| TrialExchange {
             proposal: ConsolidationProposal {
                 action,
-                rationale: "single-pass proposal".to_string(),
+                rationale: if reason.is_empty() {
+                    "single-pass proposal".to_string()
+                } else {
+                    reason
+                },
             },
             challenge: ChallengeVerdict {
                 agreed: true,
@@ -180,6 +246,14 @@ pub async fn run_single_pass(
 }
 
 fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
+    Ok(parse_reasoned_actions(raw)
+        .into_iter()
+        .map(|(action, _)| action)
+        .collect())
+}
+
+/// Each action the reply proposes, with its `reason` (empty when the model gave none).
+fn parse_reasoned_actions(raw: &str) -> Vec<(ConsolidationAction, String)> {
     let text = raw.trim();
 
     let cleaned = crate::conversation_extractor::strip_thinking(text);
@@ -190,10 +264,10 @@ fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
         if let Some(end) = cleaned.rfind(']') {
             cleaned[start..=end].to_string()
         } else {
-            return Ok(vec![]);
+            return vec![];
         }
     } else {
-        return Ok(vec![]);
+        return vec![];
     };
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap_or_default();
@@ -201,6 +275,12 @@ fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
 
     for v in &arr {
         let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+        let reason = v
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         match action {
             "merge" => {
                 let ids: Vec<String> = v
@@ -228,23 +308,61 @@ fn parse_consolidation_response(raw: &str) -> Result<Vec<ConsolidationAction>> {
                     .map(|i| (i as f32).clamp(0.0, 1.0))
                     .unwrap_or(0.5);
 
-                if ids.len() >= 2 && !merged.is_empty() {
-                    actions.push(ConsolidationAction::Merge {
-                        source_ids: ids,
-                        merged_content: merged,
-                        segment,
-                        importance,
-                    });
+                if ids.len() >= 2 && !merged.trim().is_empty() {
+                    actions.push((
+                        ConsolidationAction::Merge {
+                            source_ids: ids,
+                            merged_content: merged,
+                            segment,
+                            importance,
+                        },
+                        reason,
+                    ));
                 }
             }
             "prune" => {
                 if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
-                    actions.push(ConsolidationAction::Prune { id: id.to_string() });
+                    actions.push((ConsolidationAction::Prune { id: id.to_string() }, reason));
                 }
             }
             _ => {}
         }
     }
 
-    Ok(actions)
+    actions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_action_keeps_its_reason_and_a_blank_merge_is_dropped() {
+        let raw = r#"[
+            {"action":"prune","id":"m1","reason":"one question, not a trait"},
+            {"action":"merge","ids":["m2","m3"],"merged":"","segment":"preference","reason":"dupes"},
+            {"action":"merge","ids":["m4","m5"],"merged":"Jerry likes teal.","segment":"preference","importance":0.6,"reason":"same colour twice"}
+        ]"#;
+        let actions = parse_reasoned_actions(raw);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].1, "one question, not a trait");
+        assert!(matches!(actions[1].0, ConsolidationAction::Merge { .. }));
+        assert_eq!(actions[1].1, "same colour twice");
+    }
+
+    #[test]
+    fn the_prompt_defines_every_field_and_prunes_single_question_traits() {
+        for field in [
+            "- action:",
+            "- ids, id:",
+            "- merged:",
+            "- segment:",
+            "- importance:",
+            "- reason:",
+        ] {
+            assert!(CONSOLIDATION_PROMPT.contains(field), "{field}");
+        }
+        assert!(CONSOLIDATION_PROMPT.contains("PRUNE a trait built from a single question"));
+        assert!(CONSOLIDATION_PROMPT.contains("routine"));
+    }
 }

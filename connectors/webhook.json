@@ -1,0 +1,19 @@
+{
+  "id": "webhook",
+  "name": "Your own webhook",
+  "summary": "An address any service can call, such as GitHub or a door sensor. Each call can set off a reminder.",
+  "icon": "webhook",
+  "category": "custom",
+  "kind": "webhook",
+  "connect": { "via": "webhook" },
+  "setup": {
+    "fields": [
+      {
+        "key": "name", "label": "Name", "kind": "text", "required": true,
+        "help": "What will call it, such as GitHub or Front door."
+      }
+    ]
+  },
+  "events": [{ "id": "call", "label": "It is called" }],
+  "feeds": ["todos"]
+}

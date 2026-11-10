@@ -1,0 +1,9 @@
+{
+  "id": "uber",
+  "name": "Uber",
+  "summary": "Your own Uber account, so Goose can quote and book a ride for you when you ask.",
+  "icon": "car",
+  "category": "travel",
+  "kind": "account",
+  "connect": { "via": "uber" }
+}

@@ -75,6 +75,10 @@ pub enum ReminderDisposition {
     Pending,
     /// Turned into a proposal. Terminal here: it stops a second proposal from the same row.
     Proposed,
+    /// Offered to its member as a to-do; the phone's Add or No settles it.
+    Offered,
+    /// The member added it to their to-dos.
+    Accepted,
     /// Somebody said no.
     Dismissed,
     /// Its member was deleted. Written only by the `BEFORE DELETE ON profiles` trigger; nothing
@@ -87,6 +91,8 @@ impl ReminderDisposition {
         match self {
             Self::Pending => "pending",
             Self::Proposed => "proposed",
+            Self::Offered => "offered",
+            Self::Accepted => "accepted",
             Self::Dismissed => "dismissed",
             Self::Expired => "expired",
         }
@@ -97,6 +103,8 @@ impl ReminderDisposition {
         match raw {
             "pending" => Some(Self::Pending),
             "proposed" => Some(Self::Proposed),
+            "offered" => Some(Self::Offered),
+            "accepted" => Some(Self::Accepted),
             "dismissed" => Some(Self::Dismissed),
             "expired" => Some(Self::Expired),
             _ => None,

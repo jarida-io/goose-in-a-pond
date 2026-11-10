@@ -1,5 +1,6 @@
 //! ConversationExtractor port: read one conversation window and say what is worth remembering.
 
+use crate::user_data::domain::interest::ObservedInterest;
 use crate::user_data::domain::memory::{MemorySegment, MemoryTier};
 use crate::user_data::domain::profile::ProfileScope;
 use async_trait::async_trait;
@@ -200,13 +201,15 @@ pub struct ExtractedReminder {
 pub struct WindowExtraction {
     pub memories: Vec<ExtractedMemory>,
     pub reminders: Vec<ExtractedReminder>,
+    /// What the window showed the subject caring about; never a memory of who they are.
+    pub interests: Vec<ObservedInterest>,
     /// Items labelled outside the catalogue; counted so a misread prompt shows up as a number.
     pub rejected: usize,
 }
 
 impl WindowExtraction {
     pub fn is_empty(&self) -> bool {
-        self.memories.is_empty() && self.reminders.is_empty()
+        self.memories.is_empty() && self.reminders.is_empty() && self.interests.is_empty()
     }
 }
 

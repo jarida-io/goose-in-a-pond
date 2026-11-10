@@ -1,0 +1,10 @@
+{
+  "id": "directions",
+  "name": "Directions and rides",
+  "summary": "Directions and a map to a place, and a ride there with Uber or Bolt.",
+  "icon": "map",
+  "category": "travel",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_travel_enabled" },
+  "extension": "giap-travel"
+}

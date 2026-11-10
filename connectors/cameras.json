@@ -1,0 +1,10 @@
+{
+  "id": "cameras",
+  "name": "Cameras",
+  "summary": "Goose watches the cameras you add for people, pets and parcels, and can tell you when it sees one.",
+  "icon": "camera",
+  "category": "home",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "cameras_enabled", "also": ["vision_enabled"] },
+  "extension": "giap-vision"
+}
