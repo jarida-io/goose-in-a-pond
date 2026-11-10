@@ -4504,7 +4504,7 @@ async fn run_server(
         mesh_transport,
         mesh_provider: mesh_provider.clone(),
         peer_capability_query,
-        mesh_rebuild: Some(mesh_rebuild),
+        mesh_rebuild: cfg!(feature = "mesh").then_some(mesh_rebuild),
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),

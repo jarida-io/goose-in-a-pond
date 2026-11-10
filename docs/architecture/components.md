@@ -17,8 +17,7 @@ How the pieces fit together is in [overview.md](./overview.md); one chat turn th
 | **quarantined** | Compiles behind a feature but cannot be activated (Q2-05) |
 | **standalone** | Not a dependency of `pond-server`; has its own binary or consumer |
 
-Release builds add features on top of the default: the macOS desktop sidecar is built with
-`--features mesh` (`scripts/stage-server-sidecar.sh`), and the Jetson build adds
+Release builds add features on top of the default (which includes `mesh`): the Jetson build adds
 `pond-adapters-local-inference/cuda,pond-adapters-whisper/cuda` (`server_features` in
 `scripts/giap.sh`, `scripts/jetson/deploy.sh`).
 

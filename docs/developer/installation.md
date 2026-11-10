@@ -248,7 +248,7 @@ the app's Models page and stored as the `chat_provider` and `chat_model` setting
 | `ollama` | an Ollama server on `127.0.0.1:11434` |
 | `llamafile` | a llamafile the pond starts from `models/llm/` |
 | `mistralrs` | a mistral.rs server over its OpenAI-compatible API |
-| `mesh` | another pond over libp2p (`--features mesh` builds only) |
+| `mesh` | another pond over libp2p (the `mesh` feature is on by default) |
 
 ## Running
 

@@ -121,7 +121,7 @@ cargo test   --locked $FAST
 
 # The production binary and every test target of it (compiles Goose; slow when cold).
 cargo check --locked -p pond-server -p pond-adapters-goose --all-targets
-cargo check --locked -p pond-server --features mesh --all-targets
+cargo check --locked -p pond-server --no-default-features --features goose-agent,local-inference,vision-onnx,face-onnx --all-targets
 ```
 
 CI also checks the quarantined `pond-agent`/`pond-inference` pair, `--features mistralrs-agent`,

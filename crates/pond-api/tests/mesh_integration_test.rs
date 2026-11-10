@@ -326,6 +326,8 @@ async fn self_reports_disabled_when_mesh_transport_absent() {
     let (status, body) = json_request(&app, Method::GET, "/api/v1/mesh/self", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["mesh_enabled"], false);
+    // No `mesh_rebuild` is what a binary built without the `mesh` feature hands the router.
+    assert_eq!(body["mesh_compiled"], false);
 }
 
 #[tokio::test]

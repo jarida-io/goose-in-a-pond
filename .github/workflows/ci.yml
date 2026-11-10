@@ -255,10 +255,10 @@ jobs:
       - name: cargo check (production binary + its test targets — pond-server + goose adapter)
         run: cargo check --locked -p pond-server -p pond-adapters-goose --all-targets
 
-      # The check above doesn't pass --features mesh, but the staged sidecar
-      # build always does — this catches a mesh-only break the other misses.
-      - name: cargo check (production binary with mesh feature — matches the staged sidecar build)
-        run: cargo check --locked -p pond-server --features mesh --all-targets
+      # Mesh is a default feature, so the check above covers it; this one builds the
+      # stubs main.rs keeps for a build without it.
+      - name: cargo check (production binary without the mesh feature)
+        run: cargo check --locked -p pond-server --no-default-features --features goose-agent,local-inference,vision-onnx,face-onnx --all-targets
 
       # The quarantined PondAgent stack (Q2-05). Off pond-server's default features, so the gate
       # above never reaches it, yet AGENTS.md promises it "compiles and can be enabled"; hence
@@ -535,6 +535,15 @@ jobs:
 
       - name: Tests
         run: bash scripts/lib/remote-access.test.sh
+
+  mesh-scripts:
+    name: Mesh doctor - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/mesh.test.sh
 
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.

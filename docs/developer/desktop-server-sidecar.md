@@ -8,7 +8,7 @@ lifecycle are load-bearing.
 
 | Step | Command | What it does |
 |---|---|---|
-| Stage | `npm run stage:server` (`scripts/stage-server-sidecar.sh`) | Stages a recorded LiteRT-LM package into `resources/litert-lm/` (warns and skips when none is recorded); builds the web UI; builds `pond-server` release with `--features mesh`, `RUSTFLAGS=""` and `SQLX_OFFLINE=true`; copies it to `pond-desktop/resources/pond-server`, writes `resources/.dist-stamp`, and builds the Go `pondnet` helper into `resources/` |
+| Stage | `npm run stage:server` (`scripts/stage-server-sidecar.sh`) | Stages a recorded LiteRT-LM package into `resources/litert-lm/` (warns and skips when none is recorded); builds the web UI; builds `pond-server` release (default features, mesh included) with `RUSTFLAGS=""` and `SQLX_OFFLINE=true`; copies it to `pond-desktop/resources/pond-server`, writes `resources/.dist-stamp`, and builds the Go `pondnet` helper into `resources/` |
 | Verify | `scripts/verify-sidecar.sh` | Refuses to package unless the sidecar and `pondnet` exist and run, the sidecar is a Mach-O of the right architecture, its dist stamp matches the `dist/` about to ship, and any staged LiteRT-LM library is complete, signed, loadable and listed under `mac.binaries` |
 | Package | `npm run bundle:app` (`.app` and `.dmg`) or `npm run pack:dir` (unpacked) | Stage, `build:main`, verify, then `electron-builder --mac` |
 
