@@ -11704,6 +11704,13 @@ async fn update_schedule(
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": why})));
             }
         }
+        // As on create: this route can't tell who is asking.
+        Some(kind) if kind.member().is_some() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "a private reminder is set by its member, by voice"})),
+            );
+        }
         _ => {}
     }
     // A new prompt keeps a member's reminder theirs.

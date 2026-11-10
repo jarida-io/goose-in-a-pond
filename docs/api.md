@@ -1325,8 +1325,8 @@ The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
 `sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
-`agent_prompt` action, is `400`, on create and on update. A `member_reminder` kind is `400`: a
-private reminder is set by its member, by voice. Changing a `member_reminder`'s
+`agent_prompt` action, is `400`, on create and on update. A `member_reminder` kind is `400` on create
+and on update: a private reminder is set by its member, by voice. Changing a `member_reminder`'s
 `prompt` keeps it the member's.
 
 ## Memory, reminders, suggestions and proposals

@@ -1095,3 +1095,25 @@ async fn listings_show_a_private_reminder_without_what_it_says() {
         assert!(!listed.contains("tablets"), "{uri}: {listed}");
     }
 }
+
+#[tokio::test]
+async fn a_schedule_cannot_be_turned_into_a_private_reminder_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    app.clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules",
+            serde_json::json!({"id": "evening", "name": "Evening", "cron": "0 0 20 * * *", "prompt": "hi"}),
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(auth_put(
+            "/api/v1/schedules/evening",
+            serde_json::json!({
+                "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
