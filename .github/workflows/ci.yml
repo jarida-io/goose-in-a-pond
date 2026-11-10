@@ -536,6 +536,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/remote-access.test.sh
 
+  # Where the service's binaries go (scripts/lib/pond-binaries.sh): installed out of target/, renamed
+  # over atomically, the replaced one kept, and the unit pointed at them. Files only.
+  pond-binaries-scripts:
+    name: Service binaries - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/pond-binaries.test.sh
+
   # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
   # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.
   pond-health:
