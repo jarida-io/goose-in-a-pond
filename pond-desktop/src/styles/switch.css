@@ -1,0 +1,68 @@
+/* The shared on/off switch (components/Switch.tsx). Off is slate: 6.22:1 light and 4.80:1 dark on
+   the card, the white knob 6.22:1 and 3.53:1. */
+.giap-switch {
+  --switch-w: 46px;
+  --switch-h: 27px;
+  --switch-pad: 3px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  /* base.css centres every button's content, which would put the knob mid-track when off. */
+  justify-content: flex-start;
+  flex-shrink: 0;
+  width: var(--switch-w);
+  height: var(--switch-h);
+  padding: var(--switch-pad);
+  border: none;
+  border-radius: 999px;
+  background: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.giap-switch--sm {
+  --switch-w: 36px;
+  --switch-h: 21px;
+}
+
+.giap-switch[data-on="true"] {
+  background: var(--color-accent);
+}
+
+/* Purple on the dark panel is 2.97:1; 15% toward white makes it 3.90:1, the white knob 4.34:1. */
+:root[data-theme="dark"] .giap-switch[data-on="true"] {
+  background: color-mix(in srgb, var(--color-accent) 85%, white);
+}
+
+.giap-switch__knob {
+  width: calc(var(--switch-h) - 2 * var(--switch-pad));
+  height: calc(var(--switch-h) - 2 * var(--switch-pad));
+  border-radius: 50%;
+  background: var(--color-text-on-accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s;
+}
+
+.giap-switch[data-on="true"] .giap-switch__knob {
+  transform: translateX(calc(var(--switch-w) - var(--switch-h)));
+}
+
+.giap-switch:disabled,
+.giap-switch[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 44px hit area without changing what is drawn. */
+.giap-switch::after {
+  content: "";
+  position: absolute;
+  inset: calc((44px - var(--switch-h)) / -2) 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .giap-switch,
+  .giap-switch__knob {
+    transition: none;
+  }
+}

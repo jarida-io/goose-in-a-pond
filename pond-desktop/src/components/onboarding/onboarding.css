@@ -570,46 +570,6 @@
   line-height: 1.5;
 }
 
-/* ── Switch (native toggle) ───────────────────────────────── */
-
-.ob-switch {
-  position: relative;
-  flex-shrink: 0;
-  width: 44px;
-  height: 24px;
-  border-radius: var(--radius-pill);
-  border: none;
-  background: var(--grey-300);
-  cursor: pointer;
-  padding: 0;
-  transition: background var(--dur-base) ease;
-}
-
-.ob-switch--on {
-  background: var(--color-accent);
-}
-
-.ob-switch__thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
-  transition: transform var(--dur-base) ease;
-}
-
-.ob-switch--on .ob-switch__thumb {
-  transform: translateX(20px);
-}
-
-.ob-switch:focus-visible {
-  outline: 2px solid var(--color-border-focus);
-  outline-offset: 2px;
-}
-
 /* ── Form label ───────────────────────────────────────────── */
 
 .ob-form-label {

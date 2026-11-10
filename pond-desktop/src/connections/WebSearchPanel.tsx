@@ -2,6 +2,7 @@
 // The key leaves only in the save request and is never read back; the field clears once stored.
 
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { Switch } from "../components/Switch";
 import {
   CircleAlert,
   CircleCheck,
@@ -272,11 +273,8 @@ export function WebSearchPanel() {
               </p>
             )}
           </div>
-          <button
-            type="button"
-            role="switch"
-            className="websearch-switch"
-            aria-checked={nearbyOn}
+          <Switch
+            checked={nearbyOn}
             aria-labelledby="web-search-nearby-label"
             aria-describedby={
               placesError
@@ -286,11 +284,7 @@ export function WebSearchPanel() {
             aria-disabled={nearbyBlocked || undefined}
             aria-busy={placesSaving || undefined}
             onClick={() => void toggleNearby()}
-          >
-            <span className="websearch-switch__track" aria-hidden="true">
-              <span className="websearch-switch__thumb" />
-            </span>
-          </button>
+          />
         </div>
       )}
 

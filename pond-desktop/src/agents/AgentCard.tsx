@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Switch } from "@heroui/react";
+import { Switch } from "../components/Switch";
 import { AlertTriangle, Bot, CalendarClock, Info, Link2, ListChecks, MessageSquare, Pencil, Trash2, Zap } from "lucide-react";
 import "./agents.css";
 import type { AgentRecipe } from "../api/types";
@@ -81,13 +81,7 @@ export function AgentCard({ recipe, variant, env, onEdit, onDelete, onToggle }: 
           <Bot size={16} aria-hidden="true" />
         </span>
         <h3 className="ag-card__title">{title}</h3>
-        <Switch size="sm" isSelected={!paused} onChange={() => onToggle(recipe)} aria-label={`Enable ${title}`}>
-          <Switch.Content>
-            <Switch.Control>
-              <Switch.Thumb />
-            </Switch.Control>
-          </Switch.Content>
-        </Switch>
+        <Switch size="sm" checked={!paused} onChange={() => onToggle(recipe)} label={`Enable ${title}`} />
       </div>
 
       <p className="ag-card__purpose">{purpose !== "" ? purpose : "No description yet."}</p>

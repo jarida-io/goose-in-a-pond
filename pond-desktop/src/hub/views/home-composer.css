@@ -18,7 +18,7 @@
   border: 2px solid var(--color-text);
   border-radius: 5px;
   background: var(--color-surface);
-  box-shadow: 4px 4px 0 var(--pp);
+  box-shadow: 4px 4px 0 var(--border-ink);
   /* 20px left matches HomeStatusBar's own inset -- this sits directly under the greeting
      and would otherwise start flush at the dash's edge instead of lining up with it. */
   margin: 0 0 16px 20px;

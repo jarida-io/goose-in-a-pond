@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Plus, RefreshCw } from "lucide-react";
+import { Switch } from "../../../components/Switch";
 import { HubIco } from "../../primitives/HubIco";
 import { HP_PATHS } from "../../primitives/icons";
 import { DetailShell } from "./DetailShell";
@@ -116,18 +117,13 @@ function DeviceToggle({ device, onFlash }: DeviceToggleProps) {
   }
 
   return (
-    <button
-      className="htoggle"
-      data-on={on}
-      onClick={handleChange}
-      aria-pressed={on}
+    <Switch
+      checked={on}
+      onChange={() => void handleChange()}
       disabled={busy}
-      type="button"
-      aria-label={`${on ? "Turn off" : "Turn on"} ${device.name}`}
-      style={{ opacity: busy ? 0.5 : 1, cursor: busy ? "wait" : "pointer" }}
-    >
-      <span className="htoggle__knob" />
-    </button>
+      aria-busy={busy || undefined}
+      label={`${on ? "Turn off" : "Turn on"} ${device.name}`}
+    />
   );
 }
 
