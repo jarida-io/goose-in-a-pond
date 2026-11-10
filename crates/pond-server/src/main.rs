@@ -2672,7 +2672,10 @@ async fn run_server(
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
-                .with_reminder_repository(reminder_repo),
+                .with_reminder_repository(reminder_repo)
+                .with_interest_repository(Arc::new(
+                    pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone()),
+                )),
         );
         let extraction_storage = session_storage.clone();
         let extraction_repo = memory_repo.clone();

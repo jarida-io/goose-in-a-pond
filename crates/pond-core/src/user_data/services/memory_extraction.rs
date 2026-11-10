@@ -23,6 +23,8 @@ use crate::user_data::ports::conversation_extractor::{
     ConversationExtractor, ExtractionError, ExtractionWindow, KnownMemory, WindowExtraction,
     WindowMessage, WindowSubject,
 };
+use crate::user_data::domain::interest::Observed;
+use crate::user_data::ports::interests::InterestRepository;
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::ports::reminder_repository::ReminderRepository;
 use crate::user_data::ports::session_storage::SessionStorage;
@@ -329,6 +331,8 @@ struct WindowOutcome {
     reminders_kept_about: Vec<String>,
     /// Per dropped candidate, the stored id it lost to, or `lexical` for a lexical duplicate.
     dropped_onto: Vec<String>,
+    /// Interests this window added a conversation to: a new guess or one more behind a row.
+    interests_noted: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -347,6 +351,10 @@ pub struct PassReport {
     pub gave_up: usize,
     pub memories_offered: usize,
     pub reminders_offered: usize,
+    /// Interests the model named, whatever became of them.
+    pub interests_offered: usize,
+    /// Interests a window added its conversation to: a new guess, or evidence for a row.
+    pub interests_noted: usize,
     /// Items carrying a label outside the five-value catalogue.
     pub rejected_kinds: usize,
     pub bands: BandHistogram,
@@ -584,6 +592,8 @@ pub struct BatchExtractionService {
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// Where dated items go, since they are never memories; `None` counts every one as lost.
     reminder_repository: Option<Arc<dyn ReminderRepository>>,
+    /// Where what a member cares about goes; `None` drops it.
+    interest_repository: Option<Arc<dyn InterestRepository>>,
     health: EmbedderHealth,
 }
 
@@ -598,6 +608,7 @@ impl BatchExtractionService {
         Self {
             embedding_provider: None,
             reminder_repository: None,
+            interest_repository: None,
             health: EmbedderHealth::default(),
         }
     }
@@ -609,6 +620,11 @@ impl BatchExtractionService {
 
     pub fn with_reminder_repository(mut self, repository: Arc<dyn ReminderRepository>) -> Self {
         self.reminder_repository = Some(repository);
+        self
+    }
+
+    pub fn with_interest_repository(mut self, repository: Arc<dyn InterestRepository>) -> Self {
+        self.interest_repository = Some(repository);
         self
     }
 
@@ -977,6 +993,7 @@ impl BatchExtractionService {
 
         report.memories_offered += extraction.memories.len();
         report.reminders_offered += extraction.reminders.len();
+        report.interests_offered += extraction.interests.len();
         report.rejected_kinds += extraction.rejected;
 
         let outcome = self
@@ -1003,6 +1020,7 @@ impl BatchExtractionService {
         report.reminders_captured += outcome.reminders;
         report.reminders_written += outcome.reminders_stored;
         report.reminders_lost += outcome.reminders_lost;
+        report.interests_noted += outcome.interests_noted;
 
         let _ = repo
             .log_event(
@@ -1013,7 +1031,7 @@ impl BatchExtractionService {
                     "{{\"window\":\"{}\",\"mode\":\"{}\",\"offered\":{},\"kept\":{},\
                      \"refused\":{},\"dated\":{},\"dates_lost\":{},\"demoted\":{},\
                      \"reminders\":{},\"reminders_stored\":{},\"reminders_lost\":{},\
-                     \"rejected\":{},\
+                     \"rejected\":{},\"interests\":{},\
                      \"same\":{},\"related\":{},\"new\":{},\"unscored\":{},\"dropped_onto\":[{}]}}",
                     escape_json(&window_id),
                     config.mode.as_str(),
@@ -1027,6 +1045,7 @@ impl BatchExtractionService {
                     outcome.reminders_stored,
                     outcome.reminders_lost,
                     extraction.rejected,
+                    outcome.interests_noted,
                     outcome.bands.same,
                     outcome.bands.related,
                     outcome.bands.fresh,
@@ -1133,6 +1152,8 @@ impl BatchExtractionService {
             }
         }
 
+        // Facts about the world are not the person: shown, they invite a "better version".
+        pool.retain(|(fragment, _)| fragment.segment != Some(MemorySegment::Knowledge));
         rank_by_relevance(&mut pool, Utc::now());
 
         let mut used = 0usize;
@@ -1195,6 +1216,9 @@ impl BatchExtractionService {
             }
         }
 
+        self.note_interests(extraction, config, subject, session_id, &mut outcome)
+            .await;
+
         if extraction.memories.is_empty() {
             return outcome;
         }
@@ -1214,6 +1238,15 @@ impl BatchExtractionService {
             // A defective or dated note is refused whole, never repaired: mechanical rewrites
             // store wreckage like "The user keeps the oven."; the model's sentence or nothing.
             let content = normalise_fact_content(&memory.note);
+            // A question asked is curiosity, which the interests count; never a trait.
+            if describes_a_question(&content) {
+                outcome.refused += 1;
+                tracing::debug!(
+                    session_id = %session_id,
+                    "[batch-extraction] refused a candidate that only says what was asked"
+                );
+                continue;
+            }
             if let Some(defect) = fact_defect(&content) {
                 outcome.refused += 1;
                 if defect == FactDefect::CalendarDate {
@@ -1385,6 +1418,35 @@ impl BatchExtractionService {
         outcome
     }
 
+    /// What the window showed the member caring about, as guesses on their interests. Only a named
+    /// member's: an interest row always has an owner. The store counts a conversation once per row.
+    async fn note_interests(
+        &self,
+        extraction: &WindowExtraction,
+        config: &BatchExtractionConfig,
+        subject: &WindowSubject,
+        session_id: &str,
+        outcome: &mut WindowOutcome,
+    ) {
+        let (Some(repository), Some(profile_id)) =
+            (self.interest_repository.as_ref(), subject.profile_id.as_deref())
+        else {
+            return;
+        };
+        if !config.mode.writes() {
+            return;
+        }
+        for seen in &extraction.interests {
+            match repository.observe(profile_id, session_id, seen).await {
+                Ok(Observed::Created | Observed::Counted) => outcome.interests_noted += 1,
+                Ok(Observed::AlreadyCounted | Observed::Avoided) => {}
+                Err(e) => {
+                    tracing::warn!("[batch-extraction] an interest could not be noted: {e}");
+                }
+            }
+        }
+    }
+
     /// Store a dated item as a reminder, never a memory. Dedup is the store's UNIQUE
     /// `(window_id, about_key)`: `already_mined` only skips windows that wrote memories.
     async fn capture_reminder(&self, candidate: ReminderCandidate, outcome: &mut WindowOutcome) {
@@ -1467,6 +1529,39 @@ impl BatchExtractionService {
             }
         }
     }
+}
+
+/// Whether a note only reports what its subject asked or looked up: "inquires about", "asked
+/// for". One question is curiosity, which the interests already count.
+pub fn describes_a_question(note: &str) -> bool {
+    const ASKING: &[&str] = &[
+        " asked about ",
+        " asks about ",
+        " asked for ",
+        " asks for ",
+        " asked what ",
+        " asks what ",
+        " asked how ",
+        " asks how ",
+        " asked whether ",
+        " asks whether ",
+        " asked if ",
+        " asks if ",
+        " inquires",
+        " inquired",
+        " enquires",
+        " enquired",
+        " wants to know",
+        " wanted to know",
+        " is curious about",
+        " was curious about",
+        " requested information",
+        " requests information",
+        " looked up ",
+        " searched for ",
+    ];
+    let padded = format!(" {} ", note.to_lowercase());
+    ASKING.iter().any(|phrase| padded.contains(phrase))
 }
 
 /// Why a finished pass could do nothing, or `None` once any window was read. Parse failures set
@@ -1623,6 +1718,7 @@ mod batch_tests {
                         })
                         .collect(),
                     reminders: Vec::new(),
+                    interests: Vec::new(),
                     rejected: 0,
                 }),
                 calls: AtomicUsize::new(0),
@@ -1792,6 +1888,7 @@ mod batch_tests {
                         })
                         .collect(),
                     reminders: Vec::new(),
+                    interests: Vec::new(),
                     rejected: 0,
                 },
             }
@@ -2248,6 +2345,114 @@ mod batch_tests {
             "a conversation with nothing new must not cost an inference call"
         );
         assert_eq!(extractor.windows().len(), 2);
+    }
+
+    fn fielder_seen() -> crate::user_data::domain::interest::ObservedInterest {
+        crate::user_data::domain::interest::ObservedInterest {
+            topic: "Toyota Fielder".to_string(),
+            category: "cars".to_string(),
+            facets: vec!["Kilimall".to_string()],
+            signal: crate::user_data::domain::interest::Signal::Does,
+        }
+    }
+
+    /// The member's complaint: interests count conversations, not windows.
+    #[tokio::test]
+    async fn an_interest_counts_once_per_conversation_however_many_windows_show_it() {
+        use crate::user_data::mocks::mock_interests::InMemoryInterestRepository;
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 15).await;
+        seed(&storage, "sess-2", 3).await;
+        let repo = MockMemoryRepository::new();
+        let mut extractor = ScriptedExtractor::yielding(vec![]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.interests = vec![fielder_seen()];
+        }
+        let interests = Arc::new(InMemoryInterestRepository::new());
+        let service = service().with_interest_repository(interests.clone());
+        let mut config = config();
+        config.mode = ExtractionMode::Write;
+        config.fallback_subject = WindowSubject::member("p-jerry", "Jerry");
+        let cancel = CancellationToken::new();
+
+        for _ in 0..3 {
+            service
+                .run_pass(&storage, &repo, &extractor, &config, &cancel)
+                .await;
+        }
+        assert!(extractor.calls() >= 3, "both windows of sess-1 and sess-2 were read");
+        let rows = interests.all();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].profile_id, "p-jerry");
+        assert_eq!(rows[0].evidence, 2, "two conversations, however many windows");
+        assert!(!rows[0].confirmed);
+    }
+
+    #[tokio::test]
+    async fn interests_are_never_noted_for_nobody_or_in_shadow() {
+        use crate::user_data::mocks::mock_interests::InMemoryInterestRepository;
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let mut extractor = ScriptedExtractor::yielding(vec![]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.interests = vec![fielder_seen()];
+        }
+        let interests = Arc::new(InMemoryInterestRepository::new());
+        let service = service().with_interest_repository(interests.clone());
+        let mut config = config();
+        config.mode = ExtractionMode::Write;
+        let report = service
+            .run_pass(&storage, &repo, &extractor, &config, &CancellationToken::new())
+            .await;
+        assert_eq!(report.interests_offered, 1);
+        assert_eq!(report.interests_noted, 0, "an unattributed subject owns no rows");
+        assert!(interests.all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_note_that_only_says_what_was_asked_is_never_stored() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let extractor = ScriptedExtractor::yielding(vec![
+            (
+                "Jerry inquires about the new psychological thriller titled Primetime.",
+                MemoryKind::Preference,
+            ),
+            ("Jerry is lactose intolerant.", MemoryKind::Context),
+        ]);
+        let mut config = config();
+        config.mode = ExtractionMode::Write;
+        let report = service()
+            .run_pass(&storage, &repo, &extractor, &config, &CancellationToken::new())
+            .await;
+        assert_eq!(report.memories_written, 1);
+        assert_eq!(report.memories_refused, 1);
+        let stored = repo
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        assert!(stored.iter().all(|m| !m.content.contains("inquires")));
+    }
+
+    #[test]
+    fn asking_about_something_is_told_apart_from_doing_it() {
+        for asked in [
+            "Jerry inquires about the new psychological thriller titled Primetime.",
+            "Jerry asked about the plot of Avengers Doomsday.",
+            "Jerry wants to know who directed Primetime.",
+            "Jerry is curious about P vs NP.",
+        ] {
+            assert!(describes_a_question(asked), "{asked}");
+        }
+        for fact in [
+            "Jerry is lactose intolerant.",
+            "Jerry asks Emmanuel to cook on Fridays.",
+            "Jerry is shopping for a Toyota Fielder under KSh 1.2M.",
+        ] {
+            assert!(!describes_a_question(fact), "{fact}");
+        }
     }
 
     /// One failure must not lose the window, and endless failures must not stall the backlog.
