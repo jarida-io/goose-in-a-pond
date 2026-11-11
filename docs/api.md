@@ -1504,6 +1504,7 @@ Each member connects their own Uber account through the credentials service
 (`POND_CREDENTIALS_URL`, see [architecture/pondcredentials.md](architecture/pondcredentials.md));
 tokens stay in this pond's secret store. Every Uber route needs a loopback peer and the host
 credential; a refusal is `{error, code}`, with `code` `host_only` off this machine.
+To test with your own Uber app against the sandbox, see [uber-testing.md](uber-testing.md).
 
 | Route | Request | Response |
 |---|---|---|
