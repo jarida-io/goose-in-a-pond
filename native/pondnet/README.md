@@ -1,6 +1,6 @@
 # Embedded Pond networking
 
-This Go module (`tailscale.com` v1.104.2, Go 1.27.3, both pinned in `go.mod`) supplies
+This Go module (`tailscale.com` v1.104.2, Go 1.27.4, both pinned in `go.mod`) supplies
 the Pond's network helper, the mobile bindings goose-on-the-go links, the authenticated
 CONNECT proxy, and the enrollment service the coordinator runs. It talks to an explicit
 Headscale HTTPS origin and disables Tailscale's diagnostic uploader. It installs no OS
