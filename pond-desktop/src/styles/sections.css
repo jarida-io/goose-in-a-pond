@@ -2252,6 +2252,19 @@
 .sched-history__toggle { background: none; border: none; cursor: pointer; font-size: 12px; color: var(--grey-500); display: flex; align-items: center; gap: 4px; padding: 0; font-family: var(--font-body); }
 .sched-history__list { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
 .sched-history__empty { font-size: 12px; color: var(--grey-400); }
+/* A history that could not be read says so, with a way to try again; it never reads as "no runs". */
+.sched-history__empty--error { color: var(--color-destructive, #DC2626); }
+.sched-history__retry {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--color-accent, #8C4BFF);
+  cursor: pointer;
+}
+.sched-history__retry:hover { text-decoration: underline; }
+.sched-history__retry:focus-visible { outline: 2px solid var(--color-accent, #8C4BFF); outline-offset: 2px; border-radius: 4px; }
 
 /* Schedules: modal */
 .sched-modal__overlay { position: fixed; inset: 0; background: rgba(23, 22, 22, 0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }

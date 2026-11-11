@@ -323,13 +323,11 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case "SCHEDULE_RESULT": {
       const incoming = action.payload;
       let existing = state.scheduleToasts;
-      // If this is a completion event, replace the "running" toast for same schedule
-      if (incoming.status !== "running") {
-        existing = existing.filter(
-          (t) =>
-            !(t.status === "running" && t.schedule_id === incoming.schedule_id),
-        );
-      }
+      // One running card per schedule: a manual "Run now" and the feed's own running event
+      // replace each other, and how it ended replaces whichever is showing.
+      existing = existing.filter(
+        (t) => !(t.status === "running" && t.schedule_id === incoming.schedule_id),
+      );
       return {
         ...state,
         scheduleToasts: [incoming, ...existing].slice(0, 10),
