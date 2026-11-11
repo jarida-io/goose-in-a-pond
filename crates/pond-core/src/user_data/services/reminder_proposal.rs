@@ -1,15 +1,12 @@
-//! Turns stored reminders into proposals, best effort: one with no member to address stays
-//! `Pending`, since [`ProposalAudience::from_scope`] refuses `Household` and `Guest`.
+//! The proposals stored reminders became before they were offered as to-dos instead
+//! (`shared::services::todo_offers`): how one is built, and the conversation it names, which
+//! such a proposal still waiting in the queue needs.
 
 use crate::user_data::domain::proposal::{BusEventRef, Proposal, ProposalAudience};
-use crate::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
+use crate::user_data::domain::reminder::CapturedReminder;
 use crate::user_data::domain::schedule::TaskKind;
-use crate::user_data::ports::proposal::ProposalRepository;
-use crate::user_data::ports::reminder_repository::ReminderRepository;
-use crate::user_data::services::proactive_review::{MAX_PROPOSALS_PER_DAY, PROPOSAL_TTL};
-use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
-use std::collections::BTreeMap;
+use crate::user_data::services::proactive_review::PROPOSAL_TTL;
+use chrono::{DateTime, Utc};
 
 /// Trigger `kind` of reminder-born proposals; stable, since recorded decisions match on it.
 pub const REMINDER_TRIGGER_KIND: &str = "reminder";
@@ -127,221 +124,11 @@ pub fn reminder_session_id(proposal: &Proposal) -> Option<&str> {
     }
 }
 
-/// What one promotion run came to.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PromotionReport {
-    /// Pending reminders the run looked at.
-    pub considered: usize,
-    /// Reminders that became a proposal and were moved off `Pending`.
-    pub proposed: usize,
-    /// Reminders with no member to address, left pending; expected, not a fault.
-    pub unaddressable: usize,
-    /// Reminders held back by the daily cap, left pending.
-    pub capped: usize,
-    /// Stopped by a store error or a malformed proposal; the one outcome that is a fault.
-    pub failed: usize,
-    /// The proposals counted in `proposed`, each now waiting for its member's decision, so the
-    /// caller can tell that member's phone.
-    pub made: Vec<Proposal>,
-}
-
-/// Promote what can be promoted and report the rest, which stays `Pending`.
-pub async fn promote_pending_reminders(
-    reminders: &dyn ReminderRepository,
-    proposals: &dyn ProposalRepository,
-    limit: usize,
-    now: DateTime<Utc>,
-) -> Result<PromotionReport> {
-    // `Household`, the only caller that should: rows leave only as proposals to their owner.
-    let pending = reminders
-        .list_pending(
-            &crate::user_data::domain::profile::ProfileScope::Household,
-            limit,
-        )
-        .await?;
-    let mut report = PromotionReport {
-        considered: pending.len(),
-        ..Default::default()
-    };
-    // profile_id -> proposals made to them in the last day, this run's included.
-    let mut made_today: BTreeMap<String, usize> = BTreeMap::new();
-
-    for reminder in pending {
-        let proposal = match proposal_from_reminder(&reminder, uuid_v4(), now) {
-            Ok(proposal) => proposal,
-            Err(skip) => {
-                record_skip(&mut report, &reminder, &skip);
-                continue;
-            }
-        };
-        let profile_id = proposal.audience().profile_id().to_string();
-
-        // Shares the reviewer tick's count and window (one budget); a failed read fails closed.
-        let made = match made_today.get(&profile_id) {
-            Some(made) => *made,
-            None => match proposals
-                .count_made_since(&profile_id, now - Duration::days(1))
-                .await
-            {
-                Ok(made) => {
-                    made_today.insert(profile_id.clone(), made);
-                    made
-                }
-                Err(e) => {
-                    report.failed += 1;
-                    tracing::warn!(
-                        reminder_id = %reminder.id,
-                        "[reminders] could not read this member's proposal count, so the \
-                         reminder stays pending: {e}"
-                    );
-                    continue;
-                }
-            },
-        };
-        if made >= MAX_PROPOSALS_PER_DAY {
-            record_skip(
-                &mut report,
-                &reminder,
-                &ReminderProposalSkip::DailyCapReached {
-                    made,
-                    cap: MAX_PROPOSALS_PER_DAY,
-                },
-            );
-            continue;
-        }
-
-        if let Err(e) = proposals.save(&proposal).await {
-            report.failed += 1;
-            tracing::warn!(
-                reminder_id = %reminder.id,
-                proposal_id = %proposal.id(),
-                "[reminders] the proposal could not be saved, so the reminder stays pending: {e}"
-            );
-            continue;
-        }
-        made_today.insert(profile_id, made + 1);
-
-        // The disposition stops the next run re-proposing this row; not moving it is a failure.
-        match reminders
-            .set_disposition(
-                &reminder.id,
-                &crate::user_data::domain::profile::ProfileScope::Household,
-                ReminderDisposition::Proposed,
-                now,
-            )
-            .await
-        {
-            Ok(true) => {
-                report.proposed += 1;
-                report.made.push(proposal);
-            }
-            Ok(false) => {
-                report.failed += 1;
-                // Dismissed since the list; the proposal just saved is one nobody asked for.
-                tracing::warn!(
-                    reminder_id = %reminder.id,
-                    proposal_id = %proposal.id(),
-                    "[reminders] a proposal was made for a reminder that stopped being \
-                     pending underneath it"
-                );
-            }
-            Err(e) => {
-                report.failed += 1;
-                tracing::warn!(
-                    reminder_id = %reminder.id,
-                    proposal_id = %proposal.id(),
-                    "[reminders] a proposal was made but the reminder could not be marked \
-                     proposed; it may be proposed again: {e}"
-                );
-            }
-        }
-    }
-
-    Ok(report)
-}
-
-/// Count a refusal and log why at INFO; the reminder's private words never go above DEBUG.
-fn record_skip(
-    report: &mut PromotionReport,
-    reminder: &CapturedReminder,
-    skip: &ReminderProposalSkip,
-) {
-    match skip {
-        ReminderProposalSkip::Unaddressable { .. } => report.unaddressable += 1,
-        ReminderProposalSkip::DailyCapReached { .. } => report.capped += 1,
-        ReminderProposalSkip::Malformed { .. } => report.failed += 1,
-    }
-    tracing::info!(
-        target: "giap::trace",
-        kind = "reminder_not_proposed",
-        reminder_id = %reminder.id,
-        skip = skip.as_str(),
-        reason = %skip.reason(),
-        "a stored reminder did not become a proposal"
-    );
-}
-
-fn uuid_v4() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_data::domain::proposal::ProposalDecision;
-    use crate::user_data::mocks::mock_reminder::MockReminderRepository;
-    use std::sync::Mutex;
-
-    /// In-memory proposal store; only the three methods this module calls do anything.
-    #[derive(Default)]
-    struct FakeProposals {
-        saved: Mutex<Vec<Proposal>>,
-        already_made: usize,
-        save_fails: bool,
-    }
-
-    #[async_trait::async_trait]
-    impl ProposalRepository for FakeProposals {
-        async fn save(&self, proposal: &Proposal) -> Result<()> {
-            if self.save_fails {
-                anyhow::bail!("the drafts table is locked");
-            }
-            self.saved.lock().unwrap().push(proposal.clone());
-            Ok(())
-        }
-
-        async fn list_live_for(
-            &self,
-            _profile_id: &str,
-            _now: DateTime<Utc>,
-        ) -> Result<Vec<Proposal>> {
-            Ok(vec![])
-        }
-
-        async fn get_live(&self, _id: &str, _now: DateTime<Utc>) -> Result<Option<Proposal>> {
-            Ok(None)
-        }
-
-        async fn expire_due(&self, _now: DateTime<Utc>) -> Result<u64> {
-            Ok(0)
-        }
-
-        async fn count_made_since(
-            &self,
-            _profile_id: &str,
-            _since: DateTime<Utc>,
-        ) -> Result<usize> {
-            Ok(self.already_made + self.saved.lock().unwrap().len())
-        }
-
-        async fn decisions_since(
-            &self,
-            _profile_id: &str,
-            _since: DateTime<Utc>,
-        ) -> Result<Vec<ProposalDecision>> {
-            Ok(vec![])
-        }
-    }
+    use crate::user_data::domain::reminder::ReminderDisposition;
+    use chrono::Duration;
 
     fn reminder(id: &str, profile_id: Option<&str>) -> CapturedReminder {
         CapturedReminder {
@@ -356,67 +143,6 @@ mod tests {
             captured_at: Utc::now(),
             disposition: ReminderDisposition::Pending,
         }
-    }
-
-    #[tokio::test]
-    async fn a_reminder_with_no_member_stays_a_reminder() {
-        let reminders = MockReminderRepository::new();
-        reminders.capture(&reminder("r1", None)).await.unwrap();
-        let proposals = FakeProposals::default();
-
-        let report = promote_pending_reminders(&reminders, &proposals, 50, Utc::now())
-            .await
-            .unwrap();
-
-        assert_eq!(report.considered, 1);
-        assert_eq!(report.unaddressable, 1);
-        assert_eq!(report.proposed, 0);
-        assert_eq!(
-            report.failed, 0,
-            "an unaddressable reminder is not a failure"
-        );
-        assert!(proposals.saved.lock().unwrap().is_empty());
-        assert_eq!(
-            reminders.rows()[0].disposition,
-            ReminderDisposition::Pending,
-            "it must still be promotable once the member is identified"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_reminder_with_a_member_becomes_a_proposal_once() {
-        let reminders = MockReminderRepository::new();
-        reminders
-            .capture(&reminder("r1", Some("profile-jerry")))
-            .await
-            .unwrap();
-        let proposals = FakeProposals::default();
-
-        let first = promote_pending_reminders(&reminders, &proposals, 50, Utc::now())
-            .await
-            .unwrap();
-        assert_eq!(first.proposed, 1);
-        assert_eq!(
-            reminders.rows()[0].disposition,
-            ReminderDisposition::Proposed
-        );
-        // Handed back so the member's phone can be told; it is the proposal that was saved.
-        assert_eq!(first.made.len(), 1);
-        assert_eq!(
-            first.made[0].audience().profile_id(),
-            "profile-jerry",
-            "the notice goes to whose reminder it is"
-        );
-        assert_eq!(first.made[0].id(), proposals.saved.lock().unwrap()[0].id());
-
-        // The disposition is what stops the second one.
-        let second = promote_pending_reminders(&reminders, &proposals, 50, Utc::now())
-            .await
-            .unwrap();
-        assert_eq!(second.considered, 0);
-        assert_eq!(second.proposed, 0);
-        assert!(second.made.is_empty(), "nothing new to tell anybody");
-        assert_eq!(proposals.saved.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -465,53 +191,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reminder_session_id(&proposal), None);
-    }
-
-    #[tokio::test]
-    async fn the_daily_cap_is_not_bypassed() {
-        let reminders = MockReminderRepository::new();
-        for i in 0..4 {
-            let mut r = reminder(&format!("r{i}"), Some("profile-jerry"));
-            r.about = format!("thing {i}");
-            reminders.capture(&r).await.unwrap();
-        }
-        let proposals = FakeProposals {
-            already_made: MAX_PROPOSALS_PER_DAY - 2,
-            ..Default::default()
-        };
-
-        let report = promote_pending_reminders(&reminders, &proposals, 50, Utc::now())
-            .await
-            .unwrap();
-
-        assert_eq!(report.proposed, 2, "only the remaining budget is spent");
-        assert_eq!(report.capped, 2);
-        assert_eq!(report.failed, 0);
-    }
-
-    #[tokio::test]
-    async fn a_store_that_refuses_the_write_is_a_failure_not_a_skip() {
-        let reminders = MockReminderRepository::new();
-        reminders
-            .capture(&reminder("r1", Some("profile-jerry")))
-            .await
-            .unwrap();
-        let proposals = FakeProposals {
-            save_fails: true,
-            ..Default::default()
-        };
-
-        let report = promote_pending_reminders(&reminders, &proposals, 50, Utc::now())
-            .await
-            .unwrap();
-
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.proposed, 0);
-        assert_eq!(
-            reminders.rows()[0].disposition,
-            ReminderDisposition::Pending,
-            "a failed proposal must leave the reminder promotable"
-        );
     }
 
     #[test]

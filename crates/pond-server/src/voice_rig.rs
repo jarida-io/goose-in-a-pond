@@ -26,13 +26,54 @@ use pond_core::user_data::ports::profile::ProfileRepository;
 
 use crate::model_download;
 
+#[derive(Clone)]
+pub enum WhisperHandle {
+    Loaded(Arc<WhisperRsInput>),
+    OnDemand {
+        get: Arc<dyn Fn() -> anyhow::Result<Arc<WhisperRsInput>> + Send + Sync>,
+        skip_scan: Arc<dyn Fn() -> bool + Send + Sync>,
+        skip_transcribe: Arc<dyn Fn() -> bool + Send + Sync>,
+    },
+}
+
+impl From<Arc<WhisperRsInput>> for WhisperHandle {
+    fn from(w: Arc<WhisperRsInput>) -> Self {
+        Self::Loaded(w)
+    }
+}
+
+impl WhisperHandle {
+    fn get(&self) -> anyhow::Result<Arc<WhisperRsInput>> {
+        match self {
+            Self::Loaded(w) => Ok(w.clone()),
+            Self::OnDemand { get, .. } => get(),
+        }
+    }
+
+    fn should_skip_scan(&self) -> bool {
+        match self {
+            Self::Loaded(_) => false,
+            Self::OnDemand { skip_scan, .. } => skip_scan(),
+        }
+    }
+
+    fn should_skip_transcribe(&self) -> bool {
+        match self {
+            Self::Loaded(_) => false,
+            Self::OnDemand {
+                skip_transcribe, ..
+            } => skip_transcribe(),
+        }
+    }
+}
+
 pub struct ListeningOptions<'a> {
     pub settings: &'a Settings,
     pub data_dir: &'a Path,
     /// The process's one microphone owner.
     pub mic: &'a MicHandle,
     /// Speech-to-text for either front end; the Whisper one also records through it.
-    pub whisper: Arc<WhisperRsInput>,
+    pub whisper: WhisperHandle,
     /// In place of `settings.voice_wake_word`.
     pub wake_word: Option<&'a str>,
     /// Every turn listens at once, with no wake word.
@@ -168,7 +209,7 @@ impl Listening {
 /// Whisper through its accurate profile, for the ear: the state it already prepared at load, so
 /// the ear never builds Whisper's second, wake-word state.
 struct WhisperTranscriber {
-    whisper: Arc<WhisperRsInput>,
+    whisper: WhisperHandle,
     prompt: Option<WhisperPrompt>,
 }
 
@@ -179,8 +220,8 @@ impl WhisperTranscriber {
             .as_ref()
             .and_then(|p| p.read().unwrap_or_else(|e| e.into_inner()).clone());
         crate::room_memory::measured("whisper", || {
-            self.whisper
-                .transcribe_pcm_with(pcm, opts, prompt.as_deref())
+            let whisper = self.whisper.get()?;
+            whisper.transcribe_pcm_with(pcm, opts, prompt.as_deref())
         })
     }
 }
@@ -189,10 +230,16 @@ impl Transcriber for WhisperTranscriber {
     // Beam search on room audio: greedy decoding looped ("I think I think ...") or came back
     // empty on a spoken "hey goose" at the nano.
     fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<String> {
+        if self.whisper.should_skip_transcribe() {
+            return Ok(String::new());
+        }
         self.run(pcm, TranscribeOpts::accurate())
     }
 
     fn scan(&self, pcm: &[f32]) -> anyhow::Result<String> {
+        if self.whisper.should_skip_scan() {
+            return Ok(String::new());
+        }
         self.run(pcm, TranscribeOpts::segment_scan())
     }
 }
@@ -290,7 +337,10 @@ async fn whisper_front(
     why: WhyNotTheEar,
 ) -> Listening {
     let settings = opts.settings;
-    let backend = opts.whisper;
+    let backend = opts
+        .whisper
+        .get()
+        .expect("Whisper front end requires a loadable Whisper model");
     // Set on the shared backend, so both voice input and the wake-word detector use it.
     if let Some(detector) = build_speech_detector(&settings.vad_backend, opts.data_dir).await {
         backend.set_speech_detector(detector);

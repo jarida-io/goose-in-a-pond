@@ -23,8 +23,9 @@ pub trait ProposalRepository: Send + Sync {
     /// Mark overdue pending proposals `expired`; returns the count. Tidying, not enforcement.
     async fn expire_due(&self, now: DateTime<Utc>) -> Result<u64>;
 
-    /// Proposals made to one member since `since`, whatever their fate: the
-    /// `MAX_PROPOSALS_PER_DAY` count, since dismissed ones still interrupted someone.
+    /// Proposals made to one member since `since`, whatever their fate, and dated mentions
+    /// offered to them as to-dos: the `MAX_PROPOSALS_PER_DAY` count, since dismissed ones still
+    /// interrupted someone.
     async fn count_made_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<usize>;
 
     /// One member's decisions on proposals made since `since`, expiries included and pending

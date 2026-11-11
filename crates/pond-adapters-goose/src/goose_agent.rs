@@ -3488,11 +3488,15 @@ impl GooseAdapter {
                reports them as recognized. Use `configure_vision_bus` to adjust FPS (1-30) or \
                sensitivity, and `create_vision_automation` / `list_vision_automations` / \
                `delete_vision_automation` for motion, person, or `face:<profile_id>` triggers.\n\
-             - Timers, reminders & schedules (`giap-schedule`): Use `set_timer` for one-shot \
-               reminders and countdowns (e.g. '10m', '1h30m'), `create_schedule` for recurring \
-               6-field cron jobs (`sec min hr dom mon dow`), and `list_schedules` / \
-               `update_schedule` / `schedule_action` (`delete` | `pause` | `resume` | `run_now`) \
-               to inspect or control them. If a group is listed under ADDITIONAL CAPABILITIES, \
+             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_todo` when the \
+               person asks to be reminded of something or to put something on their to-dos, at a \
+               time, on a repeat or at a place ('remind me to call Emmanuel when I get home', \
+               'add renew the logbook to my to-dos'); `list_todos` and `complete_todo` read and \
+               tick off that list. Use `set_timer` only for a countdown ('set a timer for 10 \
+               minutes'), `create_schedule` for recurring 6-field cron jobs you run yourself \
+               (`sec min hr dom mon dow`), and `list_schedules` / `update_schedule` / \
+               `schedule_action` (`delete` | `pause` | `resume` | `run_now`) to inspect or \
+               control them. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
                     .to_string(),
             );
