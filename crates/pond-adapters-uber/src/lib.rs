@@ -20,6 +20,10 @@ use serde_json::{json, Value};
 /// Uber's production API; [`SANDBOX_API_BASE`] simulates rides without dispatching a car.
 pub const PRODUCTION_API_BASE: &str = "https://api.uber.com";
 pub const SANDBOX_API_BASE: &str = "https://sandbox-api.uber.com";
+/// Where a member signs in. A test app is known only to the sandbox's sign-in server, and
+/// production's answers it with "Invalid client".
+pub const PRODUCTION_AUTHORIZE_URL: &str = "https://auth.uber.com/oauth/v2/authorize";
+pub const SANDBOX_AUTHORIZE_URL: &str = "https://sandbox-login.uber.com/oauth/v2/authorize";
 
 const API_BASE_ENV: &str = "GIAP_UBER_API_BASE";
 const PRODUCT_ID_ENV: &str = "GIAP_UBER_PRODUCT_ID";
@@ -38,6 +42,16 @@ pub struct UberConfig {
 }
 
 impl UberConfig {
+    /// The sign-in page that belongs with this API: the sandbox's for the sandbox API, else
+    /// production's.
+    pub fn authorize_url(&self) -> &'static str {
+        if self.api_base == SANDBOX_API_BASE {
+            SANDBOX_AUTHORIZE_URL
+        } else {
+            PRODUCTION_AUTHORIZE_URL
+        }
+    }
+
     /// From `GIAP_UBER_API_BASE` (default: production) and `GIAP_UBER_PRODUCT_ID`. A base that is
     /// not https is refused, apart from http to this machine for tests: every call carries a
     /// member's token.
@@ -534,6 +548,17 @@ mod tests {
                 product_id: Some("uberx".into())
             }
         );
+    }
+
+    /// A test app exists only on the sandbox's sign-in server, so the sandbox API signs in there.
+    #[test]
+    fn the_sandbox_signs_in_on_the_sandbox() {
+        let sandbox = UberConfig::from_values(Some(format!("{SANDBOX_API_BASE}/")), None).unwrap();
+        assert_eq!(sandbox.authorize_url(), SANDBOX_AUTHORIZE_URL);
+        let production = UberConfig::from_values(None, None).unwrap();
+        assert_eq!(production.authorize_url(), PRODUCTION_AUTHORIZE_URL);
+        let local = UberConfig::from_values(Some("http://127.0.0.1:9".into()), None).unwrap();
+        assert_eq!(local.authorize_url(), PRODUCTION_AUTHORIZE_URL);
     }
 
     /// A member's token must never travel in the clear, except to this machine in a test.

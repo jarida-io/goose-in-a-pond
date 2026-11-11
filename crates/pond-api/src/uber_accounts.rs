@@ -176,11 +176,19 @@ pub async fn connect(
         crate::routes::sign_in_origin(request.origin.as_deref(), &headers),
         state.api_port,
     );
-    let auth_url = authorize_url(&client_id, &redirect_uri, &nonce);
+    let sign_in = match pond_adapters_uber::UberConfig::from_env() {
+        Ok(config) => config.authorize_url(),
+        Err(e) => {
+            tracing::warn!(error = %e, "uber connect: Uber settings unreadable, signing in on production");
+            pond_adapters_uber::PRODUCTION_AUTHORIZE_URL
+        }
+    };
+    let auth_url = authorize_url(sign_in, &client_id, &redirect_uri, &nonce);
     tracing::info!(
         kind = "oauth_start",
         provider = PROVIDER_ID,
         redirect_uri = %redirect_uri,
+        sign_in = %sign_in,
         "OAuth sign-in started"
     );
     oauth_callback::begin_session(
