@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use pond_core::models::domain::audio_device::{
-    AudioDevice, AudioDirection, LevelChange, SoundServerDefaults,
+    AudioDevice, AudioDirection, DeviceKind, LevelChange, SoundServerDefaults,
 };
 
 use crate::names::{self, Card};
@@ -17,6 +17,8 @@ use crate::names::{self, Card};
 const FULL: u32 = 65_536;
 /// A sound server that does not answer in this long is treated as absent, not waited on.
 const PACTL_LIMIT: Duration = Duration::from_secs(3);
+/// How long a headset's nodes may take to appear after its profile changes.
+const PROFILE_SETTLES: Duration = Duration::from_secs(2);
 
 pub trait Pactl: Send + Sync {
     fn run(&self, args: &[&str]) -> Result<String, String>;
@@ -305,6 +307,13 @@ fn node_for(
         let default = side.default_of(info);
         return Ok(nodes.into_iter().find(|n| Some(n.name.as_str()) == default));
     }
+    if device.kind == DeviceKind::Bluetooth {
+        return nodes
+            .into_iter()
+            .find(|n| on_card(n, &device.id))
+            .map(Some)
+            .ok_or_else(|| format!("'{}' offers no {} now", device.label, side.noun()));
+    }
     let Some(card) = names::card_index(&device.id, cards) else {
         return Ok(None);
     };
@@ -356,9 +365,25 @@ pub fn set_defaults(
         server: info.server.clone(),
         ..Default::default()
     };
+    for card in [output, input].into_iter().flatten() {
+        if card.kind != DeviceKind::Bluetooth {
+            continue;
+        }
+        let speaker = output.is_some_and(|d| d.id == card.id);
+        let mic = input.is_some_and(|d| d.id == card.id);
+        if let Err(problem) = ready_card(pactl, &card.id, speaker, mic, false) {
+            tracing::warn!(%problem, "could not ready the Bluetooth device");
+            result.problems.push(problem);
+        }
+    }
     for (device, side) in [(output, Side::Speaker), (input, Side::Mic)] {
         let Some(device) = device else { continue };
-        match make_default(pactl, cards, &info, device, side) {
+        let made = if device.kind == DeviceKind::Bluetooth {
+            settled(|| make_default(pactl, cards, &info, device, side))
+        } else {
+            make_default(pactl, cards, &info, device, side)
+        };
+        match made {
             Ok(described) => match side {
                 Side::Speaker => result.speaker = described,
                 Side::Mic => result.mic = described,
@@ -438,6 +463,227 @@ pub fn restore_levels(pactl: &dyn Pactl, changes: &[LevelChange]) {
             tracing::warn!(error = %e, "could not put a raised level back");
         }
     }
+}
+
+/// A profile of a Bluetooth card: `a2dp_sink`, `handsfree_head_unit` and the like.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub name: String,
+    pub sinks: u32,
+    pub sources: u32,
+    pub priority: u32,
+    pub available: bool,
+}
+
+/// A connected Bluetooth headset or speaker, from `pactl list cards`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BluetoothCard {
+    pub name: String,
+    pub description: String,
+    pub profiles: Vec<Profile>,
+    pub active: String,
+}
+
+impl BluetoothCard {
+    /// The best available profile that offers what is asked. `keep_active` holds on to the
+    /// current one while it does, so a brief test does not switch a headset that is in use.
+    fn profile_for(&self, speaker: bool, mic: bool, keep_active: bool) -> Option<&Profile> {
+        let fits =
+            |p: &&Profile| p.available && (!speaker || p.sinks > 0) && (!mic || p.sources > 0);
+        let active = self.profiles.iter().find(|p| p.name == self.active);
+        if keep_active {
+            if let Some(active) = active.filter(fits) {
+                return Some(active);
+            }
+        }
+        self.profiles.iter().filter(fits).max_by_key(|p| p.priority)
+    }
+}
+
+/// `a2dp_sink: High Fidelity Playback (A2DP Sink) (sinks: 1, sources: 0, priority: 40, available: yes)`
+fn parse_profile(line: &str) -> Option<Profile> {
+    let (name, rest) = line.split_once(": ")?;
+    let (_, counts) = rest.rsplit_once('(')?;
+    let mut profile = Profile {
+        name: name.to_string(),
+        available: true,
+        ..Default::default()
+    };
+    for field in counts.trim_end_matches(')').split(", ") {
+        let (key, value) = field.split_once(": ")?;
+        match key {
+            "sinks" => profile.sinks = value.parse().ok()?,
+            "sources" => profile.sources = value.parse().ok()?,
+            "priority" => profile.priority = value.parse().ok()?,
+            "available" => profile.available = value != "no",
+            _ => {}
+        }
+    }
+    Some(profile)
+}
+
+pub fn parse_bluetooth_cards(text: &str) -> Vec<BluetoothCard> {
+    let mut cards = Vec::new();
+    let mut current: Option<(BluetoothCard, bool)> = None;
+    let mut in_profiles = false;
+    for line in text.lines() {
+        if line.starts_with("Card #") {
+            cards.extend(current.take().filter(|(_, bt)| *bt).map(|(c, _)| c));
+            current = Some((BluetoothCard::default(), false));
+            in_profiles = false;
+            continue;
+        }
+        let Some((card, bluetooth)) = current.as_mut() else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if let Some((key, value)) = trimmed.split_once(" = ") {
+            match key {
+                "device.description" => card.description = quoted(value).to_string(),
+                "device.bus" => *bluetooth = quoted(value) == "bluetooth",
+                _ => {}
+            }
+            continue;
+        }
+        // The section's own lines sit one tab deeper than its heading.
+        if in_profiles && line.starts_with("\t\t") {
+            card.profiles.extend(parse_profile(trimmed));
+            continue;
+        }
+        in_profiles = trimmed == "Profiles:";
+        if let Some(name) = trimmed.strip_prefix("Name: ") {
+            card.name = name.to_string();
+        } else if let Some(active) = trimmed.strip_prefix("Active Profile: ") {
+            card.active = active.to_string();
+        }
+    }
+    cards.extend(current.filter(|(_, bt)| *bt).map(|(c, _)| c));
+    cards
+}
+
+/// Whether a sink or source belongs to a Bluetooth card: PulseAudio and PipeWire both name
+/// them after the headset's address, `bluez_sink.B0_F0_0C_5F_3E_F6.a2dp_sink` on
+/// `bluez_card.B0_F0_0C_5F_3E_F6`.
+fn on_card(node: &Node, card: &str) -> bool {
+    let address = card.strip_prefix("bluez_card.");
+    node.name.starts_with("bluez_") && node.name.split('.').nth(1) == address
+}
+
+fn bluetooth_cards(pactl: &dyn Pactl) -> Vec<BluetoothCard> {
+    pactl
+        .run(&["list", "cards"])
+        .map(|t| parse_bluetooth_cards(&t))
+        .unwrap_or_default()
+}
+
+/// The connected Bluetooth devices that can play (`Output`) or listen (`Input`) in some profile:
+/// a headset's microphone exists only in its hands-free profile, which choosing it switches to.
+pub fn bluetooth_devices(pactl: &dyn Pactl, direction: AudioDirection) -> Vec<AudioDevice> {
+    let speaker = direction == AudioDirection::Output;
+    bluetooth_cards(pactl)
+        .into_iter()
+        .filter(|c| c.profile_for(speaker, !speaker, false).is_some())
+        .map(|c| AudioDevice {
+            label: if c.description.is_empty() {
+                c.name.clone()
+            } else {
+                c.description
+            },
+            id: c.name,
+            is_default: false,
+            kind: DeviceKind::Bluetooth,
+            plugged_in: true,
+        })
+        .collect()
+}
+
+/// Put a Bluetooth card in a profile that offers what is asked; the profile it left, if it
+/// had to change one.
+fn ready_card(
+    pactl: &dyn Pactl,
+    card: &str,
+    speaker: bool,
+    mic: bool,
+    keep_active: bool,
+) -> Result<Option<String>, String> {
+    let cards = bluetooth_cards(pactl);
+    let found = cards
+        .iter()
+        .find(|c| c.name == card)
+        .ok_or_else(|| format!("the Bluetooth device '{card}' is not connected"))?;
+    let profile = found
+        .profile_for(speaker, mic, keep_active)
+        .ok_or_else(|| format!("'{}' has no profile for that", found.description))?;
+    if profile.name == found.active {
+        return Ok(None);
+    }
+    pactl.run(&["set-card-profile", card, &profile.name])?;
+    tracing::info!(card, profile = %profile.name, "switched the Bluetooth device's profile");
+    Ok(Some(found.active.clone()))
+}
+
+/// `find` until it succeeds or a headset's new profile has had time to bring up its nodes.
+fn settled<T>(mut find: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let started = Instant::now();
+    loop {
+        match find() {
+            Err(_) if started.elapsed() < PROFILE_SETTLES => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            done => return done,
+        }
+    }
+}
+
+/// A Bluetooth device made the sound server's default for a brief test, so the pond can open
+/// it as `default`. Drop puts back the default and the profile it found.
+pub struct BluetoothRoute<'a> {
+    pactl: &'a dyn Pactl,
+    side: Side,
+    card: String,
+    previous_default: Option<String>,
+    previous_profile: Option<String>,
+}
+
+impl Drop for BluetoothRoute<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = &self.previous_default {
+            let _ = self.pactl.run(&[self.side.set_default(), name]);
+        }
+        if let Some(profile) = &self.previous_profile {
+            let _ = self.pactl.run(&["set-card-profile", &self.card, profile]);
+        }
+    }
+}
+
+pub fn route_bluetooth<'a>(
+    pactl: &'a dyn Pactl,
+    device: &AudioDevice,
+    direction: AudioDirection,
+) -> Result<BluetoothRoute<'a>, String> {
+    let side = Side::from_direction(direction);
+    let info = parse_info(&pactl.run(&["info"])?);
+    let mut route = BluetoothRoute {
+        pactl,
+        side,
+        card: device.id.clone(),
+        previous_default: None,
+        previous_profile: ready_card(
+            pactl,
+            &device.id,
+            side == Side::Speaker,
+            side == Side::Mic,
+            true,
+        )?,
+    };
+    let node = settled(|| node_for(pactl, &[], &info, device, side))?
+        .ok_or_else(|| format!("'{}' offers no {}", device.label, side.noun()))?;
+    let previous = side.default_of(&info).map(str::to_string);
+    if previous.as_deref() != Some(node.name.as_str()) {
+        pactl.run(&[side.set_default(), &node.name])?;
+        route.previous_default = previous;
+    }
+    Ok(route)
 }
 
 #[cfg(test)]
@@ -737,5 +983,207 @@ Source #3
             Some("default"),
         ));
         assert!(pactl.calls.lock().unwrap().is_empty());
+    }
+
+    /// The household nano's `pactl list cards` with a JLab headset connected, trimmed.
+    const CARDS: &str = "Card #1
+\tName: alsa_card.platform-sound
+\tDriver: module-alsa-card.c
+\tProperties:
+\t\tdevice.description = \"Built-in Audio\"
+\t\tdevice.bus = \"platform\"
+\tProfiles:
+\t\toutput:analog-stereo+input:analog-stereo: Analog Stereo Duplex (sinks: 1, sources: 1, priority: 6565, available: yes)
+\tActive Profile: output:analog-stereo+input:analog-stereo
+Card #2
+\tName: bluez_card.B0_F0_0C_5F_3E_F6
+\tDriver: module-bluez5-device.c
+\tProperties:
+\t\tdevice.description = \"JLab Epic Lux Lab Edition\"
+\t\tdevice.api = \"bluez\"
+\t\tdevice.bus = \"bluetooth\"
+\tProfiles:
+\t\ta2dp_sink: High Fidelity Playback (A2DP Sink) (sinks: 1, sources: 0, priority: 40, available: yes)
+\t\thandsfree_head_unit: Handsfree Head Unit (HFP) (sinks: 1, sources: 1, priority: 30, available: yes)
+\t\toff: Off (sinks: 0, sources: 0, priority: 0, available: yes)
+\tActive Profile: ACTIVE
+\tPorts:
+\t\theadset-input: Headset (type: Headset, priority: 0, latency offset: 0 usec, availability unknown)
+\t\t\tPart of profile(s): handsfree_head_unit
+";
+
+    const HEADSET: &str = "bluez_card.B0_F0_0C_5F_3E_F6";
+    const ONBOARD_SINK: &str = "alsa_output.platform-sound.analog-stereo";
+    const ONBOARD_SOURCE: &str = "alsa_input.platform-sound.analog-stereo";
+
+    /// A sound server with the headset connected, whose nodes follow its profile.
+    struct Headset {
+        profile: Mutex<String>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Headset {
+        fn in_profile(profile: &str) -> Self {
+            Self {
+                profile: Mutex::new(profile.to_string()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn changes(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("set-"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl Pactl for Headset {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.calls.lock().unwrap().push(args.join(" "));
+            let profile = self.profile.lock().unwrap().clone();
+            let node = |kind: &str, name: &str| {
+                format!("{kind} #0\n\tName: {name}\n\tMute: no\n\tProperties:\n\t\tdevice.class = \"sound\"\n")
+            };
+            Ok(match args {
+                ["info"] => format!(
+                    "Server Name: pulseaudio\nDefault Sink: {ONBOARD_SINK}\nDefault Source: {ONBOARD_SOURCE}\n"
+                ),
+                ["list", "cards"] => CARDS.replace("ACTIVE", &profile),
+                ["list", "sinks"] => node("Sink", ONBOARD_SINK)
+                    + &node("Sink", &format!("bluez_sink.B0_F0_0C_5F_3E_F6.{profile}")),
+                ["list", "sources"] if profile == "handsfree_head_unit" => {
+                    node("Source", ONBOARD_SOURCE)
+                        + &node("Source", "bluez_source.B0_F0_0C_5F_3E_F6.handsfree_head_unit")
+                }
+                ["list", "sources"] => node("Source", ONBOARD_SOURCE),
+                ["set-card-profile", _, to] => {
+                    *self.profile.lock().unwrap() = to.to_string();
+                    String::new()
+                }
+                _ => String::new(),
+            })
+        }
+    }
+
+    fn headset() -> AudioDevice {
+        AudioDevice::new(HEADSET, false, DeviceKind::Bluetooth).plugged_in()
+    }
+
+    #[test]
+    fn only_bluetooth_cards_and_their_profiles_are_read() {
+        let cards = parse_bluetooth_cards(&CARDS.replace("ACTIVE", "a2dp_sink"));
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let jlab = &cards[0];
+        assert_eq!(jlab.name, HEADSET);
+        assert_eq!(jlab.description, "JLab Epic Lux Lab Edition");
+        assert_eq!(jlab.active, "a2dp_sink");
+        let profiles: Vec<(&str, u32, u32, u32)> = jlab
+            .profiles
+            .iter()
+            .map(|p| (p.name.as_str(), p.sinks, p.sources, p.priority))
+            .collect();
+        assert_eq!(
+            profiles,
+            [
+                ("a2dp_sink", 1, 0, 40),
+                ("handsfree_head_unit", 1, 1, 30),
+                ("off", 0, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn pipewire_profile_lines_with_a_codec_parse_too() {
+        let profile = parse_profile(
+            "a2dp-sink-sbc: High Fidelity Playback (A2DP Sink, codec SBC) (sinks: 1, sources: 0, priority: 18, available: yes)",
+        );
+        assert_eq!(
+            profile.map(|p| (p.name, p.sinks, p.priority)),
+            Some(("a2dp-sink-sbc".into(), 1, 18))
+        );
+    }
+
+    #[test]
+    fn a_headset_is_offered_as_a_speaker_and_as_a_microphone() {
+        let pactl = Headset::in_profile("a2dp_sink");
+        for direction in [AudioDirection::Output, AudioDirection::Input] {
+            let found = bluetooth_devices(&pactl, direction);
+            assert_eq!(found.len(), 1, "{direction:?}");
+            assert_eq!(found[0].id, HEADSET);
+            assert_eq!(found[0].label, "JLab Epic Lux Lab Edition");
+            assert_eq!(found[0].kind, DeviceKind::Bluetooth);
+            assert!(found[0].plugged_in);
+        }
+        assert!(pactl.changes().is_empty(), "listing switches nothing");
+    }
+
+    #[test]
+    fn a_headset_chosen_to_play_stays_in_high_fidelity_and_becomes_the_default() {
+        let pactl = Headset::in_profile("a2dp_sink");
+        let done = set_defaults(&pactl, &[], None, Some(&headset())).expect("server");
+        assert!(done.problems.is_empty(), "{:?}", done.problems);
+        assert!(done.speaker.is_some());
+        assert_eq!(
+            pactl.changes(),
+            ["set-default-sink bluez_sink.B0_F0_0C_5F_3E_F6.a2dp_sink"]
+        );
+    }
+
+    #[test]
+    fn a_headset_chosen_to_listen_switches_to_hands_free_for_its_microphone() {
+        let pactl = Headset::in_profile("a2dp_sink");
+        let done = set_defaults(&pactl, &[], Some(&headset()), Some(&headset())).expect("server");
+        assert!(done.problems.is_empty(), "{:?}", done.problems);
+        assert_eq!(
+            pactl.changes(),
+            [
+                format!("set-card-profile {HEADSET} handsfree_head_unit"),
+                "set-default-sink bluez_sink.B0_F0_0C_5F_3E_F6.handsfree_head_unit".to_string(),
+                "set-default-source bluez_source.B0_F0_0C_5F_3E_F6.handsfree_head_unit".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_headset_no_longer_listening_goes_back_to_high_fidelity() {
+        let pactl = Headset::in_profile("handsfree_head_unit");
+        set_defaults(&pactl, &[], None, Some(&headset())).expect("server");
+        assert_eq!(
+            pactl.changes()[0],
+            format!("set-card-profile {HEADSET} a2dp_sink")
+        );
+    }
+
+    #[test]
+    fn a_brief_test_of_a_headsets_microphone_puts_everything_back() {
+        let pactl = Headset::in_profile("a2dp_sink");
+        {
+            let _route =
+                route_bluetooth(&pactl, &headset(), AudioDirection::Input).expect("routed");
+            assert_eq!(*pactl.profile.lock().unwrap(), "handsfree_head_unit");
+        }
+        assert_eq!(
+            pactl.changes(),
+            [
+                format!("set-card-profile {HEADSET} handsfree_head_unit"),
+                "set-default-source bluez_source.B0_F0_0C_5F_3E_F6.handsfree_head_unit".to_string(),
+                format!("set-default-source {ONBOARD_SOURCE}"),
+                format!("set-card-profile {HEADSET} a2dp_sink"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_brief_test_of_a_headsets_speaker_leaves_its_hands_free_profile_alone() {
+        let pactl = Headset::in_profile("handsfree_head_unit");
+        drop(route_bluetooth(&pactl, &headset(), AudioDirection::Output).expect("routed"));
+        assert!(pactl
+            .changes()
+            .iter()
+            .all(|c| !c.starts_with("set-card-profile")));
     }
 }
