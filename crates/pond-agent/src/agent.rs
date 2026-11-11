@@ -723,6 +723,7 @@ mod tests {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             })
             .await
             .unwrap();
@@ -750,6 +751,7 @@ mod tests {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             })
             .await
             .unwrap();
@@ -835,6 +837,7 @@ mod tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
         let prompt = agent
             .build_system_prompt(&Settings::default(), &request)

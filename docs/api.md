@@ -882,13 +882,19 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 
 ### `POST /chat`
 
-`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?}`.
+`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?, device_locked?}`.
 `device_place` is where the asking phone is now, as its app named it ("Westlands, Nairobi"),
 sent only while the person has turned on telling Goose where the phone is. It is a name, never
 coordinates, and rides that one turn's `<system-context>` (cleaned, at most 80 characters,
 without `<` or `>`). The conversation is saved from the message alone, and the engine's history
 drops a past turn's `<system-context>` when the next turn starts. Home, where the Pond is, stays the tools' answer
 (`get_user_profile`).
+`device_locked: true` says the asking phone is locked: the app's voice orb opened over its lock
+screen. The turn then runs as an unidentified speaker's (`ProfileScope::Guest`, `locked_turn_scope`
+in `routes.rs`), whoever the phone belongs to, since a voice over a lock screen does not prove who
+holds the phone: no memories or notes, no connected accounts, cameras, sensor history, rides or
+long tasks. Its `<system-context>` carries `LOCKED_DEVICE_NOTE`, so the model says to unlock for
+those. The server logs `kind=turn_device_locked`. `/chat` (not streamed) honours it too.
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
