@@ -2001,6 +2001,26 @@ fn refused_as(error: &anyhow::Error, reason: &str) -> bool {
         .is_some_and(|refused| refused.reason.as_deref() == Some(reason))
 }
 
+/// The embedded node as the ngrok tunnel hands over to it.
+pub struct AsBuiltIn(pub Arc<Runtime>);
+
+#[async_trait::async_trait]
+impl crate::remote_tunnel::BuiltInNetwork for AsBuiltIn {
+    fn is_on(&self) -> bool {
+        self.0.config().is_ok_and(|config| config.enabled)
+    }
+
+    async fn turn_on(&self) -> Result<()> {
+        let mut config = self.0.config()?;
+        config.enabled = true;
+        self.0.start(config).await
+    }
+
+    async fn turn_off(&self) -> Result<()> {
+        self.0.disable().await
+    }
+}
+
 /// Companion enrollment uses the same bearer middleware and actual-peer LAN checks.
 pub fn companion_management(runtime: Arc<Runtime>, state: Arc<pond_api::AppState>) -> Router {
     let limiter = Arc::new(pond_api::middleware::RateLimiter::new(

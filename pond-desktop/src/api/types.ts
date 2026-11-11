@@ -2218,6 +2218,8 @@ export type NgrokTunnelStatus =
 
 export interface NgrokTunnelState {
   config: NgrokTunnelConfig;
+  /** A new address phones have not learned; the built-in network stands in meanwhile. */
+  fallback?: string | null;
   tokenSet: boolean;
   status: NgrokTunnelStatus;
 }

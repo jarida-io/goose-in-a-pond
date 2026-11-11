@@ -10,6 +10,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -32,6 +33,11 @@ use crate::tls_identity::TunnelCertifier;
 
 const DIRECTORY: &str = "remote-tunnel";
 const CONFIG_FILE: &str = "ngrok.json";
+/// The tunnel address paired phones were last able to learn at home.
+const LEARNED_FILE: &str = "learned.json";
+/// How long a switch to the built-in network waits before stopping the tunnel, so the answer
+/// reaches a phone that asked through it.
+const HANDOVER_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 /// ngrok's agent endpoint, which the session dials; checked against the network mode first.
 const NGROK_AGENT: &str = "https://connect.ngrok-agent.com";
 const LONGEST_ERROR: usize = 300;
@@ -70,6 +76,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether the address survives a restart: a reserved TCP address, or a TLS endpoint, which
+    /// always has its reserved domain. Without one ngrok hands out a new address each start.
+    pub fn reserved(&self) -> bool {
+        match self.endpoint {
+            Endpoint::Tcp => self.remote_addr.is_some(),
+            Endpoint::Tls => self.domain.is_some(),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if let Some(domain) = &self.domain {
             ensure!(is_dns_name(domain), "the domain is not a host name");
@@ -105,6 +120,20 @@ fn is_dns_name(name: &str) -> bool {
         })
 }
 
+/// The built-in network (the embedded tailnet), which the tunnel replaces while it runs and falls
+/// back to when its address changes before phones can learn it.
+#[async_trait::async_trait]
+pub trait BuiltInNetwork: Send + Sync {
+    fn is_on(&self) -> bool;
+    async fn turn_on(&self) -> Result<()>;
+    async fn turn_off(&self) -> Result<()>;
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Learned {
+    address: String,
+}
+
 /// Where the tunnel stands, as the dashboard shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -125,6 +154,11 @@ pub struct Tunnel {
     status: Mutex<Status>,
     running: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     router: OnceLock<Router>,
+    built_in: OnceLock<Arc<dyn BuiltInNetwork>>,
+    /// Set by a choice made at home, where phones learn the address: the next one is adopted.
+    adopt: AtomicBool,
+    /// The address phones have not learned yet, while the built-in network stands in.
+    fallback: Mutex<Option<String>>,
 }
 
 impl Tunnel {
@@ -137,12 +171,92 @@ impl Tunnel {
             status: Mutex::new(Status::Off),
             running: tokio::sync::Mutex::new(None),
             router: OnceLock::new(),
+            built_in: OnceLock::new(),
+            adopt: AtomicBool::new(false),
+            fallback: Mutex::new(None),
         }
     }
 
     /// The router tunnel requests are served by, from [`public_companion`]. Set once at startup.
     pub fn serve_with(&self, router: Router) {
         let _ = self.router.set(router);
+    }
+
+    /// The built-in network to hand over to. Set once at startup.
+    pub fn hand_over_to(&self, built_in: Arc<dyn BuiltInNetwork>) {
+        let _ = self.built_in.set(built_in);
+    }
+
+    /// The tunnel address phones have not learned yet, while the built-in network stands in.
+    pub fn fallback(&self) -> Option<String> {
+        self.fallback.lock().ok().and_then(|f| f.clone())
+    }
+
+    fn set_fallback(&self, address: Option<String>) {
+        if let Ok(mut current) = self.fallback.lock() {
+            *current = address;
+        }
+    }
+
+    /// The next address is one phones can learn: the choice was made on the home network.
+    fn adopt_next_address(&self) {
+        self.adopt.store(true, Ordering::SeqCst);
+    }
+
+    fn learned(&self) -> Option<String> {
+        let bytes = std::fs::read(self.directory.join(LEARNED_FILE)).ok()?;
+        serde_json::from_slice::<Learned>(&bytes)
+            .ok()
+            .map(|l| l.address)
+    }
+
+    /// Decide what a new tunnel address means for the phones. One the household chose at home,
+    /// a reserved one, or the one phones already have replaces the built-in network. Any other
+    /// is unknown to a phone away from home, so the built-in network stays or comes back on
+    /// until the household switches to ngrok again at home.
+    async fn settle_address(&self, address: &str, reserved: bool) {
+        let adopt = self.adopt.swap(false, Ordering::SeqCst);
+        let learned = self.learned();
+        let built_in = self.built_in.get();
+        let known = learned.is_none() || learned.as_deref() == Some(address);
+        if adopt || reserved || known {
+            if learned.as_deref() != Some(address) {
+                let record = Learned {
+                    address: address.to_string(),
+                };
+                if let Err(error) = write_private_json(&self.directory, LEARNED_FILE, &record) {
+                    tracing::warn!(%error, "could not record the tunnel address phones learn");
+                }
+            }
+            self.set_fallback(None);
+            if let Some(built_in) = built_in.filter(|b| b.is_on()) {
+                match built_in.turn_off().await {
+                    Ok(()) => tracing::info!(
+                        target: "giap::trace",
+                        kind = "remote_route_ngrok",
+                        "the tunnel replaced the built-in network"
+                    ),
+                    Err(error) => tracing::warn!(%error, "could not turn the built-in network off"),
+                }
+            }
+            return;
+        }
+        self.set_fallback(Some(address.to_string()));
+        tracing::warn!(
+            target: "giap::trace",
+            kind = "remote_route_fallback",
+            %address,
+            "the tunnel's address changed and it is not reserved; the built-in network stands in until phones learn it at home"
+        );
+        match built_in {
+            Some(built_in) if !built_in.is_on() => {
+                if let Err(error) = built_in.turn_on().await {
+                    tracing::warn!(%error, "could not turn the built-in network back on");
+                }
+            }
+            Some(_) => {}
+            None => tracing::warn!("no built-in network to fall back to"),
+        }
     }
 
     pub fn status(&self) -> Status {
@@ -247,6 +361,7 @@ impl Tunnel {
 
     async fn run(&self, token: &str, config: &Config, router: Router) -> Result<()> {
         let session = connect(token).await?;
+        let reserved = config.reserved();
         match config.endpoint {
             Endpoint::Tcp => {
                 let mut builder = session.tcp_endpoint();
@@ -255,7 +370,7 @@ impl Tunnel {
                 }
                 let tunnel = builder.listen().await?;
                 let url = tunnel.url().to_string();
-                self.serve(tunnel, &url, router).await
+                self.serve(tunnel, &url, reserved, router).await
             }
             Endpoint::Tls => {
                 let mut builder = session.tls_endpoint();
@@ -264,12 +379,18 @@ impl Tunnel {
                 }
                 let tunnel = builder.listen().await?;
                 let url = tunnel.url().to_string();
-                self.serve(tunnel, &url, router).await
+                self.serve(tunnel, &url, reserved, router).await
             }
         }
     }
 
-    async fn serve<T, C>(&self, mut tunnel: T, url: &str, router: Router) -> Result<()>
+    async fn serve<T, C>(
+        &self,
+        mut tunnel: T,
+        url: &str,
+        reserved: bool,
+        router: Router,
+    ) -> Result<()>
     where
         T: futures::Stream<Item = Result<C, ngrok::tunnel::AcceptError>> + Unpin,
         C: ngrok::conn::ConnInfo
@@ -289,7 +410,10 @@ impl Tunnel {
             %address,
             "ngrok tunnel is up"
         );
-        self.set_status(Status::Running { address });
+        self.set_status(Status::Running {
+            address: address.clone(),
+        });
+        self.settle_address(&address, reserved).await;
         let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         // Dropped with this task when the tunnel stops, which aborts every open connection.
         let mut connections = tokio::task::JoinSet::new();
@@ -523,6 +647,8 @@ async fn describe(tunnel: &Tunnel) -> Response {
             "config": config,
             "tokenSet": tunnel.has_authtoken().await,
             "status": tunnel.status(),
+            "reserved": config.reserved(),
+            "fallback": tunnel.fallback(),
         }))
         .into_response(),
         Err(error) => refusal(
@@ -561,8 +687,10 @@ async fn configure(State(tunnel): State<Arc<Tunnel>>, Json(config): Json<Config>
         );
     }
     if config.enabled {
+        tunnel.adopt_next_address();
         tunnel.start(config).await;
     } else {
+        tunnel.set_fallback(None);
         tunnel.stop().await;
     }
     describe(&tunnel).await
@@ -623,6 +751,267 @@ async fn forget_token(State(tunnel): State<Arc<Tunnel>>) -> Response {
     }
     tracing::info!(target: "giap::trace", kind = "remote_tunnel_token_forgotten", "ngrok authtoken forgotten");
     describe(&tunnel).await
+}
+
+// ── From a paired phone: choose the route, set the authtoken at home ──────────────────────────
+
+/// Which way phones reach the Pond from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Route {
+    BuiltIn,
+    Ngrok,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RouteChoice {
+    route: Route,
+    /// A reserved TCP address (`host:port`); empty clears it, absent leaves it.
+    #[serde(default)]
+    reserved_address: Option<String>,
+}
+
+/// `/api/v1/remote-access/route`: what a paired phone may see and change. Mounted on the
+/// companion behind the bearer middleware, so it is reachable at home and over either route.
+/// The authtoken and the reserved address change only at home; switching to ngrok from away
+/// needs a reserved address, since an unreserved one is new at every start and only a phone at
+/// home can learn it.
+pub fn phone_management(tunnel: Arc<Tunnel>) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/remote-access/route",
+            get(phone_status).put(choose_route),
+        )
+        .route(
+            "/api/v1/remote-access/route/token",
+            put(phone_set_token).delete(phone_forget_token),
+        )
+        .with_state(tunnel)
+}
+
+/// The caller is on the Pond's own network, where phones learn the tunnel's address.
+fn at_home(peer: Option<&ConnectInfo<SocketAddr>>) -> bool {
+    let Some(ConnectInfo(peer)) = peer else {
+        return false;
+    };
+    match pond_api::network::interfaces() {
+        Ok(interfaces) => pond_api::network::is_lan_peer(peer.ip(), &interfaces),
+        Err(error) => {
+            tracing::warn!(%error, "cannot classify the caller's network; treating it as away");
+            false
+        }
+    }
+}
+
+fn peer_of(request: &Request) -> Option<ConnectInfo<SocketAddr>> {
+    // A tunnel request carries the caller's public address, so it is never at home either way.
+    if request.extensions().get::<RemoteTunnel>().is_some() {
+        return None;
+    }
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .cloned()
+}
+
+async fn describe_for_phone(tunnel: &Tunnel, home: bool) -> Response {
+    let config = match tunnel.config() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "could not read the ngrok settings");
+            return refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_unreadable",
+                "Could not read the tunnel settings",
+            );
+        }
+    };
+    let built_in = tunnel.built_in.get().is_some_and(|b| b.is_on());
+    Json(json!({
+        "route": if config.enabled { "ngrok" } else { "built_in" },
+        "atHome": home,
+        "tokenSet": tunnel.has_authtoken().await,
+        "endpoint": config.endpoint,
+        "reservedAddress": config.remote_addr,
+        "reserved": config.reserved(),
+        "status": tunnel.status(),
+        "fallback": tunnel.fallback(),
+        "builtInRunning": built_in,
+    }))
+    .into_response()
+}
+
+async fn phone_status(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Response {
+    let home = at_home(peer_of(&request).as_ref());
+    describe_for_phone(&tunnel, home).await
+}
+
+async fn choose_route(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Response {
+    let home = at_home(peer_of(&request).as_ref());
+    let Ok(bytes) = axum::body::to_bytes(request.into_body(), 4096).await else {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "The request is too large",
+        );
+    };
+    let Ok(choice) = serde_json::from_slice::<RouteChoice>(&bytes) else {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "Send {\"route\": \"built_in\" | \"ngrok\"}",
+        );
+    };
+    let mut config = match tunnel.config() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "could not read the ngrok settings");
+            return refusal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_unreadable",
+                "Could not read the tunnel settings",
+            );
+        }
+    };
+    if let Some(reserved) = choice.reserved_address {
+        if !home {
+            return refusal(
+                StatusCode::FORBIDDEN,
+                "at_home_only",
+                "Change the reserved address on your home Wi-Fi",
+            );
+        }
+        let reserved = reserved.trim();
+        config.remote_addr = (!reserved.is_empty()).then(|| reserved.to_string());
+    }
+    match choice.route {
+        Route::Ngrok => {
+            if !tunnel.has_authtoken().await {
+                return refusal(
+                    StatusCode::CONFLICT,
+                    "no_authtoken",
+                    "Store your ngrok authtoken first",
+                );
+            }
+            if !home && !config.reserved() {
+                return refusal(
+                    StatusCode::CONFLICT,
+                    "needs_reserved_address",
+                    "Away from home, ngrok needs a reserved address",
+                );
+            }
+            config.enabled = true;
+        }
+        Route::BuiltIn => config.enabled = false,
+    }
+    if let Err(error) = config.validate() {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            format!("{error:#}"),
+        );
+    }
+    if let Err(error) = tunnel.save_config(&config) {
+        tracing::warn!(%error, "could not save the ngrok settings");
+        return refusal(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "config_unwritable",
+            "Could not save the tunnel settings",
+        );
+    }
+    tracing::info!(
+        target: "giap::trace",
+        kind = "remote_route_chosen",
+        route = ?choice.route,
+        at_home = home,
+        reserved = config.reserved(),
+        "a phone chose how it reaches the Pond from outside"
+    );
+    match choice.route {
+        Route::Ngrok => {
+            if home {
+                tunnel.adopt_next_address();
+            }
+            tunnel.start(config).await;
+        }
+        Route::BuiltIn => {
+            tunnel.set_fallback(None);
+            if let Some(built_in) = tunnel.built_in.get().filter(|b| !b.is_on()) {
+                if let Err(error) = built_in.turn_on().await {
+                    tracing::warn!(%error, "could not turn the built-in network on");
+                    return refusal(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "built_in_unavailable",
+                        "The built-in network could not start; the tunnel is left running",
+                    );
+                }
+            }
+            // Stopped after the answer, which may be travelling through the tunnel.
+            let stopping = tunnel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(HANDOVER_DELAY).await;
+                if stopping.config().is_ok_and(|c| !c.enabled) {
+                    stopping.stop().await;
+                }
+            });
+        }
+    }
+    describe_for_phone(&tunnel, home).await
+}
+
+async fn phone_set_token(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Response {
+    if !at_home(peer_of(&request).as_ref()) {
+        return refusal(
+            StatusCode::FORBIDDEN,
+            "at_home_only",
+            "Add the authtoken on your home Wi-Fi",
+        );
+    }
+    let Ok(bytes) = axum::body::to_bytes(request.into_body(), 4096).await else {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "The request is too large",
+        );
+    };
+    let Ok(body) = serde_json::from_slice::<TokenBody>(&bytes) else {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_authtoken",
+            "That does not look like an ngrok authtoken",
+        );
+    };
+    let stored = set_token(State(tunnel.clone()), Json(body)).await;
+    if !stored.status().is_success() {
+        return stored;
+    }
+    describe_for_phone(&tunnel, true).await
+}
+
+async fn phone_forget_token(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Response {
+    if !at_home(peer_of(&request).as_ref()) {
+        return refusal(
+            StatusCode::FORBIDDEN,
+            "at_home_only",
+            "Remove the authtoken on your home Wi-Fi",
+        );
+    }
+    let was_on = tunnel.config().is_ok_and(|c| c.enabled);
+    let forgotten = forget_token(State(tunnel.clone())).await;
+    if !forgotten.status().is_success() {
+        return forgotten;
+    }
+    tunnel.set_fallback(None);
+    // Phones away still need a way in once the tunnel is gone.
+    if was_on {
+        if let Some(built_in) = tunnel.built_in.get().filter(|b| !b.is_on()) {
+            if let Err(error) = built_in.turn_on().await {
+                tracing::warn!(%error, "could not turn the built-in network on");
+            }
+        }
+    }
+    describe_for_phone(&tunnel, true).await
 }
 
 #[cfg(test)]
@@ -725,6 +1114,123 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "ngrok.json is readable by others");
+    }
+
+    struct FakeBuiltIn {
+        on: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl BuiltInNetwork for FakeBuiltIn {
+        fn is_on(&self) -> bool {
+            self.on.load(Ordering::SeqCst)
+        }
+        async fn turn_on(&self) -> Result<()> {
+            self.on.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn turn_off(&self) -> Result<()> {
+            self.on.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn tunnel_with(dir: &Path, built_in_on: bool) -> (Arc<Tunnel>, Arc<FakeBuiltIn>) {
+        let identity =
+            crate::tls_identity::TlsIdentity::load(dir, &["pond.local".to_string()]).unwrap();
+        let tunnel = Arc::new(Tunnel::new(dir, None, identity.tunnel_certifier()));
+        let built_in = Arc::new(FakeBuiltIn {
+            on: AtomicBool::new(built_in_on),
+        });
+        tunnel.hand_over_to(built_in.clone());
+        (tunnel, built_in)
+    }
+
+    #[test]
+    fn only_a_reserved_address_or_a_tls_domain_survives_a_restart() {
+        assert!(!Config::default().reserved());
+        let tcp = Config {
+            remote_addr: Some("1.tcp.ngrok.io:20123".into()),
+            ..Config::default()
+        };
+        assert!(tcp.reserved());
+        let tls = Config {
+            endpoint: Endpoint::Tls,
+            domain: Some("pond.example.org".into()),
+            ..Config::default()
+        };
+        assert!(tls.reserved());
+    }
+
+    #[tokio::test]
+    async fn the_first_address_is_adopted_and_replaces_the_built_in_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnel, built_in) = tunnel_with(dir.path(), true);
+        tunnel
+            .settle_address("1.tcp.eu.ngrok.io:20001", false)
+            .await;
+        assert_eq!(tunnel.learned().as_deref(), Some("1.tcp.eu.ngrok.io:20001"));
+        assert_eq!(tunnel.fallback(), None);
+        assert!(!built_in.is_on());
+    }
+
+    #[tokio::test]
+    async fn a_new_unreserved_address_falls_back_to_the_built_in_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnel, built_in) = tunnel_with(dir.path(), true);
+        tunnel
+            .settle_address("1.tcp.eu.ngrok.io:20001", false)
+            .await;
+        assert!(!built_in.is_on());
+
+        // A restart: ngrok hands out another address phones away from home cannot know.
+        tunnel
+            .settle_address("4.tcp.eu.ngrok.io:31337", false)
+            .await;
+        assert_eq!(
+            tunnel.fallback().as_deref(),
+            Some("4.tcp.eu.ngrok.io:31337")
+        );
+        assert!(
+            built_in.is_on(),
+            "phones away need the built-in network back"
+        );
+        assert_eq!(
+            tunnel.learned().as_deref(),
+            Some("1.tcp.eu.ngrok.io:20001"),
+            "phones still know only the old address"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_ngrok_at_home_adopts_the_new_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnel, built_in) = tunnel_with(dir.path(), false);
+        tunnel
+            .settle_address("1.tcp.eu.ngrok.io:20001", false)
+            .await;
+        tunnel
+            .settle_address("4.tcp.eu.ngrok.io:31337", false)
+            .await;
+        assert!(built_in.is_on());
+
+        tunnel.adopt_next_address();
+        tunnel
+            .settle_address("6.tcp.eu.ngrok.io:12000", false)
+            .await;
+        assert_eq!(tunnel.learned().as_deref(), Some("6.tcp.eu.ngrok.io:12000"));
+        assert_eq!(tunnel.fallback(), None);
+        assert!(!built_in.is_on());
+    }
+
+    #[tokio::test]
+    async fn a_reserved_address_never_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tunnel, built_in) = tunnel_with(dir.path(), true);
+        tunnel.settle_address("1.tcp.eu.ngrok.io:20001", true).await;
+        tunnel.settle_address("2.tcp.eu.ngrok.io:20002", true).await;
+        assert_eq!(tunnel.fallback(), None);
+        assert!(!built_in.is_on());
     }
 
     #[test]

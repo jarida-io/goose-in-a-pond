@@ -4925,6 +4925,9 @@ async fn run_server(
             .embedded
             .layer(axum::Extension(connections.clone()));
         listeners.tunnel = listeners.tunnel.layer(axum::Extension(connections.clone()));
+        tunnel.hand_over_to(Arc::new(pond_server::embedded_network::AsBuiltIn(
+            embedded.clone(),
+        )));
         tunnel.serve_with(listeners.tunnel.clone());
         tunnel.start_if_enabled().await;
     }
