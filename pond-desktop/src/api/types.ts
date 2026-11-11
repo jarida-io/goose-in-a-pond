@@ -388,6 +388,8 @@ export interface MeshPeer {
 
 export interface MeshSelf {
   mesh_enabled: boolean;
+  /** False when this pond-server was built without mesh support; absent from older servers. */
+  mesh_compiled?: boolean;
   peer_id?: string;
   invite_url?: string;
 }

@@ -1570,7 +1570,7 @@ has no `code`. Images are multipart `image` fields; see [face-recognition.md](fa
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /mesh/self` | | `{mesh_enabled, peer_id, invite_url}` |
+| `GET /mesh/self` | | `{mesh_enabled, mesh_compiled, peer_id, invite_url}`; with the mesh off only `{mesh_enabled: false, mesh_compiled}`. `mesh_compiled: false` means this binary was built without the `mesh` feature |
 | `GET /mesh/peers` | | `{peers: [{peer_id, trust_scope, connected, credit_balance_millisats}]}` |
 | `POST /mesh/peers` | `{peer_id, trust_scope, address?}` | `201 {peer_id, trust_scope}` |
 | `DELETE /mesh/peers/{peer_id}` | | `204` |

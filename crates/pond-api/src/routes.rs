@@ -6337,12 +6337,16 @@ async fn get_mesh_settlement_status(
 }
 
 /// `GET /api/v1/mesh/self` — peer id + invite link; mesh off returns 200 so the UI can prompt.
+/// `mesh_compiled` tells a binary built without mesh apart from a transport that failed to start.
 async fn get_mesh_self(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mesh_compiled = state.mesh_rebuild.is_some();
     let transport = state.mesh_transport.read().await.clone();
     let Some(transport) = transport else {
-        return Ok(Json(json!({ "mesh_enabled": false })));
+        return Ok(Json(
+            json!({ "mesh_enabled": false, "mesh_compiled": mesh_compiled }),
+        ));
     };
     let peer_id = transport.local_peer_id();
     let addresses = transport.listen_addresses().await.unwrap_or_default();
@@ -6361,6 +6365,7 @@ async fn get_mesh_self(
     };
     Ok(Json(json!({
         "mesh_enabled": true,
+        "mesh_compiled": mesh_compiled,
         "peer_id": peer_id.to_string(),
         "invite_url": invite_url,
     })))

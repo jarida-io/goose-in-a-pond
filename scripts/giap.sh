@@ -91,6 +91,8 @@ source "$HERE/lib/time-sync.sh"
 source "$HERE/lib/data-volume.sh"
 # shellcheck source=lib/remote-access.sh
 source "$HERE/lib/remote-access.sh"
+# shellcheck source=lib/mesh.sh
+source "$HERE/lib/mesh.sh"
 # shellcheck source=lib/release-build.sh
 source "$HERE/lib/release-build.sh"
 # The agamemnon_* functions: the pond's own locked account.
@@ -980,6 +982,12 @@ doctor() {
   # turned on and not up is a warning. See scripts/lib/remote-access.sh.
   remote_doctor "$D_DATA_DIR" "$D_PORT" "$D_HEALTH"
   DOC_WARN=$((DOC_WARN + REMOTE_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + REMOTE_DOCTOR_UNK))
+
+  # Pond-to-pond mesh: whether the binary has it, and whether it is switched on. Built in but off
+  # is a note; switched on in a binary without it is a warning. See scripts/lib/mesh.sh.
+  if [ "$D_BIN_REL" = "present" ]; then _mesh_bin=target/release/pond-server; else _mesh_bin=target/debug/pond-server; fi
+  mesh_doctor "$_mesh_bin" "$(sqlite_setting mesh_enabled || true)"
+  DOC_WARN=$((DOC_WARN + MESH_DOCTOR_WARN)); DOC_UNK=$((DOC_UNK + MESH_DOCTOR_UNK))
 
   # 14. LiteRT-LM library, which goose's litert backend loads into the server process for
   # .litertlm models. Having none is a note; one that fails its manifest is a FAIL.

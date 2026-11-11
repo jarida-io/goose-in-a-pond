@@ -33,7 +33,7 @@ interactive menu.
 |---|---|
 | *(none)* | Interactive menu: diagnose, install and build, service install/start/stop/restart/remove, run in the foreground, desktop app, logs, Jetson power |
 | `status` | Print the detection banner only |
-| `doctor` | Banner plus a read-only health report; exits 1 if any check FAILs |
+| `doctor` | Banner plus a read-only health report; exits 1 if any check FAILs. Its mesh line (`scripts/lib/mesh.sh`) says whether this `pond-server` was built with mesh (it reads the binary itself), and warns when `mesh_enabled` is on in a binary built without it |
 | `install` | Guardrailed `bash scripts/install.sh`: passes `--no-service` when a service unit already exists, offers to stop a running Jetson service for the build, and offers Full or Minimal (`--minimal`) when interactive |
 | `build` | `build-ui`, then a release `pond-server` with this host's features (CUDA features on a Jetson; stops the service during the build there). Stops first, asking, when the disk has under 5 GiB free (a full disk fails the link at the end with `signal 7 [Bus error]`). Also builds the `pondnet` remote-access helper, with a Go at or above `native/pondnet/go.mod`'s pin, offering to download one first when there is none; without Go the pond builds with remote access off. Writes a build stamp |
 | `build-ui` | `npm ci` when the lockfile is newer than `node_modules`, then `npm run build` in `pond-desktop/`, then touches `dist/` so cargo re-embeds it |

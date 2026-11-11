@@ -13,8 +13,6 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail -n vite,server -c cyan,green \"vite\" \"npm run dev:server\"",
     "dev:server": "cd .. && cargo run -p pond-server -- serve --native",
-    "dev:server:mesh": "cd .. && cargo run -p pond-server --features mesh -- serve --native",
-    "dev:mesh": "concurrently --kill-others-on-fail -n vite,server -c cyan,green \"vite\" \"npm run dev:server:mesh\"",
     "dev:vite": "vite",
     "dev:electron": "concurrently --kill-others-on-fail -n vite,main,shell -c cyan,yellow,magenta \"vite\" \"tsup --watch\" \"wait-on tcp:1420 dist-electron/main/index.cjs && GIAP_DEV_SERVER=http://localhost:1420 electron .\"",
     "build": "vite build",
