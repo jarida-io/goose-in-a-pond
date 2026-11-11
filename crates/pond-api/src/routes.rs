@@ -1913,6 +1913,10 @@ struct ChatRequest {
     /// telling Goose where the phone is. A place name, never coordinates; rides this turn only.
     #[serde(default)]
     device_place: Option<String>,
+    /// The asking phone is locked (the app's voice orb opened over the lock screen): this turn
+    /// runs as an unidentified speaker's, with no personal data or tools, until it is unlocked.
+    #[serde(default)]
+    device_locked: bool,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -1973,8 +1977,13 @@ async fn chat(
     let model_role = "chat";
 
     // Scope resolved exactly as /chat/stream does, so both endpoints agree on the speaker.
+    let scope = locked_turn_scope(
+        resolve_turn_scope(&state, &session_id, &device).await,
+        req.device_locked,
+        &session_id,
+    );
     let service = ChatService::new(state.agent.clone(), session_id.clone(), storage.clone())
-        .with_profile_scope(resolve_turn_scope(&state, &session_id, &device).await);
+        .with_profile_scope(scope);
 
     // As every turn path does before the model: wait out a quiet compaction in the way.
     if let Some(wait) = state.runs.quiet_passes().turn_arrives(&session_id) {
@@ -3354,7 +3363,11 @@ async fn drive_turn(
     let model_role = "chat";
 
     // Shared with the AgentRequest so memory is written under the identity it was read under.
-    let turn_scope = resolve_turn_scope(state, &session_id, &device).await;
+    let turn_scope = locked_turn_scope(
+        resolve_turn_scope(state, &session_id, &device).await,
+        req.device_locked,
+        &session_id,
+    );
 
     let mut chat_service = pond_core::shared::services::chat::ChatService::new(
         state.agent.clone(),
@@ -3517,6 +3530,7 @@ async fn drive_turn(
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
         device_place: req.device_place.clone(),
+        device_locked: req.device_locked,
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -13134,6 +13148,7 @@ async fn agent_chat_stream(
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -18704,6 +18719,7 @@ async fn run_recipe(
         deep_research_answer: None,
         deep_research_for: None,
         device_place: None,
+        device_locked: false,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))
@@ -20326,6 +20342,21 @@ async fn decide_proposal(
 
 /// Resolves whose turn this is, once, at the edge; every failure narrows rather than widens.
 /// `device` is a [`ProvenDevice`] because a paired device outranks every other identity proof.
+/// A turn from a locked phone is an unidentified speaker's, whoever the phone belongs to: the
+/// voice that woke it over the lock screen does not prove who is holding it. The member's own
+/// scope comes back with the next turn sent after the phone is unlocked.
+fn locked_turn_scope(scope: ProfileScope, locked: bool, session_id: &str) -> ProfileScope {
+    if !locked {
+        return scope;
+    }
+    tracing::info!(
+        kind = "turn_device_locked",
+        session_id,
+        "a locked phone asked: the turn runs with no personal data or tools"
+    );
+    ProfileScope::Guest
+}
+
 async fn resolve_turn_scope(
     state: &Arc<AppState>,
     session_id: &str,
@@ -23267,6 +23298,27 @@ mod weather_icon_tests {
             ("Unknown", "cloud"),
         ] {
             assert_eq!(weather_icon_key(description), icon, "{description}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod locked_turn_tests {
+    use super::locked_turn_scope;
+    use pond_core::user_data::domain::profile::ProfileScope;
+
+    #[test]
+    fn a_locked_phone_asks_as_an_unidentified_speaker_whoever_owns_it() {
+        for scope in ProfileScope::every_shape() {
+            assert_eq!(
+                locked_turn_scope(scope.clone(), true, "s"),
+                ProfileScope::Guest
+            );
+            assert_eq!(
+                locked_turn_scope(scope.clone(), false, "s"),
+                scope,
+                "unlocked keeps its scope"
+            );
         }
     }
 }

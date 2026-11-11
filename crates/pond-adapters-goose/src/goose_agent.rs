@@ -99,6 +99,8 @@ struct TurnEnvelope<'a> {
     heard: bool,
     /// Where the person's phone is now (`device_place_note`), when their app shares it.
     device_place: Option<String>,
+    /// The asking phone is locked: [`LOCKED_DEVICE_NOTE`](pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE).
+    device_locked: bool,
 }
 
 /// A heard turn's <user-message>. No "recording": the model says it back. Never empty, or the
@@ -120,6 +122,8 @@ impl TurnEnvelope<'_> {
             self.suggestion.as_deref(),
             self.research.as_deref(),
             self.device_place.as_deref(),
+            self.device_locked
+                .then_some(pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE),
         ]
         .into_iter()
         .flatten()
@@ -3713,6 +3717,7 @@ impl GooseAdapter {
                 .device_place
                 .as_deref()
                 .and_then(pond_core::user_data::services::location::device_place_note),
+            device_locked: request.device_locked,
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -4776,6 +4781,7 @@ impl AgentPort for GooseAdapter {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         let shape = if voice_mode {
@@ -8234,6 +8240,28 @@ mod tests {
         assert!(!unshared.contains("phone is in"));
     }
 
+    /// A locked phone's turn says why it has no personal tools, in its context and only then.
+    #[test]
+    fn a_locked_phone_turn_says_so_in_the_system_context_only() {
+        use pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE;
+        let locked = TurnEnvelope {
+            message: "what is on my calendar",
+            device_locked: true,
+            ..Default::default()
+        }
+        .render();
+        let context = &locked[locked.find("<system-context>").unwrap()..];
+        assert_eq!(context.matches(LOCKED_DEVICE_NOTE).count(), 1);
+        assert!(LOCKED_DEVICE_NOTE.contains("unlock"));
+
+        let unlocked = TurnEnvelope {
+            message: "what is on my calendar",
+            ..Default::default()
+        }
+        .render();
+        assert!(!unlocked.contains(LOCKED_DEVICE_NOTE));
+    }
+
     // ── F3: the vision-capability prompt section ─────────────────────────
 
     /// A text-only model told it can see will describe an image that was never there.
@@ -9670,6 +9698,7 @@ mod tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();
