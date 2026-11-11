@@ -48,12 +48,18 @@ APPLE_TEAM_ID=TESTTEAM00 APPLE_KEY_ID=TESTKEY000 \
 APPLE_PRIVATE_KEY_FILE=$HOME/.giap-uber-test/apple-throwaway.p8 \
 UBER_CLIENT_ID=YOUR_UBER_CLIENT_ID \
 UBER_CLIENT_SECRET_FILE=$HOME/.giap-uber-test/uber_client_secret \
+UBER_TOKEN_URL=https://sandbox-login.uber.com/oauth/v2/token \
 PONDCREDENTIALS_BIND=127.0.0.1:8088 \
 cargo run --release
 ```
 
 `GET http://127.0.0.1:8088/v1/uber/client` should answer with your client ID; a `503` means the Uber
 variables were not picked up.
+
+A test app is known only to Uber's sandbox sign-in server, `sandbox-login.uber.com`, so the relay
+exchanges codes there (`UBER_TOKEN_URL`). Production's server, the default, refuses a test app with
+`unauthorized_client` ("the current application environment is mismatched"). Leave `UBER_TOKEN_URL`
+unset for a production app.
 
 ## 3. Start the pond against the relay and the sandbox
 
@@ -63,7 +69,8 @@ GIAP_UBER_API_BASE=https://sandbox-api.uber.com \
 cargo run -p pond-server -- serve
 ```
 
-Both variables accept plain `http` only for this machine. Leave `GIAP_UBER_API_BASE` unset to use
+Both variables accept plain `http` only for this machine. With the sandbox API, the pond also sends
+members to the sandbox's sign-in page (`UberConfig::authorize_url`). Leave `GIAP_UBER_API_BASE` unset to use
 production, which dispatches real cars. `GIAP_UBER_PRODUCT_ID` pins a product; unset lets Uber choose.
 
 ## 4. Connect a member
@@ -72,7 +79,9 @@ production, which dispatches real cars. `GIAP_UBER_PRODUCT_ID` pins a product; u
 2. Context → Sources → **Uber**: press **Connect Uber** beside the household member. Sign in to Uber in the
    browser that opens and approve the scopes. The panel shows the member as connected
    (`GET /api/v1/uber/accounts`).
-3. If sign-in fails, the relay's log and the pond's `uber_relay_failed` error say why. A redirect
+3. If sign-in fails, the relay's log and the pond's `uber_relay_failed` error say why. Uber's
+   "Authorisation error: Invalid client" page means the sign-in went to a server that does not know
+   the app: a test app with the pond on the production API, or the reverse. A redirect
    mismatch means the URI in step 1.3 does not match the dashboard's port.
 
 ## 5. Book a sandbox ride
