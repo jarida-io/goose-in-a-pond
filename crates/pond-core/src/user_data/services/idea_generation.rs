@@ -159,13 +159,13 @@ pub fn pick_seeds(
 const QUERY_SYSTEM: &str = "\
 You write one web search for {name}. Using the portrait of {name} and the \
 seed below, write the search most likely to find something new, specific and \
-useful that {name} could act on this week about the seed: a software release, a \
-tool or library, an open-source repo, a hardware build, a tutorial, an event, a \
-technique, or a concrete guide.
+useful that {name} could act on this week about the seed: an authentic recipe or \
+culinary technique, an outdoor trail or adventure guide, a tool or library release, \
+a hardware build, a tutorial, an event, or a concrete hands-on project guide.
 
 Do NOT search for generic academic papers, theoretical surveys, textbook definitions, \
-or broad science abstracts. Focus on practical tools, project repositories, concrete \
-announcements, and hands-on implementations.
+or broad science abstracts. Focus on practical guides, authentic recipes, trail profiles, \
+concrete announcements, hands-on implementations, and actionable steps.
 
 Reply with JSON only, exactly this shape:
 {\"query\":\"...\",\"private\":false}
@@ -227,14 +227,15 @@ idea builds on), and the text of the numbered pages. Every fact in the idea \
 must come from the pages.
 
 A good idea is:
-- actionable and tangible: propose building, testing, integrating, installing, configuring, or trying a real tool, library, device, or script.
-- NEVER suggest merely reading an article, studying a paper, or learning abstract theory.
-- new to {name}: not something the portrait shows they already know;
+- rooted in {name}'s genuine personal interests across all areas of their life: culinary arts & recipes (e.g. authentic regional dishes like Nigerian Egusi Soup, pan-seared fillet mignon, artisan sourdough), outdoor adventures & travel (e.g. hiking trails like Mt. Longonot, cycling, gear packing), home, garden & DIY craft, or creative & technical projects;
+- actionable and tangible: propose real-world steps that {name} can act on (e.g. buy ingredients, schedule trail dates, pack gear, configure, build, try);
+- NEVER suggest merely reading an article, studying a paper, or learning abstract theory without practical action;
+- new to {name}: not something the portrait shows they already know or do;
 - specific to {name}: tied to the seed and to their details in the portrait \
-(their places, tech stack, hardware, dates, names);
+(their places, interests, tech stack, hardware, dates, names);
 - sourced: built on what the pages say;
 - doable: something {name} or the Pond can act on soon. Never a question.
-Keep your thinking concise, practical, and focused on tangible utility.
+Keep your thinking concise, practical, and focused on tangible real-world utility.
 
 Reply with JSON only, exactly this shape:
 {\"title\":\"...\",\"pitch\":\"...\",\"why\":\"...\",\"sources\":[1],\
@@ -242,17 +243,15 @@ Reply with JSON only, exactly this shape:
 \"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
 
 - title: the idea as a concrete suggestion or project, under 80 characters, not a question.
-- pitch: two or three sentences: what the pages say, with specific tools, versions, \
-benchmarks, or numbers, and what practical task {name} could accomplish with it.
+- pitch: two or three sentences: what the pages say, with specific tools, ingredients, \
+temperatures, trail numbers, benchmarks, or steps, and what practical task {name} could accomplish with it.
 - why: one line to {name}, starting \"You\", naming the specific thing about \
 them or their interests it builds on.
 - sources: the numbers of the pages it rests on.
-- you_can: two to four actionable steps {name} could take (e.g., clone, install, \
-wire, configure, deploy), each a short imperative under 80 characters.
+- you_can: two to four actionable steps {name} could take (e.g. buy ingredients, \
+pack gear, schedule, clone, wire, deploy), each a short imperative under 80 characters.
 - goose_can: what the Pond could do for {name}, or null.
-  - kind: \"research\" (a deeper report or setup guide), \"watch\" (keep checking a page of \
-listings or releases), \"schedule\" (look this up again each week), \"todo\" (put the \
-first actionable step on their list) or \"chat\" (talk it through).
+  - kind: \"todo\" (stage the actionable steps on their to-do list), \"schedule\" (look this up or plan prep time each week), \"chat\" (discuss and customize the plan), \"research\" (a deeper report or setup guide), or \"watch\" (keep checking a page of listings or releases).
   - label: the button's words, under 30 characters.
   - prompt: for research or schedule, what the Pond should look up; else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \

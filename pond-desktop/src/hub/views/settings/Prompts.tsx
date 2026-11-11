@@ -16,9 +16,12 @@ const PRESET_LABELS: Record<string, string> = {
   concise:   "Concise",
   warm:      "Warm",
   technical: "Technical",
+  soul:      "Soul",
+  heartbeat: "Heartbeat",
+  memory:    "Scratchpad",
 };
 
-const PRESET_ORDER = ["balanced", "concise", "warm", "technical"];
+const PRESET_ORDER = ["balanced", "concise", "warm", "technical", "soul", "heartbeat", "memory"];
 
 /**
  * Variables `render_jinja_template` (pond-core prompts.rs) interpolates; display only. No
