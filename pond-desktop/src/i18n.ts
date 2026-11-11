@@ -61,6 +61,8 @@ void i18n.use(initReactI18next).init({
     replacesTailnet: 'Starting the tunnel turns the built-in remote network off.',
     ngrokRunning: 'Your ngrok tunnel is running. Stop it there before switching to the built-in network.',
     unavailable: 'The tunnel settings could not be read.',
+    providerSignedOut: 'Which one is in use cannot be shown: this browser is no longer signed in to the Pond. Run `pond-server dashboard` on the Pond and open the new link.',
+    providerUnread: 'Which one is in use could not be read from the Pond. Reload the page to try again.',
   }, signIn: {
     title: 'Sign in to this Pond',
     instructions: 'This browser has not been signed in. On the Pond, run this command and open the link it prints:',
