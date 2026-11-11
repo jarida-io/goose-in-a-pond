@@ -116,7 +116,8 @@ fn todo_json(todo: &IdeaTodo) -> Value {
     })
 }
 
-/// `POST /me/ideas/{id}/mine`: each step the idea suggests becomes an open to-do.
+/// `POST /me/ideas/{id}/mine`: each step the idea suggests becomes an open to-do, and a new idea
+/// is `done`: it is the member's now, and `working` would say Goose is on it.
 async fn mine(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -139,7 +140,7 @@ async fn mine(
         todos.push(todo_json(&todo));
     }
     if idea.state == IdeaState::New {
-        repo.set_state(&member, &idea.id, IdeaState::Working, None)
+        repo.set_state(&member, &idea.id, IdeaState::Done, None)
             .await
             .map_err(server_error)?;
     }

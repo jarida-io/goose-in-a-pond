@@ -230,7 +230,8 @@ Idea = { "id", "title", "pitch": "two or three sentences",
 - `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`
 - `POST /me/ideas/{id}/goose` → Idea: Goose starts its part (a research task, a watch, a
   schedule, a to-do) and the idea moves to `working`
-- `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos
+- `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos,
+  and a new idea moves to `done`, so the phone lists them where its buttons were
 - `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202
 
 Ideas replace the one-question-per-memory suggestions. Once a day on the lane, the Pond picks one
