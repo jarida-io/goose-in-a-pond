@@ -33,8 +33,9 @@ describe("NgrokTunnel", () => {
 
   it("cannot start until an authtoken is stored", async () => {
     render(<NgrokTunnel />);
-    const start = await screen.findByRole("button", { name: "Start tunnel" });
-    expect(start.hasAttribute("disabled") || start.getAttribute("data-disabled") === "true" || start.getAttribute("aria-disabled") === "true").toBe(true);
+    const reach = await screen.findByRole("switch", { name: "Reach this Pond from outside your home" });
+    expect((reach as HTMLInputElement).disabled || reach.getAttribute("aria-disabled") === "true").toBe(true);
+    expect(screen.getByText("Save your ngrok authtoken above to turn this on.")).toBeTruthy();
   });
 
   it("checks the authtoken through the pond and clears the field once stored", async () => {
@@ -65,11 +66,11 @@ describe("NgrokTunnel", () => {
     );
     const started = vi.fn();
     render(<NgrokTunnel onStarted={started} />);
-    await userEvent.click(await screen.findByRole("button", { name: "Start tunnel" }));
+    await userEvent.click(await screen.findByRole("switch", { name: "Reach this Pond from outside your home" }));
     await waitFor(() => expect(api.configureNgrokTunnel).toHaveBeenCalledWith({ enabled: true, endpoint: "tcp" }));
     expect(await screen.findByText("Phones can reach this Pond at 4.tcp.eu.ngrok.io:12345.")).toBeTruthy();
     expect(started).toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Stop tunnel" })).toBeTruthy();
+    expect((screen.getByRole("switch", { name: "Reach this Pond from outside your home" }) as HTMLInputElement).checked).toBe(true);
   });
 
   it("asks for the reserved domain when the endpoint is TLS", async () => {
