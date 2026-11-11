@@ -38,4 +38,31 @@ ignore = [
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0429",
+
+    # libsqlite3-sys 0.30.1 bundles SQLite 3.46, which can return stale page-cache memory when a
+    # database is opened with a crafted sibling -wal file of another page size (CVE-2026-119375).
+    # Fixed in 0.39.0 (SQLite 3.54), but no sqlx release can take it: sqlx-sqlite 0.8.6 requires
+    # ~0.30 and 0.9.0 requires <0.38, and `links = "sqlite3"` allows one copy in the graph, so
+    # rusqlite (breez-sdk-spark, optional lightning feature) cannot move alone. Not reachable as
+    # an attack: the pond opens only its own databases, in its data directory (owner-only, on
+    # the encrypted volume when there is one; pond-infra db.rs and sqlite_vector_index.rs) and
+    # Goose's sessions.db under it, never a file someone else supplies. Remove when sqlx allows
+    # libsqlite3-sys >= 0.39. Review by 2027-01-31 (same date as osv-scanner.toml).
+    "RUSTSEC-2026-0459",
+
+    # rmcp 2.1.0, two client-side defects:
+    #   RUSTSEC-2026-0457  OAuth discovery SSRF: the filter checked host strings, not resolved
+    #                      addresses (fixed in 3.7.0)
+    #   RUSTSEC-2026-0462  Streamable HTTP clients buffer a response body with no limit, so a
+    #                      server that never ends its reply exhausts memory (fixed in 3.9.0)
+    # Not fixable from this lockfile: the goose fork (jarida-io/Goose main) pins rmcp =2.1.0,
+    # and the workspace pin must match it (CLAUDE.md, "The rmcp pin"); upstream goose moved to
+    # rmcp 3 after the fork's last sync. Reachable, so this is a short exception, not a
+    # verdict: an owner can add a remote (streamable_http) MCP extension, and a malicious or
+    # compromised one could exhaust the pond's memory or make it request an address inside
+    # the home network during OAuth discovery. The builtin giap-* extensions and stdio ones
+    # never use these clients. Until the port lands, connect only to MCP servers you trust.
+    # Remove when the fork and this workspace are on rmcp >= 3.9.0. Review by 2026-12-15.
+    "RUSTSEC-2026-0457",
+    "RUSTSEC-2026-0462",
 ]
