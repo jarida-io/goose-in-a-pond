@@ -168,25 +168,28 @@
   transform: scale(0.4);
 }
 
-/* ── icon, tinted from the category's hue so it suits either theme ── */
+/* ── icon tile: a soft square tinted from the category's hue, ringed in it, so it suits either theme ── */
 .ncard__icon {
   width: 36px;
   height: 36px;
-  border-radius: 50%;
+  border-radius: 11px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--nc);
-  background: color-mix(in srgb, var(--nc) 13%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--nc) 16%, transparent),
+    color-mix(in srgb, var(--nc) 9%, transparent)
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nc) 22%, transparent);
 }
 
-.ncard__icon svg {
-  width: 18px;
-  height: 18px;
-}
-
+/* Read: the tile and its picture step back with the text. */
 .ncard[data-read="true"] .ncard__icon {
-  background: color-mix(in srgb, var(--nc) 8%, transparent);
+  color: color-mix(in srgb, var(--nc) 62%, var(--mut));
+  background: color-mix(in srgb, var(--nc) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nc) 12%, transparent);
 }
 
 /* ── body ── */
@@ -311,6 +314,7 @@
   .ncard__icon {
     width: 32px;
     height: 32px;
+    border-radius: 10px;
   }
   .ncard__right {
     grid-column: 3;

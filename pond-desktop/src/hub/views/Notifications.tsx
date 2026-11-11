@@ -1,7 +1,11 @@
 import { useState, useCallback, useMemo, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Bell, BellRing, Calendar, ChevronRight, Info, Sparkles, TriangleAlert } from "lucide-react";
+import {
+  Bell, BellRing, CalendarClock, ChevronRight, CloudOff, Cpu, Download, Eye, Globe, HardDrive, Info, KeyRound,
+  ListChecks, LockOpen, MessageCircle, Newspaper, Puzzle, ShoppingCart, Smartphone, Sparkles, TriangleAlert, Unplug,
+  Wifi, WifiOff, type LucideIcon,
+} from "lucide-react";
 import { useAppDispatch, useAppState } from "../../state/useAppContext";
 import { api } from "../../api/PondApiClient";
 import type { HouseholdNotice, ScheduleRunNotification } from "../../api/types";
@@ -11,24 +15,44 @@ import {
   foldRepeats,
   groupNotifications,
   noticeCategory,
+  noticeIcon,
   relativeTime,
 } from "../data/notifications";
 import type {
+  NoticeIcon,
   Notification,
-  NotificationCategory,
   NotificationGroup,
   NotificationRow,
 } from "../data/notifications";
 import { markdownToPlainText } from "../../lib/markdownBlocks";
 import "./notifications.css";
 
-// ─── Category icon map ────────────────────────────────────────────────────────
-const CATEGORY_ICON: Record<NotificationCategory, React.ReactNode> = {
-  schedule:        <Calendar size={20} strokeWidth={2} />,
-  routine:         <Sparkles size={20} strokeWidth={2} />,
-  info:            <Info size={20} strokeWidth={2} />,
-  alert:           <TriangleAlert size={20} strokeWidth={2} />,
-  action_required: <BellRing size={20} strokeWidth={2} />,
+// ─── Icons ────────────────────────────────────────────────────────────────────
+/** Each picture `noticeIcon` can choose, as the icon drawn for it. */
+const ICON: Record<NoticeIcon, LucideIcon> = {
+  unlocked: LockOpen,
+  schedule: CalendarClock,
+  routine: Sparkles,
+  download: Download,
+  downloadFailed: CloudOff,
+  disk: HardDrive,
+  diskLow: HardDrive,
+  extensions: Puzzle,
+  offline: WifiOff,
+  online: Wifi,
+  signIn: KeyRound,
+  deviceRemoved: Unplug,
+  devices: Smartphone,
+  chat: MessageCircle,
+  watch: Eye,
+  models: Cpu,
+  remote: Globe,
+  todos: ListChecks,
+  news: Newspaper,
+  cart: ShoppingCart,
+  info: Info,
+  alert: TriangleAlert,
+  request: BellRing,
 };
 
 /** The most ids one mark-read request may name (`HISTORY_MARK_READ_MAX` on the Pond). */
@@ -72,6 +96,10 @@ function buildNotificationFromNotice(notice: HouseholdNotice, t: TFunction): Not
     timestamp: notice.timestamp,
     read: notice.read,
   };
+  const kind = notice.data?.kind;
+  if (typeof kind === "string") n.kind = kind;
+  const open = notice.data?.open;
+  if (typeof open === "string") n.open = open;
   if (section) {
     n.action = { label: t(`notifications.open.${section}`), route: section };
     const sessionId = openSessionId(notice);
@@ -101,6 +129,7 @@ function NRow({ row, onOpen }: NRowProps) {
   const repeats = row.members.length;
   const flagged = n.category === "alert" || n.category === "action_required";
   const when = relativeTime(n.timestamp, new Date());
+  const Icon = ICON[noticeIcon(n)];
 
   return (
     <article
@@ -121,7 +150,7 @@ function NRow({ row, onOpen }: NRowProps) {
     >
       <span className="ncard__dot" aria-hidden="true" />
       <span className="ncard__icon" aria-hidden="true">
-        {CATEGORY_ICON[n.category]}
+        <Icon size={18} strokeWidth={1.9} />
       </span>
       <div className="ncard__body">
         <div className="ncard__line">

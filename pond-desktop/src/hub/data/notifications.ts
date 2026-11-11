@@ -39,6 +39,10 @@ export interface Notification {
   timestamp: string;
   read: boolean;
   action?: NotificationAction;
+  /** What the notice is about (`data.kind` from the Pond), for its icon. */
+  kind?: string;
+  /** The screen the notice points at (`data.open`), for its icon when it names no kind. */
+  open?: string;
 }
 
 export interface NotificationGroup {
@@ -55,6 +59,63 @@ export const CATEGORY_COLOR: Record<NotificationCategory, string> = {
   alert:           "#DC2626",
   action_required: "#D97706",
 };
+
+/** The pictures a notification can carry; the view maps each to its icon. */
+export type NoticeIcon =
+  | "unlocked" | "schedule" | "routine" | "download" | "downloadFailed" | "disk" | "diskLow"
+  | "extensions" | "offline" | "online" | "signIn" | "deviceRemoved" | "devices" | "chat"
+  | "watch" | "models" | "remote" | "todos" | "news" | "cart"
+  | "info" | "alert" | "request";
+
+/** By what the notice is about: the most specific picture there is. */
+const ICON_FOR_KIND: Record<string, NoticeIcon> = {
+  model_downloaded: "download",
+  model_download_failed: "downloadFailed",
+  startup_problems: "extensions",
+  disk_low: "diskLow",
+  disk_recovered: "disk",
+  remote_access_down: "offline",
+  remote_access_sign_in: "signIn",
+  remote_access_restored: "online",
+  device_removed: "deviceRemoved",
+  sign_in_expired: "signIn",
+};
+
+/** By the screen it opens, for a notice that names no kind ("My Pond unlocked" opens My Pond). */
+const ICON_FOR_OPEN: Record<string, NoticeIcon> = {
+  my_pond: "unlocked",
+  schedule: "schedule",
+  devices: "devices",
+  chat: "chat",
+  watch: "watch",
+  models: "models",
+  extensions: "extensions",
+  remote_access: "remote",
+  todos: "todos",
+  news: "news",
+  cart: "cart",
+};
+
+const ICON_FOR_CATEGORY: Record<NotificationCategory, NoticeIcon> = {
+  schedule: "schedule",
+  routine: "routine",
+  info: "info",
+  alert: "alert",
+  action_required: "request",
+};
+
+/**
+ * The picture a notification carries: what it is about when the Pond says (its kind), else the
+ * screen it opens, else its category's. So "My Pond unlocked" shows an open padlock and a model
+ * download an arrow into a tray, where both used to show their category's warning or info sign.
+ */
+export function noticeIcon(n: Pick<Notification, "kind" | "open" | "category">): NoticeIcon {
+  return (
+    (n.kind && ICON_FOR_KIND[n.kind]) ||
+    (n.open && ICON_FOR_OPEN[n.open]) ||
+    ICON_FOR_CATEGORY[n.category]
+  );
+}
 
 /** One row of the list: the newest of a run of identical notices, with the older ones it stands for. */
 export interface NotificationRow {
