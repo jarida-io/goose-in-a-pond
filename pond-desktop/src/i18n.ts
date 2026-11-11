@@ -106,6 +106,13 @@ void i18n.use(initReactI18next).init({
     onceAt: 'Runs once on {{date}} at {{time}}',
     oncePast: 'That date and time has already passed. Pick a moment in the future.',
     unchanged: 'Nothing changed, so the schedule was left as it was.',
+  }, toast: {
+    schedule: 'Schedule', routine: 'Routine', schedules: 'Schedules',
+    runningCount_one: '{{count}} running', runningCount_other: '{{count}} running',
+    andMore_one: 'and {{count}} more', andMore_other: 'and {{count}} more',
+    moreFinished_one: '{{count}} more finished', moreFinished_other: '{{count}} more finished',
+    status: { running: 'Running', completed: 'Done', failed: 'Failed' },
+    view: 'View in Notifications', dismiss: 'Dismiss', region: 'Schedules running now',
   }, notifications: {
     title: 'Notifications',
     unread_one: '{{count}} unread', unread_other: '{{count}} unread',
