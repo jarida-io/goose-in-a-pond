@@ -1,7 +1,8 @@
 import { useEffect, useState, type CSSProperties } from 'react';
+import { Button } from '@heroui/react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/PondApiClient';
-import { ApiError } from '../api/types';
+import { ApiError, type NgrokTunnelConfig } from '../api/types';
 import { NgrokTunnel } from './NgrokTunnel';
 import { RemoteAccess } from './RemoteAccess';
 
@@ -19,7 +20,10 @@ export function RemoteProvider() {
   // built-in network as chosen while the tunnel runs.
   const [provider, setProvider] = useState<Provider | null>(null);
   const [ngrokOn, setNgrokOn] = useState(false);
+  const [ngrokConfig, setNgrokConfig] = useState<NgrokTunnelConfig | null>(null);
   const [unread, setUnread] = useState<'signedOut' | 'failed' | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [switchFailed, setSwitchFailed] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -27,6 +31,7 @@ export function RemoteProvider() {
       if (!live) return;
       setUnread(null);
       setNgrokOn(tunnel.config.enabled);
+      setNgrokConfig(tunnel.config);
       setProvider((chosen) => chosen ?? (tunnel.config.enabled ? 'ngrok' : 'tailnet'));
     }).catch((error: unknown) => {
       if (!live) return;
@@ -43,6 +48,23 @@ export function RemoteProvider() {
     void api.remoteStatus()
       .then((status) => (status.state === 'Running' ? api.disableRemoteAccess() : undefined))
       .catch((error: unknown) => console.warn('[remote] could not turn the built-in network off', error));
+  };
+
+  // Choosing the built-in network while the tunnel runs: stop the tunnel here, rather than send
+  // the household back to the ngrok panel the choice just hid.
+  const stopNgrokForBuiltIn = async () => {
+    setSwitching(true);
+    setSwitchFailed(false);
+    try {
+      const next = await api.configureNgrokTunnel({ ...(ngrokConfig ?? { endpoint: 'tcp' }), enabled: false });
+      setNgrokConfig(next.config);
+      setNgrokOn(next.config.enabled);
+    } catch (error) {
+      console.warn('[remote] could not stop the ngrok tunnel', error);
+      setSwitchFailed(true);
+    } finally {
+      setSwitching(false);
+    }
   };
 
   const choice = (value: Provider, label: string, hint: string) => <label style={option}>
@@ -65,11 +87,15 @@ export function RemoteProvider() {
     {provider === 'ngrok'
       ? <section style={{ display: 'grid', gap: 12 }}>
         <h3 style={{ margin: 0 }}>{t('tunnel.title')}</h3>
-        <NgrokTunnel onStarted={ngrokStarted} />
+        <NgrokTunnel onStarted={ngrokStarted} onStopped={() => setNgrokOn(false)} />
       </section>
       : provider === 'tailnet'
         ? ngrokOn
-          ? <p role="status" style={{ margin: 0 }}>{t('tunnel.ngrokRunning')}</p>
+          ? <div style={{ display: 'grid', gap: 10, justifyItems: 'start' }}>
+            <p role="status" style={{ margin: 0 }}>{t('tunnel.ngrokRunning')}</p>
+            <Button variant="primary" isDisabled={switching} onPress={() => void stopNgrokForBuiltIn()}>{t('tunnel.switchToBuiltIn')}</Button>
+            {switchFailed && <p role="alert" style={{ margin: 0 }}>{t('tunnel.switchFailed')}</p>}
+          </div>
           : <RemoteAccess />
         : null}
   </div>;

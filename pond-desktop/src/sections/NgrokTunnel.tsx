@@ -18,7 +18,7 @@ function refusalMessage(error: unknown): string {
 }
 
 /** The household's own ngrok tunnel: its authtoken, the kind of address, and on or off. */
-export function NgrokTunnel({ onStarted }: { onStarted?: () => void }) {
+export function NgrokTunnel({ onStarted, onStopped }: { onStarted?: () => void; onStopped?: () => void }) {
   const { t } = useTranslation();
   const [tunnel, setTunnel] = useState<NgrokTunnelState | null>(null);
   const [unavailable, setUnavailable] = useState(false);
@@ -70,6 +70,7 @@ export function NgrokTunnel({ onStarted }: { onStarted?: () => void }) {
   const setEnabled = async (enabled: boolean) => {
     const next = await act(() => api.configureNgrokTunnel({ ...draft, enabled }));
     if (next && enabled && next.status.state !== 'failed') onStarted?.();
+    if (next && !enabled) onStopped?.();
   };
 
   const status = tunnel?.status;
