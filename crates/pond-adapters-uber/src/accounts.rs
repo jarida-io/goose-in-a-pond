@@ -19,7 +19,6 @@ use pond_core::rides::ports::RideAccounts;
 /// the connection without signing in again. Only what is used: a privileged scope needs Uber's
 /// approval and widens what a leaked token can do.
 pub const SCOPES: &[&str] = &["request", "profile", "offline_access"];
-pub const AUTHORIZE_URL: &str = "https://auth.uber.com/oauth/v2/authorize";
 
 /// Renew this long before the access token lapses, so a booking never starts with a dying token.
 const RENEW_MARGIN: chrono::Duration = chrono::Duration::minutes(10);
@@ -367,11 +366,12 @@ fn expiry(tokens: &TokenSet, now: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or(now)
 }
 
-/// Uber's sign-in page for one attempt. `state` ties Uber's return to this attempt.
-pub fn authorize_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
+/// Uber's sign-in page for one attempt, on `sign_in` ([`crate::UberConfig::authorize_url`]).
+/// `state` ties Uber's return to this attempt.
+pub fn authorize_url(sign_in: &str, client_id: &str, redirect_uri: &str, state: &str) -> String {
     let scope = SCOPES.join(" ");
     format!(
-        "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}",
+        "{sign_in}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}",
         encode(client_id),
         encode(redirect_uri),
         encode(&scope),
@@ -833,7 +833,12 @@ mod tests {
 
     #[test]
     fn the_sign_in_page_asks_for_exactly_the_scopes_phase_2_uses() {
-        let url = authorize_url("client-1", CALLBACK, "nonce-1");
+        let url = authorize_url(
+            crate::PRODUCTION_AUTHORIZE_URL,
+            "client-1",
+            CALLBACK,
+            "nonce-1",
+        );
         assert!(url.starts_with("https://auth.uber.com/oauth/v2/authorize?client_id=client-1"));
         assert!(url.contains("&response_type=code"));
         assert!(
