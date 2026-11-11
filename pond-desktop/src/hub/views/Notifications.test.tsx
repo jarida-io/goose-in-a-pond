@@ -142,17 +142,17 @@ describe("the Pond's household notices", () => {
     ];
     render(<NotificationsView />);
 
-    const alert = screen.getByRole("article", { name: "The Pond is running out of space" });
+    const alert = screen.getByRole("article", { name: "The Pond is running out of space, unread" });
     expect(alert.getAttribute("data-category")).toBe("alert");
     expect(alert.textContent).toContain("Alert");
     expect(alert.textContent).toContain("Only 1 GB of 64 GB is free on the Pond's disk.");
     expect(alert.textContent).toContain("just now");
 
-    const action = screen.getByRole("article", { name: "Remote access needs signing in" });
+    const action = screen.getByRole("article", { name: "Remote access needs signing in, unread" });
     expect(action.getAttribute("data-category")).toBe("action_required");
     expect(action.textContent).toContain("Action needed");
 
-    const info = screen.getByRole("article", { name: "Model downloaded" });
+    const info = screen.getByRole("article", { name: "Model downloaded, unread" });
     expect(info.getAttribute("data-category")).toBe("info");
     expect(info.textContent).not.toContain("Info");
   });
@@ -161,7 +161,7 @@ describe("the Pond's household notices", () => {
     appState.householdNotices = [notice({ category: "something-new", title: "Odd one" })];
     render(<NotificationsView />);
     expect(
-      screen.getByRole("article", { name: "Odd one" }).getAttribute("data-category"),
+      screen.getByRole("article", { name: "Odd one, unread" }).getAttribute("data-category"),
     ).toBe("info");
   });
 
@@ -243,6 +243,40 @@ describe("the Pond's household notices", () => {
     expect(screen.getByText("Daily Brief triggered")).toBeTruthy();
     expect(screen.getByText("View on Canvas")).toBeTruthy();
     expect(screen.queryByText("Schedule: Daily Brief")).toBeNull();
+  });
+
+  it("says unread by a dot and a heavier row, never a coloured edge, and says it to a screen reader", () => {
+    appState.householdNotices = [
+      notice({ id: "u", title: "Unread one" }),
+      notice({ id: "r", title: "Read one", read: true, timestamp: new Date(Date.now() - 60_000).toISOString() }),
+    ];
+    render(<NotificationsView />);
+    const unread = screen.getByRole("article", { name: "Unread one, unread" });
+    const read = screen.getByRole("article", { name: "Read one" });
+    expect(unread.getAttribute("data-read")).toBe("false");
+    expect(read.getAttribute("data-read")).toBe("true");
+    expect(unread.querySelector(".ncard__dot")).toBeTruthy();
+    expect(unread.getAttribute("style") ?? "").not.toContain("border");
+  });
+
+  it("folds identical notices in a row into one, which reads them all when opened", () => {
+    const at = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+    const unlocked = { category: "alert", title: "My Pond unlocked", body: "Emmanuel's A57 unlocked it.", data: { open: "my_pond" } };
+    appState.householdNotices = [
+      notice({ id: "a1", ...unlocked, timestamp: at(6) }),
+      notice({ id: "a2", ...unlocked, timestamp: at(60) }),
+      notice({ id: "a3", ...unlocked, timestamp: at(180), read: true }),
+      notice({ id: "m", timestamp: at(200) }),
+      notice({ id: "a4", ...unlocked, timestamp: at(240) }),
+    ];
+    render(<NotificationsView />);
+    const rows = screen.getAllByRole("article");
+    // Three in a row fold into one; the one after the model notice starts its own row.
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain("3 times");
+    expect(rows[2].textContent).not.toContain("times");
+    fireEvent.click(rows[0]);
+    expect(markNotificationsRead).toHaveBeenCalledWith(["a1", "a2"]);
   });
 
   it("marks every run and notice read, here and on the Pond", () => {

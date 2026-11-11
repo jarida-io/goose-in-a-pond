@@ -1,32 +1,58 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { Bell, BellRing, Calendar, Info, Sparkles, TriangleAlert } from "lucide-react";
+import {
+  Bell, BellRing, CalendarClock, ChevronRight, CloudOff, Cpu, Download, Eye, Globe, HardDrive, Info, KeyRound,
+  ListChecks, LockOpen, MessageCircle, Newspaper, Puzzle, ShoppingCart, Smartphone, Sparkles, TriangleAlert, Unplug,
+  Wifi, WifiOff, type LucideIcon,
+} from "lucide-react";
 import { useAppDispatch, useAppState } from "../../state/useAppContext";
 import { api } from "../../api/PondApiClient";
 import type { HouseholdNotice, ScheduleRunNotification } from "../../api/types";
 import { listedNotices, openSection, openSessionId, openWatchId } from "../../state/householdNotices";
 import {
   CATEGORY_COLOR,
+  foldRepeats,
   groupNotifications,
   noticeCategory,
+  noticeIcon,
   relativeTime,
 } from "../data/notifications";
 import type {
+  NoticeIcon,
   Notification,
-  NotificationCategory,
   NotificationGroup,
+  NotificationRow,
 } from "../data/notifications";
 import { markdownToPlainText } from "../../lib/markdownBlocks";
 import "./notifications.css";
 
-// ─── Category icon map ────────────────────────────────────────────────────────
-const CATEGORY_ICON: Record<NotificationCategory, React.ReactNode> = {
-  schedule:        <Calendar size={20} strokeWidth={2} />,
-  routine:         <Sparkles size={20} strokeWidth={2} />,
-  info:            <Info size={20} strokeWidth={2} />,
-  alert:           <TriangleAlert size={20} strokeWidth={2} />,
-  action_required: <BellRing size={20} strokeWidth={2} />,
+// ─── Icons ────────────────────────────────────────────────────────────────────
+/** Each picture `noticeIcon` can choose, as the icon drawn for it. */
+const ICON: Record<NoticeIcon, LucideIcon> = {
+  unlocked: LockOpen,
+  schedule: CalendarClock,
+  routine: Sparkles,
+  download: Download,
+  downloadFailed: CloudOff,
+  disk: HardDrive,
+  diskLow: HardDrive,
+  extensions: Puzzle,
+  offline: WifiOff,
+  online: Wifi,
+  signIn: KeyRound,
+  deviceRemoved: Unplug,
+  devices: Smartphone,
+  chat: MessageCircle,
+  watch: Eye,
+  models: Cpu,
+  remote: Globe,
+  todos: ListChecks,
+  news: Newspaper,
+  cart: ShoppingCart,
+  info: Info,
+  alert: TriangleAlert,
+  request: BellRing,
 };
 
 /** The most ids one mark-read request may name (`HISTORY_MARK_READ_MAX` on the Pond). */
@@ -70,6 +96,10 @@ function buildNotificationFromNotice(notice: HouseholdNotice, t: TFunction): Not
     timestamp: notice.timestamp,
     read: notice.read,
   };
+  const kind = notice.data?.kind;
+  if (typeof kind === "string") n.kind = kind;
+  const open = notice.data?.open;
+  if (typeof open === "string") n.open = open;
   if (section) {
     n.action = { label: t(`notifications.open.${section}`), route: section };
     const sessionId = openSessionId(notice);
@@ -80,67 +110,73 @@ function buildNotificationFromNotice(notice: HouseholdNotice, t: TFunction): Not
   return n;
 }
 
-// ─── Notification card ────────────────────────────────────────────────────────
-interface NCardProps {
-  notification: Notification;
-  onOpen: (n: Notification) => void;
+// ─── Notification row ─────────────────────────────────────────────────────────
+interface NRowProps {
+  row: NotificationRow;
+  onOpen: (row: NotificationRow) => void;
 }
 
-function NCard({ notification: n, onOpen }: NCardProps) {
+/**
+ * One row of a day's list. Unread is said the way a mail inbox says it, by a dot in the gutter and
+ * a heavier title, never by a coloured edge or a tinted card; read rows step back to muted text. An
+ * alert or a request names its kind in its own colour beside the title. A run of identical notices
+ * is one row that says how many times it happened.
+ */
+function NRow({ row, onOpen }: NRowProps) {
   const { t } = useTranslation();
-  const color = CATEGORY_COLOR[n.category];
-  const now = new Date();
+  const n = row.notification;
+  const unread = row.members.some((m) => !m.read);
+  const repeats = row.members.length;
   const flagged = n.category === "alert" || n.category === "action_required";
+  const when = relativeTime(n.timestamp, new Date());
+  const Icon = ICON[noticeIcon(n)];
 
   return (
     <article
       className="ncard"
-      data-read={String(n.read)}
+      data-read={String(!unread)}
       data-category={n.category}
+      style={{ "--nc": CATEGORY_COLOR[n.category] } as CSSProperties}
       role="article"
-      aria-label={n.title}
-      onClick={() => onOpen(n)}
+      aria-label={unread ? `${n.title}, ${t("notifications.unreadLabel")}` : n.title}
+      onClick={() => onOpen(row)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onOpen(n);
+          onOpen(row);
         }
       }}
       tabIndex={0}
     >
-      <span
-        className="ncard__icon"
-        style={{ background: color.bg, color: color.fg }}
-        aria-hidden="true"
-      >
-        {CATEGORY_ICON[n.category]}
+      <span className="ncard__dot" aria-hidden="true" />
+      <span className="ncard__icon" aria-hidden="true">
+        <Icon size={18} strokeWidth={1.9} />
       </span>
       <div className="ncard__body">
-        <div className="ncard__title">
-          {flagged && (
-            <span className="ncard__tag" style={{ color: color.fg, background: color.bg }}>
-              {t(`notifications.category.${n.category}`)}
-            </span>
-          )}
-          {n.title}
+        <div className="ncard__line">
+          <span className="ncard__title">{n.title}</span>
+          {flagged && <span className="ncard__tag">{t(`notifications.category.${n.category}`)}</span>}
         </div>
         <div className="ncard__sub">{n.body}</div>
+        {repeats > 1 && (
+          <div className="ncard__repeats">{t("notifications.repeats", { count: repeats })}</div>
+        )}
       </div>
       <div className="ncard__right">
-        <span className="ncard__time">{relativeTime(n.timestamp, now)}</span>
+        <time className="ncard__time" dateTime={n.timestamp}>{when}</time>
         {n.action && (
           <button
             className="ncard__cta"
             onClick={(e) => {
               e.stopPropagation();
-              onOpen(n);
+              onOpen(row);
             }}
           >
             {n.action.label}
+            <ChevronRight size={14} strokeWidth={2.25} aria-hidden="true" />
           </button>
         )}
       </div>
-      {!n.read && <span className="ncard__dot" aria-hidden="true" />}
     </article>
   );
 }
@@ -193,14 +229,16 @@ export function NotificationsView({ go }: NotificationsViewProps) {
     markNoticesRead(householdNotices.filter((n) => !n.read).map((n) => n.id));
   }, [dispatch, householdNotices, markNoticesRead]);
 
-  function open(n: Notification) {
-    if (!n.read) {
-      if (n.source === "run" && n.action?.run) {
-        dispatch({ type: "MARK_RUN_READ", payload: n.action.run.id });
-      } else if (n.source === "notice") {
-        markNoticesRead([n.id]);
-      }
+  /** Opening a row reads everything it stands for, then goes where its newest member points. */
+  function open(row: NotificationRow) {
+    const unreadNotices: string[] = [];
+    for (const m of row.members) {
+      if (m.read) continue;
+      if (m.source === "run" && m.action?.run) dispatch({ type: "MARK_RUN_READ", payload: m.action.run.id });
+      else if (m.source === "notice") unreadNotices.push(m.id);
     }
+    markNoticesRead(unreadNotices);
+    const n = row.notification;
     if (!n.action) return;
     if (n.action.sessionId) dispatch({ type: "REQUEST_CONVERSATION", payload: n.action.sessionId });
     if (n.action.watchId) dispatch({ type: "REQUEST_WATCH", payload: n.action.watchId });
@@ -260,12 +298,14 @@ export function NotificationsView({ go }: NotificationsViewProps) {
 
       {/* groups */}
       {groups.map((group) => (
-        <div key={group.label} className="nfeed__group">
-          <div className="nfeed__group-label">{group.label}</div>
-          {group.items.map((n) => (
-            <NCard key={`${n.source}-${n.id}`} notification={n} onOpen={open} />
-          ))}
-        </div>
+        <section key={group.label} className="nfeed__group" aria-label={group.label}>
+          <h2 className="nfeed__group-label">{group.label}</h2>
+          <div className="nfeed__list">
+            {foldRepeats(group.items).map((row) => (
+              <NRow key={`${row.notification.source}-${row.notification.id}`} row={row} onOpen={open} />
+            ))}
+          </div>
+        </section>
       ))}
     </div>
   );
