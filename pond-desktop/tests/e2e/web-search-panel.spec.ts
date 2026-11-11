@@ -260,7 +260,10 @@ for (const scheme of ["Light", "Dark"]) {
   });
 }
 
-/** WCAG 1.4.11: the switch's own edge, over the card it sits on, needs 3:1 in both states and themes. */
+/**
+ * WCAG 1.4.11: the switch's own edge, over the card it sits on, needs 3:1 in both states and themes.
+ * The shared switch is a filled track with no border, so its fill is its edge.
+ */
 for (const scheme of ["Light", "Dark"]) {
   for (const [surface, open] of surfaces) {
     test(`the nearby places switch keeps a 3:1 edge, off and on, ${surface}, ${scheme}`, async ({ page }) => {
@@ -268,8 +271,12 @@ for (const scheme of ["Light", "Dark"]) {
       const sw = panel(page).getByRole("switch", { name: "Nearby places" });
       await expect(sw).toBeVisible({ timeout: 5_000 });
       const edge = () =>
-        sw.locator(".websearch-switch__track").evaluate((track) => {
-          const rgb = (css: string) => (css.match(/[\d.]+/g) ?? []).map(Number);
+        sw.locator(".giap-switch__track").evaluate((track) => {
+          // `color(srgb r g b)` (what a colour mix computes to) is in 0..1; rgb() is in 0..255.
+          const rgb = (css: string) => {
+            const n = (css.match(/[\d.]+/g) ?? []).map(Number);
+            return css.startsWith("color(srgb") ? n.map((v, i) => (i < 3 ? v * 255 : v)) : n;
+          };
           const lum = ([r, g, b]: number[]) => {
             const c = (v: number) => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
             return 0.2126 * c(r) + 0.7152 * c(g) + 0.0722 * c(b);
@@ -283,16 +290,17 @@ for (const scheme of ["Light", "Dark"]) {
               break;
             }
           }
-          const [r, g, b, a = 1] = rgb(getComputedStyle(track).borderTopColor);
-          // A translucent edge is seen over the card, so it is measured over it.
+          const [r, g, b, a = 1] = rgb(getComputedStyle(track).backgroundColor);
+          // A translucent fill is seen over the card, so it is measured over it.
           const border = [r, g, b].map((v, i) => v * a + behind[i] * (1 - a));
           const [hi, lo] = [lum(border), lum(behind)].sort((a, b) => b - a);
           return (hi + 0.05) / (lo + 0.05);
         });
-      expect(await edge()).toBeGreaterThanOrEqual(3);
+      // Polled: the track's colour eases between states, and mid-way it is neither.
+      await expect.poll(edge).toBeGreaterThanOrEqual(3);
       await sw.click();
       await expect(sw).toHaveAttribute("aria-checked", "true");
-      expect(await edge()).toBeGreaterThanOrEqual(3);
+      await expect.poll(edge).toBeGreaterThanOrEqual(3);
     });
   }
 }

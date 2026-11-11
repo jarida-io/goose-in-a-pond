@@ -43,7 +43,9 @@ export function Switch({
         onChange?.(!checked);
       }}
     >
-      <span className="giap-switch__knob" aria-hidden="true" />
+      <span className="giap-switch__track" aria-hidden="true">
+        <span className="giap-switch__knob" />
+      </span>
     </button>
   );
 }

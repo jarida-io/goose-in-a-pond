@@ -195,7 +195,7 @@ test.describe("Hub — Privacy sub-screen wiring", () => {
     await expect(page.getByText("Cloud fallback")).toBeVisible({ timeout: 5_000 });
 
     // Third toggle: Cloud fallback, off in MOCK_SETTINGS.
-    const cloudToggle = page.locator(".htoggle").nth(2);
+    const cloudToggle = page.getByRole("switch").nth(2);
     await cloudToggle.click();
     await page.waitForTimeout(500);
 

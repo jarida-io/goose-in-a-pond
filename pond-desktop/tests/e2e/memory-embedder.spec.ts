@@ -341,7 +341,7 @@ test.describe("Memory, classic Context and Settings", () => {
     // The pond stored "fastembed" before the switch existed, and that is on.
     const toggle = row.getByRole("switch", { name: "Search memories by meaning" }).or(row.getByLabel("Search memories by meaning"));
     await expect(toggle).toBeChecked();
-    await row.locator(".switch__control").click();
+    await toggle.click();
     await page.getByRole("button", { name: /Save 1 change/ }).click();
     await expect.poll(() => seen.saved).toContainEqual({ embedding_provider: "none" });
   });
@@ -453,7 +453,7 @@ test.describe("Memory, hub", () => {
     await expect(card.getByText(/Swahili/)).toHaveCount(0);
     await expect(card.getByRole("combobox")).toHaveCount(0);
 
-    await card.getByRole("button", { name: "Search by meaning" }).click();
+    await card.getByRole("switch", { name: "Search by meaning" }).click();
     await expect.poll(() => seen.saved).toContainEqual({ embedding_provider: "none" });
 
     await card.getByRole("button", { name: "Choose a model" }).click();
@@ -556,26 +556,27 @@ for (const scheme of ["Light", "Dark"] as const) {
       // The hub's switch wears the same accent as the classic one, lifted the same way in dark.
       const accent = await page.evaluate((dark) => {
         const probe = document.createElement("span");
-        probe.style.background = dark ? "color-mix(in srgb, var(--pp) 85%, white)" : "var(--pp)";
+        probe.style.background = dark ? "color-mix(in srgb, var(--color-accent) 85%, white)" : "var(--color-accent)";
         document.body.append(probe);
         const value = getComputedStyle(probe).backgroundColor;
         probe.remove();
         return value;
       }, scheme === "Dark");
-      const hubSwitch = page.getByRole("button", { name: "Search by meaning" });
-      await expect(hubSwitch).toHaveCSS("background-color", accent);
+      const hubSwitch = page.getByRole("switch", { name: "Search by meaning" });
+      const hubTrack = hubSwitch.locator(".giap-switch__track");
+      await expect(hubTrack).toHaveCSS("background-color", accent);
       await expect(page.getByRole("alert").filter({ hasText: "does not have room to load" })).toBeVisible();
       await expect(page.getByText("EmbeddingGemma 2 is chosen but did not load.")).toBeVisible();
       // The card this change owns; the screen's own Add button measures 3.74:1 and is not part of it.
       await scan(page, ".setcard:has(.hm-embed)", "hub Memory screen, Search by meaning");
       // Off is a slate track that still clears 3:1 on the card.
       await hubSwitch.click();
-      await expect(hubSwitch).toHaveAttribute("aria-pressed", "false");
+      await expect(hubSwitch).toHaveAttribute("aria-checked", "false");
       await page.mouse.move(0, 0);
-      await expect.poll(() => fillContrastOf(hubSwitch), { message: "the hub switch, off" }).toBeGreaterThanOrEqual(3);
+      await expect.poll(() => fillContrastOf(hubTrack), { message: "the hub switch, off" }).toBeGreaterThanOrEqual(3);
       // The knob rests at the track's ends, inside it: left when off, right when on.
       const knobAt = async () => {
-        const [track, knob] = await Promise.all([hubSwitch.boundingBox(), hubSwitch.locator(".htoggle__knob").boundingBox()]);
+        const [track, knob] = await Promise.all([hubTrack.boundingBox(), hubSwitch.locator(".giap-switch__knob").boundingBox()]);
         return { left: (knob?.x ?? 0) - (track?.x ?? 0), right: (track?.x ?? 0) + (track?.width ?? 0) - (knob?.x ?? 0) - (knob?.width ?? 0) };
       };
       await expect.poll(async () => (await knobAt()).left).toBeLessThanOrEqual(4);
@@ -599,10 +600,11 @@ for (const scheme of ["Light", "Dark"] as const) {
         probe.remove();
         return value;
       }, scheme === "Dark");
-      await expect(row.locator(".switch__control")).toHaveCSS("background-color", accent);
-      await row.locator(".switch__control").click();
+      const settingsTrack = row.getByRole("switch").locator(".giap-switch__track");
+      await expect(settingsTrack).toHaveCSS("background-color", accent);
+      await row.getByRole("switch").click();
       await page.mouse.move(0, 0);
-      await expect.poll(() => fillContrastOf(row.locator(".switch__control")), { message: "the Settings switch, off" })
+      await expect.poll(() => fillContrastOf(settingsTrack), { message: "the Settings switch, off" })
         .toBeGreaterThanOrEqual(3);
       // The row this change owns; a "New" badge elsewhere in the category measures 2.74:1 in dark.
       await scan(page, ".scat__row:has([aria-label='Search memories by meaning'])", "settings switch");
