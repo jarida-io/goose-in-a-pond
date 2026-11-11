@@ -7,7 +7,8 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait};
 use pond_audio::MicHandle;
 use pond_core::models::domain::audio_device::{
-    AudioDevice, AudioDirection, LevelChange, PairOutcome, ProbeOutcome, SoundServerDefaults,
+    AudioDevice, AudioDirection, DeviceKind, LevelChange, PairOutcome, ProbeOutcome,
+    SoundServerDefaults,
 };
 use pond_core::models::domain::mic_gate;
 use pond_core::models::ports::audio_devices::AudioDeviceProber;
@@ -25,6 +26,9 @@ const CHECK_WAITS_FOR_SPEAKER: Duration = Duration::from_secs(120);
 
 /// cpal's only host on Linux is ALSA, whose listing opens every node.
 const ALSA: bool = cfg!(target_os = "linux");
+
+/// What a Bluetooth device is opened as, once it is the sound server's default.
+const SERVER_DEFAULT: &str = "default";
 
 /// Time allowed beyond a probe's own wait for the driver to open and close the device.
 const OPEN_SLACK: Duration = Duration::from_secs(6);
@@ -77,6 +81,40 @@ impl CpalProber {
         })
     }
 
+    /// A Bluetooth device is not an ALSA PCM: it is tested as the sound server's default, which
+    /// it is made for the length of the test.
+    fn probe_bluetooth(
+        &self,
+        device: &AudioDevice,
+        direction: AudioDirection,
+        wait: Duration,
+    ) -> ProbeOutcome {
+        if direction == AudioDirection::Output {
+            let Some(floor) = pond_audio_out::bus().claim(Claim::Probe, Some(wait), || true) else {
+                return ProbeOutcome::Untested;
+            };
+            return match sound_server::route_bluetooth(&SystemPactl, device, direction) {
+                Ok(_route) => probe::probe_output(&floor, SERVER_DEFAULT, wait),
+                Err(reason) => ProbeOutcome::Failed { reason },
+            };
+        }
+        if !mic_gate::mic_enabled() {
+            return ProbeOutcome::Untested;
+        }
+        let device = device.clone();
+        let measure = move || match sound_server::route_bluetooth(&SystemPactl, &device, direction)
+        {
+            Ok(_route) => probe::probe_input(SERVER_DEFAULT, wait),
+            Err(reason) => ProbeOutcome::Failed { reason },
+        };
+        match &self.mic {
+            None => measure(),
+            Some(mic) => mic
+                .run_exclusive(wait + OPEN_SLACK, move |_| measure())
+                .unwrap_or(ProbeOutcome::Stalled),
+        }
+    }
+
     fn open_input(&self) -> Option<String> {
         let mic = self.mic.as_ref()?;
         mic.run_exclusive(Duration::from_secs(2), |view| view.open_device.clone())
@@ -122,6 +160,9 @@ impl AudioDeviceProber for CpalProber {
                 out.push(Self::describe(&open, is_default, &cards));
             }
         }
+        if ALSA {
+            out.extend(sound_server::bluetooth_devices(&SystemPactl, direction));
+        }
         Ok(out)
     }
 
@@ -140,6 +181,7 @@ impl AudioDeviceProber for CpalProber {
                 out.push(Self::describe(&name, false, &cards));
             }
         }
+        out.extend(sound_server::bluetooth_devices(&SystemPactl, direction));
         out
     }
 
@@ -211,6 +253,9 @@ impl AudioDeviceProber for CpalProber {
         direction: AudioDirection,
         wait: Duration,
     ) -> ProbeOutcome {
+        if device.kind == DeviceKind::Bluetooth {
+            return self.probe_bluetooth(device, direction, wait);
+        }
         let cards = Self::cards();
         if direction == AudioDirection::Output {
             // Held before the card is suspended: suspending it under a reply would cut the reply.
@@ -251,13 +296,13 @@ impl AudioDeviceProber for CpalProber {
 
     fn fingerprint(&self) -> String {
         if ALSA {
-            // A card coming or going changes these; PipeWire follows its own default behind
-            // ALSA's `default`, so a Bluetooth headset there needs no reselect from us.
+            // A card or a Bluetooth headset coming or going changes these.
             let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
             return format!(
-                "{}\n{}",
+                "{}\n{}\n{}",
                 read("/proc/asound/cards"),
-                read("/proc/asound/pcm")
+                read("/proc/asound/pcm"),
+                sound_server::bluetooth_fingerprint(&SystemPactl)
             );
         }
         let mut all: Vec<String> = pond_core::shared::services::process_env::reading(|| {
@@ -279,6 +324,12 @@ impl AudioDeviceProber for CpalProber {
         let floor = pond_audio_out::bus()
             .claim(Claim::Chime, Some(CHIME_WAITS_FOR_BUS), || true)
             .ok_or_else(|| "the speaker is busy".to_string())?;
+        if device.kind == DeviceKind::Bluetooth {
+            let _route =
+                sound_server::route_bluetooth(&SystemPactl, device, AudioDirection::Output)?;
+            return pond_audio_out::route::play_chime(&floor, Some(SERVER_DEFAULT))
+                .map_err(|e| e.to_string());
+        }
         let cards = Self::cards();
         let _suspended = ALSA.then(|| {
             sound_server::suspend_for_devices(&SystemPactl, &cards, None, Some(&device.id))

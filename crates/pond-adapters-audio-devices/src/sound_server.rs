@@ -597,6 +597,17 @@ pub fn bluetooth_devices(pactl: &dyn Pactl, direction: AudioDirection) -> Vec<Au
         .collect()
 }
 
+/// The connected Bluetooth cards, which change when a headset connects or leaves; a profile
+/// switch leaves them as they are.
+pub fn bluetooth_fingerprint(pactl: &dyn Pactl) -> String {
+    let listed = pactl.run(&["list", "short", "cards"]).unwrap_or_default();
+    listed
+        .lines()
+        .filter(|l| l.contains("bluez_card."))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Put a Bluetooth card in a profile that offers what is asked; the profile it left, if it
 /// had to change one.
 fn ready_card(
