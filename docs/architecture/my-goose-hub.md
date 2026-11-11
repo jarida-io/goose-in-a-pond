@@ -167,9 +167,14 @@ offered as a to-do instead of a bare suggestion: a push, `category: "action_requ
 `data: {"action":"todo_offer","reminder_id","text","when_said"}`, answered with Add or No.
 
 - `GET /me/todos/offers` → `{"offers":[{"reminder_id","text","when_said","due_at"|null,"said_at"}]}`
+  — every reminder open to the member: those offered, and those the shared daily cap held back.
+  The cap limits the pushes, not what the member can find and answer: Home counts every pending
+  reminder, and the Reminders screen lists the same ones.
 - `POST /me/todos/offers/{reminder_id}/accept` `{"due_at"?}` → Todo (a time hook at the due time
   the Pond worked out from `when_said`, or the one the phone sends)
 - `POST /me/todos/offers/{reminder_id}/decline` → 204 (the reminder is dismissed)
+
+Accept and decline settle a held-back reminder as well, and the offer job then never pushes it.
 
 ## 4. Cart: watched links and kept listings
 

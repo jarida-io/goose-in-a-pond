@@ -311,14 +311,13 @@ mod tests {
             "no proposal beside the offer"
         );
 
-        let offered: Vec<String> = reminders
-            .offered_to("jerry")
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
+        let offered: Vec<String> = report.offered.iter().map(|r| r.id.clone()).collect();
         assert_eq!(offered.len(), 2);
+        assert_eq!(
+            reminders.open_to("jerry").await.unwrap().len(),
+            4,
+            "the two the cap held back are still Jerry's to see and answer"
+        );
         // The next day's budget: only the two still pending are offered.
         proposals.made.lock().unwrap().insert("jerry".into(), 0);
         let again =

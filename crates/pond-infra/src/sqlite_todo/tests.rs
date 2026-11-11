@@ -386,10 +386,14 @@ async fn offers_share_the_daily_cap_with_proposals_and_are_settled_once() {
         .unwrap();
     assert!(again.offered.is_empty(), "the cap holds across runs");
 
-    let offered = reminders.offered_to("jerry").await.unwrap();
-    assert_eq!(offered.len(), MAX_PROPOSALS_PER_DAY);
-    assert!(reminders.offered_to("emmanuel").await.unwrap().is_empty());
-    let id = offered[0].id.clone();
+    let open = reminders.open_to("jerry").await.unwrap();
+    assert_eq!(
+        open.len(),
+        MAX_PROPOSALS_PER_DAY + 2,
+        "the cap limits the pushes, not what Jerry can find and answer"
+    );
+    assert!(reminders.open_to("emmanuel").await.unwrap().is_empty());
+    let id = report.offered[0].id.clone();
     assert!(!reminders
         .settle_offer("emmanuel", &id, true, now)
         .await
@@ -402,8 +406,26 @@ async fn offers_share_the_daily_cap_with_proposals_and_are_settled_once() {
         .settle_offer("jerry", &id, false, now)
         .await
         .unwrap());
+    // One the cap held back is answered the same way, and the offer job then leaves it alone.
+    let held: Vec<String> = open
+        .iter()
+        .map(|r| r.id.clone())
+        .filter(|id| report.offered.iter().all(|o| &o.id != id))
+        .collect();
+    assert_eq!(held.len(), 2);
+    assert!(reminders
+        .settle_offer("jerry", &held[0], true, now)
+        .await
+        .unwrap());
     assert_eq!(
-        reminders.offered_to("jerry").await.unwrap().len(),
-        MAX_PROPOSALS_PER_DAY - 1
+        reminders.open_to("jerry").await.unwrap().len(),
+        MAX_PROPOSALS_PER_DAY
+    );
+    let next_day = offer_pending_reminders(&reminders, &proposals, 50, now + Duration::days(2))
+        .await
+        .unwrap();
+    assert!(
+        next_day.offered.iter().all(|r| r.id != held[0]),
+        "an answered reminder is never pushed"
     );
 }
