@@ -117,6 +117,8 @@ void i18n.use(initReactI18next).init({
     emptyTitle: 'Nothing here yet',
     emptyBody: 'Notifications from Goose, your devices, and schedules will appear here.',
     category: { alert: 'Alert', action_required: 'Action needed', info: 'Info' },
+    repeats_one: '{{count}} time', repeats_other: '{{count}} times',
+    unreadLabel: 'unread',
     open: {
       schedules: 'Open schedules', devices: 'Open devices', chat: 'Open chat',
       models: 'Open models', extensions: 'Open extensions', pairing: 'Open remote access',

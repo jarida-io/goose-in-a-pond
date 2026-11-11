@@ -1,7 +1,7 @@
 /* ════════════════════════════════════════════════════════════
    NOTIFICATIONS VIEW — top-level notification feed
    DO NOT append to hub.css — isolated to avoid conflicts.
-   Tokens: uses --pp, --pp-50, --ink, --ink-2, --line, --tile-bg, --mut
+   Tokens: uses --pp, --pp-50, --ink, --ink-2, --line, --tile-bg, --mut; each row sets --nc
    ════════════════════════════════════════════════════════════ */
 
 /* ── wrapper ── */
@@ -94,73 +94,114 @@
   max-width: 280px;
 }
 
-/* ── group ── */
+/* ── group: one list per day ── */
 .nfeed__group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 8px;
+  margin-bottom: 18px;
 }
 
 .nfeed__group-label {
+  margin: 0;
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--mut);
-  padding: 4px 0 2px;
+  padding: 0 4px;
 }
 
-/* ── notification card ── */
-.ncard {
+/* A day's notifications share one surface, divided by hairlines, the way a mail inbox reads. */
+.nfeed__list {
   background: var(--tile-bg);
   border: 1px solid var(--line);
   border-radius: 16px;
-  padding: 14px 16px;
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
+  overflow: hidden;
+}
+
+/* ── notification row ──
+   `--nc` is the category's hue (CATEGORY_COLOR). Unread is a dot in the gutter and a heavier
+   title; read rows step back to muted text. No coloured edge, no tinted card. */
+.ncard {
+  display: grid;
+  grid-template-columns: 8px 36px minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
+  padding: 14px 16px 14px 12px;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s;
   position: relative;
 }
 
+.ncard + .ncard::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 68px; /* the divider starts under the text, not under the icon */
+  border-top: 1px solid var(--line);
+}
+
 .ncard:hover {
-  background: var(--pp-50);
-  border-color: color-mix(in srgb, var(--pp) 20%, transparent);
+  background: color-mix(in srgb, var(--ink) 3.5%, transparent);
 }
 
-.ncard[data-read="false"] {
-  border-left: 3px solid var(--pp);
-}
-
-/* An unread alert or action is edged in its own category's colour, not the brand's. */
-.ncard[data-read="false"][data-category="alert"] {
-  border-left-color: #DC2626;
-}
-
-.ncard[data-read="false"][data-category="action_required"] {
-  border-left-color: #D97706;
-}
-
-/* ── icon square ── */
-.ncard__icon {
-  width: 40px;
-  height: 40px;
+.ncard:focus-visible {
+  outline: 2px solid var(--pp);
+  outline-offset: -2px;
   border-radius: 12px;
+}
+
+/* ── unread dot, in the gutter ── */
+.ncard__dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 14px;
+  border-radius: 50%;
+  background: var(--pp);
+  transition: transform 0.2s, opacity 0.2s;
+}
+
+.ncard[data-read="true"] .ncard__dot {
+  opacity: 0;
+  transform: scale(0.4);
+}
+
+/* ── icon, tinted from the category's hue so it suits either theme ── */
+.ncard__icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
+  color: var(--nc);
+  background: color-mix(in srgb, var(--nc) 13%, transparent);
+}
+
+.ncard__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.ncard[data-read="true"] .ncard__icon {
+  background: color-mix(in srgb, var(--nc) 8%, transparent);
 }
 
 /* ── body ── */
 .ncard__body {
-  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+}
+
+.ncard__line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
 .ncard__title {
@@ -170,74 +211,117 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
+.ncard[data-read="true"] .ncard__title {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+/* An alert or a request says so in its own colour, as a word, not a pill. */
 .ncard__tag {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  border-radius: 6px;
-  padding: 1px 6px;
-  margin-right: 6px;
-  vertical-align: 1px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--nc);
 }
 
 .ncard__sub {
-  font-size: 12px;
-  color: var(--mut);
-  line-height: 1.4;
-  /* allow up to 2 lines */
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.45;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-/* ── time + CTA ── */
+.ncard[data-read="true"] .ncard__sub {
+  color: var(--mut);
+}
+
+.ncard__repeats {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mut);
+}
+
+/* ── time + action ── */
 .ncard__right {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
+  gap: 6px;
+  padding-top: 1px;
 }
 
 .ncard__time {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--mut);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
+.ncard[data-read="false"] .ncard__time {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+/* A quiet link, not a boxed button: the whole row opens it too. */
 .ncard__cta {
   background: none;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: 8px;
-  padding: 4px 10px;
-  font-size: 11px;
+  padding: 2px 4px 2px 8px;
+  gap: 2px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--pp);
   cursor: pointer;
   font-family: inherit;
-  transition: background 0.15s;
   white-space: nowrap;
+  transition: background 0.15s;
 }
 
 .ncard__cta:hover {
   background: var(--pp-50);
 }
 
-/* ── unread dot ── */
-.ncard__dot {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--pp);
-  flex-shrink: 0;
+.ncard__cta:focus-visible {
+  outline: 2px solid var(--pp);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ncard,
+  .ncard__dot {
+    transition: none;
+  }
+}
+
+/* A narrow window: the time and the action drop under the text. */
+@media (max-width: 560px) {
+  .nfeed {
+    padding: 20px 16px 32px;
+  }
+  .ncard {
+    grid-template-columns: 8px 32px minmax(0, 1fr);
+  }
+  .ncard__icon {
+    width: 32px;
+    height: 32px;
+  }
+  .ncard__right {
+    grid-column: 3;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+  }
+  .ncard + .ncard::before {
+    left: 64px;
+  }
 }
 
 /* ── schedule offline note ── */
