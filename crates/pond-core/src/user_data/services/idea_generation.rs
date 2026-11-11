@@ -250,10 +250,10 @@ them or their interests it builds on.
 - sources: the numbers of the pages it rests on.
 - you_can: two to four actionable steps {name} could take (e.g. buy ingredients, \
 pack gear, schedule, clone, wire, deploy), each a short imperative under 80 characters.
-- goose_can: what the Pond could do for {name}, or null.
-  - kind: \"todo\" (stage the actionable steps on their to-do list), \"schedule\" (look this up or plan prep time each week), \"chat\" (discuss and customize the plan), \"research\" (a deeper report or setup guide), or \"watch\" (keep checking a page of listings or releases).
-  - label: the button's words, under 30 characters.
-  - prompt: for research or schedule, what the Pond should look up; else \"\".
+- goose_can: what the Pond can do for {name}, or null. The Pond is an on-premise domestic hardware hub (Goose In A Pond) with live tools for smart home devices (Matter), hyper-local weather, calendars, household to-dos, and local research.
+  - kind: \"todo\" (stage actionable prep steps like ingredients or gear on their to-do list), \"schedule\" (plan check-in dates, recipe prep times, or recurring reminders on their schedule), \"chat\" (discuss and customize the idea), \"research\" (conduct an autonomous deep research investigation for this household), or \"watch\" (monitor a web listings page for price drops or new items).
+  - label: the button's action words, under 30 characters.
+  - prompt: for research or schedule, what the Pond should look up or schedule; else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \
 items for sale or rent; else \"\".
 - score: 0 to 1, how new, specific and doable this is for {name}.
