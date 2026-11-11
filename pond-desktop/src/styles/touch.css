@@ -100,25 +100,6 @@
   height: var(--tap-min);
 }
 
-/* The hub Toggle (46x27px) is a purpose-built pill, not a dense data
- * control — it does NOT join the block above, whose `min-height` and
- * `justify-content: center` would stretch it and re-centre its knob. It only
- * needs the anchor for its own invisible reach, so `position: relative` is
- * declared on its own. */
-.htoggle {
-  position: relative;
-}
-
-.htoggle::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  height: var(--tap-min);
-}
-
 /* ── Row pitch: the constraint a reach creates ────────────────────────────
  *
  * A 44px reach on a 36px pill overhangs its box by 4px above and below. Where
@@ -308,21 +289,6 @@ label:has(> .native-checkbox) {
 
 .dtile__dots::after { height: var(--tap-dense); }
 .dtile__dots:hover { background: var(--color-hover); }
-
-/* ── Focus ring: the two cases the global rule cannot cover ──────────────
- *
- * `base.css` already carries an app-wide `:focus-visible` safety net with
- * `!important`, so a blanket rule here would be redundant — and mine was, until
- * I removed it. What the global rule genuinely cannot handle is these two:
- */
-
-/* A switch's visible track is a SIBLING of its screen-reader-only input, so the
-   global rule paints a ring on a 1px clipped box nobody can see. */
-:where(label):has(input:focus-visible) .switch__control,
-:where(.switch):has(input:focus-visible) .switch__control {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
 
 /* ── Quality floor: reduced motion ───────────────────────────────────────
  *

@@ -30,7 +30,7 @@ async function renderMemory(go: (route: string) => void = () => {}) {
   render(<MemoryDetail go={go} />);
   await screen.findByText("Search by meaning", { selector: ".setcard__title" });
   await waitFor(() => expect(api.getSettings).toHaveBeenCalled());
-  await within(semanticCard()).findByRole("button", { name: "Search by meaning" });
+  await within(semanticCard()).findByRole("switch", { name: "Search by meaning" });
 }
 
 /** The card the screen titles `Search by meaning`, as the classic setting is named. */
@@ -53,7 +53,7 @@ describe("Hub Memory: search by meaning", () => {
   it("is one switch, with the model chosen on the Models screen", async () => {
     await renderMemory();
     const card = semanticCard();
-    expect(within(card).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(card).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("true");
     expect(within(card).queryByRole("combobox")).toBeNull();
     expect(card.textContent).not.toMatch(/FastEmbed|GGUF|Embedding provider|Orin/);
   });
@@ -95,7 +95,7 @@ describe("Hub Memory: search by meaning", () => {
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "fastembed" } as never);
     await renderMemory();
     await waitFor(() =>
-      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("true"),
+      expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("true"),
     );
   });
 
@@ -103,7 +103,7 @@ describe("Hub Memory: search by meaning", () => {
     vi.mocked(api.getSettings).mockReturnValue(new Promise(() => {}) as never);
     render(<MemoryDetail go={() => {}} />);
     await screen.findByText("Search by meaning", { selector: ".setcard__title" });
-    expect(within(semanticCard()).queryByRole("button", { name: "Search by meaning" })).toBeNull();
+    expect(within(semanticCard()).queryByRole("switch", { name: "Search by meaning" })).toBeNull();
     expect(semanticCard().textContent).not.toMatch(/^Using /);
   });
 
@@ -111,29 +111,29 @@ describe("Hub Memory: search by meaning", () => {
     vi.mocked(api.listMemories).mockRejectedValue(new Error("offline"));
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
     await renderMemory();
-    expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false");
+    expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("false");
   });
 
   it("says so when the setting cannot be read, rather than showing a switch in either position", async () => {
     vi.mocked(api.getSettings).mockRejectedValue(new Error("offline"));
     render(<MemoryDetail go={() => {}} />);
     expect(await within(await waitFor(() => semanticCard())).findByText("Could not read this setting")).toBeTruthy();
-    expect(within(semanticCard()).queryByRole("button", { name: "Search by meaning" })).toBeNull();
+    expect(within(semanticCard()).queryByRole("switch", { name: "Search by meaning" })).toBeNull();
   });
 
   it("shows a setting changed elsewhere once the screen reads it again", async () => {
     await renderMemory();
-    expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("true");
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
     fireEvent.click(screen.getByRole("button", { name: "Refresh memories" }));
     await waitFor(() =>
-      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false"),
+      expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("false"),
     );
   });
 
   it("keeps focus on the switch when it is pressed", async () => {
     await renderMemory();
-    const toggle = within(semanticCard()).getByRole("button", { name: "Search by meaning" });
+    const toggle = within(semanticCard()).getByRole("switch", { name: "Search by meaning" });
     toggle.focus();
     fireEvent.click(toggle);
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalled());
@@ -144,13 +144,13 @@ describe("Hub Memory: search by meaning", () => {
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
     await renderMemory();
     await waitFor(() =>
-      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false"),
+      expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("false"),
     );
   });
 
   it("writes \"none\" when switched off, and says what Memory does instead", async () => {
     await renderMemory();
-    fireEvent.click(within(semanticCard()).getByRole("button", { name: "Search by meaning" }));
+    fireEvent.click(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ embedding_provider: "none" }));
     expect(await screen.findByText("Search by meaning is off. Memory searches by keyword.")).toBeTruthy();
   });
@@ -159,9 +159,9 @@ describe("Hub Memory: search by meaning", () => {
     vi.mocked(api.getSettings).mockResolvedValue({ embedding_provider: "none" } as never);
     await renderMemory();
     await waitFor(() =>
-      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("false"),
+      expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("false"),
     );
-    fireEvent.click(within(semanticCard()).getByRole("button", { name: "Search by meaning" }));
+    fireEvent.click(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }));
     await waitFor(() => expect(api.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
     expect(await screen.findByText("Search by meaning is on. The pond reads memories again at the next quiet moment.")).toBeTruthy();
   });
@@ -169,10 +169,10 @@ describe("Hub Memory: search by meaning", () => {
   it("puts the switch back and says why when the pond refuses", async () => {
     vi.mocked(api.updateSettings).mockRejectedValue(new Error("settings are locked"));
     await renderMemory();
-    fireEvent.click(within(semanticCard()).getByRole("button", { name: "Search by meaning" }));
+    fireEvent.click(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }));
     expect(await screen.findByText(/settings are locked/)).toBeTruthy();
     await waitFor(() =>
-      expect(within(semanticCard()).getByRole("button", { name: "Search by meaning" }).getAttribute("aria-pressed")).toBe("true"),
+      expect(within(semanticCard()).getByRole("switch", { name: "Search by meaning" }).getAttribute("aria-checked")).toBe("true"),
     );
   });
 });

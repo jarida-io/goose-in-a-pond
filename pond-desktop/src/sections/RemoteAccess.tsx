@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Switch } from '@heroui/react';
+import { Button } from '@heroui/react';
+import { Switch } from '../components/Switch';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/PondApiClient';
 import { isSignInRequired } from '../api/hostCredential';
@@ -157,13 +158,11 @@ export function RemoteAccess() {
         <span role="status" style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }}>{t(`remote.${state}`)}</span>
       </div>
       <Switch
-        aria-label={t('remote.toggleLabel')}
-        isSelected={on}
-        isDisabled={busy || settling}
+        label={t('remote.toggleLabel')}
+        checked={on}
+        disabled={busy || settling}
         onChange={(next: boolean) => void run(next ? 'enable' : 'disable')}
-      >
-        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-      </Switch>
+      />
     </div>
 
     {device?.provisioned && !ADMISSION_REFUSALS.includes(state)

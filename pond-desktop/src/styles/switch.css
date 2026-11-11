@@ -1,0 +1,74 @@
+/* The shared on/off switch (components/Switch.tsx). Off is slate: 6.22:1 light and 4.80:1 dark on
+   the card, the white knob 6.22:1 and 3.53:1.
+
+   The button is the hit area, 44px tall (the touch floor), with the drawn track centred inside it,
+   so what is measured is what can be pressed. */
+.giap-switch {
+  --switch-w: 46px;
+  --switch-h: 27px;
+  --switch-pad: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: max(var(--switch-w), 44px);
+  height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.giap-switch--sm {
+  --switch-w: 36px;
+  --switch-h: 21px;
+}
+
+.giap-switch__track {
+  display: inline-flex;
+  align-items: center;
+  /* Off puts the knob at the start; on slides it across. */
+  justify-content: flex-start;
+  box-sizing: border-box;
+  width: var(--switch-w);
+  height: var(--switch-h);
+  padding: var(--switch-pad);
+  border-radius: 999px;
+  background: var(--color-text-tertiary);
+  transition: background-color 0.2s;
+}
+
+.giap-switch[data-on="true"] .giap-switch__track {
+  background: var(--color-accent);
+}
+
+/* Purple on the dark panel is 2.97:1; 15% toward white makes it 3.90:1, the white knob 4.34:1. */
+:root[data-theme="dark"] .giap-switch[data-on="true"] .giap-switch__track {
+  background: color-mix(in srgb, var(--color-accent) 85%, white);
+}
+
+.giap-switch__knob {
+  width: calc(var(--switch-h) - 2 * var(--switch-pad));
+  height: calc(var(--switch-h) - 2 * var(--switch-pad));
+  border-radius: 50%;
+  background: var(--color-text-on-accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s;
+}
+
+.giap-switch[data-on="true"] .giap-switch__knob {
+  transform: translateX(calc(var(--switch-w) - var(--switch-h)));
+}
+
+.giap-switch:disabled,
+.giap-switch[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .giap-switch__track,
+  .giap-switch__knob {
+    transition: none;
+  }
+}

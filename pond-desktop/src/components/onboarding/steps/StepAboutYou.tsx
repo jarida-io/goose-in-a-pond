@@ -1,6 +1,7 @@
 // Step 1, About You (Basics + Accessibility); userName is required.
 
 import { MessageCircle, Turtle, Contrast, CircleSlash } from "lucide-react";
+import { Switch } from "../../Switch";
 import { useOnboarding } from "../onboarding.context";
 import { FormLabel } from "../primitives/FormLabel";
 import { Lead } from "../primitives/StepShell";
@@ -114,15 +115,11 @@ export function StepAboutYou() {
                 </div>
                 <p className="ob-toggle-row__desc">{it.desc}</p>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={draft[it.key]}
-                onClick={() => patch({ [it.key]: !draft[it.key] })}
-                className={`ob-switch ${draft[it.key] ? "ob-switch--on" : ""}`}
-              >
-                <span className="ob-switch__thumb" />
-              </button>
+              <Switch
+                checked={draft[it.key]}
+                label={it.title}
+                onChange={(on) => patch({ [it.key]: on })}
+              />
             </div>
           ))}
         </div>

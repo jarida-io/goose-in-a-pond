@@ -8,8 +8,7 @@
    cascade layer; base.css's `* { padding: 0 }` reset is unlayered, so per the
    CSS cascade-layers spec it wins over the layered rule regardless of
    specificity — silently zeroing every HeroUI button's padding. Re-declared
-   here at class specificity, matching the fix already applied to
-   `.switch__thumb` in base.css for the same reason. Shared by every
+   here at class specificity. Shared by every
    page-header primary action button (Devices, Mesh, …) since they all hit
    the same zeroed-padding bug. */
 .page-header-btn { padding: 0 12px; }
@@ -39,7 +38,7 @@
 .button--primary {
   background-color: var(--color-accent);
   border: 1px solid var(--color-accent-hover);
-  color: #fff;
+  color: var(--color-text-on-accent);
 }
 .button--primary:hover,
 .button--primary[data-hovered="true"] {
@@ -3703,9 +3702,10 @@
   box-shadow: var(--shadow-ink);
 }
 
-.secret-modal__choice-option:focus-within {
-  outline: 3px solid var(--color-accent);
-  outline-offset: 2px;
+/* Keyboard focus only, drawn over the border: a mouse click on the radio is not a second ring. */
+.secret-modal__choice-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .secret-modal__choice-option input {
@@ -4840,14 +4840,15 @@
   margin-top: 4px;
   padding: 7px 16px;
   border-radius: 8px;
-  border: 1px solid var(--color-accent);
-  background: transparent;
-  color: var(--color-accent);
+  border: 1px solid var(--border-ink);
+  background: var(--color-surface);
+  /* The accent is never text: it measures under 4.5:1 for some household accents. */
+  color: var(--color-text);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   cursor: pointer;
 }
-.empty-state__cta:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.empty-state__cta:hover { background: var(--color-hover); }
 
 .muted { color: var(--grey-500); }
 

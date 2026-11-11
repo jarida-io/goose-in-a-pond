@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Switch } from "../../components/Switch";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, SUBTYPE_ICON, lockEl, unlockEl, micEl } from "../primitives/icons";
 import { HubModal as Modal } from "../primitives/HubModal";
@@ -287,16 +288,12 @@ function DeviceControl({ deviceId, onClose }: DeviceControlProps) {
           <span className="dc-head__room">{device.room}</span>
         </div>
         {showSwitch && (
-          <button
-            className="htoggle"
-            data-on={on}
-            onClick={toggle}
+          <Switch
+            checked={on}
+            onChange={() => toggle()}
             style={{ marginRight: 36 }}
-            type="button"
-            aria-label={`Toggle ${device.name}`}
-          >
-            <span className="htoggle__knob" />
-          </button>
+            label={`Toggle ${device.name}`}
+          />
         )}
       </div>
       <div className="dc-body">
@@ -432,15 +429,11 @@ function CatRow({ device }: { device: DeviceData }) {
           </button>
         </div>
       ) : (
-        <button
-          className="htoggle"
-          data-on={on}
-          type="button"
-          aria-label={`Toggle ${device.name}`}
-          onClick={() => control(k === "lock" ? { locked: !st.locked } : { on: !st.on })}
-        >
-          <span className="htoggle__knob" />
-        </button>
+        <Switch
+          checked={on}
+          label={`Toggle ${device.name}`}
+          onChange={() => control(k === "lock" ? { locked: !st.locked } : { on: !st.on })}
+        />
       )}
     </div>
   );

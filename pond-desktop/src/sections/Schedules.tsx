@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { Switch } from "../components/Switch";
 import { Button, Separator } from "@heroui/react";
 import { Plus, Trash2, Play, Pencil, CalendarClock, ChevronDown, ChevronUp, Clock, List, Calendar, Repeat } from "lucide-react";
 import { api } from "../api/PondApiClient";
@@ -884,16 +885,12 @@ export function Schedules() {
                       {s.timezone && s.timezone !== "UTC" && ` · ${s.timezone}`}
                     </div>
                   </div>
-                  <label className="toggle-wrap" aria-label={s.enabled ? "Pause schedule" : "Resume schedule"}>
-                    <input
-                      type="checkbox"
-                      checked={s.enabled}
-                      disabled={!state.serverOnline}
-                      onChange={() => handleToggle(s)}
-                    />
-                    <span className="toggle-track" />
-                    <span className="toggle-thumb" />
-                  </label>
+                  <Switch
+                    checked={s.enabled}
+                    label={s.enabled ? "Pause schedule" : "Resume schedule"}
+                    disabled={!state.serverOnline}
+                    onChange={() => handleToggle(s)}
+                  />
                 </div>
 
                 {/* Chips: prompt snippet + status */}

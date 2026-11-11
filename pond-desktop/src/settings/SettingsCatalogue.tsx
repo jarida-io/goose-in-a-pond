@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { Switch, Button } from "@heroui/react";
+import { Button } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import {
   Search,
   Crosshair,
@@ -339,19 +341,13 @@ function EntryRow({
               }
             >
               <Switch
-                aria-label={entry.label}
-                isSelected={control.values ? value !== control.values.off : Boolean(value)}
-                isDisabled={inert}
+                label={entry.label}
+                checked={control.values ? value !== control.values.off : Boolean(value)}
+                disabled={inert}
                 onChange={(v: boolean) =>
                   onChange(entry.key, control.values ? (v ? control.values.on : control.values.off) : v)
                 }
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                </Switch.Content>
-              </Switch>
+              />
             </span>
           )}
 

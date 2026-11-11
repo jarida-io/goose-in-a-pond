@@ -222,10 +222,10 @@ test.describe("Connections: Hub", () => {
     const pond = newPond();
     await mockPond(page, pond);
     await bootHub(page);
-    await page.getByRole("button", { name: "Set up over Bluetooth" }).click();
+    await page.getByRole("switch", { name: "Set up over Bluetooth" }).click();
     await expect.poll(() => pond.settingsPuts).toContainEqual({ ble_setup_enabled: false });
     await expect(page.getByText(/Setup over Bluetooth is switched off/)).toBeVisible({ timeout: 6_000 });
-    await page.getByRole("button", { name: "Say pairing codes aloud" }).click();
+    await page.getByRole("switch", { name: "Say pairing codes aloud" }).click();
     await expect.poll(() => pond.settingsPuts).toContainEqual({ spoken_pairing_codes: false });
   });
 
@@ -329,8 +329,7 @@ test.describe("Connections: Classic", () => {
     const pond = newPond();
     await mockPond(page, pond);
     await bootClassic(page, { width: 1024, height: 600 });
-    // The input is visually hidden; the pointer lands on the control drawn over it.
-    await page.locator(".scat__row", { has: page.getByLabel("Set up over Bluetooth") }).locator(".switch__control").click();
+    await page.getByRole("switch", { name: "Set up over Bluetooth" }).click();
     expect(pond.settingsPuts).toEqual([]);
     await shot(page, info, "classic-1024x600-staged");
     await page.getByRole("button", { name: /Save 1 change/ }).click();
