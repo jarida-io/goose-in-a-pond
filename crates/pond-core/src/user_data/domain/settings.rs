@@ -285,12 +285,14 @@ pub struct Settings {
     pub audio_output_device: String,
 
     /// Chooses the speaker and microphone by sound: each choice plays a short soft test sound
-    /// and keeps the first pair where the microphone hears it. Off, devices are checked silently.
+    /// and keeps the first pair where the microphone hears it. Off, devices are checked silently,
+    /// as a connected Bluetooth headset always is.
     #[serde(default = "Settings::default_audio_sound_test")]
     pub audio_sound_test: bool,
 
     /// On a Linux board, makes the chosen speaker and microphone the sound server's defaults,
     /// unmuted, and raises a level too low for the test sound to be heard. A Mac is left alone.
+    /// A chosen Bluetooth headset becomes the default either way: it is reachable no other way.
     #[serde(default = "Settings::default_audio_manage_system")]
     pub audio_manage_system: bool,
 
