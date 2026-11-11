@@ -1,0 +1,19 @@
+{
+  "id": "web_search",
+  "name": "Web search",
+  "summary": "Goose searches the web for anything current: news, prices, opening hours. It needs a Brave Search key.",
+  "icon": "search",
+  "category": "web",
+  "kind": "built_in",
+  "connect": { "via": "web_search_key" },
+  "setup": {
+    "fields": [
+      {
+        "key": "key", "label": "Brave Search key", "kind": "secret", "required": true,
+        "help": "Get a free key at brave.com/search/api. Goose checks it once before keeping it."
+      }
+    ]
+  },
+  "feeds": ["news", "ideas"],
+  "tools": 1
+}

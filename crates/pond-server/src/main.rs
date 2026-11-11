@@ -15,8 +15,10 @@ mod kokoro_control;
 mod litert_runtime;
 mod llamafile_process;
 mod llm_memory_consolidator;
+mod my_goose_mind;
 use pond_server::tls_identity;
 mod model_download;
+mod news_runner;
 mod node_path;
 mod onnx_gpu;
 mod ports;
@@ -1402,6 +1404,8 @@ async fn run_server(
                     error = format!("{e:#}"),
                     "the room's wake-only Whisper did not load at startup"
                 );
+            } else {
+                whisper.release_unheld("startup");
             }
         }
     }
@@ -2636,20 +2640,20 @@ async fn run_server(
             ..Default::default()
         },
     ));
-    // Reminders the extraction loop turns into proposals, handed to the notification pipeline
+    // Dated mentions the extraction loop offers as to-dos, handed to the notification pipeline
     // once it exists further down.
     let (proposal_notice_tx, proposal_notice_rx) =
-        tokio::sync::mpsc::channel::<pond_core::user_data::domain::proposal::Proposal>(64);
+        tokio::sync::mpsc::channel::<pond_core::user_data::domain::reminder::CapturedReminder>(64);
     {
         use pond_core::models::ports::embedding::EmbeddingProvider as _;
+        use pond_core::shared::services::todo_offers;
         use pond_core::user_data::services::consolidation_schedule as sched;
         use pond_core::user_data::services::inference_lane::LaneJob;
         use pond_core::user_data::services::memory_extraction::{
             BatchExtractionConfig, BatchExtractionService, HouseholdRoster,
         };
-        use pond_core::user_data::services::reminder_proposal;
 
-        /// Pending reminders per tick; the daily cap lets only a handful become proposals anyway.
+        /// Pending reminders per tick; the daily cap lets only a handful become offers anyway.
         const REMINDER_PROMOTION_LIMIT: usize = 50;
 
         // Where a date the rule refuses as a memory goes; without it the date is lost.
@@ -2672,7 +2676,10 @@ async fn run_server(
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
-                .with_reminder_repository(reminder_repo),
+                .with_reminder_repository(reminder_repo)
+                .with_interest_repository(Arc::new(
+                    pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone()),
+                )),
         );
         let extraction_storage = session_storage.clone();
         let extraction_repo = memory_repo.clone();
@@ -2823,7 +2830,7 @@ async fn run_server(
                 status.write().await.record(config.mode, &report);
 
                 // After the pass, not inside it, so a proposal failure never costs a stored date.
-                match reminder_proposal::promote_pending_reminders(
+                match todo_offers::offer_pending_reminders(
                     promotion_reminders.as_ref(),
                     promotion_proposals.as_ref(),
                     REMINDER_PROMOTION_LIMIT,
@@ -2832,14 +2839,14 @@ async fn run_server(
                 .await
                 {
                     Ok(promotion) if promotion.considered > 0 => {
-                        for proposal in &promotion.made {
-                            if let Err(e) = promotion_notices.try_send(proposal.clone()) {
+                        for offer in &promotion.offered {
+                            if let Err(e) = promotion_notices.try_send(offer.clone()) {
                                 tracing::warn!(
-                                    kind = "proposal_notice_dropped",
-                                    proposal = %proposal.id(),
+                                    kind = "todo_offer_notice_dropped",
+                                    reminder = %offer.id,
                                     error = %e,
-                                    "a reminder became a proposal, but its member will not be \
-                                     told on their phone; it still waits in the app"
+                                    "a mention was offered as a to-do, but its member will not \
+                                     be told on their phone; it still waits in My Goose"
                                 );
                             }
                         }
@@ -2848,20 +2855,20 @@ async fn run_server(
                             target: "giap::trace",
                             kind = "reminder_promotion",
                             considered = promotion.considered,
-                            proposed = promotion.proposed,
+                            offered = promotion.offered.len(),
                             // Expected on a pond with nobody on file.
                             unaddressable = promotion.unaddressable,
                             capped = promotion.capped,
                             // The only one of the four that is a fault.
                             failed = promotion.failed,
-                            "pending reminders considered for the proposal queue"
+                            "pending reminders considered for to-do offers"
                         );
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        // Dates are kept, but a promotion that never runs never fills the queue.
+                        // Dates are kept, but an offering that never runs never reaches anyone.
                         tracing::warn!(
-                            "[reminders] could not consider pending reminders for proposals: {e}"
+                            "[reminders] could not consider pending reminders for offers: {e}"
                         );
                     }
                 }
@@ -3697,11 +3704,18 @@ async fn run_server(
                     pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
                         targeted_notification_sender.clone(),
                     )
-                    .with_speech(spoken_watch_alerts),
+                    .with_speech(spoken_watch_alerts.clone()),
                 ),
             ),
         ),
         settings_repo.clone(),
+    );
+    // Members' watched links: the cart's loop, its routes and the chat's tool share one reader.
+    pond_server::cart_runner::spawn(
+        db.system.clone(),
+        llm_provider.clone(),
+        targeted_notification_sender.clone(),
+        spoken_watch_alerts,
     );
     #[cfg(unix)]
     {
@@ -3715,15 +3729,22 @@ async fn run_server(
             system_notices.clone(),
         );
     }
-    // Reminders the extraction loop proposed reach their member's phones, never the household's.
-    pond_server::system_notices::spawn_proposal_notices(
+    // Mentions the extraction loop offered as to-dos reach their member's phones only.
+    pond_server::hooks_runner::spawn_offer_notices(
         proposal_notice_rx,
         targeted_notification_sender.clone(),
+        settings_repo.clone(),
     );
     // Lets the `send_notification` MCP tool reach connected phones too.
     pond_mcp_server::init_notification_sender(notification_sender.clone());
     // Profile-addressed, so a tool's link reaches the speaker's phones and no one else's.
     pond_mcp_server::init_member_notifier(targeted_notification_sender.clone());
+    pond_server::hooks_runner::spawn(
+        db.system.clone(),
+        settings_repo.clone(),
+        targeted_notification_sender.clone(),
+        event_bus.clone(),
+    );
     // Read now, as the extensions were registered: an unreadable row leaves booking off.
     let travel_enabled = settings_repo
         .get()
@@ -3919,6 +3940,8 @@ async fn run_server(
         let gen_lane = inference_lane.clone();
         let gen_profiles = profile_repo.clone();
         let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
+        let gen_interests =
+            pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone());
         let gen_queue: Arc<
             dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
         > = Arc::new(
@@ -3994,6 +4017,7 @@ async fn run_server(
                     }
                     res = compose_suggestions(
                         gen_memories.as_ref(),
+                        &gen_interests,
                         gen_queue.as_ref(),
                         gen_provider.clone(),
                         &subjects,
@@ -4037,6 +4061,32 @@ async fn run_server(
         let _ = ProfileScope::Household;
     }
 
+    news_runner::spawn(news_runner::NewsDeps {
+        db: db.system.clone(),
+        settings: settings_repo.clone(),
+        profiles: profile_repo.clone(),
+        memories: memory_repo.clone(),
+        scheduler: scheduler.clone(),
+        provider: llm_provider.clone(),
+        lane: inference_lane.clone(),
+        last_user_activity: last_user_activity.clone(),
+        sessions: session_storage.clone(),
+        members: targeted_notification_sender.clone(),
+        voice: tts.clone(),
+        data_dir: data_dir.clone(),
+    });
+    let mind = my_goose_mind::MindDeps {
+        lane: inference_lane.clone(),
+        db: db.clone(),
+        profiles: profile_repo.clone(),
+        memories: memory_repo.clone(),
+        sessions: session_storage.clone(),
+        provider: llm_provider.clone(),
+        last_user_activity: last_user_activity.clone(),
+    };
+    my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_ideas_job(mind);
+
     // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
     // subscription, not the reviewer's ring: every event must be seen once, and rings wrap.
@@ -4076,15 +4126,25 @@ async fn run_server(
 
         // Delayed so no first turn waits on a calendar server; calendars rarely change.
         if let Some(secrets) = secret_repo.clone() {
-            let syncer = Arc::new(pond_server::account_sync::AccountSyncer::new(
-                context_repo.clone(),
-                pipeline.clone(),
-                secrets.clone(),
-            ));
+            const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let syncer = Arc::new(
+                pond_server::account_sync::AccountSyncer::new(
+                    context_repo.clone(),
+                    pipeline.clone(),
+                    secrets.clone(),
+                )
+                .with_hook_events(
+                    Arc::new(
+                        pond_infra::sqlite_hook_event_sink::SqliteHookEventSink::new(
+                            db.system.clone(),
+                        ),
+                    ),
+                    INTERVAL,
+                ),
+            );
             account_syncer = Some(syncer.clone());
             tokio::spawn(async move {
                 const FIRST_RUN_DELAY: std::time::Duration = std::time::Duration::from_secs(90);
-                const INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
                 tokio::time::sleep(FIRST_RUN_DELAY).await;
                 loop {
                     match syncer.run(chrono::Utc::now()).await {
@@ -5941,7 +6001,7 @@ async fn run_chat(
                 settings: &settings,
                 data_dir: &data_dir,
                 mic: &mic_handle,
-                whisper: backend.clone(),
+                whisper: backend.clone().into(),
                 wake_word,
                 no_wake_word,
                 audio_level: audio_level_sink.clone(),
@@ -6548,6 +6608,7 @@ struct ComposeReport {
 /// Early returns still spend the lane's interval: the caller holds the slot guard.
 async fn compose_suggestions(
     memories: &dyn pond_core::user_data::ports::memory_repository::MemoryRepository,
+    interests: &dyn pond_core::user_data::ports::interests::InterestRepository,
     queue: &dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
     provider: Arc<
         tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>,
@@ -6581,6 +6642,10 @@ async fn compose_suggestions(
         .filter(|m| !already.contains(&m.id))
         // Too short to carry a question; asking would spend a slot to learn that.
         .filter(|m| m.content.trim().chars().count() >= 20)
+        // A trait made of one question asked is curiosity: nothing to build a question on.
+        .filter(|m| {
+            !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
+        })
         .collect();
 
     // Which twelve matters most: habits and preferences before trivia, recency within each rank.
@@ -6597,7 +6662,15 @@ async fn compose_suggestions(
         return Ok(empty);
     };
 
-    let user = gen::build_user_prompt(&candidates);
+    // The owner's portrait and confirmed interests, so each question is worth looking up for them.
+    let about = match candidates.first().and_then(|m| m.profile_id.as_deref()) {
+        Some(owner) => pond_core::user_data::services::member_portrait::about_member(
+            interests.portrait(owner).await.ok().flatten().as_ref(),
+            &interests.list(owner).await.unwrap_or_default(),
+        ),
+        None => None,
+    };
+    let user = gen::build_user_prompt(&candidates, about.as_deref());
     let reply = provider
         .complete(gen::SYSTEM, vec![ChatMessage::user(user)])
         .await?;
@@ -7180,6 +7253,9 @@ fn install_long_task_deps(
             authorities: orchestration.authorities(),
         },
     );
+    pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
+        pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
+    ));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),
@@ -8113,26 +8189,27 @@ async fn consolidate_one_batch(
     match result {
         Ok(ref result) => {
             // Collected, not lazy: a borrowing iterator across the await breaks HRTB inference.
-            let accepted: Vec<
+            let accepted: Vec<(
                 pond_core::user_data::ports::memory_consolidator::ConsolidationAction,
-            > = result
+                String,
+            )> = result
                 .exchanges
                 .iter()
                 .filter(|e| e.judgment.accepted)
-                .map(|e| e.proposal.action.clone())
+                .map(|e| (e.proposal.action.clone(), e.proposal.rationale.clone()))
                 .collect();
 
-            let outcome = match consolidation::apply_actions(repo, &selection.batch, accepted).await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!("consolidation: applying actions failed: {e}");
-                    let _ = broadcast_tx.send(ConsolidationEvent::Error {
-                        message: e.to_string(),
-                    });
-                    return;
-                }
-            };
+            let (outcome, changes) =
+                match consolidation::apply_proposals(repo, &selection.batch, accepted).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::warn!("consolidation: applying actions failed: {e}");
+                        let _ = broadcast_tx.send(ConsolidationEvent::Error {
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                };
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
@@ -8147,7 +8224,11 @@ async fn consolidate_one_batch(
                     duration_ms = result.duration_ms,
                     "memory consolidation complete"
                 );
-                let details_json = serde_json::to_string(&result).ok();
+                // What changed, row by row with its text and reason, beside the whole trial.
+                let details_json = Some(consolidation::run_details(
+                    &changes,
+                    serde_json::to_value(result).ok(),
+                ));
                 let _ = repo
                     .log_consolidation_run(
                         mode_label,

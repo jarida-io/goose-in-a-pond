@@ -25,4 +25,7 @@ pub trait RoomVoiceControl: Send + Sync {
 
     /// End a pause now.
     fn resume(&self) {}
+
+    /// Someone is using the app or sending a message: free Whisper and stay quiet while they do.
+    fn note_user_activity(&self) {}
 }

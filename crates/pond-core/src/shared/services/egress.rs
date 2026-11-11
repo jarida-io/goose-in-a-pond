@@ -270,13 +270,15 @@ pub enum EgressPurpose {
     Push,
     /// A POST form a member confirmed on their phone, and the page it sits on.
     WebForms,
+    /// A member's news: its searches and the pages it reads.
+    News,
     /// The public tunnel (ngrok) that carries paired phones' requests from outside the house.
     RemoteTunnel,
 }
 
 impl EgressPurpose {
     /// Every purpose, for tests that pin the wire names.
-    pub const ALL: [EgressPurpose; 14] = [
+    pub const ALL: [EgressPurpose; 15] = [
         Self::Assistant,
         Self::SignIn,
         Self::Music,
@@ -290,6 +292,7 @@ impl EgressPurpose {
         Self::Extensions,
         Self::Push,
         Self::WebForms,
+        Self::News,
         Self::RemoteTunnel,
     ];
 
@@ -309,6 +312,7 @@ impl EgressPurpose {
             Self::Extensions => "giap-extensions",
             Self::Push => "giap-push",
             Self::WebForms => "giap-web-forms",
+            Self::News => "giap-news",
             Self::RemoteTunnel => "giap-remote-tunnel",
         }
     }
@@ -858,6 +862,7 @@ mod tests {
                 "giap-extensions",
                 "giap-push",
                 "giap-web-forms",
+                "giap-news",
                 "giap-remote-tunnel",
             ]
         );

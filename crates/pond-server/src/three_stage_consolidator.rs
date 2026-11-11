@@ -26,21 +26,28 @@ Then output a JSON array of proposals.
   {\"action\":\"merge\",\"ids\":[\"id1\",\"id2\"],\"merged\":\"combined text\",\"segment\":\"...\",\"importance\":0.0-1.0,\"reason\":\"...\"}
 - split: break a compound memory into separate distinct facts, each properly categorized.
   {\"action\":\"split\",\"id\":\"SOURCE_ID\",\"new\":[{\"content\":\"fact 1\",\"segment\":\"...\",\"importance\":0.5},{\"content\":\"fact 2\",\"segment\":\"...\",\"importance\":0.6}],\"reason\":\"...\"}
-- prune: remove memories that do not help the assistant serve the user.
+- prune: archive memories that do not help the assistant serve the user.
   {\"action\":\"prune\",\"id\":\"ID\",\"reason\":\"...\"}
 - supersede: a newer memory replaces an older conflicting one.
   {\"action\":\"supersede\",\"newer\":\"ID\",\"older\":\"ID\",\"reason\":\"...\"}
 - recategorize: move a memory to the correct segment category.
-  {\"action\":\"recategorize\",\"id\":\"ID\",\"segment\":\"identity|preference|correction|relationship|project|knowledge|context\",\"importance\":0.0-1.0,\"reason\":\"...\"}
+  {\"action\":\"recategorize\",\"id\":\"ID\",\"segment\":\"identity|preference|correction|relationship|routine|project|knowledge|context\",\"importance\":0.0-1.0,\"reason\":\"...\"}
 </actions>
 
 <rules>
 - Evaluate each memory by asking: does this help the assistant serve the user better?
-- MERGE memories that express the same fact in different words.
+- MERGE memories that express the same fact in different words, and fold near-duplicates \
+into one sentence that keeps every detail. A merge always carries its merged text.
 - SPLIT memories that contain multiple unrelated facts crammed into one entry.
 - PRUNE: empty/vague content, general knowledge the assistant already has, \
 info duplicated in the system prompt (assistant name, timezone, personality), \
 speculative claims, conversational filler, assistant-provided facts (weather, search results).
+- PRUNE a trait built from a single question. Asking about something once is curiosity, not \
+who the user is. Any memory saying the user inquires about, tracks, researches or is working \
+through a film, show, book, game or public figure came from one question: \"<user> inquires about the new thriller Primetime\", \"<user> tracks the \
+biographies and career milestones of public figures such as Willem Dafoe\", \"<user> is working \
+through an assignment named Avengers Doomsday\" (a film they asked about), \"<user> repeatedly \
+offers apologies to <user>\" (nonsense from one exchange).
 - KEEP: identity facts, corrections, personal preferences, relationships, active projects.
 - Organize by segment: ensure each memory is in its correct thematic category.
 - Corrections must never be pruned or superseded by non-corrections.
@@ -68,6 +75,9 @@ Then output a JSON array with one challenge per proposal.
 - DENY (medium severity) if a merge combines thematically unrelated facts.
 - DENY (medium severity) if a split loses important context from the original.
 - AGREE (low severity) for pruning genuinely useless content (empty, filler, system-prompt duplicates).
+- AGREE (low severity) for pruning a trait built from one question the user asked (\"inquires \
+about\", \"tracks biographies of\", a film title read as an assignment): it is not personal.
+- DENY (high severity) a merge with no merged text.
 - AGREE for merging true duplicates that say the same thing differently.
 - You MUST include an entry for EVERY proposal, even if you agree.
 - When unsure, err on the side of DENY — memory is cheap, information loss is not.
@@ -343,25 +353,27 @@ fn parse_proposals(raw: &str) -> Vec<ConsolidationProposal> {
             .to_string();
 
         let action = match action_str {
-            "merge" | "supersede" => {
-                let ids: Vec<String> = if action_str == "supersede" {
-                    // supersede format: {newer, older}
-                    let newer = v.get("newer").and_then(|n| n.as_str()).unwrap_or("");
-                    let older = v.get("older").and_then(|o| o.as_str()).unwrap_or("");
-                    if newer.is_empty() || older.is_empty() {
-                        continue;
-                    }
-                    vec![newer.to_string(), older.to_string()]
-                } else {
-                    v.get("ids")
-                        .and_then(|a| a.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|i| i.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
+            "supersede" => {
+                let newer = v.get("newer").and_then(|n| n.as_str()).unwrap_or("");
+                let older = v.get("older").and_then(|o| o.as_str()).unwrap_or("");
+                if newer.is_empty() || older.is_empty() || newer == older {
+                    continue;
+                }
+                ConsolidationAction::Supersede {
+                    newer_id: newer.to_string(),
+                    older_id: older.to_string(),
+                }
+            }
+            "merge" => {
+                let ids: Vec<String> = v
+                    .get("ids")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|i| i.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
                 let merged = v
                     .get("merged")
@@ -379,7 +391,8 @@ fn parse_proposals(raw: &str) -> Vec<ConsolidationProposal> {
                     .map(|i| (i as f32).clamp(0.0, 1.0))
                     .unwrap_or(0.5);
 
-                if ids.len() < 2 {
+                // A merge with no text would store a blank memory over its sources.
+                if ids.len() < 2 || merged.trim().is_empty() {
                     continue;
                 }
 
@@ -676,11 +689,24 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0].rationale, "updated info");
         match &proposals[0].action {
-            ConsolidationAction::Merge { source_ids, .. } => {
-                assert_eq!(source_ids, &["n1", "o1"]);
+            ConsolidationAction::Supersede { newer_id, older_id } => {
+                assert_eq!((newer_id.as_str(), older_id.as_str()), ("n1", "o1"));
             }
-            other => panic!("expected Merge from supersede, got {other:?}"),
+            other => panic!("expected Supersede, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_merge_with_no_text_is_not_proposed() {
+        let json = r#"[{"action":"merge","ids":["a1","a2"],"merged":"","reason":"dupes"}]"#;
+        assert!(parse_proposals(json).is_empty());
+    }
+
+    #[test]
+    fn the_proposer_may_file_a_memory_as_a_routine() {
+        assert!(PROPOSER_PROMPT.contains("relationship|routine|project"));
+        assert!(PROPOSER_PROMPT.contains("PRUNE a trait built from a single question"));
+        assert!(ADVERSARY_PROMPT.contains("pruning a trait built from one question"));
     }
 
     #[test]

@@ -163,12 +163,18 @@ impl ProposalRepository for SqliteProposalRepository {
     }
 
     async fn count_made_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<usize> {
-        // Unfiltered on purpose: dismissed and expired proposals still count toward the daily cap.
+        // Unfiltered on purpose: dismissed and expired proposals still count toward the daily cap,
+        // and so does a dated mention offered as a to-do, which interrupted them just the same.
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM drafts \
-             WHERE origin = ? AND profile_id = ? AND datetime(created_at) >= datetime(?)",
+            "SELECT (SELECT COUNT(*) FROM drafts \
+                      WHERE origin = ? AND profile_id = ? AND datetime(created_at) >= datetime(?)) \
+                  + (SELECT COUNT(*) FROM reminders \
+                      WHERE profile_id = ? AND offered_at IS NOT NULL \
+                        AND datetime(offered_at) >= datetime(?))",
         )
         .bind(PROPOSAL_ORIGIN)
+        .bind(profile_id)
+        .bind(sql_ts(since))
         .bind(profile_id)
         .bind(sql_ts(since))
         .fetch_one(&self.pool)
