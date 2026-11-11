@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use pond_core::shared::ports::event_bus::{BusEvent, EventBus};
-use pond_core::user_data::ports::device_registry::{DeviceRegistry, RegisterDeviceRequest};
+use pond_core::user_data::ports::device_registry::{
+    DeviceRegistry, RegisterDeviceRequest, PHONE_DEVICE_TYPE,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -80,9 +82,6 @@ fn publish_reading(reading: &WireReading, cache: &mut ReadingCache, bus: &Arc<dy
 
 /// Readings that carry a device's own battery verdict: 0 OK, 1 low, 2 critical.
 const BATTERY_VERDICTS: &[&str] = &["battery_charge", "alarm_battery"];
-
-/// The device type a paired Goose on the Go phone registers under.
-const PHONE_DEVICE_TYPE: &str = "gotg";
 
 /// The household's paired phones; none on a lookup failure, which falls back to a broadcast.
 async fn paired_phones(registry: &Arc<dyn DeviceRegistry + Send + Sync>) -> Vec<String> {

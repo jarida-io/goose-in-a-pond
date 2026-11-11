@@ -3,7 +3,7 @@
 use pond_core::models::domain::audio_device::{
     AudioDevice, AudioDeviceStatus, AudioDirection, ChoiceBasis,
 };
-use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::device_registry::{device_type_label, DeviceRegistry};
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
 use rmcp::{
@@ -98,7 +98,7 @@ impl DeviceMcpServer {
                             format!(
                                 "- {} ({}): {}{can}",
                                 d.name,
-                                d.device_type,
+                                device_type_label(&d.device_type),
                                 if d.is_online { "online" } else { "offline" }
                             )
                         })
@@ -114,6 +114,7 @@ impl DeviceMcpServer {
                                 "name": d.name,
                                 "is_online": d.is_online,
                                 "device_type": d.device_type,
+                                "kind_label": device_type_label(&d.device_type),
                                 "room_id": d.room_id.clone().unwrap_or_default(),
                             })
                         })
@@ -699,5 +700,52 @@ mod tests {
         let result = server.list_skills(ctx).await.unwrap();
         let text = tool_text(&result);
         assert!(text.contains("morning-briefing: Summarizes the day each morning."));
+    }
+
+    struct PairedPhoneRegistry;
+    #[async_trait]
+    impl DeviceRegistry for PairedPhoneRegistry {
+        async fn register(&self, _: RegisterDeviceRequest) -> anyhow::Result<Device> {
+            unimplemented!()
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![Device {
+                id: "phone-1".into(),
+                name: "Emmanuel's A57".into(),
+                device_type: "gotg".into(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec!["speak".into()],
+                registered_at: "2026-01-01T00:00:00Z".into(),
+                last_seen: None,
+                is_online: true,
+                room_id: Some("living-room".into()),
+            }])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(None)
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_phone_is_listed_as_the_companion_phone_not_its_type_code() {
+        let server = DeviceMcpServer::new(
+            Arc::new(PairedPhoneRegistry),
+            Arc::new(StubSettings),
+            Arc::new(StubSkills),
+        );
+        let ctx = make_ctx(server.clone()).await;
+        let text = tool_text(&server.list_registered_devices(ctx).await.unwrap());
+        assert!(
+            text.contains("Emmanuel's A57 (phone running the Goose On The Go companion app)"),
+            "{text}"
+        );
+        assert!(!text.contains("(gotg)"), "{text}");
     }
 }

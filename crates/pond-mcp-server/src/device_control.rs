@@ -8,7 +8,7 @@ use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::device_control::{
     DeviceControlPort, DeviceDescription, DeviceState, DeviceStatePatch, ModeChange, ValueSpec,
 };
-use pond_core::user_data::ports::device_registry::{Device, DeviceRegistry};
+use pond_core::user_data::ports::device_registry::{device_type_label, Device, DeviceRegistry};
 use pond_core::user_data::ports::last_action::{LastActionRepository, LastDeviceAction};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -244,7 +244,7 @@ fn render_operation(requested: &str, became: Option<&str>) -> OperationNote {
 
 /// A device's description as prose, not JSON, so the next tool call is obvious from it.
 fn render_description(d: &DeviceDescription) -> String {
-    let mut out = format!("{} ({})", d.device_id, d.device_type);
+    let mut out = format!("{} ({})", d.device_id, device_type_label(&d.device_type));
 
     if d.capabilities.is_empty() {
         out.push_str("\n  Cannot be controlled — nothing to set on this device.");
