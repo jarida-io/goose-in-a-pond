@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Button } from '@heroui/react';
+import { Button, Switch } from '@heroui/react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/PondApiClient';
 import { ApiError, type NgrokTunnelConfig, type NgrokTunnelState } from '../api/types';
@@ -128,11 +128,20 @@ export function NgrokTunnel({ onStarted, onStopped }: { onStarted?: () => void; 
         </div>}
     </fieldset>
 
-    <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-      {on
-        ? <Button variant="secondary" isDisabled={busy} onPress={() => void setEnabled(false)}>{t('tunnel.stop')}</Button>
-        : <Button variant="primary" isDisabled={busy || !tunnel?.tokenSet} onPress={() => void setEnabled(true)}>{t('tunnel.start')}</Button>}
-      <span role="status" style={hint}>{statusText}</span>
+    {/* The same row the built-in network has, so remote access is switched the same way on either route. */}
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: 'var(--space-3) var(--space-4)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
+      <div style={{ display: 'grid', gap: 2 }}>
+        <span style={{ fontWeight: 'var(--weight-semibold)' }}>{t('remote.toggleLabel')}</span>
+        <span role="status" style={hint}>{tunnel?.tokenSet || on ? statusText : t('tunnel.needsToken')}</span>
+      </div>
+      <Switch
+        aria-label={t('remote.toggleLabel')}
+        isSelected={on}
+        isDisabled={busy || (!on && !tunnel?.tokenSet)}
+        onChange={(next: boolean) => void setEnabled(next)}
+      >
+        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
+      </Switch>
     </div>
     {!on && <p style={{ ...hint, margin: 0 }}>{t('tunnel.replacesTailnet')}</p>}
     {error && <p role="alert" style={{ margin: 0 }}>{error}</p>}
