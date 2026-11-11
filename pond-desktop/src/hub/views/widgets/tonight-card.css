@@ -1,91 +1,156 @@
-/* Tonight — routines left before midnight. Flat (plan §1): widget frames don't
-   spend InkBudget's raised offset, so no box-shadow here, 2px ink border like
-   every other card. Warning/amber for the "up next" row, not a new colour --
-   the routine-due alert (home-alerts.css) already uses that register for
-   exactly this kind of thing. */
+/* Tonight — the evening's routines on the sky they run under.
+
+   The gradient is the weather tile's own night sky (hub.css .wx--night), so the
+   two read as one material; the colour means "after dark" here as it does
+   there, not decoration. White text on its lightest stop, #312E81, is 12.3:1;
+   the 72% white for secondary text is 6.6:1 on the same stop.
+
+   A soft drop like the weather tile, not InkBudget's hard offset, which stays
+   with the composer and the first alert. */
 
 .tonight {
+  position: relative;
+  overflow: hidden;
   box-sizing: border-box;
   height: 100%;
-  border: 2px solid var(--color-text);
-  border-radius: 12px;
-  background: var(--color-surface);
-  padding: 14px;
+  border-radius: 18px;
+  padding: 16px;
+  color: #fff;
+  background: linear-gradient(150deg, #1E293B 0%, #0F172A 60%, #312E81 100%);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.4);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+}
+
+.tonight > :not(.tonight__stars) {
+  position: relative;
+}
+
+/* A few fixed points of light. Static: nothing on this card moves but the clock. */
+.tonight__stars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  background:
+    radial-gradient(1.5px 1.5px at 78% 18%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 88% 34%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 64% 12%, #fff 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 93% 8%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 56% 28%, #fff 50%, transparent 51%),
+    radial-gradient(1px 1px at 71% 42%, #fff 50%, transparent 51%);
 }
 
 .tonight__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font: 700 11px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--color-text-secondary);
+  color: rgba(255, 255, 255, 0.72);
 }
 
-.tonight__count {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.tonight__number {
-  font: 800 40px/1 Quicksand, sans-serif;
-  color: var(--color-text);
-}
-
-.tonight__count-label {
-  font: 600 13px Quicksand, sans-serif;
-  color: var(--color-text-secondary);
-}
+/* ── The next routine ─────────────────────────────────────── */
 
 .tonight__next {
-  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: var(--color-warning-soft);
 }
 
-.tonight__next-kind {
-  font: 700 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--color-text-secondary);
+.tonight__until {
+  font: 800 34px/1.05 Quicksand, sans-serif;
+  letter-spacing: -1px;
 }
 
 .tonight__next-name {
-  font: 600 14px Quicksand, sans-serif;
-  color: var(--color-text);
+  font: 700 15px Quicksand, sans-serif;
 }
 
 .tonight__next-time {
-  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
-  font-size: 12px;
-  color: var(--color-text-secondary);
+  font: 600 12px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.tonight__headline {
+  font: 800 26px/1.1 Quicksand, sans-serif;
+  letter-spacing: -0.5px;
+}
+
+.tonight__quiet {
+  font: 500 13px Quicksand, sans-serif;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+/* ── The evening, now to midnight ─────────────────────────── */
+
+/* Inset by half the largest mark, so a routine at a quarter to midnight sits on
+   the line rather than on the "Midnight" label's edge. */
+.tonight__line {
+  position: relative;
+  height: 36px;
+  margin: 0 7px;
+}
+
+.tonight__track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.15));
+}
+
+.tonight__mark {
+  position: absolute;
+  top: 5px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* The next one is the one the headline is about, so it is the larger light. */
+.tonight__mark[data-next] {
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.18), 0 0 14px rgba(255, 255, 255, 0.55);
+}
+
+.tonight__ends {
+  position: absolute;
+  left: -7px;
+  right: -7px;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  font: 600 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .tonight__more {
   margin: 0;
   font: 500 12px Quicksand, sans-serif;
-  color: var(--color-text-secondary);
+  color: rgba(255, 255, 255, 0.72);
 }
 
-.tonight__quiet {
-  font: 500 13px Quicksand, sans-serif;
-  color: var(--color-text-secondary);
-}
-
+/* Frosted, so it belongs to the sky rather than sitting on it as a paper button. */
 .tonight__link {
   margin-top: auto;
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 12px;
-  background: var(--color-surface);
-  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
   font: 600 13px Quicksand, sans-serif;
   display: inline-flex;
   align-items: center;
@@ -94,9 +159,14 @@
 }
 
 .tonight__link:hover {
-  background: var(--color-hover);
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .tonight__link:active {
-  background: var(--color-pressed);
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.tonight__link:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }

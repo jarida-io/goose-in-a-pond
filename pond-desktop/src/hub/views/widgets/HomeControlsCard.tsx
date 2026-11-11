@@ -5,7 +5,7 @@ import { powerStateOf } from "../../../sections/devicePower";
 import { timeSince } from "../../../sections/timeSince";
 import type { DeviceData } from "../../data/mockHome";
 import { HubIco } from "../../primitives/HubIco";
-import { HP_PATHS } from "../../primitives/icons";
+import { HP_PATHS, SUBTYPE_ICON } from "../../primitives/icons";
 import { useHomeData } from "../../state/hubDataStore";
 import "./home-controls-card.css";
 
@@ -44,6 +44,22 @@ async function readPower(id: string): Promise<PowerRead> {
     return typeof result?.content === "string" ? powerStateOf(result.content) : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** What the device is, as a glyph: kinds differ by shape, never by colour (DESIGN.md §3). */
+function glyphOf(device: DeviceData): string {
+  switch (device.kind) {
+    case "light":
+      return HP_PATHS.bulb;
+    case "plug":
+      return HP_PATHS.plug;
+    case "lock":
+      return HP_PATHS.shield;
+    case "thermo":
+      return HP_PATHS.thermo;
+    default:
+      return (device.subtype && SUBTYPE_ICON[device.subtype]) || HP_PATHS.sliders;
   }
 }
 
@@ -259,9 +275,24 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     );
   }
 
+  const connected = known.filter((d) => connectivityOf(d.id)?.is_online).length;
+  const everyone = connected === known.length;
+
   return (
-    <div className="hcc" data-hook="home-controls" data-state="ready">
+    <div className="hcc" data-hook="home-controls" data-state="ready" data-everyone={everyone}>
+      <span className="hcc__glow" aria-hidden="true" />
       {head(true)}
+
+      <p className="hcc__hero">
+        <span className="hcc__count">{connected}</span>
+        <span className="hcc__count-of">
+          {everyone
+            ? known.length === 1
+              ? "device connected"
+              : `of ${known.length} connected`
+            : `of ${known.length} connected, ${known.length - connected} not answering`}
+        </span>
+      </p>
 
       {visible.length > 0 && (
         <div className="hcc__grid">
@@ -271,6 +302,9 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
             if (!canPower(device.id)) {
               return (
                 <div className="hcc__tile hcc__static" key={device.id} data-online={String(online)}>
+                  <span className="hcc__glyph" aria-hidden="true">
+                    <HubIco d={glyphOf(device)} size={18} color="currentColor" sw={1.8} />
+                  </span>
                   <span className="hcc__name">{device.name}</span>
                   <span className="hcc__room">{device.room}</span>
                   {connectivity(device.id)}
@@ -296,6 +330,9 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
                   aria-label={`${device.name}, not reporting — open controls`}
                   onClick={() => openControls(device)}
                 >
+                  <span className="hcc__glyph" aria-hidden="true">
+                    <HubIco d={glyphOf(device)} size={18} color="currentColor" sw={1.8} />
+                  </span>
                   <span className="hcc__name">{device.name}</span>
                   <span className="hcc__value">Not reporting</span>
                   {connectivity(device.id)}
@@ -319,7 +356,10 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
                   void toggle(device.id, last !== "on");
                 }}
               >
-                <span className="hcc__name">{device.name}</span>
+                <span className="hcc__glyph" aria-hidden="true">
+                    <HubIco d={glyphOf(device)} size={18} color="currentColor" sw={1.8} />
+                  </span>
+                  <span className="hcc__name">{device.name}</span>
                 <span className="hcc__value">{last === "on" ? "On" : "Off"}</span>
                 {connectivity(device.id)}
               </button>

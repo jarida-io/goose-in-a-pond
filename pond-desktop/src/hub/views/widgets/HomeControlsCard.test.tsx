@@ -213,3 +213,28 @@ describe("the dashboard or the desktop app on Home", () => {
     expect(screen.queryByText("Online")).toBeNull();
   });
 });
+
+describe("the house at a glance", () => {
+  it("counts who is connected, and dims when someone is not", async () => {
+    listDevices.mockResolvedValue([
+      { id: "lamp", name: "Hall Lamp", capabilities: [], is_online: true },
+      { id: "sensor", name: "Back Door", capabilities: [], is_online: false },
+    ]);
+    const { container } = mount();
+
+    expect(await screen.findByText("of 2 connected, 1 not answering")).toBeTruthy();
+    expect(container.querySelector(".hcc")?.getAttribute("data-everyone")).toBe("false");
+    expect(container.querySelectorAll(".hcc__glyph")).toHaveLength(2);
+  });
+
+  it("says everyone is connected when they are", async () => {
+    listDevices.mockResolvedValue([
+      { id: "lamp", name: "Hall Lamp", capabilities: [], is_online: true },
+      { id: "sensor", name: "Back Door", capabilities: [], is_online: true },
+    ]);
+    const { container } = mount();
+
+    expect(await screen.findByText("of 2 connected")).toBeTruthy();
+    expect(container.querySelector(".hcc")?.getAttribute("data-everyone")).toBe("true");
+  });
+});
