@@ -1,0 +1,10 @@
+{
+  "id": "personal_context",
+  "name": "Your accounts in chat",
+  "summary": "When you ask, Goose searches what your connected mail, calendar and cameras have recorded.",
+  "icon": "folder-search",
+  "category": "custom",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_context_enabled" },
+  "extension": "giap-context"
+}

@@ -1,16 +1,19 @@
 //! `web_watch` for `giap-knowledge`: start, list or stop a watch on a page that lists things, such
-//! as a car site's results. The pond checks it in code on a schedule and tells the member when
-//! something they asked for appears or drops in price.
+//! as a car site's results, or watch one product's price. The pond checks it in code on a schedule
+//! and tells the member when something they asked for appears or drops in price.
 
 use std::sync::{Arc, OnceLock};
 
 use chrono::{Duration, Utc};
 use pond_core::mcp::services::page_addresses;
+use pond_core::shared::domain::cart::{money_words, Notify};
 use pond_core::shared::domain::web_watch::{
     WatchFilters, WatchItem, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
     MIN_INTERVAL_HOURS,
 };
+use pond_core::shared::ports::cart::ModelUse;
 use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
+use pond_core::shared::services::cart_watch::{self, AddRefusal, NewCartItem};
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use rmcp::{
     handler::server::wrapper::Parameters,
@@ -49,7 +52,7 @@ pub fn init_web_watch_deps(deps: WebWatchDeps) {
 // Undocumented fields and plain types on purpose: this tool is in every turn's tool block.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct WebWatchParams {
-    /// start, list or stop
+    /// start, list, stop, or watch_price for one product's page
     #[schemars(with = "String")]
     pub action: Option<String>,
     #[schemars(with = "String")]
@@ -89,6 +92,13 @@ impl WebWatchParams {
     fn action(&self) -> &str {
         match self.action.as_deref().map(str::trim) {
             Some(a) if a.eq_ignore_ascii_case("list") => "list",
+            Some(a)
+                if ["watch_price", "price", "cart"]
+                    .iter()
+                    .any(|s| a.eq_ignore_ascii_case(s)) =>
+            {
+                "watch_price"
+            }
             Some(a)
                 if ["stop", "delete", "remove", "cancel"]
                     .iter()
@@ -177,6 +187,7 @@ async fn run(meta: &Meta, params: WebWatchParams) -> String {
     let result = match params.action() {
         "list" => list(&deps, &owner).await,
         "stop" => stop(&deps, &owner, &params).await,
+        "watch_price" => watch_price(&owner, &params).await,
         _ => start(&deps, &owner, &params, session).await,
     };
     result.unwrap_or_else(|e| {
@@ -225,6 +236,10 @@ async fn start(
         Ok(page) => page,
         Err(failure) => return Ok(format_dead_end(what, &unreadable(&failure))),
     };
+    // One product's page lists nothing to compare, but its price can be watched.
+    if page.items.is_empty() && cart_watch::installed().is_some() {
+        return watch_price(owner, params).await;
+    }
     if page.items.is_empty() {
         return Ok(format_dead_end(
             what,
@@ -323,6 +338,87 @@ async fn stop(deps: &WebWatchDeps, owner: &str, params: &WebWatchParams) -> anyh
     Ok(format!("Stopped watching {}.", watch.title))
 }
 
+/// Watches the price of the one product a page sells, in the member's cart.
+async fn watch_price(owner: &str, params: &WebWatchParams) -> anyhow::Result<String> {
+    let what = "watching that price";
+    let Some(cart) = cart_watch::installed() else {
+        return Ok(format_dead_end(
+            what,
+            "Watching prices is not set up on this pond yet.",
+        ));
+    };
+    let asked = text(params.url.as_ref());
+    let Some(address) = page_addresses::global().resolve(&asked) else {
+        return Ok(format_dead_end(
+            what,
+            "I watch only a page whose address the person gave, or one read_web_page read.",
+        ));
+    };
+    let target = number(params.max_price.as_ref().or(params.extra.get("target")));
+    let new = NewCartItem {
+        url: address,
+        target,
+        collection: None,
+        every_hours: number(params.every_hours.as_ref()),
+        notify: Some(if target.is_some() {
+            Notify::Target
+        } else {
+            Notify::Drop
+        }),
+    };
+    let now = Utc::now();
+    let item = match cart.add(owner, new, now).await? {
+        Ok(item) => item,
+        Err(AddRefusal::AlreadyWatched(item)) => {
+            return Ok(format!(
+                "They already watch this price: {}.",
+                cart_watch::item_words(&item)
+            ))
+        }
+        Err(AddRefusal::TooMany) => {
+            return Ok(format_dead_end(
+                what,
+                "They already watch as many prices as one member may. Offer to remove one in \
+                 My Goose, under Cart.",
+            ))
+        }
+        Err(AddRefusal::NotAnAddress) => {
+            return Ok(format_dead_end(what, "That is not a web address."))
+        }
+    };
+    // A turn holds the model, so this first read uses the page's own data; a page without any is
+    // read again by the cart's own checks.
+    let checked = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        cart.check(item.clone(), ModelUse::Never, now),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(item);
+    tracing::info!(target: "giap::trace", kind = "cart_added_by_chat", priced = checked.price.is_some());
+    let when = match checked.target {
+        Some(t) => format!(
+            "when it is at or under {}",
+            money_words(t, checked.currency.as_deref())
+        ),
+        None => "when it gets cheaper".to_string(),
+    };
+    Ok(if checked.price.is_some() {
+        format!(
+            "Watching the price: {}. The person will be told on their phone {when}. It is in \
+             My Goose, under Cart.",
+            cart_watch::item_words(&checked)
+        )
+    } else {
+        format!(
+            "Watching {}. Its price could not be read yet; the pond tries again shortly and tells \
+             the person on their phone {when}. It is in My Goose, under Cart.",
+            checked.url
+        )
+    })
+}
+
 fn unreadable(failure: &FetchFailure) -> String {
     match failure {
         FetchFailure::Status(401 | 403) => "The site would not let the pond read the page.".into(),
@@ -380,6 +476,10 @@ mod tests {
         assert_eq!(
             params(serde_json::json!({"action": "watch"})).action(),
             "start"
+        );
+        assert_eq!(
+            params(serde_json::json!({"action": "watch_price"})).action(),
+            "watch_price"
         );
     }
 

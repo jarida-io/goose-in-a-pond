@@ -1,0 +1,10 @@
+{
+  "id": "sensors",
+  "name": "Sensors",
+  "summary": "Goose reads your home's sensors over time: temperature, humidity, air and power.",
+  "icon": "gauge",
+  "category": "home",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_sensor_enabled" },
+  "extension": "giap-sensors"
+}

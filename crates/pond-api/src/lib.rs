@@ -4,16 +4,22 @@ pub mod audio_devices;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub(crate) mod audio_normalize;
+mod cart;
+mod catalog;
 pub mod connections;
+mod connectors;
 pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
 mod home_location;
 pub mod host_guard;
+mod ideas;
 pub mod idempotency;
 pub(crate) mod image_normalize;
 pub mod insecure_dev;
+mod interests;
+mod me;
 pub(crate) mod member_notes;
 pub mod middleware;
 pub mod model_acquisition;
@@ -21,6 +27,7 @@ pub(crate) mod model_views;
 pub mod music_choice;
 pub mod musickit;
 pub mod network;
+mod news;
 pub mod oauth_callback;
 pub mod player;
 pub mod pond_admin;
@@ -37,6 +44,7 @@ pub mod spotify_focus;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 pub mod thought_filter;
+mod todos;
 pub mod tool_context;
 pub mod uber_accounts;
 pub mod voice_agent;
@@ -346,6 +354,9 @@ impl AppState {
         *self.last_user_activity.write().await = std::time::Instant::now();
         if let Some(cancel) = self.consolidation_cancel.read().await.as_ref() {
             cancel.cancel();
+        }
+        if let Some(room) = &self.room_voice {
+            room.note_user_activity();
         }
     }
 }

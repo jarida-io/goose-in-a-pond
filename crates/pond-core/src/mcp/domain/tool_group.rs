@@ -83,11 +83,13 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
     ToolGroup {
         extension: "giap-schedule",
         // The one-shot timer clause relies on `set_timer`; a 6-field cron cannot express it.
-        description: "Reminders, alarms, timers, recurring routines and scheduled tasks: set a \
-                      one-shot timer for a few minutes or hours from now, create a repeating \
-                      schedule, list or inspect what is scheduled, change or pause or delete one, \
-                      run one now, and review past runs. Anything about doing something later or \
-                      every day at a certain time.",
+        description: "Reminders, to-dos, alarms, timers, recurring routines and scheduled \
+                      tasks: remind me to do something at a time or when I get home, add \
+                      something to my to-do list, tick it off, set a one-shot timer for a few \
+                      minutes or hours from now, create a repeating schedule, list or inspect \
+                      what is scheduled, change or pause or delete one, run one now, and review \
+                      past runs. Anything about doing something later or every day at a certain \
+                      time.",
         core: false,
     },
     ToolGroup {

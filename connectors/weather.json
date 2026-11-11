@@ -1,0 +1,13 @@
+{
+  "id": "weather",
+  "name": "Weather",
+  "summary": "Today's weather and the days ahead, for home or anywhere you ask about.",
+  "icon": "cloud-sun",
+  "category": "weather",
+  "kind": "built_in",
+  "connect": {
+    "via": "setting", "setting": "ext_weather_enabled", "also": ["weather_enabled"],
+    "needs_location": true
+  },
+  "extension": "giap-weather"
+}

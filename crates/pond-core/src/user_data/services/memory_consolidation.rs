@@ -117,6 +117,7 @@ pub struct ApplyOutcome {
     pub pruned: usize,
     pub split: usize,
     pub recategorized: usize,
+    pub superseded: usize,
     /// Actions refused by a correction, kept-memory or owner guard.
     pub blocked: usize,
 }
@@ -124,7 +125,7 @@ pub struct ApplyOutcome {
 impl ApplyOutcome {
     /// Total number of actions that changed the store.
     pub fn changed(&self) -> usize {
-        self.merged + self.pruned + self.split + self.recategorized
+        self.merged + self.pruned + self.split + self.recategorized + self.superseded
     }
 }
 
@@ -146,6 +147,38 @@ fn sole_owner<'a>(
     owner
 }
 
+/// One memory a run changed or wrote, with its text, so the member can see what changed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChangedRow {
+    pub id: String,
+    pub text: String,
+}
+
+/// One change a run made: `archive`, `merge`, `split`, `supersede` or `recategorize`, the rows
+/// it took out of use (`rows`), what replaced them (`into`), and the model's reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AppliedChange {
+    pub action: &'static str,
+    pub reason: String,
+    pub rows: Vec<ChangedRow>,
+    pub into: Vec<ChangedRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment: Option<String>,
+}
+
+fn changed(memory: &MemoryFragment) -> ChangedRow {
+    ChangedRow {
+        id: memory.id.clone(),
+        text: memory.content.clone(),
+    }
+}
+
+/// What `consolidation_runs.details` records for a run: every change with its rows' text and
+/// reason, beside the trial the model held (`null` for a single-pass run).
+pub fn run_details(changes: &[AppliedChange], trial: Option<serde_json::Value>) -> String {
+    serde_json::json!({ "changes": changes, "trial": trial }).to_string()
+}
+
 /// Apply accepted consolidation actions. Pass the batch the model saw: an action naming a memory
 /// outside it, or a merge across owners, is refused, and what is written keeps its sources' owner.
 pub async fn apply_actions(
@@ -153,12 +186,28 @@ pub async fn apply_actions(
     batch: &[MemoryFragment],
     actions: impl IntoIterator<Item = ConsolidationAction>,
 ) -> Result<ApplyOutcome> {
+    Ok(apply_proposals(
+        repo,
+        batch,
+        actions.into_iter().map(|action| (action, String::new())),
+    )
+    .await?
+    .0)
+}
+
+/// [`apply_actions`], each action with the model's reason for it, returning every change made.
+pub async fn apply_proposals(
+    repo: &dyn MemoryRepository,
+    batch: &[MemoryFragment],
+    proposals: impl IntoIterator<Item = (ConsolidationAction, String)>,
+) -> Result<(ApplyOutcome, Vec<AppliedChange>)> {
     let memory_map: HashMap<&str, &MemoryFragment> =
         batch.iter().map(|m| (m.id.as_str(), m)).collect();
 
     let mut outcome = ApplyOutcome::default();
+    let mut changes: Vec<AppliedChange> = Vec::new();
 
-    for action in actions {
+    for (action, reason) in proposals {
         match action {
             ConsolidationAction::Merge {
                 source_ids,
@@ -166,6 +215,12 @@ pub async fn apply_actions(
                 segment,
                 importance,
             } => {
+                // A blank merge would store an empty memory and supersede every source onto it.
+                if merged_content.trim().is_empty() {
+                    tracing::warn!("[consolidation] blocked a merge with no merged text");
+                    outcome.blocked += 1;
+                    continue;
+                }
                 let Some(owner) = sole_owner(&source_ids, &memory_map) else {
                     tracing::warn!(
                         "[consolidation] blocked a merge across owners or outside the batch"
@@ -203,6 +258,7 @@ pub async fn apply_actions(
                     );
                 }
 
+                let merged_text = merged_content.clone();
                 let mut new_frag = MemoryFragment::from_extraction(
                     uuid::Uuid::new_v4().to_string(),
                     None,
@@ -228,7 +284,65 @@ pub async fn apply_actions(
                 let _ = repo
                     .log_event(MemoryEventKind::Consolidated, &new_id, None, None)
                     .await;
+                changes.push(AppliedChange {
+                    action: "merge",
+                    reason: reason.clone(),
+                    rows: source_ids
+                        .iter()
+                        .filter_map(|id| memory_map.get(id.as_str()))
+                        .map(|m| changed(m))
+                        .collect(),
+                    into: vec![ChangedRow {
+                        id: new_id.clone(),
+                        text: merged_text,
+                    }],
+                    segment: None,
+                });
                 outcome.merged += 1;
+            }
+            ConsolidationAction::Supersede { newer_id, older_id } => {
+                let pair = [newer_id.clone(), older_id.clone()];
+                let (Some(_), Some(older), Some(newer)) = (
+                    sole_owner(&pair, &memory_map),
+                    memory_map.get(older_id.as_str()),
+                    memory_map.get(newer_id.as_str()),
+                ) else {
+                    tracing::warn!(
+                        "[consolidation] blocked a supersede across owners or outside the batch"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                };
+                if newer_id == older_id
+                    || older.is_kept()
+                    || (older.is_correction() && !newer.is_correction())
+                {
+                    tracing::warn!(
+                        "[consolidation] blocked superseding a kept or correction memory {older_id}"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                }
+                let _ = repo.mark_superseded(&older_id, &newer_id).await;
+                let _ = repo
+                    .update_lifecycle(&older_id, MemoryLifecycle::Archived)
+                    .await;
+                let _ = repo
+                    .log_event(
+                        MemoryEventKind::Superseded,
+                        &older_id,
+                        None,
+                        Some(&newer_id),
+                    )
+                    .await;
+                changes.push(AppliedChange {
+                    action: "supersede",
+                    reason: reason.clone(),
+                    rows: vec![changed(older)],
+                    into: vec![changed(newer)],
+                    segment: None,
+                });
+                outcome.superseded += 1;
             }
             ConsolidationAction::Prune { id } => {
                 let Some(mem) = memory_map.get(id.as_str()) else {
@@ -244,10 +358,18 @@ pub async fn apply_actions(
                     continue;
                 }
 
+                // Archived, never deleted: the member can see it in the run's details and restore it.
                 let _ = repo.update_lifecycle(&id, MemoryLifecycle::Archived).await;
                 let _ = repo
                     .log_event(MemoryEventKind::Pruned, &id, None, None)
                     .await;
+                changes.push(AppliedChange {
+                    action: "archive",
+                    reason: reason.clone(),
+                    rows: vec![changed(mem)],
+                    into: Vec::new(),
+                    segment: None,
+                });
                 outcome.pruned += 1;
             }
             ConsolidationAction::Recategorize {
@@ -255,13 +377,20 @@ pub async fn apply_actions(
                 new_segment,
                 new_importance,
             } => {
-                if !memory_map.contains_key(id.as_str()) {
+                let Some(memory) = memory_map.get(id.as_str()) else {
                     tracing::warn!(
                         "[consolidation] blocked recategorising {id}, outside the batch"
                     );
                     outcome.blocked += 1;
                     continue;
-                }
+                };
+                changes.push(AppliedChange {
+                    action: "recategorize",
+                    reason: reason.clone(),
+                    rows: vec![changed(memory)],
+                    into: Vec::new(),
+                    segment: Some(format!("{new_segment:?}").to_lowercase()),
+                });
                 let _ = repo.update_segment(&id, new_segment, new_importance).await;
                 let _ = repo
                     .log_event(
@@ -291,6 +420,7 @@ pub async fn apply_actions(
 
                 let mut first_new_id = String::new();
                 let mut corrects_assigned = false;
+                let mut pieces: Vec<ChangedRow> = Vec::new();
 
                 for entry in &new_memories {
                     let entry_corrects = if !corrects_assigned
@@ -319,6 +449,10 @@ pub async fn apply_actions(
                     if first_new_id.is_empty() {
                         first_new_id = nid.clone();
                     }
+                    pieces.push(ChangedRow {
+                        id: nid.clone(),
+                        text: entry.content.clone(),
+                    });
                     repo.add(new_frag).await?;
                     let _ = repo
                         .log_event(MemoryEventKind::Consolidated, &nid, None, None)
@@ -334,13 +468,20 @@ pub async fn apply_actions(
                             Some(&first_new_id),
                         )
                         .await;
+                    changes.push(AppliedChange {
+                        action: "split",
+                        reason: reason.clone(),
+                        rows: vec![changed(source)],
+                        into: pieces,
+                        segment: None,
+                    });
                     outcome.split += 1;
                 }
             }
         }
     }
 
-    Ok(outcome)
+    Ok((outcome, changes))
 }
 
 /// Run single-pass consolidation once per owner's batch, recording an audit row for each; returns
@@ -370,7 +511,12 @@ pub async fn run_consolidation(
 
         let actions = consolidator.consolidate(&selection.batch).await?;
         let proposed = actions.len();
-        let outcome = apply_actions(repo, &selection.batch, actions).await?;
+        let (outcome, changes) = apply_proposals(
+            repo,
+            &selection.batch,
+            actions.into_iter().map(|a| (a, String::new())),
+        )
+        .await?;
 
         if outcome.changed() > 0 {
             tracing::info!(
@@ -390,7 +536,7 @@ pub async fn run_consolidation(
                 outcome.changed(),
                 proposed.saturating_sub(outcome.changed()),
                 started.elapsed().as_millis() as u64,
-                None,
+                Some(&run_details(&changes, None)),
             )
             .await;
 
@@ -573,6 +719,130 @@ mod tests {
         assert_eq!(outcome.pruned, 0);
         assert_eq!(outcome.blocked, 1);
         assert!(repo.lifecycle_updates().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_merge_with_no_text_stores_nothing_and_supersedes_nothing() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![
+            frag("k1", MemorySegment::Knowledge, 5),
+            frag("k2", MemorySegment::Knowledge, 6),
+        ];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Merge {
+                source_ids: vec!["k1".to_string(), "k2".to_string()],
+                merged_content: "  ".to_string(),
+                segment: MemorySegment::Knowledge,
+                importance: 0.5,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.merged, 0);
+        assert_eq!(outcome.blocked, 1);
+        assert!(repo
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_supersede_archives_the_older_and_keeps_the_newer() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![
+            frag("old", MemorySegment::Preference, 1),
+            frag("new", MemorySegment::Preference, 9),
+        ];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Supersede {
+                newer_id: "new".to_string(),
+                older_id: "old".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.superseded, 1);
+        assert_eq!(outcome.merged, 0, "no merged row is written");
+        assert_eq!(
+            repo.lifecycle_updates().await,
+            vec![("old".to_string(), MemoryLifecycle::Archived)]
+        );
+    }
+
+    /// The member reads what a run changed from `consolidation_runs.details`.
+    #[tokio::test]
+    async fn every_change_is_recorded_with_its_rows_text_and_reason() {
+        let repo = MockMemoryRepository::new();
+        let batch = vec![
+            frag("q1", MemorySegment::Knowledge, 1),
+            frag("d1", MemorySegment::Preference, 2),
+            frag("d2", MemorySegment::Preference, 3),
+        ];
+        let (outcome, changes) = apply_proposals(
+            &repo,
+            &batch,
+            vec![
+                (
+                    ConsolidationAction::Prune {
+                        id: "q1".to_string(),
+                    },
+                    "one question, not a trait".to_string(),
+                ),
+                (
+                    ConsolidationAction::Merge {
+                        source_ids: vec!["d1".to_string(), "d2".to_string()],
+                        merged_content: "likes teal".to_string(),
+                        segment: MemorySegment::Preference,
+                        importance: 0.6,
+                    },
+                    "the same colour twice".to_string(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.changed(), 2);
+        assert_eq!(changes[0].action, "archive");
+        assert_eq!(changes[0].reason, "one question, not a trait");
+        assert_eq!(changes[0].rows[0].text, batch[0].content);
+        assert_eq!(
+            repo.lifecycle_updates().await,
+            vec![("q1".to_string(), MemoryLifecycle::Archived)],
+            "archived, never deleted"
+        );
+        assert_eq!(changes[1].action, "merge");
+        assert_eq!(changes[1].rows.len(), 2);
+        assert_eq!(changes[1].into[0].text, "likes teal");
+
+        let details: serde_json::Value =
+            serde_json::from_str(&run_details(&changes, None)).unwrap();
+        assert_eq!(details["changes"][0]["rows"][0]["id"], "q1");
+        assert!(details["trial"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_correction_is_never_superseded_by_a_plain_memory() {
+        let repo = MockMemoryRepository::new();
+        let mut correction = frag("fix", MemorySegment::Correction, 1);
+        correction.corrects = Some("was wrong".to_string());
+        let batch = vec![correction, frag("plain", MemorySegment::Preference, 9)];
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![ConsolidationAction::Supersede {
+                newer_id: "plain".to_string(),
+                older_id: "fix".to_string(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.superseded, 0);
+        assert_eq!(outcome.blocked, 1);
     }
 
     #[tokio::test]

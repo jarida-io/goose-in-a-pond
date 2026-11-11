@@ -1,0 +1,11 @@
+{
+  "id": "memory",
+  "name": "Memory",
+  "summary": "Goose remembers what you tell it about yourself, and brings it up when it helps.",
+  "icon": "brain",
+  "category": "custom",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_memory_enabled" },
+  "feeds": ["ideas"],
+  "extension": "giap-memory"
+}

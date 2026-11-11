@@ -1637,7 +1637,7 @@ mod tests {
             lane.acquire(
                 LaneJob::LongTaskStep,
                 true,
-                Cadence::new(Duration::ZERO, Duration::from_secs(2), true),
+                Cadence::new(Duration::from_secs(60), Duration::from_secs(2), true),
                 false,
                 true,
                 LONG_IDLE
