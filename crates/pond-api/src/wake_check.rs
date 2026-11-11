@@ -49,18 +49,43 @@ fn unreadable(e: axum::extract::multipart::MultipartError) -> Refusal {
     )
 }
 
-async fn read_audio(mut multipart: Multipart) -> Result<Vec<u8>, Refusal> {
+/// What a phone sends: the segment, and whether it wants the whole phrase only.
+struct Check {
+    audio: Vec<u8>,
+    phrase_only: bool,
+}
+
+async fn read_check(mut multipart: Multipart) -> Result<Check, Refusal> {
+    let mut audio = None;
+    let mut phrase_only = false;
     while let Some(field) = multipart.next_field().await.map_err(unreadable)? {
-        if field.name() == Some("audio") {
-            return field.bytes().await.map(|b| b.to_vec()).map_err(unreadable);
+        match field.name() {
+            Some("audio") => {
+                audio = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map(|b| b.to_vec())
+                        .map_err(unreadable)?,
+                )
+            }
+            Some("phrase_only") => {
+                phrase_only = matches!(field.text().await.map_err(unreadable)?.trim(), "true" | "1")
+            }
+            _ => {}
         }
     }
-    Err(refuse(StatusCode::BAD_REQUEST, "missing_audio"))
+    let audio = audio.ok_or_else(|| refuse(StatusCode::BAD_REQUEST, "missing_audio"))?;
+    Ok(Check { audio, phrase_only })
 }
 
 /// `POST /api/v1/voice/wake/check`
 ///
-/// **Request**: multipart/form-data with an `audio` field, a WAV of at most 8 s.
+/// **Request**: multipart/form-data with an `audio` field, a WAV of at most 8 s, and an optional
+/// `phrase_only` field. With `phrase_only=true` the segment must open with the whole phrase or a
+/// calibrated mishearing of it, with only a hesitation before it
+/// (`pond_voice::text::heard_wake_phrase`): a phone confirming its own detector asks this, so "OK
+/// goose" or a plain "goose" never wakes it. Without it the room's own rule applies.
 ///
 /// **Response**: `{"heard": true, "phrase": "hey jarvis"}`. `heard` is false for speech that is
 /// not the phrase and for a segment with no words. 503 `speech_recognition_unavailable` on a Pond
@@ -70,7 +95,7 @@ pub(crate) async fn check_wake(
     multipart: Multipart,
 ) -> Result<Json<Value>, Refusal> {
     let started = Instant::now();
-    let audio = read_audio(multipart).await?;
+    let Check { audio, phrase_only } = read_check(multipart).await?;
     pond_voice::dsp::decode_wav(&audio)
         .map_err(|_| refuse(StatusCode::BAD_REQUEST, "audio_must_be_wav"))?;
     let Some(transcribe) = state.transcribe_audio.clone() else {
@@ -86,16 +111,25 @@ pub(crate) async fn check_wake(
         .map_err(failed)?;
 
     let settings = state.settings_repo.get().await.map_err(failed)?;
-    let triggers = pond_voice::text::wake_triggers(
-        &settings.voice_wake_word,
-        &settings.voice_wake_word_transcriptions,
-    );
-    let heard = pond_voice::text::heard_wake(&transcript, &triggers);
+    let heard = if phrase_only {
+        pond_voice::text::heard_wake_phrase(
+            &transcript,
+            &settings.voice_wake_word,
+            &settings.voice_wake_word_transcriptions,
+        )
+    } else {
+        let triggers = pond_voice::text::wake_triggers(
+            &settings.voice_wake_word,
+            &settings.voice_wake_word_transcriptions,
+        );
+        pond_voice::text::heard_wake(&transcript, &triggers)
+    };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     if heard {
         tracing::info!(
             kind = "wake_check",
             heard,
+            phrase_only,
             bytes,
             elapsed_ms,
             "a phone heard the wake phrase"
@@ -104,6 +138,7 @@ pub(crate) async fn check_wake(
         tracing::debug!(
             kind = "wake_check",
             heard,
+            phrase_only,
             bytes,
             elapsed_ms,
             "a phone's segment was not the wake phrase"

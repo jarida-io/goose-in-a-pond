@@ -1987,6 +1987,55 @@ mod tests {
     }
 
     #[test]
+    fn heard_wake_phrase_needs_the_whole_phrase_and_only_a_hesitation_before_it() {
+        let none: Vec<String> = Vec::new();
+        assert!(heard_wake_phrase(
+            "Hey Goose, turn on the lights.",
+            "hey goose",
+            &none
+        ));
+        assert!(heard_wake_phrase("um, hey goose", "hey goose", &none));
+        // The room accepts these; a phone confirming its own detector must not.
+        assert!(!heard_wake_phrase(
+            "OK goose, what time is it",
+            "hey goose",
+            &none
+        ));
+        assert!(!heard_wake_phrase("so, goose", "hey goose", &none));
+        assert!(!heard_wake_phrase("Goose!", "hey goose", &none));
+        // Rhymes and other phrases.
+        assert!(!heard_wake_phrase("hey hoose", "hey goose", &none));
+        assert!(!heard_wake_phrase(
+            "I saw a goose fly past",
+            "hey goose",
+            &none
+        ));
+        assert!(!heard_wake_phrase("", "hey goose", &none));
+        assert!(!heard_wake_phrase("hey goose", "", &none));
+        // A custom phrase, and run-up words before it.
+        assert!(heard_wake_phrase("Hey Jarvis, lights", "hey jarvis", &none));
+        assert!(!heard_wake_phrase("okay hey jarvis", "hey jarvis", &none));
+    }
+
+    #[test]
+    fn heard_wake_phrase_takes_a_calibrated_mishearing_of_the_whole_phrase() {
+        // Calibration learned "hey gus" for this household: the full phrase, as Whisper hears them.
+        let calibrated = vec!["Hey gus, good morning.".to_string()];
+        assert!(heard_wake_phrase(
+            "hey gus, the lights",
+            "hey goose",
+            &calibrated
+        ));
+        // Still the whole phrase only: "gus" alone is a shortening, as "goose" alone is.
+        assert!(!heard_wake_phrase(
+            "gus, the lights",
+            "hey goose",
+            &calibrated
+        ));
+        assert!(!heard_wake_phrase("hey gus, the lights", "hey goose", &[]));
+    }
+
+    #[test]
     fn heard_wake_matches_whole_words_in_any_punctuation() {
         let t = wake_triggers("goose", &[]);
         assert!(heard_wake("Goose, what's the time?", &t));
@@ -2588,6 +2637,39 @@ pub fn heard_wake(transcript: &str, triggers: &[String]) -> bool {
     triggers.iter().any(|t| {
         find_trigger_words(&heard, t)
             .map(|(start, _)| words[..start].iter().all(|w| RUN_UP_WORDS.contains(w)))
+            .unwrap_or(false)
+    })
+}
+
+/// Hesitations a strict check allows before the phrase. Unlike [`RUN_UP_WORDS`], never a word
+/// such as "ok" or "so": "OK goose" is a different phrase, and the one a phone most often mistakes.
+const HESITATION_WORDS: &[&str] = &["um", "uh", "er"];
+
+/// Whether `transcript` opens with the whole wake phrase, for a phone confirming what it heard.
+///
+/// Stricter than [`heard_wake`], which the room uses: the phrase must be said in full, or as a
+/// mishearing calibration learned for the full phrase (same number of words), so "goose" alone
+/// does not count for "hey goose"; and only a hesitation may come before it.
+pub fn heard_wake_phrase(transcript: &str, wake_word: &str, calibrated: &[String]) -> bool {
+    let phrase = normalize_transcript(wake_word);
+    let length = phrase.split_whitespace().count();
+    if length == 0 {
+        return false;
+    }
+    let mut triggers = vec![phrase.clone()];
+    for heard in calibrated
+        .iter()
+        .filter_map(|v| extract_wake_variant(v, &phrase, None))
+    {
+        if heard.split_whitespace().count() == length && !triggers.contains(&heard) {
+            triggers.push(heard);
+        }
+    }
+    let heard = normalize_transcript(transcript);
+    let words: Vec<&str> = heard.split_whitespace().collect();
+    triggers.iter().any(|t| {
+        find_trigger_words(&heard, t)
+            .map(|(start, _)| words[..start].iter().all(|w| HESITATION_WORDS.contains(w)))
             .unwrap_or(false)
     })
 }

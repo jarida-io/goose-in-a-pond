@@ -30,6 +30,7 @@ from five prints; `consistency` is the mean cosine between their prints.
 | `GET /api/v1/voice/prints` | The model's state, progress and credit, and a row per member: takes, needed, enrolled, consistency, updated_at |
 | `DELETE /api/v1/voice/prints/{profile_id}` | Forgets that member's voice; their face and wake calibration stay (204) |
 | `POST /api/v1/voice/prints/model` | Fetches the speaker model again (202) |
+| `GET /api/v1/voice/prints/model/file` | The speaker model's bytes, with `X-Model-Sha256`; `409 model_not_ready` until it is ready |
 | `DELETE /api/v1/faces/profile/{profile_id}` | Forgets the face only (`faces_deleted`) |
 | `DELETE /api/v1/users/{id}/biometrics` | Forgets everything: face, voice prints and wake takes (`voice_prints_deleted`) |
 | `POST /api/v1/voice/room/pause {seconds}` | The room hears no wake word and starts no turn for 1 to 300 s, then resumes on its own; never saved (204) |
@@ -80,8 +81,10 @@ phone. Voice prints cascade with their profile, and the pruning pass sweeps orph
 
 WeSpeaker's ResNet34-LM is fetched by default on serve's start to
 `models/voice-match/resnet34_LM.onnx`, pinned to one revision and checksum, and converted once to
-`.vmw` beside it; no load parses the ONNX after that. It must carry its credit, which
-`GET /voice/prints` returns:
+`.vmw` beside it; no load parses the ONNX after that. A phone that checks its own wake phrase
+against the voices taught on it fetches the same ONNX from `GET /voice/prints/model/file`, never
+from the internet, and pins the same checksum (`voice_match_model::SHA256`). It must carry its
+credit, which `GET /voice/prints` returns, and the phone shows it too:
 
 > Speaker embeddings by WeSpeaker ResNet34-LM (H. Wang et al., "WeSpeaker: A Research and
 > Production oriented Speaker Embedding Learning Toolkit", ICASSP 2023), trained on VoxCeleb

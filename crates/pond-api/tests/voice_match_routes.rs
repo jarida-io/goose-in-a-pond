@@ -302,6 +302,44 @@ async fn a_refused_take_says_why_by_name() {
 }
 
 #[tokio::test]
+async fn a_phone_fetches_the_ready_model_with_its_pinned_checksum() {
+    let pond = pond(false).await;
+    let (status, body) = call(&pond, Method::GET, "/api/v1/voice/prints/model/file", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "model_not_ready");
+
+    let path = pond
+        ._dir
+        .path()
+        .join(pond_core::models::domain::voice_match_model::LOCAL_PATH);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"speaker-model-bytes").unwrap();
+    *pond.engine.ready.lock().unwrap() = true;
+    let response = pond
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/voice/prints/model/file")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["x-model-sha256"],
+        pond_core::models::domain::voice_match_model::SHA256
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"speaker-model-bytes");
+}
+
+#[tokio::test]
 async fn the_model_is_fetched_again_on_request() {
     let pond = pond(false).await;
     let (status, body) = call(

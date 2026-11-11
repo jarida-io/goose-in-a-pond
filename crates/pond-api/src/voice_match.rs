@@ -8,8 +8,11 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use pond_core::models::domain::voice_match_model;
 use pond_core::models::domain::wake_detector::{household_wake_detector, WakeDetector};
-use pond_core::models::ports::voice_match::{TakeError, VoiceMatchEngine, VOICE_MATCH_CREDIT};
+use pond_core::models::ports::voice_match::{
+    TakeError, VoiceMatchEngine, VoiceModelState, VOICE_MATCH_CREDIT,
+};
 use pond_core::user_data::domain::voice_print::{VoicePrint, WakeTake};
 use pond_core::user_data::ports::voice_print::VoicePrintRepository;
 use pond_core::user_data::services::voice_match::{
@@ -357,6 +360,56 @@ pub(crate) async fn fetch_model(State(state): State<Arc<AppState>>) -> Response 
                 .into_response()
         }
         Err(refusal) => refusal.into_response(),
+    }
+}
+
+/// `GET /api/v1/voice/prints/model/file`: the speaker model itself, for a phone that checks its
+/// own wake phrase against the voices taught on it.
+///
+/// The bytes the Pond downloaded and verified, so a phone never fetches from the internet. The
+/// phone pins the same checksum (`voice_match_model::SHA256`, also sent as `X-Model-Sha256`) and
+/// refuses anything else. 409 `model_not_ready` while the Pond is still fetching it.
+pub(crate) async fn model_file(State(state): State<Arc<AppState>>) -> Response {
+    let engine = match engine(&state) {
+        Ok(engine) => engine,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let status = engine.model_status();
+    if status.state != VoiceModelState::Ready {
+        return refuse(
+            StatusCode::CONFLICT,
+            json!({"error": "model_not_ready", "state": status.state}),
+        )
+        .into_response();
+    }
+    let Some(data_dir) = state.data_dir.as_ref() else {
+        return failed("the Pond has no data directory").into_response();
+    };
+    let path = data_dir.join(voice_match_model::LOCAL_PATH);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            tracing::info!(
+                kind = "voice_match_model",
+                bytes = bytes.len(),
+                "voice match: a phone fetched the speaker model"
+            );
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+                    (
+                        axum::http::HeaderName::from_static("x-model-sha256"),
+                        voice_match_model::SHA256,
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!(kind = "voice_match_model", error = %e, "voice match: the ready model could not be read");
+            failed(e).into_response()
+        }
     }
 }
 

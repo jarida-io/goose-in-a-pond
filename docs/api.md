@@ -984,7 +984,7 @@ Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 | `POST /voice/tts/prewarm`, `/voice/tts/unload` | | `{status}`; `503` without an engine |
 | `POST /voice/calibrate` | multipart `audio` (WAV), optional `prompt` | `{transcript, normalized, heard, new_variant, all_variants, sample_count, target_count, complete}` |
 | `DELETE /voice/calibrate` | optional `?variant=` (one variant as heard, e.g. the one a take just added) | `{cleared, message}`; with `variant`, `{removed, all_variants}` |
-| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
+| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s), optional `phrase_only` (`true`) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
 | `POST /transcribe` | multipart `audio` | `{text}` |
 | `GET /audio/devices` | | `AudioDeviceStatus {input, output, updated_at_ms, source, pid, raised?, sound_server?}` |
 | `POST /audio/devices/test` | empty, or `{chime: bool}` | `AudioDeviceStatus` after a re-test |
@@ -1005,6 +1005,12 @@ learned pronunciations as they are at that moment, so a change on the Pond count
 segment; `phrase` lets the phone notice a return to "hey goose". It needs the in-process
 whisper-rs model. The recording and the transcript are dropped, never logged and never returned:
 a heard wake logs `kind=wake_check heard=true` at info, a miss only at debug.
+
+A phone also asks here to confirm its own "hey goose" detector, with `phrase_only=true`. Then the
+segment must open with the whole phrase, or a mishearing of the whole phrase that calibration
+learned, with only a hesitation ("um", "uh", "er") before it (`pond_voice::text::heard_wake_phrase`).
+The room's rule is looser on purpose: it takes a plain "goose" after a run-up word, so "OK goose"
+counts there and not here. Without the field the room's rule applies.
 
 ## Models
 
