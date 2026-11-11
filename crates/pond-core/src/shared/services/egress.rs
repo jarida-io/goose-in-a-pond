@@ -270,11 +270,13 @@ pub enum EgressPurpose {
     Push,
     /// A POST form a member confirmed on their phone, and the page it sits on.
     WebForms,
+    /// A member's news: its searches and the pages it reads.
+    News,
 }
 
 impl EgressPurpose {
     /// Every purpose, for tests that pin the wire names.
-    pub const ALL: [EgressPurpose; 13] = [
+    pub const ALL: [EgressPurpose; 14] = [
         Self::Assistant,
         Self::SignIn,
         Self::Music,
@@ -288,6 +290,7 @@ impl EgressPurpose {
         Self::Extensions,
         Self::Push,
         Self::WebForms,
+        Self::News,
     ];
 
     /// The name the event log records in the `tool` attribute.
@@ -306,6 +309,7 @@ impl EgressPurpose {
             Self::Extensions => "giap-extensions",
             Self::Push => "giap-push",
             Self::WebForms => "giap-web-forms",
+            Self::News => "giap-news",
         }
     }
 }
@@ -854,6 +858,7 @@ mod tests {
                 "giap-extensions",
                 "giap-push",
                 "giap-web-forms",
+                "giap-news",
             ]
         );
         let distinct: std::collections::BTreeSet<&str> = names.iter().copied().collect();

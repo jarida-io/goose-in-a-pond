@@ -1,0 +1,36 @@
+{
+  "id": "calendar",
+  "name": "Calendar",
+  "summary": "Goose reads your calendar, so it knows what is coming up and can remind you before it starts.",
+  "icon": "calendar",
+  "category": "calendar",
+  "kind": "account",
+  "connect": { "via": "context_source", "source_kind": "calendar" },
+  "setup": {
+    "fields": [
+      {
+        "key": "provider", "label": "Calendar service", "kind": "select", "required": true,
+        "options": [
+          { "value": "icloud", "label": "iCloud" },
+          { "value": "fastmail", "label": "Fastmail" },
+          { "value": "nextcloud", "label": "Nextcloud" },
+          { "value": "custom", "label": "Another calendar server" }
+        ]
+      },
+      { "key": "username", "label": "User name", "kind": "text", "required": true },
+      {
+        "key": "password", "label": "App password", "kind": "secret", "required": true,
+        "help": "Make an app password in your calendar service's security settings. Your usual password will not work."
+      },
+      {
+        "key": "base_url", "label": "Calendar address", "kind": "url", "required": false,
+        "help": "Only for Nextcloud or another server: the address you sign in at."
+      }
+    ]
+  },
+  "events": [
+    { "id": "event_added", "label": "An event is added" },
+    { "id": "event_starting", "label": "An event is about to start" }
+  ],
+  "feeds": ["todos", "ideas"]
+}

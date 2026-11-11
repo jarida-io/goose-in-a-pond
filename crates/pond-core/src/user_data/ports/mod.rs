@@ -11,6 +11,8 @@ pub mod draft;
 pub mod face_detector;
 pub mod face_embedding_extractor;
 pub mod face_recognition;
+pub mod ideas;
+pub mod interests;
 pub mod lane_control;
 pub mod lane_run_log;
 pub mod last_action;

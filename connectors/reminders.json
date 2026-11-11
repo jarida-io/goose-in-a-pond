@@ -1,0 +1,11 @@
+{
+  "id": "reminders",
+  "name": "Reminders and routines",
+  "summary": "Timers, alarms and things to do every day at a set time, set by asking.",
+  "icon": "alarm-clock",
+  "category": "calendar",
+  "kind": "built_in",
+  "connect": { "via": "setting", "setting": "ext_schedule_enabled" },
+  "feeds": ["todos"],
+  "extension": "giap-schedule"
+}

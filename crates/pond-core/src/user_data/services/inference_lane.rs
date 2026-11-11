@@ -31,6 +31,14 @@ pub enum LaneJob {
     /// Compose questions out of the household's own memories.
     /// Declared after `MemoryExtraction` because it reads what extraction writes.
     SuggestionGeneration,
+    /// Write a member's topic map and news stories from the pages it finds.
+    NewsTiles,
+    /// Write a member's daily digest from the day's stories, ready by their digest time.
+    NewsDigest,
+    /// Rewrite each member's portrait from their interests, memories and recent conversations.
+    Portrait,
+    /// Research an idea for a member from what they are into or working on.
+    Ideas,
 }
 
 impl LaneJob {
@@ -44,6 +52,10 @@ impl LaneJob {
         LaneJob::SummaryRefresh,
         LaneJob::MemoryExtraction,
         LaneJob::SuggestionGeneration,
+        LaneJob::NewsTiles,
+        LaneJob::NewsDigest,
+        LaneJob::Portrait,
+        LaneJob::Ideas,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -57,6 +69,10 @@ impl LaneJob {
             LaneJob::SummaryRefresh => "summary_refresh",
             LaneJob::MemoryExtraction => "memory_extraction",
             LaneJob::SuggestionGeneration => "suggestion_generation",
+            LaneJob::NewsTiles => "news_tiles",
+            LaneJob::NewsDigest => "news_digest",
+            LaneJob::Portrait => "portrait",
+            LaneJob::Ideas => "ideas",
         }
     }
 
@@ -71,6 +87,10 @@ impl LaneJob {
             LaneJob::SummaryRefresh => "Refresh conversation summaries",
             LaneJob::MemoryExtraction => "Read conversations for memories",
             LaneJob::SuggestionGeneration => "Think of things to suggest",
+            LaneJob::NewsTiles => "Write members' news",
+            LaneJob::NewsDigest => "Write members' daily digests",
+            LaneJob::Portrait => "Keep a portrait of each member",
+            LaneJob::Ideas => "Research ideas for members",
         }
     }
 
@@ -405,6 +425,10 @@ mod tests {
             LaneJob::SummaryRefresh,
             LaneJob::MemoryExtraction,
             LaneJob::SuggestionGeneration,
+            LaneJob::NewsTiles,
+            LaneJob::NewsDigest,
+            LaneJob::Portrait,
+            LaneJob::Ideas,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),
@@ -412,7 +436,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 8, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 12, "a job was added or removed");
     }
 
     #[test]

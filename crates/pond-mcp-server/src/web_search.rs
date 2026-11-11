@@ -314,6 +314,25 @@ news, opening hours, prices, products, businesses, recent results.")]
     }
 }
 
+/// Brave's results for background work that writes from them in its own words and keeps none
+/// of them: the same key, client, town and key-status record as `search_web`.
+pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {
+    let key = brave_key().await.ok_or_else(key_removed)?;
+    let brave =
+        brave_client().ok_or_else(|| search_failed("the search client could not be built"))?;
+    let town = local_town_for_search().await;
+    WebSearch {
+        brave_base: BRAVE_API_BASE,
+        brave,
+        pages: page_client(),
+        board: web_search_status::global(),
+        town: town.as_deref(),
+        context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+    }
+    .search(&key, question)
+    .await
+}
+
 /// The town this search may send: only with local places on, read at each call so the switch
 /// takes effect on the next search.
 async fn local_town_for_search() -> Option<String> {
@@ -330,7 +349,7 @@ async fn local_town_for_search() -> Option<String> {
     }
 }
 
-async fn brave_key() -> Option<String> {
+pub(crate) async fn brave_key() -> Option<String> {
     crate::secrets::secret(BRAVE_SEARCH_API_KEY)
         .await
         .map(|k| k.trim().to_string())
@@ -339,7 +358,7 @@ async fn brave_key() -> Option<String> {
 
 /// One client for Brave's host. It follows no redirect: reqwest strips only its standard credential
 /// headers on one, so the key's header would go wherever it points. `None` if TLS failed.
-fn brave_client() -> Option<&'static reqwest::Client> {
+pub(crate) fn brave_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -1802,7 +1821,7 @@ fn without_urls(text: &str) -> String {
 
 /// Tags out, the common entities decoded, whitespace collapsed: Brave's fields are plain text
 /// with decorations off, and this keeps them so if one slips through.
-fn plain_text(text: &str) -> String {
+pub(crate) fn plain_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_tag = false;
     for c in text.chars() {
