@@ -101,15 +101,17 @@ impl ReminderRepository for MockReminderRepository {
         }
     }
 
-    async fn offered_to(&self, profile_id: &str) -> Result<Vec<CapturedReminder>> {
+    async fn open_to(&self, profile_id: &str) -> Result<Vec<CapturedReminder>> {
         let mut offered: Vec<CapturedReminder> = self
             .rows
             .lock()
             .unwrap()
             .iter()
             .filter(|row| {
-                row.disposition == ReminderDisposition::Offered
-                    && row.profile_id.as_deref() == Some(profile_id)
+                matches!(
+                    row.disposition,
+                    ReminderDisposition::Offered | ReminderDisposition::Pending
+                ) && row.profile_id.as_deref() == Some(profile_id)
             })
             .cloned()
             .collect();
@@ -127,7 +129,10 @@ impl ReminderRepository for MockReminderRepository {
         let mut rows = self.rows.lock().unwrap();
         match rows.iter_mut().find(|row| {
             row.id == id
-                && row.disposition == ReminderDisposition::Offered
+                && matches!(
+                    row.disposition,
+                    ReminderDisposition::Offered | ReminderDisposition::Pending
+                )
                 && row.profile_id.as_deref() == Some(profile_id)
         }) {
             Some(row) => {
