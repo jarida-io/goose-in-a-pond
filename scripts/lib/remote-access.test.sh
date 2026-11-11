@@ -124,6 +124,25 @@ test_neither_is_a_note_not_a_warning() {
   contains "$(logged)" "note: remote access is not set up — this Pond is reachable on the LAN only"
 }
 
+test_an_ngrok_tunnel_turned_on_is_not_lan_only() {
+  host none "$NO_ADDR" absent
+  mkdir -p "$W/data/remote-tunnel"
+  printf '{"enabled":true,"endpoint":"tcp"}' > "$W/data/remote-tunnel/ngrok.json"
+  remote_doctor "$W/data" 8080 200
+  eq "$REMOTE_DOCTOR_WARN/$REMOTE_DOCTOR_UNK" "0/0" || return 1
+  contains "$(logged)" "ngrok tunnel is turned on" || return 1
+  lacks "$(logged)" "LAN only"
+}
+
+test_an_ngrok_tunnel_turned_off_says_nothing_of_it() {
+  host none "$NO_ADDR" absent
+  mkdir -p "$W/data/remote-tunnel"
+  printf '{"enabled":false,"endpoint":"tcp"}' > "$W/data/remote-tunnel/ngrok.json"
+  remote_doctor "$W/data" 8080 200
+  lacks "$(logged)" "ngrok" || return 1
+  contains "$(logged)" "LAN only"
+}
+
 test_the_range_matches_the_servers() {
   restore_path
   # shellcheck source=remote-access.sh
