@@ -11,7 +11,7 @@
  */
 import { useEffect, useId, useRef } from "react";
 import {
-  BACK_SHEEN, BANDS, BELLY, BODY, CHEST_SHEEN, GLINTS, HEAD_DETAIL, PRIMARIES, SCALLOPS, TAIL, WAKE, WAVES, WING,
+  BACK_SHEEN, BANDS, BELLY, BODY, CHEST_SHEEN, GLINTS, HEAD_DETAIL, PRIMARIES, RIPPLE, SCALLOPS, TAIL, WAKE, WAVES, WING,
   WING_LINES, easeListen, neckFrame, neckPose, partsFrame, restingParts, wavePath,
   type GooseMood, type PartsFrame,
 } from "./gooseMotion";
@@ -145,7 +145,7 @@ function Pond({ id }: { id: string }) {
       {WAKE.map((d) => (
         <path key={d} data-part="wake" d={d} fill="none" style={{ stroke: C.accent }} strokeWidth="1.3" strokeLinecap="round" strokeDasharray="14 60" opacity="0" />
       ))}
-      {[0, 1].map((i) => <ellipse key={i} data-part="ripple" cx="88" cy="98" rx="30" ry="5.5" fill="none" style={{ stroke: C.accent }} strokeWidth="1.3" opacity="0" />)}
+      {[0, 1].map((i) => <ellipse key={i} data-part="ripple" cx={RIPPLE[0]} cy={RIPPLE[1]} rx={RIPPLE[2]} ry={RIPPLE[3]} fill="none" style={{ stroke: C.accent }} strokeWidth="1.3" opacity="0" />)}
     </>
   );
 }

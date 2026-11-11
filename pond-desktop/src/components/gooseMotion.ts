@@ -74,6 +74,13 @@ export const HEAD_OUTLINE: readonly Point[] = [
 /** The neck's spine at rest: from inside the chest, up the front of the body, to the throat. */
 export const SPINE: readonly Point[] = [[60, 80], [58.5, 62], [53, 44], [57, 29]];
 
+/**
+ * A ripple ring at rest: [cx, cy, rx, ry]. It hangs from the waterline (y = 98): its top edge sits on
+ * the line, and it is scaled about (cx, 98) as it spreads, so the ring always lies on the water and never
+ * rises beside the body as one centred on the line did.
+ */
+export const RIPPLE = [88, 98 + 5.5, 30, 5.5] as const;
+
 /** Waves under the bird, nearest the waterline first: [y, amplitude, wavelength, width, opacity, seconds, reverse]. */
 export const WAVES = [
   [101.4, 0.8, 18, 0.6, 0.42, 6, false],
@@ -197,7 +204,10 @@ export interface NeckPose {
   spine: Point[];
   /** Radians, added to the turn the neck's curve gives the head. */
   tilt: number;
-  /** 0 to 1: how far the head has turned toward the viewer, which foreshortens it. */
+  /**
+   * 0 to 1: how far the head has turned toward the viewer. The face ahead of the throat (eye, beak)
+   * foreshortens and the head rounds a little; the back of the head stays the neck's width.
+   */
   glance: number;
   /** 1 open, near 0 closed. */
   lid: number;
@@ -254,15 +264,23 @@ export function neckFrame(pose: NeckPose): NeckFrame {
   const end = tangent(P, 1), J = P[3];
   // The neck's curve turns the head 60% of the way; the rest is the bird keeping its head level.
   const heading = Math.PI + 0.6 * (Math.atan2(end[1], end[0]) - REST_HEADING) + tilt;
+  // A turn toward the viewer is about the head's own upright axis, which passes through the throat:
+  // only what lies ahead of it comes toward you and shortens, so the back of the head never pinches
+  // where it meets the neck, and the head fills out a touch as its round front shows.
   const squeeze = 1 - 0.26 * glance;
-  const fx = Math.cos(heading) * squeeze, fy = Math.sin(heading) * squeeze;
-  const ux = -Math.sin(heading), uy = Math.cos(heading);
-  const place = (q: Point): Point => [J[0] + q[0] * fx + q[1] * ux, J[1] + q[0] * fy + q[1] * uy];
+  const round = 1 + 0.06 * glance;
+  const cx = Math.cos(heading), cy = Math.sin(heading);
+  const ux = -Math.sin(heading) * round, uy = Math.cos(heading) * round;
+  const place = (q: Point): Point => {
+    const x = q[0] > 0 ? q[0] * squeeze : q[0];
+    return [J[0] + x * cx + q[1] * ux, J[1] + x * cy + q[1] * uy];
+  };
   return {
     neck: smoothPath(left.concat(right.reverse()), true),
     highlight: smoothPath(shine, false),
     head: smoothPath(HEAD_OUTLINE.map(place), true),
-    headMatrix: [fx, fy, ux, uy, J[0], J[1]],
+    // The face's details (eye, beak, gloss) sit ahead of the throat, so they take the full squeeze.
+    headMatrix: [cx * squeeze, cy * squeeze, ux, uy, J[0], J[1]],
     ringCentre: place([3, 2]),
   };
 }

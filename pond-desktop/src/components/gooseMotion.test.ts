@@ -3,7 +3,7 @@
 // reduced motion each look the way the component promises.
 import { describe, expect, it } from "vitest";
 import {
-  BANDS, BAND_PERIOD, GLINTS, WAVES, neckFrame, neckPose, neckWidth, partsFrame, restingParts, smoothPath, swell,
+  BANDS, BAND_PERIOD, GLINTS, HEAD_OUTLINE, RIPPLE, WAVES, neckFrame, neckPose, neckWidth, partsFrame, restingParts, smoothPath, swell,
   type GooseMood,
 } from "./gooseMotion";
 
@@ -32,6 +32,28 @@ describe("the neck and head", () => {
       expect(e).toBeCloseTo(pose.spine[3][0], 6);
       expect(f).toBeCloseTo(pose.spine[3][1], 6);
     }
+  });
+
+  it("turns its face toward you without pinching the back of its head where it meets the neck", () => {
+    const pose = neckPose(0, "idle", 0);
+    const side = neckFrame({ ...pose, glance: 0 });
+    const turned = neckFrame({ ...pose, glance: 1 });
+    const points = (d: string) => {
+      const n = numbers(d);
+      return [[n[0], n[1]], ...Array.from({ length: (n.length - 2) / 6 }, (_, i) => [n[2 + 6 * i + 4], n[2 + 6 * i + 5]])];
+    };
+    const [a, b] = [points(side.head), points(turned.head)];
+    const width = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+    HEAD_OUTLINE.forEach(([x], i) => {
+      if (x > 0) return;
+      // Behind the throat nothing shortens: the back of the head keeps its place, give or take the
+      // head rounding a little as it turns.
+      expect(width(a[i], b[i])).toBeLessThan(0.8);
+    });
+    // The beak's tip comes toward you, so it ends nearer the throat.
+    const tip = HEAD_OUTLINE.findIndex(([x]) => x === Math.max(...HEAD_OUTLINE.map(([v]) => v)));
+    const throat = [side.headMatrix[4], side.headMatrix[5]];
+    expect(width(b[tip], throat)).toBeLessThan(width(a[tip], throat) * 0.85);
   });
 
   it("is thickest at the chest, slimmest up the throat, and swells into the head", () => {
@@ -80,6 +102,17 @@ describe("the pond", () => {
     expect(partsFrame(3, "working", 0).wake.every((w) => w.opacity > 0)).toBe(true);
     expect(partsFrame(3, "idle", 0).rings.every((r) => r.opacity === 0)).toBe(true);
     expect(partsFrame(3, "listening", 1).rings.some((r) => r.opacity > 0)).toBe(true);
+  });
+
+  it("hangs each ripple from the waterline, so its ring lies on the water however far it spreads", () => {
+    const [, cy, , ry] = RIPPLE;
+    expect(cy - ry).toBe(98);
+    for (let t = 0; t < 20; t += 0.25) {
+      for (const r of partsFrame(t, "idle", 0).ripples) {
+        // Scaled about the waterline, the top edge stays on it.
+        expect(98 + (cy - ry - 98) * r.scale).toBeCloseTo(98, 9);
+      }
+    }
   });
 
   it("goes still at rest: no ripples, the glints showing", () => {
