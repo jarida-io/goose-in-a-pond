@@ -21,9 +21,13 @@ vi.mock("../api/PondApiClient", () => ({
 
 // ── Mock AppContext (Schedules uses useAppState) ───────────────────────────────
 
+const app = vi.hoisted(() => ({
+  state: { serverOnline: true, sessionToken: "test-token" } as Record<string, unknown>,
+  dispatch: (() => undefined) as (action: unknown) => void,
+}));
 vi.mock("../state/useAppContext", () => ({
-  useAppState: () => ({ serverOnline: true, sessionToken: "test-token" }),
-  useAppDispatch: () => vi.fn(),
+  useAppState: () => app.state,
+  useAppDispatch: () => app.dispatch,
 }));
 
 // ── Mock useConfirm (used in handleDelete) ────────────────────────────────────
@@ -59,6 +63,8 @@ function renderSchedules() {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  app.state = { serverOnline: true, sessionToken: "test-token" };
+  app.dispatch = vi.fn();
 });
 
 afterEach(() => {
@@ -398,5 +404,49 @@ describe("Schedules run history", () => {
     expect(preview.querySelectorAll("li")).toHaveLength(2);
     expect(preview.querySelector(".md__h")?.textContent).toBe("Today");
     expect(preview.textContent).not.toMatch(/\*\*|###/);
+  });
+
+  it("keeps a run that has only started as running: the Pond's feed says how it ended", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([activeSchedule]);
+    vi.mocked(api.runScheduleNow).mockResolvedValue(undefined);
+    renderSchedules();
+    fireEvent.click(await screen.findByText("Run now"));
+    await waitFor(() => expect(api.runScheduleNow).toHaveBeenCalledWith("sched-morning"));
+    const statuses = vi.mocked(app.dispatch).mock.calls
+      .map(([a]) => a as { type: string; payload?: { status?: string } })
+      .filter((a) => a.type === "SCHEDULE_RESULT")
+      .map((a) => a.payload?.status);
+    expect(statuses).toEqual(["running"]);
+  });
+
+  it("keeps the cards on screen while a finished run refreshes the list", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValueOnce([activeSchedule]).mockReturnValueOnce(new Promise(() => {}));
+    const view = renderSchedules();
+    await screen.findByText("Morning Briefing");
+    app.state = {
+      ...app.state,
+      latestScheduleResult: { id: "r1", schedule_id: "sched-morning", schedule_label: "Morning Briefing", status: "completed", timestamp: 1 },
+    };
+    view.rerender(<Schedules />);
+    await waitFor(() => expect(api.listSchedules).toHaveBeenCalledTimes(2));
+    // The second read never answers here: the card must still be showing, not placeholders.
+    expect(screen.getByText("Morning Briefing")).toBeTruthy();
+  });
+
+  it("says the history is loading, then says why it failed, and tries again", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([activeSchedule]);
+    let fail!: (e: Error) => void;
+    vi.mocked(api.getScheduleRuns)
+      .mockReturnValueOnce(new Promise((_, reject) => { fail = reject; }))
+      .mockResolvedValueOnce([]);
+    renderSchedules();
+    fireEvent.click(await screen.findByText("History"));
+    expect(await screen.findByText("Loading runs…")).toBeTruthy();
+    expect(screen.queryByText("No runs yet.")).toBeNull();
+    fail(new Error("timed out"));
+    expect((await screen.findByRole("alert")).textContent).toContain("timed out");
+    fireEvent.click(screen.getByText("Try again"));
+    expect(await screen.findByText("No runs yet.")).toBeTruthy();
+    expect(api.getScheduleRuns).toHaveBeenCalledTimes(2);
   });
 });
