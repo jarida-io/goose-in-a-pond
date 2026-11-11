@@ -220,6 +220,7 @@ impl ServeWhisper {
 
     /// Let go of each model nobody holds and nobody has used for [`IDLE`].
     fn release_idle(&self) {
+        let mut released = false;
         for slot in [&self.full, &self.wake] {
             let mut held = lock(slot);
             let idle = held
@@ -228,6 +229,7 @@ impl ServeWhisper {
                 .map(|h| h.which);
             if let Some(which) = idle {
                 *held = None;
+                released = true;
                 tracing::info!(
                     target: "giap::trace",
                     kind = "whisper_released",
@@ -235,6 +237,35 @@ impl ServeWhisper {
                     "released Whisper after a quiet spell"
                 );
             }
+        }
+        if released {
+            pond_adapters_ear::release_process_memory();
+        }
+    }
+
+    /// Drop any loaded model not currently in a call, and hand its pages back to the OS.
+    pub fn release_unheld(&self, reason: &'static str) {
+        let mut released = false;
+        for slot in [&self.full, &self.wake] {
+            let mut held = lock(slot);
+            let free = held
+                .as_ref()
+                .filter(|h| Arc::strong_count(&h.whisper) == 1)
+                .map(|h| h.which);
+            if let Some(which) = free {
+                *held = None;
+                released = true;
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "whisper_released",
+                    which,
+                    reason,
+                    "released Whisper"
+                );
+            }
+        }
+        if released {
+            pond_adapters_ear::release_process_memory();
         }
     }
 }

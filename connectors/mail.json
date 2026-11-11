@@ -1,0 +1,33 @@
+{
+  "id": "mail",
+  "name": "Email",
+  "summary": "Goose reads new mail in an inbox you connect, so it can tell you what came in and remind you to answer.",
+  "icon": "mail",
+  "category": "mail",
+  "kind": "account",
+  "connect": { "via": "context_source", "source_kind": "mail" },
+  "setup": {
+    "fields": [
+      {
+        "key": "provider", "label": "Mail service", "kind": "select", "required": true,
+        "options": [
+          { "value": "gmail", "label": "Gmail" },
+          { "value": "icloud", "label": "iCloud" },
+          { "value": "fastmail", "label": "Fastmail" },
+          { "value": "custom", "label": "Another mail server" }
+        ]
+      },
+      { "key": "username", "label": "Email address", "kind": "text", "required": true },
+      {
+        "key": "password", "label": "App password", "kind": "secret", "required": true,
+        "help": "Make an app password in your mail service's security settings. Your usual password will not work."
+      },
+      {
+        "key": "base_url", "label": "Mail server", "kind": "text", "required": false,
+        "help": "Only for another mail server: its name and port, such as mail.example.com:993."
+      }
+    ]
+  },
+  "events": [{ "id": "new_mail", "label": "A new email arrives" }],
+  "feeds": ["todos"]
+}

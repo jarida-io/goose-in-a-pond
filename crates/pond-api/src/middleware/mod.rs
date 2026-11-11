@@ -340,6 +340,9 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::POST, "/player/command", Exposure::HostOnly),
     (Method::GET, "/player/status", Exposure::HostOnly),
     (Method::POST, "/extension/egress", Exposure::HostOnly),
+    // A webhook connector's call from any service: the token in the path is the credential,
+    // checked against its stored hash in the handler, and each token is rate limited.
+    (Method::POST, "/hooks/in/{token}", Exposure::Always),
 ];
 
 /// Segment-wise route match; `{brace}` matches exactly one non-empty segment, never more.

@@ -196,7 +196,9 @@ pub struct ScheduleMcpServer {
 impl ScheduleMcpServer {
     /// All tools, without constructing the server; the generated `tool_router()` is private.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
-        Self::tool_router().list_all()
+        let mut tools = Self::tool_router().list_all();
+        tools.extend(Self::todo_tool_router().list_all());
+        tools
     }
 
     pub fn new(
@@ -206,7 +208,8 @@ impl ScheduleMcpServer {
         Self {
             scheduler,
             settings_repo,
-            tool_router: Self::tool_router(),
+            // `todo_tools.rs` holds the second router.
+            tool_router: Self::tool_router() + Self::todo_tool_router(),
         }
     }
 
@@ -293,8 +296,8 @@ impl ScheduleMcpServer {
     }
 
     #[tool(description = "\
-One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
-(\"in 10 minutes\"). Anything repeating: create_schedule.")]
+Countdown timer: fires ONCE after a delay, then deletes itself (\"set a timer for 10 \
+minutes\"). Anything repeating: create_schedule. Reminding the person of a task: add_todo.")]
     async fn set_timer(
         &self,
         _ctx: RequestContext<RoleServer>,
@@ -762,8 +765,9 @@ impl ServerHandler for ScheduleMcpServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "GIAP Schedule MCP server — manage one-shot timers/reminders, recurring cron schedules, and event rules.\n\n\
-                 Tools: set_timer (one-shot reminder or countdown, e.g. '10m', '1h30m'), \
+                "GIAP Schedule MCP server — the person's to-dos and reminders, one-shot timers, recurring cron schedules, and event rules.\n\n\
+                 Tools: add_todo, list_todos, complete_todo (the person's own to-dos and reminders, \
+                 at a time, a repeat or a place), set_timer (a countdown, e.g. '10m', '1h30m'), \
                  create_schedule (recurring 6-field cron: sec min hr dom mon dow), \
                  list_schedules, update_schedule, schedule_action (delete | pause | resume | run_now), \
                  get_schedule_runs, world_clock.",

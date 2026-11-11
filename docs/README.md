@@ -39,6 +39,7 @@ bash scripts/giap.sh doctor   # health check; exits 1 on any FAIL
 | [Model capabilities](architecture/model_capabilities.md) | Thinking, vision and context detection |
 | [Token tracking](architecture/token_tracking.md) | Usage accounting per session |
 | [MCP compliance](architecture/mcp-compliance.md) | What of the MCP spec GIAP implements |
+| [Connectors](CONNECTORS.md) | Writing a connector for My Goose: its manifest, setup fields, events, and the webhook connector |
 | [Web watches and exploration](architecture/web-watch-and-exploration.md) | Watching pages for changes, exploring sites, saved items, report images and source chips (design, 2026-11-09) |
 | [Changes, 28 and 29 October 2026](architecture/changes-2026-10-28-29.md) | Long tasks, deep research, the queue, pace, the MTP drafter, My Pond and `agamemnon`, and their security controls |
 

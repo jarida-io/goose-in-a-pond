@@ -27,6 +27,7 @@ pub const DEFAULT_MODEL: &str = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M";
 /// `LlmProvider` over in-process GGUF; [`GooseProviderAdapter`] does the message conversion.
 pub struct LocalInferenceLlmAdapter {
     inner: GooseProviderAdapter,
+    raw_inner: GooseProviderAdapter,
 }
 
 impl LocalInferenceLlmAdapter {
@@ -34,7 +35,15 @@ impl LocalInferenceLlmAdapter {
 
     /// `model_id`: HuggingFace `repo:QUANT` or a local path. Weights load on first `complete()`.
     pub async fn new(model_id: &str) -> Result<Self> {
-        let model_config = ModelConfig::new(model_id);
+        let raw_config = ModelConfig::new(model_id);
+        // Side calls strip reasoning anyway, and thinking exhausts the 2,048-token sacrificial window.
+        let model_config =
+            raw_config
+                .clone()
+                .with_merged_request_params(std::collections::HashMap::from([(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(false),
+                )]));
 
         Self::apply_model_settings(model_id);
 
@@ -43,13 +52,11 @@ impl LocalInferenceLlmAdapter {
             model_id
         );
         goose::providers::local_inference::configure_local_inference();
-        let provider = LocalInferenceProvider::from_env().await?;
+        let provider: Arc<dyn GooseProvider> = Arc::new(LocalInferenceProvider::from_env().await?);
 
         Ok(Self {
-            inner: GooseProviderAdapter::new(
-                Arc::new(provider) as Arc<dyn GooseProvider>,
-                model_config,
-            ),
+            inner: GooseProviderAdapter::new(provider.clone(), model_config),
+            raw_inner: GooseProviderAdapter::new(provider, raw_config),
         })
     }
 
@@ -611,7 +618,7 @@ impl LocalInferenceLlmAdapter {
         system: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        self.inner.complete(system, messages).await
+        self.raw_inner.complete(system, messages).await
     }
 }
 

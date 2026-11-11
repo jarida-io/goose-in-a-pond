@@ -28,6 +28,8 @@ pub enum ConsolidationAction {
         new_segment: MemorySegment,
         new_importance: f32,
     },
+    /// A newer memory replaces an older one it contradicts: the older is archived, the newer kept.
+    Supersede { newer_id: String, older_id: String },
 }
 
 /// A single entry produced by splitting a memory.

@@ -283,6 +283,7 @@ async fn compose_for(h: &Harness, member: &str, memory_id: &str, prompt: &str) {
             profile_id: Some(member.to_string()),
             prompt: prompt.to_string(),
             reason: "From something you told me, saved 3 days ago.".to_string(),
+            fact: "a private note".to_string(),
         }])
         .await
         .unwrap();

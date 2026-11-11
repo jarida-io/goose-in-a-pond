@@ -1,0 +1,10 @@
+{
+  "id": "home",
+  "name": "Home devices",
+  "summary": "Goose sees and switches the lights, plugs and other Matter devices you add to your home.",
+  "icon": "house",
+  "category": "home",
+  "kind": "built_in",
+  "connect": { "via": "matter", "setting": "ext_device_enabled" },
+  "extension": "giap-device"
+}

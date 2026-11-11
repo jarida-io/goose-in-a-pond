@@ -31,7 +31,7 @@ const MAX_JSON_NODES: usize = 200_000;
 const MAX_JSON_DEPTH: usize = 48;
 
 /// schema.org types that are a thing on offer.
-const ITEM_TYPES: &[&str] = &[
+pub(crate) const ITEM_TYPES: &[&str] = &[
     "Car",
     "Vehicle",
     "Motorcycle",
@@ -159,7 +159,7 @@ pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
     }
 }
 
-fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
+pub(crate) fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
     static META: LazyLock<scraper::Selector> = LazyLock::new(|| {
         selector(
             r#"meta[property="og:image"], meta[property="og:image:url"], meta[name="twitter:image"]"#,
@@ -233,7 +233,7 @@ fn distinct(items: Vec<Item>) -> Vec<Item> {
         .collect()
 }
 
-fn types_of(object: &Map<String, Value>) -> Vec<String> {
+pub(crate) fn types_of(object: &Map<String, Value>) -> Vec<String> {
     match object.get("@type") {
         Some(Value::String(t)) => vec![t.clone()],
         Some(Value::Array(ts)) => ts
@@ -289,7 +289,7 @@ fn ld_items(value: &Value, base: &Url, out: &mut Vec<Item>, depth: usize, budget
     }
 }
 
-fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
+pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
     let offered = object.get("itemOffered").and_then(Value::as_object);
     let title = text_of(object.get("name").or_else(|| object.get("headline")))
         .or_else(|| offered.and_then(|o| text_of(o.get("name"))))?;

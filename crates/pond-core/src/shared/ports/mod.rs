@@ -1,8 +1,12 @@
 pub mod agent_prefill;
+pub mod cart;
 pub mod event_bus;
+pub mod hook_event_sink;
 pub mod long_task;
+pub mod news;
 pub mod orchestrator;
 pub mod pond_admin;
 pub mod saved_item;
+pub mod todo;
 pub mod web_form;
 pub mod web_watch;

@@ -14,6 +14,8 @@ pub struct QueuedSuggestion {
     pub prompt: String,
     pub reason: String,
     pub source_memory_id: String,
+    /// The source memory's text, read live, which grounds the chat model's answer.
+    pub fact: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -22,7 +24,7 @@ impl QueuedSuggestion {
     pub fn context(&self) -> crate::user_data::domain::suggestion::SuggestionContext {
         crate::user_data::domain::suggestion::SuggestionContext::PersonalMemory {
             source_memory_id: self.source_memory_id.clone(),
-            fact: self.reason.clone(),
+            fact: self.fact.clone(),
         }
     }
 }
