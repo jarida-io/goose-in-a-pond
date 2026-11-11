@@ -45,7 +45,7 @@ The `Makefile` targets forward to these commands.
 | C compiler | `xcode-select --install` | `apt install build-essential` |
 | cmake, pkg-config | `brew install cmake pkg-config` | `apt install cmake pkg-config` |
 | ALSA, D-Bus, OpenSSL headers | not needed | `apt install libasound2-dev libdbus-1-dev libssl-dev` |
-| Go (`native/pondnet/go.mod`: 1.27.3) | [go.dev](https://go.dev/dl/) | [go.dev](https://go.dev/dl/) |
+| Go (`native/pondnet/go.mod`: 1.27.4) | [go.dev](https://go.dev/dl/) | [go.dev](https://go.dev/dl/) |
 | Node | `bash scripts/giap.sh node` | `bash scripts/giap.sh node` |
 | Read access to `jarida-io/llama-cpp-rs-giap` | see [CONTRIBUTING](../CONTRIBUTING.md#prerequisites) | same |
 
