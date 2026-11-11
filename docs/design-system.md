@@ -175,6 +175,22 @@ async function handleDelete() {
 }
 ```
 
+### `<Switch checked onChange? label? size? />` (`components/Switch.tsx`, `styles/switch.css`)
+
+The one on/off control in the app: the household's accent when on, a round knob, `role="switch"`
+with `aria-checked`, and a 44px hit area at either size (`"md"`, or `"sm"` in dense rows). Pass
+`label` when no visible label names it through `aria-labelledby`. The hub's `Toggle` wraps it.
+
+Do not import HeroUI's `Switch` or hand-draw a switch: `styles/controls.test.ts` fails on a new
+HeroUI `Switch` import, on an offset shadow drawn in the accent (offsets use `--border-ink`), and
+on a focus ring drawn outside a selected tile's border (the ring sits over the border instead).
+
+```tsx
+import { Switch } from "../components/Switch";
+
+<Switch checked={enabled} onChange={setEnabled} label="Turn on mesh" />
+```
+
 ### Model marks (`components/models/ModelMarks.tsx`, `styles/model-marks.css`)
 
 The repeated words of a Models screen. The classic page, the hub, the picks and the composer chip
