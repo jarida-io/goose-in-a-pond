@@ -18,6 +18,8 @@
 # Re-reviewed 2026-11-02 against main bf38019c: follow-redirects and joi were
 # bumped rather than ignored; block-buffer's entry went when OSV narrowed it to
 # 0.11 and later; minimatch was added.
+# Re-reviewed 2026-11-11: rustix (RUSTSEC-2026-0486) was bumped to 1.1.6 in this workspace's lockfile;
+# only goose/Cargo.lock keeps 1.1.4, so it has an entry until the fork's lockfile moves.
 # Re-reviewed 2026-11-08: x/crypto was moved to the commit that fixes GO-2026-5932 and
 # klauspost/compress to 1.20.3 (GO-2026-6865) rather than ignored; pin-utils was added.
 
@@ -176,3 +178,8 @@ reason = "rmcp 2.1.0 OAuth discovery SSRF (host strings checked, not resolved ad
 id = "RUSTSEC-2026-0462"
 ignoreUntil = 2026-12-15
 reason = "rmcp 2.1.0 Streamable HTTP clients buffer a response body with no limit, so a server that never ends its reply exhausts memory (fixed in 3.9.0). Same blocker and same reach as RUSTSEC-2026-0457: only a remote MCP extension an owner adds. Short exception while rmcp 3.9 is ported into the fork and the workspace. Also in goose/Cargo.lock."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0486"
+ignoreUntil = 2026-12-15
+reason = "rustix 1.1.4: the xattr functions (getxattr, listxattr and their l/f forms) mark bytes initialized that the kernel never wrote when given a zero-length buffer; fixed in 1.1.6. This workspace's Cargo.lock is on 1.1.6; what remains is goose/Cargo.lock, the submodule's own lockfile, which GIAP's build never reads (goose's crates resolve against this workspace's lockfile). Remove when the goose fork's lockfile moves to 1.1.6."
