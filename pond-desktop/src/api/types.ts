@@ -2026,7 +2026,7 @@ export interface DetectedPlace {
 
 export type AudioDirection = "input" | "output";
 
-export type AudioDeviceKind = "sound_server" | "hardware" | "raw" | "virtual";
+export type AudioDeviceKind = "sound_server" | "hardware" | "bluetooth" | "raw" | "virtual";
 
 /** What briefly opening a device found. A microphone is measured for level, never recorded. */
 export type AudioProbeOutcome =

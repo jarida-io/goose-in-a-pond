@@ -82,6 +82,21 @@ describe("describeChoice", () => {
     expect(line).toEqual({ text: "USB PnP Audio Device, plugged in, taking audio.", problem: false });
   });
 
+  it("says a Bluetooth headset is used because it is connected", () => {
+    const jlab: ProbedAudioDevice = {
+      ...device("JLab Epic Lux Lab Edition", { result: "accepting" }),
+      kind: "bluetooth",
+      plugged_in: true,
+    };
+    const line = describeChoice(
+      choice({ direction: "output", device: jlab, outcome: jlab.outcome, basis: "plugged_in", devices: [jlab] }),
+    );
+    expect(line).toEqual({
+      text: "JLab Epic Lux Lab Edition, connected over Bluetooth, taking audio.",
+      problem: false,
+    });
+  });
+
   it("names the pair a sound test proved, from each end", () => {
     const speakers = device("MacBook Air Speakers", { result: "accepting" }, true);
     const out = describeChoice(
@@ -144,6 +159,18 @@ describe("deviceOptions", () => {
       { value: "MacBook Air Microphone", label: "MacBook Air Microphone (default, hears sound)" },
       { value: "Phone", label: "Phone" },
     ]);
+  });
+
+  it("marks a Bluetooth headset as one", () => {
+    const jlab: ProbedAudioDevice = {
+      ...device("bluez_card.B0_F0_0C_5F_3E_F6", { result: "hearing", level_dbfs: -85 }),
+      label: "JLab Epic Lux Lab Edition",
+      kind: "bluetooth",
+    };
+    expect(deviceOptions(choice({ devices: [jlab] }), "").at(-1)).toEqual({
+      value: "bluez_card.B0_F0_0C_5F_3E_F6",
+      label: "JLab Epic Lux Lab Edition (Bluetooth, hears sound)",
+    });
   });
 
   it("keeps a pin that is not connected, so opening the picker never drops it", () => {
