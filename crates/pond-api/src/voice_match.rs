@@ -16,7 +16,7 @@ use pond_core::models::ports::voice_match::{
 use pond_core::user_data::domain::voice_print::{VoicePrint, WakeTake};
 use pond_core::user_data::ports::voice_print::VoicePrintRepository;
 use pond_core::user_data::services::voice_match::{
-    latest_runs, members, wake_verdict, TAKES_PER_RUN,
+    latest_runs, members, replaceable, wake_verdict, TAKES_PER_RUN,
 };
 use serde_json::{json, Value};
 
@@ -83,6 +83,8 @@ struct Take {
     prompt: Option<String>,
     profile_id: Option<String>,
     voice_match: bool,
+    /// A take of the same run this one replaces: the sentence said again after the detector missed it.
+    replaces: Option<String>,
 }
 
 async fn read_take(mut multipart: Multipart) -> Result<Take, Refusal> {
@@ -92,6 +94,7 @@ async fn read_take(mut multipart: Multipart) -> Result<Take, Refusal> {
         prompt: None,
         profile_id: None,
         voice_match: true,
+        replaces: None,
     };
     while let Some(field) = multipart
         .next_field()
@@ -111,6 +114,7 @@ async fn read_take(mut multipart: Multipart) -> Result<Take, Refusal> {
             "profile_id" => {
                 take.profile_id = field.text().await.ok().filter(|p| !p.trim().is_empty())
             }
+            "replaces" => take.replaces = field.text().await.ok().filter(|p| !p.trim().is_empty()),
             "voice_match" => {
                 take.voice_match = !matches!(
                     field.text().await.unwrap_or_default().trim(),
@@ -150,6 +154,37 @@ pub(crate) async fn post_take(
             return Err(refuse(
                 StatusCode::NOT_FOUND,
                 json!({"error": "profile_not_found"}),
+            ));
+        }
+    }
+    // A retake must replace a take of this member's current run, or the run would come apart.
+    if let Some(replaces) = &take.replaces {
+        let phrase = pond_voice::text::normalize_transcript(
+            &state
+                .settings_repo
+                .get()
+                .await
+                .map_err(failed)?
+                .voice_wake_word,
+        );
+        let takes = voice_prints(&state)
+            .wake_takes(&phrase)
+            .await
+            .map_err(failed)?;
+        if !replaceable(
+            &takes,
+            take.profile_id.as_deref(),
+            replaces,
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(
+                kind = "voice_take_refused",
+                reason = "retake_not_found",
+                "voice: a retake named a take that is not in this member's current run"
+            );
+            return Err(refuse(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({"error": "retake_not_found"}),
             ));
         }
     }
@@ -236,9 +271,13 @@ pub(crate) async fn post_take(
 
     let store = voice_prints(&state);
     let now = chrono::Utc::now();
+    if let Some(replaces) = &take.replaces {
+        store.delete_wake_take(replaces).await.map_err(failed)?;
+    }
+    let take_id = uuid::Uuid::new_v4().to_string();
     store
         .add_wake_take(&WakeTake {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: take_id.clone(),
             profile_id: take.profile_id.clone(),
             phrase: phrase.clone(),
             cnn_heard: heard.cnn_heard,
@@ -284,9 +323,11 @@ pub(crate) async fn post_take(
         take = take_number,
         cnn_heard = heard.cnn_heard,
         voice_match = take.voice_match,
+        retake = take.replaces.is_some(),
         "voice: an enrolment take was heard; its recording is not kept"
     );
     Ok(Json(json!({
+        "take_id": take_id,
         "take": take_number,
         "of": TAKES_PER_RUN,
         "wake": {

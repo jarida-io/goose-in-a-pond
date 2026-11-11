@@ -145,6 +145,28 @@ async fn take(
     profile: Option<&str>,
     voice_match: bool,
 ) -> (StatusCode, Value) {
+    let mut fields = vec![("voice_match", if voice_match { "true" } else { "false" })];
+    if let Some(profile) = profile {
+        fields.push(("profile_id", profile));
+    }
+    post_take(pond, said, &fields).await
+}
+
+/// One sentence said again for `profile`, replacing the take `replaces`.
+async fn retake(pond: &Pond, said: &str, profile: &str, replaces: &str) -> (StatusCode, Value) {
+    post_take(
+        pond,
+        said,
+        &[
+            ("voice_match", "true"),
+            ("profile_id", profile),
+            ("replaces", replaces),
+        ],
+    )
+    .await
+}
+
+async fn post_take(pond: &Pond, said: &str, fields: &[(&str, &str)]) -> (StatusCode, Value) {
     // A take refused before transcription leaves nothing queued for the next.
     *pond.heard.lock().unwrap() = VecDeque::from([said.to_string()]);
     let boundary = "voice-take-boundary";
@@ -156,10 +178,9 @@ async fn take(
         );
     };
     text("prompt", "Hey goose, set a timer for ten minutes");
-    if let Some(profile) = profile {
-        text("profile_id", profile);
+    for (name, value) in fields {
+        text(name, value);
     }
-    text("voice_match", if voice_match { "true" } else { "false" });
     body.extend_from_slice(
         format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"take.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
@@ -266,6 +287,45 @@ async fn five_takes_teach_the_wake_word_and_the_voice_and_keep_no_audio() {
     assert_eq!(amina["needed"], 5);
     assert_eq!(amina["enrolled"], true);
     assert!(amina["updated_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn a_missed_sentence_is_said_again_without_the_other_four() {
+    let pond = pond(true).await;
+    pond.engine
+        .cnn
+        .lock()
+        .unwrap()
+        .extend([true, false, true, true, false, true]);
+    let mut ids = Vec::new();
+    let mut last = Value::Null;
+    for n in 1..=5 {
+        let (status, body) = take(&pond, SAID, Some(&pond.amina), true).await;
+        assert_eq!(status, StatusCode::OK, "take {n}: {body}");
+        ids.push(body["take_id"].as_str().unwrap().to_string());
+        last = body;
+    }
+    assert_eq!(last["wake_detector"]["heard"], 3, "{last}");
+    assert_eq!(last["wake_detector"]["kind"], "whisper");
+
+    let (status, body) = retake(&pond, SAID, &pond.amina, &ids[1]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["take"], 5, "the run is still one run of five: {body}");
+    assert_eq!(body["wake"]["new_detector"], true);
+    assert_eq!(body["wake_detector"]["heard"], 4, "{body}");
+    assert_eq!(body["wake_detector"]["kind"], "hey_goose", "{body}");
+    assert_ne!(body["take_id"], ids[1].as_str());
+
+    // The replaced take is gone, so it cannot be replaced twice, and nobody else's can be.
+    let (status, body) = retake(&pond, SAID, &pond.amina, &ids[1]).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["error"], "retake_not_found");
+    let (status, body) = retake(&pond, SAID, "someone-else", &ids[4]).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown member is refused first: {body}"
+    );
 }
 
 #[tokio::test]

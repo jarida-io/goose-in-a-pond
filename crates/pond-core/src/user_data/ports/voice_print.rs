@@ -25,4 +25,8 @@ pub trait VoicePrintRepository: Send + Sync {
 
     /// Forgets one member's wake takes, when everything about them is forgotten.
     async fn delete_wake_takes(&self, profile_id: &str) -> Result<u64>;
+
+    /// Forgets one take by its id, when a retake of the same sentence replaces it; the number
+    /// removed.
+    async fn delete_wake_take(&self, id: &str) -> Result<u64>;
 }

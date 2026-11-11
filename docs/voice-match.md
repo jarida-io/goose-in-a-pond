@@ -8,7 +8,8 @@ the pond knows only by voice never approves a draft, a proposal or a ride.
 
 A member reads five sentences on the phone, each starting with the household's wake phrase ("Hey
 goose, set a timer for ten minutes"). Each take is a `POST /api/v1/voice/takes` (multipart `audio`
-as a 16 kHz mono WAV, `prompt`, `profile_id`, `voice_match`, default `true`). Serve:
+as a 16 kHz mono WAV, `prompt`, `profile_id`, `voice_match`, default `true`, and optionally
+`replaces`). Serve:
 
 1. transcribes the take with Whisper and records the phrase as heard, as `/voice/calibrate` does;
 2. scores the take with the "hey goose" CNN (`TakeEar`, an ear of its own with no echo canceller);
@@ -16,13 +17,19 @@ as a 16 kHz mono WAV, `prompt`, `profile_id`, `voice_match`, default `true`). Se
    and stores the print in `voice_prints`;
 4. discards the audio. Recordings are never kept.
 
-The reply is `{take, of: 5, wake: {heard, heard_as, new_detector}, voice_match: {stored, enrolled,
+The reply is `{take_id, take, of: 5, wake: {heard, heard_as, new_detector}, voice_match: {stored, enrolled,
 consistency} | null, wake_detector: {kind, heard, of, reason, missed}}`. `new_detector` is whether
 the CNN fired on this take; `wake_detector` is the household's verdict across every taught
 member's latest run. Refusals are by name: 422 `no_speech`, 422 `no_wake_phrase` with `heard_as`,
-422 `profile_required` (Voice Match on and nobody named), 409 `model_not_ready`.
+422 `profile_required` (Voice Match on and nobody named), 409 `model_not_ready`, 422
+`retake_not_found`.
 
-A run is a member's takes until five, or until 15 minutes pass between two. A member is enrolled
+A run is a member's takes until five, or until 15 minutes pass between two. A sentence the CNN
+missed can be said again on its own: the phone sends `replaces` with that take's `take_id`, and
+the new take takes its place, so the run stays five takes and the verdict counts the retake
+instead (`replaceable` in `pond-core/src/user_data/services/voice_match.rs`). The replaced take
+must be the same member's, in their latest run, and under 15 minutes old; anything else is 422
+`retake_not_found`. The print the retake makes is kept beside the others. A member is enrolled
 from five prints; `consistency` is the mean cosine between their prints.
 
 | Route | What it does |
