@@ -1,18 +1,44 @@
-/* Remote Access — away-from-home connection status. Flat, 2px ink border like every other
-   small widget card (tonight-card.css); no box-shadow since widget frames don't spend
-   InkBudget's raised offset. The dot answers on/off at a glance; the amber callout only
-   appears when a recovery request is actually waiting on a person. */
+/* Remote access — the path between home and a phone that is away.
+
+   The wire is the state: lit and carrying a spark while phones can reach the
+   Pond, dashed while the way in opens, broken when it is home only or down.
+   Shape and words carry it, so it never rests on colour alone (DESIGN.md §6),
+   and the accent is spent as a line, never as text (§2).
+
+   The same soft sheet and accent glow as the devices tile; the glow is on only
+   while the Pond is reachable. */
 
 .rac {
+  position: relative;
+  overflow: hidden;
   box-sizing: border-box;
   height: 100%;
-  border: 2px solid var(--color-text);
-  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
   background: var(--color-surface);
-  padding: 14px;
+  box-shadow: 0 6px 18px rgba(23, 22, 22, 0.08);
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+}
+
+.rac > :not(.rac__glow) {
+  position: relative;
+}
+
+.rac__glow {
+  position: absolute;
+  inset: -50% -40% 45% 45%;
+  background: radial-gradient(circle at 70% 30%, var(--color-accent) 0%, transparent 60%);
+  filter: blur(40px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 600ms var(--ease-in-out, ease);
+}
+
+.rac[data-state="on"] .rac__glow {
+  opacity: 0.1;
 }
 
 .rac__eyebrow {
@@ -22,34 +48,117 @@
   color: var(--color-text-secondary);
 }
 
-.rac__status {
+/* ── The path ─────────────────────────────────────────────── */
+
+.rac__path {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
-.rac__dot {
-  width: 10px;
-  height: 10px;
+.rac__end {
   flex: none;
-  border-radius: 999px;
-}
-
-.rac__dot--on {
-  background: var(--color-success);
-}
-
-.rac__dot--off {
-  background: var(--color-neutral);
-}
-
-.rac__dot--unknown {
-  background: var(--color-warning);
-}
-
-.rac__status-label {
-  font: 700 18px Quicksand, sans-serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--bg-brand-soft);
   color: var(--color-text);
+}
+
+.rac__wire {
+  position: relative;
+  flex: 1;
+  height: 0;
+  border-top: 2px dashed var(--color-text-secondary);
+}
+
+.rac[data-state="on"] .rac__wire {
+  border-top: 2px solid var(--border-ink);
+}
+
+.rac[data-state="connecting"] .rac__wire {
+  border-top-color: var(--border-ink);
+}
+
+/* Broken in the middle: a gap the width of a step, so "home only" reads as a cut line. */
+.rac[data-state="off"] .rac__wire,
+.rac[data-state="problem"] .rac__wire {
+  border-top: 0;
+  background:
+    linear-gradient(90deg, var(--color-text-secondary) 0 42%, transparent 42% 58%, var(--color-text-secondary) 58% 100%)
+    top / 100% 2px no-repeat;
+  height: 2px;
+}
+
+.rac[data-state="problem"] .rac__wire {
+  background:
+    linear-gradient(90deg, var(--color-warning) 0 42%, transparent 42% 58%, var(--color-warning) 58% 100%)
+    top / 100% 2px no-repeat;
+}
+
+.rac[data-state="unknown"] .rac__wire {
+  border-top-style: dotted;
+}
+
+.rac__spark {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-ink);
+  box-shadow: 0 0 10px var(--color-accent);
+}
+
+.rac[data-state="on"] .rac__spark {
+  display: block;
+  animation: rac-travel 2.8s var(--ease-in-out, ease-in-out) infinite;
+}
+
+@keyframes rac-travel {
+  0%   { left: 0; opacity: 0; }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { left: calc(100% - 8px); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rac[data-state="on"] .rac__spark {
+    animation: none;
+    left: calc(50% - 4px);
+  }
+  .rac__glow {
+    transition: none;
+  }
+}
+
+/* ── The words ────────────────────────────────────────────── */
+
+.rac__words {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rac__headline {
+  font: 800 19px/1.2 Quicksand, sans-serif;
+  color: var(--color-text);
+}
+
+.rac__route {
+  font: 600 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+.rac__address {
+  font: 600 12px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
 }
 
 .rac__pending {

@@ -213,6 +213,23 @@ status. While search by meaning is off nothing is fetched or read, so `Use` only
 
 ---
 
+## Home widget tiles (`hub/views/widgets/`)
+
+Each tile on Home takes its look from what it shows, so the surface itself carries meaning:
+
+| Tile | Surface | What the surface says |
+|---|---|---|
+| Weather (`hub/primitives/WeatherWidget.tsx`) | the sky for the hour and condition | the weather outside |
+| Now playing (`MediaCard.tsx`) | a glow sampled from the album art | the track |
+| Tonight (`TonightCard.tsx`) | the weather tile's night sky | after dark: the next routine, and a line from now to midnight with a mark per routine (`hub/state/evening.ts`) |
+| Remote access (`RemoteAccessCard.tsx`) | the path from home to a phone away | lit while phones can reach the Pond, dashed while the way in opens, cut when it is home only or down; it reads the ngrok tunnel and the built-in network (`hub/state/remoteReach.ts`) |
+| Devices (`HomeControlsCard.tsx`) | a faint accent glow | full while every device is connected, dim when one is not |
+
+They share one material: an 18px radius and a soft drop shadow, not InkBudget's hard offset, which
+stays with the composer and the first alert. Device kinds differ by glyph and state by words and
+line, never by a new hue. Text on the night sky is measured in `tonight-card.css` (12.3:1, and
+6.6:1 for secondary text), and the moving spark honours `prefers-reduced-motion`.
+
 ## HeroUI Components
 
 Use HeroUI (`@heroui/react`) for interactive widgets: `Button`, `Input`, `Switch`, `Tabs`, `Card/CardContent`, `Chip`, `Separator`. Dialogs are not HeroUI: use `useConfirm()` or `ConfirmDialog` from `components/shared/`.

@@ -2199,3 +2199,25 @@ export type ConnectionErrorCode =
   | "no_address"
   | "invalid_request"
   | "unsupported_security";
+
+/** The household's own ngrok tunnel, the alternative to the built-in remote network. */
+export interface NgrokTunnelConfig {
+  enabled: boolean;
+  endpoint: "tcp" | "tls";
+  /** The reserved domain a TLS endpoint needs. */
+  domain?: string;
+  /** A reserved TCP address, `host:port`; without one ngrok picks a new one each start. */
+  remoteAddr?: string;
+}
+
+export type NgrokTunnelStatus =
+  | { state: "off" }
+  | { state: "starting" }
+  | { state: "running"; address: string }
+  | { state: "failed"; reason: string };
+
+export interface NgrokTunnelState {
+  config: NgrokTunnelConfig;
+  tokenSet: boolean;
+  status: NgrokTunnelStatus;
+}

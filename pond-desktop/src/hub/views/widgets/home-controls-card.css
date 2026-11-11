@@ -10,18 +10,87 @@
    no source in the pond (DESIGN.md §3), so no rule below has anywhere to put one.
    ──────────────────────────────────────────────────────────── */
 
-/* Flat (plan §1): widget frames don't spend InkBudget's raised offset -- that's
-   the composer and whichever alert renders first. Border stays 2px ink. */
+/* The same material as the weather and music tiles: a rounded sheet with a soft
+   drop, not InkBudget's hard offset, which stays with the composer and the first
+   alert. The accent glow is the house answering: full while every device is
+   connected, faint when one is not, so the tile's mood carries the count. */
 .hcc {
+  position: relative;
+  overflow: hidden;
   box-sizing: border-box;
   height: 100%;
-  border: 2px solid var(--color-text);
-  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
   background: var(--color-surface);
-  padding: 14px;
+  box-shadow: 0 6px 18px rgba(23, 22, 22, 0.08);
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+}
+
+.hcc > :not(.hcc__glow) {
+  position: relative;
+}
+
+.hcc__glow {
+  position: absolute;
+  inset: -40% 30% 30% -30%;
+  background: radial-gradient(circle at 30% 30%, var(--color-accent) 0%, transparent 65%);
+  filter: blur(40px);
+  opacity: 0.1;
+  pointer-events: none;
+  transition: opacity 600ms var(--ease-in-out, ease);
+}
+
+.hcc[data-everyone="false"] .hcc__glow {
+  opacity: 0.03;
+}
+
+/* ── Hero: how much of the house is answering ─────────────── */
+
+.hcc__hero {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hcc__count {
+  font: 800 40px/1 Quicksand, sans-serif;
+  letter-spacing: -1.5px;
+  color: var(--color-text);
+}
+
+.hcc__count-of {
+  font: 600 13px Quicksand, sans-serif;
+  color: var(--color-text-secondary);
+}
+
+/* The glyph sits in a soft disc; on an inverted "on" tile it takes the tile's
+   own light text through currentColor. */
+.hcc__glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-bottom: 6px;
+  border-radius: 50%;
+  background: var(--bg-brand-soft);
+  color: var(--color-text);
+}
+
+.hcc__tile[data-state="on"] .hcc__glyph,
+.hcc__tile[data-state="pending"][data-last="on"] .hcc__glyph {
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hcc__glow {
+    transition: none;
+  }
 }
 
 /* ── Head ─────────────────────────────────────────────────── */
@@ -114,18 +183,17 @@
   color: var(--color-bg);
 }
 
-/* 2px, matching .hcc's own border weight (plan §2: one card material) --
-   this used to be a 1px hairline, a lighter weight than the rest of the
-   app's card borders even though the "on" tile beside it is a full
-   inverted fill, a much louder material than a thin outline. */
+/* A quiet edge on a frosted face, so the glow reads through and an inverted
+   "on" tile stays the loudest thing in the card. */
 .hcc__tile[data-state="off"],
 .hcc__tile[data-state="unknown"],
 .hcc__tile[data-state="pending"][data-last="off"],
 .hcc__tile[data-state="pending"][data-last="unknown"],
 .hcc__static {
-  background: var(--color-surface);
-  border: 2px solid var(--color-text);
+  background: color-mix(in srgb, var(--color-surface) 82%, transparent);
+  border: 1.5px solid var(--color-border-strong);
   color: var(--color-text);
+  backdrop-filter: blur(6px);
 }
 
 /* The write is in flight and the label still reads what the device last said.

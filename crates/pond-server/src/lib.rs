@@ -17,4 +17,6 @@ pub mod system_notices;
 
 #[cfg(unix)]
 pub mod embedded_network;
+#[cfg(unix)]
+pub mod remote_tunnel;
 pub mod tls_identity;
