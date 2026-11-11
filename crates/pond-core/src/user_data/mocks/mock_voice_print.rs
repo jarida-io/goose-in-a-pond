@@ -67,4 +67,11 @@ impl VoicePrintRepository for InMemoryVoicePrints {
         takes.retain(|t| t.profile_id.as_deref() != Some(profile_id));
         Ok((before - takes.len()) as u64)
     }
+
+    async fn delete_wake_take(&self, id: &str) -> Result<u64> {
+        let mut takes = self.takes.lock().unwrap();
+        let before = takes.len();
+        takes.retain(|t| t.id != id);
+        Ok((before - takes.len()) as u64)
+    }
 }

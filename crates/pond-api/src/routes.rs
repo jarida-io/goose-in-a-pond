@@ -696,6 +696,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/voice/prints", get(crate::voice_match::get_prints))
         .route("/voice/prints/model", post(crate::voice_match::fetch_model))
         .route(
+            "/voice/prints/model/file",
+            get(crate::voice_match::model_file),
+        )
+        .route(
             "/voice/prints/{profile_id}",
             delete(crate::voice_match::delete_prints),
         )
