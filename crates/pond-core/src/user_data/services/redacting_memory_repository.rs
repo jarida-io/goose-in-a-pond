@@ -229,6 +229,10 @@ impl MemoryRepository for RedactingMemoryRepository {
         self.inner.note_unfiled_attempt(id).await
     }
 
+    async fn archived_of(&self, profile_id: &str, limit: usize) -> Result<Vec<MemoryFragment>> {
+        self.inner.archived_of(profile_id, limit).await
+    }
+
     async fn log_consolidation_run(
         &self,
         mode: &str,

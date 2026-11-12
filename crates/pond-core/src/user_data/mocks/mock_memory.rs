@@ -254,6 +254,21 @@ impl MemoryRepository for MockMemoryRepository {
             .collect())
     }
 
+    async fn archived_of(&self, profile_id: &str, limit: usize) -> Result<Vec<MemoryFragment>> {
+        Ok(self
+            .fragments
+            .read()
+            .await
+            .iter()
+            .filter(|f| {
+                f.profile_id.as_deref() == Some(profile_id)
+                    && f.lifecycle == Some(MemoryLifecycle::Archived)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
     async fn unfiled(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
         let now = chrono::Utc::now();
         Ok(self

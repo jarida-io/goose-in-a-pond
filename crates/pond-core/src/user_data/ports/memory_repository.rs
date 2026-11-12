@@ -210,6 +210,11 @@ pub trait MemoryRepository: Send + Sync {
         Ok(vec![])
     }
 
+    /// The archived rows this member owns, newest first: what they may bring back.
+    async fn archived_of(&self, _profile_id: &str, _limit: usize) -> Result<Vec<MemoryFragment>> {
+        Ok(vec![])
+    }
+
     /// Count one re-sort call that said nothing usable of this row.
     async fn note_unfiled_attempt(&self, _id: &str) -> Result<()> {
         Ok(())
