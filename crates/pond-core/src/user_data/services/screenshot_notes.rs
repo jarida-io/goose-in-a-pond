@@ -176,8 +176,9 @@ Reply with JSON only, one of these two shapes:
 
 - note: one plain line of at most 20 words about the subject on the screen, \
 by its name: the place, product, dish, event, show, article or topic. Start \
-with \"Looking at\", \"Reading about\" or \"Saved\". Never copy a message, a \
-private person's name, a number, an address, an email or a code.
+with \"Looking at\", \"Reading about\" or \"Saved\". Say only what the screen \
+names, never a guess at what it might be. Never copy a message, a private \
+person's name, a number, an address, an email or a code.
 - skip: use it instead, with one word for why, when the screenshot shows any \
 of these: banking, payments or balances; passwords, codes or logins; a \
 private conversation or an email; an identity document; medical or legal \

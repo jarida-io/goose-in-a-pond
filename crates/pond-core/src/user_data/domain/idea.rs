@@ -102,6 +102,16 @@ impl IdeaKind {
     }
 }
 
+/// The card's small label for an idea of `kind` built on `grounded_in`: one from a screenshot
+/// says so, since it came from what they looked at and not from an interest they named.
+pub fn card_label(kind: IdeaKind, grounded_in: &[Grounding]) -> &'static str {
+    if grounded_in.iter().any(|g| g.kind == "screenshot") {
+        "From a screenshot"
+    } else {
+        kind.label()
+    }
+}
+
 /// One thing worth seeing at a glance on an idea's page: where, when, the cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeaFact {
@@ -157,7 +167,7 @@ pub struct GoosePlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grounding {
-    /// `interest`, `memory` or `conversation`.
+    /// `interest`, `memory`, `conversation` or `screenshot`.
     pub kind: String,
     pub label: String,
 }
