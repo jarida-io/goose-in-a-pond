@@ -8,7 +8,8 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::shared::domain::web_watch::{
-    backoff_hours, compare, Comparison, WatchChange, CHANGE_HISTORY_DAYS, FAILURES_BEFORE_TELLING,
+    backoff_hours, compare, ChangeKind, Comparison, WatchChange, CHANGE_HISTORY_DAYS,
+    FAILURES_BEFORE_TELLING,
 };
 use crate::shared::ports::web_watch::{
     CheckOutcome, NoticeKind, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
@@ -193,10 +194,15 @@ fn match_notice(watch: &WebWatch, changes: &[WatchChange]) -> Option<WatchNotice
     if lines.is_empty() {
         return None;
     }
+    // What a rule was set to tell is the news itself, not a match among items.
+    let told = changes
+        .iter()
+        .any(|c| c.matched && c.kind == ChangeKind::Condition);
     Some(WatchNotice {
         owner: watch.owner.clone(),
         kind: NoticeKind::Match,
         title: match lines.len() {
+            _ if told => watch.title.clone(),
             1 => format!("A match on {}", watch.title),
             n => format!("{n} matches on {}", watch.title),
         },
@@ -408,6 +414,59 @@ mod tests {
         told: Arc<Told>,
     ) -> WebWatchChecker {
         WebWatchChecker::new(store, Arc::new(Pages(Mutex::new(pages))), told)
+    }
+
+    #[tokio::test]
+    async fn a_rule_coming_true_is_pushed_once_and_nothing_else_on_the_page_is() {
+        use crate::shared::domain::web_watch::TellWhen;
+        let now = Utc::now();
+        let section = |text: &str| WatchItem {
+            title: "Trail bike".into(),
+            link: Some("https://shop.example/bike".into()),
+            snippet: Some(text.into()),
+            ..Default::default()
+        };
+        let mut bike = watch(now);
+        bike.title = "Trail bike 29er".into();
+        bike.filters = WatchFilters {
+            tell_when: TellWhen::Disappears {
+                phrase: "sold out".into(),
+            },
+            ..Default::default()
+        };
+        bike.items = Some(vec![section("KES 85,000. Sold out")]);
+        let store = Arc::new(Store::default());
+        store.create(&bike).await.unwrap();
+        let told = Arc::new(Told::default());
+        let checker = checker(
+            store.clone(),
+            vec![
+                Ok(vec![section("KES 85,000. Sold out. Free delivery")]),
+                Ok(vec![section("KES 85,000. In stock. Free delivery")]),
+                Ok(vec![section("KES 85,000. In stock. Two left")]),
+            ],
+            told.clone(),
+        );
+        for pass in 0..3 {
+            assert_eq!(
+                checker
+                    .check_due(now + Duration::hours(6 * pass))
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        let notices = told.0.lock().unwrap();
+        assert_eq!(notices.len(), 1, "told once, when it came true");
+        assert_eq!(notices[0].title, "Trail bike 29er");
+        assert_eq!(notices[0].body, "\"sold out\" is no longer on the page");
+        assert_eq!(notices[0].kind, NoticeKind::Match);
+        drop(notices);
+        assert_eq!(
+            checker.send_digests(now).await.unwrap(),
+            0,
+            "other changes on the page are not kept for a digest"
+        );
     }
 
     #[tokio::test]

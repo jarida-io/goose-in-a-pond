@@ -19,6 +19,8 @@ use pond_core::shared::domain::context_card::ContextCard;
 use pond_core::shared::domain::todo::{Todo, TodoKind, TodoState};
 use pond_core::shared::ports::news::NewsStore;
 use pond_core::shared::ports::todo::TodoRepository;
+use pond_core::shared::ports::web_watch::{StoredChange, WebWatch, WebWatchRepository};
+use pond_infra::sqlite_web_watch::SqliteWebWatchRepository;
 
 use crate::me::{caller_member, failure, server_error, Failure};
 use crate::AppState;
@@ -26,12 +28,15 @@ use crate::AppState;
 /// A card as a chat request names it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CardRef {
-    /// `idea`, `news`, `digest`, `todo` or `cart`.
+    /// `idea`, `news`, `digest`, `todo`, `cart` or `watch`.
     pub kind: String,
     pub id: String,
 }
 
-pub(crate) const KINDS: [&str; 5] = ["idea", "news", "digest", "todo", "cart"];
+pub(crate) const KINDS: [&str; 6] = ["idea", "news", "digest", "todo", "cart", "watch"];
+
+/// Changes a watch's card tells Goose about.
+const WATCH_CHANGES: usize = 8;
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/me/cards/{kind}/{id}", get(read))
@@ -121,6 +126,43 @@ fn cart_card(item: &CartItem) -> ContextCard {
     )
 }
 
+fn watch_card(watch: &WebWatch, changes: &[StoredChange]) -> ContextCard {
+    let items = watch.items.as_deref().unwrap_or_default();
+    let mut content = format!(
+        "{}\nTells them about: {}",
+        watch.address,
+        watch.filters.words_for_people()
+    );
+    if let Some(standing) = watch.filters.tell_when.standing(items) {
+        content.push_str(&format!("\nAt the last check {standing}."));
+    }
+    let mut notes = String::new();
+    if !watch.looking_for.trim().is_empty() {
+        notes.push_str(&format!(
+            "What they asked for: {}\n",
+            watch.looking_for.trim()
+        ));
+    }
+    notes.push_str(&format!(
+        "Checked every {} hour(s){}. The page listed {} thing(s) at the last check.\n",
+        watch.interval_hours,
+        if watch.paused { ", paused now" } else { "" },
+        items.len()
+    ));
+    if watch.failures > 0 {
+        notes.push_str(&format!("The last {} check(s) failed.\n", watch.failures));
+    }
+    for change in changes {
+        notes.push_str(&format!(
+            "{}: {}\n",
+            change.found_at.format("%-d %B"),
+            change.change.line()
+        ));
+    }
+    notes.push_str(&format!("Its id is {}.\n", watch.id));
+    ContextCard::new("Web watch".to_string(), watch.title.clone(), content, notes)
+}
+
 /// The member's card, or `None` when they have none of that kind by that id.
 pub(crate) async fn resolve(
     state: &AppState,
@@ -148,6 +190,16 @@ pub(crate) async fn resolve(
             .get(member, &card.id)
             .await?
             .map(|item| cart_card(&item)),
+        "watch" => {
+            let watches = SqliteWebWatchRepository::new(state.db.system.clone());
+            match watches.get(&card.id).await? {
+                Some(watch) if watch.owner == member => {
+                    let changes = watches.changes(&watch.id, WATCH_CHANGES).await?;
+                    Some(watch_card(&watch, &changes))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     })
 }
