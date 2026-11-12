@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::user_data::domain::member_profile::About;
 use pond_core::user_data::domain::memory::{
     cosine_similarity, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle,
     MemorySegment, MemoryTier,
@@ -169,6 +170,8 @@ struct FragmentRow {
     superseded_by: Option<String>,
     /// For correction memories: what wrong claim this corrects.
     corrects: Option<String>,
+    about: Option<String>,
+    valid_until: Option<String>,
 }
 
 /// Accepts `add`'s `%Y-%m-%d %H:%M:%S` and RFC3339 (other writers); unreadable falls back to now.
@@ -188,7 +191,7 @@ fn parse_dt(s: &str) -> chrono::DateTime<Utc> {
 }
 
 fn parse_segment(s: &str) -> Option<MemorySegment> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+    MemorySegment::parse(s)
 }
 
 fn parse_tier(s: &str) -> Option<MemoryTier> {
@@ -220,6 +223,8 @@ fn row_to_fragment(row: FragmentRow) -> MemoryFragment {
         lifecycle: row.lifecycle.as_deref().and_then(parse_lifecycle),
         superseded_by: row.superseded_by,
         corrects: row.corrects,
+        about: row.about.as_deref().and_then(About::parse),
+        valid_until: row.valid_until.as_deref().map(parse_dt),
     }
 }
 
@@ -242,19 +247,14 @@ fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
 const SELECT_ALL: &str = "\
     id, profile_id, session_id, content, embedding, source, tags, created_at, \
     segment, importance, tier, decay_rate, access_count, last_accessed_at, \
-    lifecycle, superseded_by, corrects";
+    lifecycle, superseded_by, corrects, about, valid_until";
+
+/// A row a turn or a recall may see: live and not past its time.
+const LIVE: &str = "(lifecycle IS NULL OR lifecycle = 'active') \
+    AND (valid_until IS NULL OR valid_until > datetime('now'))";
 
 fn segment_to_str(s: &MemorySegment) -> &'static str {
-    match s {
-        MemorySegment::Identity => "identity",
-        MemorySegment::Preference => "preference",
-        MemorySegment::Correction => "correction",
-        MemorySegment::Relationship => "relationship",
-        MemorySegment::Project => "project",
-        MemorySegment::Routine => "routine",
-        MemorySegment::Knowledge => "knowledge",
-        MemorySegment::Context => "context",
-    }
+    s.as_str()
 }
 
 fn lifecycle_to_str(l: &MemoryLifecycle) -> &'static str {
@@ -296,8 +296,8 @@ impl MemoryRepository for SqliteMemoryRepository {
             "INSERT INTO memory_fragments \
              (id, profile_id, session_id, content, embedding, source, tags, created_at, \
               segment, importance, tier, decay_rate, access_count, last_accessed_at, \
-              lifecycle, superseded_by, corrects) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              lifecycle, superseded_by, corrects, about, valid_until) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&fragment.id)
         .bind(&fragment.profile_id)
@@ -316,6 +316,12 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(lifecycle_str)
         .bind(&fragment.superseded_by)
         .bind(&fragment.corrects)
+        .bind(fragment.about.map(About::as_str))
+        .bind(
+            fragment
+                .valid_until
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+        )
         .execute(&self.pool)
         .await?;
 
@@ -336,7 +342,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let (filter, bind) = scope_sql(scope);
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE (lifecycle IS NULL OR lifecycle = 'active') {filter} \
+             WHERE {LIVE} {filter} \
              ORDER BY created_at DESC LIMIT ?"
         );
         let mut q = sqlx::query_as::<_, FragmentRow>(&query);
@@ -364,7 +370,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
              WHERE embedding IS NOT NULL \
-             AND (lifecycle IS NULL OR lifecycle = 'active') {filter}"
+             AND {LIVE} {filter}"
         );
 
         let rows: Vec<FragmentRow> = match bind {
@@ -509,7 +515,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let sql = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE (lifecycle IS NULL OR lifecycle = 'active') \
+             WHERE {LIVE} \
              AND ({likes_sql}) \
              {profile_filter} \
              ORDER BY COALESCE(importance, 0.5) DESC, created_at DESC \
@@ -601,7 +607,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let (filter, bind) = scope_sql(scope);
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE segment = ? AND (lifecycle IS NULL OR lifecycle = 'active') {filter} \
+             WHERE segment = ? AND {LIVE} {filter} \
              ORDER BY created_at DESC LIMIT ?"
         );
 
@@ -704,15 +710,104 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(rows.into_iter().map(row_to_event).collect())
     }
 
+    async fn live_about(&self, scope: &ProfileScope, about: About) -> Result<Vec<MemoryFragment>> {
+        if scope.excludes_everything() {
+            return Ok(vec![]);
+        }
+        let (filter, bind) = scope_sql(scope);
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about = ? AND {LIVE} {filter} ORDER BY created_at DESC"
+        );
+        let mut q = sqlx::query_as::<_, FragmentRow>(&query).bind(about.as_str());
+        if let Some(pid) = bind {
+            q = q.bind(pid);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn always_shown(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<MemoryFragment>> {
+        if scope.excludes_everything() {
+            return Ok(vec![]);
+        }
+        let listed = About::ALL
+            .iter()
+            .filter(|a| a.always_shown())
+            .map(|a| format!("'{}'", a.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (filter, bind) = scope_sql(scope);
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about IN ({listed}) AND {LIVE} {filter} \
+             ORDER BY COALESCE(importance, 0.5) DESC, created_at DESC LIMIT ?"
+        );
+        let mut q = sqlx::query_as::<_, FragmentRow>(&query);
+        if let Some(pid) = bind {
+            q = q.bind(pid);
+        }
+        let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn unfiled(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about IS NULL AND resort_attempts < {} AND {LIVE} \
+             ORDER BY created_at ASC, rowid ASC LIMIT ?",
+            pond_core::user_data::services::memory_resort::MAX_ATTEMPTS
+        );
+        let rows = sqlx::query_as::<_, FragmentRow>(&query)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn note_unfiled_attempt(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE memory_fragments SET resort_attempts = resort_attempts + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn file_row(&self, id: &str, about: About) -> Result<()> {
+        let tier = about.tier();
+        let valid_until = about
+            .valid_until(Utc::now())
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        sqlx::query(
+            "UPDATE memory_fragments SET about = ?, segment = ?, importance = ?, tier = ?, \
+             decay_rate = ?, valid_until = ? WHERE id = ?",
+        )
+        .bind(about.as_str())
+        .bind(about.segment().as_str())
+        .bind(about.importance() as f64)
+        .bind(tier_to_str(&tier))
+        .bind(tier.default_decay_rate() as f64)
+        .bind(valid_until)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn update_segment(
         &self,
         id: &str,
         segment: pond_core::user_data::domain::memory::MemorySegment,
         importance: f32,
     ) -> anyhow::Result<()> {
-        let seg_str = format!("{:?}", segment).to_lowercase();
         sqlx::query("UPDATE memory_fragments SET segment = ?, importance = ? WHERE id = ?")
-            .bind(&seg_str)
+            .bind(segment.as_str())
             .bind(importance as f64)
             .bind(id)
             .execute(&self.pool)

@@ -1,6 +1,7 @@
 //! The background thinking behind My Goose, on the inference lane: each member's portrait (and
-//! the pictures of their interests), and the ideas researched for them. Both acquire the lane like
-//! every idle job and yield to a returning member between model calls.
+//! the pictures of their interests), the ideas researched for them, and the filing of older
+//! memories into their profiles. Each acquires the lane like every idle job and yields to a
+//! returning member between model calls.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +11,9 @@ use chrono::Utc;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
 use pond_core::user_data::domain::interest::{topic_key, OFFERED_AT};
-use pond_core::user_data::domain::memory::MemorySegment;
+use pond_core::user_data::domain::memory::{
+    MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
+};
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::ideas::IdeaRepository;
 use pond_core::user_data::ports::interests::InterestRepository;
@@ -23,6 +26,7 @@ use pond_core::user_data::services::idea_generation::{
 };
 use pond_core::user_data::services::inference_lane::LaneJob;
 use pond_core::user_data::services::member_portrait as portrait;
+use pond_core::user_data::services::memory_resort::{self as resort, Verdict};
 
 use crate::inference_lane_runner::{Cadence, InferenceLane, LaneSlot};
 
@@ -517,4 +521,211 @@ async fn idea_from(
             .map(|image| pond_core::user_data::domain::interest::picture_path(&image.key));
     }
     Ok(Some(idea))
+}
+
+// ── The re-sort ────────────────────────────────────────────────────────
+
+/// Unfiled rows read at once, to find the next member's batch among them.
+const RESORT_LOOKAHEAD: usize = resort::NOTES_PER_CALL * 4;
+
+/// Files memories kept before the profile under what each is about, a batch a model call, for
+/// as long as the house stays quiet. It has nothing to do once every older row is filed.
+pub fn spawn_memory_resort_job(deps: MindDeps) {
+    let wake = deps.lane.claim(LaneJob::MemoryResort);
+    let started_at = std::time::Instant::now();
+    let started_at_utc = Utc::now();
+    tokio::spawn(async move {
+        loop {
+            let tick =
+                crate::inference_lane_runner::wait_for_tick(resort::RESORT_POLL, &wake).await;
+            if deps
+                .memories
+                .unfiled(1)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                continue;
+            }
+            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
+            let cadence = Cadence::new(
+                resort::RESORT_POLL,
+                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
+                false,
+            );
+            let enabled = deps.provider.read().await.is_some();
+            let Some(slot) = deps
+                .lane
+                .acquire(
+                    LaneJob::MemoryResort,
+                    enabled,
+                    cadence,
+                    tick.waives(),
+                    saw_activity,
+                    idle_for,
+                )
+                .await
+            else {
+                continue;
+            };
+            while !slot.is_cancelled() {
+                let pending = deps
+                    .memories
+                    .unfiled(RESORT_LOOKAHEAD)
+                    .await
+                    .unwrap_or_default();
+                let Some(owner) = pending.first().map(|row| row.profile_id.clone()) else {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "memory_resort_done",
+                        "every older memory is filed or archived"
+                    );
+                    break;
+                };
+                let batch: Vec<MemoryFragment> = pending
+                    .into_iter()
+                    .filter(|row| row.profile_id == owner)
+                    .take(resort::NOTES_PER_CALL)
+                    .collect();
+                if !resort_batch(&deps, &slot, owner.as_deref(), &batch).await {
+                    break;
+                }
+            }
+            drop(slot);
+        }
+    });
+}
+
+/// File one member's batch. `false` when the model gave no reply, so the pass stops instead of
+/// counting an attempt against rows it never judged.
+async fn resort_batch(
+    deps: &MindDeps,
+    slot: &LaneSlot<'_>,
+    owner: Option<&str>,
+    batch: &[MemoryFragment],
+) -> bool {
+    let (name, aliases, scope) = match owner {
+        Some(id) => {
+            let profile = deps.profiles.get(id).await.ok().flatten();
+            let mut names: Vec<String> = profile
+                .iter()
+                .flat_map(|p| {
+                    [
+                        Some(p.display_name.trim().to_string()),
+                        p.preferences
+                            .get("preferred_name")
+                            .map(|n| n.trim().to_string()),
+                    ]
+                })
+                .flatten()
+                .filter(|n| !n.is_empty())
+                .collect();
+            names.dedup();
+            let name = names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "the user".to_string());
+            (name, names, ProfileScope::Owner(id.to_string()))
+        }
+        None => (
+            "the household".to_string(),
+            Vec::new(),
+            ProfileScope::Household,
+        ),
+    };
+    let started = std::time::Instant::now();
+    let Some(reply) = deps
+        .complete(
+            slot,
+            &resort::render_system(&name),
+            resort::build_user_message(batch),
+        )
+        .await
+    else {
+        return false;
+    };
+    let said = resort::parse_reply(&reply, batch.len());
+    let (mut filed, mut archived, mut unanswered) = (0usize, 0usize, 0usize);
+    for (row, said) in batch.iter().zip(said) {
+        match resort::verdict(row, said, &aliases) {
+            Verdict::File(about) => {
+                if let Err(e) = deps.memories.file_row(&row.id, about).await {
+                    tracing::warn!(error = %e, "[re-sort] a memory could not be filed");
+                    continue;
+                }
+                filed += 1;
+                let _ = deps
+                    .memories
+                    .log_event(
+                        MemoryEventKind::Consolidated,
+                        &row.id,
+                        None,
+                        Some(&format!(
+                            "{{\"resort\":\"filed\",\"about\":\"{}\"}}",
+                            about.as_str()
+                        )),
+                    )
+                    .await;
+                if about.single_valued() {
+                    let rows: Vec<MemoryFragment> = deps
+                        .memories
+                        .live_about(&scope, about)
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|r| r.profile_id.as_deref() == owner)
+                        .collect();
+                    for (old, newest) in resort::closed_by_the_newest(&rows) {
+                        if deps
+                            .memories
+                            .mark_superseded(&old.id, &newest.id)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = deps
+                                .memories
+                                .log_event(MemoryEventKind::Superseded, &old.id, None, None)
+                                .await;
+                        }
+                    }
+                }
+            }
+            Verdict::Archive(reason) => {
+                if let Err(e) = deps
+                    .memories
+                    .update_lifecycle(&row.id, MemoryLifecycle::Archived)
+                    .await
+                {
+                    tracing::warn!(error = %e, "[re-sort] a memory could not be archived");
+                    continue;
+                }
+                archived += 1;
+                let _ = deps
+                    .memories
+                    .log_event(
+                        MemoryEventKind::Archived,
+                        &row.id,
+                        None,
+                        Some(&format!("{{\"resort\":\"{reason}\"}}")),
+                    )
+                    .await;
+            }
+            Verdict::Unanswered => {
+                unanswered += 1;
+                let _ = deps.memories.note_unfiled_attempt(&row.id).await;
+            }
+        }
+    }
+    // Counts only: a memory's words never reach the on-disk log.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "memory_resort_batch",
+        notes = batch.len(),
+        filed,
+        archived,
+        unanswered,
+        ms = started.elapsed().as_millis() as u64,
+        "older memories were filed into a profile"
+    );
+    true
 }

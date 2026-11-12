@@ -197,7 +197,7 @@ pub async fn generate_params(
 pub use device::DeviceMcpServer;
 pub use device_control::DeviceControlMcpServer;
 pub use knowledge::{clean_query_for_search, KnowledgeMcpServer};
-pub use memory::{auto_classify_segment, parse_memory_segment, parse_memory_tier, MemoryMcpServer};
+pub use memory::MemoryMcpServer;
 pub use orchestrator::OrchestratorMcpServer;
 pub use schedule::{
     init_schedule_deps, spawn_schedule_server, try_upcoming_schedules_context,

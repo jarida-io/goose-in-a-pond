@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use crate::security::domain::event::PrivacySensitivity;
 use crate::security::domain::redaction::{Redacted, RedactionLevel};
 use crate::security::ports::redactor::Redactor;
+use crate::user_data::domain::member_profile::About;
 use crate::user_data::domain::memory::{
     MemoryEdge, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryGraph, MemoryLifecycle,
     MemorySegment, MemoryTier,
@@ -202,6 +203,30 @@ impl MemoryRepository for RedactingMemoryRepository {
 
     async fn update_tier(&self, id: &str, tier: MemoryTier) -> Result<()> {
         self.inner.update_tier(id, tier).await
+    }
+
+    async fn live_about(&self, scope: &ProfileScope, about: About) -> Result<Vec<MemoryFragment>> {
+        self.inner.live_about(scope, about).await
+    }
+
+    async fn always_shown(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<MemoryFragment>> {
+        self.inner.always_shown(scope, limit).await
+    }
+
+    async fn unfiled(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
+        self.inner.unfiled(limit).await
+    }
+
+    async fn file_row(&self, id: &str, about: About) -> Result<()> {
+        self.inner.file_row(id, about).await
+    }
+
+    async fn note_unfiled_attempt(&self, id: &str) -> Result<()> {
+        self.inner.note_unfiled_attempt(id).await
     }
 
     async fn log_consolidation_run(

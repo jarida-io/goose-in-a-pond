@@ -133,10 +133,10 @@ score, highest first.
 pub fn worth_asking_about(memory: &MemoryFragment) -> u8 {
     match memory.segment {
         Some(MemorySegment::Routine) => 0,
-        Some(MemorySegment::Preference) => 1,
+        Some(MemorySegment::Preference | MemorySegment::FoodHealth) => 1,
         Some(MemorySegment::Project) => 2,
-        Some(MemorySegment::Relationship) => 3,
-        Some(MemorySegment::Correction) => 4,
+        Some(MemorySegment::Relationship | MemorySegment::Place | MemorySegment::Date) => 3,
+        Some(MemorySegment::Correction | MemorySegment::Instruction) => 4,
         Some(MemorySegment::Identity) => 5,
         Some(MemorySegment::Context) | None => 6,
         Some(MemorySegment::Knowledge) => 7,
@@ -186,6 +186,10 @@ pub fn reason_for(memory: &MemoryFragment, now: DateTime<Utc>) -> String {
         Some(MemorySegment::Project) => "something you were working on",
         Some(MemorySegment::Identity) => "something about you",
         Some(MemorySegment::Correction) => "a correction you made",
+        Some(MemorySegment::FoodHealth) => "what you eat and what you need",
+        Some(MemorySegment::Place) => "a place you mentioned",
+        Some(MemorySegment::Date) => "a date you keep",
+        Some(MemorySegment::Instruction) => "something you asked me to always do",
         Some(MemorySegment::Knowledge) => "something you told me",
         Some(MemorySegment::Context) | None => "something you told me",
     };
@@ -476,6 +480,8 @@ mod tests {
             lifecycle: None,
             superseded_by: None,
             corrects: None,
+            about: None,
+            valid_until: None,
         }
     }
 

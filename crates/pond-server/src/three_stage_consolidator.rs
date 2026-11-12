@@ -680,6 +680,8 @@ mod tests {
             lifecycle: None,
             superseded_by: None,
             corrects: None,
+            about: None,
+            valid_until: None,
         }
     }
 

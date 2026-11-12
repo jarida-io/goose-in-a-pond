@@ -1,5 +1,6 @@
 //! MemoryRepository port — driven port for semantic memory persistence.
 
+use crate::user_data::domain::member_profile::About;
 use crate::user_data::domain::memory::{
     MemoryEdge, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryGraph, MemoryLifecycle,
     MemorySegment, MemoryTier,
@@ -169,6 +170,54 @@ pub trait MemoryRepository: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<MemoryEvent>> {
         Ok(vec![])
+    }
+
+    /// The live rows in scope that are about `about`, newest first.
+    async fn live_about(&self, scope: &ProfileScope, about: About) -> Result<Vec<MemoryFragment>> {
+        Ok(self
+            .search_recent(scope, 500)
+            .await?
+            .into_iter()
+            .filter(|row| row.about == Some(about))
+            .collect())
+    }
+
+    /// The live rows in scope every conversation starts with ([`About::always_shown`]),
+    /// weightiest first, at most `limit`.
+    async fn always_shown(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<MemoryFragment>> {
+        let mut rows: Vec<MemoryFragment> = self
+            .search_recent(scope, 500)
+            .await?
+            .into_iter()
+            .filter(|row| row.about.is_some_and(About::always_shown))
+            .collect();
+        rows.sort_by(|a, b| {
+            b.importance
+                .unwrap_or(0.0)
+                .total_cmp(&a.importance.unwrap_or(0.0))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// Live rows filed under no `about` yet that the re-sort has not given up on, oldest
+    /// first: what it still has to read.
+    async fn unfiled(&self, _limit: usize) -> Result<Vec<MemoryFragment>> {
+        Ok(vec![])
+    }
+
+    /// Count one re-sort call that said nothing usable of this row.
+    async fn note_unfiled_attempt(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// File an existing row under `about`, with the heading, weight and lifetime that implies.
+    async fn file_row(&self, _id: &str, _about: About) -> Result<()> {
+        Ok(())
     }
 
     /// Update the segment and importance of a memory (for recategorization).
