@@ -604,7 +604,7 @@ async fn resort_batch(
     owner: Option<&str>,
     batch: &[MemoryFragment],
 ) -> bool {
-    let (name, aliases, scope) = match owner {
+    let (name, aliases) = match owner {
         Some(id) => {
             let profile = deps.profiles.get(id).await.ok().flatten();
             let mut names: Vec<String> = profile
@@ -625,13 +625,9 @@ async fn resort_batch(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "the user".to_string());
-            (name, names, ProfileScope::Owner(id.to_string()))
+            (name, names)
         }
-        None => (
-            "the household".to_string(),
-            Vec::new(),
-            ProfileScope::Household,
-        ),
+        None => ("the household".to_string(), Vec::new()),
     };
     let started = std::time::Instant::now();
     let Some(reply) = deps
@@ -666,29 +662,6 @@ async fn resort_batch(
                         )),
                     )
                     .await;
-                if about.single_valued() {
-                    let rows: Vec<MemoryFragment> = deps
-                        .memories
-                        .live_about(&scope, about)
-                        .await
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|r| r.profile_id.as_deref() == owner)
-                        .collect();
-                    for (old, newest) in resort::closed_by_the_newest(&rows) {
-                        if deps
-                            .memories
-                            .mark_superseded(&old.id, &newest.id)
-                            .await
-                            .is_ok()
-                        {
-                            let _ = deps
-                                .memories
-                                .log_event(MemoryEventKind::Superseded, &old.id, None, None)
-                                .await;
-                        }
-                    }
-                }
             }
             Verdict::Archive(reason) => {
                 if let Err(e) = deps

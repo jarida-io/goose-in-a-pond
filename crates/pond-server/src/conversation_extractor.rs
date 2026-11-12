@@ -48,7 +48,8 @@ memories: NEW facts about who {subject} is that outlast this conversation.
   partner child pet family friend: who that one is to {subject}
   diet allergy health: what {subject} eats, what their body needs
   routine: something {subject} does again and again
-  likes dislikes style: their tastes, how they like to be answered
+  likes dislikes: their tastes
+  style: how they want to be answered (length, tone, format)
   goal place date: what they work towards, a place of theirs, a yearly date
   instruction: what {assistant} must always or never do for them
 - Never a memory: a question {subject} asked, something they looked up or

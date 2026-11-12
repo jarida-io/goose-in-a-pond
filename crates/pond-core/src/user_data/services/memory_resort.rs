@@ -1,5 +1,9 @@
 //! Re-sorting memories filed before the profile: the prompt that asks what each note is about,
 //! reading the reply, and what code then does with each note. Nothing here calls a model.
+//!
+//! A re-sort files and archives; it never closes one row in favour of another. Older rows were
+//! written with no notion of one-at-a-time facts, and a model that files three different
+//! preferences under one such word would otherwise leave two of them closed.
 
 use crate::user_data::domain::member_profile::{admit, About, NotKept};
 use crate::user_data::domain::memory::MemoryFragment;
@@ -26,7 +30,8 @@ Reply with JSON only, exactly this shape:
   partner child pet family friend: who that one is to {name}
   diet allergy health: what {name} eats, what their body needs
   routine: something {name} does again and again
-  likes dislikes style: their tastes, how they like to be answered
+  likes dislikes: their tastes
+  style: how they want to be answered (length, tone, format)
   goal place date: what they work towards, a place of theirs, a yearly date
   instruction: what the assistant must always or never do for them
 - \"none\" when the note is not a lasting fact about {name}: a question they \
@@ -118,22 +123,9 @@ fn reason(why: NotKept) -> &'static str {
     why.as_str()
 }
 
-/// The older rows a newly filed single-valued fact leaves closed: every live row of the same
-/// member and `about` but the newest. `rows` are that member's live rows about it.
-pub fn closed_by_the_newest(rows: &[MemoryFragment]) -> Vec<(&MemoryFragment, &MemoryFragment)> {
-    let Some(newest) = rows.iter().max_by_key(|row| row.created_at) else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter(|row| row.id != newest.id)
-        .map(|row| (row, newest))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_data::domain::member_profile::file_under;
 
     fn note(content: &str) -> MemoryFragment {
         MemoryFragment::from_chat("id".into(), Some("m1".into()), None, content.to_string())
@@ -232,26 +224,5 @@ mod tests {
             verdict(&note("Jerry likes tea."), None, &aliases),
             Verdict::Unanswered
         );
-    }
-
-    #[test]
-    fn of_several_rows_about_one_single_valued_thing_only_the_newest_stays() {
-        let mut rows: Vec<MemoryFragment> = ["Jerry is vegetarian.", "Jerry eats fish."]
-            .iter()
-            .enumerate()
-            .map(|(i, content)| {
-                let mut row = note(content);
-                row.id = format!("row-{i}");
-                row.created_at += chrono::Duration::days(i as i64);
-                file_under(&mut row, About::Diet);
-                row
-            })
-            .collect();
-        let closed = closed_by_the_newest(&rows);
-        assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].0.id, "row-0");
-        assert_eq!(closed[0].1.id, "row-1");
-        rows.truncate(1);
-        assert!(closed_by_the_newest(&rows).is_empty());
     }
 }
