@@ -593,6 +593,10 @@ pub fn embedder_may_stay(available_mb: Option<u64>, loaded: bool, estimate_mb: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The runtime allowlist is one per process: tests that set it or read through it take
+    /// turns, or one sees the other's entries.
+    static ALLOWLIST_TURN: Mutex<()> = Mutex::new(());
     use crate::models::domain::gguf::test_gguf::GgufWriter;
     use crate::models::domain::vision_encoder::encoder_by_dir;
 
@@ -1059,6 +1063,8 @@ mod tests {
 
     #[test]
     fn on_the_budgeted_device_a_model_needs_the_list_and_the_fit() {
+        let _turn = ALLOWLIST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        clear_vision_allowlist();
         let never = |_: &EncoderSpec| -> VisionFit { panic!("an unlisted encoder costs no I/O") };
         let e2b = Some(by_dir("gemma-4-e2b-it"));
         assert!(matches!(
@@ -1102,6 +1108,8 @@ mod tests {
 
     #[test]
     fn the_budgeted_policy_today_declares_nothing() {
+        let _turn = ALLOWLIST_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        clear_vision_allowlist();
         for model in [
             "gemma-4-E2B-it-Q4_K_M",
             "gemma-4-E2B-it-qat-UD-Q4_K_XL",
@@ -1158,6 +1166,7 @@ mod tests {
 
     #[test]
     fn allowlist_enables_gemma_vision_on_budgeted_device() {
+        let _turn = ALLOWLIST_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let e2b = Some(by_dir("gemma-4-e2b-it"));
         clear_vision_allowlist();
         assert!(!is_vision_allowlisted("gemma-4-e2b-it"));
