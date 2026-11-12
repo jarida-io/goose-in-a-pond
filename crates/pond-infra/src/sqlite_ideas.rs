@@ -22,6 +22,27 @@ impl SqliteIdeaRepository {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self { pool }
     }
+
+    async fn sync_finished(&self, profile_id: &str) {
+        let _ = sqlx::query(
+            "UPDATE ideas SET state = 'done', updated_at = datetime('now') \
+             WHERE profile_id = ? AND state = 'working' AND task_id IS NOT NULL \
+             AND task_id IN (SELECT id FROM long_tasks WHERE state IN ('completed', 'failed', 'cancelled'))",
+        )
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await;
+
+        let _ = sqlx::query(
+            "UPDATE ideas SET state = 'done', updated_at = datetime('now') \
+             WHERE profile_id = ? AND state = 'working' AND task_id IS NULL \
+             AND id IN (SELECT source_ref FROM todos WHERE source = 'idea') \
+             AND NOT EXISTS (SELECT 1 FROM todos WHERE source = 'idea' AND source_ref = ideas.id AND state = 'open')",
+        )
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await;
+    }
 }
 
 const COLUMNS: &str = "id, profile_id, topic, title, pitch, why, grounded_json, sources_json, \
@@ -64,6 +85,7 @@ fn time_or_none(raw: Option<String>) -> Option<DateTime<Utc>> {
 #[async_trait]
 impl IdeaRepository for SqliteIdeaRepository {
     async fn list(&self, profile_id: &str) -> Result<Vec<Idea>> {
+        self.sync_finished(profile_id).await;
         let rows = sqlx::query(&format!(
             "SELECT {COLUMNS} FROM ideas WHERE profile_id = ? AND state != 'dismissed' \
              ORDER BY created_at DESC, rowid DESC LIMIT 50"
@@ -76,6 +98,7 @@ impl IdeaRepository for SqliteIdeaRepository {
     }
 
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Idea>> {
+        self.sync_finished(profile_id).await;
         let row = sqlx::query(&format!(
             "SELECT {COLUMNS} FROM ideas WHERE profile_id = ? AND id = ?"
         ))
@@ -471,5 +494,31 @@ mod tests {
             (source.as_str(), source_ref.as_str(), state.as_str(), ask),
             ("idea", "i1", "open", 1)
         );
+    }
+
+    #[tokio::test]
+    async fn working_idea_auto_syncs_to_done_when_task_or_todos_complete() {
+        let pool = pool().await;
+        let repo = SqliteIdeaRepository::new(pool.clone());
+        let mut i1 = idea("i-task", "jerry", "ai");
+        i1.state = IdeaState::Working;
+        repo.add(&i1).await.unwrap();
+        repo.set_state("jerry", "i-task", IdeaState::Working, Some("t-99"))
+            .await
+            .unwrap();
+
+        let got = repo.get("jerry", "i-task").await.unwrap().unwrap();
+        assert_eq!(got.state, IdeaState::Working);
+
+        sqlx::query(
+            "INSERT INTO long_tasks (id, owner_profile_id, scope, goal, state, max_steps, created_at, updated_at) \
+             VALUES ('t-99', 'jerry', 'owner', 'research', 'completed', 10, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let list = repo.list("jerry").await.unwrap();
+        assert_eq!(list[0].state, IdeaState::Done);
     }
 }

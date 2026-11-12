@@ -19,7 +19,7 @@ pub const SEEDS_PER_RUN: usize = 2;
 /// Pages read per seed.
 pub const PAGES_PER_SEED: usize = 3;
 /// Characters of each page the idea prompt shows.
-pub const PAGE_CHARS: usize = 2_000;
+pub const PAGE_CHARS: usize = 4_000;
 /// Below this self-score an idea is not worth the member's time.
 const MIN_SCORE: f64 = 0.3;
 const MAX_TITLE_CHARS: usize = 90;
@@ -159,14 +159,19 @@ pub fn pick_seeds(
 const QUERY_SYSTEM: &str = "\
 You write one web search for {name}. Using the portrait of {name} and the \
 seed below, write the search most likely to find something new, specific and \
-useful that {name} could act on this week about the seed: a price movement, a \
-release, an event, a technique, an opening, a deadline.
+useful that {name} could act on this week about the seed: an authentic recipe or \
+culinary technique, an outdoor trail or adventure guide, a tool or library release, \
+a hardware build, a tutorial, an event, or a concrete hands-on project guide.
+
+Do NOT search for generic academic papers, theoretical surveys, textbook definitions, \
+or broad science abstracts. Focus on practical guides, authentic recipes, trail profiles, \
+concrete announcements, hands-on implementations, and actionable steps.
 
 Reply with JSON only, exactly this shape:
 {\"query\":\"...\",\"private\":false}
 
-- query: 4 to 10 words, specific and technical: the exact names, models, \
-places, versions or terms that narrow it, with {name}'s city or country where \
+- query: 4 to 10 words, specific and technical: the exact names, libraries, \
+hardware models, versions or terms that narrow it, with {name}'s city or country where \
 it matters. No question mark, no quotes.
 - private: true when the seed is a private matter the public web cannot \
 answer, such as {name}'s own company finances, staff or health records; the \
@@ -215,38 +220,40 @@ pub struct ReadPage {
 }
 
 const IDEA_SYSTEM: &str = "\
-You write one idea for {name} from pages the Pond just read for them.
+You write one practical, high-utility idea for {name} from pages the Pond just read for them.
 
 Use only these sources, given below: the portrait of {name}, the seed (what the \
 idea builds on), and the text of the numbered pages. Every fact in the idea \
 must come from the pages.
 
 A good idea is:
-- new to {name}: not something the portrait shows they already know;
+- rooted in {name}'s genuine personal interests across all areas of their life: culinary arts & recipes (e.g. authentic regional dishes like Nigerian Egusi Soup, pan-seared fillet mignon, artisan sourdough), outdoor adventures & travel (e.g. hiking trails like Mt. Longonot, cycling, gear packing), home, garden & DIY craft, or creative & technical projects;
+- actionable and tangible: propose real-world steps that {name} can act on (e.g. buy ingredients, schedule trail dates, pack gear, configure, build, try);
+- NEVER suggest merely reading an article, studying a paper, or learning abstract theory without practical action;
+- new to {name}: not something the portrait shows they already know or do;
 - specific to {name}: tied to the seed and to their details in the portrait \
-(their places, budgets, dates, names);
+(their places, interests, tech stack, hardware, dates, names);
 - sourced: built on what the pages say;
 - doable: something {name} or the Pond can act on soon. Never a question.
+Keep your thinking concise, practical, and focused on tangible real-world utility.
 
 Reply with JSON only, exactly this shape:
 {\"title\":\"...\",\"pitch\":\"...\",\"why\":\"...\",\"sources\":[1],\
 \"you_can\":[\"...\"],\"goose_can\":{\"kind\":\"research\",\"label\":\"...\",\
 \"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
 
-- title: the idea as a concrete suggestion, under 80 characters, not a question.
-- pitch: two or three sentences: what the pages say, with the specific \
-numbers, names and dates, and what {name} could do with it.
+- title: the idea as a concrete suggestion or project, under 80 characters, not a question.
+- pitch: two or three sentences: what the pages say, with specific tools, ingredients, \
+temperatures, trail numbers, benchmarks, or steps, and what practical task {name} could accomplish with it.
 - why: one line to {name}, starting \"You\", naming the specific thing about \
-them it builds on.
+them or their interests it builds on.
 - sources: the numbers of the pages it rests on.
-- you_can: two to four steps {name} could take, each a short imperative under \
-80 characters.
-- goose_can: what the Pond could do for {name}, or null.
-  - kind: \"research\" (a deeper report), \"watch\" (keep checking a page of \
-listings), \"schedule\" (look this up again each week), \"todo\" (put the \
-first step on their list) or \"chat\" (talk it through).
-  - label: the button's words, under 30 characters.
-  - prompt: for research or schedule, what the Pond should look up; else \"\".
+- you_can: two to four actionable steps {name} could take (e.g. buy ingredients, \
+pack gear, schedule, clone, wire, deploy), each a short imperative under 80 characters.
+- goose_can: what the Pond can do for {name}, or null. The Pond is an on-premise domestic hardware hub (Goose In A Pond) with live tools for smart home devices (Matter), hyper-local weather, calendars, household to-dos, and local research.
+  - kind: \"todo\" (stage actionable prep steps like ingredients or gear on their to-do list), \"schedule\" (plan check-in dates, recipe prep times, or recurring reminders on their schedule), \"chat\" (discuss and customize the idea), \"research\" (conduct an autonomous deep research investigation for this household), or \"watch\" (monitor a web listings page for price drops or new items).
+  - label: the button's action words, under 30 characters.
+  - prompt: for research or schedule, what the Pond should look up or schedule; else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \
 items for sale or rent; else \"\".
 - score: 0 to 1, how new, specific and doable this is for {name}.

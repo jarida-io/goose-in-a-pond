@@ -12,10 +12,13 @@ const PRESET_META: Record<string, { label: string; desc: string }> = {
   concise:   { label: "Concise",   desc: "Short, direct answers. Minimal explanation" },
   technical: { label: "Technical", desc: "Precise, detailed. Favors accuracy over brevity" },
   warm:      { label: "Warm",      desc: "Friendly, encouraging tone. Conversational style" },
+  soul:      { label: "Soul",      desc: "Sovereign multi-modal core identity: hears, talks, sees, and organizes" },
+  heartbeat: { label: "Heartbeat", desc: "Autonomous perception pulse, checklists, and tool routines" },
+  memory:    { label: "Scratchpad", desc: "Agent working scratchpad: active intentions and observation journal" },
 };
 
-/** The four preset keys in display order. */
-const PRESET_KEYS = ["balanced", "concise", "technical", "warm"];
+/** The preset keys in display order. */
+const PRESET_KEYS = ["balanced", "concise", "technical", "warm", "soul", "heartbeat", "memory"];
 
 /** Rough token estimate: ~4 chars per token. */
 function estimateTokens(text: string): number {

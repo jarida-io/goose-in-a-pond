@@ -16,5 +16,6 @@ pub mod turn_failure;
 pub mod turn_stats;
 pub mod web_form;
 pub mod web_watch;
+pub mod when_repeats;
 pub mod when_said;
 pub mod wipe;

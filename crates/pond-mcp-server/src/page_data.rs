@@ -30,7 +30,7 @@ const MAX_LINK_TEXT_BYTES: usize = 80;
 const MAX_JSON_NODES: usize = 200_000;
 const MAX_JSON_DEPTH: usize = 48;
 
-/// schema.org types that are a thing on offer.
+/// schema.org types that are a thing on offer, an article, or an announcement.
 pub(crate) const ITEM_TYPES: &[&str] = &[
     "Car",
     "Vehicle",
@@ -39,6 +39,15 @@ pub(crate) const ITEM_TYPES: &[&str] = &[
     "IndividualProduct",
     "ProductModel",
     "Offer",
+    "Article",
+    "NewsArticle",
+    "BlogPosting",
+    "TechArticle",
+    "SocialMediaPosting",
+    "Event",
+    "JobPosting",
+    "SoftwareApplication",
+    "SoftwareSourceCode",
 ];
 
 const TITLE_KEYS: &[&str] = &[
@@ -101,7 +110,7 @@ const IMAGE_KEYS: &[&str] = &[
     "photos",
 ];
 
-/// One thing a page lists: a car, a product, an offer.
+/// One thing a page lists: a car, a product, an article, or an update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Item {
     pub title: String,
@@ -111,6 +120,7 @@ pub struct Item {
     pub year: Option<String>,
     pub link: Option<String>,
     pub image: Option<String>,
+    pub snippet: Option<String>,
 }
 
 /// Where a page's items came from.
@@ -119,6 +129,8 @@ pub enum ItemSource {
     JsonLd,
     NextData,
     NuxtData,
+    HtmlArticles,
+    ContentSections,
 }
 
 impl ItemSource {
@@ -127,6 +139,8 @@ impl ItemSource {
             ItemSource::JsonLd => "json_ld",
             ItemSource::NextData => "next_data",
             ItemSource::NuxtData => "nuxt_data",
+            ItemSource::HtmlArticles => "html_articles",
+            ItemSource::ContentSections => "content_sections",
         }
     }
 }
@@ -221,7 +235,77 @@ fn items_of(document: &scraper::Html, base: &Url) -> (Vec<Item>, Option<ItemSour
             return (items, Some(ItemSource::NuxtData));
         }
     }
+    let articles = html_articles(document, base);
+    if !articles.is_empty() {
+        return (articles, Some(ItemSource::HtmlArticles));
+    }
     (Vec::new(), None)
+}
+
+fn html_articles(document: &scraper::Html, base: &Url) -> Vec<Item> {
+    static ARTICLE: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"article, [role="article"], .post, .blog-post, .entry, .news-item, .release-entry, .release"#,
+        )
+    });
+    static TITLE: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"h1 a, h2 a, h3 a, h4 a, h1, h2, h3, h4, .entry-title a, .post-title a, .title a"#,
+        )
+    });
+    static LINK: LazyLock<scraper::Selector> = LazyLock::new(|| selector(r#"a[href]"#));
+    static TIME: LazyLock<scraper::Selector> =
+        LazyLock::new(|| selector(r#"time, .date, [datetime]"#));
+    static SNIPPET: LazyLock<scraper::Selector> =
+        LazyLock::new(|| selector(r#"p, .summary, .excerpt, .description, .entry-summary"#));
+    static IMG: LazyLock<scraper::Selector> = LazyLock::new(|| selector(r#"img[src]"#));
+
+    let mut items = Vec::new();
+    for element in document.select(&ARTICLE).take(MAX_ITEMS) {
+        let title_elem = element.select(&TITLE).next();
+        let title = title_elem
+            .map(|e| e.text().collect::<String>())
+            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty());
+        let Some(title) = title else { continue };
+
+        let link = title_elem
+            .and_then(|e| e.value().attr("href"))
+            .or_else(|| element.select(&LINK).find_map(|e| e.value().attr("href")))
+            .and_then(|l| absolute(l, base));
+
+        let time_text = element.select(&TIME).next().and_then(|e| {
+            e.value()
+                .attr("datetime")
+                .map(str::to_string)
+                .or_else(|| Some(e.text().collect::<String>()))
+        });
+        let year = time_text.as_deref().and_then(year_in);
+
+        let snippet = element
+            .select(&SNIPPET)
+            .map(|e| e.text().collect::<String>())
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|s| !s.is_empty() && s != &title)
+            .map(|s| clip(&s));
+
+        let image = element
+            .select(&IMG)
+            .find_map(|e| e.value().attr("src"))
+            .and_then(|s| absolute(s, base));
+
+        items.push(Item {
+            title: clip(&title),
+            price: None,
+            currency: None,
+            mileage: None,
+            year,
+            link,
+            image,
+            snippet,
+        });
+    }
+    distinct(items)
 }
 
 fn distinct(items: Vec<Item>) -> Vec<Item> {
@@ -323,6 +407,10 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         "modelDate",
         "productionDate",
         "dateVehicleFirstRegistered",
+        "datePublished",
+        "dateCreated",
+        "dateModified",
+        "startDate",
     ]
     .iter()
     .find_map(|k| text_of(object.get(*k)))
@@ -335,6 +423,12 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         .get("image")
         .and_then(image_of)
         .and_then(|u| absolute(&u, base));
+    let snippet = text_of(
+        object
+            .get("description")
+            .or_else(|| object.get("articleBody"))
+            .or_else(|| object.get("summary")),
+    );
     Some(Item {
         title: clip(&title),
         price,
@@ -343,6 +437,7 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         year,
         link,
         image,
+        snippet,
     })
 }
 
@@ -435,6 +530,10 @@ fn state_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
     let image = key(object, IMAGE_KEYS)
         .and_then(image_of)
         .and_then(|u| absolute(&u, base));
+    let snippet = text_of(key(
+        object,
+        &["snippet", "description", "summary", "excerpt", "text"],
+    ));
     Some(Item {
         title: clip(&title),
         price,
@@ -443,6 +542,7 @@ fn state_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         year,
         link,
         image,
+        snippet,
     })
 }
 
@@ -925,5 +1025,63 @@ mod tests {
         assert!(!is_private("hotel", "text", ""));
         assert!(!is_private("scorecard_min", "text", ""));
         assert!(!is_private("q", "search", "off"));
+    }
+
+    #[test]
+    fn json_ld_blog_posts_and_articles_read_as_items() {
+        let page = data(
+            r#"<html><head><script type="application/ld+json">
+            {"@context":"https://schema.org","@type":"BlogPosting",
+             "headline":"Announcing Model v3.0",
+             "description":"Our new multimodal model is now available.",
+             "datePublished":"2026-11-01",
+             "url":"https://blog.example/v3"}
+            </script></head><body></body></html>"#,
+        );
+        assert_eq!(page.items_from, Some(ItemSource::JsonLd));
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "Announcing Model v3.0");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://blog.example/v3")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("Our new multimodal model is now available.")
+        );
+    }
+
+    #[test]
+    fn html_articles_read_as_items() {
+        let page = data(
+            r#"<html><body>
+            <main>
+              <article class="post">
+                <h2><a href="/posts/first">First Post</a></h2>
+                <time datetime="2026-10-15">Oct 15, 2026</time>
+                <p>Welcome to our new publication feed.</p>
+              </article>
+              <article class="post">
+                <h2><a href="/posts/second">Second Post</a></h2>
+                <time datetime="2026-11-02">Nov 02, 2026</time>
+                <p>Updates on distributed training techniques.</p>
+              </article>
+            </main>
+            </body></html>"#,
+        );
+        assert_eq!(page.items_from, Some(ItemSource::HtmlArticles));
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].title, "First Post");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://cars.example/posts/first")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("Welcome to our new publication feed.")
+        );
+        assert_eq!(page.items[1].title, "Second Post");
     }
 }

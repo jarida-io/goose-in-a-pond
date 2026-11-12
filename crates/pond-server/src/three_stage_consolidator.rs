@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 const PROPOSER_PROMPT: &str = "\
 <identity>
-You are the Memory Proposer. You analyze a user's memory store and propose \
-changes that improve how the assistant can help the user.
+You are the Memory Consolidator and Cleaner. You analyze a user's memory store and propose \
+changes that clean up noise, resolve contradictions, deduplicate, and organize memories.
 </identity>
 
 <instructions>
@@ -48,6 +48,7 @@ through a film, show, book, game or public figure came from one question: \"<use
 biographies and career milestones of public figures such as Willem Dafoe\", \"<user> is working \
 through an assignment named Avengers Doomsday\" (a film they asked about), \"<user> repeatedly \
 offers apologies to <user>\" (nonsense from one exchange).
+- PRUNE ephemeral states that are no longer relevant (temporary requests like holding on for 5 minutes, momentary screen checks).
 - KEEP: identity facts, corrections, personal preferences, relationships, active projects.
 - Organize by segment: ensure each memory is in its correct thematic category.
 - Corrections must never be pruned or superseded by non-corrections.
@@ -59,26 +60,28 @@ Output ONLY the JSON array.";
 
 const ADVERSARY_PROMPT: &str = "\
 <identity>
-You are the Memory Adversary. You protect user memories from harmful changes. \
-Your role is to challenge proposals that risk losing valuable information.
+You are the Memory Guardian and Skeptic. You protect user memories from harmful changes. \
+Your role is to challenge proposals that risk losing valuable information, context, or corrections.
 </identity>
 
 <instructions>
 Think carefully about whether each proposal preserves the user's knowledge. \
+Two opposite agents must agree: an action will ONLY execute if you agree. \
 Then output a JSON array with one challenge per proposal.
 
 [{\"index\":0,\"agreed\":true|false,\"reason\":\"...\",\"severity\":\"low\"|\"medium\"|\"high\"}]
 
 <rules>
-- DENY (high severity) if a proposal loses unique personal information.
-- DENY (high severity) if a correction is superseded by a non-correction.
-- DENY (medium severity) if a merge combines thematically unrelated facts.
+- TWO-AGENT AGREEMENT IS REQUIRED: If you do not agree (agreed: false), the proposal is rejected.
+- DENY (high severity) if a proposal loses unique personal information, nuance, or specific details.
+- DENY (high severity) if a correction or negative constraint is superseded, weakened, or pruned.
+- DENY (medium severity) if a merge combines thematically unrelated facts or blurs specific facts into vague generalities.
 - DENY (medium severity) if a split loses important context from the original.
-- AGREE (low severity) for pruning genuinely useless content (empty, filler, system-prompt duplicates).
+- DENY (high severity) a merge with no merged text or empty text.
+- AGREE (low severity) for pruning genuinely useless content (empty, filler, ephemeral requests, system-prompt duplicates).
 - AGREE (low severity) for pruning a trait built from one question the user asked (\"inquires \
 about\", \"tracks biographies of\", a film title read as an assignment): it is not personal.
-- DENY (high severity) a merge with no merged text.
-- AGREE for merging true duplicates that say the same thing differently.
+- AGREE for merging true duplicates that say the same thing differently while preserving all details.
 - You MUST include an entry for EVERY proposal, even if you agree.
 - When unsure, err on the side of DENY — memory is cheap, information loss is not.
 </rules>
@@ -88,24 +91,23 @@ Output ONLY the JSON array.";
 
 const JUDGE_PROMPT: &str = "\
 <identity>
-You are the Memory Judge. You make final decisions on disputed memory proposals \
-by weighing the Proposer's rationale against the Adversary's objections.
+You are the Consensus Verifier and Judge. You enforce the mutual agreement rule \
+between the Memory Consolidator and the Memory Guardian.
 </identity>
 
 <instructions>
-Think carefully about the balance between keeping the memory store clean and \
-preserving valuable user information. Then output a JSON array of decisions.
+Evaluate each proposal alongside the Guardian's challenge. Output a JSON array of decisions.
 
 [{\"index\":0,\"accepted\":true|false,\"reason\":\"...\"}]
 
 <rules>
-- High severity objections: usually reject unless the benefit clearly outweighs the risk.
-- Medium severity objections: weigh the specific tradeoff — accept if information is truly preserved.
-- Low severity objections: usually accept the proposal.
-- Never accept a proposal that would delete correction metadata.
-- For splits: accept if the resulting parts are cleaner and better categorized.
-- For merges: accept only if no distinct information is lost.
-- The goal is a memory store that maximally helps the assistant serve the user.
+- TWO-AGENT AGREEMENT IS MANDATORY: An action is accepted IF AND ONLY IF both opposite agents agree.
+- If the Guardian disagreed (\"agreed\": false), you MUST reject the proposal (\"accepted\": false). Never overrule the Guardian's veto.
+- If the Guardian agreed (\"agreed\": true), accept the proposal UNLESS it violates a critical safety rule:
+  * Never accept a proposal that weakens, deletes, or supersedes a user correction with a non-correction.
+  * Never accept a merge with empty or blank merged text.
+  * Never accept a merge combining contradictory facts without an explicit supersede.
+- The resulting memory store must reflect the consensus of both opposite agents.
 </rules>
 </instructions>
 
@@ -296,23 +298,64 @@ impl ThreeStageConsolidator {
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 fn format_memories(memories: &[MemoryFragment]) -> String {
-    memories
-        .iter()
-        .map(|m| {
-            let seg = m
-                .segment
-                .as_ref()
-                .map(|s| format!("{:?}", s).to_lowercase())
-                .unwrap_or_else(|| "unknown".to_string());
-            let imp = m.importance.unwrap_or(0.5);
-            let mut line = format!("[{}] ({}, {:.1}) {}", m.id, seg, imp, m.content);
-            if let Some(ref corrects) = m.corrects {
-                line.push_str(&format!(" [corrects: {corrects}]"));
-            }
-            line
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut corrections = Vec::new();
+    let mut identity = Vec::new();
+    let mut preferences = Vec::new();
+    let mut projects = Vec::new();
+    let mut knowledge = Vec::new();
+
+    for m in memories {
+        let seg = m
+            .segment
+            .as_ref()
+            .map(|s| format!("{:?}", s).to_lowercase())
+            .unwrap_or_else(|| "unknown".to_string());
+        let imp = m.importance.unwrap_or(0.5);
+        let mut line = format!("[{}] ({}, {:.1}) {}", m.id, seg, imp, m.content);
+        if let Some(ref corrects) = m.corrects {
+            line.push_str(&format!(" [corrects: {corrects}]"));
+        }
+
+        if seg == "correction" || m.corrects.is_some() {
+            corrections.push(line);
+        } else if seg == "identity" || seg == "relationship" {
+            identity.push(line);
+        } else if seg == "preference" || seg == "routine" {
+            preferences.push(line);
+        } else if seg == "project" || seg == "context" {
+            projects.push(line);
+        } else {
+            knowledge.push(line);
+        }
+    }
+
+    let mut sections = Vec::new();
+    if !corrections.is_empty() {
+        sections.push(format!(
+            "<corrections>\n{}\n</corrections>",
+            corrections.join("\n")
+        ));
+    }
+    if !identity.is_empty() {
+        sections.push(format!("<identity>\n{}\n</identity>", identity.join("\n")));
+    }
+    if !preferences.is_empty() {
+        sections.push(format!(
+            "<preferences>\n{}\n</preferences>",
+            preferences.join("\n")
+        ));
+    }
+    if !projects.is_empty() {
+        sections.push(format!("<projects>\n{}\n</projects>", projects.join("\n")));
+    }
+    if !knowledge.is_empty() {
+        sections.push(format!(
+            "<knowledge>\n{}\n</knowledge>",
+            knowledge.join("\n")
+        ));
+    }
+
+    sections.join("\n")
 }
 
 // ── JSON parsing helpers ─────────────────────────────────────────────────────
@@ -586,10 +629,14 @@ fn build_exchanges(
                 rationale: "no adversary response — defaulting to reject".to_string(),
                 severity: ChallengeSeverity::High,
             });
-            let judgment = decisions.get(i).cloned().unwrap_or(JudgeDecision {
+            let mut judgment = decisions.get(i).cloned().unwrap_or(JudgeDecision {
                 accepted: false,
                 rationale: "no judge response — defaulting to reject".to_string(),
             });
+            // Consensus rule: an action is accepted only if both opposite agents agree.
+            if !challenge.agreed {
+                judgment.accepted = false;
+            }
             TrialExchange {
                 proposal,
                 challenge,
@@ -788,6 +835,27 @@ mod tests {
             exchanges[1].challenge.severity,
             ChallengeSeverity::High
         ));
+    }
+
+    #[test]
+    fn adversary_disagreement_vetoes_acceptance() {
+        let proposals = vec![ConsolidationProposal {
+            action: ConsolidationAction::Prune {
+                id: "x".to_string(),
+            },
+            rationale: "cleanup".to_string(),
+        }];
+        let challenges = vec![ChallengeVerdict {
+            agreed: false,
+            rationale: "guardian protects personal detail".to_string(),
+            severity: ChallengeSeverity::High,
+        }];
+        let decisions = vec![JudgeDecision {
+            accepted: true,
+            rationale: "judge wanted to clean".to_string(),
+        }];
+        let exchanges = build_exchanges(proposals, challenges, decisions);
+        assert!(!exchanges[0].judgment.accepted);
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub struct WatchItem {
     pub link: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 impl WatchItem {
@@ -114,11 +116,12 @@ impl WatchFilters {
     /// met: an alert has to be one they can trust.
     pub fn matches(&self, item: &WatchItem) -> bool {
         let title = item.title.to_lowercase();
+        let snippet = item.snippet.as_deref().unwrap_or("").to_lowercase();
         self.words
             .iter()
             .map(|w| w.trim().to_lowercase())
             .filter(|w| !w.is_empty())
-            .all(|w| title.contains(&w))
+            .all(|w| title.contains(&w) || snippet.contains(&w))
             && self
                 .max_price
                 .is_none_or(|max| item.price_value().is_some_and(|p| p <= max))
@@ -163,6 +166,7 @@ pub enum ChangeKind {
     New,
     Gone,
     PriceChanged { from: String, to: String },
+    Updated { from: String, to: String },
 }
 
 /// One change a check found.
@@ -188,9 +192,14 @@ impl WatchChange {
                     price_with(item, to)
                 ));
             }
+            ChangeKind::Updated { from: _, to } => {
+                if !to.trim().is_empty() {
+                    facts.push(to.clone());
+                }
+            }
             _ => facts.extend(item.price_words()),
         }
-        if !matches!(self.kind, ChangeKind::Gone) {
+        if !matches!(self.kind, ChangeKind::Gone | ChangeKind::Updated { .. }) {
             facts.extend(item.mileage_words());
         }
         let what = match &self.kind {
@@ -201,6 +210,7 @@ impl WatchChange {
                 (Some(a), Some(b)) if b > a => "Price up",
                 _ => "Price changed",
             },
+            ChangeKind::Updated { .. } => "Updated",
         };
         format!("{what}: {}", facts.join(", "))
     }
@@ -269,6 +279,16 @@ pub fn compare(
                         item: item.clone(),
                         matched: false,
                     });
+                } else if old.snippet != item.snippet {
+                    let from = old.snippet.clone().unwrap_or_default();
+                    let to = item.snippet.clone().unwrap_or_default();
+                    if !from.is_empty() || !to.is_empty() {
+                        changes.push(WatchChange {
+                            kind: ChangeKind::Updated { from, to },
+                            item: item.clone(),
+                            matched: false,
+                        });
+                    }
                 }
             }
         }
@@ -284,7 +304,8 @@ pub fn compare(
         }
     }
     for change in &mut changes {
-        let wanted = matches!(change.kind, ChangeKind::New) || change.is_price_drop();
+        let wanted = matches!(change.kind, ChangeKind::New | ChangeKind::Updated { .. })
+            || change.is_price_drop();
         change.matched = wanted && filters.matches(&change.item);
     }
     Comparison::Changes(changes)
@@ -488,5 +509,34 @@ mod tests {
         let mut nameless = car("Big Kettle", "1", "");
         nameless.link = None;
         assert_eq!(nameless.key(), "big kettle");
+    }
+
+    #[test]
+    fn a_content_snippet_update_is_reported_and_matches_keywords() {
+        let before = [WatchItem {
+            title: "Application Deadlines".into(),
+            link: Some("https://uni.example/admissions#deadlines".into()),
+            snippet: Some("Applications close November 15".into()),
+            ..Default::default()
+        }];
+        let now = [WatchItem {
+            title: "Application Deadlines".into(),
+            link: Some("https://uni.example/admissions#deadlines".into()),
+            snippet: Some("Applications extended to December 1".into()),
+            ..Default::default()
+        }];
+        let filters = WatchFilters {
+            words: vec!["december".into()],
+            ..Default::default()
+        };
+        let Comparison::Changes(changes) = compare(Some(&before), &now, &filters) else {
+            panic!("changes expected");
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].line(),
+            "Updated: Application Deadlines, Applications extended to December 1"
+        );
+        assert!(changes[0].matched);
     }
 }

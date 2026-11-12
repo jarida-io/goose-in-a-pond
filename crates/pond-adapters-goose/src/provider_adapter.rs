@@ -101,11 +101,19 @@ impl LlmProvider for GooseProviderAdapter {
             &goose_messages,
             &[], // no tools for direct completion
         );
+        let helper_completion = async {
+            if goose_providers::request_context::is_helper() {
+                completion.await
+            } else {
+                goose_providers::request_context::as_helper(true, completion).await
+            }
+        };
         let completed = match &call {
             Some(call) => {
-                goose_providers::request_context::stopping_when(call.stop_when(), completion).await
+                goose_providers::request_context::stopping_when(call.stop_when(), helper_completion)
+                    .await
             }
-            None => completion.await,
+            None => helper_completion.await,
         };
         lease.finished();
         if call.as_ref().is_some_and(|call| call.was_cut()) {

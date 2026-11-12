@@ -28,6 +28,20 @@ pub enum MemorySegment {
 }
 
 impl MemorySegment {
+    /// Canonical segment tag.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Preference => "preference",
+            Self::Correction => "correction",
+            Self::Relationship => "relationship",
+            Self::Project => "project",
+            Self::Routine => "routine",
+            Self::Knowledge => "knowledge",
+            Self::Context => "context",
+        }
+    }
+
     /// Default importance for this segment (0.0–1.0).
     pub fn default_importance(&self) -> f32 {
         match self {
@@ -1486,7 +1500,7 @@ mod tests {
 
     #[test]
     fn is_correction_by_corrects_field() {
-        let mut frag = MemoryFragment::from_extraction(
+        let frag = MemoryFragment::from_extraction(
             "c2".to_string(),
             None,
             "Likes tea not coffee".to_string(),

@@ -170,8 +170,8 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            20_331,
-            "the default tool block is now {total} raw bytes, was 20,331. That is \
+            19_926,
+            "the default tool block is now {total} raw bytes, was 19,926. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
@@ -214,8 +214,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 21_133,
-            "the block with every key stored is now {total} raw bytes, was 21,133"
+            total, 20_728,
+            "the block with every key stored is now {total} raw bytes, was 20,728"
         );
     }
 
