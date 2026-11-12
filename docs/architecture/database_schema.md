@@ -68,7 +68,7 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `memory_fragments` | Curated long-term memory | `profile_id` (FK cascade; null = household-wide), `session_id` (FK set null), `content`, `source`, `tags` (JSON), `segment`, `importance`, `tier`, `decay_rate`, `access_count`, `last_accessed_at`, `lifecycle`, `superseded_by`, `corrects`, `embedding` |
+| `memory_fragments` | Curated long-term memory | `profile_id` (FK cascade; null = household-wide), `session_id` (FK set null), `content`, `source`, `tags` (JSON), `segment`, `importance`, `tier`, `decay_rate`, `access_count`, `last_accessed_at`, `lifecycle`, `superseded_by`, `corrects`, `about` (what it says of its member, from the closed list), `valid_until` (a passing fact's end), `resort_attempts`, `embedding` |
 | `memory_events` | Audit trail of memory lifecycle events | `event_kind`, `memory_id`, `session_id`, `data` |
 | `consolidation_runs` | One row per memory consolidation pass | `mode`, `memory_count`, `accepted`, `rejected`, `duration_ms`, `details` |
 | `memory_edges` | Edges between memories (`from_id`, `to_id`, `relation`). No code reads or writes it, and its foreign keys name a `memories` table that does not exist | |

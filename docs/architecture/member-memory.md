@@ -65,8 +65,8 @@ how much it weighs and how long it lasts.
 
 ## The write policy
 
-One function, `member_profile::admit`, stands in front of every route that writes a memory: the
-chat model's `save_memory`, batch extraction, the re-sort, and a member's own entry on their phone.
+One function, `member_profile::admit`, stands in front of every route by which the Pond itself
+writes a memory: the chat model's `save_memory`, batch extraction and the re-sort.
 
 1. Only what a member says about themselves, that will hold for months, and that would change a
    later answer.
@@ -113,6 +113,16 @@ Importance, tier, tags, segment and the ids of superseded rows are no longer the
 invent; `about` implies them. The keyword classifier that guessed a segment from the sentence
 (`auto_classify_segment`) is gone, and an empty `content` no longer saves the person's message.
 
+## Routes
+
+`/api/v1/me/about` is the member's own view and hand: the profile by heading, add, reword,
+re-file, forget, and the archived rows with restore. Shapes are in
+[my-goose-hub.md](my-goose-hub.md#0a-about-you-the-members-profile). A fact the member writes
+there is theirs to word, so its sentence is not judged; it is filed under the `about` they pick.
+`/api/v1/memories` keeps its older shape for the desktop's memory screens.
+
+`POST /api/v1/lane/jobs/memory_resort/run` starts the re-sort without waiting for its next look.
+
 ## Extraction
 
 The extraction prompt names each memory's `about` from the same list (without `now`: it keeps what
@@ -125,7 +135,10 @@ one-at-a-time `about` is not dropped as "related" to the old one; it replaces it
 A lane job re-sorts every live row that has no `about`, ten at a time while the house is quiet: the
 model names each row's `about`, or says it is not a fact about a member; code applies the write
 policy. Rows that fail are archived with the reason, never deleted, and can be restored. The job
-resumes where it stopped.
+resumes where it stopped. A row the model gives no usable answer for twice is left as it is: still
+recalled, shown under "Other". Of several older rows about one one-at-a-time thing, the newest
+stays and the rest are closed. A row consolidation merges comes out unfiled and is filed on the
+next pass.
 
 ## Goose's own notes
 

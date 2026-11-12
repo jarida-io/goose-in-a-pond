@@ -25,9 +25,34 @@ else Goose can do. This document is the contract between the Pond and the phone.
 
 ## 0. What this Pond serves
 
-`GET /me/hub` → `{"version":1,"interests":bool,"news":bool,"todos":bool,"cart":bool,
+`GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"news":bool,"todos":bool,"cart":bool,
 "connectors":bool,"ideas":bool,"catalog":bool}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
+
+## 0a. About you: the member's profile
+
+What the Pond remembers about the member, under headings, with the member's own hand on it. The
+headings, the closed `about` list and the write policy are in
+[member-memory.md](member-memory.md).
+
+```
+Fact = { "id", "content": "Jerry is allergic to peanuts.", "about": "allergy"|null,
+  "sensitive": bool,      // allergy, health, partner: never put in a notice's words
+  "shared": bool,         // a household row: shown, not the member's to change
+  "created_at", "expires_at"|null }   // expires_at: a passing ("now") fact
+```
+
+- `GET /me/about` → `{"headings":[{"segment","heading","facts":[Fact]}], "to_file": n,
+  "words":[{"about","heading","one_at_a_time":bool}]}`. Headings come in profile order and only
+  when they hold a fact; `to_file` counts older rows the re-sort has yet to file (shown under
+  "Other"); `words` is the list a picker offers.
+- `POST /me/about` `{content, about, shared?}` → Fact, `201`. The same sentence again answers `200`
+  with the row already there. A one-at-a-time `about` closes the member's old row. A word
+  outside the list is `400`.
+- `PATCH /me/about/{id}` `{content?, about?}` → Fact; `DELETE /me/about/{id}` → `204`. Only the
+  member's own rows; a shared row or another member's is `404`.
+- `GET /me/about/archived` → `{"facts":[Fact + "why"]}`: rows the re-sort set aside, each with
+  its reason. `POST /me/about/{id}/restore` → Fact (`409` when the row is not archived).
 
 ## 1. Interests, the interview that builds them, and the portrait
 
