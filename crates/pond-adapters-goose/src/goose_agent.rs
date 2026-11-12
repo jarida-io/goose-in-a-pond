@@ -3489,10 +3489,10 @@ impl GooseAdapter {
                time, on a repeat or at a place ('remind me to call Emmanuel when I get home', \
                'add renew the logbook to my to-dos'); `list_todos` and `complete_todo` read and \
                tick off that list. Use `set_timer` only for a countdown ('set a timer for 10 \
-               minutes'), `create_schedule` for recurring 6-field cron jobs you run yourself \
-               (`sec min hr dom mon dow`), and `list_schedules` / `update_schedule` / \
-               `schedule_action` (`delete` | `pause` | `resume` | `run_now`) to inspect or \
-               control them. If a group is listed under ADDITIONAL CAPABILITIES, \
+               minutes'), `create_schedule` for something you do yourself again and again \
+               (`when` in plain words: 'every weekday at 7am'; pass a schedule's name as `id` \
+               to change it), and `list_schedules` / `schedule_action` (`delete` | `pause` | \
+               `resume` | `run_now`) to inspect or control them by name. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
                     .to_string(),
             );

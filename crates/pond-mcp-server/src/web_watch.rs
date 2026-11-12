@@ -50,10 +50,13 @@ pub fn init_web_watch_deps(deps: WebWatchDeps) {
 }
 
 // Undocumented fields and plain types on purpose: this tool is in every turn's tool block.
+// `default` keeps every field out of the schema's `required`; a small model asks for each one listed.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(transform = crate::without_null_defaults)]
 pub struct WebWatchParams {
     /// start, list, stop, or watch_price for one product's page
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "start"))]
     pub action: Option<String>,
     #[schemars(with = "String")]
     pub url: Option<String>,
@@ -66,7 +69,7 @@ pub struct WebWatchParams {
     pub min_year: Option<Value>,
     #[schemars(with = "f64")]
     pub max_mileage: Option<Value>,
-    #[schemars(with = "u32")]
+    #[schemars(with = "u32", extend("default" = 6))]
     pub every_hours: Option<Value>,
     #[schemars(with = "String")]
     pub watch_id: Option<String>,
@@ -158,7 +161,8 @@ pub fn watch_item(item: Item) -> WatchItem {
 impl KnowledgeMcpServer {
     #[tool(description = "\
 Keep checking any web page (listings, blogs, news feeds, release notes, announcement boards, or \
-content pages) and tell the person when new articles appear, content updates, or prices drop.")]
+content pages) and tell the person when new articles appear, content updates, or prices drop. \
+Only url is needed; the other fields narrow what matches.")]
     async fn web_watch(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -446,6 +450,33 @@ mod tests {
 
     fn params(value: serde_json::Value) -> WebWatchParams {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_model_sees_every_field_as_optional_with_its_real_default() {
+        let tools = crate::prefix_oracle::all_tools();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|(_, t)| t.name == name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("{name} is not offered"))
+        };
+        for name in ["web_watch", "saved_items"] {
+            let required = tool(name).input_schema.get("required").cloned();
+            assert!(
+                required.is_none_or(|r| r.as_array().is_some_and(Vec::is_empty)),
+                "{name} lists required fields, so a small model asks the person for each one"
+            );
+        }
+        let watch = tool("web_watch").input_schema;
+        assert_eq!(
+            watch["properties"]["every_hours"]["default"],
+            serde_json::json!(DEFAULT_INTERVAL_HOURS),
+            "the interval the model is shown is the one a watch gets"
+        );
+        assert_eq!(watch["properties"]["action"]["default"], "start");
+        assert!(watch["properties"]["url"].get("default").is_none());
     }
 
     #[test]

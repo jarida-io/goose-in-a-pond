@@ -37,9 +37,10 @@ pub struct GetSensorHistoryParams {
     pub device_id: Option<String>,
     /// e.g. "temperature".
     pub sensor_type: Option<String>,
-    /// ISO 8601 start, inclusive. Omit for all history.
+    /// From when, as a person says it: "yesterday", "6 hours ago", "Monday", or a date. Omit
+    /// for all history.
     pub since: Option<String>,
-    /// ISO 8601 end, exclusive. Omit for up to now.
+    /// Up to when, said the same way. Omit for up to now.
     pub until: Option<String>,
     /// "min", "max", or "avg"; omit for raw readings.
     pub agg: Option<String>,
@@ -387,8 +388,26 @@ impl SensorsMcpServer {
             )]));
         };
 
-        let since = params.0.since.as_deref().and_then(parse_datetime);
-        let until = params.0.until.as_deref().and_then(parse_datetime);
+        let (now, tz) = (
+            chrono::Utc::now(),
+            crate::todo_tools::household_zone().await,
+        );
+        let edge = |name: &str, raw: Option<&str>| match range_edge(raw, now, tz) {
+            Ok(at) => Ok(at),
+            Err(raw) => Err(CallToolResult::success(vec![ContentBlock::text(format!(
+                "No readings were looked up: `{name}` \"{raw}\" is not a time the Pond can \
+                 place. Say \"yesterday\", \"6 hours ago\", \"Monday\", or a date like \
+                 2026-11-10."
+            ))])),
+        };
+        let since = match edge("since", params.0.since.as_deref()) {
+            Ok(at) => at,
+            Err(refusal) => return Ok(refusal),
+        };
+        let until = match edge("until", params.0.until.as_deref()) {
+            Ok(at) => at,
+            Err(refusal) => return Ok(refusal),
+        };
         let agg = params.0.agg.as_deref().map(str::to_lowercase);
 
         let readings = match self
@@ -549,6 +568,30 @@ fn resolve_str_param(
         }
     }
     None
+}
+
+/// One end of a history range as it was sent: a timestamp, a date, or a person's words. An
+/// end that cannot be placed is returned as the error, never dropped: no end means all history.
+fn range_edge(
+    raw: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    tz: chrono_tz::Tz,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(at) = parse_datetime(raw) {
+        return Ok(Some(at));
+    }
+    if let Ok(day) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        let midnight = chrono::NaiveTime::from_hms_opt(0, 0, 0).expect("midnight");
+        return pond_core::shared::domain::todo::local_instant(tz, day, midnight)
+            .map(Some)
+            .ok_or_else(|| raw.to_string());
+    }
+    pond_core::shared::domain::when_said::earlier_from_words(raw, now, tz)
+        .map(Some)
+        .ok_or_else(|| raw.to_string())
 }
 
 fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -1160,5 +1203,33 @@ mod tests {
     fn parse_datetime_rfc3339() {
         assert!(parse_datetime("2024-01-15T10:00:00Z").is_some());
         assert!(parse_datetime("not-a-date").is_none());
+    }
+
+    #[test]
+    fn a_range_end_is_a_timestamp_a_date_or_words_and_never_silently_dropped() {
+        let now = "2026-11-09T07:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let tz = chrono_tz::Africa::Nairobi;
+        let edge = |raw: &str| range_edge(Some(raw), now, tz).map(|at| at.map(|a| a.to_rfc3339()));
+        assert_eq!(range_edge(None, now, tz), Ok(None));
+        assert_eq!(range_edge(Some("  "), now, tz), Ok(None));
+        assert_eq!(
+            edge("2026-11-08T10:00:00Z"),
+            Ok(Some("2026-11-08T10:00:00+00:00".to_string()))
+        );
+        assert_eq!(
+            edge("2026-11-08"),
+            Ok(Some("2026-11-07T21:00:00+00:00".to_string()))
+        );
+        assert_eq!(
+            edge("yesterday"),
+            Ok(Some("2026-11-07T21:00:00+00:00".to_string()))
+        );
+        assert_eq!(
+            edge("6 hours ago"),
+            Ok(Some("2026-11-09T01:00:00+00:00".to_string()))
+        );
+        assert_eq!(edge("a while back"), Err("a while back".to_string()));
     }
 }
