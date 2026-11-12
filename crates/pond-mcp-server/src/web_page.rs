@@ -242,8 +242,14 @@ whole, and what the page lists.")]
             host = %web_search::domain_of(&page.address),
             lines = page.lines.len(),
             parts = page.parts.len(),
-            items = page.data.items.len(),
-            items_from = page.data.items_from.map(|f| f.as_str()).unwrap_or("none"),
+            items = page.data.items.len().max(page.data.listed_links.len()),
+            items_from = page
+                .data
+                .items_from
+                .or((!page.data.listed_links.is_empty())
+                    .then_some(page_data::ItemSource::LinkList))
+                .map(|f| f.as_str())
+                .unwrap_or("none"),
             links = page.data.links.len(),
             forms = page.data.forms.len(),
             depth,
@@ -532,10 +538,15 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
                 PageData::default(),
             ),
         };
+        // Sections before plain links, so a page already watched by its sections keeps its list.
         let items = if !data.items.is_empty() {
             data.items
         } else {
-            items_from_sections(&title, &final_address, &lines)
+            let sections = items_from_sections(&title, &final_address, &lines);
+            match sections.is_empty() {
+                true => data.listed_links,
+                false => sections,
+            }
         };
         WatchedPage {
             address: final_address,
@@ -1080,6 +1091,7 @@ impl Page {
             .data
             .items
             .iter()
+            .chain(&self.data.listed_links)
             .filter_map(|i| i.link.clone().map(|l| (l, i.title.clone())));
         let links = self
             .data
@@ -1168,7 +1180,11 @@ impl Page {
 
     /// The page's listed items, those the question names first, within [`ITEMS_BYTES`].
     fn items_text(&self, question: &str) -> String {
-        let items = &self.data.items;
+        let from_data = !self.data.items.is_empty();
+        let items = match from_data {
+            true => &self.data.items,
+            false => &self.data.listed_links,
+        };
         if items.is_empty() {
             return String::new();
         }
@@ -1196,7 +1212,11 @@ impl Page {
         }
         shown.sort_unstable();
         let mut out = format!(
-            "\nListed on this page, from its own data ({} of {}):",
+            "\nListed on this page, {} ({} of {}):",
+            match from_data {
+                true => "from its own data",
+                false => "in the page's order",
+            },
             shown.len(),
             items.len()
         );
@@ -1474,6 +1494,7 @@ mod tests {
                 ),
             ],
             items_from: Some(page_data::ItemSource::JsonLd),
+            listed_links: Vec::new(),
             links: vec![
                 page_data::Link {
                     address: "https://cars.example/finance".into(),
