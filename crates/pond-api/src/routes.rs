@@ -2589,8 +2589,15 @@ async fn prepare_turn_audio(
         });
     }
     if as_words.is_some() {
+        let clips = words.len();
         let words = words.join(" ");
         if words.trim().is_empty() {
+            tracing::warn!(
+                target: "giap::audio",
+                kind = "voice_note_no_words",
+                clips,
+                "a voice note went as words but none were heard; refused"
+            );
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
@@ -2656,10 +2663,17 @@ async fn transcribe_voice_note(
             })),
         )
     };
-    tokio::task::spawn_blocking(move || transcribe(wav))
+    let words = tokio::task::spawn_blocking(move || transcribe(wav))
         .await
         .map_err(|e| refused(e.to_string()))?
-        .map_err(|e| refused(format!("{e:#}")))
+        .map_err(|e| refused(format!("{e:#}")))?;
+    tracing::info!(
+        target: "giap::audio",
+        kind = "voice_note_transcribed",
+        chars = words.trim().chars().count(),
+        "transcribed a voice note"
+    );
+    Ok(words)
 }
 
 /// Maps a document refusal onto 413, 422 or 400, with the household sentence and the code.
