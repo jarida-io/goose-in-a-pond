@@ -472,8 +472,9 @@ Reply with JSON only, exactly this shape:
 \"you_can\":[\"...\"],\"notes\":\"...\",\"goose_can\":{\"kind\":\"todo\",\
 \"label\":\"...\",\"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
 
-- title: the idea itself in at most 8 words, as you would say it to a friend. \
-Not a question.
+- title: the idea itself in at most 8 words, naming the actual place, dish, \
+event or thing the pages describe, as you would say it to a friend. Not a \
+question.
 - hook: one line of at most 15 words that makes {name} want to open it.
 - pitch: two or three short sentences for the page that opens: what it is and \
 what makes it good, with the specifics the pages give.
@@ -481,7 +482,7 @@ what makes it good, with the specifics the pages give.
 theirs it fits.
 - facts: two to four things worth seeing at a glance, each a label of one or \
 two words and a short value from the pages: where, when, how long, the cost, \
-how many it serves, how hard it is.
+how many it serves, how hard it is. Never where you read it.
 - sources: the numbers of the pages it rests on.
 - you_can: two to four steps {name} could take, each a short imperative under \
 80 characters.
@@ -502,8 +503,10 @@ else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \
 items; else \"\".
 - score: 0 to 1, how new, specific and doable this is for {name}.
-If the pages hold nothing that fits {name} and the kind of idea, reply \
-{\"title\":\"\"}.";
+Write as if you know it yourself: never say \"page\", \"the pages\" or a \
+page's number outside sources.
+If the pages hold nothing that fits {name} and the kind of idea, or no one \
+specific thing to name, reply {\"title\":\"\"}.";
 
 pub fn render_idea_system(name: &str) -> String {
     IDEA_SYSTEM.replace("{name}", name)
@@ -543,6 +546,15 @@ fn clipped_at_word(text: &str, max: usize) -> String {
     cut[..end]
         .trim_end_matches([',', ';', ':', ' '])
         .to_string()
+}
+
+/// A fact that points at the reading rather than the thing: "Source: Page 1".
+fn says_where_it_was_read(fact: &IdeaFact) -> bool {
+    let label = fact.label.to_lowercase();
+    let value = fact.value.to_lowercase();
+    ["source", "sources", "page", "link", "url", "website"].contains(&label.as_str())
+        || value.starts_with("page ")
+        || value.starts_with("http")
 }
 
 /// The first sentence of `text`, for an idea whose reply gave no hook.
@@ -601,6 +613,7 @@ pub fn parse_idea(
                 value: clipped_at_word(&text_of(f, "value")?, 80),
             })
         })
+        .filter(|fact| !says_where_it_was_read(fact))
         .take(MAX_FACTS)
         .collect();
     let notes = clipped_at_word(&text_of(&map, "notes").unwrap_or_default(), MAX_NOTES_CHARS);
@@ -1059,6 +1072,16 @@ mod tests {
         );
         assert_eq!(idea.facts.len(), 1);
         assert_eq!(idea.facts[0].label, "Serves");
+        let pointing = r#"{"title":"Lentil dal","pitch":"Red lentils and spinach.",
+            "facts":[{"label":"Source","value":"Page 1"},{"label":"Recipe","value":"Page 2 of the list"},
+                     {"label":"Time","value":"35 minutes"}],"sources":[1],"score":0.9}"#;
+        let pointed = parse_idea(pointing, "p", &known, &recipe, &pages(), Utc::now()).unwrap();
+        assert_eq!(
+            pointed.facts.len(),
+            1,
+            "facts about the reading are left out"
+        );
+        assert_eq!(pointed.facts[0].label, "Time");
         assert_eq!(idea.notes, "Soak the lentils for 20 minutes.");
 
         let card = idea.as_card();
