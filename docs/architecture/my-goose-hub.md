@@ -25,8 +25,8 @@ else Goose can do. This document is the contract between the Pond and the phone.
 
 ## 0. What this Pond serves
 
-`GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"news":bool,"todos":bool,"cart":bool,
-"connectors":bool,"ideas":bool,"catalog":bool}`. A Pond without the route answers 404 and the phone
+`GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"catalog":bool}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
 
 ## 0a. About you: the member's profile
@@ -62,6 +62,46 @@ follow-ups. `DELETE /me/notes/{id}` → `204`. A member does not write them; Goo
 ([agent-documents.md](agent-documents.md)). The soul, the heartbeat's checklist and the
 scratchpad's rules are read and saved with `GET/PUT /prompts/{soul|heartbeat|scratchpad}` and
 `POST /prompts/{name}/reset`.
+
+## 0c. The interview
+
+One interview a member, about three minutes: eight fixed sections (you, your people, food and
+health, your days, for fun, news, off limits, how Goose talks to you), each one question with
+tap answers. A section asks at most one follow-up, chosen in code from the answer ("What are
+their names?", "What are you allergic to?"). Every section can be skipped and the interview
+resumes where it stopped. Table: `member_interviews` (migration 0094).
+
+No model writes a question, so an answer returns the next one at once. Taps become facts from
+sentences written in code. Only what the member typed goes to one model call after the last
+answer; an interview of taps alone never calls a model, and a call that fails still leaves
+every tap written up. Every drafted fact passes the profile's write policy
+([member-memory.md](member-memory.md)); the draft repeats nothing the profile holds, never
+offers "has a partner" where the Pond already knows who, and holds one fact for each
+one-at-a-time word. Nothing is kept until the member approves.
+
+```
+Interview = { "status": "not_started|asking|thinking|review|done",
+              "turns": [InterviewTurn],            // as in section 1; the last is the open question
+              "heading": "Food and health"|null,   // the section being asked
+              "progress": {"done": 2, "total": 8},
+              "sections": [{"id","heading"}],
+              "facts": [{"id":"f1","about","content"}],   // the draft, once in review
+              "interests": [Interest],                    // the draft; ids d1, d2, ...
+              "news": "digest|tiles|both|none"|null }
+```
+
+- `GET /me/interview` → Interview. While `thinking` the phone polls it every 1.5 s.
+- `POST /me/interview` `{}` → starts, resumes, or begins again once done
+- `POST /me/interview/answer` `{"choices"?: [string], "text"?, "skip"?: true}` → Interview with
+  the next question, `thinking` when the last answer leaves typed words to write up, or
+  `review` at once. `422` for an answer with none of the three, `409` when nothing is asked.
+- `POST /me/interview/finish` `{}` → stops asking and writes up what there is
+- `POST /me/interview/approve` `{"facts":[ids], "interests":[ids], "edits"?: {factId: sentence},
+  "news"?: bool}` → `{"facts": n, "interests": n, "news": bool}`, status `done`. Facts go to
+  the profile (source `interview`), interests are confirmed with origin `interview`, and unless
+  `"news": false` the news answer sets the member's `tiles` and `digest`.
+
+The interests interview below and the setup interview in chat remain for older phones.
 
 ## 1. Interests, the interview that builds them, and the portrait
 

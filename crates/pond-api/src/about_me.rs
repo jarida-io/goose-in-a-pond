@@ -29,7 +29,7 @@ use crate::AppState;
 pub(crate) const SERVED: bool = true;
 
 /// Rows a profile reads. More than anyone's profile holds; a bound, not a page.
-const PROFILE_ROWS: usize = 400;
+pub(crate) const PROFILE_ROWS: usize = 400;
 /// Archived rows listed for restoring.
 const ARCHIVED_ROWS: usize = 100;
 
@@ -134,22 +134,19 @@ async fn embed(state: &AppState, text: &str) -> Option<Vec<f32>> {
     state.embedder.embed(text).await.ok()
 }
 
-/// `POST /me/about`: a fact the member writes about themselves. It is theirs to word, so the
-/// sentence is not judged; it is filed under the `about` they pick, and a one-at-a-time fact
-/// closes their old one.
-async fn add(
-    State(state): State<Arc<AppState>>,
-    principal: Option<Extension<Principal>>,
-    Json(request): Json<AddRequest>,
-) -> Result<(StatusCode, Json<Value>), Failure> {
-    let member = caller_member(&state, principal.as_ref()).await?;
-    let about = about_word(&request.about)?;
-    let content = normalise_fact_content(&request.content);
-    if content.is_empty() {
-        return Err(failure(StatusCode::BAD_REQUEST, "content is empty"));
-    }
-    let owner = (!request.shared).then(|| member.clone());
-    let scope = ProfileScope::Owner(member.clone());
+/// Keep `content` as a fact filed under `about`, the member's own or the household's: the row,
+/// and whether it is new. A sentence already held is returned as it is, and a one-at-a-time
+/// fact closes the old one.
+pub(crate) async fn keep_fact(
+    state: &AppState,
+    member: &str,
+    about: About,
+    content: &str,
+    shared: bool,
+    source: &str,
+) -> Result<(MemoryFragment, bool), Failure> {
+    let owner = (!shared).then(|| member.to_string());
+    let scope = ProfileScope::Owner(member.to_string());
     let existing: Vec<MemoryFragment> = state
         .memory_repo
         .live_about(&scope, about)
@@ -160,19 +157,19 @@ async fn add(
         .collect();
     if let Some(known) = existing
         .iter()
-        .find(|row| same_sentence(&row.content, &content))
+        .find(|row| same_sentence(&row.content, content))
     {
-        return Ok((StatusCode::OK, Json(fact(known, &member))));
+        return Ok((known.clone(), false));
     }
 
     let mut row = MemoryFragment::from_chat(
         uuid::Uuid::new_v4().to_string(),
         owner,
         None,
-        content.clone(),
+        content.to_string(),
     );
-    row.source = "member".to_string();
-    row.embedding = embed(&state, &content).await;
+    row.source = source.to_string();
+    row.embedding = embed(state, content).await;
     row.lifecycle = Some(MemoryLifecycle::Active);
     file_under(&mut row, about);
     state
@@ -184,7 +181,7 @@ async fn add(
         .memory_repo
         .log_event(MemoryEventKind::Written, &row.id, None, None)
         .await;
-    for old in closed_by(about, &content, &existing) {
+    for old in closed_by(about, content, &existing) {
         if state
             .memory_repo
             .mark_superseded(&old.id, &row.id)
@@ -197,7 +194,30 @@ async fn add(
                 .await;
         }
     }
-    Ok((StatusCode::CREATED, Json(fact(&row, &member))))
+    Ok((row, true))
+}
+
+/// `POST /me/about`: a fact the member writes about themselves. It is theirs to word, so the
+/// sentence is not judged; it is filed under the `about` they pick.
+async fn add(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Json(request): Json<AddRequest>,
+) -> Result<(StatusCode, Json<Value>), Failure> {
+    let member = caller_member(&state, principal.as_ref()).await?;
+    let about = about_word(&request.about)?;
+    let content = normalise_fact_content(&request.content);
+    if content.is_empty() {
+        return Err(failure(StatusCode::BAD_REQUEST, "content is empty"));
+    }
+    let (row, created) =
+        keep_fact(&state, &member, about, &content, request.shared, "member").await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(fact(&row, &member))))
 }
 
 /// A row the caller may change: their own, never a shared one or another member's.
