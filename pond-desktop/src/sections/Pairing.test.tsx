@@ -73,10 +73,18 @@ function code(n: string, profile_id: string | null) {
 
 describe("Pairing for a household member", () => {
   beforeEach(() => {
+    const base = {
+      avatar_emoji: "*",
+      preferences: {},
+      role: "member" as const,
+      guest_until: null,
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-01T00:00:00Z",
+    };
     vi.mocked(api.listProfiles).mockResolvedValue({
       profiles: [
-        { id: "emmanuel", display_name: "Emmanuel Charles Oyugi", avatar_emoji: "*" },
-        { id: "jerry", display_name: "Jerry", avatar_emoji: "*" },
+        { ...base, id: "emmanuel", display_name: "Emmanuel Charles Oyugi" },
+        { ...base, id: "jerry", display_name: "Jerry" },
       ],
     });
   });

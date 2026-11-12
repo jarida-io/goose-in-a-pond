@@ -410,6 +410,24 @@ export interface MeshSettlementStatus {
   }>;
 }
 
+// ── Factory reset ─────────────────────────────────────────────
+export type FactoryResetStep =
+  | "exporting"
+  | "notifying_household"
+  | "revoking_devices"
+  | "erasing_data"
+  | "speaking_goodbye"
+  | "reopening_onboarding";
+
+export type FactoryResetStatus =
+  | { active: false }
+  | {
+      active: true;
+      current_step: FactoryResetStep;
+      steps_completed: number;
+      total_steps: number;
+    };
+
 // ── Schedules ─────────────────────────────────────────────────
 export interface Schedule {
   id: string;
@@ -2199,3 +2217,18 @@ export type ConnectionErrorCode =
   | "no_address"
   | "invalid_request"
   | "unsupported_security";
+
+// ── Household roles & guest device access ───────────────────────
+export type HouseholdRole = "owner" | "member" | "guest" | "developer";
+
+export interface HouseholdProfile {
+  id: string;
+  display_name: string;
+  avatar_emoji: string;
+  preferences: Record<string, string>;
+  role: HouseholdRole;
+  /** Only meaningful for `role: "guest"`; `null` means access never expires on its own. */
+  guest_until: string | null;
+  created_at: string;
+  updated_at: string;
+}

@@ -129,6 +129,8 @@ fn make_app_over(base: TestState, handshake: Arc<dyn Handshake>) -> Harness {
         notification_queue: Some(queue),
         notification_history: None,
         notification_sender: Some(sender),
+        member_notifier: None,
+        factory_reset_progress: None,
         ..base.state
     });
 

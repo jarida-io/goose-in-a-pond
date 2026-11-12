@@ -219,7 +219,9 @@ async fn start_research(state: &AppState, member: &str, idea: &Idea) -> Result<S
         .prompt
         .clone()
         .unwrap_or_else(|| format!("{}: {}", idea.title, idea.pitch));
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // Prefixed so the presence observer never reads this background research as someone arriving
+    // (`POND_AUTHORED_SESSION_PREFIXES`); nobody is in front of the Pond when an idea starts it.
+    let session_id = format!("idea-research-{}", uuid::Uuid::new_v4());
     state
         .session_storage
         .create_session(session_id.clone())

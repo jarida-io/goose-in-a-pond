@@ -43,6 +43,7 @@ const MANAGE_ROWS: Array<{ label: string; section: GuiSection }> = [
   { label: "Models",     section: "models" },
   { label: "Prompts",    section: "prompts" },
   { label: "Extensions", section: "extensions" },
+  { label: "Household",  section: "household" },
   { label: "Faces",      section: "faces" },
 ];
 

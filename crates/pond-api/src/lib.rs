@@ -156,6 +156,13 @@ pub struct AppState {
     pub device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
     /// Rooms the household has named, that devices are placed into.
     pub room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    /// Rooms guests (an unidentified speaker) may use devices in; household-wide, not per-guest.
+    pub guest_room_access:
+        Arc<dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync>,
+    /// Devices an invited, identified guest profile (`Role::Guest`) may use; per-guest, unlike
+    /// [`Self::guest_room_access`].
+    pub guest_device_access:
+        Arc<dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync>,
     /// Matter runtime, reconciled from `matter_enabled`; `None` only where no Matter is wired.
     /// Off is a runtime state, so an unreachable controller never reads as "not enabled".
     pub matter: Option<Arc<dyn pond_core::user_data::ports::matter_runtime::MatterRuntimePort>>,
@@ -290,6 +297,13 @@ pub struct AppState {
     /// What producers (`send_notification`, the schedule bridge) send through.
     pub notification_sender:
         Option<Arc<dyn pond_core::mcp::ports::notification::NotificationSender>>,
+    /// Delivers to one member's own devices, never a broadcast; the factory reset notice uses
+    /// this to reach each member in their own language.
+    pub member_notifier: Option<Arc<dyn pond_core::mcp::ports::notification::MemberNotifier>>,
+    /// Which step a factory reset in progress has reached, for `GET /admin/factory-reset/status`
+    /// to poll; `None` outside the one request that runs a reset.
+    pub factory_reset_progress:
+        Option<Arc<pond_infra::factory_reset_progress::InMemoryFactoryResetProgress>>,
     /// Per-turn telemetry recorder. `None` when `telemetry_enabled` is false.
     pub telemetry: Option<Arc<dyn TelemetryPort>>,
     /// Per-session context fill tracking; warns before the "context cliff" where quality drops.
@@ -343,6 +357,8 @@ pub struct AppState {
     pub device_events: Arc<crate::device_events::DeviceEvents>,
     /// My Pond: the admin card's unlocks and the host it administers. `None` answers `503`.
     pub pond_admin: Option<Arc<crate::pond_admin::PondAdmin>>,
+    /// A factory reset's erase step; `None` where no reset route is wired (tests, CLI).
+    pub data_wipe: Option<Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>>,
     /// Developer mode: the host's test Pond mark and the logs' debug switch. The default is a home Pond.
     pub developer: Arc<crate::developer::DeveloperMode>,
 }

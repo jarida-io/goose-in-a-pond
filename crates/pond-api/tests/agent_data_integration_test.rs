@@ -89,6 +89,7 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for StubDispa
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        _scope: &pond_core::user_data::domain::profile::ProfileScope,
     ) -> anyhow::Result<pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult> {
         Ok(
             pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
@@ -138,6 +139,7 @@ async fn make_app_full(
     let session_storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -162,6 +164,12 @@ async fn make_app_full(
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -204,6 +212,8 @@ async fn make_app_full(
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -442,6 +452,7 @@ async fn prompt_template_delete_system_returns_403() {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -464,6 +475,12 @@ async fn prompt_template_delete_system_returns_403() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -506,6 +523,8 @@ async fn prompt_template_delete_system_returns_403() {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1302,6 +1321,7 @@ async fn returns_501_when_repos_not_configured() {
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -1324,6 +1344,12 @@ async fn returns_501_when_repos_not_configured() {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -1366,6 +1392,8 @@ async fn returns_501_when_repos_not_configured() {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1497,6 +1525,7 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for CountingD
         &self,
         tool_name: &str,
         _arguments: serde_json::Value,
+        _scope: &pond_core::user_data::domain::profile::ProfileScope,
     ) -> anyhow::Result<pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult> {
         let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1853,6 +1882,9 @@ async fn an_empty_profile_id_is_rejected() {
 async fn deleting_a_member_reports_what_went_and_what_stayed() {
     let (app, storage, _tmp) = make_app_with_sessions().await;
     storage.create_session("sess-1".to_string()).await.unwrap();
+    // The first profile in an empty household becomes its owner, and the last owner can't be
+    // deleted -- seed one ahead of Jerry so deleting him isn't refused on that ground.
+    seed_profile(&app, "Liz").await;
     let jerry = seed_profile(&app, "Jerry").await;
     storage
         .set_session_identity(
@@ -1900,6 +1932,9 @@ async fn deleting_a_member_who_does_not_exist_is_404() {
 #[tokio::test]
 async fn deleting_the_primary_member_clears_the_setting_that_named_them() {
     let (app, _storage, _tmp) = make_app_with_sessions().await;
+    // The first profile in an empty household becomes its owner, and the last owner can't be
+    // deleted -- seed one ahead of Jerry so deleting him isn't refused on that ground.
+    seed_profile(&app, "Liz").await;
     let jerry = seed_profile(&app, "Jerry").await;
 
     let resp = app

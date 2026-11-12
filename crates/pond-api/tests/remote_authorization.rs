@@ -51,6 +51,7 @@ async fn make_app() -> Harness {
             .unwrap();
     }
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -74,6 +75,12 @@ async fn make_app() -> Harness {
         profile_repo: profiles.clone(),
         device_registry: registry.clone(),
         room_registry,
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -119,6 +126,8 @@ async fn make_app() -> Harness {
         )),
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -454,6 +463,9 @@ async fn revocation_waits_for_durable_queue_and_uses_authenticated_device() {
             *self.device.lock().unwrap() = Some(id.to_owned());
             Ok(())
         }
+        async fn enrolled_devices(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
     }
     let h = make_app().await;
     let a = pair(&h, "phone000000000001").await;
@@ -510,6 +522,9 @@ async fn removing_a_device_queues_its_remote_revocation_first() {
             }
             self.devices.lock().unwrap().push(id.to_owned());
             Ok(())
+        }
+        async fn enrolled_devices(&self) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
         }
     }
     let h = make_app().await;

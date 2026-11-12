@@ -39,7 +39,7 @@ impl SessionPhase {
 
 /// Id prefixes of sessions the pond mints for its own work (the scheduler's `sched-…`).
 /// Deny-list: human ids take any form. Audited by `session_origin_covers_every_minted_session`.
-pub const POND_AUTHORED_SESSION_PREFIXES: &[&str] = &["sched-"];
+pub const POND_AUTHORED_SESSION_PREFIXES: &[&str] = &["sched-", "idea-research-"];
 
 /// Who caused a session row to exist, inferred from the id: `sessions` has no origin column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

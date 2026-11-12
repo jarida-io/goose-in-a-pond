@@ -40,6 +40,12 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
          AgentPrompt action. Covered by POND_AUTHORED_SESSION_PREFIXES.",
     ),
     (
+        "crates/pond-api/src/ideas.rs",
+        "MACHINE: `idea-research-{uuid}`, `start_research`'s deep-research task from an idea a \
+         member approved -- nobody is in front of the Pond when it starts. Covered by \
+         POND_AUTHORED_SESSION_PREFIXES.",
+    ),
+    (
         "crates/pond-adapters-goose/src/goose_agent.rs",
         "goose's own `session_manager`, which writes goose's sessions.db -- a different \
          store that the observer never reads",

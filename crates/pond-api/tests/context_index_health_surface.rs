@@ -118,6 +118,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
     hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -142,6 +143,12 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         profile_repo: profiles.clone(),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Arc::new(embedder),
@@ -205,6 +212,8 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         api_port: 4000,
         weather_provider: None,
         peer_directory: Arc::new(

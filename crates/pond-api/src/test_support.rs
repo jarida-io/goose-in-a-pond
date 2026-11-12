@@ -66,6 +66,12 @@ pub async fn app_state() -> TestState {
         profile_repo: profiles.clone(),
         device_registry: Arc::new(SqliteDeviceRegistry::new(pool.clone())),
         room_registry: Arc::new(SqliteRoomRegistry::new(pool.clone())),
+        guest_room_access: Arc::new(
+            pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(pool.clone()),
+        ),
+        guest_device_access: Arc::new(
+            pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone()),
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -107,6 +113,8 @@ pub async fn app_state() -> TestState {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(crate::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -149,6 +157,7 @@ pub async fn app_state() -> TestState {
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: None,
+        data_wipe: None,
         developer: Default::default(),
     };
     TestState {

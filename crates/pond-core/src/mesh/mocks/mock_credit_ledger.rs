@@ -63,6 +63,15 @@ impl CreditLedger for MockCreditLedger {
         balances.insert(peer, updated);
         Ok(())
     }
+
+    async fn has_any_balance(&self) -> Result<bool, CreditLedgerError> {
+        Ok(self
+            .balances
+            .read()
+            .await
+            .values()
+            .any(|b| *b != Millisats::new(0)))
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +134,18 @@ mod tests {
         ledger.credit(a, Millisats::new(500)).await.unwrap();
         assert_eq!(ledger.balance(b).await.unwrap(), Millisats::new(0));
         assert_eq!(ledger.balance(a).await.unwrap(), Millisats::new(500));
+    }
+
+    #[tokio::test]
+    async fn has_any_balance_is_false_until_a_peer_is_credited() {
+        let ledger = MockCreditLedger::new();
+        assert!(!ledger.has_any_balance().await.unwrap());
+
+        let peer = PeerId::from([7u8; 32]);
+        ledger.credit(peer, Millisats::new(1)).await.unwrap();
+        assert!(ledger.has_any_balance().await.unwrap());
+
+        ledger.debit(peer, Millisats::new(1)).await.unwrap();
+        assert!(!ledger.has_any_balance().await.unwrap());
     }
 }

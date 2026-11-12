@@ -11,6 +11,8 @@ pub mod draft;
 pub mod face_detector;
 pub mod face_embedding_extractor;
 pub mod face_recognition;
+pub mod guest_device_access;
+pub mod guest_room_access;
 pub mod ideas;
 pub mod interests;
 pub mod lane_control;
