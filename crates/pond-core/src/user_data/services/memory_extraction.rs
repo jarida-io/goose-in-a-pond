@@ -10,9 +10,10 @@ use crate::models::domain::message::Role;
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::shared::domain::session_activity::SessionOrigin;
 use crate::user_data::domain::interest::Observed;
+use crate::user_data::domain::member_profile::{file_under, same_sentence, About};
 use crate::user_data::domain::memory::{
     cosine_similarity, fact_defect, names_subject, normalise_fact_content, reminder_covers_note,
-    FactDefect, MemoryEventKind, MemoryFragment, MemorySegment,
+    FactDefect, MemoryEventKind, MemoryFragment, MemorySegment, MemoryTier,
 };
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::proposal::PROPOSAL_SESSION_ID;
@@ -1247,7 +1248,11 @@ impl BatchExtractionService {
                 );
                 continue;
             }
-            if let Some(defect) = fact_defect(&content) {
+            // A yearly date is the one date a memory may carry.
+            let yearly = memory.about.is_some_and(About::keeps_a_date);
+            if let Some(defect) =
+                fact_defect(&content).filter(|d| !(yearly && *d == FactDefect::CalendarDate))
+            {
                 outcome.refused += 1;
                 if defect == FactDefect::CalendarDate {
                     outcome.dated += 1;
@@ -1283,7 +1288,17 @@ impl BatchExtractionService {
                     | MemorySegment::Preference
                     | MemorySegment::Routine
             );
-            if about_the_subject && !names_subject(&content, &subject.gate_aliases) {
+            let names_them = names_subject(&content, &subject.gate_aliases);
+            // Filed in a member's profile, a fact that never names them is not theirs to keep.
+            if memory.about.is_some() && !names_them {
+                outcome.refused += 1;
+                tracing::debug!(
+                    session_id = %session_id,
+                    "[batch-extraction] refused a profile fact that never named its member"
+                );
+                continue;
+            }
+            if about_the_subject && !names_them {
                 segment = MemorySegment::Knowledge;
                 importance = MemorySegment::Knowledge.default_importance();
                 outcome.demoted += 1;
@@ -1349,7 +1364,11 @@ impl BatchExtractionService {
             outcome.bands.count(band);
 
             // ── Store it, or record the loss ─────────────────────────────
-            let drop_it = matches!(band, Band::Same | Band::Related) && !is_correction;
+            // A new value for a single-valued fact is near the old one by nature, and replaces
+            // it below; only the same fact said again is dropped.
+            let replaces = memory.about.is_some_and(About::single_valued);
+            let drop_it =
+                !is_correction && (band == Band::Same || (band == Band::Related && !replaces));
             if drop_it {
                 // No reinforcement yet: a match is dropped, and the id it lost to recorded.
                 outcome
@@ -1378,6 +1397,14 @@ impl BatchExtractionService {
                 importance,
                 tier,
             );
+            if let Some(about) = memory.about {
+                file_under(&mut fragment, about);
+                // Heard in passing, not told to the Pond: it lasts, but is never permanent.
+                if fragment.tier == Some(MemoryTier::Permanent) {
+                    fragment.tier = Some(MemoryTier::Long);
+                    fragment.decay_rate = Some(MemoryTier::Long.default_decay_rate());
+                }
+            }
             // Reuse the banding vector if any. Best-effort: an embed failure leaves the row
             // for the embedding slot and never aborts the window.
             fragment.embedding = match vector_for_row {
@@ -1391,6 +1418,20 @@ impl BatchExtractionService {
             }
             outcome.written += 1;
             recent.push(content.to_lowercase());
+            if let Some(about) = memory.about.filter(|a| a.single_valued()) {
+                let older = repo.live_about(scope, about).await.unwrap_or_default();
+                for old in older.iter().filter(|old| {
+                    old.id != id
+                        && old.profile_id == subject.profile_id
+                        && !same_sentence(&old.content, &content)
+                }) {
+                    if repo.mark_superseded(&old.id, &id).await.is_ok() {
+                        let _ = repo
+                            .log_event(MemoryEventKind::Superseded, &old.id, Some(session_id), None)
+                            .await;
+                    }
+                }
+            }
             // Never log the fact itself: INFO lands in the on-disk log, outside the store's
             // scoping, retention and redaction. The id links the line to the row.
             tracing::info!(
@@ -1406,9 +1447,10 @@ impl BatchExtractionService {
                     &id,
                     Some(session_id),
                     Some(&format!(
-                        "{{\"window\":\"{}\",\"kind\":\"{}\",\"band\":\"{}\"}}",
+                        "{{\"window\":\"{}\",\"kind\":\"{}\",\"about\":\"{}\",\"band\":\"{}\"}}",
                         escape_json(window_id),
                         memory.kind.as_str(),
+                        memory.about.map_or("", About::as_str),
                         band.as_str(),
                     )),
                 )
@@ -1532,38 +1574,7 @@ impl BatchExtractionService {
     }
 }
 
-/// Whether a note only reports what its subject asked or looked up: "inquires about", "asked
-/// for". One question is curiosity, which the interests already count.
-pub fn describes_a_question(note: &str) -> bool {
-    const ASKING: &[&str] = &[
-        " asked about ",
-        " asks about ",
-        " asked for ",
-        " asks for ",
-        " asked what ",
-        " asks what ",
-        " asked how ",
-        " asks how ",
-        " asked whether ",
-        " asks whether ",
-        " asked if ",
-        " asks if ",
-        " inquires",
-        " inquired",
-        " enquires",
-        " enquired",
-        " wants to know",
-        " wanted to know",
-        " is curious about",
-        " was curious about",
-        " requested information",
-        " requests information",
-        " looked up ",
-        " searched for ",
-    ];
-    let padded = format!(" {} ", note.to_lowercase());
-    ASKING.iter().any(|phrase| padded.contains(phrase))
-}
+pub use crate::user_data::domain::member_profile::describes_a_question;
 
 /// Why a finished pass could do nothing, or `None` once any window was read. Parse failures set
 /// nothing: a model answering badly is not a stopped engine.
@@ -1605,7 +1616,8 @@ fn segment_label(segment: &MemorySegment) -> &'static str {
         MemorySegment::Identity | MemorySegment::Context => "context",
         // Not in the catalogue: a project is nearest a routine, a taught fact nearest context.
         MemorySegment::Project => "routine",
-        MemorySegment::Knowledge => "context",
+        MemorySegment::Knowledge | MemorySegment::Place | MemorySegment::Date => "context",
+        MemorySegment::FoodHealth | MemorySegment::Instruction => "preference",
     }
 }
 
@@ -1716,6 +1728,7 @@ mod batch_tests {
                         .map(|(note, kind)| ExtractedMemory {
                             note: note.to_string(),
                             kind,
+                            about: None,
                         })
                         .collect(),
                     reminders: Vec::new(),
@@ -1886,6 +1899,7 @@ mod batch_tests {
                         .map(|(note, kind)| ExtractedMemory {
                             note: note.to_string(),
                             kind,
+                            about: None,
                         })
                         .collect(),
                     reminders: Vec::new(),

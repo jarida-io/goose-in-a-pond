@@ -301,7 +301,13 @@ message; if that names none either, or the repeat has no time of day, or an hour
 neither am nor pm, nothing is scheduled and the reply says what to ask the person. A five- or
 six-field cron sent as `when` (or as the old `cron` argument) is still accepted.
 
-The same readers serve the other tools: `add_todo` takes `when` as a moment ("tomorrow at 6pm")
+Reminders are not schedules. On the nano the model sent "remind me to call the garage tomorrow at
+6pm" to `set_timer` and "every Monday and Thursday remind me to water the plants" to
+`create_schedule`, never to the to-do tool, which was then called `add_todo`. It is now
+`add_reminder`, each of the three descriptions names the other two, and `set_timer` given a time of
+day instead of a length of time files the reminder itself rather than refusing.
+
+The same readers serve the other tools: `add_reminder` takes `when` as a moment ("tomorrow at 6pm")
 or a repeat ("every weekday at 18:00"), `get_sensor_history` takes `since` and `until` as "yesterday"
 or "6 hours ago" (`when_said::earlier_from_words`) and refuses an end it cannot place instead of
 returning all history, and `get_weather_forecast` takes `date` as a weekday name

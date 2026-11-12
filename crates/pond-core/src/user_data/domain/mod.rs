@@ -5,6 +5,7 @@ mod factory_defaults;
 pub mod idea;
 pub mod interest;
 pub mod interest_interview;
+pub mod member_profile;
 pub mod memory;
 pub mod onboarding;
 pub mod profile;

@@ -151,6 +151,8 @@ mod tests {
             lifecycle: Some(MemoryLifecycle::Active),
             superseded_by: None,
             corrects: None,
+            about: None,
+            valid_until: None,
         }
     }
 

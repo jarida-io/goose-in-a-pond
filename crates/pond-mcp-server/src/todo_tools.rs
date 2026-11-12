@@ -1,4 +1,4 @@
-//! `add_todo`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
+//! `add_reminder`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
 //! reminders in My Goose, which the Pond pushes to their phone at a time, a repeat or a place.
 
 use std::sync::{Arc, OnceLock};
@@ -86,17 +86,17 @@ pub struct CompleteTodoParams {
 #[tool_router(router = todo_tool_router, vis = "pub")]
 impl ScheduleMcpServer {
     #[tool(description = "\
-Put a to-do or reminder on the person's own list in My Goose; the Pond pushes it to their phone \
+Remind the person of something, or put it on their to-do list in My Goose: their phone gets it \
 at a time, on a repeat, or at a place. For \"remind me to call Emmanuel when I get home\", \
-\"add renew the logbook to my to-dos\", \"remind me on Friday at 9 to call the garage\", \
-\"every weekday at 18:00 remind me to stretch\". Not for a countdown (\"set a timer for 10 \
-minutes\"): that is set_timer.")]
-    async fn add_todo(
+\"remind me on Friday at 9 to call the garage\", \"every weekday at 18:00 remind me to \
+stretch\", \"add renew the logbook to my to-dos\". Any reminder goes here, not to set_timer \
+(a countdown) or create_schedule (work Goose does by itself).")]
+    async fn add_reminder(
         &self,
         ctx: RequestContext<RoleServer>,
         params: Parameters<AddTodoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        crate::set_current_tool("add_todo");
+        crate::set_current_tool("add_reminder");
         Ok(said(add(&ctx.meta, params.0).await))
     }
 
@@ -304,7 +304,7 @@ fn place_hook(said: &str, transition: Transition, places: &[Place]) -> Result<Va
     })
 }
 
-async fn add(meta: &Meta, p: AddTodoParams) -> String {
+pub(crate) async fn add(meta: &Meta, p: AddTodoParams) -> String {
     let what = "adding that to their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return format_dead_end(what, "To-dos are not set up on this Pond yet.");
@@ -636,7 +636,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name.to_string())
             .collect();
-        for tool in ["add_todo", "list_todos", "complete_todo", "set_timer"] {
+        for tool in ["add_reminder", "list_todos", "complete_todo", "set_timer"] {
             assert!(
                 names.iter().any(|n| n == tool),
                 "{tool} missing from {names:?}"

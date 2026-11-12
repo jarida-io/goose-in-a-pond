@@ -4083,6 +4083,7 @@ async fn run_server(
         last_user_activity: last_user_activity.clone(),
     };
     my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_memory_resort_job(mind.clone());
     my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
@@ -7239,6 +7240,9 @@ fn install_long_task_deps(
     );
     pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
         pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::memory::init_memory_profiles(Arc::new(
+        pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
     ));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
@@ -11069,6 +11073,8 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
                 lifecycle: None,
                 superseded_by: None,
                 corrects: None,
+                about: None,
+                valid_until: None,
             };
             repo.add(fragment).await?;
             println!("✓ Memory saved (id: {id})");

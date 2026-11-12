@@ -14,6 +14,7 @@ pub mod memory_consolidation;
 pub mod memory_extraction;
 pub mod memory_graph;
 pub mod memory_relevance;
+pub mod memory_resort;
 pub mod model_json;
 pub mod nearby;
 pub mod oauth_providers;

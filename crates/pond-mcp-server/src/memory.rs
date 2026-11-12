@@ -3,11 +3,15 @@
 use pond_core::models::ports::embedding::EmbeddingProvider;
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::member_profile::{
+    admit, closed_by, file_under, profile_order, render_profile, same_sentence, About,
+};
 use pond_core::user_data::domain::memory::{
-    MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment, MemoryTier,
+    cosine_similarity, MemoryEventKind, MemoryFragment, MemoryLifecycle,
 };
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
+use pond_core::user_data::ports::profile::ProfileRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -23,37 +27,50 @@ use std::sync::Arc;
 
 // ── Parameter structs ──────────────────────────────────────────────────────
 
+/// Rows a whole-profile recall returns when no limit is asked for.
+const PROFILE_ROWS: usize = 40;
+/// Rows a recall with a query returns when no limit is asked for.
+const RECALLED_ROWS: usize = 10;
+/// Rows of a member's that `forget_memory` looks through for the words it was given.
+const FORGET_SEARCHED: usize = 200;
+/// Two sentences this close say one fact. High on purpose: a lower bar drops "likes hiking"
+/// as a copy of "likes biking".
+const SAME_FACT_SIMILARITY: f32 = 0.97;
+
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct RecallMemoriesParams {
+    /// What to look for, in the person's words. Omit for their whole profile.
     pub query: Option<String>,
-    /// Max results, default 10.
+    /// Max results.
     pub limit: Option<u32>,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SaveMemoryParams {
+    /// One whole sentence in the third person that names the person and states the fact.
     #[serde(default)]
     pub content: String,
-    /// Comma-separated tags.
-    pub tags: Option<String>,
-    /// identity|preference|correction|relationship|project|knowledge|context; auto if omitted.
-    pub segment: Option<String>,
-    /// 0.0-1.0; defaults by segment.
-    pub importance: Option<f32>,
-    /// short|long|permanent; defaults by segment.
-    pub tier: Option<String>,
-    /// IDs of memories this replaces (archived).
-    #[serde(default)]
-    pub supersedes: Option<Vec<String>>,
-    /// Wrong claim this corrects (correction segment).
-    pub corrects: Option<String>,
+    /// What the fact is about, one of: name birthday work home language partner child pet
+    /// family friend diet allergy health routine likes dislikes style goal place date
+    /// instruction now ("now": true for days or weeks only).
+    pub about: Option<String>,
+    /// Catch-all for unexpected fields the model sends; an old `segment` arrives here.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ForgetMemoryParams {
-    pub id: Option<String>,
-    /// Exact content match, used when id is absent.
-    pub content: Option<String>,
+    /// The memory to forget: words from it, as the person said them.
+    pub what: Option<String>,
+    /// Catch-all for unexpected fields the model sends; an old `id` or `content` arrives here.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Why a call touched no memory. Rendered as a successful result: small models retry errors.
@@ -109,6 +126,9 @@ pub struct MemoryMcpServer {
     /// Live turns by engine session; `None` reads the registry installed with the orchestrator.
     turns: Option<Arc<TurnAuthorityRegistry>>,
     children: Arc<ChildSessionRegistry>,
+    /// Who the members are, so a saved fact can be checked to name its member; `None` reads
+    /// the store installed with [`init_memory_profiles`].
+    profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
@@ -129,14 +149,14 @@ impl MemoryMcpServer {
             embedding_provider,
             turns: None,
             children: process_child_sessions(),
+            profiles: None,
             tool_router: Self::tool_router(),
         }
     }
 
-    #[tool(
-        description = "Recall memories, optionally filtered by keyword (semantic when available). \
-        Returns segment, importance, and IDs."
-    )]
+    #[tool(description = "\
+What the Pond remembers about the person, as their profile: with `query`, the facts nearest it; \
+without, the whole profile. Check it before answering about them.")]
     async fn recall_memories(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -145,9 +165,11 @@ impl MemoryMcpServer {
         self.run_recall(&ctx.meta, params.0).await
     }
 
-    #[tool(
-        description = "Save a memory. Pass supersedes=[ids] to replace and archive old memories."
-    )]
+    #[tool(description = "\
+Remember one lasting fact the person said about themselves: who they are, their people, what \
+they eat, their routines, likes, goals, or a standing instruction to you. Not a question they \
+asked, a task, a one-off plan (that is add_reminder), or anything you or a web page said. A new \
+name, home, work, partner, diet or style replaces the old one by itself.")]
     async fn save_memory(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -156,7 +178,7 @@ impl MemoryMcpServer {
         self.run_save(&ctx.meta, params.0).await
     }
 
-    #[tool(description = "Delete a specific memory by ID or by exact content match.")]
+    #[tool(description = "Forget a memory when the person asks, by words from it.")]
     async fn forget_memory(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -176,6 +198,34 @@ impl MemoryMcpServer {
         self.turns = Some(turns);
         self.children = children;
         self
+    }
+
+    /// Checks saved facts against these members' names instead of the process's own store.
+    pub fn with_profiles(mut self, profiles: Arc<dyn ProfileRepository + Send + Sync>) -> Self {
+        self.profiles = Some(profiles);
+        self
+    }
+
+    /// The member a scope files under: the name to use in advice, and every name a fact about
+    /// them may use. Empty for the household, and when the member cannot be read.
+    async fn names_for(&self, scope: &ProfileScope) -> (String, Vec<String>) {
+        // The process's store is read per call, so it may be installed after this server starts.
+        let profiles = self
+            .profiles
+            .clone()
+            .or_else(|| MEMORY_PROFILES.get().cloned());
+        let (Some(id), Some(profiles)) = (scope.owner_id(), profiles) else {
+            return (String::new(), Vec::new());
+        };
+        let Ok(Some(profile)) = profiles.get(id).await else {
+            return (String::new(), Vec::new());
+        };
+        let mut names = vec![profile.display_name.trim().to_string()];
+        if let Some(preferred) = profile.preferences.get("preferred_name") {
+            names.push(preferred.trim().to_string());
+        }
+        names.retain(|n| !n.is_empty());
+        (names.first().cloned().unwrap_or_default(), names)
     }
 
     /// Whose memories this call may reach: the live turn's scope, which its injected memories were
@@ -208,7 +258,23 @@ impl MemoryMcpServer {
             Ok(scope) => scope,
             Err(refusal) => return Ok(refused("recall_memories", refusal)),
         };
-        let limit = params.limit.unwrap_or(10) as usize;
+        let asked = params
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
+        let default_rows = if asked.is_some() {
+            RECALLED_ROWS
+        } else {
+            PROFILE_ROWS
+        };
+        let limit = params
+            .limit
+            .map_or(default_rows, |l| (l as usize).clamp(1, PROFILE_ROWS));
+        let params = RecallMemoriesParams {
+            query: asked.map(str::to_string),
+            ..params
+        };
 
         let filtered: Vec<_> = if let Some(ref query) = params.query {
             if let Some(emb) = self.embedding_provider.as_ref().filter(|e| e.available()) {
@@ -267,6 +333,13 @@ impl MemoryMcpServer {
                 .await;
         }
 
+        let now = chrono::Utc::now();
+        let mut filtered: Vec<MemoryFragment> =
+            filtered.into_iter().filter(|f| f.is_shown(now)).collect();
+        // A whole profile reads in profile order; an answer to a query keeps its ranking.
+        if params.query.is_none() {
+            profile_order(&mut filtered);
+        }
         let text = if filtered.is_empty() {
             crate::format::format_dead_end(
                 "stored memories matching this",
@@ -274,74 +347,7 @@ impl MemoryMcpServer {
                  the user — do not search the web for a fact about them.",
             )
         } else {
-            let mut corrections = Vec::new();
-            let mut identity = Vec::new();
-            let mut preferences = Vec::new();
-            let mut projects = Vec::new();
-            let mut knowledge = Vec::new();
-
-            for f in &filtered {
-                let seg = f
-                    .segment
-                    .as_ref()
-                    .map(|s| format!("{:?}", s).to_lowercase())
-                    .unwrap_or_else(|| "—".to_string());
-                let imp = f
-                    .importance
-                    .map(|i| format!("{:.1}", i))
-                    .unwrap_or_else(|| "—".to_string());
-                let mut line = format!(
-                    "- [{}] [id:{}] [{}, {}] {}",
-                    f.created_at.format("%Y-%m-%d"),
-                    f.id,
-                    seg,
-                    imp,
-                    f.content
-                );
-                if let Some(ref corrects) = f.corrects {
-                    line.push_str(&format!(" (Replaces: {corrects})"));
-                }
-
-                if seg == "correction" || f.corrects.is_some() {
-                    corrections.push(line);
-                } else if seg == "identity" || seg == "relationship" {
-                    identity.push(line);
-                } else if seg == "preference" || seg == "routine" {
-                    preferences.push(line);
-                } else if seg == "project" || seg == "context" {
-                    projects.push(line);
-                } else {
-                    knowledge.push(line);
-                }
-            }
-
-            let mut sections = Vec::new();
-            if !corrections.is_empty() {
-                sections.push(format!(
-                    "<corrections>\n{}\n</corrections>",
-                    corrections.join("\n")
-                ));
-            }
-            if !identity.is_empty() {
-                sections.push(format!("<identity>\n{}\n</identity>", identity.join("\n")));
-            }
-            if !preferences.is_empty() {
-                sections.push(format!(
-                    "<preferences>\n{}\n</preferences>",
-                    preferences.join("\n")
-                ));
-            }
-            if !projects.is_empty() {
-                sections.push(format!("<projects>\n{}\n</projects>", projects.join("\n")));
-            }
-            if !knowledge.is_empty() {
-                sections.push(format!(
-                    "<knowledge>\n{}\n</knowledge>",
-                    knowledge.join("\n")
-                ));
-            }
-
-            sections.join("\n")
+            render_profile(&filtered)
         };
 
         if !filtered.is_empty() {
@@ -350,9 +356,8 @@ impl MemoryMcpServer {
                 .map(|f| {
                     serde_json::json!({
                         "content": f.content,
-                        "segment": f.segment.as_ref()
-                            .map(|s| format!("{:?}", s).to_lowercase())
-                            .unwrap_or_else(|| "unknown".to_string()),
+                        "segment": f.segment.as_ref().map_or("unknown", |s| s.as_str()),
+                        "about": f.about.map(About::as_str),
                         "importance": f.importance.unwrap_or(0.0),
                         "created_at": f.created_at.format("%Y-%m-%d").to_string(),
                     })
@@ -379,129 +384,136 @@ impl MemoryMcpServer {
             Ok(scope) => scope,
             Err(refusal) => return Ok(refused("save_memory", refusal)),
         };
-        let id = uuid::Uuid::new_v4().to_string();
-
-        let supersedes = params.supersedes.clone();
-
-        let content = if !params.content.is_empty() {
-            params.content.clone()
-        } else {
-            let user_msg = crate::last_user_message();
-            if user_msg.is_empty() {
-                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                    "No content provided to save. Tell me what you'd like me to remember.",
-                )]));
-            }
-            eprintln!(
-                "[memory] empty content param, using user message: {:?}",
-                user_msg
-            );
-            user_msg
+        let internal = |e: anyhow::Error| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to save memory: {e}"),
+                None,
+            )
         };
-        let tag_list: Vec<String> = params
-            .tags
-            .unwrap_or_default()
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
+        let (name, aliases) = self.names_for(&scope).await;
+        let about = params
+            .about
+            .as_deref()
+            .or_else(|| params.extra.get("segment").and_then(|v| v.as_str()))
+            .and_then(About::parse);
+        let content = match admit(&params.content, about, &aliases) {
+            Ok(content) => content,
+            Err(why) => {
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "memory_not_kept",
+                    reason = why.as_str(),
+                    "save_memory was offered something the write policy does not keep"
+                );
+                return Ok(said(format!(
+                    "Nothing was saved: it {}. {}",
+                    why.as_str(),
+                    why.advice(&name)
+                )));
+            }
+        };
+        let Some(about) = about else {
+            return Ok(said("Nothing was saved."));
+        };
+
+        let owner = scope.owner_id().map(str::to_string);
+        let existing: Vec<MemoryFragment> = self
+            .memory_repo
+            .live_about(&scope, about)
+            .await
+            .map_err(internal)?
+            .into_iter()
+            .filter(|row| row.profile_id == owner)
             .collect();
-
-        let segment = params
-            .segment
-            .as_deref()
-            .and_then(parse_memory_segment)
-            .unwrap_or_else(|| auto_classify_segment(&content));
-
-        let importance = params
-            .importance
-            .map(|i| i.clamp(0.0, 1.0))
-            .unwrap_or_else(|| segment.default_importance());
-
-        let tier = params
-            .tier
-            .as_deref()
-            .and_then(parse_memory_tier)
-            .unwrap_or_else(|| segment.default_tier());
-
-        let decay_rate = tier.default_decay_rate();
+        if let Some(known) = existing
+            .iter()
+            .find(|row| same_sentence(&row.content, &content))
+        {
+            let _ = self.memory_repo.record_access(&known.id).await;
+            return Ok(said(format!("Already remembered: {}", known.content)));
+        }
 
         let embedder = self.embedding_provider.as_ref().filter(|e| e.available());
-        let embedding = if let Some(emb) = embedder {
-            match emb.embed(&content).await {
-                Ok(vec) => {
-                    tracing::debug!(dims = vec.len(), "save_memory: embedding generated");
-                    Some(vec)
-                }
+        let embedding = match embedder {
+            Some(embedder) => match embedder.embed(&content).await {
+                Ok(vector) => Some(vector),
                 Err(e) => {
                     tracing::warn!("save_memory: embedding failed ({e}), saving without");
                     None
                 }
+            },
+            None => None,
+        };
+        // A list fact said again in other words is not a second fact. A single-valued one is
+        // let through: the new wording replaces the old.
+        if !about.single_valued() {
+            let again = embedding.as_deref().and_then(|new| {
+                existing.iter().find(|row| {
+                    row.embedding.as_deref().is_some_and(|old| {
+                        old.len() == new.len()
+                            && cosine_similarity(old, new) >= SAME_FACT_SIMILARITY
+                    })
+                })
+            });
+            if let Some(known) = again {
+                let _ = self.memory_repo.record_access(&known.id).await;
+                return Ok(said(format!("Already remembered: {}", known.content)));
             }
-        } else {
-            None
-        };
+        }
 
-        let corrects = params.corrects.clone().filter(|s| !s.is_empty());
-
-        let new_id = id.clone();
-        let fragment = MemoryFragment {
-            id,
-            // A member's save is theirs; a household turn's stays shared, as extraction files it.
-            profile_id: scope.owner_id().map(str::to_string),
-            session_id: None,
-            content: content.clone(),
-            embedding,
-            source: "mcp_tool".to_string(),
-            tags: tag_list,
-            created_at: chrono::Utc::now(),
-            segment: Some(segment.clone()),
-            importance: Some(importance),
-            tier: Some(tier.clone()),
-            decay_rate: Some(decay_rate),
-            access_count: 0,
-            last_accessed_at: None,
-            lifecycle: Some(MemoryLifecycle::Active),
-            superseded_by: None,
-            corrects,
-        };
-
-        self.memory_repo.add(fragment).await.map_err(|e| {
-            ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to save memory: {}", e),
-                None,
-            )
-        })?;
-
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut fragment = MemoryFragment::from_chat(id.clone(), owner, None, content.clone());
+        fragment.source = "mcp_tool".to_string();
+        fragment.embedding = embedding;
+        fragment.lifecycle = Some(MemoryLifecycle::Active);
+        file_under(&mut fragment, about);
+        self.memory_repo.add(fragment).await.map_err(internal)?;
         let _ = self
             .memory_repo
-            .log_event(MemoryEventKind::Written, &new_id, None, None)
+            .log_event(MemoryEventKind::Written, &id, None, None)
             .await;
 
-        if let Some(ref superseded_ids) = supersedes {
-            for old_id in superseded_ids {
-                // Only a row this caller could recall may be archived, never another member's.
-                if let Ok(Some(_)) = self.memory_repo.get_in_scope(old_id, &scope).await {
-                    let _ = self.memory_repo.mark_superseded(old_id, &new_id).await;
+        let mut replaced: Vec<String> = Vec::new();
+        for old in closed_by(about, &content, &existing) {
+            if self.memory_repo.mark_superseded(&old.id, &id).await.is_ok() {
+                let _ = self
+                    .memory_repo
+                    .log_event(MemoryEventKind::Superseded, &old.id, None, None)
+                    .await;
+                replaced.push(old.content.clone());
+            }
+        }
+        // An older caller's explicit list; only a row this caller could recall is retired.
+        let listed = params
+            .extra
+            .get("supersedes")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str());
+        for old_id in listed {
+            if let Ok(Some(old)) = self.memory_repo.get_in_scope(old_id, &scope).await {
+                if self.memory_repo.mark_superseded(old_id, &id).await.is_ok() {
+                    replaced.push(old.content);
                 }
             }
         }
 
-        let seg_label = format!("{:?}", segment).to_lowercase();
-        let tier_label = format!("{:?}", tier).to_lowercase();
-        let plain_text = format!(
-            "Memory saved ({seg_label}, importance={importance:.1}, tier={tier_label}): {content}"
-        );
+        let heading = about.segment().heading();
+        let mut plain_text = format!("Remembered under {heading}: {content}");
+        if !replaced.is_empty() {
+            plain_text.push_str(&format!(" It replaces: {}", replaced.join(" ")));
+        }
         let ui_data = serde_json::json!({
             "content": content,
-            "segment": seg_label,
+            "segment": about.segment().as_str(),
+            "about": about.as_str(),
             "saved": true,
         });
-        let hint = format!("[[[mcp-ui:memory_saved:{}]]]\n", ui_data);
-        let full_result = format!("{}{}", hint, plain_text);
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            full_result,
-        )]))
+        Ok(said(format!(
+            "[[[mcp-ui:memory_saved:{ui_data}]]]\n{plain_text}"
+        )))
     }
 
     /// The body of `forget_memory`, apart from the rmcp wrapper so tests can call it.
@@ -514,78 +526,98 @@ impl MemoryMcpServer {
             Ok(scope) => scope,
             Err(refusal) => return Ok(refused("forget_memory", refusal)),
         };
-        if let Some(id) = &params.id {
-            // Out of scope reads as missing, so another member's memory can't be deleted or probed.
-            let found = self
-                .memory_repo
-                .get_in_scope(id, &scope)
-                .await
-                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-            if found.is_none() {
-                return Ok(CallToolResult::success(vec![ContentBlock::text(
-                    crate::format::format_dead_end(
-                        "a memory with that id",
-                        "Nothing was deleted. Call recall_memories to find the memory's id \
-                         before trying to forget it again.",
-                    ),
-                )]));
+        let internal = |e: anyhow::Error| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to forget: {e}"),
+                None,
+            )
+        };
+        let extra = |key: &str| params.extra.get(key).and_then(|v| v.as_str());
+        let Some(what) = params
+            .what
+            .as_deref()
+            .or_else(|| extra("id"))
+            .or_else(|| extra("content"))
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+        else {
+            return Ok(said(
+                "Nothing was forgotten. Send `what`: words from the memory to forget.",
+            ));
+        };
+
+        // Out of scope reads as missing, so another member's memory can't be deleted or probed.
+        let by_id = self
+            .memory_repo
+            .get_in_scope(what, &scope)
+            .await
+            .map_err(internal)?;
+        let found = match by_id {
+            Some(row) => vec![row],
+            None => {
+                let rows = self
+                    .memory_repo
+                    .search_recent(&scope, FORGET_SEARCHED)
+                    .await
+                    .map_err(internal)?;
+                matching_words(rows, what)
             }
-            self.memory_repo.delete(id).await.map_err(|e| {
-                ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to delete: {}", e),
-                    None,
-                )
-            })?;
-            let _ = self
-                .memory_repo
-                .log_event(MemoryEventKind::Deleted, id, None, None)
-                .await;
-            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Memory {id} deleted."
-            ))]));
-        }
-
-        if let Some(content) = &params.content {
-            let memories = self
-                .memory_repo
-                .search_recent(&scope, 100)
-                .await
-                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-
-            let lower = content.to_lowercase();
-            if let Some(found) = memories.iter().find(|m| m.content.to_lowercase() == lower) {
-                let id = found.id.clone();
-                self.memory_repo.delete(&id).await.map_err(|e| {
-                    ErrorData::new(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to delete: {}", e),
-                        None,
-                    )
-                })?;
+        };
+        match found.as_slice() {
+            [] => Ok(said(crate::format::format_dead_end(
+                "a memory with those words",
+                "Nothing was forgotten. Call recall_memories to see how it is worded, then \
+                 send words from it.",
+            ))),
+            [one] => {
+                self.memory_repo.delete(&one.id).await.map_err(internal)?;
                 let _ = self
                     .memory_repo
-                    .log_event(MemoryEventKind::Deleted, &id, None, None)
+                    .log_event(MemoryEventKind::Deleted, &one.id, None, None)
                     .await;
-                return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "Memory deleted: {}",
-                    found.content
-                ))]));
+                Ok(said(format!("Forgotten: {}", one.content)))
             }
-
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                crate::format::format_dead_end(
-                    "a memory with that exact content",
-                    "Nothing was deleted. Call recall_memories to find the exact \
-                     wording before trying to forget it again.",
-                ),
-            )]));
+            several => Ok(said(format!(
+                "Nothing was forgotten: {} memories fit those words. Ask which they mean, \
+                 then send more of its words:\n{}",
+                several.len(),
+                several
+                    .iter()
+                    .take(5)
+                    .map(|row| format!("- {}", row.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))),
         }
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            "Provide either an 'id' or 'content' to identify the memory to forget.".to_string(),
-        )]))
     }
+}
+
+fn said(text: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(text.into())])
+}
+
+/// The rows `what` points at: the one that is that sentence, else every row holding all of its
+/// words of three letters or more.
+fn matching_words(rows: Vec<MemoryFragment>, what: &str) -> Vec<MemoryFragment> {
+    if let Some(exact) = rows.iter().find(|row| same_sentence(&row.content, what)) {
+        return vec![exact.clone()];
+    }
+    let words: Vec<String> = what
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_string)
+        .collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    rows.into_iter()
+        .filter(|row| {
+            let content = row.content.to_lowercase();
+            words.iter().all(|w| content.contains(w.as_str()))
+        })
+        .collect()
 }
 
 #[tool_handler]
@@ -598,15 +630,14 @@ impl ServerHandler for MemoryMcpServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "GIAP Memory MCP server — save, recall, and forget memory fragments.\n\n\
-                 Tools: recall_memories (keyword-filtered recall with segment metadata and IDs), \
-                 save_memory (with optional segment/importance/tier; use 'supersedes' to replace \
-                 old memories by ID), forget_memory (by ID or exact content match).\n\n\
-                 When correcting a fact, recall the old memory first, then save the correction \
-                 with supersedes=[old_id] to replace it.\n\n\
-                 Memories are categorized by segment (identity, preference, correction, \
-                 relationship, project, knowledge, context) with importance scoring and \
-                 decay-based lifecycle management.",
+                "GIAP Memory MCP server — the profile the Pond keeps of each household member.\n\n\
+                 Tools: recall_memories (their profile, or the facts nearest a query), \
+                 save_memory (one lasting fact they said about themselves, with what it is \
+                 `about`), forget_memory (by words from it).\n\n\
+                 A new name, home, work, partner, diet or style replaces the old one in code; \
+                 a correction is saved the same way. Facts are filed under headings (who they \
+                 are, people, food and health, routines, preferences, goals, places, dates, \
+                 standing instructions, right now).",
             )
     }
 }
@@ -638,109 +669,6 @@ async fn keyword_search(
         .collect())
 }
 
-// ── Memory helpers (public for use by other crates) ────────────────────────
-
-pub fn parse_memory_segment(s: &str) -> Option<MemorySegment> {
-    match s.to_lowercase().as_str() {
-        "identity" => Some(MemorySegment::Identity),
-        "preference" => Some(MemorySegment::Preference),
-        "correction" => Some(MemorySegment::Correction),
-        "relationship" => Some(MemorySegment::Relationship),
-        "project" => Some(MemorySegment::Project),
-        // The batch engine's habit bin. Accepted here so a routine row the
-        // engine wrote can be read back by the same name the tool takes.
-        "routine" => Some(MemorySegment::Routine),
-        "knowledge" => Some(MemorySegment::Knowledge),
-        "context" => Some(MemorySegment::Context),
-        _ => None,
-    }
-}
-
-pub fn parse_memory_tier(s: &str) -> Option<MemoryTier> {
-    match s.to_lowercase().as_str() {
-        "short" => Some(MemoryTier::Short),
-        "long" => Some(MemoryTier::Long),
-        "permanent" => Some(MemoryTier::Permanent),
-        _ => None,
-    }
-}
-
-/// Classify a memory's segment by keyword heuristics (no LLM: fast, deterministic).
-pub fn auto_classify_segment(content: &str) -> MemorySegment {
-    let lower = content.to_lowercase();
-
-    // Correction indicators (highest priority)
-    if lower.starts_with("actually")
-        || lower.starts_with("no, ")
-        || lower.starts_with("correction:")
-        || lower.contains("that's wrong")
-        || lower.contains("that's not right")
-        || lower.contains("not correct")
-    {
-        return MemorySegment::Correction;
-    }
-
-    if lower.starts_with("my name is")
-        || lower.starts_with("i am a ")
-        || lower.starts_with("i'm a ")
-        || lower.contains("i live in")
-        || lower.contains("i work at")
-        || lower.contains("i work as")
-        || lower.contains("my job is")
-        || lower.contains("my role is")
-    {
-        return MemorySegment::Identity;
-    }
-
-    if lower.contains("my wife")
-        || lower.contains("my husband")
-        || lower.contains("my partner")
-        || lower.contains("my friend")
-        || lower.contains("my boss")
-        || lower.contains("my colleague")
-        || lower.contains("my sister")
-        || lower.contains("my brother")
-        || lower.contains("my mother")
-        || lower.contains("my father")
-        || lower.contains("my son")
-        || lower.contains("my daughter")
-    {
-        return MemorySegment::Relationship;
-    }
-
-    if lower.starts_with("i prefer")
-        || lower.starts_with("i like")
-        || lower.starts_with("i love")
-        || lower.starts_with("i hate")
-        || lower.starts_with("i don't like")
-        || lower.contains("my favorite")
-        || lower.contains("my favourite")
-    {
-        return MemorySegment::Preference;
-    }
-
-    if lower.contains("working on")
-        || lower.contains("my project")
-        || lower.contains("my goal")
-        || lower.contains("deadline")
-        || lower.contains("i'm building")
-        || lower.contains("i'm developing")
-    {
-        return MemorySegment::Project;
-    }
-
-    // Context indicators (transient)
-    if lower.starts_with("right now")
-        || lower.starts_with("currently")
-        || lower.starts_with("today ")
-        || lower.contains("at the moment")
-    {
-        return MemorySegment::Context;
-    }
-
-    MemorySegment::Knowledge
-}
-
 // ── Static deps + spawn function for Goose builtin registry ──────────────
 
 use std::sync::OnceLock;
@@ -762,6 +690,14 @@ pub fn init_memory_deps(
         memory_repo,
         embedding_provider,
     });
+}
+
+static MEMORY_PROFILES: OnceLock<Arc<dyn ProfileRepository + Send + Sync>> = OnceLock::new();
+
+/// Install the member store once at startup, so a saved fact is checked to name its member.
+/// Without it that check is skipped.
+pub fn init_memory_profiles(profiles: Arc<dyn ProfileRepository + Send + Sync>) {
+    let _ = MEMORY_PROFILES.set(profiles);
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
@@ -835,94 +771,6 @@ mod tests {
     #[test]
     fn server_constructs_with_embeddings() {
         let _server = test_server_with_embeddings();
-    }
-
-    #[test]
-    fn auto_classify_correction() {
-        assert_eq!(
-            auto_classify_segment("Actually, my name is Jerry"),
-            MemorySegment::Correction
-        );
-        assert_eq!(
-            auto_classify_segment("No, that's not right"),
-            MemorySegment::Correction
-        );
-    }
-
-    #[test]
-    fn auto_classify_identity() {
-        assert_eq!(
-            auto_classify_segment("My name is Jerry"),
-            MemorySegment::Identity
-        );
-        assert_eq!(
-            auto_classify_segment("I work at Jarida"),
-            MemorySegment::Identity
-        );
-    }
-
-    #[test]
-    fn auto_classify_relationship() {
-        assert_eq!(
-            auto_classify_segment("My wife loves gardening"),
-            MemorySegment::Relationship
-        );
-    }
-
-    #[test]
-    fn auto_classify_preference() {
-        assert_eq!(
-            auto_classify_segment("I prefer dark mode"),
-            MemorySegment::Preference
-        );
-        assert_eq!(
-            auto_classify_segment("My favorite color is blue"),
-            MemorySegment::Preference
-        );
-    }
-
-    #[test]
-    fn auto_classify_project() {
-        assert_eq!(
-            auto_classify_segment("I'm building a home automation system"),
-            MemorySegment::Project
-        );
-    }
-
-    #[test]
-    fn auto_classify_context() {
-        assert_eq!(
-            auto_classify_segment("Right now I'm at the office"),
-            MemorySegment::Context
-        );
-    }
-
-    #[test]
-    fn auto_classify_defaults_to_knowledge() {
-        assert_eq!(
-            auto_classify_segment("The capital of France is Paris"),
-            MemorySegment::Knowledge
-        );
-    }
-
-    #[test]
-    fn parse_segment_valid() {
-        assert_eq!(
-            parse_memory_segment("identity"),
-            Some(MemorySegment::Identity)
-        );
-        assert_eq!(
-            parse_memory_segment("CORRECTION"),
-            Some(MemorySegment::Correction)
-        );
-        assert_eq!(parse_memory_segment("unknown"), None);
-    }
-
-    #[test]
-    fn parse_tier_valid() {
-        assert_eq!(parse_memory_tier("short"), Some(MemoryTier::Short));
-        assert_eq!(parse_memory_tier("PERMANENT"), Some(MemoryTier::Permanent));
-        assert_eq!(parse_memory_tier("invalid"), None);
     }
 
     #[test]
@@ -1019,15 +867,35 @@ mod tests {
     fn recall(query: Option<&str>) -> RecallMemoriesParams {
         RecallMemoriesParams {
             query: query.map(str::to_string),
-            limit: None,
+            ..Default::default()
         }
     }
 
-    fn save(content: &str) -> SaveMemoryParams {
+    fn save(content: &str, about: &str) -> SaveMemoryParams {
         SaveMemoryParams {
             content: content.into(),
+            about: Some(about.into()),
             ..Default::default()
         }
+    }
+
+    fn forget(what: &str) -> ForgetMemoryParams {
+        ForgetMemoryParams {
+            what: Some(what.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Every live row in the pond, whoever owns it.
+    async fn live(pond: &Pond) -> Vec<MemoryFragment> {
+        let now = chrono::Utc::now();
+        pond.repo
+            .search_recent(&ProfileScope::Household, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.is_shown(now))
+            .collect()
     }
 
     #[tokio::test]
@@ -1104,53 +972,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_formats_into_structured_sections() {
+    async fn a_whole_profile_reads_as_headings_in_profile_order() {
         let pond = Pond::new().await;
-        let mut c = MemoryFragment::from_chat(
-            "c1".into(),
-            Some(AMINA.into()),
-            None,
-            "User prefers dark mode".into(),
-        );
-        c.segment = Some(MemorySegment::Correction);
-        c.corrects = Some("User prefers light mode".into());
-        pond.repo.add(c).await.unwrap();
-
-        let mut id = MemoryFragment::from_chat(
-            "i1".into(),
-            Some(AMINA.into()),
-            None,
-            "User is Amina".into(),
-        );
-        id.segment = Some(MemorySegment::Identity);
-        pond.repo.add(id).await.unwrap();
-
-        let mut pref = MemoryFragment::from_chat(
-            "p1".into(),
-            Some(AMINA.into()),
-            None,
-            "Drinks mint tea".into(),
-        );
-        pref.segment = Some(MemorySegment::Preference);
-        pond.repo.add(pref).await.unwrap();
-
-        let mut proj = MemoryFragment::from_chat(
-            "j1".into(),
-            Some(AMINA.into()),
-            None,
-            "Working on pond server".into(),
-        );
-        proj.segment = Some(MemorySegment::Project);
-        pond.repo.add(proj).await.unwrap();
-
-        let mut k = MemoryFragment::from_chat(
-            "k1".into(),
-            Some(AMINA.into()),
-            None,
-            "Coffee machine code is 1234".into(),
-        );
-        k.segment = Some(MemorySegment::Knowledge);
-        pond.repo.add(k).await.unwrap();
+        for (id, about, content) in [
+            ("l1", About::Likes, "Amina likes mint tea."),
+            ("n1", About::Name, "Amina goes by Mama Amina."),
+            ("i1", About::Instruction, "Amina wants short answers."),
+        ] {
+            let mut row =
+                MemoryFragment::from_chat(id.into(), Some(AMINA.into()), None, content.into());
+            file_under(&mut row, about);
+            pond.repo.add(row).await.unwrap();
+        }
 
         let _turn = pond.turn("engine-test", ProfileScope::Owner(AMINA.into()));
         let res = pond
@@ -1160,12 +993,178 @@ mod tests {
             .unwrap();
         let got = text(&res);
 
-        assert!(got.contains("<corrections>"));
-        assert!(got.contains("(Replaces: User prefers light mode)"));
-        assert!(got.contains("<identity>"));
-        assert!(got.contains("<preferences>"));
-        assert!(got.contains("<projects>"));
-        assert!(got.contains("<knowledge>"));
+        let at = |needle: &str| {
+            got.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} is not in {got}"))
+        };
+        assert!(at("Standing instructions") < at("Who they are"));
+        assert!(at("Who they are") < at("Preferences"));
+        assert!(at("Amina wants short answers.") < at("Amina goes by Mama Amina."));
+        assert!(!got.contains("[id:"), "a profile carries no ids: {got}");
+    }
+
+    #[tokio::test]
+    async fn a_save_is_kept_only_when_it_is_a_fact_about_the_member() {
+        let pond = Pond::new().await;
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let server = pond.server(false);
+        let meta = meta_for("engine-amina");
+        let before = live(&pond).await.len();
+
+        for refused in [
+            SaveMemoryParams {
+                content: "Amina likes jazz.".into(),
+                ..Default::default()
+            },
+            save("Amina likes jazz.", "music taste"),
+            save("I like jazz.", "likes"),
+            save("Amina asked about the weather in Kisumu.", "likes"),
+            save("Amina sees the dentist on Tuesday.", "health"),
+            save("", "likes"),
+        ] {
+            let got = text(&server.run_save(&meta, refused).await.unwrap());
+            assert!(got.contains("Nothing was saved"), "{got}");
+        }
+        assert_eq!(live(&pond).await.len(), before, "a refused save was kept");
+
+        let got = text(
+            &server
+                .run_save(&meta, save("Amina  likes jazz.", "likes"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Remembered under Preferences"), "{got}");
+        let kept = live(&pond).await;
+        let row = kept
+            .iter()
+            .find(|f| f.content == "Amina likes jazz.")
+            .expect("the fact, with its spacing tidied");
+        assert_eq!(row.about, Some(About::Likes));
+        assert_eq!(row.profile_id.as_deref(), Some(AMINA));
+        assert_eq!(row.source, "mcp_tool");
+    }
+
+    #[tokio::test]
+    async fn a_fact_must_name_the_member_it_is_filed_under() {
+        use pond_core::user_data::domain::profile::CreateProfileRequest;
+        use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
+
+        let pond = Pond::new().await;
+        let profiles = Arc::new(MockProfileRepository::new());
+        let member = profiles
+            .create(CreateProfileRequest {
+                display_name: "Wanjiru Kamau".into(),
+                avatar_emoji: String::new(),
+            })
+            .await
+            .unwrap();
+        let _turn = pond.turn("engine-wanjiru", ProfileScope::Owner(member.id.clone()));
+        let server = pond.server(false).with_profiles(profiles);
+        let meta = meta_for("engine-wanjiru");
+
+        let got = text(
+            &server
+                .run_save(&meta, save("The neighbour keeps bees.", "friend"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Nothing was saved"), "{got}");
+        assert!(got.contains("names Wanjiru Kamau"), "{got}");
+
+        let got = text(
+            &server
+                .run_save(&meta, save("Wanjiru's neighbour keeps bees.", "friend"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Remembered under People"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn a_new_single_valued_fact_replaces_the_old_and_a_repeat_is_not_saved_twice() {
+        let pond = Pond::new().await;
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let server = pond.server(false);
+        let meta = meta_for("engine-amina");
+
+        server
+            .run_save(&meta, save("Amina is vegetarian.", "diet"))
+            .await
+            .unwrap();
+        let got = text(
+            &server
+                .run_save(&meta, save("amina is vegetarian", "diet"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Already remembered"), "{got}");
+
+        let got = text(
+            &server
+                .run_save(&meta, save("Amina eats fish but no other meat.", "diet"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("It replaces: Amina is vegetarian."), "{got}");
+        let diets: Vec<String> = live(&pond)
+            .await
+            .into_iter()
+            .filter(|f| f.about == Some(About::Diet))
+            .map(|f| f.content)
+            .collect();
+        assert_eq!(
+            diets,
+            vec!["Amina eats fish but no other meat.".to_string()]
+        );
+
+        // A list fact closes nothing.
+        for likes in ["Amina likes hiking.", "Amina likes bowling."] {
+            server.run_save(&meta, save(likes, "likes")).await.unwrap();
+        }
+        let liked = live(&pond)
+            .await
+            .into_iter()
+            .filter(|f| f.about == Some(About::Likes))
+            .count();
+        assert_eq!(liked, 2);
+    }
+
+    #[tokio::test]
+    async fn forgetting_by_words_takes_the_one_row_they_fit_and_asks_when_several_fit() {
+        let pond = Pond::new().await;
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let server = pond.server(false);
+        let meta = meta_for("engine-amina");
+        for likes in [
+            "Amina likes hiking in Karura.",
+            "Amina likes hiking up Longonot.",
+        ] {
+            server.run_save(&meta, save(likes, "likes")).await.unwrap();
+        }
+
+        let got = text(&server.run_forget(&meta, forget("hiking")).await.unwrap());
+        assert!(got.contains("Nothing was forgotten: 2 memories"), "{got}");
+
+        let got = text(
+            &server
+                .run_forget(&meta, forget("hiking Longonot"))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            got.contains("Forgotten: Amina likes hiking up Longonot."),
+            "{got}"
+        );
+
+        let got = text(&server.run_forget(&meta, forget("sailing")).await.unwrap());
+        assert!(got.contains("Nothing was forgotten"), "{got}");
+        let got = text(
+            &server
+                .run_forget(&meta, ForgetMemoryParams::default())
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Nothing was forgotten"), "{got}");
     }
 
     #[tokio::test]
@@ -1194,14 +1193,15 @@ mod tests {
                 "a refused recall carried a memory: {got}"
             );
 
-            let got = text(&server.run_save(&meta, save("I like jazz")).await.unwrap());
+            let got = text(
+                &server
+                    .run_save(&meta, save("Amina likes jazz.", "likes"))
+                    .await
+                    .unwrap(),
+            );
             assert!(got.contains(expected.message()), "{got}");
 
-            let forget = ForgetMemoryParams {
-                id: Some("shared-1".into()),
-                content: None,
-            };
-            let got = text(&server.run_forget(&meta, forget).await.unwrap());
+            let got = text(&server.run_forget(&meta, forget("shared-1")).await.unwrap());
             assert!(got.contains(expected.message()), "{got}");
         }
         assert_eq!(
@@ -1223,13 +1223,19 @@ mod tests {
         let server = pond.server(false);
 
         server
-            .run_save(&meta_for("engine-amina"), save("Amina prefers tea"))
+            .run_save(
+                &meta_for("engine-amina"),
+                save("Amina prefers tea.", "likes"),
+            )
             .await
             .unwrap();
         server
             .run_save(
                 &meta_for("engine-household"),
-                save("The wifi password is on the fridge"),
+                save(
+                    "The household keeps the wifi password on the fridge.",
+                    "routine",
+                ),
             )
             .await
             .unwrap();
@@ -1258,29 +1264,25 @@ mod tests {
         let server = pond.server(false);
         let meta = meta_for("engine-amina");
 
-        let forget = |id: &str| ForgetMemoryParams {
-            id: Some(id.into()),
-            content: None,
-        };
         server.run_forget(&meta, forget("otieno-1")).await.unwrap();
         assert!(
             pond.owner_of("otieno-1").await.is_some(),
             "Amina deleted Otieno's memory"
         );
-        let by_content = ForgetMemoryParams {
-            id: None,
-            content: Some("Otieno is allergic to shellfish".into()),
-        };
-        server.run_forget(&meta, by_content).await.unwrap();
+        server
+            .run_forget(&meta, forget("Otieno is allergic to shellfish"))
+            .await
+            .unwrap();
         assert!(
             pond.owner_of("otieno-1").await.is_some(),
             "Amina deleted it by its words"
         );
 
-        let replacing = SaveMemoryParams {
-            supersedes: Some(vec!["otieno-1".into(), "amina-1".into()]),
-            ..save("Amina is allergic to peanuts and sesame")
-        };
+        let mut replacing = save("Amina is allergic to peanuts and sesame.", "allergy");
+        replacing.extra.insert(
+            "supersedes".into(),
+            serde_json::json!(["otieno-1", "amina-1"]),
+        );
         server.run_save(&meta, replacing).await.unwrap();
         let retired: Vec<String> = pond
             .repo

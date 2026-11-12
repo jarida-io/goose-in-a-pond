@@ -227,7 +227,8 @@ impl ScheduleMcpServer {
             .unwrap_or_else(|_| "UTC".to_string())
     }
 
-    /// The schedule a caller means, by its id or by its name as the person would say it.
+    /// The schedule a caller means: its id, its name, or words that describe only it ("the
+    /// weekday morning weather one"), read against its name, what it does and when it runs.
     async fn find(&self, said_as: &str) -> Result<Schedule, String> {
         let wanted = said_as.trim();
         let tasks = self
@@ -239,17 +240,14 @@ impl ScheduleMcpServer {
             return Ok(task.clone());
         }
         let lower = wanted.to_lowercase();
-        let exact: Vec<&Schedule> = tasks
+        let named: Vec<&Schedule> = tasks
             .iter()
             .filter(|t| t.label.to_lowercase() == lower)
             .collect();
-        let matches = if exact.is_empty() && !lower.is_empty() {
-            tasks
-                .iter()
-                .filter(|t| t.label.to_lowercase().contains(&lower))
-                .collect()
+        let matches = if named.is_empty() {
+            described_by(&tasks, wanted)
         } else {
-            exact
+            named
         };
         let names = |from: &[&Schedule]| {
             from.iter()
@@ -261,7 +259,7 @@ impl ScheduleMcpServer {
             [one] => Ok((*one).clone()),
             [] if tasks.is_empty() => Err("There are no schedules yet.".to_string()),
             [] => Err(format!(
-                "No schedule is called \"{wanted}\". The schedules: {}.",
+                "No schedule fits \"{wanted}\". Send one of these names exactly: {}.",
                 names(&tasks.iter().collect::<Vec<_>>())
             )),
             many => Err(format!(
@@ -270,6 +268,96 @@ impl ScheduleMcpServer {
             )),
         }
     }
+}
+
+/// Words that say nothing about which schedule is meant.
+const SCHEDULE_FILLER: &[&str] = &[
+    "the",
+    "and",
+    "for",
+    "that",
+    "this",
+    "one",
+    "schedule",
+    "schedules",
+    "scheduled",
+    "task",
+    "tasks",
+    "job",
+    "every",
+    "each",
+    "daily",
+];
+
+fn telling_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3 && !SCHEDULE_FILLER.contains(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The part of the day a repeat falls in, as someone would refer to it.
+fn day_part(cron: &str) -> &'static str {
+    use pond_core::shared::domain::when_repeats::{repeat_from_cron, Repeat};
+    let hour = match repeat_from_cron(cron) {
+        Some(Repeat::Daily { at } | Repeat::Weekly { at, .. } | Repeat::Monthly { at, .. }) => {
+            chrono::Timelike::hour(&at)
+        }
+        _ => return "",
+    };
+    match hour {
+        5..=11 => "morning",
+        12..=16 => "afternoon",
+        17..=20 => "evening",
+        _ => "night",
+    }
+}
+
+/// The schedules `said` describes: those holding every telling word, else the one holding the
+/// most when it holds at least two.
+fn described_by<'a>(tasks: &'a [Schedule], said: &str) -> Vec<&'a Schedule> {
+    let words = telling_words(said);
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let scored: Vec<(&Schedule, usize)> = tasks
+        .iter()
+        .map(|task| {
+            let does = match &task.kind {
+                TaskKind::AgentPrompt { prompt } => prompt.clone(),
+                TaskKind::Webhook { webhook_url } => webhook_url.clone(),
+                TaskKind::SensorTrigger(spec) => sensor_rule_summary(spec),
+                TaskKind::Routine { actions } => routine_summary(actions),
+            };
+            let about = format!(
+                "{} {does} {} {}",
+                task.label,
+                when_in_words(&task.cron),
+                day_part(&task.cron)
+            )
+            .to_lowercase();
+            let hits = words.iter().filter(|w| about.contains(w.as_str())).count();
+            (task, hits)
+        })
+        .collect();
+    let all: Vec<&Schedule> = scored
+        .iter()
+        .filter(|(_, hits)| *hits == words.len())
+        .map(|(task, _)| *task)
+        .collect();
+    if !all.is_empty() {
+        return all;
+    }
+    let best = scored.iter().map(|(_, hits)| *hits).max().unwrap_or(0);
+    if best < 2 {
+        return Vec::new();
+    }
+    scored
+        .iter()
+        .filter(|(_, hits)| *hits == best)
+        .map(|(task, _)| *task)
+        .collect()
 }
 
 #[tool_router]
@@ -352,11 +440,11 @@ impl ScheduleMcpServer {
     }
 
     #[tool(description = "\
-Countdown timer: fires ONCE after a delay, then deletes itself (\"set a timer for 10 \
-minutes\"). Anything repeating: create_schedule. Reminding the person of a task: add_todo.")]
+A countdown from now, in minutes or hours: \"set a timer for 10 minutes\". It fires once. For \
+a time of day, a date, or to remind the person of a task, use add_reminder.")]
     async fn set_timer(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SetTimerParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("set_timer");
@@ -373,11 +461,25 @@ minutes\"). Anything repeating: create_schedule. Reminding the person of a task:
         };
 
         let Some(delta) = parse_duration(&raw) else {
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                "How long? Give a duration like \"10 minutes\", \"1h30m\" or \"90 seconds\" \
-                 as 'duration'. A timer set for the wrong moment is worse than one not set, \
-                 so this is not guessed.",
-            )]));
+            // A time of day or a date is a reminder the model sent to the wrong tool; with
+            // something to remind them of, it is kept as one rather than asked for again.
+            let about = [p.prompt.trim(), p.name.trim()]
+                .into_iter()
+                .find(|t| !t.is_empty());
+            if let (Some(about), false) = (about, raw.trim().is_empty()) {
+                let reminder = crate::todo_tools::AddTodoParams {
+                    text: about.to_string(),
+                    kind: Some("reminder".to_string()),
+                    when: Some(raw.trim().to_string()),
+                    ..Default::default()
+                };
+                return said(crate::todo_tools::add(&ctx.meta, reminder).await);
+            }
+            return said(
+                "No timer was set. A timer needs a length of time as `duration`: \"10 \
+                 minutes\", \"1h30m\", \"90 seconds\". For a time of day or a date, call \
+                 add_reminder with `when` instead.",
+            );
         };
 
         let fire_at = chrono::Utc::now() + delta;
@@ -424,9 +526,10 @@ minutes\"). Anything repeating: create_schedule. Reminding the person of a task:
     }
 
     #[tool(description = "\
-Have Goose do something again and again: \"every weekday at 7am give me the weather and my \
-day\". `when` is how often, in plain words; `prompt` is what to do each time. To change an \
-existing schedule, pass its name or id as `id` with only the fields that change.")]
+Have Goose do work by itself again and again: \"every weekday at 7am give me the weather and \
+my day\". `when` is how often, in plain words; `prompt` is what to do each time. Only to \
+remind the person of something, use add_reminder instead: it repeats too. To change an existing \
+schedule, pass its name as `id` with only the fields that change.")]
     async fn create_schedule(
         &self,
         _ctx: RequestContext<RoleServer>,
@@ -682,7 +785,7 @@ impl ServerHandler for ScheduleMcpServer {
             ))
             .with_instructions(
                 "GIAP Schedule MCP server — the person's to-dos and reminders, one-shot timers, repeating schedules, and event rules.\n\n\
-                 Tools: add_todo, list_todos, complete_todo (the person's own to-dos and reminders, \
+                 Tools: add_reminder, list_todos, complete_todo (the person's own reminders and to-dos, \
                  at a time, a repeat or a place), set_timer (a countdown, e.g. '10m', '1h30m'), \
                  create_schedule (something Goose does again and again; `when` in plain words, \
                  e.g. 'every weekday at 7am'; also changes one), \
@@ -897,6 +1000,62 @@ mod tests {
             Ok(("0 30 8 * * *".to_string(), "every day at 08:30".to_string()))
         );
         assert_eq!(repeat_said("at 3 pm", today), Err(RepeatUnclear::NoCadence));
+    }
+
+    fn schedule(label: &str, cron: &str, prompt: &str) -> Schedule {
+        Schedule {
+            id: label.to_string(),
+            label: label.to_string(),
+            cron: cron.to_string(),
+            fire_at: None,
+            timezone: "Africa/Nairobi".to_string(),
+            kind: TaskKind::AgentPrompt {
+                prompt: prompt.to_string(),
+            },
+            paused: false,
+            currently_running: false,
+            last_run: None,
+            next_run: None,
+            created_at: chrono::Utc::now(),
+            ask_if_missed: false,
+            missed_run: None,
+        }
+    }
+
+    #[test]
+    fn a_schedule_is_found_by_words_that_describe_only_it() {
+        let tasks = vec![
+            schedule(
+                "give me the weather and what is on my...",
+                "0 0 7 * * 1-5",
+                "give me the weather and what is on my day",
+            ),
+            schedule("Daily Briefing", "0 0 6 * * *", "brief me on the news"),
+            schedule(
+                "movies",
+                "0 0 18 * * 5",
+                "what films are showing this weekend",
+            ),
+        ];
+        let found = |said: &str| -> Vec<&str> {
+            described_by(&tasks, said)
+                .iter()
+                .map(|t| t.label.as_str())
+                .collect()
+        };
+        assert_eq!(
+            found("weekday morning weather"),
+            vec!["give me the weather and what is on my..."]
+        );
+        assert_eq!(found("the briefing schedule"), vec!["Daily Briefing"]);
+        assert_eq!(found("Friday evening films"), vec!["movies"]);
+        assert_eq!(
+            found("morning").len(),
+            2,
+            "two run in the morning, so it is asked"
+        );
+        assert!(found("gardening").is_empty());
+        assert!(found("the schedule").is_empty());
     }
 
     #[test]

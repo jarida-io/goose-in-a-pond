@@ -24,6 +24,10 @@ const SEG_COLOR: Record<MemorySegment, string> = {
   routine:      "#A855F7",
   knowledge:    "#16A34A",
   context:      "#6B7280",
+  food_health:  "#E11D48",
+  place:        "#0EA5E9",
+  date:         "#B45309",
+  instruction:  "#4F46E5",
 };
 
 // ─── Mock fallback (offline / first paint) ───────────────────
@@ -117,8 +121,8 @@ function Composer({ onSave, onCancel }: ComposerProps) {
   }
 
   const segOptions: MemorySegment[] = [
-    "identity", "preference", "correction", "relationship",
-    "project", "knowledge", "context",
+    "instruction", "identity", "relationship", "food_health", "routine",
+    "preference", "project", "place", "date", "context",
   ];
 
   return (

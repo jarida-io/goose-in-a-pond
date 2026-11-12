@@ -60,6 +60,7 @@ pub(crate) async fn caller_member(
 async fn hub() -> Json<Value> {
     Json(json!({
         "version": 1,
+        "about": crate::about_me::SERVED,
         "interests": crate::interests::SERVED,
         "news": crate::news::SERVED,
         "todos": crate::todos::SERVED,
@@ -74,6 +75,7 @@ async fn hub() -> Json<Value> {
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me/hub", get(hub))
+        .merge(crate::about_me::routes())
         .merge(crate::interests::routes())
         .merge(crate::news::routes())
         .merge(crate::todos::routes())

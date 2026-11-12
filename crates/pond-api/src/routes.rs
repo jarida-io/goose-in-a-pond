@@ -15881,6 +15881,8 @@ async fn save_memory(
         lifecycle: Some(pond_core::user_data::domain::memory::MemoryLifecycle::Active),
         superseded_by: None,
         corrects: None,
+        about: None,
+        valid_until: None,
     };
     match state.memory_repo.add(fragment.clone()).await {
         Ok(()) => (StatusCode::CREATED, Json(json!(fragment))).into_response(),
