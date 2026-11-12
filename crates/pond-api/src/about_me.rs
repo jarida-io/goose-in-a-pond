@@ -78,15 +78,23 @@ async fn profile(
         .map(Some)
         .chain([None])
         .filter_map(|segment| {
+            // What a fact is filed under decides its heading; an older row's own segment can
+            // disagree with it.
             let facts: Vec<Value> = rows
                 .iter()
-                .filter(|row| row.segment.as_ref() == segment)
+                .filter(|row| {
+                    row.about
+                        .map(|about| about.segment())
+                        .or_else(|| row.segment.clone())
+                        .as_ref()
+                        == segment
+                })
                 .map(|row| fact(row, &member))
                 .collect();
             (!facts.is_empty()).then(|| {
                 json!({
                     "segment": segment.map_or("other", MemorySegment::as_str),
-                    "heading": segment.map_or("Other", MemorySegment::heading),
+                    "heading": segment.map_or("Other", MemorySegment::heading_to_member),
                     "facts": facts,
                 })
             })
@@ -97,7 +105,7 @@ async fn profile(
         .map(|about| {
             json!({
                 "about": about.as_str(),
-                "heading": about.segment().heading(),
+                "heading": about.segment().heading_to_member(),
                 "one_at_a_time": about.single_valued(),
             })
         })

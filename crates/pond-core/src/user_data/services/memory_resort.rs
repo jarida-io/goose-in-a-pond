@@ -6,7 +6,9 @@
 //! preferences under one such word would otherwise leave two of them closed.
 
 use crate::user_data::domain::member_profile::{admit, About, NotKept};
-use crate::user_data::domain::memory::MemoryFragment;
+use crate::user_data::domain::memory::{
+    MemoryFragment, MAX_FACT_CONTENT_LEN, MIN_FACT_CONTENT_LEN,
+};
 use crate::user_data::services::model_json::{object_in, text_of};
 
 /// Notes one model call files: few enough that a small model answers for every one.
@@ -123,6 +125,85 @@ fn reason(why: NotKept) -> &'static str {
     why.as_str()
 }
 
+/// Whether a note runs several facts together, so it is unpacked before anything is filed.
+pub fn is_a_paragraph(note: &str) -> bool {
+    note.trim().chars().count() > MAX_FACT_CONTENT_LEN
+}
+
+/// Words a sentence does not end on, though they end in a stop.
+const ABBREVIATIONS: [&str; 12] = [
+    "dr", "mr", "mrs", "ms", "prof", "st", "vs", "etc", "no", "ltd", "inc", "jr",
+];
+
+/// The single sentences a paragraph breaks into, for the re-sort to file one at a time. One
+/// that opens on "he" or "his" names `name` instead, since alone it would say nothing of whom.
+/// Sentences too long to be one fact are left out: the paragraph itself is archived, not lost.
+pub fn unpacked(note: &str, name: Option<&str>) -> Vec<String> {
+    let note = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut sentences: Vec<String> = Vec::new();
+    let mut from = 0;
+    let stops: Vec<(usize, char)> = note.char_indices().collect();
+    for (i, &(at, c)) in stops.iter().enumerate() {
+        let next = stops.get(i + 1).map(|&(_, n)| n);
+        let after = stops.get(i + 2).map(|&(_, n)| n);
+        let ends = match c {
+            ';' => next == Some(' '),
+            '.' | '!' | '?' => {
+                let word = note[from..at]
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                next == Some(' ')
+                    && after.is_some_and(|a| a.is_uppercase() || a == '\'' || a == '"')
+                    && word.chars().count() > 1
+                    && !ABBREVIATIONS.contains(&word.as_str())
+            }
+            _ => false,
+        };
+        if ends {
+            sentences.push(note[from..at].to_string());
+            from = at + c.len_utf8();
+        }
+    }
+    sentences.push(note[from..].to_string());
+
+    let mut out: Vec<String> = Vec::new();
+    for sentence in sentences {
+        let sentence = sentence.trim().trim_end_matches(['.', ';']).trim();
+        let sentence = match name {
+            Some(name) => named(sentence, name),
+            None => sentence.to_string(),
+        };
+        let chars = sentence.chars().count();
+        if !(MIN_FACT_CONTENT_LEN..MAX_FACT_CONTENT_LEN).contains(&chars) {
+            continue;
+        }
+        let sentence = format!("{sentence}.");
+        if !out.iter().any(|kept| kept.eq_ignore_ascii_case(&sentence)) {
+            out.push(sentence);
+        }
+    }
+    out
+}
+
+/// `sentence` with a leading "he", "she", "his" or "her" replaced by `name`.
+fn named(sentence: &str, name: &str) -> String {
+    let (first, rest) = sentence.split_once(' ').unwrap_or((sentence, ""));
+    match first.to_lowercase().as_str() {
+        "he" | "she" => format!("{name} {rest}"),
+        "his" | "her" => format!("{name}'s {rest}"),
+        _ => {
+            let mut chars = sentence.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +229,34 @@ mod tests {
             );
         }
         assert!(prompt.contains("\"none\""));
+    }
+
+    #[test]
+    fn a_paragraph_is_unpacked_into_sentences_that_each_name_the_member() {
+        let blob = "Jerry Anyumba is a backend engineer and CEO of Jarida One Ltd. and leads \
+            Jarida, based in Nairobi. He speaks English and Swahili. His projects include \
+            'Goose In A Pond'; he monitors his room with a camera. He is mentored by Dr. Anya. \
+            He speaks English and Swahili.";
+        assert_eq!(
+            unpacked(blob, Some("Jerry Anyumba")),
+            vec![
+                "Jerry Anyumba is a backend engineer and CEO of Jarida One Ltd. and leads \
+                 Jarida, based in Nairobi.",
+                "Jerry Anyumba speaks English and Swahili.",
+                "Jerry Anyumba's projects include 'Goose In A Pond'.",
+                "Jerry Anyumba monitors his room with a camera.",
+                "Jerry Anyumba is mentored by Dr. Anya.",
+            ]
+        );
+        // A household note names nobody, and a run-on too long to be a fact is left out.
+        assert_eq!(
+            unpacked("The house has two cats. They eat at six.", None),
+            vec!["The house has two cats.", "They eat at six."]
+        );
+        let run_on = format!("Jerry likes {}.", "tea and ".repeat(60));
+        assert!(is_a_paragraph(&run_on));
+        assert!(unpacked(&run_on, Some("Jerry")).is_empty());
+        assert!(!is_a_paragraph("Jerry likes tea."));
     }
 
     #[test]

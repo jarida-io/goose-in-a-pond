@@ -2,15 +2,16 @@
 //! [`apply_actions`] is the only write path, so both modes share its correction, kept and owner
 //! guards.
 
+use crate::user_data::domain::member_profile::{file_under, About};
 use crate::user_data::domain::memory::{
-    MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
+    MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment, MAX_FACT_CONTENT_LEN,
 };
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::ports::memory_consolidator::{ConsolidationAction, MemoryConsolidator};
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::services::consolidation_schedule::MIN_MEMORIES_TO_CONSOLIDATE;
 use anyhow::Result;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Single-pass label in `consolidation_runs`, matching the `memory_consolidation_mode` value.
 pub const MODE_SINGLE: &str = "single";
@@ -228,6 +229,22 @@ pub async fn apply_proposals(
                     outcome.blocked += 1;
                     continue;
                 };
+                // A merge folds one fact said twice. Longer than a fact, or built from rows
+                // filed under different things, it is a paragraph that undoes the profile.
+                let filed: HashSet<About> = source_ids
+                    .iter()
+                    .filter_map(|id| memory_map.get(id.as_str()))
+                    .filter_map(|m| m.about)
+                    .collect();
+                if merged_content.trim().chars().count() > MAX_FACT_CONTENT_LEN || filed.len() > 1 {
+                    tracing::warn!(
+                        chars = merged_content.trim().chars().count(),
+                        filed_under = filed.len(),
+                        "[consolidation] blocked a merge that joins different facts"
+                    );
+                    outcome.blocked += 1;
+                    continue;
+                }
                 // A correction source makes the merge a correction too, so it stays unprunable.
                 let any_correction = source_ids
                     .iter()
@@ -268,6 +285,10 @@ pub async fn apply_proposals(
                     corrects,
                 );
                 new_frag.profile_id = owner;
+                // What its sources were filed under still says what the merge is about.
+                if let (Some(about), false) = (filed.iter().next().copied(), any_correction) {
+                    file_under(&mut new_frag, about);
+                }
                 if any_kept {
                     new_frag.keep();
                 }
@@ -873,6 +894,57 @@ mod tests {
             .unwrap();
         assert!(created.is_kept(), "merging must not undo a keep");
         assert_eq!(created.decay_rate, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn a_merge_never_joins_different_facts_into_a_paragraph() {
+        let repo = MockMemoryRepository::new();
+        let filed = |id: &str, about: About| {
+            let mut row = frag(id, MemorySegment::Knowledge, 5);
+            file_under(&mut row, about);
+            row
+        };
+        let batch = vec![
+            filed("name", About::Name),
+            filed("work", About::Work),
+            filed("tea1", About::Likes),
+            filed("tea2", About::Likes),
+            frag("loose", MemorySegment::Preference, 9),
+        ];
+        let merge = |ids: &[&str], text: &str| ConsolidationAction::Merge {
+            source_ids: ids.iter().map(|id| id.to_string()).collect(),
+            merged_content: text.to_string(),
+            segment: MemorySegment::Knowledge,
+            importance: 0.5,
+        };
+        let outcome = apply_actions(
+            &repo,
+            &batch,
+            vec![
+                merge(&["name", "work"], "Jerry is an engineer called Jerr."),
+                merge(&["tea1", "tea2"], &"Jerry likes tea. ".repeat(30)),
+                merge(&["tea1", "tea2", "loose"], "Jerry likes strong tea."),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.blocked, 2, "two filings, then a paragraph");
+        assert_eq!(outcome.merged, 1);
+
+        let stored = repo
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let created = stored
+            .iter()
+            .find(|m| m.content == "Jerry likes strong tea.")
+            .unwrap();
+        assert_eq!(
+            created.about,
+            Some(About::Likes),
+            "a merge stays filed where its sources were"
+        );
+        assert_eq!(created.segment, Some(MemorySegment::Preference));
     }
 
     #[tokio::test]

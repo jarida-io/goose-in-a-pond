@@ -803,6 +803,64 @@ pub fn spawn_memory_resort_job(deps: MindDeps) {
     });
 }
 
+/// Replace a note that runs several facts together with its sentences, unfiled, and archive
+/// the note. Archived even when no sentence survives, so it is not unpacked again.
+async fn unpack_paragraph(deps: &MindDeps, row: &MemoryFragment, name: Option<&str>) {
+    let mut pieces = 0usize;
+    for sentence in resort::unpacked(&row.content, name) {
+        let mut piece = MemoryFragment::from_extraction(
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            sentence,
+            row.segment.clone().unwrap_or(MemorySegment::Knowledge),
+            row.importance.unwrap_or(0.5),
+            None,
+        );
+        piece.profile_id = row.profile_id.clone();
+        let id = piece.id.clone();
+        if let Err(e) = deps.memories.add(piece).await {
+            tracing::warn!(error = %e, "[re-sort] a sentence of a paragraph could not be kept");
+            continue;
+        }
+        pieces += 1;
+        let _ = deps
+            .memories
+            .log_event(
+                MemoryEventKind::Consolidated,
+                &id,
+                None,
+                Some(&format!(
+                    "{{\"resort\":\"unpacked\",\"from\":\"{}\"}}",
+                    row.id
+                )),
+            )
+            .await;
+    }
+    if let Err(e) = deps
+        .memories
+        .update_lifecycle(&row.id, MemoryLifecycle::Archived)
+        .await
+    {
+        tracing::warn!(error = %e, "[re-sort] a paragraph could not be archived");
+        return;
+    }
+    let _ = deps
+        .memories
+        .log_event(
+            MemoryEventKind::Archived,
+            &row.id,
+            None,
+            Some(&format!("{{\"resort\":\"unpacked\",\"into\":{pieces}}}")),
+        )
+        .await;
+    tracing::info!(
+        target: "giap::trace",
+        kind = "memory_paragraph_unpacked",
+        sentences = pieces,
+        "a memory that ran several facts together was split into its sentences"
+    );
+}
+
 /// File one member's batch. `false` when the model gave no reply, so the pass stops instead of
 /// counting an attempt against rows it never judged.
 async fn resort_batch(
@@ -837,6 +895,18 @@ async fn resort_batch(
         None => ("the household".to_string(), Vec::new()),
     };
     let started = std::time::Instant::now();
+    // A paragraph is not asked about: its sentences come round as notes of their own.
+    let (paragraphs, batch): (Vec<&MemoryFragment>, Vec<&MemoryFragment>) = batch
+        .iter()
+        .partition(|row| resort::is_a_paragraph(&row.content));
+    for row in &paragraphs {
+        unpack_paragraph(deps, row, owner.map(|_| name.as_str())).await;
+    }
+    if batch.is_empty() {
+        return true;
+    }
+    let batch: Vec<MemoryFragment> = batch.into_iter().cloned().collect();
+    let batch = batch.as_slice();
     let Some(reply) = deps
         .complete(
             slot,
