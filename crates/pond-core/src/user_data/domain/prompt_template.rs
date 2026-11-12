@@ -22,4 +22,4 @@ pub struct PromptTemplate {
 }
 
 /// Built-in template generation; bump when shipped templates change meaningfully (not typos).
-pub const FACTORY_VERSION: i64 = 5;
+pub const FACTORY_VERSION: i64 = 6;

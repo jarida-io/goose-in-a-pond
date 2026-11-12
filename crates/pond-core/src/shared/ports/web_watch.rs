@@ -59,6 +59,9 @@ pub struct CheckOutcome {
     pub checked_at: DateTime<Utc>,
     pub next_check_at: DateTime<Utc>,
     pub changes: Vec<WatchChange>,
+    /// The changes wait for the model to say which the owner asked for: none is pushed or
+    /// digested until then.
+    pub held: bool,
 }
 
 #[async_trait]
@@ -82,6 +85,11 @@ pub trait WebWatchRepository: Send + Sync {
     async fn mark_digested(&self, ids: &[i64]) -> Result<()>;
     /// Deletes changes found before `before`; returns how many.
     async fn prune_changes(&self, before: DateTime<Utc>) -> Result<u64>;
+    /// Changes waiting to be judged, oldest first.
+    async fn held(&self, limit: usize) -> Result<Vec<StoredChange>>;
+    /// Releases held changes: `told` were what the owner asked for and count as matches; the
+    /// rest of `judged` stay in the watch's history and reach no digest.
+    async fn judged(&self, judged: &[i64], told: &[i64]) -> Result<()>;
 }
 
 /// Why a check could not read its page.

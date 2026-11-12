@@ -359,6 +359,15 @@ async fn start(
              {rule_words}. Right now {standing}."
         ));
     }
+    // No rule and no filters: what they asked for, in their words, is all there is to go by.
+    if pond_core::shared::services::web_watch_judge::needs_judging(&watch) {
+        return Ok(format!(
+            "Watching {title} every {interval} hours. It lists {} items now. Each change the \
+             page shows is checked against what the person asked for, and they are told on \
+             their phone only when one is what they asked for.",
+            items.len()
+        ));
+    }
     let matching: Vec<&WatchItem> = items.iter().filter(|i| filters.matches(i)).collect();
     let has_prices = items.iter().any(|i| i.price.is_some());
     let mut out = if has_prices {

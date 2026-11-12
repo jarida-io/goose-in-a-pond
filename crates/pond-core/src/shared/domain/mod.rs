@@ -5,6 +5,7 @@ pub mod cart;
 pub mod catalog;
 pub mod connector;
 pub mod context_card;
+pub mod goose_activity;
 pub mod long_task;
 pub mod news;
 pub mod orchestration;

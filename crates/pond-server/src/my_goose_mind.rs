@@ -10,6 +10,11 @@ use chrono::Utc;
 
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::shared::domain::web_watch::WatchChange;
+use pond_core::shared::ports::web_watch::{
+    StoredChange, WatchNotifier, WebWatch, WebWatchRepository,
+};
+use pond_core::shared::services::web_watch_judge as judge;
 use pond_core::user_data::domain::interest::{topic_key, OFFERED_AT};
 use pond_core::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
@@ -724,6 +729,167 @@ pub fn spawn_screenshot_notes_job(deps: MindDeps) {
                     ms = started.elapsed().as_millis() as u64,
                     "a screenshot was read and dropped"
                 );
+            }
+            drop(slot);
+        }
+    });
+}
+
+// ── The watch judge ────────────────────────────────────────────────────
+
+/// Held changes read at once: enough for every watch a pass could have checked.
+const HELD_LOOKAHEAD: usize = judge::CHANGES_PER_CALL * 8;
+
+/// Release `changes` of one watch: `told` are pushed to its owner as one notice, the rest stay
+/// in its history untold.
+async fn release_watch_changes(
+    watches: &dyn WebWatchRepository,
+    notifier: &dyn WatchNotifier,
+    watch: &WebWatch,
+    changes: &[StoredChange],
+    told: &[usize],
+) {
+    let ids: Vec<i64> = changes.iter().map(|c| c.id).collect();
+    let told_ids: Vec<i64> = told.iter().filter_map(|i| ids.get(*i).copied()).collect();
+    if let Err(e) = watches.judged(&ids, &told_ids).await {
+        tracing::warn!(error = %e, "[watch judge] a judgement could not be kept");
+        return;
+    }
+    let lines: Vec<&WatchChange> = told
+        .iter()
+        .filter_map(|i| changes.get(*i).map(|c| &c.change))
+        .collect();
+    if let Some(notice) = judge::notice(watch, &lines) {
+        if let Err(e) = notifier.notify(notice).await {
+            tracing::warn!(error = %e, "[watch judge] the owner could not be told");
+        }
+    }
+}
+
+/// Asks the model which of a watch's held changes are what its owner asked for, tells them of
+/// those and lets the rest go. A change no model could judge in time is told anyway.
+pub fn spawn_watch_judge_job(
+    deps: MindDeps,
+    watches: Arc<dyn WebWatchRepository>,
+    notifier: Arc<dyn WatchNotifier>,
+) {
+    let wake = deps.lane.claim(LaneJob::WatchJudge);
+    let started_at = std::time::Instant::now();
+    let started_at_utc = Utc::now();
+    tokio::spawn(async move {
+        loop {
+            let tick = crate::inference_lane_runner::wait_for_tick(judge::JUDGE_POLL, &wake).await;
+            let held = watches.held(HELD_LOOKAHEAD).await.unwrap_or_default();
+            if held.is_empty() {
+                continue;
+            }
+            let mut by_watch: std::collections::BTreeMap<String, Vec<StoredChange>> =
+                std::collections::BTreeMap::new();
+            for change in held {
+                by_watch
+                    .entry(change.watch_id.clone())
+                    .or_default()
+                    .push(change);
+            }
+            let now = Utc::now();
+            let mut waiting: Vec<(WebWatch, Vec<StoredChange>)> = Vec::new();
+            for (watch_id, changes) in by_watch {
+                let Some(watch) = watches.get(&watch_id).await.ok().flatten() else {
+                    continue;
+                };
+                let (late, rest): (Vec<StoredChange>, Vec<StoredChange>) = changes
+                    .into_iter()
+                    .partition(|change| judge::waited_out(change, now));
+                if !late.is_empty() {
+                    let all: Vec<usize> = (0..late.len()).collect();
+                    release_watch_changes(watches.as_ref(), notifier.as_ref(), &watch, &late, &all)
+                        .await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "watch_changes_judged",
+                        changes = late.len(),
+                        told = late.len(),
+                        by = "wait",
+                        "held changes were told unjudged: no model was free in time"
+                    );
+                }
+                if !rest.is_empty() {
+                    waiting.push((watch, rest));
+                }
+            }
+            if waiting.is_empty() {
+                continue;
+            }
+            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
+            let cadence = Cadence::new(
+                judge::JUDGE_POLL,
+                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
+                false,
+            );
+            let enabled = deps.provider.read().await.is_some();
+            let Some(slot) = deps
+                .lane
+                .acquire(
+                    LaneJob::WatchJudge,
+                    enabled,
+                    cadence,
+                    tick.waives(),
+                    saw_activity,
+                    idle_for,
+                )
+                .await
+            else {
+                continue;
+            };
+            'watches: for (watch, changes) in waiting {
+                let name = deps
+                    .profiles
+                    .get(&watch.owner)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.display_name.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "the person".to_string());
+                for batch in changes.chunks(judge::CHANGES_PER_CALL) {
+                    if slot.is_cancelled() {
+                        break 'watches;
+                    }
+                    let started = std::time::Instant::now();
+                    let shown: Vec<WatchChange> = batch.iter().map(|c| c.change.clone()).collect();
+                    let Some(reply) = deps
+                        .complete(
+                            &slot,
+                            &judge::render_system(&name),
+                            judge::build_user_message(&watch, &shown),
+                        )
+                        .await
+                    else {
+                        break 'watches;
+                    };
+                    // An unusable reply leaves them held, to be asked about again.
+                    let Some(told) = judge::parse_reply(&reply, batch.len()) else {
+                        continue;
+                    };
+                    release_watch_changes(
+                        watches.as_ref(),
+                        notifier.as_ref(),
+                        &watch,
+                        batch,
+                        &told,
+                    )
+                    .await;
+                    // Counts only: what a member watches stays out of the log.
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "watch_changes_judged",
+                        changes = batch.len(),
+                        told = told.len(),
+                        by = "model",
+                        ms = started.elapsed().as_millis() as u64,
+                        "a watch's changes were sorted by what its owner asked for"
+                    );
+                }
             }
             drop(slot);
         }

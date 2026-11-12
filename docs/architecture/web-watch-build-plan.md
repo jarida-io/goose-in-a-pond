@@ -265,6 +265,22 @@ Not done in phase 12:
 - A feed is not discovered for a page that already has articles or structured items; those are watched as before.
 - JSON Feed is not read.
 
+## Phase 13: a watch in the member's words, what landed
+
+Found on a phone: "watch this page and tell me when a story mentioning Zig appears" started a
+watch with no rule, which pushed every new story as a match while the reply promised only Zig.
+
+| Step | Kind | Status |
+|---|---|---|
+| A watch with its owner's words and no rule or filters holds every change a check finds: none is pushed or digested until judged | Code | Done |
+| A lane job (`watch_judge`) shows the model their words and the numbered changes, twelve a call, and reads back which to tell. Those are pushed as one notice and count as matches; the rest stay in the watch's history untold | Code and model | Done |
+| A change no model judged within two hours is told as it is, so an alert is never lost | Code | Done |
+| The tool tells the model what such a watch will do, so its reply promises what happens | Code | Done |
+
+Not done in phase 13:
+- A watch with filters or a rule is still judged by code alone, as before.
+- The judgement is not shown on the watch's page: a change reads as told or not.
+
 ## What waits on you
 
 | What | Why |
