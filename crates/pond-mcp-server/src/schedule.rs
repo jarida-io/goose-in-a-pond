@@ -214,7 +214,6 @@ fn said(text: impl Into<String>) -> Result<CallToolResult, ErrorData> {
 pub struct ScheduleMcpServer {
     scheduler: Arc<dyn SchedulerPort>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
-    #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
 
@@ -774,7 +773,9 @@ schedule, pass its name as `id` with only the fields that change.")]
     }
 }
 
-#[tool_handler]
+// `router = self.tool_router` is load-bearing: the default is this impl block's router alone,
+// which drops the composed to-do tools from `list_tools`, so the model is never offered them.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ScheduleMcpServer {
     fn get_info(&self) -> ServerInfo {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
