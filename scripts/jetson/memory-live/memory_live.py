@@ -6,13 +6,16 @@ shape, and asks it to forget one. Each check reads the member's profile (`/me/ab
 the model said it did.
 
 Like tools_live.py it pairs a phone bound to nobody, so it needs a household of exactly one
-member and acts as them. It removes only the facts and conversations it made. Writes a JSON
-log beside itself.
+member and acts as them. It removes only the facts and conversations it made. A phone bound to
+nobody saves facts for the whole household, which the profile route will not delete, so those
+are removed from the pond's own databases by the ids this run saw. Writes a JSON log beside
+itself.
 
 Run it as the pond's user, e.g. `sudo -u agamemnon python3 memory_live.py`.
 """
 import json
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools-live"))
@@ -30,6 +33,30 @@ def facts(token):
     return out
 
 
+def remove_rows(ids):
+    """Delete this run's own memory rows by id; returns the ids still there afterwards."""
+    if not ids:
+        return []
+    marks = ",".join("?" for _ in ids)
+    ids = sorted(ids)
+    system = sqlite3.connect(os.path.join(live.DATA, "pond_system.db"), timeout=10)
+    try:
+        system.execute(f"DELETE FROM memory_events WHERE memory_id IN ({marks})", ids)
+        system.execute(f"DELETE FROM memory_edges WHERE from_id IN ({marks}) OR to_id IN ({marks})", ids + ids)
+        system.execute(f"DELETE FROM memory_fragments WHERE id IN ({marks})", ids)
+        system.commit()
+        left = [row[0] for row in system.execute(f"SELECT content FROM memory_fragments WHERE id IN ({marks})", ids)]
+    finally:
+        system.close()
+    vectors = sqlite3.connect(os.path.join(live.DATA, "pond_vectors.db"), timeout=10)
+    try:
+        vectors.execute(f"DELETE FROM vectors WHERE row_id IN ({marks})", ids)
+        vectors.commit()
+    finally:
+        vectors.close()
+    return left
+
+
 def main():
     token = live.pair(None, "memory-live-phone")
     _, body = live.call("GET", "/profiles", token=token)
@@ -40,9 +67,14 @@ def main():
         sys.exit(2)
     before = {f["id"] for f in facts(token)}
     sessions, ok = [], True
+    # Every row this run ever saw of its own: one replaced by a newer fact leaves the profile
+    # and stays in the store.
+    made = set()
 
     def mine():
-        return [f for f in facts(token) if f["id"] not in before]
+        rows = [f for f in facts(token) if f["id"] not in before]
+        made.update(f["id"] for f in rows)
+        return rows
 
     def about(word):
         return [f for f in mine() if f.get("about") == word]
@@ -90,7 +122,10 @@ def main():
         for sid in sessions:
             if sid:
                 live.call("DELETE", f"/sessions/{sid}", token=token)
-        left = [f["content"] for f in mine()]
+        try:
+            left = remove_rows(made)
+        except sqlite3.Error as e:
+            left = [f["content"] for f in mine()] + [f"store not cleaned: {e}"]
         _, body = live.call("GET", "/devices", token=token)
         devices = body.get("devices", body) if isinstance(body, dict) else body
         own = [d["id"] for d in devices if isinstance(devices, list) and d.get("name") == "memory-live-phone"]

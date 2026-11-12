@@ -3877,6 +3877,9 @@ async fn run_server(
                 todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
                     db.system.clone(),
                 )),
+                watches: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
             },
         ));
     }
@@ -6933,9 +6936,30 @@ struct HeartbeatDeps {
     >,
     notes: Arc<dyn pond_core::shared::ports::agent_notes::AgentNotesRepository>,
     todos: Arc<dyn pond_core::shared::ports::todo::TodoRepository>,
+    watches: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository>,
 }
 
 impl HeartbeatDeps {
+    /// The member's web watches as the brief lists them.
+    async fn watch_lines(
+        &self,
+        member: &str,
+    ) -> Vec<pond_core::user_data::services::proactive_review::WatchLine> {
+        self.watches
+            .list_for(member)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(
+                |w| pond_core::user_data::services::proactive_review::WatchLine {
+                    title: w.title,
+                    paused: w.paused,
+                    failures: w.failures,
+                },
+            )
+            .collect()
+    }
+
     /// The checklist as the household keeps it, and the member's follow-ups still worth a look.
     /// A follow-up nobody came back to in a month is dropped here.
     async fn checklist_and_notes(
@@ -7096,6 +7120,53 @@ impl HeartbeatDeps {
                                 "the heartbeat closed one of its notes"
                             );
                         }
+                    }
+                }
+                HeartbeatAct::PauseWatch { words } => {
+                    use pond_core::shared::ports::web_watch::WatchEdit;
+                    use pond_core::user_data::services::proactive_review::watch_to_pause;
+                    let watches = self.watches.list_for(member).await.unwrap_or_default();
+                    let lines = self.watch_lines(member).await;
+                    // Checked again here: only one failing watch the words fit, never a guess.
+                    let Some(line) = watch_to_pause(&lines, words) else {
+                        continue;
+                    };
+                    let Some(watch) = watches.iter().find(|w| w.title == line.title) else {
+                        continue;
+                    };
+                    let paused = WatchEdit {
+                        paused: Some(true),
+                        ..WatchEdit::default()
+                    };
+                    if self
+                        .watches
+                        .edit(member, &watch.id, &paused)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        // Written where the member reads Goose's notes, so the pause is seen.
+                        let told = AgentNote {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            profile_id: Some(member.to_string()),
+                            kind: NoteKind::Note,
+                            text: format!(
+                                "Paused the web watch \"{}\": it could not be checked {} times \
+                                 in a row. Tell them, and offer to resume it.",
+                                watch.title, watch.failures
+                            )
+                            .chars()
+                            .take(pond_core::shared::domain::agent_note::NOTE_CHARS)
+                            .collect(),
+                            created_at: now,
+                        };
+                        let _ = self.notes.add(told).await;
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "heartbeat_act",
+                            act = "pause_watch",
+                            member = %member,
+                            "the heartbeat paused a watch that kept failing"
+                        );
                     }
                 }
             }
@@ -7298,7 +7369,19 @@ async fn run_proactive_reviewer(
             audience.profile_id().to_string(),
         );
         let (checklist, open_notes) = heartbeat.checklist_and_notes(&member_scope, now).await;
-        let brief = review::heartbeat_brief(now, zone, &events, &ledger, &checklist, &open_notes);
+        let watch_lines = match member_scope.owner_id() {
+            Some(member) => heartbeat.watch_lines(member).await,
+            None => Vec::new(),
+        };
+        let brief = review::heartbeat_brief(
+            now,
+            zone,
+            &events,
+            &ledger,
+            &checklist,
+            &open_notes,
+            &watch_lines,
+        );
         let spec =
             match review::plan_review(&role, &audience, &session_id, &brief, serde_json::json!({}))
             {

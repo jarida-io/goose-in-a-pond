@@ -62,7 +62,7 @@ The heartbeat is the proactive review, made to run by itself with something to g
   and Goose's open follow-ups for that member. It may read memory, devices, sensors, weather and
   the web. It holds no tool that acts.
 - **What it may answer.** A JSON array, empty when nothing needs anyone. Each element is a
-  suggestion or one of three acts, named by `"do"`.
+  suggestion or one of four acts, named by `"do"`.
 
 | `do` | What code does with it | Limits |
 |---|---|---|
@@ -70,6 +70,7 @@ The heartbeat is the proactive review, made to run by itself with something to g
 | `remind` | A reminder on the member's own list, pushed at its time; `when` is read in plain words | 2 a run, 3 a day, within 14 days |
 | `note` | A follow-up in Goose's notes | 3 a run with `done` |
 | `done` | Closes the one follow-up its words fit | |
+| `pause_watch` | Pauses the one web watch of the member's that its words fit, only when that watch has failed three checks in a row, and writes a follow-up saying so | 1 a run |
 
 The model never performs an act. `proactive_review::interpret_heartbeat` checks each one (a
 `when` that names no time, one that has passed or is too far off, an act with no words, an act
@@ -78,5 +79,6 @@ reaches further than the member's own list or Goose's own notes is a suggestion:
 messages, forms and money stay behind the member's tap. A reminder Goose set carries
 `source: "goose"` on the to-do, so the member sees whose it is and deletes it like any other.
 
-Not built: starting or stopping a web watch from the heartbeat. A watch needs an address, and
-the heartbeat has none that a person gave it.
+Starting or resuming a web watch is never an act: a watch needs an address a person gave, and
+a watch the member paused stays paused until they say otherwise. The heartbeat proposes it and
+the member taps.
