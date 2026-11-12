@@ -15,7 +15,7 @@ WireGuard tunnel away from home. TLS terminates on the Pond; no cloud service ho
 its private key.
 
 Both ends embed a userspace Tailscale node (tsnet, `tailscale.com` v1.104.2 pinned in
-`native/pondnet/go.mod`, built with Go 1.27.3). v1.104.2 and Go 1.27.3 are the floor:
+`native/pondnet/go.mod`, built with Go 1.27.4). v1.104.2 and Go 1.27.3 are the floor:
 earlier builds trust the leaked eMudhra intermediates (TS-2026-013, CVE-2026-111943,
 GO-2026-6809) when the node fetches the coordinator's key over HTTPS. The Pond runs it as the supervised helper `pondnet`; the
 phone links it through gomobile bindings. No Tailscale app, OS VPN profile or Tailscale
