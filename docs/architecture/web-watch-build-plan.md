@@ -30,6 +30,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Merged | fork #10 |
 | 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
+| 11 | General watches: tell me when words appear or go away, or a number goes below or above a value; passing changes (clock times, "3 hours ago", view counts) no longer count as updates; a watch as a card sent to chat | Merged | fork #18 |
 
 ## Phase 2: watches, what landed
 
@@ -156,6 +157,30 @@ Not done in phase 9:
 - A report forgets that an option was saved once its sheet closes, so a second Save makes a second card.
 - A `Saved { item_id }` notice screen: the pond does not send one yet.
 - The chips follow the model's `[title](link)` words. Ledger numbers, with the line used and the date read in the chip's card, come with the chips phase.
+
+## Phase 11: general watches, what landed
+
+A watch was a listing's: new items, updates and price drops among the items a page lists. It
+now also takes one rule read off the whole page, in code, with no model in a check.
+
+| Step | Kind | Status |
+|---|---|---|
+| `TellWhen` on a watch's filters: `new_or_changed` (default), `appears {phrase}`, `disappears {phrase}`, `below {phrase, value}`, `above {phrase, value}`. Stored in the filters' JSON, so no migration and older watches read as the default | Code | Done |
+| A rule reports only itself, once, when it comes true between two checks: the phrase was absent and is there, was there and is gone, or the number crossed the value. Nothing else on that page is kept for the digest | Code | Done |
+| The number is the one written within 60 characters after the phrase; with no phrase, the page's first price | Code | Done |
+| A section whose words did not change is not an update: clock times, "3 hours ago", "just now" and counts of views, likes and comments are set aside before comparing. A version number still counts | Code | Done |
+| `web_watch` tool: `when`, `phrase`, `value`. Setting a rule up says how the page stands now ("USD/KES is 129.4 now"), and refuses a number rule whose number is not on the page | Code | Done |
+| Routes: a watch's view carries `filters.tell_when`, the rule in words (`filters_words`) and `standing`; `PATCH /web-watches/{id}` takes the rule in `filters` | Code | Done |
+| A watch is a card that can be sent to chat (`"card": {"kind": "watch", "id"}`), with what it tells about, how the page stood and its recent changes as Goose's notes | Code | Done |
+| The tool block is 226 bytes larger (20,664 to 20,890) for the three fields | Measured | Done |
+
+Not done in phase 11:
+- Feeds (RSS, Atom) are not read as entries; a blog's own page is watched through its sections.
+- A file that is replaced (a PDF) is not watched: only pages the reader turns into text.
+- No model judges whether a change matters. Every check is code, so "tell me when the timetable changes in a way that affects mornings" is not possible yet; the rules above are.
+- A change is not confirmed by a second read, so a page that shows different sections on every visit can report updates. Its owner can switch that watch to a rule.
+- Checks run no more often than hourly, as before.
+- The phone and desktop screens do not offer the rule yet; it is set from a conversation.
 
 ## What waits on you
 

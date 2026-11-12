@@ -3,6 +3,9 @@
 //! read as changes; and the comparison, the filters and the notice are all code, so a check never
 //! needs the model.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Hours between checks unless the member sets another.
@@ -96,6 +99,219 @@ impl WatchItem {
     }
 }
 
+/// What a watch tells its owner about. The default is a listing's: a new item, an update or a
+/// price drop that fits the filters. The others are read off the whole page, in code.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "when", rename_all = "snake_case")]
+pub enum TellWhen {
+    #[default]
+    NewOrChanged,
+    /// The phrase is on the page when it was not at the last check.
+    Appears { phrase: String },
+    /// The phrase was on the page at the last check and is not now.
+    Disappears { phrase: String },
+    /// The number beside the phrase is under `value` when it was not at the last check.
+    Below { phrase: String, value: f64 },
+    /// The number beside the phrase is over `value` when it was not at the last check.
+    Above { phrase: String, value: f64 },
+}
+
+/// Characters after a phrase in which its number is looked for.
+const NUMBER_WITHIN: usize = 60;
+/// The longest line of a page a notice quotes.
+const QUOTED_CHARS: usize = 160;
+
+fn plain(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// An item as the page showed it, on one line.
+fn item_text(item: &WatchItem) -> String {
+    [
+        Some(item.title.as_str()),
+        item.price.as_deref(),
+        item.snippet.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// The first item whose text has `phrase`, as the page showed it.
+fn item_with(items: &[WatchItem], phrase: &str) -> Option<String> {
+    let phrase = plain(phrase);
+    if phrase.is_empty() {
+        return None;
+    }
+    items
+        .iter()
+        .map(item_text)
+        .find(|text| text.to_lowercase().contains(&phrase))
+}
+
+/// The number written just after `phrase` on the page; with no phrase, the first price.
+pub fn number_beside(items: &[WatchItem], phrase: &str) -> Option<f64> {
+    let phrase = plain(phrase);
+    if phrase.is_empty() {
+        return items.iter().find_map(WatchItem::price_value);
+    }
+    items.iter().map(item_text).find_map(|text| {
+        let lower = text.to_lowercase();
+        let at = lower.find(&phrase)? + phrase.len();
+        let after: String = lower[at..].chars().take(NUMBER_WITHIN).collect();
+        number_in(&after)
+    })
+}
+
+fn quoted(text: &str) -> String {
+    if text.chars().count() <= QUOTED_CHARS {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(QUOTED_CHARS).collect();
+    format!(
+        "{} ...",
+        cut[..cut.rfind(' ').unwrap_or(cut.len())].trim_end()
+    )
+}
+
+impl TellWhen {
+    pub fn is_default(&self) -> bool {
+        *self == TellWhen::NewOrChanged
+    }
+
+    /// The rule as people read it: `when "sold out" is gone`, `when USD goes above 130`.
+    pub fn in_words(&self) -> Option<String> {
+        Some(match self {
+            TellWhen::NewOrChanged => return None,
+            TellWhen::Appears { phrase } => format!("when \"{}\" appears", phrase.trim()),
+            TellWhen::Disappears { phrase } => format!("when \"{}\" is gone", phrase.trim()),
+            TellWhen::Below { phrase, value } => {
+                format!("when {} goes below {}", subject(phrase), shown(*value))
+            }
+            TellWhen::Above { phrase, value } => {
+                format!("when {} goes above {}", subject(phrase), shown(*value))
+            }
+        })
+    }
+
+    /// How the page stands against the rule now, for the reply when a watch is set up.
+    /// `None` when the rule cannot be read off this page at all.
+    pub fn standing(&self, items: &[WatchItem]) -> Option<String> {
+        match self {
+            TellWhen::NewOrChanged => None,
+            TellWhen::Appears { phrase } | TellWhen::Disappears { phrase } => {
+                Some(match item_with(items, phrase) {
+                    Some(_) => format!("\"{}\" is on the page now", phrase.trim()),
+                    None => format!("\"{}\" is not on the page now", phrase.trim()),
+                })
+            }
+            TellWhen::Below { phrase, .. } | TellWhen::Above { phrase, .. } => {
+                number_beside(items, phrase)
+                    .map(|n| format!("{} is {} now", subject(phrase), shown(n)))
+            }
+        }
+    }
+
+    /// The one change the rule reports from `before` to `now`, if it came true between them.
+    fn came_true(&self, before: &[WatchItem], now: &[WatchItem]) -> Option<String> {
+        match self {
+            TellWhen::NewOrChanged => None,
+            TellWhen::Appears { phrase } => {
+                match (item_with(before, phrase), item_with(now, phrase)) {
+                    (None, Some(line)) => Some(format!(
+                        "\"{}\" is on the page now: {}",
+                        phrase.trim(),
+                        quoted(&line)
+                    )),
+                    _ => None,
+                }
+            }
+            TellWhen::Disappears { phrase } => {
+                match (item_with(before, phrase), item_with(now, phrase)) {
+                    (Some(_), None) => {
+                        Some(format!("\"{}\" is no longer on the page", phrase.trim()))
+                    }
+                    _ => None,
+                }
+            }
+            TellWhen::Below { phrase, value } => {
+                let now = number_beside(now, phrase)?;
+                let was_under = number_beside(before, phrase).is_some_and(|b| b < *value);
+                (now < *value && !was_under).then(|| {
+                    format!(
+                        "{} is {} now, below {}",
+                        subject(phrase),
+                        shown(now),
+                        shown(*value)
+                    )
+                })
+            }
+            TellWhen::Above { phrase, value } => {
+                let now = number_beside(now, phrase)?;
+                let was_over = number_beside(before, phrase).is_some_and(|b| b > *value);
+                (now > *value && !was_over).then(|| {
+                    format!(
+                        "{} is {} now, above {}",
+                        subject(phrase),
+                        shown(now),
+                        shown(*value)
+                    )
+                })
+            }
+        }
+    }
+}
+
+/// A number as a notice shows it: whole numbers grouped, others to two places.
+fn shown(n: f64) -> String {
+    if n.fract().abs() < 1e-9 {
+        return grouped(n);
+    }
+    let fixed = format!("{n:.2}");
+    fixed
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// What a number rule calls its number.
+fn subject(phrase: &str) -> String {
+    match phrase.trim() {
+        "" => "the price".to_string(),
+        phrase => phrase.to_string(),
+    }
+}
+
+/// Parts of a page that change on every visit without anything having happened: a clock time,
+/// "3 hours ago", a count of views.
+static PASSING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)
+        \b\d{1,2}:\d{2}(:\d{2})?(\s?[ap]\.?m\.?)?
+        | \b(\d+|an?|one)\s+(second|sec|minute|min|hour|hr|day|week|month|year)s?\s+ago\b
+        | \bjust\s+now\b
+        | \b[\d.,]+[km]?\s+(views?|likes?|comments?|shares?|replies|reply|reads?|reactions?)\b
+        ",
+    )
+    .expect("the pattern is a constant")
+});
+
+/// `text` without what changes on every visit, for telling a real update from a passing one.
+pub fn steady(text: &str) -> String {
+    PASSING
+        .replace_all(text, "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What the member is looking for, as the model wrote it from their words and they may edit.
 /// An empty filter matches every item.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -109,6 +325,9 @@ pub struct WatchFilters {
     pub min_year: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_mileage: Option<f64>,
+    /// What to tell them about; the default is a new or changed item that fits the rest.
+    #[serde(default, skip_serializing_if = "TellWhen::is_default")]
+    pub tell_when: TellWhen,
 }
 
 impl WatchFilters {
@@ -139,6 +358,9 @@ impl WatchFilters {
 
     /// The filters in words, for a list or a notice: "subaru forester, up to 1,500,000".
     pub fn words_for_people(&self) -> String {
+        if let Some(rule) = self.tell_when.in_words() {
+            return rule;
+        }
         let mut parts = Vec::new();
         if !self.words.is_empty() {
             parts.push(self.words.join(" "));
@@ -165,8 +387,16 @@ impl WatchFilters {
 pub enum ChangeKind {
     New,
     Gone,
-    PriceChanged { from: String, to: String },
-    Updated { from: String, to: String },
+    PriceChanged {
+        from: String,
+        to: String,
+    },
+    Updated {
+        from: String,
+        to: String,
+    },
+    /// What the watch was set to tell came true; the item's title says what.
+    Condition,
 }
 
 /// One change a check found.
@@ -183,6 +413,9 @@ impl WatchChange {
     /// The change as one line: "New: 2017 Subaru Forester, KES 1,450,000, 98,000 km".
     pub fn line(&self) -> String {
         let item = &self.item;
+        if self.kind == ChangeKind::Condition {
+            return item.title.clone();
+        }
         let mut facts = vec![item.title.clone()];
         match &self.kind {
             ChangeKind::PriceChanged { from, to } => {
@@ -211,6 +444,7 @@ impl WatchChange {
                 _ => "Price changed",
             },
             ChangeKind::Updated { .. } => "Updated",
+            ChangeKind::Condition => "Now",
         };
         format!("{what}: {}", facts.join(", "))
     }
@@ -258,6 +492,21 @@ pub fn compare(
     if now.is_empty() && !before.is_empty() {
         return Comparison::Emptied;
     }
+    // A rule read off the whole page reports only itself: its owner asked for one thing.
+    if !filters.tell_when.is_default() {
+        let told = filters
+            .tell_when
+            .came_true(before, now)
+            .map(|what| WatchChange {
+                kind: ChangeKind::Condition,
+                item: WatchItem {
+                    title: what,
+                    ..WatchItem::default()
+                },
+                matched: true,
+            });
+        return Comparison::Changes(told.into_iter().collect());
+    }
     let mut changes = Vec::new();
     for item in now {
         let key = item.key();
@@ -282,7 +531,8 @@ pub fn compare(
                 } else if old.snippet != item.snippet {
                     let from = old.snippet.clone().unwrap_or_default();
                     let to = item.snippet.clone().unwrap_or_default();
-                    if !from.is_empty() || !to.is_empty() {
+                    // A clock time or a view count moving is not an update.
+                    if steady(&from) != steady(&to) {
                         changes.push(WatchChange {
                             kind: ChangeKind::Updated { from, to },
                             item: item.clone(),
@@ -538,5 +788,167 @@ mod tests {
             "Updated: Application Deadlines, Applications extended to December 1"
         );
         assert!(changes[0].matched);
+    }
+
+    fn section(title: &str, text: &str) -> WatchItem {
+        WatchItem {
+            title: title.into(),
+            link: Some(format!("https://shop.example/#{}", title.to_lowercase())),
+            snippet: Some(text.into()),
+            ..Default::default()
+        }
+    }
+
+    fn told(before: &[WatchItem], now: &[WatchItem], rule: TellWhen) -> Vec<String> {
+        let filters = WatchFilters {
+            tell_when: rule,
+            ..Default::default()
+        };
+        match compare(Some(before), now, &filters) {
+            Comparison::Changes(changes) => {
+                assert!(changes
+                    .iter()
+                    .all(|c| c.matched && c.kind == ChangeKind::Condition));
+                changes.iter().map(WatchChange::line).collect()
+            }
+            other => panic!("changes expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_phrase_appearing_is_told_once_and_only_when_it_was_not_there() {
+        let closed = [section("Tickets", "Registration opens soon")];
+        let open = [section("Tickets", "Registration is now open for 2027")];
+        let rule = TellWhen::Appears {
+            phrase: "now open".into(),
+        };
+        assert_eq!(
+            told(&closed, &open, rule.clone()),
+            vec!["\"now open\" is on the page now: Tickets Registration is now open for 2027"]
+        );
+        assert!(
+            told(&open, &open, rule.clone()).is_empty(),
+            "still there is not news"
+        );
+        assert!(
+            told(&open, &closed, rule).is_empty(),
+            "going away is not what was asked"
+        );
+    }
+
+    #[test]
+    fn a_phrase_going_away_is_told_and_other_changes_on_the_page_are_not() {
+        let sold_out = [
+            section("Bike", "Trail bike 29er. Sold out"),
+            section("News", "Old post"),
+        ];
+        let back = [
+            section("Bike", "Trail bike 29er. In stock"),
+            section("News", "A new post nobody asked about"),
+        ];
+        let rule = TellWhen::Disappears {
+            phrase: "Sold  Out".into(),
+        };
+        assert_eq!(
+            told(&sold_out, &back, rule.clone()),
+            vec!["\"Sold  Out\" is no longer on the page"]
+        );
+        assert!(told(&back, &back, rule).is_empty());
+    }
+
+    #[test]
+    fn a_number_is_told_when_it_crosses_and_not_again_while_it_stays_across() {
+        let at = |rate: &str| [section("Rates", &format!("USD/KES {rate} EUR/KES 151.20"))];
+        let rule = TellWhen::Above {
+            phrase: "usd/kes".into(),
+            value: 130.0,
+        };
+        assert_eq!(number_beside(&at("129.40"), "USD/KES"), Some(129.4));
+        assert!(told(&at("129.40"), &at("129.90"), rule.clone()).is_empty());
+        assert_eq!(
+            told(&at("129.90"), &at("130.25"), rule.clone()),
+            vec!["usd/kes is 130.25 now, above 130"]
+        );
+        assert!(told(&at("130.25"), &at("131"), rule.clone()).is_empty());
+        // The number gone from the page is no crossing.
+        let gone = [section("Rates", "Rates are being updated")];
+        assert!(told(&at("129.90"), &gone, rule).is_empty());
+
+        let cheap = TellWhen::Below {
+            phrase: String::new(),
+            value: 4_000.0,
+        };
+        let kettle = |price: &str| [car("Kettle", price, "https://shop.example/kettle")];
+        assert_eq!(
+            told(&kettle("4,500"), &kettle("3,800"), cheap.clone()),
+            vec!["the price is 3,800 now, below 4,000"]
+        );
+        assert_eq!(
+            cheap.standing(&kettle("4,500")).as_deref(),
+            Some("the price is 4,500 now")
+        );
+        assert_eq!(cheap.standing(&[section("About", "No prices here")]), None);
+    }
+
+    #[test]
+    fn a_rule_reads_as_people_say_it_and_survives_storage() {
+        let filters = WatchFilters {
+            tell_when: TellWhen::Disappears {
+                phrase: "sold out".into(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(filters.words_for_people(), "when \"sold out\" is gone");
+        let stored = serde_json::to_string(&filters).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"tell_when":{"when":"disappears","phrase":"sold out"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<WatchFilters>(&stored).unwrap(),
+            filters
+        );
+        // A watch kept before rules existed reads as the default.
+        let old: WatchFilters = serde_json::from_str(r#"{"words":["subaru"]}"#).unwrap();
+        assert!(old.tell_when.is_default());
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"words":["subaru"]}"#
+        );
+    }
+
+    #[test]
+    fn a_clock_or_a_counter_moving_is_not_an_update() {
+        assert_eq!(
+            steady("Updated 14:05, 3 hours ago. 1,204 views. Road closed"),
+            steady("Updated 09:12, just now. 1.3k views. Road closed")
+        );
+        let before = [section(
+            "Status",
+            "Last checked 09:12. All lines running. 120 views",
+        )];
+        let later = [section(
+            "Status",
+            "Last checked 14:05. All lines running. 133 views",
+        )];
+        let changed = [section(
+            "Status",
+            "Last checked 14:05. Line 2 suspended. 140 views",
+        )];
+        let filters = WatchFilters::default();
+        assert_eq!(
+            compare(Some(&before), &later, &filters),
+            Comparison::Changes(Vec::new())
+        );
+        let Comparison::Changes(changes) = compare(Some(&before), &changed, &filters) else {
+            panic!("changes expected");
+        };
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(changes[0].kind, ChangeKind::Updated { .. }));
+        // A version number is not a clock: a release still shows.
+        assert_ne!(
+            steady("Version 1.2.3 released"),
+            steady("Version 1.2.4 released")
+        );
     }
 }

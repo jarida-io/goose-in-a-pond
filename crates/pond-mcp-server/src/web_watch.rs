@@ -8,8 +8,8 @@ use chrono::{Duration, Utc};
 use pond_core::mcp::services::page_addresses;
 use pond_core::shared::domain::cart::{money_words, Notify};
 use pond_core::shared::domain::web_watch::{
-    WatchFilters, WatchItem, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
-    MIN_INTERVAL_HOURS,
+    TellWhen, WatchFilters, WatchItem, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS,
+    MAX_WATCHES_PER_MEMBER, MIN_INTERVAL_HOURS,
 };
 use pond_core::shared::ports::cart::ModelUse;
 use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
@@ -69,6 +69,14 @@ pub struct WebWatchParams {
     pub min_year: Option<Value>,
     #[schemars(with = "f64")]
     pub max_mileage: Option<Value>,
+    /// new (default), appears, disappears, below or above
+    #[schemars(with = "String")]
+    pub when: Option<String>,
+    /// The words to appear or disappear, or the label beside the number
+    #[schemars(with = "String")]
+    pub phrase: Option<String>,
+    #[schemars(with = "f64")]
+    pub value: Option<Value>,
     #[schemars(with = "u32", extend("default" = 6))]
     pub every_hours: Option<Value>,
     #[schemars(with = "String")]
@@ -133,6 +141,39 @@ impl WebWatchParams {
             max_price: number(self.max_price.as_ref()),
             min_year: number(self.min_year.as_ref()).map(|y| y as u32),
             max_mileage: number(self.max_mileage.as_ref()),
+            tell_when: TellWhen::NewOrChanged,
+        }
+    }
+
+    /// What the watch tells about, or what is missing to say so. A rule read off the whole
+    /// page takes the place of the item filters: its owner asked for one thing.
+    fn rule(&self) -> Result<TellWhen, &'static str> {
+        let when = self
+            .when
+            .as_deref()
+            .map(|w| w.trim().to_lowercase())
+            .unwrap_or_default();
+        let phrase = text(self.phrase.as_ref());
+        let value = number(self.value.as_ref());
+        let is = |names: &[&str]| names.iter().any(|n| when == *n || when.starts_with(n));
+        if is(&["appear", "shows up", "is there"]) {
+            if phrase.is_empty() {
+                return Err("Say which words should appear, in phrase.");
+            }
+            Ok(TellWhen::Appears { phrase })
+        } else if is(&["disappear", "gone", "is gone", "goes away"]) {
+            if phrase.is_empty() {
+                return Err("Say which words should be gone, in phrase.");
+            }
+            Ok(TellWhen::Disappears { phrase })
+        } else if is(&["below", "under", "less"]) {
+            let value = value.ok_or("Say the number it should go below, in value.")?;
+            Ok(TellWhen::Below { phrase, value })
+        } else if is(&["above", "over", "more", "pass"]) {
+            let value = value.ok_or("Say the number it should go above, in value.")?;
+            Ok(TellWhen::Above { phrase, value })
+        } else {
+            Ok(TellWhen::NewOrChanged)
         }
     }
 
@@ -160,9 +201,9 @@ pub fn watch_item(item: Item) -> WatchItem {
 #[tool_router(router = web_watch_tool_router, vis = "pub")]
 impl KnowledgeMcpServer {
     #[tool(description = "\
-Keep checking any web page (listings, blogs, news feeds, release notes, announcement boards, or \
-content pages) and tell the person when new articles appear, content updates, or prices drop. \
-Only url is needed; the other fields narrow what matches.")]
+Keep checking a web page and tell the person on their phone when a new listing or article \
+appears, a price drops, words appear or go away (sold out, registration open), or a number \
+goes below or above a value. Only url is needed.")]
     async fn web_watch(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -251,9 +292,27 @@ async fn start(
             "That page has no readable content to compare from one check to the next.",
         ));
     }
-    let filters = params.filters();
-    let interval = params.interval();
+    let rule = match params.rule() {
+        Ok(rule) => rule,
+        Err(missing) => return Ok(format_dead_end(what, missing)),
+    };
     let items: Vec<WatchItem> = page.items.into_iter().map(watch_item).collect();
+    let standing = rule.standing(&items);
+    if !rule.is_default() && standing.is_none() {
+        return Ok(format_dead_end(
+            what,
+            "I found no number beside those words on that page. Read the page and use the label \
+             written just before the number.",
+        ));
+    }
+    let filters = match rule.is_default() {
+        true => params.filters(),
+        false => WatchFilters {
+            tell_when: rule.clone(),
+            ..WatchFilters::default()
+        },
+    };
+    let interval = params.interval();
     let now = Utc::now();
     let title = if page.title.is_empty() {
         crate::web_search::domain_of(&page.address)
@@ -282,6 +341,12 @@ async fn start(
     };
     deps.repo.create(&watch).await?;
     tracing::info!(target: "giap::trace", kind = "web_watch_started", items = items.len(), interval);
+    if let (Some(rule_words), Some(standing)) = (rule.in_words(), standing) {
+        return Ok(format!(
+            "Watching {title} every {interval} hours. The person will be told on their phone \
+             {rule_words}. Right now {standing}."
+        ));
+    }
     let matching: Vec<&WatchItem> = items.iter().filter(|i| filters.matches(i)).collect();
     let has_prices = items.iter().any(|i| i.price.is_some());
     let mut out = if has_prices {
@@ -477,6 +542,44 @@ mod tests {
         );
         assert_eq!(watch["properties"]["action"]["default"], "start");
         assert!(watch["properties"]["url"].get("default").is_none());
+    }
+
+    #[test]
+    fn a_rule_is_read_from_how_the_model_says_it_and_asks_for_what_is_missing() {
+        let rule = |value: serde_json::Value| params(value).rule();
+        assert_eq!(
+            rule(serde_json::json!({"url": "a.example"})),
+            Ok(TellWhen::NewOrChanged)
+        );
+        assert_eq!(
+            rule(serde_json::json!({"when": "Disappears", "phrase": " sold out "})),
+            Ok(TellWhen::Disappears {
+                phrase: "sold out".into()
+            })
+        );
+        assert_eq!(
+            rule(serde_json::json!({"when": "appears", "phrase": "registration open"})),
+            Ok(TellWhen::Appears {
+                phrase: "registration open".into()
+            })
+        );
+        assert_eq!(
+            rule(serde_json::json!({"when": "above", "phrase": "USD/KES", "value": "130"})),
+            Ok(TellWhen::Above {
+                phrase: "USD/KES".into(),
+                value: 130.0
+            })
+        );
+        // With no label, a number rule reads the page's first price.
+        assert_eq!(
+            rule(serde_json::json!({"when": "under", "value": 4000})),
+            Ok(TellWhen::Below {
+                phrase: String::new(),
+                value: 4000.0
+            })
+        );
+        assert!(rule(serde_json::json!({"when": "appears"})).is_err());
+        assert!(rule(serde_json::json!({"when": "below", "phrase": "USD"})).is_err());
     }
 
     #[test]

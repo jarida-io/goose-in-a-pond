@@ -18,6 +18,7 @@ use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
 use pond_core::user_data::ports::ideas::IdeaRepository;
 use pond_infra::sqlite_device_attribution::SqliteDeviceAttribution;
 use pond_infra::sqlite_ideas::SqliteIdeaRepository;
+use pond_infra::sqlite_web_watch::SqliteWebWatchRepository;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -29,6 +30,7 @@ struct Pond {
     router: axum::Router,
     agent: Arc<MockAgent>,
     ideas: SqliteIdeaRepository,
+    watches: SqliteWebWatchRepository,
     member: String,
     other: String,
     _dir: tempfile::TempDir,
@@ -73,6 +75,7 @@ async fn a_pond() -> Pond {
         .unwrap();
     state.handshake = Arc::new(DeviceHandshake(device_id));
     let ideas = SqliteIdeaRepository::new(state.db.system.clone());
+    let watches = SqliteWebWatchRepository::new(state.db.system.clone());
     Pond {
         router: build_router(
             Arc::new(state),
@@ -80,6 +83,7 @@ async fn a_pond() -> Pond {
         ),
         agent,
         ideas,
+        watches,
         member: ids[0].clone(),
         other: ids[1].clone(),
         _dir: built.dir,
@@ -171,7 +175,7 @@ async fn an_idea_is_a_short_card_with_its_own_page_and_goose_notes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         hub["cards"],
-        json!(["idea", "news", "digest", "todo", "cart"])
+        json!(["idea", "news", "digest", "todo", "cart", "watch"])
     );
 
     let (status, list) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
@@ -258,4 +262,104 @@ async fn a_turn_sent_with_a_card_carries_its_content_and_notes_to_the_model() {
         StatusCode::OK,
         "a client cannot write a card's words"
     );
+}
+
+#[tokio::test]
+async fn a_watch_with_a_rule_shows_how_the_page_stands_and_is_a_card_of_its_owners() {
+    use pond_core::shared::domain::web_watch::{TellWhen, WatchFilters, WatchItem};
+    use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
+
+    let pond = a_pond().await;
+    let now = Utc::now();
+    let watch = |id: &str, owner: &str| WebWatch {
+        id: id.to_string(),
+        owner: owner.to_string(),
+        address: format!("https://rates.example/{id}"),
+        title: "Today's rates".into(),
+        looking_for: "tell me when the dollar passes 130".into(),
+        filters: WatchFilters {
+            tell_when: TellWhen::Above {
+                phrase: "USD/KES".into(),
+                value: 130.0,
+            },
+            ..WatchFilters::default()
+        },
+        interval_hours: 1,
+        paused: false,
+        items: Some(vec![WatchItem {
+            title: "Rates".into(),
+            snippet: Some("USD/KES 129.40 EUR/KES 151.20".into()),
+            ..WatchItem::default()
+        }]),
+        failures: 0,
+        last_checked_at: Some(now),
+        next_check_at: now,
+        created_at: now,
+        session_id: None,
+    };
+    pond.watches
+        .create(&watch("w1", &pond.member))
+        .await
+        .unwrap();
+    pond.watches
+        .create(&watch("w2", &pond.other))
+        .await
+        .unwrap();
+
+    let (status, view) = call(&pond, Method::GET, "/web-watches/w1", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["filters_words"], "when USD/KES goes above 130");
+    assert_eq!(view["standing"], "USD/KES is 129.4 now");
+    assert_eq!(view["filters"]["tell_when"]["when"], "above");
+
+    let (status, card) = call(&pond, Method::GET, "/me/cards/watch/w1", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["kind"], "Web watch");
+    let content = card["content"].as_str().unwrap();
+    assert!(
+        content.contains("Tells them about: when USD/KES goes above 130"),
+        "{content}"
+    );
+    assert!(
+        content.contains("At the last check USD/KES is 129.4 now."),
+        "{content}"
+    );
+    assert!(card["notes"]
+        .as_str()
+        .unwrap()
+        .contains("What they asked for: tell me when the dollar passes 130"));
+
+    let (status, _) = call(&pond, Method::GET, "/me/cards/watch/w2", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another member's watch");
+
+    // A screen that knows no rules edits the words; the rule stays.
+    let (status, edited) = call(
+        &pond,
+        Method::PATCH,
+        "/web-watches/w1",
+        json!({"filters": {"words": ["usd"]}, "interval_hours": 2}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["filters"]["tell_when"]["when"], "above");
+    assert_eq!(edited["interval_hours"], 2);
+    // Naming the rule changes it, and the default clears it.
+    let (_, edited) = call(
+        &pond,
+        Method::PATCH,
+        "/web-watches/w1",
+        json!({"filters": {"tell_when": {"when": "below", "phrase": "EUR/KES", "value": 150}}}),
+    )
+    .await;
+    assert_eq!(edited["filters_words"], "when EUR/KES goes below 150");
+    assert_eq!(edited["standing"], "EUR/KES is 151.2 now");
+    let (_, cleared) = call(
+        &pond,
+        Method::PATCH,
+        "/web-watches/w1",
+        json!({"filters": {"tell_when": {"when": "new_or_changed"}}}),
+    )
+    .await;
+    assert!(cleared["filters"].get("tell_when").is_none(), "{cleared}");
+    assert_eq!(cleared["standing"], Value::Null);
 }

@@ -342,7 +342,7 @@ Card = { "kind": "Recipe", "title", "content": "what the member read",
 ```
 
 - `GET /me/cards/{kind}/{id}` → Card, for `kind` one of `idea`, `news` (a story), `digest`,
-  `todo`, `cart`. `GET /me/hub` lists the kinds this Pond serves under `"cards"`.
+  `todo`, `cart`, `watch` (a web watch). `GET /me/hub` lists the kinds this Pond serves under `"cards"`.
 - `POST /chat/stream` takes `"card": {"kind","id"}` beside the message. The turn's
   `<system-context>` then carries the card and the notes; later turns of the conversation see
   it in the history. A card that is not the speaker's is left out and the turn runs without it.
