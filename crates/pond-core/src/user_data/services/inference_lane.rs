@@ -39,9 +39,11 @@ pub enum LaneJob {
     Portrait,
     /// Research an idea for a member from what they are into or working on.
     Ideas,
-    /// File memories kept before the profile under what each is about. Last: it has no
-    /// deadline, and ends once every older row is filed.
+    /// File memories kept before the profile under what each is about. It has no deadline,
+    /// and ends once every older row is filed.
     MemoryResort,
+    /// Read the screenshots members sent for a one-line note each, then drop the pictures.
+    ScreenshotNotes,
 }
 
 impl LaneJob {
@@ -60,6 +62,7 @@ impl LaneJob {
         LaneJob::Portrait,
         LaneJob::Ideas,
         LaneJob::MemoryResort,
+        LaneJob::ScreenshotNotes,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -78,6 +81,7 @@ impl LaneJob {
             LaneJob::Portrait => "portrait",
             LaneJob::Ideas => "ideas",
             LaneJob::MemoryResort => "memory_resort",
+            LaneJob::ScreenshotNotes => "screenshot_notes",
         }
     }
 
@@ -97,6 +101,7 @@ impl LaneJob {
             LaneJob::Portrait => "Keep a portrait of each member",
             LaneJob::Ideas => "Research ideas for members",
             LaneJob::MemoryResort => "File older memories into profiles",
+            LaneJob::ScreenshotNotes => "Read members' screenshots for ideas",
         }
     }
 
@@ -436,6 +441,7 @@ mod tests {
             LaneJob::Portrait,
             LaneJob::Ideas,
             LaneJob::MemoryResort,
+            LaneJob::ScreenshotNotes,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),
@@ -443,7 +449,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 13, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 14, "a job was added or removed");
     }
 
     #[test]

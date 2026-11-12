@@ -4094,6 +4094,7 @@ async fn run_server(
     };
     my_goose_mind::spawn_portrait_job(mind.clone());
     my_goose_mind::spawn_memory_resort_job(mind.clone());
+    my_goose_mind::spawn_screenshot_notes_job(mind.clone());
     my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────

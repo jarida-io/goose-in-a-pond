@@ -24,7 +24,13 @@ impl GooseProviderAdapter {
 
     fn to_goose_message(msg: &ChatMessage) -> GooseMessage {
         match msg.role {
-            Role::User => GooseMessage::user().with_text(&msg.content),
+            // A side call may show the model a picture: a screenshot read for a note.
+            Role::User => msg
+                .images
+                .iter()
+                .fold(GooseMessage::user().with_text(&msg.content), |m, img| {
+                    m.with_image(&img.data, &img.mime_type)
+                }),
             Role::Assistant => GooseMessage::assistant().with_text(&msg.content),
             Role::System => {
                 // Goose has no System role (that text goes in `system`); fall back to User.

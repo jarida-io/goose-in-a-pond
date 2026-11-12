@@ -26,7 +26,8 @@ else Goose can do. This document is the contract between the Pond and the phone.
 ## 0. What this Pond serves
 
 `GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
-"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"catalog":bool,"cards":[kind]}`. A Pond without the route answers 404 and the phone
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"catalog":bool,
+"cards":[kind]}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
 
 ## 0a. About you: the member's profile
@@ -303,7 +304,7 @@ Idea = { "id",
   "why": "the fact or interest of the member it fits",
   "facts": [{"label": "Serves", "value": "4"}],   // two to four, seen at a glance on the page
   "notes": "what Goose kept to work from",        // the page may show it under "Goose's notes"
-  "grounded_in": [{"kind":"interest|memory|conversation","label"}],
+  "grounded_in": [{"kind":"interest|memory|conversation|screenshot","label"}],
   "sources": [{"title","url","site"}], "picture": path|null,
   "goose_can": {"label", "kind": "research|watch|todo|schedule|chat"}|null,
   "you_can": ["step", ...],
@@ -350,6 +351,38 @@ An idea's notes are written with the idea, from the pages it was read from. A st
 digest's are its sources, why it was shown and when it was written; a to-do's and a watched
 link's are their state. Chat suggestions carry their grounding the same way
 (`suggestion_context`).
+
+## 6b. Ideas from screenshots (opt-in)
+
+Off until the member turns it on. With it on, the phone sends the member's recent screenshots
+and one idea a run may build on what one of them showed.
+
+- The Pond looks at a screenshot once and keeps one line about what the member seems
+  interested in ("Looking at the Ngong Hills hiking trail"). **The picture is never stored**:
+  it waits in memory, at most six a member, until the lane reads it, and is dropped whether or
+  not a line came of it. A restart forgets any still waiting.
+- A screen showing banking or payments, passwords or codes, a private conversation or email,
+  an identity document, medical or legal records, or someone's personal details is skipped
+  whole: the model is told to skip it, and a line that still carries an email address, a long
+  number or the vocabulary of such a screen is refused in code. The line is never logged.
+- The member sees every note, deletes any one or all of them, and turning it off forgets every
+  screenshot still waiting. At most forty notes are kept; a note seeds an idea for fourteen
+  days, once.
+- It needs a model that reads pictures; `available` says whether this Pond's does.
+
+```
+Screenshots = { "enabled": bool, "available": bool, "pending": n, "max_pending": 6,
+                "notes": [{"id","note","taken_at"|null,"created_at","used_at"|null}] }
+```
+
+- `GET /me/screenshots` → Screenshots; `PUT /me/screenshots` `{"enabled": bool}` → Screenshots
+- `POST /me/screenshots` `{"image": base64, "mime_type": "image/jpeg|image/png|image/webp",
+  "taken_at"?}` → `202 {"pending": n}`. `409` while off or when the model reads no pictures,
+  `413` over about 1.5 MB, `415` another type, `429` when six are waiting.
+- `DELETE /me/screenshots/{id}` → 204; `DELETE /me/screenshots` → `{"deleted": n, "dropped": n}`
+
+The choice is the member preference `ideas_from_screenshots`. An idea built on a note says so:
+`grounded_in: [{"kind":"screenshot","label": the note}]`.
 
 ## 7. What else Goose can do
 

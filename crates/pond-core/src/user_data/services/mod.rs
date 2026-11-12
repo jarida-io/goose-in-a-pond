@@ -25,6 +25,7 @@ pub mod proactive_review;
 pub mod profile_interview;
 pub mod redacting_memory_repository;
 pub mod reminder_proposal;
+pub mod screenshot_notes;
 pub mod suggestion;
 pub mod suggestion_generation;
 pub mod voice_match;
