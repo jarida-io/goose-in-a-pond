@@ -19,7 +19,7 @@ heartbeat and the scratchpad are now read and run, not only stored; and ideas ar
 |---|---|---|
 | Tools in plain words | Schedules, reminders and timers take "every weekday at 7", "tomorrow at 6 pm"; a schedule is found by describing it; `world_clock` takes city names. Reminders never worked before: `schedule.rs` composed its to-do router without `#[tool_handler(router = self.tool_router)]`, so those tools were never listed | `crates/pond-mcp-server/src/schedule.rs`, `todo_tools.rs`, `tests/composed_routers_are_served.rs` |
 | Memories around the person | A closed list of 22 words a fact is filed under, one write policy (`member_profile::admit`), one-at-a-time words that replace, a re-sort of older rows that files or archives and never deletes | [member-memory.md](member-memory.md) |
-| Soul, heartbeat, scratchpad | The soul leads every prompt preset; the heartbeat runs hourly with its checklist and may add a reminder, write a note or push a notice within caps; Goose keeps lessons and follow-ups with `note_to_self` | [agent-documents.md](agent-documents.md) |
+| Soul, heartbeat, scratchpad | The soul leads every prompt preset; the heartbeat runs hourly with its checklist and may add a reminder, write a note, pause a web watch that keeps failing or push a notice, within caps; Goose keeps lessons and follow-ups with `note_to_self` | [agent-documents.md](agent-documents.md) |
 | One interview | Eight fixed sections asked in code, taps first, one follow-up at most, one model call only for typed words, nothing kept until approved | [my-goose-hub.md](my-goose-hub.md) section 0c |
 | Ideas | A short card (kind, title, one line) with its own page (facts, steps, sources, Goose's notes). One everyday idea a run (recipe, outing, date or solo date, something to do, holiday) written against the profile; an idea naming an allergen is dropped in code | my-goose-hub.md section 6 |
 | Cards sent to chat | `"card": {"kind","id"}` on `/chat/stream` for an idea, story, digest, to-do, watched link or web watch; the Pond reads the card as the speaker and the turn carries its content and Goose's notes | my-goose-hub.md section 6a |
@@ -40,7 +40,7 @@ heartbeat and the scratchpad are now read and run, not only stored; and ideas ar
 - No click-and-type browser agent, no feeds or replaced-file watches, no model judging whether a watch's change matters, no robots.txt.
 - Screenshots are chosen by hand on the phone; syncing them automatically needs a native build.
 - A guest's turn whose personal tools are withheld still ends as "I could not produce a response".
-- The heartbeat cannot start or stop a web watch.
+- The heartbeat pauses a web watch only when it has failed three checks in a row; it never starts or resumes one by itself.
 
 ### Traps found this week
 
