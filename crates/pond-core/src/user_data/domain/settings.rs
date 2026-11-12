@@ -990,7 +990,7 @@ impl Default for Settings {
             quiet_hours_start: Self::default_quiet_hours_start(),
             quiet_hours_end: Self::default_quiet_hours_end(),
             unprompted_speech_categories: Self::default_unprompted_speech_categories(),
-            proactive_review_enabled: false,
+            proactive_review_enabled: Self::default_proactive_review_enabled(),
             long_tasks_enabled: Self::default_long_tasks_enabled(),
             agent_activations_enabled: Self::default_agent_activations_enabled(),
             agent_prefill_retention_days: Self::default_agent_prefill_retention_days(),
@@ -1454,7 +1454,7 @@ impl Settings {
     }
 
     fn default_proactive_review_enabled() -> bool {
-        factory_defaults::boolean("proactive_review_enabled", false)
+        factory_defaults::boolean("proactive_review_enabled", true)
     }
 
     fn default_long_tasks_enabled() -> bool {

@@ -3866,6 +3866,15 @@ async fn run_server(
             observed,
             inference_lane.clone(),
             profile_repo.clone(),
+            HeartbeatDeps {
+                documents: prompt_template_repo.clone(),
+                notes: Arc::new(pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(
+                    db.system.clone(),
+                )),
+                todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
+                    db.system.clone(),
+                )),
+            },
         ));
     }
 
@@ -6911,6 +6920,184 @@ async fn run_quiet_compaction(
     }
 }
 
+/// What makes a review a heartbeat: the checklist it goes through, Goose's own notes, and the
+/// member's list its reminders go on.
+struct HeartbeatDeps {
+    documents: Arc<
+        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+    >,
+    notes: Arc<dyn pond_core::shared::ports::agent_notes::AgentNotesRepository>,
+    todos: Arc<dyn pond_core::shared::ports::todo::TodoRepository>,
+}
+
+impl HeartbeatDeps {
+    /// The checklist as the household keeps it, and the member's follow-ups still worth a look.
+    /// A follow-up nobody came back to in a month is dropped here.
+    async fn checklist_and_notes(
+        &self,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (
+        String,
+        Vec<pond_core::shared::domain::agent_note::AgentNote>,
+    ) {
+        use pond_core::shared::domain::agent_note::{is_stale, NoteKind};
+        let checklist = self
+            .documents
+            .get(pond_core::prompts::HEARTBEAT)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.content)
+            .unwrap_or_else(|| pond_core::prompts::PROMPT_HEARTBEAT.to_string());
+        let mut notes = self
+            .notes
+            .list(scope, NoteKind::Note)
+            .await
+            .unwrap_or_default();
+        for stale in notes.iter().filter(|n| is_stale(n, now)) {
+            let _ = self.notes.remove(&stale.id, scope).await;
+        }
+        notes.retain(|n| !is_stale(n, now));
+        (checklist, notes)
+    }
+
+    /// Reminders the heartbeat has set for `member` since `since`; the day's cap on failure, so
+    /// a store that cannot be read sets none.
+    async fn reminders_set_since(
+        &self,
+        member: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> usize {
+        use pond_core::shared::domain::todo::{StateFilter, TodoSource};
+        match self.todos.list(member, StateFilter::All).await {
+            Ok(todos) => todos
+                .iter()
+                .filter(|t| t.source == TodoSource::Goose && t.created_at >= since)
+                .count(),
+            Err(_) => pond_core::user_data::services::proactive_review::MAX_REMINDERS_PER_DAY,
+        }
+    }
+
+    /// Do what the heartbeat decided, each act already checked and capped by `interpret_heartbeat`.
+    async fn carry_out(
+        &self,
+        member: &str,
+        acts: &[pond_core::user_data::services::proactive_review::HeartbeatAct],
+        open_notes: &[pond_core::shared::domain::agent_note::AgentNote],
+        now: chrono::DateTime<chrono::Utc>,
+        zone: pond_core::shared::domain::todo::Tz,
+    ) {
+        use pond_core::shared::domain::agent_note::{
+            dropped_for_room, same_note, AgentNote, NoteKind,
+        };
+        use pond_core::shared::domain::todo::{
+            new_todo, rfc3339, HookCatalog, HookSource, TodoSource,
+        };
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::services::proactive_review::HeartbeatAct;
+
+        let scope = ProfileScope::Owner(member.to_string());
+        for act in acts {
+            match act {
+                HeartbeatAct::Remind { text, due, why } => {
+                    let body = serde_json::json!({
+                        "kind": "reminder",
+                        "text": text,
+                        "notes": why,
+                        "due_at": rfc3339(*due),
+                        "ask": false,
+                        "hooks": [{"kind": "time", "spec": {"at": rfc3339(*due)}}],
+                    });
+                    let catalog = HookCatalog {
+                        places: Vec::new(),
+                        sources: vec![HookSource::presence()],
+                    };
+                    let made =
+                        match new_todo(member, &body, &catalog, TodoSource::Goose, None, now, zone)
+                        {
+                            Ok(todo) => self.todos.create(&todo).await.map_err(|e| e.to_string()),
+                            Err(e) => Err(e.0),
+                        };
+                    match made {
+                        // Counts and kinds only: what it reminds of stays out of the log.
+                        Ok(()) => tracing::info!(
+                            target: "giap::trace",
+                            kind = "heartbeat_act",
+                            act = "remind",
+                            member = %member,
+                            "the heartbeat set a reminder"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "heartbeat: a reminder it decided on could not be set"
+                        ),
+                    }
+                }
+                HeartbeatAct::Note { text } => {
+                    let existing = self
+                        .notes
+                        .owned(Some(member), NoteKind::Note)
+                        .await
+                        .unwrap_or_default();
+                    if existing.iter().any(|n| same_note(&n.text, text)) {
+                        continue;
+                    }
+                    for old in dropped_for_room(NoteKind::Note, &existing) {
+                        let _ = self.notes.remove(&old, &scope).await;
+                    }
+                    let note = AgentNote {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        profile_id: Some(member.to_string()),
+                        kind: NoteKind::Note,
+                        text: text.clone(),
+                        created_at: now,
+                    };
+                    match self.notes.add(note).await {
+                        Ok(()) => tracing::info!(
+                            target: "giap::trace",
+                            kind = "heartbeat_act",
+                            act = "note",
+                            member = %member,
+                            "the heartbeat wrote itself a note"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "heartbeat: a note could not be kept")
+                        }
+                    }
+                }
+                HeartbeatAct::Done { words } => {
+                    let wanted: Vec<String> = words
+                        .to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .filter(|w| w.chars().count() >= 3)
+                        .map(str::to_string)
+                        .collect();
+                    let fits: Vec<&AgentNote> = open_notes
+                        .iter()
+                        .filter(|n| {
+                            let text = n.text.to_lowercase();
+                            !wanted.is_empty() && wanted.iter().all(|w| text.contains(w.as_str()))
+                        })
+                        .collect();
+                    // Only when the words fit one note: a guess would close the wrong one.
+                    if let [note] = fits.as_slice() {
+                        if self.notes.remove(&note.id, &scope).await.unwrap_or(false) {
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "done",
+                                member = %member,
+                                "the heartbeat closed one of its notes"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Idle-time proactive review; every failed read fails closed (skips the tick or hits the cap).
 async fn run_proactive_reviewer(
     settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
@@ -6925,6 +7112,7 @@ async fn run_proactive_reviewer(
     >,
     lane: Arc<crate::inference_lane_runner::InferenceLane>,
     profiles: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
+    heartbeat: HeartbeatDeps,
 ) {
     use pond_core::user_data::services::consolidation_schedule as sched;
     use pond_core::user_data::services::inference_lane::LaneJob;
@@ -7040,8 +7228,9 @@ async fn run_proactive_reviewer(
 
         // One `acquire` per tick, refusals as `enabled: false`: a stale registration wins
         // every tie-break and gets woken again and again to decline.
+        // Its own cadence: it looks in on the house, where consolidation tidies a store.
         let cadence = crate::inference_lane_runner::Cadence::new(
-            sched::interval_floor_from_hours(settings.memory_consolidation_interval_hours),
+            review::HEARTBEAT_EVERY,
             idle_threshold,
             false,
         );
@@ -7099,7 +7288,12 @@ async fn run_proactive_reviewer(
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = review::review_session_id(&run_id);
-        let brief = review::review_brief(now, &events, &ledger);
+        let zone = pond_core::shared::domain::todo::zone(&settings.timezone);
+        let member_scope = pond_core::user_data::domain::profile::ProfileScope::Owner(
+            audience.profile_id().to_string(),
+        );
+        let (checklist, open_notes) = heartbeat.checklist_and_notes(&member_scope, now).await;
+        let brief = review::heartbeat_brief(now, zone, &events, &ledger, &checklist, &open_notes);
         let spec =
             match review::plan_review(&role, &audience, &session_id, &brief, serde_json::json!({}))
             {
@@ -7176,19 +7370,33 @@ async fn run_proactive_reviewer(
         };
 
         // A cancelled or turn-exhausted run yields nothing here, never partial opinions.
-        let yielded = review::interpret_answer(
+        let acted_at = chrono::Utc::now();
+        let reminders_today = heartbeat
+            .reminders_set_since(audience.profile_id(), acted_at - chrono::Duration::days(1))
+            .await;
+        let yielded = review::interpret_heartbeat(
             &run,
             &audience,
-            chrono::Utc::now(),
+            acted_at,
             &ledger,
             proposals_today,
+            review::ActAllowance::for_heartbeat(reminders_today, zone),
         );
         for refusal in &yielded.refusals {
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
         }
+        heartbeat
+            .carry_out(
+                audience.profile_id(),
+                &yielded.acts,
+                &open_notes,
+                acted_at,
+                zone,
+            )
+            .await;
 
         // WARN: all-refused is always a defect; a run with nothing to say returns an empty array.
-        if yielded.proposals.is_empty() && !yielded.refusals.is_empty() {
+        if yielded.proposals.is_empty() && yielded.acts.is_empty() && !yielded.refusals.is_empty() {
             tracing::warn!(
                 refused = yielded.refusals.len(),
                 first = ?yielded.refusals.first(),
@@ -7243,6 +7451,9 @@ fn install_long_task_deps(
     ));
     pond_mcp_server::memory::init_memory_profiles(Arc::new(
         pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::memory::init_agent_notes(Arc::new(
+        pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(pool.clone()),
     ));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(

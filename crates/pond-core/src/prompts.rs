@@ -474,74 +474,119 @@ pub fn vision_capability_section(compact: bool) -> &'static str {
     }
 }
 
-// ── Soul, Heartbeat & Agent Scratchpad Templates ─────────────────────────
+// ── Goose's own documents: soul, heartbeat, scratchpad ───────────────────────
 
-/// Soul — sovereign multi-modal core identity: hears, talks, sees, organizes.
+/// The name of the soul's row: who Goose is, in every prompt style.
+pub const SOUL: &str = "soul";
+/// The name of the heartbeat's row: what Goose checks by itself while the house is quiet.
+pub const HEARTBEAT: &str = "heartbeat";
+/// The name of the scratchpad's row: the rules Goose keeps memory by. Its lessons and notes are
+/// rows of their own (`AgentNote`), since Goose writes those and a person writes these.
+pub const SCRATCHPAD: &str = "scratchpad";
+
+/// The documents, which are not prompt styles: `Settings.prompt_style` never names one.
+pub const AGENT_DOCUMENTS: &[&str] = &[SOUL, HEARTBEAT, SCRATCHPAD];
+
+/// Longest soul, rules or checklist kept, in characters: each rides a prompt.
+pub const AGENT_DOCUMENT_CHARS: usize = 1_500;
+
+/// Who Goose is. It replaces the `<identity>` block of whichever style is in use, so the
+/// styles differ in manner and never in who is speaking.
 pub const PROMPT_SOUL: &str = "\
 <identity>
-You are {{assistant_name}}, {{user_name}}'s personal assistant — living right here \
-inside Goose In A Pond on their own physical hardware. No data leaves this home.
-You belong to this household alone: loyal, sovereign, and fiercely protective of their privacy.
+You are {{assistant_name}}, {{user_name}}'s personal agentic assistant — a \
+copilot that acts, not only answers. This pond is {{user_name}}'s: Goose In A \
+Pond, on their own hardware, no data ever leaving it.
+You hear through this pond's microphones, speak through its voice, see through \
+its cameras, and help run this home's days. You keep a profile of each person \
+here, and notes of your own; you look in on the house by yourself and say so \
+only when something needs them.
+Personality: {{personality}}. Timezone: {{timezone}}.{{location}}
 </identity>
-
-<embodiment>
-- HEARS: You listen through the pond's microphones. You hear ambient sounds and conversational cadence. In voice conversations, speak with natural brevity and warmth — never mention recordings or audio files.
-- TALKS: You speak naturally via Kokoro TTS. You match tone, keep spoken replies crisp (1-3 sentences for dialogue, thorough for briefings), and yield immediately when interrupted.
-- SEES: You see through cameras and visual sensors. You notice who is in the room, track motion, and inspect photos and screenshots shared by the household. You prioritize fast text events, reaching for snapshots only when visual inspection is vital.
-- ORGANIZES: You are a relentless household organizer. You track commitments, calendar clashes, travel itineraries, recipe prep schedules, groceries, and home maintenance. You anticipate needs before they become emergencies.
-</embodiment>
-
-<agency>
-Autonomous Initiative with Deference: Take initiative in researching, monitoring, and planning in the background. When real-world action is needed, propose it clearly with one-tap confirmation.
-Grounded Real-World Depth: Food, outdoors, mechanics, and craft matter. Provide exact details, authentic spices, trail logistics, and actionable next steps.
-No Corporate AI Fluff: Deliver answers directly without disclaimers or filler.
-</agency>
 ";
 
-/// Heartbeat — autonomous perception pulse, checklists, tool routines, and self-editing directives.
+/// What Goose looks at when it wakes by itself. A checklist of questions, never tool names:
+/// the run is told what it may read, and code performs what it decides.
 pub const PROMPT_HEARTBEAT: &str = "\
-<heartbeat-routine>
-# Autonomous Heartbeat Routine
-
-## Pulse Schedules
-- Morning Pulse (07:00):
-  1. Call `giap-weather__get_current_conditions` and today's hourly forecast.
-  2. Call `giap-schedule__list_todos` to review tasks scheduled for today.
-  3. If severe weather conflicts with an outdoor to-do or calendar item, formulate a proposal.
-  4. Prepare a crisp morning briefing card for Goose On The Go.
-
-- Evening Prep Pulse (19:30):
-  1. Check tomorrow's schedule and to-dos.
-  2. If dinner or meal prep is planned (e.g. Egusi soup, marinated steak), verify recipe prep steps (e.g. defrosting meat, soaking beans).
-  3. Formulate reminder proposal if prep is needed tonight.
-
-- Hourly Health & Presence Check:
-  1. If member arrives home after absence, check for overdue high-priority reminders.
-  2. Call `giap-system__get_system_metrics` periodically: monitor RAM headroom and disk space.
-
-## Self-Editing Directives
-- When a check is complete, record timestamp and observations in your scratchpad (`memory.md`).
-- If an outdoor event has passed, remove its weather watch from your active scratchpad.
-</heartbeat-routine>
+- Does today's or tomorrow's weather touch a reminder, to-do or plan of theirs?
+- Is a reminder or to-do overdue, or due within a day and easy to miss?
+- Has a device or sensor read out of the ordinary?
+- Has a follow-up in your notes come due?
+Say nothing when nothing needs them.
 ";
 
-/// Memory — agent working scratchpad: active intentions, behavioral observations, and pending proposals.
-pub const PROMPT_MEMORY: &str = "\
-# Agent Working Scratchpad & Active Intentions
-
-## 1. Active Autonomous Intentions
-- [ ] Weekend Outing Watch: Monitor weather for planned outdoor activities.
-- [ ] Recipe & Cooking Prep: Check pantry to-dos for ingredients when a recipe idea is viewed.
-- [ ] System Health Watch: Monitor RAM headroom and background inference compaction.
-
-## 2. Learned Preferences & Behavioral Observations
-- Propose schedule adjustments when weather conflicts with outdoor plans.
-- Prefer authentic culinary details and real-world execution steps.
-- Avoid generic alarms; focus on time-sensitive commitments.
-
-## 3. Pending Proposals Awaiting Review
-- None currently pending.
+/// The rules Goose keeps memory by. It replaces the `<memory-rules>` block of whichever style
+/// is in use.
+pub const PROMPT_SCRATCHPAD: &str = "\
+<memory-rules>
+<memories> holds what is known of the person: use it, and recall_memories for \
+what it lacks. Never guess a fact about them.
+save_memory keeps only what they say about themselves that will hold for \
+months: one sentence naming them, with what it is about. A new fact replaces \
+the old by itself.
+Never keep a question they asked, a task, a mood, a plan for one day (that is \
+add_reminder), or anything you or a web page said. Health, money and beliefs \
+only when they ask.
+\"Forget that\": forget_memory, then say it is done.
+Say something is remembered, changed or forgotten only after the tool said so \
+this turn.
+A lesson about how to work, or a follow-up of your own: note_to_self. Facts \
+about people never go there.
+</memory-rules>
 ";
+
+fn block_span(text: &str, tag: &str) -> Option<(usize, usize)> {
+    let start = text.find(&format!("<{tag}>"))?;
+    let close = format!("</{tag}>");
+    let end = start + text[start..].find(&close)? + close.len();
+    Some((start, end))
+}
+
+/// `template` with its `<tag>` block replaced by `document`'s, when both have one. A document
+/// written without the tags is wrapped in them; an empty one leaves the template as it is.
+fn with_block(template: &str, tag: &str, document: &str) -> String {
+    let document = sanitize_document(document);
+    if document.is_empty() {
+        return template.to_string();
+    }
+    let Some((start, end)) = block_span(template, tag) else {
+        return template.to_string();
+    };
+    let block = match block_span(&document, tag) {
+        Some((from, to)) => document[from..to].to_string(),
+        None => format!("<{tag}>\n{document}\n</{tag}>"),
+    };
+    format!("{}{block}{}", &template[..start], &template[end..])
+}
+
+/// A document as it may ride a prompt: trimmed, and no longer than [`AGENT_DOCUMENT_CHARS`].
+pub fn sanitize_document(document: &str) -> String {
+    document
+        .trim()
+        .chars()
+        .take(AGENT_DOCUMENT_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// A style template speaking as the soul and keeping memory by the scratchpad's rules.
+/// Either may be `None` or empty, and the style's own block then stands.
+pub fn with_agent_documents(template: &str, soul: Option<&str>, rules: Option<&str>) -> String {
+    let template = match soul {
+        Some(soul) => with_block(template, "identity", soul),
+        None => template.to_string(),
+    };
+    match rules {
+        Some(rules) => with_block(&template, "memory-rules", rules),
+        None => template,
+    }
+}
+
+/// Whether `name` is a prompt style a person may pick, rather than one of Goose's documents.
+pub fn is_prompt_style(name: &str) -> bool {
+    !AGENT_DOCUMENTS.contains(&name)
+}
 
 // ── Built-in template lookup ─────────────────────────────────────────────
 
@@ -568,20 +613,16 @@ pub const BUILTIN_PROMPT_TEMPLATES: &[(&str, &str, &str)] = &[
         PROMPT_WARM,
         "Conversational, family-friendly, personality-forward.",
     ),
+    (SOUL, PROMPT_SOUL, "Who Goose is, in every style."),
     (
-        "soul",
-        PROMPT_SOUL,
-        "Sovereign multi-modal core identity: hears, talks, sees, and organizes.",
-    ),
-    (
-        "heartbeat",
+        HEARTBEAT,
         PROMPT_HEARTBEAT,
-        "Autonomous perception pulse, checklists, tool routines, and self-editing directives.",
+        "What Goose checks by itself while the house is quiet.",
     ),
     (
-        "memory",
-        PROMPT_MEMORY,
-        "Agent working scratchpad: active intentions, behavioral observations, and pending proposals.",
+        SCRATCHPAD,
+        PROMPT_SCRATCHPAD,
+        "The rules Goose keeps memory by.",
     ),
 ];
 
@@ -898,6 +939,86 @@ pub fn build_system_prompt_from_template_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Goose's documents ─────────────────────────────────────────────────────
+
+    #[test]
+    fn every_style_speaks_as_the_soul_and_keeps_memory_by_the_rules() {
+        let soul = "<identity>\nYou are {{assistant_name}}, a goose of few words.\n</identity>";
+        let rules = "<memory-rules>\nSave nothing without asking.\n</memory-rules>";
+        for style in [
+            PROMPT_BALANCED,
+            PROMPT_CONCISE,
+            PROMPT_TECHNICAL,
+            PROMPT_WARM,
+        ] {
+            let out = with_agent_documents(style, Some(soul), Some(rules));
+            assert_eq!(out.matches("<identity>").count(), 1);
+            assert!(out.contains("a goose of few words"));
+            assert!(!out.contains("personal agentic assistant"));
+            assert_eq!(out.matches("<memory-rules>").count(), 1);
+            assert!(out.contains("Save nothing without asking."));
+            assert!(
+                out.contains("<instructions>") && out.contains("<output-quality>"),
+                "the rest of the style stands"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_empty_document_leaves_the_style_as_it_is() {
+        assert_eq!(
+            with_agent_documents(PROMPT_BALANCED, None, None),
+            PROMPT_BALANCED
+        );
+        assert_eq!(
+            with_agent_documents(PROMPT_BALANCED, Some("  \n "), Some("")),
+            PROMPT_BALANCED
+        );
+    }
+
+    #[test]
+    fn a_document_written_without_its_tags_is_wrapped_and_a_long_one_is_cut() {
+        let out = with_agent_documents(PROMPT_BALANCED, Some("You are a quiet goose."), None);
+        assert!(out.contains("<identity>\nYou are a quiet goose.\n</identity>"));
+
+        let long = "a".repeat(AGENT_DOCUMENT_CHARS * 2);
+        let out = with_agent_documents(PROMPT_BALANCED, Some(&long), None);
+        let (start, end) = block_span(&out, "identity").unwrap();
+        assert!(end - start < AGENT_DOCUMENT_CHARS + 40);
+    }
+
+    #[test]
+    fn the_shipped_soul_and_rules_fit_their_blocks_and_render() {
+        let settings = Settings::default();
+        let template =
+            with_agent_documents(PROMPT_BALANCED, Some(PROMPT_SOUL), Some(PROMPT_SCRATCHPAD));
+        let state = PromptState {
+            tools_offered: true,
+            ..PromptState::default()
+        };
+        let out = render_jinja_template(&template, &settings, Some(&state), None);
+        assert!(
+            !out.contains("{{"),
+            "a placeholder was left unrendered: {out}"
+        );
+        assert!(out.contains("note_to_self"));
+        assert!(out.contains("add_reminder"));
+        for document in [PROMPT_SOUL, PROMPT_HEARTBEAT, PROMPT_SCRATCHPAD] {
+            assert!(document.chars().count() <= AGENT_DOCUMENT_CHARS);
+        }
+    }
+
+    #[test]
+    fn a_document_is_not_a_style_a_person_may_pick() {
+        for name in ["balanced", "concise", "technical", "warm"] {
+            assert!(is_prompt_style(name));
+        }
+        for name in AGENT_DOCUMENTS {
+            assert!(!is_prompt_style(name));
+            assert!(builtin_template_content(name).is_some());
+        }
+    }
 
     // ── sanitize_field ────────────────────────────────────────────────────────
 

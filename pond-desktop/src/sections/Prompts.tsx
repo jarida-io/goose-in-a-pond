@@ -12,13 +12,15 @@ const PRESET_META: Record<string, { label: string; desc: string }> = {
   concise:   { label: "Concise",   desc: "Short, direct answers. Minimal explanation" },
   technical: { label: "Technical", desc: "Precise, detailed. Favors accuracy over brevity" },
   warm:      { label: "Warm",      desc: "Friendly, encouraging tone. Conversational style" },
-  soul:      { label: "Soul",      desc: "Sovereign multi-modal core identity: hears, talks, sees, and organizes" },
-  heartbeat: { label: "Heartbeat", desc: "Autonomous perception pulse, checklists, and tool routines" },
-  memory:    { label: "Scratchpad", desc: "Agent working scratchpad: active intentions and observation journal" },
+  // Goose's own documents, not styles: the soul and the scratchpad's rules go into whichever
+  // style is in use, and the heartbeat is the checklist Goose goes through by itself.
+  soul:       { label: "Soul",       desc: "Who Goose is. Used with every style" },
+  heartbeat:  { label: "Heartbeat",  desc: "What Goose looks at by itself while the house is quiet" },
+  scratchpad: { label: "Scratchpad", desc: "The rules Goose follows when it remembers things" },
 };
 
-/** The preset keys in display order. */
-const PRESET_KEYS = ["balanced", "concise", "technical", "warm", "soul", "heartbeat", "memory"];
+/** The four styles, then Goose's own documents, in display order. */
+const PRESET_KEYS = ["balanced", "concise", "technical", "warm", "soul", "heartbeat", "scratchpad"];
 
 /** Rough token estimate: ~4 chars per token. */
 function estimateTokens(text: string): number {

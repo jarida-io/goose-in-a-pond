@@ -54,6 +54,15 @@ Fact = { "id", "content": "Jerry is allergic to peanuts.", "about": "allergy"|nu
 - `GET /me/about/archived` → `{"facts":[Fact + "why"]}`: rows the re-sort set aside, each with
   its reason. `POST /me/about/{id}/restore` → Fact (`409` when the row is not archived).
 
+## 0b. Goose's own notes
+
+`GET /me/notes` → `{"lessons":[Note], "notes":[Note]}`, `Note = {"id","text","created_at",
+"shared": bool}`: what Goose wrote down for itself about working for this member, and its open
+follow-ups. `DELETE /me/notes/{id}` → `204`. A member does not write them; Goose does
+([agent-documents.md](agent-documents.md)). The soul, the heartbeat's checklist and the
+scratchpad's rules are read and saved with `GET/PUT /prompts/{soul|heartbeat|scratchpad}` and
+`POST /prompts/{name}/reset`.
+
 ## 1. Interests, the interview that builds them, and the portrait
 
 Tables: `interests`, `member_portraits` (migration 0086).

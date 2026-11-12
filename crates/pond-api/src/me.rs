@@ -76,6 +76,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me/hub", get(hub))
         .merge(crate::about_me::routes())
+        .merge(crate::agent_notes::routes())
         .merge(crate::interests::routes())
         .merge(crate::news::routes())
         .merge(crate::todos::routes())

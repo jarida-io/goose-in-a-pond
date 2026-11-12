@@ -1,6 +1,10 @@
 //! Memory MCP server: recall, save and forget memory fragments.
 
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::shared::domain::agent_note::{
+    dropped_for_room, same_note, tidy, AgentNote, NoteKind,
+};
+use pond_core::shared::ports::agent_notes::AgentNotesRepository;
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::domain::member_profile::{
@@ -73,6 +77,19 @@ pub struct ForgetMemoryParams {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct NoteToSelfParams {
+    /// The note, as one sentence.
+    #[serde(default)]
+    pub text: String,
+    /// "lesson" for how to work better; "note" for something to come back to. Default "note".
+    pub kind: Option<String>,
+    /// Catch-all for unexpected fields the model sends.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
 /// Why a call touched no memory. Rendered as a successful result: small models retry errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -129,6 +146,8 @@ pub struct MemoryMcpServer {
     /// Who the members are, so a saved fact can be checked to name its member; `None` reads
     /// the store installed with [`init_memory_profiles`].
     profiles: Option<Arc<dyn ProfileRepository + Send + Sync>>,
+    /// Goose's own notes; `None` reads the store installed with [`init_agent_notes`].
+    notes: Option<Arc<dyn AgentNotesRepository>>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
@@ -150,6 +169,7 @@ impl MemoryMcpServer {
             turns: None,
             children: process_child_sessions(),
             profiles: None,
+            notes: None,
             tool_router: Self::tool_router(),
         }
     }
@@ -186,6 +206,17 @@ name, home, work, partner, diet or style replaces the old one by itself.")]
     ) -> Result<CallToolResult, ErrorData> {
         self.run_forget(&ctx.meta, params.0).await
     }
+
+    #[tool(description = "\
+Write a note for yourself, not a fact about the person: a lesson (how to work better, learnt \
+from a mistake or a correction) or a follow-up to come back to.")]
+    async fn note_to_self(
+        &self,
+        ctx: RequestContext<RoleServer>,
+        params: Parameters<NoteToSelfParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.run_note(&ctx.meta, params.0).await
+    }
 }
 
 impl MemoryMcpServer {
@@ -204,6 +235,75 @@ impl MemoryMcpServer {
     pub fn with_profiles(mut self, profiles: Arc<dyn ProfileRepository + Send + Sync>) -> Self {
         self.profiles = Some(profiles);
         self
+    }
+
+    /// Keeps Goose's notes in this store instead of the process's own.
+    pub fn with_notes(mut self, notes: Arc<dyn AgentNotesRepository>) -> Self {
+        self.notes = Some(notes);
+        self
+    }
+
+    /// The body of `note_to_self`, apart from the rmcp wrapper so tests can call it.
+    pub async fn run_note(
+        &self,
+        meta: &Meta,
+        params: NoteToSelfParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scope = match self.scope_for(meta) {
+            Ok(scope) => scope,
+            Err(refusal) => return Ok(refused("note_to_self", refusal)),
+        };
+        let Some(notes) = self.notes.clone().or_else(|| AGENT_NOTES.get().cloned()) else {
+            return Ok(said(
+                "Nothing was noted: this Pond keeps no notes for you yet. Carry on without.",
+            ));
+        };
+        let Ok(text) = tidy(&params.text) else {
+            return Ok(said(
+                "Nothing was noted. Send `text`: the note, as one sentence.",
+            ));
+        };
+        let kind = NoteKind::parse(params.kind.as_deref().unwrap_or_default());
+        let owner = scope.owner_id().map(str::to_string);
+        let internal = |e: anyhow::Error| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to keep the note: {e}"),
+                None,
+            )
+        };
+        let existing = notes
+            .owned(owner.as_deref(), kind)
+            .await
+            .map_err(internal)?;
+        if existing.iter().any(|note| same_note(&note.text, &text)) {
+            return Ok(said("Already noted."));
+        }
+        // Few are kept, so the list stays read: the oldest makes room.
+        for old in dropped_for_room(kind, &existing) {
+            let _ = notes.remove(&old, &scope).await;
+        }
+        notes
+            .add(AgentNote {
+                id: uuid::Uuid::new_v4().to_string(),
+                profile_id: owner,
+                kind,
+                text: text.clone(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .map_err(internal)?;
+        tracing::info!(
+            target: "giap::trace",
+            kind = "agent_note_written",
+            note_kind = kind.as_str(),
+            chars = text.chars().count(),
+            "the agent wrote itself a note"
+        );
+        Ok(said(match kind {
+            NoteKind::Lesson => format!("Noted for yourself as a lesson: {text}"),
+            NoteKind::Note => format!("Noted for yourself to come back to: {text}"),
+        }))
     }
 
     /// The member a scope files under: the name to use in advice, and every name a fact about
@@ -633,7 +733,8 @@ impl ServerHandler for MemoryMcpServer {
                 "GIAP Memory MCP server — the profile the Pond keeps of each household member.\n\n\
                  Tools: recall_memories (their profile, or the facts nearest a query), \
                  save_memory (one lasting fact they said about themselves, with what it is \
-                 `about`), forget_memory (by words from it).\n\n\
+                 `about`), forget_memory (by words from it), note_to_self (your own lessons \
+                 and follow-ups, never facts about people).\n\n\
                  A new name, home, work, partner, diet or style replaces the old one in code; \
                  a correction is saved the same way. Facts are filed under headings (who they \
                  are, people, food and health, routines, preferences, goals, places, dates, \
@@ -690,6 +791,19 @@ pub fn init_memory_deps(
         memory_repo,
         embedding_provider,
     });
+}
+
+static AGENT_NOTES: OnceLock<Arc<dyn AgentNotesRepository>> = OnceLock::new();
+
+/// Install the store for Goose's own notes once at startup; without it `note_to_self` says
+/// nothing was noted.
+pub fn init_agent_notes(notes: Arc<dyn AgentNotesRepository>) {
+    let _ = AGENT_NOTES.set(notes);
+}
+
+/// The store installed with [`init_agent_notes`], for the turn that shows Goose its lessons.
+pub fn agent_notes() -> Option<Arc<dyn AgentNotesRepository>> {
+    AGENT_NOTES.get().cloned()
 }
 
 static MEMORY_PROFILES: OnceLock<Arc<dyn ProfileRepository + Send + Sync>> = OnceLock::new();
@@ -1127,6 +1241,65 @@ mod tests {
             .filter(|f| f.about == Some(About::Likes))
             .count();
         assert_eq!(liked, 2);
+    }
+
+    #[tokio::test]
+    async fn a_note_to_self_is_the_members_capped_and_never_written_twice() {
+        use pond_core::shared::domain::agent_note::LESSONS_KEPT;
+        use pond_core::shared::mocks::mock_agent_notes::MockAgentNotes;
+
+        let pond = Pond::new().await;
+        let notes = Arc::new(MockAgentNotes::new());
+        let _amina = pond.turn("engine-amina", ProfileScope::Owner(AMINA.into()));
+        let _guest = pond.turn("engine-guest", ProfileScope::Guest);
+        let server = pond.server(false).with_notes(notes.clone());
+        let meta = meta_for("engine-amina");
+        let note = |text: &str, kind: &str| NoteToSelfParams {
+            text: text.into(),
+            kind: Some(kind.into()),
+            ..Default::default()
+        };
+
+        let got = text(
+            &server
+                .run_note(&meta, note(" Give prices in  shillings. ", "lesson"))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            got.contains("as a lesson: Give prices in shillings."),
+            "{got}"
+        );
+        let got = text(
+            &server
+                .run_note(&meta, note("give prices in shillings", "lesson"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains("Already noted"), "{got}");
+        let got = text(&server.run_note(&meta, note("  ", "note")).await.unwrap());
+        assert!(got.contains("Nothing was noted"), "{got}");
+        let got = text(
+            &server
+                .run_note(&meta_for("engine-guest"), note("Check the pump.", "note"))
+                .await
+                .unwrap(),
+        );
+        assert!(got.contains(Refusal::Guest.message()), "{got}");
+
+        for i in 0..LESSONS_KEPT + 2 {
+            server
+                .run_note(&meta, note(&format!("Lesson number {i}."), "lesson"))
+                .await
+                .unwrap();
+        }
+        let kept = notes.all().await;
+        assert_eq!(kept.len(), LESSONS_KEPT);
+        assert!(kept.iter().all(|n| n.profile_id.as_deref() == Some(AMINA)));
+        assert!(
+            !kept.iter().any(|n| n.text == "Give prices in shillings."),
+            "the oldest made room"
+        );
     }
 
     #[tokio::test]

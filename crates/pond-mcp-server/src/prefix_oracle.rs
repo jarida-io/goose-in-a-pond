@@ -143,6 +143,7 @@ mod tests {
             "giap-knowledge__saved_items",
             "giap-knowledge__web_watch",
             "giap-memory__forget_memory",
+            "giap-memory__note_to_self",
             "giap-memory__recall_memories",
             "giap-memory__save_memory",
             "giap-system__get_current_time",
@@ -170,14 +171,14 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            20_140,
-            "the default tool block is now {total} raw bytes, was 20,140. That is \
+            20_664,
+            "the default tool block is now {total} raw bytes, was 20,664. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 34, "tool count moved");
+        assert_eq!(entries.len(), 35, "tool count moved");
     }
 
     /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
@@ -214,8 +215,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 20_942,
-            "the block with every key stored is now {total} raw bytes, was 20,942"
+            total, 21_466,
+            "the block with every key stored is now {total} raw bytes, was 21,466"
         );
     }
 

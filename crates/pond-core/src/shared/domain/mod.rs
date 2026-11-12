@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_note;
 pub mod agent_prefill;
 pub mod cart;
 pub mod catalog;
