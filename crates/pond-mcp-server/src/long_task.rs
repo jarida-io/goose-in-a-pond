@@ -26,8 +26,8 @@ use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -430,7 +430,10 @@ impl TasksMcpServer {
     }
 
     /// The calling turn, refused unless it is a live, identified, top-level one.
-    fn caller(&self, meta: &Meta) -> Result<(LongTaskDeps, DelegationAuthority), Refusal> {
+    fn caller(
+        &self,
+        meta: &RequestMetaObject,
+    ) -> Result<(LongTaskDeps, DelegationAuthority), Refusal> {
         let Some(deps) = self.deps() else {
             return Err(Refusal::Unavailable {
                 trace: "deps_not_installed",
@@ -458,7 +461,11 @@ impl TasksMcpServer {
         Ok((deps, authority))
     }
 
-    async fn run_start(&self, meta: &Meta, mut params: TaskStartParams) -> Result<String, Refusal> {
+    async fn run_start(
+        &self,
+        meta: &RequestMetaObject,
+        mut params: TaskStartParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         let goal = non_blank(params.goal.take())
             .or_else(|| take_alias(&mut params.extra, &GOAL_ALIASES))
@@ -529,12 +536,20 @@ impl TasksMcpServer {
         ))
     }
 
-    async fn run_status(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
+    async fn run_status(
+        &self,
+        meta: &RequestMetaObject,
+        params: TaskIdParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         status_text(&deps, authority.profile_scope(), task_id_of(params)).await
     }
 
-    async fn run_cancel(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
+    async fn run_cancel(
+        &self,
+        meta: &RequestMetaObject,
+        params: TaskIdParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         let task_id = task_id_of(params).ok_or_else(|| {
             Refusal::Malformed(
@@ -799,7 +814,7 @@ fn clip(text: &str, max: usize) -> String {
 
 #[tool_handler]
 impl ServerHandler for TasksMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1071,7 +1086,7 @@ impl TaskWorkMcpServer {
     }
 
     /// The calling helper's run. The task comes from here and never from the arguments.
-    fn helper(&self, meta: &Meta) -> Result<Helper, Refusal> {
+    fn helper(&self, meta: &RequestMetaObject) -> Result<Helper, Refusal> {
         let Some(deps) = self.deps() else {
             return Err(Refusal::Unavailable {
                 trace: "deps_not_installed",
@@ -1100,7 +1115,7 @@ impl TaskWorkMcpServer {
         })
     }
 
-    async fn run_list(&self, meta: &Meta) -> Result<String, Refusal> {
+    async fn run_list(&self, meta: &RequestMetaObject) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         let artifacts = helper
             .deps
@@ -1132,7 +1147,7 @@ impl TaskWorkMcpServer {
 
     async fn run_read(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         mut params: ArtifactReadParams,
     ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
@@ -1169,7 +1184,7 @@ impl TaskWorkMcpServer {
 
     async fn run_write(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         mut params: ArtifactWriteParams,
     ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
@@ -1248,7 +1263,11 @@ impl TaskWorkMcpServer {
         ))
     }
 
-    async fn run_report(&self, meta: &Meta, params: StepReportParams) -> Result<String, Refusal> {
+    async fn run_report(
+        &self,
+        meta: &RequestMetaObject,
+        params: StepReportParams,
+    ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         if helper.binding.work == StepWork::Plan {
             return Err(Refusal::PlannerDoesNotReport);
@@ -1282,7 +1301,11 @@ impl TaskWorkMcpServer {
         ))
     }
 
-    async fn run_plan(&self, meta: &Meta, mut params: PlanWriteParams) -> Result<String, Refusal> {
+    async fn run_plan(
+        &self,
+        meta: &RequestMetaObject,
+        mut params: PlanWriteParams,
+    ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         if helper.binding.work != StepWork::Plan {
             return Err(Refusal::NotThePlanner);
@@ -1622,7 +1645,7 @@ fn read_window(artifact: &Artifact, from: u32, asked_to: Option<u32>) -> String 
 
 #[tool_handler]
 impl ServerHandler for TaskWorkMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1652,8 +1675,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::Duration;
 
-    fn meta_for(engine_session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta_for(engine_session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::SESSION_ID_META_KEY.to_string(),
             Value::String(engine_session.to_string()),
@@ -1790,7 +1813,10 @@ mod tests {
         let prime = pond.prime();
         let goal = || params::<TaskStartParams>(serde_json::json!({"goal": "compare plumbers"}));
 
-        let no_meta = prime.run_start(&Meta::new(), goal()).await.unwrap_err();
+        let no_meta = prime
+            .run_start(&RequestMetaObject::new(), goal())
+            .await
+            .unwrap_err();
         let no_turn = prime
             .run_start(&meta_for("engine-1"), goal())
             .await
@@ -2204,7 +2230,10 @@ mod tests {
         let worker = pond.worker();
         let task = pond.task(ProfileScope::Household, "compare plumbers").await;
 
-        let no_meta = worker.run_list(&Meta::new()).await.unwrap_err();
+        let no_meta = worker
+            .run_list(&RequestMetaObject::new())
+            .await
+            .unwrap_err();
         let not_a_child = worker.run_list(&meta_for("engine-x")).await.unwrap_err();
         let _unbound_child = pond.children.bind(
             "engine-orphan",

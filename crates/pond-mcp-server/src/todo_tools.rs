@@ -13,7 +13,7 @@ use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -144,7 +144,7 @@ fn said(text: String) -> CallToolResult {
 
 /// The household member speaking in this call: the turn's owner, else a one-member household's
 /// only member. A guest keeps no list.
-async fn speaker(meta: &Meta) -> Option<String> {
+async fn speaker(meta: &RequestMetaObject) -> Option<String> {
     let session = crate::session_from_meta(meta)?;
     let owner = crate::installed_orchestrator_deps()
         .and_then(|deps| deps.authorities().authority_for_engine_session(&session))
@@ -318,7 +318,7 @@ fn place_hook(said: &str, transition: Transition, places: &[Place]) -> Result<Va
     })
 }
 
-async fn add(meta: &Meta, p: AddTodoParams) -> String {
+async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> String {
     let what = "adding that to their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return format_dead_end(what, "To-dos are not set up on this Pond yet.");
@@ -453,7 +453,7 @@ fn line(todo: &Todo) -> String {
     out
 }
 
-async fn list(meta: &Meta, p: ListTodosParams) -> String {
+async fn list(meta: &RequestMetaObject, p: ListTodosParams) -> String {
     let what = "reading their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return format_dead_end(what, "To-dos are not set up on this Pond yet.");
@@ -478,7 +478,7 @@ async fn list(meta: &Meta, p: ListTodosParams) -> String {
     }
 }
 
-async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
+async fn complete(meta: &RequestMetaObject, p: CompleteTodoParams) -> String {
     let what = "ticking that off";
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return format_dead_end(what, "To-dos are not set up on this Pond yet.");

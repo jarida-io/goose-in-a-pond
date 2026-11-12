@@ -16,7 +16,7 @@ use pond_core::shared::services::egress::EgressPurpose;
 use pond_core::shared::services::passages;
 use pond_core::shared::services::web_form_confirm::{self, FormConfirmations, FormRequest};
 use pond_core::user_data::domain::profile::ProfileScope;
-use rmcp::model::Meta;
+use rmcp::model::RequestMetaObject;
 
 use crate::format::format_dead_end;
 use crate::web_page::{forms_on, keep_answer, ACCEPT, PAGE_TIMEOUT};
@@ -57,7 +57,7 @@ fn tell_once(id: &str) -> bool {
 }
 
 /// A POST form's address, asked for in a turn: how it went, or a new ask on the speaker's phone.
-pub async fn ask_to_send(meta: &Meta, request: PostRequest) -> FormAnswer {
+pub async fn ask_to_send(meta: &RequestMetaObject, request: PostRequest) -> FormAnswer {
     let Some(forms) = web_form_confirm::installed() else {
         return FormAnswer::Said(format_dead_end(
             WHAT,
@@ -231,7 +231,7 @@ fn fields_words(values: &[(String, String)]) -> String {
 
 /// The household member speaking in this call, or why there is none. An unidentified speaker in
 /// a one-member household can only be that member; a guest is nobody's.
-async fn speaking_member(meta: &Meta) -> Result<String, &'static str> {
+async fn speaking_member(meta: &RequestMetaObject) -> Result<String, &'static str> {
     const NOT_ONE_MEMBER: &str = "the speaker is not identified as one household member";
     let authority = crate::speaker_authority().ok_or("this pond cannot tell who is speaking")?;
     let session = crate::session_from_meta(meta).ok_or("this call carries no session")?;

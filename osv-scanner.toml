@@ -145,6 +145,11 @@ id = "GHSA-g3hv-75wg-m249"
 ignoreUntil = 2027-01-31
 reason = "minimatch: a crafted pattern makes firstPhasePreProcess() (optimizationLevel >= 2) multiply its glob parts, which the second phase then compares pairwise. Fixed only in 11.0.1, a new major, with no fix on any earlier line. Every copy (3.1.5, 5.1.9, 9.0.9, 10.2.6) is in pond-desktop's dev tree under eslint and electron-builder; none ships in the app or the server. Their latest releases still require older majors: eslint 10.14.0 (^10.2.6), app-builder-lib 26.18.0 (^10.2.5), @typescript-eslint/typescript-estree 8.72.1 (^10.2.2), dir-compare 5.0.0 (^3.0.5). Not reachable: the patterns are the repo's own lint and packaging globs. npm audit rates it moderate, below that job's high gate. Remove when eslint and electron-builder take minimatch 11."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0459"
+ignoreUntil = 2027-01-31
+reason = "libsqlite3-sys 0.30.1 bundles an SQLite that can return uninitialised page-cache memory when a database is opened beside a crafted -wal file whose page size differs. Fixed in 0.39.0 (SQLite 3.54.0). Not fixable from this lockfile: sqlx-sqlite, through sqlx 0.8.6 (GIAP and goose) and 0.9.0 (its latest release), requires libsqlite3-sys >=0.30.1, <0.38, and the crate's links = sqlite3 allows one copy in the graph. Not reachable: the attacker must write both files where the victim opens them. pond-infra (db.rs, sqlite_vector_index.rs) and goose's session_manager.rs open only databases the server creates in its own data directory, and nothing opens a user-supplied database; whoever can write there already holds the data. Remove when sqlx takes libsqlite3-sys 0.39."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]
