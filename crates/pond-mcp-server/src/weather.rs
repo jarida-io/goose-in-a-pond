@@ -39,7 +39,7 @@ pub struct ForecastParams {
     pub days: Option<u8>,
     /// Days from today.
     pub day: Option<u8>,
-    /// YYYY-MM-DD.
+    /// The day as they said it: "Saturday", "tomorrow", or a date.
     pub date: Option<String>,
     /// Catch-all for unexpected fields the model might send.
     #[serde(flatten)]
@@ -151,8 +151,9 @@ location for home rather than asking which city. Never guess weather.")]
     }
 
     #[tool(description = "\
-Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date. Else days 1-7 from \
-today, each labelled with its weekday (a week or a weekday name: 7). Highs/lows, rain chance, \
+Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date \
+(a weekday name or a date). Else days 1-7 from today, each labelled with its weekday (a week: \
+7). Highs/lows, rain chance, \
 UV, sun times. One call per place; for a trip, here and the destination. Omit location \
 for home. Never guess data.")]
     async fn get_weather_forecast(
@@ -174,23 +175,24 @@ impl WeatherMcpServer {
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty());
+        let today = self.household_today(now).await;
         let named = match named {
             None => None,
-            Some(d) => match NaiveDate::parse_from_str(d, "%Y-%m-%d") {
-                Ok(day) => Some(day),
-                Err(_) => {
+            Some(d) => match pond_core::shared::domain::when_said::day_from_words(d, today) {
+                Some(day) => Some(day),
+                None => {
                     tracing::warn!(
                         kind = "forecast_date_invalid",
                         date = d,
-                        "forecast date is not YYYY-MM-DD"
+                        "forecast date names no day"
                     );
                     return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "The date {d} is not YYYY-MM-DD. Pass the day asked for, e.g. 2026-11-05."
+                        "\"{d}\" names no day. Pass the day asked for: \"Saturday\", \
+                         \"tomorrow\", or a date like 2026-11-05."
                     ))]);
                 }
             },
         };
-        let today = self.household_today(now).await;
         // `day` wins: it is a count the tool turns into a date, so it cannot carry the model's
         // arithmetic slip that a disagreeing `date` would.
         let asked = match params.day {

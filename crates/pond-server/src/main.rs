@@ -4083,6 +4083,7 @@ async fn run_server(
         last_user_activity: last_user_activity.clone(),
     };
     my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_memory_resort_job(mind.clone());
     my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
@@ -7240,6 +7241,9 @@ fn install_long_task_deps(
     pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
         pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
     ));
+    pond_mcp_server::memory::init_memory_profiles(Arc::new(
+        pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
+    ));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),
@@ -9305,15 +9309,13 @@ async fn run_onboard(reset: bool) -> Result<()> {
                 println!("Step: Wake Word");
                 println!("Presets: 1) goose  2) hey goose  3) ok computer  4) custom");
 
-                let wake_word = loop {
-                    let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
-                    break match choice.trim() {
-                        "1" => "goose".to_string(),
-                        "2" => "hey goose".to_string(),
-                        "3" => "ok computer".to_string(),
-                        "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
-                        other => other.to_string(),
-                    };
+                let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
+                let wake_word = match choice.trim() {
+                    "1" => "goose".to_string(),
+                    "2" => "hey goose".to_string(),
+                    "3" => "ok computer".to_string(),
+                    "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
+                    other => other.to_string(),
                 };
 
                 user_data.insert("voice_wake_word".to_string(), wake_word);
@@ -11071,6 +11073,8 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
                 lifecycle: None,
                 superseded_by: None,
                 corrects: None,
+                about: None,
+                valid_until: None,
             };
             repo.add(fragment).await?;
             println!("✓ Memory saved (id: {id})");

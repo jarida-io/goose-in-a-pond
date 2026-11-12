@@ -67,6 +67,10 @@ fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
 
 /// The ranked fragments that fit `budget`, estimated at four characters a token; the first
 /// always fits.
+/// Standing facts a conversation starts with: enough for a few instructions, a name, a diet
+/// and the allergies, few enough to stay a handful of lines.
+const STANDING_FACTS_SHOWN: usize = 8;
+
 fn fragments_within<'a>(
     ranked: impl IntoIterator<Item = &'a MemoryFragment>,
     budget: usize,
@@ -3169,7 +3173,18 @@ impl GooseAdapter {
         // A preamble budget (clamped window): injected memories are re-prefilled every turn.
         let compaction_profile = &turn_profile;
 
-        if !memory_candidates.is_empty() {
+        // What every conversation of this member's starts with, whatever the message is about:
+        // their standing instructions, name, diet, allergies and how they like to be answered.
+        let standing: Vec<MemoryFragment> = if turn_scope.excludes_everything() {
+            Vec::new()
+        } else {
+            self.memory_repo
+                .always_shown(&turn_scope, STANDING_FACTS_SHOWN)
+                .await
+                .unwrap_or_default()
+        };
+
+        if !memory_candidates.is_empty() || !standing.is_empty() {
             // Blended ranking, so a topical memory can displace the high-importance identity block,
             // and the memory closest to the message keeps a seat however old it is.
             memory_candidates = pond_core::user_data::services::memory_relevance::select_for_turn(
@@ -3184,26 +3199,33 @@ impl GooseAdapter {
             let (budgeted, tokens_used) =
                 fragments_within(memory_candidates.iter().map(|(m, _)| m), token_budget);
 
-            if !budgeted.is_empty() {
-                use pond_core::models::services::context::memory_block;
-                let rendered: Vec<String> = budgeted
+            let mut offered: Vec<&MemoryFragment> = standing.iter().collect();
+            offered.extend(
+                budgeted
                     .iter()
-                    .map(|m| {
-                        let seg = m
-                            .segment
-                            .as_ref()
-                            .map(|s| format!("{:?}", s).to_lowercase());
-                        memory_block::line(seg.as_deref(), &m.content)
-                    })
-                    .collect();
+                    .copied()
+                    .filter(|m| !standing.iter().any(|s| s.id == m.id)),
+            );
+            if !offered.is_empty() {
+                use pond_core::models::services::context::memory_block;
+                use pond_core::user_data::domain::member_profile::{profile_order, render_profile};
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
-                let fresh = memory_block::not_yet_shown(&rendered, &earlier);
+                let mut fresh: Vec<MemoryFragment> = offered
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        let l = memory_block::line(None, &m.content);
+                        !earlier.iter().any(|text| memory_block::shown_in(&l, text))
+                    })
+                    .cloned()
+                    .collect();
 
                 tracing::debug!(
                     fragments_injected = fresh.len(),
-                    fragments_already_shown = rendered.len() - fresh.len(),
+                    fragments_already_shown = offered.len() - fresh.len(),
+                    fragments_standing = standing.len(),
                     fragments_available = memory_candidates.len(),
                     closest_floor = ?closest_floor,
                     lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
@@ -3217,11 +3239,8 @@ impl GooseAdapter {
                     effective_ctx,
                 );
 
-                memory_block_for_user_msg = fresh
-                    .iter()
-                    .map(|line| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                profile_order(&mut fresh);
+                memory_block_for_user_msg = render_profile(&fresh);
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
@@ -3488,15 +3507,15 @@ impl GooseAdapter {
                reports them as recognized. Use `configure_vision_bus` to adjust FPS (1-30) or \
                sensitivity, and `create_vision_automation` / `list_vision_automations` / \
                `delete_vision_automation` for motion, person, or `face:<profile_id>` triggers.\n\
-             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_todo` when the \
+             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_reminder` when the \
                person asks to be reminded of something or to put something on their to-dos, at a \
                time, on a repeat or at a place ('remind me to call Emmanuel when I get home', \
                'add renew the logbook to my to-dos'); `list_todos` and `complete_todo` read and \
                tick off that list. Use `set_timer` only for a countdown ('set a timer for 10 \
-               minutes'), `create_schedule` for recurring 6-field cron jobs you run yourself \
-               (`sec min hr dom mon dow`), and `list_schedules` / `update_schedule` / \
-               `schedule_action` (`delete` | `pause` | `resume` | `run_now`) to inspect or \
-               control them. If a group is listed under ADDITIONAL CAPABILITIES, \
+               minutes'), `create_schedule` for something you do yourself again and again \
+               (`when` in plain words: 'every weekday at 7am'; pass a schedule's name as `id` \
+               to change it), and `list_schedules` / `schedule_action` (`delete` | `pause` | \
+               `resume` | `run_now`) to inspect or control them by name. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
                     .to_string(),
             );

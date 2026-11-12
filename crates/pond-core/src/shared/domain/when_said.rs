@@ -50,7 +50,7 @@ enum Day {
     Date(u32, u32),
 }
 
-fn weekday(word: &str) -> Option<Weekday> {
+pub(crate) fn weekday(word: &str) -> Option<Weekday> {
     Some(match word {
         "monday" | "mon" | "jumatatu" => Weekday::Mon,
         "tuesday" | "tue" | "tues" | "jumanne" => Weekday::Tue,
@@ -84,7 +84,7 @@ fn month(word: &str) -> Option<u32> {
         .map(|i| i as u32 + 1)
 }
 
-fn number(word: &str) -> Option<u64> {
+pub(crate) fn number(word: &str) -> Option<u64> {
     if let Ok(n) = word.parse::<u64>() {
         return Some(n);
     }
@@ -104,7 +104,7 @@ fn number(word: &str) -> Option<u64> {
 }
 
 /// "19th", "1st", "22nd": a day of the month.
-fn ordinal(word: &str) -> Option<u32> {
+pub(crate) fn ordinal(word: &str) -> Option<u32> {
     let digits = ["st", "nd", "rd", "th"]
         .iter()
         .find_map(|s| word.strip_suffix(s))?;
@@ -113,7 +113,7 @@ fn ordinal(word: &str) -> Option<u32> {
 }
 
 /// "6pm", "6:30pm", "18:00", "6.30am".
-fn clock_word(word: &str) -> Option<NaiveTime> {
+pub(crate) fn clock_word(word: &str) -> Option<NaiveTime> {
     let (body, half) = if let Some(b) = word.strip_suffix("pm") {
         (b, Some(true))
     } else if let Some(b) = word.strip_suffix("am") {
@@ -144,7 +144,7 @@ fn clock_word(word: &str) -> Option<NaiveTime> {
 }
 
 /// "at 3" with no am or pm: an afternoon hour for 1 to 7, as appointments are spoken.
-fn bare_hour(n: u64) -> Option<NaiveTime> {
+pub(crate) fn bare_hour(n: u64) -> Option<NaiveTime> {
     let hour = match n {
         1..=7 => n + 12,
         8..=23 => n,
@@ -157,7 +157,7 @@ fn hour(h: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, 0, 0).expect("an hour of the day")
 }
 
-fn tokens(words: &str) -> Vec<String> {
+pub(crate) fn tokens(words: &str) -> Vec<String> {
     let lower = words.to_lowercase().replace(['\'', '\u{2019}'], "");
     let cleaned: String = lower
         .chars()
@@ -216,9 +216,17 @@ fn tokens(words: &str) -> Vec<String> {
     joined
 }
 
-/// When `words` mean, said at `said_at` by someone in `tz`; `None` when they name no one time.
-pub fn due_from_words(words: &str, said_at: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
-    let words = tokens(words);
+/// What the words name: a day, a clock time, a part of the day, or a wait from now.
+#[derive(Debug, Default, Clone, Copy)]
+struct Said {
+    day: Option<Day>,
+    time: Option<NaiveTime>,
+    part: Option<u32>,
+    within: Option<Duration>,
+}
+
+/// `None` for words that make the timing a condition or a range.
+fn read(words: &[String]) -> Option<Said> {
     if words.iter().any(|w| VAGUE.contains(&w.as_str())) {
         return None;
     }
@@ -251,8 +259,18 @@ pub fn due_from_words(words: &str, said_at: DateTime<Utc>, tz: Tz) -> Option<Dat
                 if let (Some(n), unit) = (number(word(i + 1)), word(i + 2)) {
                     let unit = unit.trim_end_matches('s');
                     match unit {
-                        "minute" | "min" => return Some(said_at + Duration::minutes(n as i64)),
-                        "hour" | "hr" => return Some(said_at + Duration::hours(n as i64)),
+                        "minute" | "min" => {
+                            return Some(Said {
+                                within: Some(Duration::minutes(n as i64)),
+                                ..Said::default()
+                            })
+                        }
+                        "hour" | "hr" => {
+                            return Some(Said {
+                                within: Some(Duration::hours(n as i64)),
+                                ..Said::default()
+                            })
+                        }
                         "day" => day = Some(Day::Ahead(n)),
                         "week" => day = Some(Day::Ahead(n * 7)),
                         _ => {}
@@ -305,6 +323,25 @@ pub fn due_from_words(words: &str, said_at: DateTime<Utc>, tz: Tz) -> Option<Dat
         }
         i += 1;
     }
+    Some(Said {
+        day,
+        time,
+        part,
+        within: None,
+    })
+}
+
+/// When `words` mean, said at `said_at` by someone in `tz`; `None` when they name no one time.
+pub fn due_from_words(words: &str, said_at: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
+    let Said {
+        day,
+        time,
+        part,
+        within,
+    } = read(&tokens(words))?;
+    if let Some(wait) = within {
+        return Some(said_at + wait);
+    }
     if day.is_none() && time.is_none() && part.is_none() {
         return None;
     }
@@ -345,6 +382,106 @@ fn soon_on_the_minute(at: DateTime<Utc>) -> DateTime<Utc> {
     at.with_second(0)
         .and_then(|t| t.with_nanosecond(0))
         .unwrap_or(at)
+}
+
+/// The calendar day `words` name, seen from `today`: "today", "tomorrow", "Saturday", "19
+/// November", or a date written `2026-11-14`. `None` when they name no day.
+pub fn day_from_words(words: &str, today: NaiveDate) -> Option<NaiveDate> {
+    if let Ok(day) = NaiveDate::parse_from_str(words.trim(), "%Y-%m-%d") {
+        return Some(day);
+    }
+    resolve_day(read(&tokens(words))?.day?, today)
+}
+
+/// The moment `words` point back to, said at `now` by someone in `tz`: "yesterday", "6 hours
+/// ago", "the last 3 days", "Monday", "this morning", "yesterday at 6pm". `None` when they
+/// name no earlier moment.
+pub fn earlier_from_words(words: &str, now: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
+    let words = tokens(words);
+    let word = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
+    let span = |n: u64, unit: &str| -> Option<Duration> {
+        let n = i64::try_from(n).ok()?;
+        match unit.trim_end_matches('s') {
+            "minute" | "min" => Some(Duration::minutes(n)),
+            "hour" | "hr" => Some(Duration::hours(n)),
+            "day" => Some(Duration::days(n)),
+            "week" => Some(Duration::weeks(n)),
+            "month" => Some(Duration::days(30 * n)),
+            _ => None,
+        }
+    };
+    let today = now.with_timezone(&tz).date_naive();
+    let mut date: Option<NaiveDate> = None;
+    let mut time: Option<NaiveTime> = None;
+
+    for i in 0..words.len() {
+        let w = word(i);
+        let previous = if i > 0 { word(i - 1) } else { "" };
+        match w {
+            "now" => return Some(now),
+            "ago" => {
+                // "6 hours ago", "an hour ago".
+                let n = if i >= 2 { number(word(i - 2)) } else { None };
+                return span(n?, previous).map(|back| now - back);
+            }
+            "last" | "past" => {
+                let next = word(i + 1);
+                if let Some(n) = number(next).filter(|_| span(1, word(i + 2)).is_some()) {
+                    return span(n, word(i + 2)).map(|back| now - back);
+                }
+                if next == "night" {
+                    date = today.checked_sub_days(Days::new(1));
+                    time = Some(hour(EVENING));
+                } else if let Some(back) = span(1, next) {
+                    return Some(now - back);
+                }
+            }
+            "today" | "morning" | "afternoon" | "evening" | "tonight" => {
+                date = date.or(Some(today));
+                time = time.or(match w {
+                    "afternoon" => Some(hour(12)),
+                    "evening" | "tonight" => Some(hour(EVENING)),
+                    _ => None,
+                });
+            }
+            "yesterday" => date = today.checked_sub_days(Days::new(1)),
+            "week" if previous == "this" => {
+                date = today
+                    .checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_monday())));
+            }
+            "month" if previous == "this" => date = today.with_day(1),
+            "at" => {
+                if let Some(t) =
+                    clock_word(word(i + 1)).or_else(|| number(word(i + 1)).and_then(bare_hour))
+                {
+                    time = Some(t);
+                }
+            }
+            _ => {
+                if let Some(wd) = weekday(w) {
+                    let back = (today.weekday().num_days_from_monday() + 7
+                        - wd.num_days_from_monday())
+                        % 7;
+                    date = today.checked_sub_days(Days::new(u64::from(back)));
+                } else if let Some(t) = clock_word(w) {
+                    time = Some(t);
+                }
+            }
+        }
+    }
+    match (date, time) {
+        (None, None) => None,
+        (Some(date), time) => local_instant(tz, date, time.unwrap_or(hour(0))),
+        // A bare clock time is today's, or yesterday's when today's has not come yet.
+        (None, Some(t)) => {
+            let at = local_instant(tz, today, t)?;
+            if at <= now {
+                Some(at)
+            } else {
+                local_instant(tz, today.checked_sub_days(Days::new(1))?, t)
+            }
+        }
+    }
 }
 
 fn resolve_day(day: Day, today: NaiveDate) -> Option<NaiveDate> {
@@ -535,5 +672,44 @@ mod tests {
                 .map(crate::shared::domain::todo::rfc3339),
             at("2026-11-09 09:00")
         );
+    }
+    #[test]
+    fn a_day_is_read_on_its_own() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let day = |words: &str| day_from_words(words, today).map(|d| d.to_string());
+        assert_eq!(day("today").as_deref(), Some("2026-11-09"));
+        assert_eq!(day("tomorrow").as_deref(), Some("2026-11-10"));
+        assert_eq!(day("kesho kutwa").as_deref(), Some("2026-11-11"));
+        assert_eq!(day("Saturday").as_deref(), Some("2026-11-14"));
+        assert_eq!(
+            day("on the 19th of November").as_deref(),
+            Some("2026-11-19")
+        );
+        assert_eq!(day("2026-11-21").as_deref(), Some("2026-11-21"));
+        assert_eq!(day("at 6pm"), None);
+        assert_eq!(day("whenever"), None);
+    }
+
+    #[test]
+    fn words_that_point_back_name_an_earlier_moment() {
+        let back = |words: &str| {
+            earlier_from_words(words, said(), NAIROBI).map(crate::shared::domain::todo::rfc3339)
+        };
+        let ago = |d: Duration| Some(crate::shared::domain::todo::rfc3339(said() - d));
+        assert_eq!(back("6 hours ago"), ago(Duration::hours(6)));
+        assert_eq!(back("an hour ago"), ago(Duration::hours(1)));
+        assert_eq!(back("the last 3 days"), ago(Duration::days(3)));
+        assert_eq!(back("last week"), ago(Duration::weeks(1)));
+        assert_eq!(back("past 30 minutes"), ago(Duration::minutes(30)));
+        assert_eq!(back("today"), at("2026-11-09 00:00"));
+        assert_eq!(back("this morning"), at("2026-11-09 00:00"));
+        assert_eq!(back("yesterday"), at("2026-11-08 00:00"));
+        assert_eq!(back("yesterday at 6pm"), at("2026-11-08 18:00"));
+        assert_eq!(back("last night"), at("2026-11-08 18:00"));
+        assert_eq!(back("Friday"), at("2026-11-06 00:00"));
+        assert_eq!(back("this week"), at("2026-11-09 00:00"));
+        assert_eq!(back("8am"), at("2026-11-09 08:00"));
+        assert_eq!(back("at 21:00"), at("2026-11-08 21:00"));
+        assert_eq!(back("whenever"), None);
     }
 }

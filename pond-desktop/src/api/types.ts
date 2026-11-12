@@ -506,7 +506,13 @@ export type MemorySegment =
   // Written only by batch extraction, the one path that sees more than a single turn.
   | "routine"
   | "knowledge"
-  | "context";
+  | "context"
+  // The member's profile headings: what they eat and need, their places, yearly dates, and
+  // standing instructions to Goose.
+  | "food_health"
+  | "place"
+  | "date"
+  | "instruction";
 
 /** One inference-spending background job in `GET /api/v1/lane`, as the lane sees it now. */
 export interface LaneJobStatus {

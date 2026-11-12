@@ -1,6 +1,7 @@
 //! In-memory mock implementations of `EmbeddingProvider` and `MemoryRepository`.
 
 use crate::models::ports::embedding::EmbeddingProvider;
+use crate::user_data::domain::member_profile::About;
 use crate::user_data::domain::memory::{
     cosine_similarity, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle,
     MemorySegment, MemoryTier,
@@ -237,6 +238,54 @@ impl MemoryRepository for MockMemoryRepository {
         if let Some(f) = fragments.iter_mut().find(|f| f.id == id) {
             f.superseded_by = Some(superseded_by.to_string());
             f.lifecycle = Some(MemoryLifecycle::Merged);
+        }
+        Ok(())
+    }
+
+    async fn live_about(&self, scope: &ProfileScope, about: About) -> Result<Vec<MemoryFragment>> {
+        let now = chrono::Utc::now();
+        Ok(self
+            .fragments
+            .read()
+            .await
+            .iter()
+            .filter(|f| scope_matches(f, scope) && f.about == Some(about) && f.is_shown(now))
+            .cloned()
+            .collect())
+    }
+
+    async fn archived_of(&self, profile_id: &str, limit: usize) -> Result<Vec<MemoryFragment>> {
+        Ok(self
+            .fragments
+            .read()
+            .await
+            .iter()
+            .filter(|f| {
+                f.profile_id.as_deref() == Some(profile_id)
+                    && f.lifecycle == Some(MemoryLifecycle::Archived)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn unfiled(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
+        let now = chrono::Utc::now();
+        Ok(self
+            .fragments
+            .read()
+            .await
+            .iter()
+            .filter(|f| f.about.is_none() && f.is_shown(now))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn file_row(&self, id: &str, about: About) -> Result<()> {
+        let mut fragments = self.fragments.write().await;
+        if let Some(f) = fragments.iter_mut().find(|f| f.id == id) {
+            crate::user_data::domain::member_profile::file_under(f, about);
         }
         Ok(())
     }

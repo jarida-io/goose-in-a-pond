@@ -1,4 +1,4 @@
-//! `add_todo`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
+//! `add_reminder`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
 //! reminders in My Goose, which the Pond pushes to their phone at a time, a repeat or a place.
 
 use std::sync::{Arc, OnceLock};
@@ -8,6 +8,7 @@ use pond_core::shared::domain::todo::{
     local_instant, new_todo, parse_clock, rfc3339, zone, Answer, HookCatalog, HookError,
     HookSource, Place, StateFilter, Todo, TodoSource, TodoState, Transition, Tz, PRESENCE_HOME,
 };
+use pond_core::shared::domain::when_repeats::{repeat_from_words, RepeatUnclear};
 use pond_core::shared::domain::when_said::due_from_words;
 use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::profile::ProfileScope;
@@ -36,18 +37,6 @@ pub fn init_todo_deps(repo: Arc<dyn TodoRepository>) {
     let _ = TODO_DEPS.set(repo);
 }
 
-/// A repeat, as `add_todo`'s `repeat` takes it.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct RepeatParam {
-    /// "day", "weekday" (Monday to Friday), "week" or "month".
-    pub every: String,
-    /// The time of day, 24-hour "HH:MM", e.g. "18:00".
-    pub at: String,
-    /// For "week": the weekdays as numbers, 1 Monday to 7 Sunday, e.g. [2, 4]. For "month": the
-    /// days of the month, 1 to 31. Null for "day" and "weekday".
-    pub days: Option<Vec<u32>>,
-}
-
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AddTodoParams {
     /// What to do or remember, in the person's words, without the time or place: "call Emmanuel".
@@ -56,13 +45,10 @@ pub struct AddTodoParams {
     /// "reminder" when they said "remind me"; "todo" when they asked to add a task to their
     /// to-dos. Null: "todo".
     pub kind: Option<String>,
-    /// One moment, as an RFC 3339 time with the person's UTC offset, worked out from the turn's
-    /// stated current date and time: "2026-11-10T18:00:00+03:00". A day said without a time is
-    /// that day at 09:00. Null when they gave no time, or when it repeats.
+    /// When, as they said it: "tomorrow at 6pm", "Friday 9am", "in 2 hours", "19 November at
+    /// 10:00"; or a repeat: "every weekday at 18:00". Null when they gave no time.
     pub when: Option<String>,
-    /// Only when they said "every ...": {"every": "weekday", "at": "18:00", "days": null}.
-    /// Null otherwise.
-    #[schemars(with = "Option<RepeatParam>")]
+    #[schemars(skip)]
     pub repeat: Option<Value>,
     /// A place they named for it, as they named it: "home", "work", "the gym". Null when they
     /// named no place.
@@ -100,17 +86,17 @@ pub struct CompleteTodoParams {
 #[tool_router(router = todo_tool_router, vis = "pub")]
 impl ScheduleMcpServer {
     #[tool(description = "\
-Put a to-do or reminder on the person's own list in My Goose; the Pond pushes it to their phone \
+Remind the person of something, or put it on their to-do list in My Goose: their phone gets it \
 at a time, on a repeat, or at a place. For \"remind me to call Emmanuel when I get home\", \
-\"add renew the logbook to my to-dos\", \"remind me on Friday at 9 to call the garage\", \
-\"every weekday at 18:00 remind me to stretch\". Not for a countdown (\"set a timer for 10 \
-minutes\"): that is set_timer.")]
-    async fn add_todo(
+\"remind me on Friday at 9 to call the garage\", \"every weekday at 18:00 remind me to \
+stretch\", \"add renew the logbook to my to-dos\". Any reminder goes here, not to set_timer \
+(a countdown) or create_schedule (work Goose does by itself).")]
+    async fn add_reminder(
         &self,
         ctx: RequestContext<RoleServer>,
         params: Parameters<AddTodoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        crate::set_current_tool("add_todo");
+        crate::set_current_tool("add_reminder");
         Ok(said(add(&ctx.meta, params.0).await))
     }
 
@@ -160,7 +146,7 @@ async fn speaker(meta: &Meta) -> Option<String> {
     }
 }
 
-async fn household_zone() -> Tz {
+pub(crate) async fn household_zone() -> Tz {
     match crate::schedule::scheduler_and_settings() {
         Some((_, settings)) => settings
             .get()
@@ -318,7 +304,7 @@ fn place_hook(said: &str, transition: Transition, places: &[Place]) -> Result<Va
     })
 }
 
-async fn add(meta: &Meta, p: AddTodoParams) -> String {
+pub(crate) async fn add(meta: &Meta, p: AddTodoParams) -> String {
     let what = "adding that to their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return format_dead_end(what, "To-dos are not set up on this Pond yet.");
@@ -339,30 +325,50 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
     let repeat = p.repeat.as_ref().filter(|r| !r.is_null());
     let when = p.when.as_deref().filter(|w| !w.trim().is_empty());
 
-    // With a repeat, `when` is only the repeat's time of day.
+    // With a repeat sent on its own, `when` is only the repeat's time of day.
     if let Some(raw) = when.filter(|_| repeat.is_none()) {
-        let Some(at) = moment(raw, now, tz) else {
-            return format_dead_end(
-                what,
-                &format!(
-                    "`when` \"{raw}\" is not a time. Send RFC 3339 with the offset, worked out \
-                     from the turn's current date and time, e.g. \"2026-11-10T18:00:00+03:00\"."
-                ),
-            );
-        };
-        if at < now - Duration::minutes(PAST_SLACK_MINUTES) {
-            let local = now.with_timezone(&tz).format("%A %-d %B %Y %H:%M");
-            return format_dead_end(
-                what,
-                &format!(
-                    "`when` {} has already passed: it is now {local} there. Work the time out \
-                     again from the current date.",
-                    rfc3339(at)
-                ),
-            );
+        let today = now.with_timezone(&tz).date_naive();
+        match repeat_from_words(raw, today) {
+            Ok(found) => match found.as_todo_repeat() {
+                Some((every, at, days)) => hooks.push(json!({"kind": "repeat", "spec": {
+                    "every": every.as_str(),
+                    "at": at.format("%H:%M").to_string(),
+                    "days": if days.is_empty() { Value::Null } else { json!(days) },
+                }})),
+                None => {
+                    return format_dead_end(
+                        what,
+                        "A to-do repeats by the day, the week or the month, not within a day. \
+                         For something every few minutes or hours use create_schedule.",
+                    )
+                }
+            },
+            Err(RepeatUnclear::NoCadence) => {
+                let Some(at) = moment(raw, now, tz) else {
+                    return format_dead_end(
+                        what,
+                        &format!(
+                            "`when` \"{raw}\" is not a time the Pond can place. Say it plainly: \
+                             \"tomorrow at 6pm\", \"Friday 9am\", \"in 2 hours\", \"19 November \
+                             at 10:00\". Ask them when if they did not say."
+                        ),
+                    );
+                };
+                if at < now - Duration::minutes(PAST_SLACK_MINUTES) {
+                    let local = now.with_timezone(&tz).format("%A %-d %B %Y %H:%M");
+                    return format_dead_end(
+                        what,
+                        &format!(
+                            "`when` \"{raw}\" has already passed: it is now {local} there. Ask \
+                             them which day they mean."
+                        ),
+                    );
+                }
+                due_at = Some(at);
+                hooks.push(json!({"kind": "time", "spec": {"at": rfc3339(at)}}));
+            }
+            Err(unclear) => return format_dead_end(what, unclear.advice()),
         }
-        due_at = Some(at);
-        hooks.push(json!({"kind": "time", "spec": {"at": rfc3339(at)}}));
     }
     if let Some(repeat) = repeat {
         match repeat_spec(repeat, when) {
@@ -396,7 +402,7 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
     if kind.eq_ignore_ascii_case("reminder") && hooks.is_empty() {
         return format_dead_end(
             what,
-            "A reminder needs a moment to remind them: `when`, `repeat` or `place`. Ask them when.",
+            "A reminder needs a moment to remind them: `when` or `place`. Ask them when.",
         );
     }
     let body = json!({
@@ -630,7 +636,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name.to_string())
             .collect();
-        for tool in ["add_todo", "list_todos", "complete_todo", "set_timer"] {
+        for tool in ["add_reminder", "list_todos", "complete_todo", "set_timer"] {
             assert!(
                 names.iter().any(|n| n == tool),
                 "{tool} missing from {names:?}"

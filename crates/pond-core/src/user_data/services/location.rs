@@ -208,6 +208,92 @@ pub fn normalize_zone(zone: &str) -> Option<String> {
         .map(|z| z.name().to_string())
 }
 
+/// Places people name that no zone is named after, and the abbreviations they say.
+const PLACE_ZONES: &[(&str, &str)] = &[
+    ("uk", "Europe/London"),
+    ("england", "Europe/London"),
+    ("britain", "Europe/London"),
+    ("scotland", "Europe/London"),
+    ("ireland", "Europe/Dublin"),
+    ("france", "Europe/Paris"),
+    ("germany", "Europe/Berlin"),
+    ("spain", "Europe/Madrid"),
+    ("italy", "Europe/Rome"),
+    ("netherlands", "Europe/Amsterdam"),
+    ("kenya", "Africa/Nairobi"),
+    ("uganda", "Africa/Kampala"),
+    ("tanzania", "Africa/Dar_es_Salaam"),
+    ("rwanda", "Africa/Kigali"),
+    ("ethiopia", "Africa/Addis_Ababa"),
+    ("nigeria", "Africa/Lagos"),
+    ("ghana", "Africa/Accra"),
+    ("south africa", "Africa/Johannesburg"),
+    ("egypt", "Africa/Cairo"),
+    ("india", "Asia/Kolkata"),
+    ("mumbai", "Asia/Kolkata"),
+    ("delhi", "Asia/Kolkata"),
+    ("bangalore", "Asia/Kolkata"),
+    ("china", "Asia/Shanghai"),
+    ("beijing", "Asia/Shanghai"),
+    ("japan", "Asia/Tokyo"),
+    ("korea", "Asia/Seoul"),
+    ("uae", "Asia/Dubai"),
+    ("abu dhabi", "Asia/Dubai"),
+    ("israel", "Asia/Jerusalem"),
+    ("turkey", "Europe/Istanbul"),
+    ("san francisco", "America/Los_Angeles"),
+    ("california", "America/Los_Angeles"),
+    ("seattle", "America/Los_Angeles"),
+    ("washington", "America/New_York"),
+    ("boston", "America/New_York"),
+    ("miami", "America/New_York"),
+    ("texas", "America/Chicago"),
+    ("brazil", "America/Sao_Paulo"),
+    ("pacific", "America/Los_Angeles"),
+    ("mountain", "America/Denver"),
+    ("central", "America/Chicago"),
+    ("eastern", "America/New_York"),
+    ("pst", "America/Los_Angeles"),
+    ("pdt", "America/Los_Angeles"),
+    ("mst", "America/Denver"),
+    ("cst", "America/Chicago"),
+    ("est", "America/New_York"),
+    ("edt", "America/New_York"),
+    ("gmt", "UTC"),
+    ("bst", "Europe/London"),
+    ("cet", "Europe/Berlin"),
+    ("eat", "Africa/Nairobi"),
+    ("wat", "Africa/Lagos"),
+    ("cat", "Africa/Maputo"),
+    ("ist", "Asia/Kolkata"),
+    ("jst", "Asia/Tokyo"),
+    ("aest", "Australia/Sydney"),
+];
+
+/// The zone for a place as people name one: a zone name, the city a zone is named after
+/// ("Tokyo", "new york"), or a country or abbreviation in common use.
+pub fn zone_from_place(place: &str) -> Option<chrono_tz::Tz> {
+    let said = place.trim().trim_end_matches(" time").trim();
+    let lower = said.to_lowercase();
+    // Before the zone names: "EST" is also a fixed zone that ignores summer time.
+    if let Some((_, zone)) = PLACE_ZONES.iter().find(|(name, _)| *name == lower) {
+        return zone.parse().ok();
+    }
+    if let Some(zone) = normalize_zone(said) {
+        return zone.parse().ok();
+    }
+    let city = lower.replace(' ', "_");
+    chrono_tz::TZ_VARIANTS
+        .iter()
+        .find(|z| {
+            z.name()
+                .rsplit('/')
+                .next()
+                .is_some_and(|last| last.eq_ignore_ascii_case(&city))
+        })
+        .copied()
+}
+
 // ── Time ────────────────────────────────────────────────────────────────────
 
 /// The current local time in `zone`, or `None` if the zone is not real.
@@ -296,6 +382,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_place_as_people_name_it_has_its_zone() {
+        for (said, zone) in [
+            ("Asia/Tokyo", "Asia/Tokyo"),
+            ("tokyo", "Asia/Tokyo"),
+            ("New York", "America/New_York"),
+            ("Nairobi", "Africa/Nairobi"),
+            ("dar es salaam", "Africa/Dar_es_Salaam"),
+            ("UK", "Europe/London"),
+            ("India", "Asia/Kolkata"),
+            ("EST", "America/New_York"),
+            ("London time", "Europe/London"),
+            ("utc", "UTC"),
+        ] {
+            assert_eq!(
+                zone_from_place(said).map(|z| z.name()),
+                Some(zone),
+                "{said}"
+            );
+        }
+        assert_eq!(zone_from_place("Atlantis"), None);
+        assert_eq!(zone_from_place(""), None);
+    }
+
     use chrono::TimeZone;
 
     fn with(name: &str, zone: &str, lat: f64, lon: f64) -> Settings {

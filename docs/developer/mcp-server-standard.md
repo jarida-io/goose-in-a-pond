@@ -70,10 +70,16 @@ pub struct WeatherParams {
 Resolve in this order: the named parameter, then likely keys in `extra` (`location`, `city`,
 `place`, ...), then, where it makes sense, the user's last message (`crate::last_user_message()`).
 
-`get_wikipedia_article` and `create_schedule` also ask an optional argument specialist first:
+`get_wikipedia_article` also asks an optional argument specialist first:
 `crate::generate_params(tool_name, schema)` calls the `ToolCaller` set from the `tool_model` setting
 (a small GGUF run by `ToolCallerEngine` in `pond-adapters-local-inference`). With no `tool_model`, it
 returns `None` and the chain above applies.
+
+Ask for times the way a person says them, never as a format the model must compute: `when:
+"every weekday at 7am"`, `since: "yesterday"`, `date: "Saturday"`. `pond_core::shared::domain`'s
+`when_said` (a moment, a day, an earlier moment) and `when_repeats` (a repeat, and a stored cron
+back into words) read them in the member's time zone. Words they cannot place are refused with what
+to ask the person; they are never guessed, and never dropped to a default.
 
 ## Results
 
