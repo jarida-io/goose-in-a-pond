@@ -8,6 +8,7 @@ pub mod context_card;
 pub mod long_task;
 pub mod news;
 pub mod orchestration;
+pub mod page_render;
 pub mod pond_admin;
 pub mod role_block;
 pub mod saved_item;

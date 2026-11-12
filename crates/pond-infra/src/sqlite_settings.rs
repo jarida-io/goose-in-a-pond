@@ -113,6 +113,10 @@ impl SettingsRepository for SqliteSettingsRepository {
             settings.voice_room_enabled.to_string()
         );
         upsert!(
+            "browser_rendering_enabled",
+            settings.browser_rendering_enabled.to_string()
+        );
+        upsert!(
             "voice_recording_duration_secs",
             settings.voice_recording_duration_secs.to_string()
         );
@@ -911,6 +915,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "voice_room_enabled" => {
             if let Ok(v) = value.parse() {
                 s.voice_room_enabled = v;
+            }
+        }
+        "browser_rendering_enabled" => {
+            if let Ok(v) = value.parse() {
+                s.browser_rendering_enabled = v;
             }
         }
         "voice_recording_duration_secs" => {

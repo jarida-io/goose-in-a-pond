@@ -77,6 +77,8 @@ export interface Settings {
   voice_wake_word_transcriptions?: string[];
   /** The pond listens through its own microphone and answers on its speaker (room voice). */
   voice_room_enabled?: boolean;
+  /** A page only a browser can show is read with a headless browser, when one is there. */
+  browser_rendering_enabled?: boolean;
   /** Suggestor ids never offered on Home; per kind, as a suggestion has no durable id. */
   suggestions_muted?: string[];
   voice_recording_duration_secs?: number;

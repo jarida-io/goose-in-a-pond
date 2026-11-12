@@ -249,6 +249,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_voice_room_enabled")]
     pub voice_room_enabled: bool,
 
+    /// A page that only a browser can show is read with a headless browser, when the pond
+    /// finds one and has the memory free.
+    #[serde(default = "Settings::default_browser_rendering_enabled")]
+    pub browser_rendering_enabled: bool,
+
     /// Suggestor ids muted on Home; per kind, as a derived suggestion has no durable id.
     #[serde(default)]
     pub suggestions_muted: Vec<String>,
@@ -857,6 +862,7 @@ impl Default for Settings {
             voice_wake_word: Self::default_wake_word(),
             voice_wake_detector: Self::default_wake_detector(),
             voice_room_enabled: Self::default_voice_room_enabled(),
+            browser_rendering_enabled: Self::default_browser_rendering_enabled(),
             voice_kws_energy_threshold: Self::default_kws_energy_threshold(),
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
@@ -1041,6 +1047,10 @@ impl Settings {
     /// On: the pond is a room device first, and it runs only where a mic and speaker pair works.
     fn default_voice_room_enabled() -> bool {
         factory_defaults::boolean("voice_room_enabled", true)
+    }
+    /// On: it does nothing until a page needs it, a browser is there and memory is free.
+    fn default_browser_rendering_enabled() -> bool {
+        factory_defaults::boolean("browser_rendering_enabled", true)
     }
     fn default_kws_energy_threshold() -> f32 {
         factory_defaults::f32("kws_energy_threshold", 0.003)
@@ -2300,6 +2310,8 @@ mod tests {
             // The phone's Voice agent page and the desktop catalogue's Listening group; it also
             // answers `PUT /voice/room`.
             "voice_room_enabled",
+            // The desktop catalogue's Web group; applied at once by `PUT /settings`.
+            "browser_rendering_enabled",
             "weather_enabled",
             "weather_latitude",
             "weather_location_name",

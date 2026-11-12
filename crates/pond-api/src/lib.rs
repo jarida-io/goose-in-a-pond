@@ -3,6 +3,7 @@
 mod about_me;
 mod agent_notes;
 pub mod audio_devices;
+mod browser;
 mod camera;
 pub use pond_infra::hf_cleanup as cleanup;
 pub(crate) mod audio_normalize;

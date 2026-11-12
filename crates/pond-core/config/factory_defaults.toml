@@ -29,6 +29,7 @@ active_llm_model = ""
 # ── Voice pipeline ────────────────────────────────────────────────────────
 wake_word = "hey goose"
 voice_room_enabled = true
+browser_rendering_enabled = true
 kws_energy_threshold = 0.003
 kws_post_trigger_silence_ms = 400
 kws_cooldown_ms = 2000
