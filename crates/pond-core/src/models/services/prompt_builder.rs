@@ -32,6 +32,16 @@ fn hash_string(s: &str) -> u64 {
 pub const TEMPORAL_RULE: &str = "Each turn's CURRENT CONTEXT line gives the date and time: answer \
                                  time/date questions directly from it — no tools needed.";
 
+/// Told to the model on a turn whose speaker the pond could not identify. Their personal tools
+/// are withheld, and a small model that is not told reaches for one anyway and answers nothing.
+pub const UNKNOWN_SPEAKER_RULE: &str = "You do not know who is speaking this turn, so nothing \
+                                        personal is in reach: you cannot remember or recall \
+                                        anything about them, set a reminder or a to-do, read a \
+                                        schedule, or keep a watch for them. If they ask for any \
+                                        of that, say so in one sentence and tell them to use the \
+                                        app on a phone paired with this home, or to say who they \
+                                        are. Answer everything else as usual.";
+
 /// Build the partitioned prompt; date and time go to the suffix only.
 pub fn build_prompt_partition(
     settings: &Settings,
@@ -141,6 +151,19 @@ pub fn resolve_builtin_template(settings: &Settings) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unknown_speaker_is_told_what_is_out_of_reach_and_what_to_do() {
+        for must in [
+            "do not know who is speaking",
+            "remember",
+            "reminder",
+            "paired",
+            "say who they are",
+        ] {
+            assert!(super::UNKNOWN_SPEAKER_RULE.contains(must), "{must}");
+        }
+    }
+
     use super::*;
     use crate::prompts::{PROMPT_BALANCED, PROMPT_CONCISE, PROMPT_TECHNICAL, PROMPT_WARM};
 

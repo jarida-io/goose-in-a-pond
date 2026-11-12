@@ -3575,6 +3575,13 @@ impl GooseAdapter {
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
         }
+        // An unidentified speaker's personal tools are withheld below; told so, the model says
+        // it rather than reaching for a tool that is not there.
+        if turn_scope.excludes_everything() {
+            shim_appendix.push(
+                pond_core::models::services::prompt_builder::UNKNOWN_SPEAKER_RULE.to_string(),
+            );
+        }
         self.shim_controls
             .session(&goose_sid)
             .set_turn_appendix(if shim_appendix.is_empty() {
