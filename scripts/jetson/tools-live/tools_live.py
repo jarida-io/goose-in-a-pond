@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Live check of the plain-words tools against the pond on this board, with the real model.
 
-Makes a test member, pairs a test phone as them, and asks for a schedule, a reminder at a
-moment, a repeating reminder, a pause and a delete by name, and the time in two cities. Each
-check reads what the pond stored, not what the model said it did. Everything it creates is
-removed at the end. Writes a JSON log beside itself.
+Pairs a test phone and asks for a schedule, a reminder at a moment, a repeating reminder, a
+pause and a delete by description, and the time in two cities. Each check reads what the pond
+stored, not what the model said it did.
+
+The phone is paired to nobody, which a one-member household takes to be its member: a phone
+paired here cannot be bound to a test member, and a guest is given no personal tools. So it
+needs a household of exactly one, acts as that member, and removes only the schedules, to-dos
+and conversations it made. Writes a JSON log beside itself.
 
 Run it as the pond's user, e.g. `sudo -u agamemnon python3 tools_live.py`.
 """
@@ -30,7 +34,6 @@ DATA = next(
 PORT = open(os.path.join(DATA, ".runtime_api_port")).read().strip()
 CRED = open(os.path.join(DATA, ".runtime_host_credential")).read().strip()
 BASE = f"http://127.0.0.1:{PORT}/api/v1"
-MEMBER = "Tools Test"
 LOG = []
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools_live_result.json")
 
@@ -111,16 +114,18 @@ def todos(token):
 
 
 def main():
-    setup = pair(None, "tools-live-setup")
+    token = pair(None, "tools-live-phone")
+    _, body = call("GET", "/profiles", token=token)
+    members = body.get("profiles", body) if isinstance(body, dict) else body
+    if len(members) != 1:
+        call("POST", "/handshake/revoke", {}, token=token)
+        print(json.dumps({"ok": False, "why": f"needs a household of one member, found {len(members)}"}))
+        sys.exit(2)
     sessions, ok = [], True
-    member = None
-    before = {s["id"] for s in schedules(setup)}
+    before = {s["id"] for s in schedules(token)}
+    todos_before = {t["id"] for t in todos(token)}
     try:
-        s, p = call("POST", "/profiles", {"display_name": MEMBER}, token=setup)
-        assert s in (200, 201), (s, p)
-        member = p["id"]
-        token = pair(member, "tools-live-phone")
-        _, settings = call("GET", "/settings", token=setup)
+        _, settings = call("GET", "/settings", token=token)
         tz = ZoneInfo(settings.get("timezone") or "UTC")
         today = dt.datetime.now(tz).date()
 
@@ -132,18 +137,23 @@ def main():
             ok = ok and passed
             note(label, passed=passed, seconds=el, status=s, saw=saw, reply=reply)
 
-        def new_schedule():
-            return [s for s in schedules(setup) if s["id"] not in before]
+        def new_schedules():
+            return [s for s in schedules(token) if s["id"] not in before]
+
+        def new_todos():
+            return [t for t in todos(token) if t["id"] not in todos_before]
+
+        def weather():
+            return [s for s in new_schedules() if s["cron"] == "0 0 7 * * 1-5"]
 
         ask("schedule_created",
             "Every weekday at 7am, give me the weather and what is on my day.",
-            lambda: (any(s["cron"] == "0 0 7 * * 1-5" for s in new_schedule()),
-                     [(s["label"], s["cron"]) for s in new_schedule()]))
+            lambda: (len(weather()) == 1, [(s["label"], s["cron"]) for s in new_schedules()]))
 
         def reminder_tomorrow():
             want = today + dt.timedelta(days=1)
             found = []
-            for t in todos(token):
+            for t in new_todos():
                 due = t.get("due_at")
                 if due:
                     local = dt.datetime.fromisoformat(due.replace("Z", "+00:00")).astimezone(tz)
@@ -155,7 +165,7 @@ def main():
         ask("reminder_at_a_moment", "Remind me to call the garage tomorrow at 6pm.", reminder_tomorrow)
 
         def repeating():
-            specs = [h.get("spec") for t in todos(token) for h in t.get("hooks", []) if h.get("kind") == "repeat"]
+            specs = [h.get("spec") for t in new_todos() for h in t.get("hooks", []) if h.get("kind") == "repeat"]
             hit = any(sp.get("every") == "week" and sorted(sp.get("days") or []) == [1, 4]
                       and sp.get("at") == "18:00" for sp in specs)
             return hit, specs
@@ -164,33 +174,42 @@ def main():
             "Every Monday and Thursday at 6 in the evening, remind me to water the plants.",
             repeating)
 
-        ask("schedule_paused_by_name", "Pause my weekday morning weather schedule.",
-            lambda: (any(s.get("paused") for s in new_schedule()),
-                     [(s["label"], s.get("paused")) for s in new_schedule()]))
+        ask("schedule_paused_by_description", "Pause my weekday morning weather schedule.",
+            lambda: (any(s.get("paused") for s in weather()),
+                     [(s["label"], s.get("paused")) for s in new_schedules()]))
 
         ask("world_clock_by_city", "What time is it in Tokyo and in New York right now?",
             lambda: (True, "read the reply"))
 
-        ask("schedule_deleted_by_name", "Delete my weekday morning weather schedule.",
-            lambda: (not new_schedule(), [(s["label"], s["cron"]) for s in new_schedule()]))
+        ask("schedule_deleted_by_description", "Delete my weekday morning weather schedule.",
+            lambda: (not weather(), [(s["label"], s["cron"]) for s in new_schedules()]))
     finally:
-        for s in schedules(setup):
+        for s in schedules(token):
             if s["id"] not in before:
-                call("DELETE", f"/schedules/{s['id']}", token=setup)
+                call("DELETE", f"/schedules/{s['id']}", token=token)
+        for t in todos(token):
+            if t["id"] not in todos_before:
+                call("DELETE", f"/me/todos/{t['id']}", token=token)
         for sid in sessions:
             if sid:
-                call("DELETE", f"/sessions/{sid}", token=setup)
-        if member:
-            call("DELETE", f"/profiles/{member}", token=setup)
-        _, body = call("GET", "/devices", token=setup)
+                call("DELETE", f"/sessions/{sid}", token=token)
+        left = {
+            "schedules": [s["label"] for s in schedules(token) if s["id"] not in before],
+            "todos": [t["text"] for t in todos(token) if t["id"] not in todos_before],
+        }
+        _, body = call("GET", "/devices", token=token)
         devices = body.get("devices", body) if isinstance(body, dict) else body
-        for d in devices if isinstance(devices, list) else []:
-            if str(d.get("name", "")).startswith("tools-live") and d.get("name") != "tools-live-setup":
-                call("DELETE", f"/devices/{d['id']}", token=setup)
-        call("POST", "/handshake/revoke", {}, token=setup)
-        with open(OUT, "w") as f:
-            json.dump({"ok": ok, "log": LOG}, f, ensure_ascii=False, indent=1)
-    print(json.dumps({"ok": ok, "checks": len(LOG)}))
+        mine = [d["id"] for d in devices if isinstance(devices, list) and d.get("name") == "tools-live-phone"]
+        try:
+            with open(OUT, "w") as f:
+                json.dump({"ok": ok, "left_behind": left, "log": LOG}, f, ensure_ascii=False, indent=1)
+        except OSError as e:
+            print(json.dumps({"result_not_written": str(e)}))
+        # Its own device last: the token dies with it.
+        for device_id in mine:
+            call("DELETE", f"/devices/{device_id}", token=token)
+        call("POST", "/handshake/revoke", {}, token=token)
+    print(json.dumps({"ok": ok, "checks": len(LOG), "left_behind": left}))
     sys.exit(0 if ok else 1)
 
 
