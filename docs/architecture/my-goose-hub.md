@@ -329,6 +329,9 @@ dislike and asked not to hear about, who they live with, where the household is.
 names something the member is allergic to is dropped in code, whatever the model wrote. A
 search never carries a person's name, an address or a health condition.
 
+"Not for me" is heard: the kind of everyday idea turned down rests ten days rather than three,
+and the interest or piece of work an idea was built on rests thirty days rather than seven.
+
 ## 6a. Cards sent to chat
 
 Anything the member reads as a card can be sent to chat, where Goose works from what they read

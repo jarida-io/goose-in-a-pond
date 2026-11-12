@@ -282,6 +282,18 @@ async fn start(
         Ok(page) => page,
         Err(failure) => return Ok(format_dead_end(what, &unreadable(&failure))),
     };
+    // A page that only shows its posts as prose is better watched by the feed it declares:
+    // a feed lists each post once, with its own address.
+    let page = match page.feed.clone().filter(|_| !page.items_are_its_own) {
+        Some(feed) => match read_watched(&feed).await {
+            Ok(of_feed) if !of_feed.items.is_empty() => {
+                tracing::info!(target: "giap::trace", kind = "web_watch_uses_feed", items = of_feed.items.len());
+                of_feed
+            }
+            _ => page,
+        },
+        None => page,
+    };
     // One product's page with no items or sections can be price-watched.
     if page.items.is_empty() && cart_watch::installed().is_some() {
         return watch_price(owner, params).await;

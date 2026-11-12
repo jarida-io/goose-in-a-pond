@@ -30,6 +30,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Merged | fork #10 |
 | 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
+| 12 | Lists and feeds: a page that is a list of links is read as its entries in order; RSS and Atom feeds are read as pages; a new watch uses the feed a page declares | Merged | fork #23 |
 | 11 | General watches: tell me when words appear or go away, or a number goes below or above a value; passing changes (clock times, "3 hours ago", view counts) no longer count as updates; a watch as a card sent to chat | Merged | fork #18 |
 
 ## Phase 2: watches, what landed
@@ -242,12 +243,27 @@ now also takes one rule read off the whole page, in code, with no model in a che
 | The tool block is 226 bytes larger (20,664 to 20,890) for the three fields | Measured | Done |
 
 Not done in phase 11:
-- Feeds (RSS, Atom) are not read as entries; a blog's own page is watched through its sections.
+- Feeds came with phase 12.
 - A file that is replaced (a PDF) is not watched: only pages the reader turns into text.
 - No model judges whether a change matters. Every check is code, so "tell me when the timetable changes in a way that affects mornings" is not possible yet; the rules above are.
 - A change is not confirmed by a second read, so a page that shows different sections on every visit can report updates. Its owner can switch that watch to a rule.
 - Checks run no more often than hourly, as before.
 - The phone and desktop screens do not offer the rule yet; it is set from a conversation.
+
+## Phase 12: lists and feeds, what landed
+
+| Step | Kind | Status |
+|---|---|---|
+| A page with no items of its own (no structured data, no articles) is read for the largest run of links that sit in the same place in the same kind of row. Titles win over a column of "3 hours ago" links, a short title inside a list of titles stays, and a menu, a footer and a handful of links are not a list | Code | Done |
+| The page tool shows that list in the page's order ("Listed on this page, in the page's order"), so "the first three stories" has an answer. Tried on the Hacker News front page: 30 of 30 stories, in order | Code, tried on a real page | Done |
+| A watch falls back to that list only where a page has neither items nor sections, so a page already watched keeps the list it had and a page with no headings can now be watched | Code | Done |
+| An RSS or Atom address is read as a page of articles (each entry an item with its link, date and plain-text summary); other XML is still refused as a file. Tried on a real Atom feed (10 entries) and a real RSS feed (45) | Code, tried on real feeds | Done |
+| A page names the feed it declares on its own site, and a watch started on a page with no items of its own watches that feed instead | Code | Done |
+
+Not done in phase 12:
+- Neither has been exercised on the nano in a conversation yet.
+- A feed is not discovered for a page that already has articles or structured items; those are watched as before.
+- JSON Feed is not read.
 
 ## What waits on you
 

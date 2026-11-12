@@ -197,6 +197,21 @@ impl IdeaRepository for SqliteIdeaRepository {
             .collect())
     }
 
+    async fn declined_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT topic, created_at FROM ideas WHERE profile_id = ? AND state = 'dismissed'",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("read the topics of the ideas a member turned down")?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, at)| parse_time(at).is_ok_and(|at| at >= since))
+            .map(|(topic, _)| topic)
+            .collect())
+    }
+
     async fn run(&self, profile_id: &str) -> Result<IdeaRun> {
         let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT requested_at, started_at, finished_at FROM idea_runs WHERE profile_id = ?",
@@ -426,10 +441,18 @@ mod tests {
         let working = repo.get("jerry", "i1").await.unwrap().unwrap();
         assert_eq!(working.progress.unwrap().task_id, "task-9");
 
+        let week = Utc::now() - chrono::Duration::days(7);
+        assert!(repo.declined_since("jerry", week).await.unwrap().is_empty());
         repo.set_state("jerry", "i1", IdeaState::Dismissed, None)
             .await
             .unwrap();
         assert!(repo.list("jerry").await.unwrap().is_empty());
+        assert_eq!(
+            repo.declined_since("jerry", week).await.unwrap(),
+            vec!["Toyota Fielder"],
+            "what they turned down is remembered as a topic"
+        );
+        assert!(repo.declined_since("liz", week).await.unwrap().is_empty());
         assert_eq!(
             repo.topics_since("jerry", Utc::now() - chrono::Duration::days(7))
                 .await
