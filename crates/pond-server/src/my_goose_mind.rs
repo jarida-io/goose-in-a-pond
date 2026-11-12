@@ -434,15 +434,28 @@ async fn think_of_ideas(
         .unwrap_or_default();
     let rows = interests.list(member).await.unwrap_or_default();
     let known = interests.portrait(member).await.ok().flatten();
-    let used = ideas_repo
+    let mut used = ideas_repo
         .topics_since(member, rest_since)
         .await
         .unwrap_or_default();
+    // "Not for me" is heard: what they turned down stays away for longer than what they saw.
+    used.extend(
+        ideas_repo
+            .declined_since(member, now - ideas::DECLINED_TOPIC_REST)
+            .await
+            .unwrap_or_default(),
+    );
     let profile = idea_profile(deps, member).await;
-    let rested_kinds = ideas_repo
+    let mut rested_kinds = ideas_repo
         .topics_since(member, now - ideas::KIND_REST)
         .await
         .unwrap_or_default();
+    rested_kinds.extend(
+        ideas_repo
+            .declined_since(member, now - ideas::DECLINED_KIND_REST)
+            .await
+            .unwrap_or_default(),
+    );
     // The household's own day decides whose turn it is among the everyday kinds.
     let today = ideas::local_day(now, &profile.1);
     let profile = profile.0;

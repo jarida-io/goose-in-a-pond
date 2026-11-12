@@ -17,6 +17,10 @@ pub const IDEAS_EVERY: Duration = Duration::hours(24);
 pub const TOPIC_REST: Duration = Duration::days(7);
 /// How long a kind of everyday idea (a recipe, an outing, a date) rests after one was written.
 pub const KIND_REST: Duration = Duration::days(3);
+/// How long a kind of everyday idea rests after the member turned one down.
+pub const DECLINED_KIND_REST: Duration = Duration::days(10);
+/// How long an interest or a piece of work rests after the member turned down an idea on it.
+pub const DECLINED_TOPIC_REST: Duration = Duration::days(30);
 /// Seeds one run researches from the member's interests and work, beside one everyday idea.
 pub const SEEDS_PER_RUN: usize = 2;
 /// Pages read per seed.
