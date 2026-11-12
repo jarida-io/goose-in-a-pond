@@ -26,6 +26,11 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
          the id is a fresh UUID -- a person",
     ),
     (
+        "crates/pond-api/src/ideas.rs",
+        "a member asked Goose to research one of their ideas (`POST /me/ideas/{id}/goose`); \
+         the id is a fresh UUID -- a person",
+    ),
+    (
         "crates/pond-server/src/main.rs",
         "the terminal voice/chat CLI's own session -- a person, in another process",
     ),
