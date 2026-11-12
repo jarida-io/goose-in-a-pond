@@ -107,8 +107,14 @@ async fn a_member_reads_what_goose_did_marks_it_seen_and_takes_a_note_back() {
         created_at: now,
     };
     pond.notes.add(note.clone()).await.unwrap();
-    let wrote = GooseActivity::note(&pond.member, &note.text, &note.id, now - Duration::minutes(5));
-    let looked = GooseActivity::errand(&pond.member, "when the pool opens", "It opens at 6am.", now);
+    let wrote = GooseActivity::note(
+        &pond.member,
+        &note.text,
+        &note.id,
+        now - Duration::minutes(5),
+    );
+    let looked =
+        GooseActivity::errand(&pond.member, "when the pool opens", "It opens at 6am.", now);
     pond.activity.add(&wrote).await.unwrap();
     pond.activity.add(&looked).await.unwrap();
 
@@ -134,7 +140,12 @@ async fn a_member_reads_what_goose_did_marks_it_seen_and_takes_a_note_back() {
     let (status, body) = call(&pond, Method::POST, &undo(&wrote.id)).await;
     assert_eq!((status, &body["undone"]), (StatusCode::OK, &json!(true)));
     let scope = ProfileScope::Owner(pond.member.clone());
-    assert!(pond.notes.list(&scope, NoteKind::Note).await.unwrap().is_empty());
+    assert!(pond
+        .notes
+        .list(&scope, NoteKind::Note)
+        .await
+        .unwrap()
+        .is_empty());
     let (status, _) = call(&pond, Method::POST, &undo(&wrote.id)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (status, _) = call(&pond, Method::POST, &undo("no-such-entry")).await;
