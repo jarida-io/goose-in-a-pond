@@ -466,6 +466,8 @@ pub enum FetchFailure {
     Status(u16),
     StoppedArriving,
     NotAPage(String),
+    /// The page is a shell that scripts fill in, and it could not be read with a browser.
+    NeedsBrowser(pond_core::shared::domain::page_render::NotRendered),
 }
 
 impl FetchFailure {
@@ -495,6 +497,7 @@ impl FetchFailure {
                 what,
                 &format!("That address is a file ({mime}), not a web page."),
             ),
+            FetchFailure::NeedsBrowser(why) => format_dead_end(what, &why.words()),
         }
     }
 }
@@ -736,7 +739,11 @@ async fn fetch_page_as(
     let body = if plain {
         Body::Text(body)
     } else {
-        Body::Html(body)
+        Body::Html(
+            crate::page_render::filled(&final_address, body)
+                .await
+                .map_err(FetchFailure::NeedsBrowser)?,
+        )
     };
     Ok((final_address, body))
 }

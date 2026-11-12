@@ -1266,6 +1266,7 @@ async fn run_server(
 
     // Apply the mic privacy setting before anything can open a device.
     pond_core::models::domain::mic_gate::set_mic_enabled(settings.mic_enabled);
+    pond_core::shared::domain::page_render::set_enabled(settings.browser_rendering_enabled);
     if settings.picture_support_download_enabled {
         pond_core::models::domain::device_budget::allow_gemma_vision();
     }
@@ -3671,6 +3672,8 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // The pond's own headless browser, when the household downloads one, lives in its data.
+    pond_mcp_server::page_render::init_data_dir(data_dir.clone());
     // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
     pond_core::shared::services::report_images::install(Arc::new(
         pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
@@ -7457,6 +7460,7 @@ fn install_long_task_deps(
     pond_mcp_server::memory::init_agent_notes(Arc::new(
         pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(pool.clone()),
     ));
+    pond_core::shared::ports::browser::install(Arc::new(pond_mcp_server::page_render::PondBrowser));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),

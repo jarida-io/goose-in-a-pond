@@ -87,6 +87,7 @@ pub(super) const EXPECTED_KEYS: &[&str] = &[
     "active_llm_model",
     "wake_word",
     "voice_room_enabled",
+    "browser_rendering_enabled",
     "kws_energy_threshold",
     "kws_post_trigger_silence_ms",
     "kws_cooldown_ms",

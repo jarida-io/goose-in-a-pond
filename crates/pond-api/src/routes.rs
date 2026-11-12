@@ -706,6 +706,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .delete(delete_profile_threshold_handler),
         )
         .merge(crate::me::routes())
+        .merge(crate::browser::routes())
         .route("/faces/debug/pairwise", get(face_pairwise_debug))
         .route("/faces/debug/eval", get(face_eval_debug))
         .route("/faces/models", get(list_face_models_handler))
@@ -6787,6 +6788,7 @@ pub(crate) async fn update_settings(
 
     // Privacy controls must apply now, not at the next restart.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
+    pond_core::shared::domain::page_render::set_enabled(merged.browser_rendering_enabled);
     if current.voice_room_enabled != merged.voice_room_enabled {
         if let Some(room) = &state.room_voice {
             room.set_enabled(merged.voice_room_enabled).await;

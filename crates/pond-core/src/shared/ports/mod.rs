@@ -1,5 +1,6 @@
 pub mod agent_notes;
 pub mod agent_prefill;
+pub mod browser;
 pub mod cart;
 pub mod event_bus;
 pub mod hook_event_sink;

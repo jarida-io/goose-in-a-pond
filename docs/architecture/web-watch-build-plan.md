@@ -26,7 +26,7 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 | 4 | Exploration: 30-minute budget on the card, one site per step, compare step writes options | Merged | fork #5 |
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
-| 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
+| 7 | A browser for pages that scripts build: Chromium's headless shell, run once a page, on demand (Lightpanda set aside: its arm64 binary needs glibc 2.38) | Merged; the nano measurement waits for you | fork #19 |
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Merged | fork #10 |
 | 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
@@ -157,6 +157,31 @@ Not done in phase 9:
 - A report forgets that an option was saved once its sheet closes, so a second Save makes a second card.
 - A `Saved { item_id }` notice screen: the pond does not send one yet.
 - The chips follow the model's `[title](link)` words. Ledger numbers, with the line used and the date read in the chip's card, come with the chips phase.
+
+## Phase 7: reading pages that need a browser, what landed
+
+Some pages arrive as an empty shell that scripts fill in. Every read (the page tool, watches,
+the news, ideas, research) goes through one fetch; that fetch now hands such a shell to a
+headless browser once and reads what the browser built with the usual reader.
+
+| Step | Kind | Status |
+|---|---|---|
+| A shell is a page with under 200 characters to read, scripts, and a mark that the scripts build it (`id="root"`, `__next`, "enable JavaScript", ...). A page with words is never sent to a browser | Code | Done |
+| One render: `--headless --dump-dom` with 8 s of virtual time for the page's scripts, 30 s at most, pictures and sound off, a fresh profile deleted afterwards, incognito, the browser's own sandbox on. One at a time; a second page is told to try again | Code | Done |
+| The browser is the pond's own download if there is one, else `chrome-headless-shell`, Chromium, Chrome or Edge found on the machine. No setup: it is looked for when a page needs it | Code | Done |
+| Memory gate: on a board that reports free memory, a browser starts only with 900 MB available. The refusal says how much was free | Code | Done |
+| `POST /browser/install` downloads the stable headless shell for the machine from Chrome for Testing (about 130 MB) into `<data_dir>/browser`, unpacks it and checks that it runs; `GET /browser` shows the browser in use, whether a page could be rendered now and why not, and the download's progress; `DELETE /browser` removes the pond's own | Code | Done |
+| Household setting `browser_rendering_enabled` (on by default), in the desktop's Extensions & Tools; applied at once | Code | Done |
+| A shell that was not rendered is a failed read whose reason the model is given in words: turned off, no browser yet, too little memory free, busy, or the browser could not read it | Code | Done |
+| A real page built by a script is rendered by the installed Chrome in the tests on a Mac (under a second); the test is skipped where no browser is installed | Tests | Done |
+| The headless shell for `linux-arm64` (157.0.8103.78) starts on the nano's glibc 2.35 with no library missing | Measured on the nano | Done |
+
+Not done in phase 7:
+- **What a render costs on the nano is not measured.** The nano had 498 MB available with the model loaded, under the 900 MB gate, so the pond refuses there today rather than risk the model. The gate is a guess from desktop figures (about 390 MB for an idle headless Chromium). Measuring it means running the browser beside the live pond under a memory cap; that run was not allowed in this session and waits for you. The downloaded shell is still in `/tmp/chs` on the nano.
+- No browser is downloaded on its own: it is 130 MB, so the household starts it. The phone has no button for it yet; the route is there.
+- Clicking, typing and signing in with a browser are not built. The pond already follows same-site links, sends search forms, and sends other forms after a yes on the phone; a click-driven browser for a small model needs the memory answer first, and its tools would sit in every turn's prompt unless they are a group that is off by default.
+- The browser does its own networking, outside `pond-net`. It is only ever given an address the pond's own fetch already read from the public web, but scripts on that page make their own requests.
+- robots.txt is not read, and fetches are not spaced per site beyond each job's own limits.
 
 ## Phase 11: general watches, what landed
 
