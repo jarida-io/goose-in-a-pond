@@ -75,8 +75,10 @@ giap_role:
         "confidence": 0.0 to 1.0
       }
 
-    A suggestion is work they can approve: "Check whether the gate was left
-    open". A question, a greeting or a remark on what happened is not one.
+    A suggestion is work they can approve: "Turn the porch light off at
+    midnight". A question, a greeting or a remark on what happened is not one.
+    When all you would suggest is to check, look up or find something out,
+    do not ask: do it yourself with "look_into", described at the end.
     Someone being at home, arriving, leaving or moving about is ordinary:
     never raise it by itself.
 
@@ -317,6 +319,18 @@ pub fn reviewer_refusal(run_in_flight: bool, proposals_today: usize) -> Option<R
     }
     None
 }
+
+/// [`reviewer_refusal`] for a heartbeat. The day's suggestions being spent does not stop it:
+/// what it may do by itself has caps of its own, and [`interpret_heartbeat`] refuses any
+/// suggestion past the day's.
+pub fn heartbeat_refusal(run_in_flight: bool) -> Option<ReviewSkip> {
+    run_in_flight.then_some(ReviewSkip::RunInFlight)
+}
+
+/// What a heartbeat's brief ends with once the day's suggestions are spent, so the run does not
+/// spend its answer on ones that will be refused.
+pub const SUGGESTIONS_SPENT: &str = "\nYou have asked them enough for today: make no suggestion \
+     in this answer. The small things you may do yourself are still open to you.\n";
 
 /// Must an in-flight review be cancelled? Reuses `saw_activity_since_start` from the run's
 /// start, which also sees the out-of-process voice child; on an Orin the review holds the GPU.
@@ -2174,6 +2188,39 @@ mod tests {
         );
         let spec = plan_errand(&role, &audience(), "sched-proactive-review-r1", &brief).unwrap();
         assert_eq!(spec.role(), ERRAND_ROLE);
+    }
+
+    #[test]
+    fn a_day_of_suggestions_spent_does_not_stop_the_heartbeat_acting() {
+        assert_eq!(heartbeat_refusal(false), None);
+        assert_eq!(heartbeat_refusal(true), Some(ReviewSkip::RunInFlight));
+        assert!(matches!(
+            reviewer_refusal(false, MAX_PROPOSALS_PER_DAY),
+            Some(ReviewSkip::DailyCapReached { .. })
+        ));
+        // With the day spent a suggestion is refused and an act is still carried out.
+        let body = r#"[
+            {"trigger_kind":"time","rationale":"the bins go out tomorrow",
+             "suggestion":"Put the bins out tonight","confidence":0.9},
+            {"do":"note","text":"Look at the pump reading again"}]"#;
+        let out = interpret_heartbeat(
+            &answer(body),
+            &audience(),
+            Utc::now(),
+            &FeedbackLedger::empty(),
+            MAX_PROPOSALS_PER_DAY,
+            ActAllowance::for_heartbeat(0, chrono_tz::UTC),
+        );
+        assert!(out.proposals.is_empty());
+        assert!(matches!(
+            out.refusals.as_slice(),
+            [ImpulseRefused::OverCap {
+                index: 0,
+                allowance: 0
+            }]
+        ));
+        assert_eq!(out.acts.len(), 1);
+        assert!(SUGGESTIONS_SPENT.contains("make no suggestion"));
     }
 
     #[test]

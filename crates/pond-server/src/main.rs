@@ -7350,12 +7350,11 @@ async fn run_proactive_reviewer(
             None => 0,
         };
 
-        // Whether a review is worth running: not waivable by a hand-asked tick (the daily cap
-        // must hold), and before `acquire` so the slot isn't taken just to find no work.
-        let refusal = review::reviewer_refusal(
+        // Whether a heartbeat is worth running, before `acquire` so the slot isn't taken just to
+        // find no work. A day of suggestions spent is no reason: it may still act by itself.
+        let refusal = review::heartbeat_refusal(
             // This loop awaits its own run, so runs never overlap here.
             false,
-            proposals_today,
         );
         if let Some(reason) = refusal {
             tracing::trace!(
@@ -7435,7 +7434,7 @@ async fn run_proactive_reviewer(
             Some(member) => heartbeat.watch_lines(member).await,
             None => Vec::new(),
         };
-        let brief = review::heartbeat_brief(
+        let mut brief = review::heartbeat_brief(
             now,
             zone,
             &events,
@@ -7444,6 +7443,9 @@ async fn run_proactive_reviewer(
             &open_notes,
             &watch_lines,
         );
+        if proposals_today >= review::MAX_PROPOSALS_PER_DAY {
+            brief.push_str(review::SUGGESTIONS_SPENT);
+        }
         let spec =
             match review::plan_review(&role, &audience, &session_id, &brief, serde_json::json!({}))
             {
