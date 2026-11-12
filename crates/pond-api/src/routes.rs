@@ -1899,6 +1899,10 @@ struct ChatRequest {
     /// Grounding context when this turn was initiated from a suggestion card.
     #[serde(default)]
     suggestion_context: Option<pond_core::user_data::domain::suggestion::SuggestionContext>,
+    /// A card the member sent to chat (an idea, a news story, a to-do), by kind and id. The
+    /// Pond reads it as the speaker; the turn carries its content and Goose's notes on it.
+    #[serde(default)]
+    card: Option<crate::context_cards::CardRef>,
     /// The member asked for deep research: the pond starts a research task on the message.
     #[serde(default)]
     deep_research: bool,
@@ -3489,6 +3493,27 @@ async fn drive_turn(
 
     use pond_core::shared::domain::agent::AgentRequest;
 
+    // Read as the speaker, so a card id can never reach another member's card.
+    let card_context = match (&req.card, turn_scope.owner_id()) {
+        (Some(card), Some(member)) => crate::context_cards::resolve(state, member, card)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, kind = %card.kind, "a turn's card could not be read");
+                None
+            })
+            .map(pond_core::user_data::domain::suggestion::SuggestionContext::Card),
+        _ => None,
+    };
+    if req.card.is_some() {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "turn_card",
+            card = req.card.as_ref().map(|c| c.kind.as_str()).unwrap_or_default(),
+            found = card_context.is_some(),
+            "a turn came with a card"
+        );
+    }
+
     // The speaker's own setup interview runs in this session: its state, and only its tools.
     let interview = interview_turn_for(state, &session_id, &turn_scope).await;
     let tool_group_allowlist = match &interview {
@@ -3513,7 +3538,7 @@ async fn drive_turn(
         profile_context: profile_context_for(state, &turn_scope).await,
         tool_group_allowlist,
         warmup: false,
-        suggestion_context: req.suggestion_context.clone(),
+        suggestion_context: card_context.or_else(|| req.suggestion_context.clone()),
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
         device_place: req.device_place.clone(),
@@ -18702,6 +18727,7 @@ async fn run_recipe(
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
         suggestion_context: None,
+        card: None,
         deep_research: false,
         deep_research_answer: None,
         deep_research_for: None,

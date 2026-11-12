@@ -26,7 +26,7 @@ else Goose can do. This document is the contract between the Pond and the phone.
 ## 0. What this Pond serves
 
 `GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
-"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"catalog":bool}`. A Pond without the route answers 404 and the phone
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"catalog":bool,"cards":[kind]}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
 
 ## 0a. About you: the member's profile
@@ -291,9 +291,18 @@ or MCP server; the phone draws its setup from the fields with no app release.
 
 ## 6. Ideas
 
+An idea is a short card that opens to its own page.
+
 ```
-Idea = { "id", "title", "pitch": "two or three sentences",
-  "why": "the specific thing about the member it builds on",
+Idea = { "id",
+  "kind": "outing|activity|date|solo_date|trip|recipe|interest|project",
+  "kind_label": "Recipe",                      // the card's small label
+  "title": "at most eight words",
+  "hook": "the card's one line",
+  "pitch": "two or three short sentences, for the page",
+  "why": "the fact or interest of the member it fits",
+  "facts": [{"label": "Serves", "value": "4"}],   // two to four, seen at a glance on the page
+  "notes": "what Goose kept to work from",        // the page may show it under "Goose's notes"
   "grounded_in": [{"kind":"interest|memory|conversation","label"}],
   "sources": [{"title","url","site"}], "picture": path|null,
   "goose_can": {"label", "kind": "research|watch|todo|schedule|chat"}|null,
@@ -301,15 +310,46 @@ Idea = { "id", "title", "pitch": "two or three sentences",
   "state": "new|working|done|dismissed", "progress": {"task_id"}|null, "created_at" }
 ```
 
-- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`
+- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`; `GET /me/ideas/{id}` → Idea
 - `POST /me/ideas/{id}/goose` → Idea: Goose starts its part (a research task, a watch, a
   schedule, a to-do) and the idea moves to `working`
 - `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos
 - `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202
 
-Ideas replace the one-question-per-memory suggestions. Once a day on the lane, the Pond picks one
-or two interests or things the member is working on, searches for something new about them,
-reads the pages, and writes an idea that is specific to the member, sourced, and doable.
+Once a day on the lane, and when the member asks, the Pond writes up to three ideas for each
+member: one everyday idea and up to two from their interests and what they are working on.
+Each is searched for, read from the pages found, and written by the model as JSON.
+
+The everyday kinds take turns by the day, and a kind rests three days after one is written: a
+nutritious recipe, somewhere to go outdoors, a date (with their partner when the profile names
+one, else with themselves), something fun to do, a holiday. They are written against the
+member's profile ([member-memory.md](member-memory.md)): what they eat, are allergic to,
+dislike and asked not to hear about, who they live with, where the household is. An idea that
+names something the member is allergic to is dropped in code, whatever the model wrote. A
+search never carries a person's name, an address or a health condition.
+
+## 6a. Cards sent to chat
+
+Anything the member reads as a card can be sent to chat, where Goose works from what they read
+and from its own notes on it. The phone names the card; the Pond reads it as the speaker and
+puts both in the turn, so no client writes what the model is told and a card id never reaches
+another member's card.
+
+```
+Card = { "kind": "Recipe", "title", "content": "what the member read",
+         "notes": "what Goose kept: sources, details that did not fit, why it was shown" }
+```
+
+- `GET /me/cards/{kind}/{id}` → Card, for `kind` one of `idea`, `news` (a story), `digest`,
+  `todo`, `cart`. `GET /me/hub` lists the kinds this Pond serves under `"cards"`.
+- `POST /chat/stream` takes `"card": {"kind","id"}` beside the message. The turn's
+  `<system-context>` then carries the card and the notes; later turns of the conversation see
+  it in the history. A card that is not the speaker's is left out and the turn runs without it.
+
+An idea's notes are written with the idea, from the pages it was read from. A story's and a
+digest's are its sources, why it was shown and when it was written; a to-do's and a watched
+link's are their state. Chat suggestions carry their grounding the same way
+(`suggestion_context`).
 
 ## 7. What else Goose can do
 

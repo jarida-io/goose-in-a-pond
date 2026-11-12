@@ -37,6 +37,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me/ideas", get(list))
         .route("/me/ideas/refresh", post(refresh))
+        .route("/me/ideas/{id}", get(read))
         .route("/me/ideas/{id}/goose", post(goose))
         .route("/me/ideas/{id}/mine", post(mine))
         .route("/me/ideas/{id}/dismiss", post(dismiss))
@@ -54,6 +55,16 @@ async fn list(
         "ideas": ideas,
         "state": if run.is_thinking(Utc::now()) { "thinking" } else { "idle" },
     })))
+}
+
+/// `GET /me/ideas/{id}`: the idea's own page.
+async fn read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    let member = caller_member(&state, principal.as_ref()).await?;
+    Ok(Json(json!(the_idea(&state, &member, &id).await?)))
 }
 
 async fn refresh(

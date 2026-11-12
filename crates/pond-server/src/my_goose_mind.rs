@@ -20,9 +20,10 @@ use pond_core::user_data::ports::interests::InterestRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
 use pond_core::user_data::ports::session_storage::SessionStorage;
+use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::services::consolidation_schedule as sched;
 use pond_core::user_data::services::idea_generation::{
-    self as ideas, IdeaSeed, ReadPage, SeedFrom,
+    self as ideas, IdeaProfile, IdeaSeed, ReadPage, SeedFrom,
 };
 use pond_core::user_data::services::inference_lane::LaneJob;
 use pond_core::user_data::services::member_portrait as portrait;
@@ -37,6 +38,8 @@ const IDEAS_POLL: Duration = Duration::from_secs(15 * 60);
 const PICTURES_PER_PASS: usize = 5;
 /// Search results tried per seed for readable pages.
 const HITS_TRIED: usize = 6;
+/// Memories read for the facts an idea has to fit.
+const PROFILE_ROWS: usize = 400;
 
 type Provider = Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>;
 
@@ -62,6 +65,7 @@ pub struct MindDeps {
     pub sessions: Arc<dyn SessionStorage>,
     pub provider: Provider,
     pub last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
+    pub settings: Arc<dyn SettingsRepository + Send + Sync>,
 }
 
 impl MindDeps {
@@ -422,13 +426,24 @@ async fn think_of_ideas(
         .topics_since(member, rest_since)
         .await
         .unwrap_or_default();
-    let seeds = ideas::pick_seeds(&topic_map, &rows, known.as_ref(), &used);
+    let profile = idea_profile(deps, member).await;
+    let rested_kinds = ideas_repo
+        .topics_since(member, now - ideas::KIND_REST)
+        .await
+        .unwrap_or_default();
+    // The household's own day decides whose turn it is among the everyday kinds.
+    let today = ideas::local_day(now, &profile.1);
+    let profile = profile.0;
+    let mut seeds: Vec<IdeaSeed> = ideas::life_seed(&profile, &rested_kinds, today)
+        .into_iter()
+        .collect();
+    seeds.extend(ideas::pick_seeds(&topic_map, &rows, known.as_ref(), &used));
     let mut made = 0;
     for seed in seeds {
         if slot.is_cancelled() {
             break;
         }
-        match idea_from(deps, slot, member, name, known.as_ref(), &seed).await {
+        match idea_from(deps, slot, member, name, &profile, known.as_ref(), &seed).await {
             Ok(Some(idea)) => {
                 if let Err(e) = ideas_repo.add(&idea).await {
                     tracing::warn!(error = %e, "[my-goose] an idea could not be stored");
@@ -451,12 +466,35 @@ async fn think_of_ideas(
     made
 }
 
+/// What an idea has to fit: the member's live profile facts and where the household is, with
+/// the household's time zone.
+async fn idea_profile(deps: &MindDeps, member: &str) -> (IdeaProfile, String) {
+    let now = Utc::now();
+    let facts = deps
+        .memories
+        .search_recent(&ProfileScope::Owner(member.to_string()), PROFILE_ROWS)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.is_shown(now))
+        .filter_map(|row| Some((row.about?, row.content)))
+        .collect();
+    let settings = deps.settings.get().await.ok();
+    let place = settings
+        .as_ref()
+        .map(|s| s.weather_location_name.trim().to_string())
+        .filter(|place| !place.is_empty());
+    let zone = settings.map(|s| s.timezone).unwrap_or_default();
+    (IdeaProfile { place, facts }, zone)
+}
+
 /// One seed to one idea. `Err` when searching itself is unavailable.
 async fn idea_from(
     deps: &MindDeps,
     slot: &LaneSlot<'_>,
     member: &str,
     name: &str,
+    profile: &IdeaProfile,
     known: Option<&pond_core::user_data::domain::interest::MemberPortrait>,
     seed: &IdeaSeed,
 ) -> Result<Option<pond_core::user_data::domain::idea::Idea>, String> {
@@ -466,7 +504,7 @@ async fn idea_from(
             .complete(
                 slot,
                 &ideas::render_query_system(name),
-                ideas::build_query_message(known, seed),
+                ideas::build_query_message(name, profile, known, seed),
             )
             .await
             .and_then(|reply| ideas::parse_query(&reply)),
@@ -502,13 +540,20 @@ async fn idea_from(
         .complete(
             slot,
             &ideas::render_idea_system(name),
-            ideas::build_idea_message(known, seed, &pages),
+            ideas::build_idea_message(name, profile, known, seed, &pages),
         )
         .await
     else {
         return Ok(None);
     };
-    let Some(mut idea) = ideas::parse_idea(&reply, member, seed, &pages, Utc::now()) else {
+    let Some(mut idea) = ideas::parse_idea(&reply, member, profile, seed, &pages, Utc::now())
+    else {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "idea_not_kept",
+            idea_kind = seed.kind.as_str(),
+            "a seed's pages gave no idea that fits the member"
+        );
         return Ok(None);
     };
     if let Some(images) = pond_core::shared::services::report_images::installed() {

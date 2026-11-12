@@ -8,7 +8,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
 use pond_core::user_data::domain::idea::{
-    GooseCan, GoosePlan, Grounding, Idea, IdeaProgress, IdeaSource, IdeaState,
+    GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource, IdeaState,
 };
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaRun, IdeaTodo, TopicSeed};
 
@@ -45,8 +45,9 @@ impl SqliteIdeaRepository {
     }
 }
 
-const COLUMNS: &str = "id, profile_id, topic, title, pitch, why, grounded_json, sources_json, \
-     picture, goose_can_json, goose_plan_json, you_can_json, state, task_id, created_at";
+const COLUMNS: &str = "id, profile_id, topic, kind, title, hook, pitch, why, facts_json, notes, \
+     grounded_json, sources_json, picture, goose_can_json, goose_plan_json, you_can_json, state, \
+     task_id, created_at";
 
 fn idea_of(row: &SqliteRow) -> Result<Idea> {
     let grounded: String = row.try_get("grounded_json")?;
@@ -57,13 +58,24 @@ fn idea_of(row: &SqliteRow) -> Result<Idea> {
     let state: String = row.try_get("state")?;
     let task_id: Option<String> = row.try_get("task_id")?;
     let created_at: String = row.try_get("created_at")?;
+    let kind: String = row.try_get("kind")?;
+    let kind = IdeaKind::parse(&kind).unwrap_or_default();
+    let facts: String = row.try_get("facts_json")?;
+    let pitch: String = row.try_get("pitch")?;
+    let hook: String = row.try_get("hook")?;
     Ok(Idea {
         id: row.try_get("id")?,
         profile_id: row.try_get("profile_id")?,
         topic: row.try_get("topic")?,
+        kind,
+        kind_label: kind.label().to_string(),
         title: row.try_get("title")?,
-        pitch: row.try_get("pitch")?,
+        // An idea written before cards had a line of their own shows its pitch.
+        hook: if hook.is_empty() { pitch.clone() } else { hook },
+        pitch,
         why: row.try_get("why")?,
+        facts: serde_json::from_str::<Vec<IdeaFact>>(&facts).unwrap_or_default(),
+        notes: row.try_get("notes")?,
         grounded_in: serde_json::from_str::<Vec<Grounding>>(&grounded).unwrap_or_default(),
         sources: serde_json::from_str::<Vec<IdeaSource>>(&sources).unwrap_or_default(),
         picture: row.try_get("picture")?,
@@ -113,17 +125,21 @@ impl IdeaRepository for SqliteIdeaRepository {
     async fn add(&self, idea: &Idea) -> Result<()> {
         let now = stamp(Utc::now());
         sqlx::query(
-            "INSERT INTO ideas (id, profile_id, topic, title, pitch, why, grounded_json, \
-             sources_json, picture, goose_can_json, goose_plan_json, you_can_json, state, \
-             task_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ideas (id, profile_id, topic, kind, title, hook, pitch, why, \
+             facts_json, notes, grounded_json, sources_json, picture, goose_can_json, \
+             goose_plan_json, you_can_json, state, task_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&idea.id)
         .bind(&idea.profile_id)
         .bind(&idea.topic)
+        .bind(idea.kind.as_str())
         .bind(&idea.title)
+        .bind(&idea.hook)
         .bind(&idea.pitch)
         .bind(&idea.why)
+        .bind(serde_json::to_string(&idea.facts)?)
+        .bind(&idea.notes)
         .bind(serde_json::to_string(&idea.grounded_in)?)
         .bind(serde_json::to_string(&idea.sources)?)
         .bind(idea.picture.as_deref())
@@ -347,9 +363,17 @@ mod tests {
             id: id.to_string(),
             profile_id: owner.to_string(),
             topic: topic.to_string(),
+            kind: IdeaKind::Outing,
+            kind_label: IdeaKind::Outing.label().to_string(),
             title: "Catch the January dip on Fielders".to_string(),
+            hook: "Prices dip in January.".to_string(),
             pitch: "Prices soften after the import rush.".to_string(),
             why: "You are shopping for a Toyota Fielder under KSh 1.2M.".to_string(),
+            facts: vec![IdeaFact {
+                label: "Where".into(),
+                value: "Mombasa Road yards".into(),
+            }],
+            notes: "Yards open at 8.".to_string(),
             grounded_in: vec![Grounding {
                 kind: "interest".into(),
                 label: "Toyota Fielder".into(),
@@ -387,6 +411,11 @@ mod tests {
             Some("https://example.com/fielders")
         );
         assert_eq!(back.sources.len(), 1);
+        assert_eq!(back.kind, IdeaKind::Outing);
+        assert_eq!(back.kind_label, "Get outside");
+        assert_eq!(back.hook, "Prices dip in January.");
+        assert_eq!(back.facts[0].value, "Mombasa Road yards");
+        assert_eq!(back.notes, "Yards open at 8.");
         assert!(repo.get("liz", "i1").await.unwrap().is_none());
         assert!(repo.list("liz").await.unwrap().is_empty());
 
