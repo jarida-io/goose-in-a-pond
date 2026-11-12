@@ -27,6 +27,10 @@ import {
   Check,
   Minus,
   Repeat,
+  Utensils,
+  MapPin,
+  CalendarHeart,
+  ListChecks,
 } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import i18n from "../i18n";
@@ -64,6 +68,10 @@ const SEGMENTS: Record<
   routine:      { icon: <Repeat size={13} strokeWidth={1.8} />,    cssClass: "routine",      importanceDefault: 0.65 },
   knowledge:    { icon: <BookOpen size={13} strokeWidth={1.8} />,  cssClass: "knowledge",    importanceDefault: 0.5 },
   context:      { icon: <Clock size={13} strokeWidth={1.8} />,     cssClass: "context",      importanceDefault: 0.3 },
+  food_health:  { icon: <Utensils size={13} strokeWidth={1.8} />,  cssClass: "food_health",  importanceDefault: 0.85 },
+  place:        { icon: <MapPin size={13} strokeWidth={1.8} />,    cssClass: "place",        importanceDefault: 0.6 },
+  date:         { icon: <CalendarHeart size={13} strokeWidth={1.8} />, cssClass: "date",     importanceDefault: 0.8 },
+  instruction:  { icon: <ListChecks size={13} strokeWidth={1.8} />, cssClass: "instruction", importanceDefault: 0.9 },
 };
 
 const SEGMENT_IMPORT_FILL: Record<MemorySegment, string> = {
@@ -75,10 +83,16 @@ const SEGMENT_IMPORT_FILL: Record<MemorySegment, string> = {
   routine:      "var(--mem-routine)",
   knowledge:    "var(--mem-knowledge)",
   context:      "var(--mem-context)",
+  food_health:  "var(--mem-food_health)",
+  place:        "var(--mem-place)",
+  date:         "var(--mem-date)",
+  instruction:  "var(--mem-instruction)",
 };
 
+// The order a member's profile is read in on every surface.
 const SEGMENT_ORDER: MemorySegment[] = [
-  "identity", "preference", "correction", "relationship", "project", "knowledge", "context",
+  "instruction", "correction", "identity", "relationship", "food_health", "routine",
+  "preference", "project", "place", "date", "context", "knowledge",
 ];
 
 // ── Helpers ───────────────────────────────────────────────────

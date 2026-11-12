@@ -85,6 +85,7 @@ void i18n.use(initReactI18next).init({
     segment: {
       identity: 'About you', preference: 'Preference', correction: 'Correction', relationship: 'People',
       project: 'Project', routine: 'Habit', knowledge: 'Knowledge', context: 'Right now',
+      food_health: 'Food and health', place: 'Place', date: 'Date', instruction: 'Standing instruction',
     },
   }, chat: {
     steps: 'Steps',
