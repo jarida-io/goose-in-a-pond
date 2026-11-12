@@ -43,7 +43,7 @@ giap_role:
     - giap-sensors
     - giap-weather
   personal_data: inherit
-  max_turns: 4
+  max_turns: 6
   context_fraction: 0.35
   instructions: |
     You are reviewing what has happened in this household recently and deciding
@@ -52,16 +52,19 @@ giap_role:
     connect actual events, sensors, weather forecasts, or memories to helpful
     suggestions rather than generic observations.
 
-    You do not act. You cannot turn anything on, write anything down, schedule
-    anything or send anything. Everything you suggest is shown to the person,
-    who decides. Suggesting something they did not want costs more than saying
-    nothing, so when in doubt, say nothing.
+    You cannot turn anything on, schedule anything or send anything. What you
+    suggest is shown to the person, who decides; the few small things you may
+    do yourself are listed at the end. Suggesting something they did not want
+    costs more than saying nothing, so when in doubt, say nothing.
 
     You have no clock and no calendar. The current time is stated in the brief;
     do not guess at it and do not use any other time.
 
-    Answer with a JSON array and nothing else. An empty array is a complete and
-    common answer. Each element:
+    Look things up with at most three tool calls, then answer. Your last
+    message must be the answer.
+
+    Answer with a JSON array and nothing else: no words before or after it. An
+    empty array, [], is a complete and common answer. Each element:
 
       {
         "trigger_kind": "camera" | "sensor" | "device" | "time" | "presence",
@@ -88,7 +91,8 @@ giap_role:
       "pause_watch"  stop checking one of their web watches that the brief
                  says keeps failing. Add "text", words from its title
 
-    "remind", "note", "done" and "pause_watch" need no "suggestion".
+    "remind", "note", "done" and "pause_watch" need no "suggestion". "note" and
+    "done" need only "do" and "text".
 "#;
 
 /// Build the shipped reviewer role; fallible so a recipe typo is a refusal, not a loop panic.
@@ -463,13 +467,15 @@ pub fn heartbeat_brief(
 /// `deny_unknown_fields`: small models add stray keys, and required fields already catch typos.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReviewerImpulse {
-    /// The bus event family this is about.
+    /// The bus event family this is about. Blank only for an act; a proposal refuses one.
+    #[serde(default)]
     pub trigger_kind: String,
     #[serde(default)]
     pub source_id: Option<String>,
     #[serde(default)]
     pub signal: Option<String>,
-    /// Required; `Proposal::from_parts` refuses a blank one.
+    /// Blank only for an act; `Proposal::from_parts` refuses a blank one.
+    #[serde(default)]
     pub rationale: String,
     /// What to ask the member about. Becomes a prompt and nothing else. Blank only for an act.
     #[serde(default)]
@@ -724,10 +730,7 @@ pub fn interpret_heartbeat(
     let Some(answer) = run.result_for_parent() else {
         return ReviewYield::refused(ImpulseRefused::NoAnswer);
     };
-    let Some(array) = first_json_array(answer) else {
-        return ReviewYield::refused(ImpulseRefused::NotAJsonArray);
-    };
-    let Ok(elements) = serde_json::from_str::<Vec<serde_json::Value>>(array) else {
+    let Some(elements) = impulses_in(answer) else {
         return ReviewYield::refused(ImpulseRefused::NotAJsonArray);
     };
 
@@ -751,7 +754,13 @@ pub fn interpret_heartbeat(
                 continue;
             }
         };
-        if !(impulse.confidence.is_finite() && impulse.confidence >= MIN_PROPOSAL_CONFIDENCE) {
+        // A note is Goose's own and reaches nobody, so it needs no confidence.
+        let reaches_the_member = !impulse.act.as_deref().is_some_and(|word| {
+            ["note", "done"].contains(&word.trim().to_ascii_lowercase().as_str())
+        });
+        if reaches_the_member
+            && !(impulse.confidence.is_finite() && impulse.confidence >= MIN_PROPOSAL_CONFIDENCE)
+        {
             refusals.push(ImpulseRefused::LowConfidence {
                 index,
                 confidence: impulse.confidence,
@@ -862,41 +871,95 @@ fn build_proposal(
     )
 }
 
-/// The first balanced `[...]` in the text, ignoring brackets inside JSON strings.
-fn first_json_array(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let mut start = None;
+/// The impulses an answer holds: its JSON array, or the one object a small model writes instead
+/// of an array of one. Words around either are skipped, brackets in prose included.
+fn impulses_in(answer: &str) -> Option<Vec<serde_json::Value>> {
+    for (at, _) in answer.match_indices('[') {
+        // Prose brackets open on a word; an answer opens on an object or closes at once.
+        let opens_an_answer = answer[at + 1..]
+            .trim_start()
+            .starts_with(|c: char| c == '{' || c == ']');
+        if !opens_an_answer {
+            continue;
+        }
+        return serde_json::from_str(balanced(&answer[at..], b'[', b']')?).ok();
+    }
+    const IMPULSE_KEYS: [&str; 4] = ["do", "suggestion", "rationale", "trigger_kind"];
+    answer.match_indices('{').find_map(|(at, _)| {
+        let object: serde_json::Value =
+            serde_json::from_str(balanced(&answer[at..], b'{', b'}')?).ok()?;
+        IMPULSE_KEYS
+            .iter()
+            .any(|key| object.get(key).is_some())
+            .then(|| vec![object])
+    })
+}
+
+/// The outline of an answer for the log: its punctuation and JSON keys, with every other word
+/// and number masked, so an unreadable answer can be diagnosed without recording what it said.
+pub fn answer_shape(answer: &str, max: usize) -> String {
+    let chars: Vec<char> = answer.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() && out.chars().count() < max {
+        let c = chars[at];
+        if c == '"' {
+            let end = (at + 1..chars.len())
+                .find(|&i| chars[i] == '"' && chars[i - 1] != '\\')
+                .unwrap_or(chars.len() - 1);
+            let is_key = chars[end + 1..]
+                .iter()
+                .find(|c| !c.is_whitespace())
+                .is_some_and(|c| *c == ':');
+            if is_key && end > at {
+                out.extend(&chars[at..=end]);
+            } else {
+                out.push_str("\"a\"");
+            }
+            at = end + 1;
+        } else if c.is_alphanumeric() {
+            out.push(if c.is_numeric() { '9' } else { 'a' });
+            while at < chars.len() && chars[at].is_alphanumeric() {
+                at += 1;
+            }
+        } else if c.is_whitespace() {
+            out.push(' ');
+            while at < chars.len() && chars[at].is_whitespace() {
+                at += 1;
+            }
+        } else {
+            out.push(c);
+            at += 1;
+        }
+    }
+    out
+}
+
+/// The balanced span `text` opens with, ignoring brackets inside JSON strings.
+fn balanced(text: &str, open: u8, close: u8) -> Option<&str> {
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
-    for (index, byte) in bytes.iter().enumerate() {
+    for (index, byte) in text.bytes().enumerate() {
         if in_string {
             if escaped {
                 escaped = false;
-            } else if *byte == b'\\' {
+            } else if byte == b'\\' {
                 escaped = true;
-            } else if *byte == b'"' {
+            } else if byte == b'"' {
                 in_string = false;
             }
             continue;
         }
-        match byte {
-            b'"' => in_string = true,
-            b'[' => {
-                if depth == 0 {
-                    start = Some(index);
-                }
-                depth += 1;
+        if byte == b'"' {
+            in_string = true;
+        } else if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return text.get(..=index);
             }
-            b']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    if let Some(from) = start {
-                        return text.get(from..=index);
-                    }
-                }
-            }
-            _ => {}
         }
     }
     None
@@ -1850,6 +1913,81 @@ mod tests {
         );
         assert!(out.proposals.is_empty());
         assert!(out.refusals.is_empty(), "silence is a valid review");
+    }
+
+    #[test]
+    fn an_answer_is_read_past_the_words_a_small_model_puts_around_it() {
+        let element = r#"{"trigger_kind":"sensor","source_id":"freezer","signal":"temp",
+            "rationale":"the freezer is warming up","suggestion":"check the freezer",
+            "confidence":0.9}"#;
+        for (name, body) in [
+            ("one object, no array", element.to_string()),
+            (
+                "a bracket in the words before it",
+                format!("I looked at the events [3 of them] and said \"hm.\n[{element}]"),
+            ),
+            ("a code fence", format!("```json\n[{element}]\n```")),
+        ] {
+            let out = interpret_answer(
+                &answer(&body),
+                &audience(),
+                Utc::now(),
+                &FeedbackLedger::empty(),
+                0,
+            );
+            assert_eq!(out.proposals.len(), 1, "{name}: {:?}", out.refusals);
+        }
+        // Words with a bracket and no answer are still no answer.
+        let out = interpret_answer(
+            &answer("Nothing today [quiet house]."),
+            &audience(),
+            Utc::now(),
+            &FeedbackLedger::empty(),
+            0,
+        );
+        assert_eq!(out.refusals, vec![ImpulseRefused::NotAJsonArray]);
+    }
+
+    #[test]
+    fn the_logged_shape_of_an_answer_keeps_its_keys_and_none_of_its_words() {
+        let shape = answer_shape(
+            "Sure! Here it is:\n{\"action\": \"note\", \"text\": \"Amina's flight lands at 9\"}",
+            200,
+        );
+        assert_eq!(shape, "a! a a a: {\"action\": \"a\", \"text\": \"a\"}");
+        assert_eq!(answer_shape("Nothing to raise today.", 9), "a a a a.");
+        assert_eq!(answer_shape("\"", 9), "\"a\"");
+    }
+
+    #[test]
+    fn a_note_needs_only_its_words_and_a_reminder_still_needs_confidence() {
+        let now = Utc::now();
+        let heartbeat = |body: &str| {
+            interpret_heartbeat(
+                &answer(body),
+                &audience(),
+                now,
+                &FeedbackLedger::empty(),
+                0,
+                ActAllowance::for_heartbeat(0, chrono_tz::UTC),
+            )
+        };
+        let out = heartbeat(r#"[{"do":"Note","text":"Ask how the interview went"}]"#);
+        assert_eq!(
+            out.acts,
+            vec![HeartbeatAct::Note {
+                text: "Ask how the interview went".to_string()
+            }],
+            "{:?}",
+            out.refusals
+        );
+        let out =
+            heartbeat(r#"[{"do":"remind","text":"Call the dentist","when":"tomorrow at 9am"}]"#);
+        assert!(out.acts.is_empty());
+        assert!(matches!(
+            out.refusals.as_slice(),
+            [ImpulseRefused::LowConfidence { index: 0, .. }]
+        ));
     }
 
     /// Only the unbalanced cases test string tracking; a balanced pair passes without it.

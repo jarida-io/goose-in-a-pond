@@ -7473,6 +7473,18 @@ async fn run_proactive_reviewer(
         for refusal in &yielded.refusals {
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
         }
+        // Counts and the run's state only: what it said about the household stays out of the log.
+        tracing::info!(
+            target: "giap::trace",
+            kind = "heartbeat_run",
+            status = ?run.status,
+            proposals = yielded.proposals.len(),
+            acts = yielded.acts.len(),
+            refused = yielded.refusals.len(),
+            answer_chars = run.result.as_deref().map_or(0, |a| a.chars().count()),
+            error = run.error.as_deref().unwrap_or(""),
+            "a heartbeat ended"
+        );
         heartbeat
             .carry_out(
                 audience.profile_id(),
@@ -7483,8 +7495,22 @@ async fn run_proactive_reviewer(
             )
             .await;
 
-        // WARN: all-refused is always a defect; a run with nothing to say returns an empty array.
-        if yielded.proposals.is_empty() && yielded.acts.is_empty() && !yielded.refusals.is_empty() {
+        // WARN: all-refused is a defect in a run that answered; one cut short for a turn is not,
+        // and a run with nothing to say returns an empty array.
+        if run.status.produced_an_answer()
+            && yielded.proposals.is_empty()
+            && yielded.acts.is_empty()
+            && !yielded.refusals.is_empty()
+        {
+            if yielded
+                .refusals
+                .contains(&review::ImpulseRefused::NotAJsonArray)
+            {
+                tracing::info!(
+                    shape = %review::answer_shape(run.result.as_deref().unwrap_or(""), 240),
+                    "proactive reviewer: the answer held no impulses"
+                );
+            }
             tracing::warn!(
                 refused = yielded.refusals.len(),
                 first = ?yielded.refusals.first(),
