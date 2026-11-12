@@ -419,13 +419,12 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             state,
             LongTaskState::Completed | LongTaskState::Failed | LongTaskState::Cancelled
         ) {
-            let _ = sqlx::query(
-                "UPDATE ideas SET state = 'done', updated_at = ? WHERE task_id = ?",
-            )
-            .bind(sql_ts(task.updated_at()))
-            .bind(id)
-            .execute(&self.pool)
-            .await;
+            let _ =
+                sqlx::query("UPDATE ideas SET state = 'done', updated_at = ? WHERE task_id = ?")
+                    .bind(sql_ts(task.updated_at()))
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await;
         }
         Ok(Some(task))
     }
