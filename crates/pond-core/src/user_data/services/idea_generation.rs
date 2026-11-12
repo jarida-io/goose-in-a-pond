@@ -119,6 +119,8 @@ pub enum SeedFrom {
     WorkingOn,
     /// An everyday idea of the seed's kind, built on the member's profile.
     Life,
+    /// A note from a screenshot the member took, by the note's id.
+    Screenshot(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +141,7 @@ impl IdeaSeed {
             kind: match self.from {
                 SeedFrom::TopicMap(_) | SeedFrom::Interest(_) => "interest",
                 SeedFrom::WorkingOn | SeedFrom::Life => "memory",
+                SeedFrom::Screenshot(_) => "screenshot",
             }
             .to_string(),
             label: self.label.clone(),
@@ -219,6 +222,17 @@ pub fn life_seed(
             detail: String::new(),
             query: None,
         })
+}
+
+/// An idea built on what a screenshot showed the member looking at.
+pub fn screenshot_seed(note_id: &str, note: &str) -> IdeaSeed {
+    IdeaSeed {
+        from: SeedFrom::Screenshot(note_id.to_string()),
+        kind: IdeaKind::Interest,
+        label: note.to_string(),
+        detail: String::new(),
+        query: None,
+    }
 }
 
 /// What kind of idea the seed asks for, as both prompts read it.
@@ -388,7 +402,12 @@ fn brief(
         "Kind of idea: {}",
         kind_guidance(seed.kind, name, profile.place.as_deref())
     );
-    if seed.from != SeedFrom::Life {
+    if let SeedFrom::Screenshot(_) = seed.from {
+        out.push_str(&format!(
+            "\nBuilds on: a screenshot {name} took. What it showed: {}",
+            seed.label
+        ));
+    } else if seed.from != SeedFrom::Life {
         out.push_str(&format!("\nBuilds on: {}", seed.label));
         if !seed.detail.is_empty() {
             out.push_str(&format!(" ({})", seed.detail));
@@ -563,6 +582,7 @@ pub fn parse_idea(
     }
     let why = text_of(&map, "why").unwrap_or_else(|| match seed.from {
         SeedFrom::Life => String::new(),
+        SeedFrom::Screenshot(_) => "You took a screenshot of this.".to_string(),
         _ => format!("You follow {}.", seed.label),
     });
     let hook = clipped_at_word(
@@ -995,6 +1015,26 @@ mod tests {
         let message = build_query_message("Jerry", &IdeaProfile::default(), None, &seed());
         assert!(message.contains("Builds on: Toyota Fielder"));
         assert!(!message.contains("About Jerry"));
+
+        let shot = screenshot_seed("n1", "Looking at the Ngong Hills hiking trail");
+        let message = build_query_message("Jerry", &IdeaProfile::default(), None, &shot);
+        assert!(message.contains(
+            "Builds on: a screenshot Jerry took. What it showed: Looking at the Ngong Hills \
+             hiking trail"
+        ));
+        assert_eq!(shot.grounding().kind, "screenshot");
+        let raw = r#"{"title":"Walk the Ngong Hills loop","pitch":"An 11 km ridge walk.","sources":[1],"score":0.8}"#;
+        let idea = parse_idea(
+            raw,
+            "p",
+            &IdeaProfile::default(),
+            &shot,
+            &pages(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(idea.why, "You took a screenshot of this.");
+        assert_eq!(idea.grounded_in[0].kind, "screenshot");
     }
 
     #[test]

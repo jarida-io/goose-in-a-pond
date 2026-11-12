@@ -32,6 +32,7 @@ pub mod reminder_repository;
 pub mod room_registry;
 pub mod schedule_execution;
 pub mod scheduler;
+pub mod screenshot_notes;
 pub mod sensor_storage;
 pub mod session_storage;
 pub mod settings;
