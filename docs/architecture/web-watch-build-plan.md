@@ -205,8 +205,22 @@ of it.
   then, and renders when the encoder is not held.
 - The peak is a sample every tenth of a second, so a shorter spike could be higher.
 
+### On the nano
+
+The household asked for the download on 12 November 2026. `POST /browser/install` fetched the
+headless shell (128 MB) into `/var/lib/goose-in-a-pond/browser`, unpacked it, checked that it
+runs, and `GET /browser` answered `ready` with 685 MB free against the 600 MB it needs.
+
+`scripts/jetson/render-live/render_live.py` then asked the pond, in a conversation with
+Gemma 4 E4B, to read a page that arrives as an empty shell (Hacker News search). The pond's
+log shows the one render: `web_page_rendered ok=true bytes=42524 ms=9876`. The turn took 42
+seconds, the pond stayed healthy, and 715 MB was available afterwards. The answer was drawn
+from the rendered page but was thin: asked for the first three story titles, the model quoted
+one passage and said it could find no more. What the reader picks out of a rendered list for
+a question is the next thing to look at; the browser did its part.
+
 Not done in phase 7:
-- No browser is downloaded on its own: it is 130 MB, so the household starts it. The phone has no button for it yet; the route is there.
+- No browser is downloaded on its own: it is 130 MB, so the household starts it. The phone has no button for it yet; the route is there. A newer build of the browser is not fetched either; `DELETE /browser` then `POST /browser/install` replaces it.
 - Clicking, typing and signing in with a browser are not built. The pond already follows same-site links, sends search forms, and sends other forms after a yes on the phone; a click-driven browser for a small model needs the memory answer first, and its tools would sit in every turn's prompt unless they are a group that is off by default.
 - The browser does its own networking, outside `pond-net`. It is only ever given an address the pond's own fetch already read from the public web, but scripts on that page make their own requests.
 - robots.txt is not read, and fetches are not spaced per site beyond each job's own limits.
