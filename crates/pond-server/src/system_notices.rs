@@ -258,6 +258,24 @@ pub fn proposal_notification(proposal: &Proposal) -> Notification {
     }
 }
 
+/// The member's notification for what Goose did by itself in one run, or `None` when none of it
+/// is worth a buzz. `update`, never `alert`: what Goose did is read, not spoken to the room.
+pub fn goose_activity_notification(
+    did: &[pond_core::shared::domain::goose_activity::GooseActivity],
+) -> Option<Notification> {
+    let (title, body) = pond_core::shared::domain::goose_activity::notice(did)?;
+    let first = did.iter().find(|entry| entry.kind.tells())?;
+    Some(Notification {
+        id: format!("goose-activity-{}", first.id),
+        target: String::new(),
+        category: "update".to_string(),
+        title,
+        body,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data: Some(OpenScreen::GooseActivity.data()),
+    })
+}
+
 /// Tell one member about one proposal on their own phones, never the household's.
 pub async fn notify_proposal(notifier: &dyn MemberNotifier, proposal: &Proposal) -> MemberDelivery {
     let member = proposal.audience().profile_id();

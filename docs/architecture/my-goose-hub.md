@@ -26,8 +26,8 @@ else Goose can do. This document is the contract between the Pond and the phone.
 ## 0. What this Pond serves
 
 `GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
-"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"catalog":bool,
-"cards":[kind]}`. A Pond without the route answers 404 and the phone
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"activity":bool,
+"catalog":bool,"cards":[kind]}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
 
 ## 0a. About you: the member's profile
@@ -63,6 +63,30 @@ follow-ups. `DELETE /me/notes/{id}` → `204`. A member does not write them; Goo
 ([agent-documents.md](agent-documents.md)). The soul, the heartbeat's checklist and the
 scratchpad's rules are read and saved with `GET/PUT /prompts/{soul|heartbeat|scratchpad}` and
 `POST /prompts/{name}/reset`.
+
+## 0b-1. What Goose did by itself
+
+`GET /me/goose/activity` → `{"activity":[Entry], "unseen": n, "seen_at": time|null}`, newest
+first, at most 60. `Entry = {"id","kind","summary","detail": text|null,"at","can_undo": bool,
+"undone": bool}`. `kind` is `reminder` (one it set on their list), `note` and `note_closed`
+(its own follow-ups), `watch_paused` (a watch whose checks kept failing), `suggestion` (something
+it asked them to approve) or `errand` (something it looked up; `detail` is what it found).
+`summary` is one line written for the member.
+
+- `POST /me/goose/activity/seen` → `204`: the member has read the list down to now.
+- `POST /me/goose/activity/{id}/undo` → `{"undone":true}`: the reminder is removed, the note
+  deleted or the watch resumed. `409` for an entry that cannot be taken back or already was,
+  `404` for one that is not theirs.
+
+Only the heartbeat writes entries, after the thing is done. A run that did something the member
+should hear of (a reminder, a paused watch, an errand) sends one notification, category
+`update`, with `{"open":"goose_activity"}`; its own notes and its suggestions do not, the first
+being for itself and the second having a notification of their own. Entries are kept 30 days.
+
+What the heartbeat may do alone is small and reversible or read-only: set a reminder for
+something already theirs (two a run, a few a day), write and close its own notes, pause a watch
+that keeps failing, and look one thing up a run (four a day) with reading tools only. Anything
+that changes a device, spends, sends or schedules is still a suggestion they approve.
 
 ## 0c. The interview
 

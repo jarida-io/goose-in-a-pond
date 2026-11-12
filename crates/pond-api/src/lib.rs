@@ -5,6 +5,7 @@ mod agent_notes;
 pub mod audio_devices;
 mod browser;
 mod camera;
+mod goose_activity;
 pub use pond_infra::hf_cleanup as cleanup;
 pub(crate) mod audio_normalize;
 mod cart;

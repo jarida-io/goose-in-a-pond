@@ -71,9 +71,14 @@ giap_role:
         "source_id": "the device, camera or sensor it came from, or omit",
         "signal": "the reading or event type, or omit",
         "rationale": "why this matters to this person, in one sentence",
-        "suggestion": "what you would ask them about, as one instruction",
+        "suggestion": "what you would do for them if they say yes, as one instruction to yourself",
         "confidence": 0.0 to 1.0
       }
+
+    A suggestion is work they can approve: "Check whether the gate was left
+    open". A question, a greeting or a remark on what happened is not one.
+    Someone being at home, arriving, leaving or moving about is ordinary:
+    never raise it by itself.
 
     Never repeat a suggestion the brief says was already declined.
 
@@ -90,10 +95,92 @@ giap_role:
       "done"     a note of yours is dealt with. Add "text", words from it
       "pause_watch"  stop checking one of their web watches that the brief
                  says keeps failing. Add "text", words from its title
+      "look_into"  find something out for them yourself, after this review:
+                 a price, opening hours, whether something on their list is
+                 still on, what a page now says. Add "text", the question in
+                 full as one instruction. It only reads; they are told what
+                 you found
 
-    "remind", "note", "done" and "pause_watch" need no "suggestion". "note" and
-    "done" need only "do" and "text".
+    "remind", "note", "done", "pause_watch" and "look_into" need no
+    "suggestion". "note" and "done" need only "do" and "text".
 "#;
+
+/// The role name an errand runs under.
+pub const ERRAND_ROLE: &str = "errand-runner";
+
+/// The shipped recipe for what the heartbeat looks up by itself: reading tools only.
+pub const ERRAND_ROLE_RECIPE: &str = r#"
+version: 1.0.0
+title: Errand runner
+description: Finds one thing out for a member and says what it found.
+giap_role:
+  tool_groups:
+    - giap-knowledge
+    - giap-weather
+  personal_data: inherit
+  max_turns: 8
+  context_fraction: 0.5
+  instructions: |
+    You are finding one thing out for the person you work for. Nobody asked
+    in a conversation: you decided it was worth knowing, and they will be
+    told what you found in a notification.
+
+    You only read. You cannot change, save, book, buy, send or schedule
+    anything, and you do not try.
+
+    You have no clock. The current time is stated in the brief.
+
+    Look it up with your tools, in at most five calls, then answer. Answer in
+    plain text of at most 100 words, as you would tell them yourself: what you
+    found, with the names, numbers, times and places that matter. No headings,
+    no lists, no links unless one is the answer. If you could not find it out,
+    say so in one line and say what you tried.
+"#;
+
+/// The knowledge tools an errand is not offered: each writes something of the member's.
+pub const ERRAND_TOOLS_WITHHELD: &[&str] =
+    &["giap-knowledge__web_watch", "giap-knowledge__saved_items"];
+
+/// Build the shipped errand role.
+pub fn errand_role() -> Result<AgentRole, RoleError> {
+    AgentRole::from_recipe_yaml(ERRAND_ROLE, ERRAND_ROLE_RECIPE)?.ok_or(RoleError::Yaml {
+        role: ERRAND_ROLE.to_string(),
+        message: format!("the shipped recipe has no `{ROLE_YAML_KEY}` block"),
+    })
+}
+
+/// What an errand's child is told: the question, why it matters and the time.
+pub fn errand_brief(text: &str, why: &str, now: DateTime<Utc>, zone: chrono_tz::Tz) -> String {
+    let mut brief = format!("Find out: {}\n", text.trim());
+    if !why.trim().is_empty() {
+        brief.push_str(&format!("Why it matters to them: {}\n", why.trim()));
+    }
+    brief.push_str(&format!(
+        "For the person it is {}.\n",
+        now.with_timezone(&zone).format("%A %-d %B %Y, %H:%M")
+    ));
+    brief
+}
+
+/// Authorise one errand under the review's own authority, which the loop keeps alive for it.
+pub fn plan_errand(
+    role: &AgentRole,
+    audience: &ProposalAudience,
+    session_id: &str,
+    brief: &str,
+) -> Result<TaskSpec, DelegationRefused> {
+    Ok(review_authority(audience, session_id)
+        .delegate(
+            role,
+            TaskRequest {
+                role: role.name().to_string(),
+                instructions: brief.to_string(),
+                inputs: serde_json::json!({}),
+                background: false,
+            },
+        )?
+        .withholding(ERRAND_TOOLS_WITHHELD.iter().copied()))
+}
 
 /// Build the shipped reviewer role; fallible so a recipe typo is a refusal, not a loop panic.
 pub fn proactive_reviewer_role() -> Result<AgentRole, RoleError> {
@@ -389,19 +476,51 @@ pub fn brief_events(audience: &ProposalAudience, observed: &[BusEventRef]) -> Ve
 /// The brief a review is given. States the time since subagents lack `get_current_time`; lists
 /// declines to save a turn, though [`interpret_answer`] enforces them regardless.
 pub fn review_brief(now: DateTime<Utc>, recent: &[BusEventRef], ledger: &FeedbackLedger) -> String {
-    let mut brief = format!(
-        "The current time is {} (UTC). Review what has happened and answer with the JSON array.\n",
-        now.to_rfc3339()
-    );
+    brief_in(now, None, recent, ledger)
+}
+
+/// The brief with every time in `zone`, the member's own, or in UTC and marked so. A model
+/// shown both reads one as the other.
+fn brief_in(
+    now: DateTime<Utc>,
+    zone: Option<chrono_tz::Tz>,
+    recent: &[BusEventRef],
+    ledger: &FeedbackLedger,
+) -> String {
+    let mut brief = match zone {
+        Some(zone) => format!(
+            "For the person it is {}. Every time below is their own. Review what has happened \
+             and answer with the JSON array.\n",
+            now.with_timezone(&zone).format("%A %-d %B %Y, %H:%M")
+        ),
+        None => format!(
+            "The current time is {} (UTC). Review what has happened and answer with the JSON \
+             array.\n",
+            now.to_rfc3339()
+        ),
+    };
     if recent.is_empty() {
         brief.push_str("\nNothing has been observed since the last review.\n");
     } else {
         brief.push_str("\nRecent events:\n");
         for event in recent {
+            let at = match zone {
+                Some(zone) => {
+                    let (seen, today) = (
+                        event.observed_at().with_timezone(&zone),
+                        now.with_timezone(&zone),
+                    );
+                    if seen.date_naive() == today.date_naive() {
+                        seen.format("%H:%M").to_string()
+                    } else {
+                        seen.format("%H:%M on %-d %B").to_string()
+                    }
+                }
+                None => event.observed_at().to_rfc3339(),
+            };
             brief.push_str(&format!(
-                "- {} at {}\n",
+                "- {} at {at}\n",
                 TriggerIdentity::of(event).describe(),
-                event.observed_at().to_rfc3339()
             ));
         }
     }
@@ -426,11 +545,7 @@ pub fn heartbeat_brief(
     notes: &[crate::shared::domain::agent_note::AgentNote],
     watches: &[WatchLine],
 ) -> String {
-    let mut brief = review_brief(now, recent, ledger);
-    brief.push_str(&format!(
-        "\nFor the person it is {}.\n",
-        now.with_timezone(&zone).format("%A %-d %B %Y, %H:%M")
-    ));
+    let mut brief = brief_in(now, Some(zone), recent, ledger);
     let checklist = crate::prompts::sanitize_document(checklist);
     if !checklist.is_empty() {
         brief.push_str("\nYour checklist:\n");
@@ -511,6 +626,8 @@ pub enum HeartbeatAct {
     /// A web watch of the member's that keeps failing is paused, named by words from its title.
     /// Starting or resuming a watch is never an act: the member approves that.
     PauseWatch { words: String },
+    /// Something Goose finds out by itself, reading only, and then tells the member.
+    LookInto { text: String, why: String },
 }
 
 /// Reminders one run may set.
@@ -521,6 +638,10 @@ pub const MAX_REMINDERS_PER_DAY: usize = 3;
 pub const MAX_NOTES_PER_RUN: usize = 3;
 /// Web watches one run may pause.
 pub const MAX_WATCHES_PAUSED_PER_RUN: usize = 1;
+/// Things one run may look into: each costs the model a few minutes.
+pub const MAX_ERRANDS_PER_RUN: usize = 1;
+/// Things looked into for one member in a day.
+pub const MAX_ERRANDS_PER_DAY: usize = 4;
 
 /// One of the member's web watches, as the heartbeat's brief lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,6 +745,8 @@ pub struct ActAllowance {
     pub notes: usize,
     /// Web watches this run may pause.
     pub watches: usize,
+    /// Things this run may look into.
+    pub errands: usize,
     /// The member's time zone, which "tomorrow at 8am" is read in.
     pub zone: chrono_tz::Tz,
 }
@@ -635,6 +758,7 @@ impl ActAllowance {
             reminders_today: MAX_REMINDERS_PER_DAY,
             notes: 0,
             watches: 0,
+            errands: 0,
             zone: chrono_tz::UTC,
         }
     }
@@ -645,8 +769,15 @@ impl ActAllowance {
             reminders_today,
             notes: MAX_NOTES_PER_RUN,
             watches: MAX_WATCHES_PAUSED_PER_RUN,
+            errands: 0,
             zone,
         }
+    }
+
+    /// With room to look things into, for a member who has had `errands_today` already.
+    pub fn with_errands(mut self, errands_today: usize) -> Self {
+        self.errands = MAX_ERRANDS_PER_RUN.min(MAX_ERRANDS_PER_DAY.saturating_sub(errands_today));
+        self
     }
 }
 
@@ -692,6 +823,10 @@ fn act_of(
         "pause_watch" | "pause watch" | "stop_watch" => {
             Ok(Some(HeartbeatAct::PauseWatch { words: text()? }))
         }
+        "look_into" | "look into" | "find_out" | "look_up" => Ok(Some(HeartbeatAct::LookInto {
+            text: text()?,
+            why: impulse.rationale.trim().to_string(),
+        })),
         _ => Err("it asks for something the heartbeat does not do"),
     }
 }
@@ -794,6 +929,12 @@ pub fn interpret_heartbeat(
                             .count(),
                         allowance.watches,
                     ),
+                    HeartbeatAct::LookInto { .. } => (
+                        acts.iter()
+                            .filter(|a| matches!(a, HeartbeatAct::LookInto { .. }))
+                            .count(),
+                        allowance.errands,
+                    ),
                 };
                 if made >= cap {
                     refusals.push(ImpulseRefused::OverCap {
@@ -811,6 +952,14 @@ pub fn interpret_heartbeat(
             refusals.push(ImpulseRefused::Unreadable {
                 index,
                 message: "a suggestion with no words".to_string(),
+            });
+            continue;
+        }
+        // A proposal is run when approved; a question has nothing to run.
+        if impulse.suggestion.trim().ends_with('?') {
+            refusals.push(ImpulseRefused::Unreadable {
+                index,
+                message: "a question, not something to do".to_string(),
             });
             continue;
         }
@@ -1957,6 +2106,124 @@ mod tests {
         assert_eq!(shape, "a! a a a: {\"action\": \"a\", \"text\": \"a\"}");
         assert_eq!(answer_shape("Nothing to raise today.", 9), "a a a a.");
         assert_eq!(answer_shape("\"", 9), "\"a\"");
+    }
+
+    #[test]
+    fn the_heartbeat_looks_one_thing_into_a_run_and_a_few_a_day() {
+        let now = Utc::now();
+        let body = r#"[
+            {"do":"look_into","text":"When does the Karura Forest gate open on Saturday?",
+             "rationale":"they plan to walk there","confidence":0.8},
+            {"do":"look_into","text":"What the pool costs","confidence":0.8}]"#;
+        let run = |errands_today: usize| {
+            interpret_heartbeat(
+                &answer(body),
+                &audience(),
+                now,
+                &FeedbackLedger::empty(),
+                0,
+                ActAllowance::for_heartbeat(0, chrono_tz::UTC).with_errands(errands_today),
+            )
+        };
+        let out = run(0);
+        assert_eq!(
+            out.acts,
+            vec![HeartbeatAct::LookInto {
+                text: "When does the Karura Forest gate open on Saturday?".to_string(),
+                why: "they plan to walk there".to_string(),
+            }]
+        );
+        assert!(matches!(
+            out.refusals.as_slice(),
+            [ImpulseRefused::OverCap {
+                index: 1,
+                allowance: 1
+            }]
+        ));
+        assert!(run(MAX_ERRANDS_PER_DAY).acts.is_empty(), "the day is spent");
+        // A review that only proposes looks nothing into.
+        let plain = interpret_answer(&answer(body), &audience(), now, &FeedbackLedger::empty(), 0);
+        assert!(plain.acts.is_empty());
+    }
+
+    #[test]
+    fn an_errand_reads_and_never_writes() {
+        let role = errand_role().unwrap();
+        assert_eq!(role.name(), ERRAND_ROLE);
+        let groups: Vec<&str> = role
+            .requested_tool_groups()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(groups, vec!["giap-knowledge", "giap-weather"]);
+        for group in &groups {
+            assert!(
+                PROACTIVE_ROOT_GROUPS.contains(group),
+                "{group} is past the ceiling"
+            );
+        }
+        assert!(ERRAND_TOOLS_WITHHELD.contains(&"giap-knowledge__web_watch"));
+
+        let zone: chrono_tz::Tz = "Africa/Nairobi".parse().unwrap();
+        let at = "2026-11-12T19:30:00Z".parse().unwrap();
+        let brief = errand_brief(" when the pool opens ", "they swim on Fridays", at, zone);
+        assert_eq!(
+            brief,
+            "Find out: when the pool opens\nWhy it matters to them: they swim on Fridays\n\
+             For the person it is Thursday 12 November 2026, 22:30.\n"
+        );
+        let spec = plan_errand(&role, &audience(), "sched-proactive-review-r1", &brief).unwrap();
+        assert_eq!(spec.role(), ERRAND_ROLE);
+    }
+
+    #[test]
+    fn a_question_or_a_remark_is_not_a_suggestion() {
+        let body = r#"[{"trigger_kind":"device","source_id":"room","signal":"person",
+            "rationale":"someone came home","suggestion":"Did you know someone arrived home at 8pm?",
+            "confidence":0.9}]"#;
+        let out = interpret_answer(
+            &answer(body),
+            &audience(),
+            Utc::now(),
+            &FeedbackLedger::empty(),
+            0,
+        );
+        assert!(out.proposals.is_empty());
+        assert!(matches!(
+            out.refusals.as_slice(),
+            [ImpulseRefused::Unreadable { index: 0, .. }]
+        ));
+    }
+
+    #[test]
+    fn a_heartbeat_is_briefed_in_the_members_own_time_only() {
+        let zone: chrono_tz::Tz = "Africa/Nairobi".parse().unwrap();
+        let now: DateTime<Utc> = "2026-11-12T20:04:00Z".parse().unwrap();
+        let seen = |at: &str| {
+            BusEventRef::new(
+                "camera",
+                Some("front-door".into()),
+                Some("person".into()),
+                at.parse().unwrap(),
+            )
+            .unwrap()
+        };
+        let brief = heartbeat_brief(
+            now,
+            zone,
+            &[seen("2026-11-12T19:40:00Z"), seen("2026-11-11T05:15:00Z")],
+            &FeedbackLedger::empty(),
+            "",
+            &[],
+            &[],
+        );
+        assert!(brief.starts_with("For the person it is Thursday 12 November 2026, 23:04."));
+        assert!(brief.contains("(person) at 22:40\n"));
+        assert!(brief.contains("(person) at 08:15 on 11 November\n"));
+        assert!(
+            !brief.contains("UTC") && !brief.contains("T20:04"),
+            "{brief}"
+        );
     }
 
     #[test]

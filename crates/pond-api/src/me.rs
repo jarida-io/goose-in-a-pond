@@ -69,6 +69,7 @@ async fn hub() -> Json<Value> {
         "connectors": crate::connectors::SERVED,
         "ideas": crate::ideas::SERVED,
         "screenshots": true,
+        "activity": crate::goose_activity::SERVED,
         "catalog": crate::catalog::SERVED,
         "cards": crate::context_cards::KINDS,
     }))
@@ -80,6 +81,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .route("/me/hub", get(hub))
         .merge(crate::about_me::routes())
         .merge(crate::agent_notes::routes())
+        .merge(crate::goose_activity::routes())
         .merge(crate::interests::routes())
         .merge(crate::member_interview::routes())
         .merge(crate::news::routes())

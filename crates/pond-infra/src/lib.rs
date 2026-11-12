@@ -31,6 +31,7 @@ pub mod sqlite_device_registry;
 pub mod sqlite_draft;
 pub mod sqlite_event_log;
 pub mod sqlite_face_recognition;
+pub mod sqlite_goose_activity;
 pub mod sqlite_handshake;
 pub mod sqlite_hook_event_sink;
 pub mod sqlite_ideas;

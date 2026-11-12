@@ -3885,6 +3885,9 @@ async fn run_server(
                 watches: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
                     db.system.clone(),
                 )),
+                activity: Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+                    db.system.clone(),
+                )),
             },
         ));
     }
@@ -6955,6 +6958,7 @@ struct HeartbeatDeps {
     notes: Arc<dyn pond_core::shared::ports::agent_notes::AgentNotesRepository>,
     todos: Arc<dyn pond_core::shared::ports::todo::TodoRepository>,
     watches: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository>,
+    activity: Arc<dyn pond_core::shared::ports::goose_activity::GooseActivityRepository>,
 }
 
 impl HeartbeatDeps {
@@ -7034,10 +7038,12 @@ impl HeartbeatDeps {
         open_notes: &[pond_core::shared::domain::agent_note::AgentNote],
         now: chrono::DateTime<chrono::Utc>,
         zone: pond_core::shared::domain::todo::Tz,
-    ) {
+    ) -> Vec<pond_core::shared::domain::goose_activity::GooseActivity> {
         use pond_core::shared::domain::agent_note::{
             dropped_for_room, same_note, AgentNote, NoteKind,
         };
+        use pond_core::shared::domain::goose_activity::GooseActivity;
+        let mut did: Vec<GooseActivity> = Vec::new();
         use pond_core::shared::domain::todo::{
             new_todo, rfc3339, HookCatalog, HookSource, TodoSource,
         };
@@ -7063,18 +7069,34 @@ impl HeartbeatDeps {
                     let made =
                         match new_todo(member, &body, &catalog, TodoSource::Goose, None, now, zone)
                         {
-                            Ok(todo) => self.todos.create(&todo).await.map_err(|e| e.to_string()),
+                            Ok(todo) => self
+                                .todos
+                                .create(&todo)
+                                .await
+                                .map(|()| todo.id.clone())
+                                .map_err(|e| e.to_string()),
                             Err(e) => Err(e.0),
                         };
                     match made {
                         // Counts and kinds only: what it reminds of stays out of the log.
-                        Ok(()) => tracing::info!(
-                            target: "giap::trace",
-                            kind = "heartbeat_act",
-                            act = "remind",
-                            member = %member,
-                            "the heartbeat set a reminder"
-                        ),
+                        Ok(todo_id) => {
+                            did.push(GooseActivity::reminder(
+                                member,
+                                text,
+                                &due.with_timezone(&zone)
+                                    .format("%a %-d %b, %H:%M")
+                                    .to_string(),
+                                &todo_id,
+                                now,
+                            ));
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "remind",
+                                member = %member,
+                                "the heartbeat set a reminder"
+                            )
+                        }
                         Err(error) => tracing::warn!(
                             %error,
                             "heartbeat: a reminder it decided on could not be set"
@@ -7100,14 +7122,18 @@ impl HeartbeatDeps {
                         text: text.clone(),
                         created_at: now,
                     };
+                    let note_id = note.id.clone();
                     match self.notes.add(note).await {
-                        Ok(()) => tracing::info!(
-                            target: "giap::trace",
-                            kind = "heartbeat_act",
-                            act = "note",
-                            member = %member,
-                            "the heartbeat wrote itself a note"
-                        ),
+                        Ok(()) => {
+                            did.push(GooseActivity::note(member, text, &note_id, now));
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "note",
+                                member = %member,
+                                "the heartbeat wrote itself a note"
+                            )
+                        }
                         Err(error) => {
                             tracing::warn!(%error, "heartbeat: a note could not be kept")
                         }
@@ -7130,6 +7156,7 @@ impl HeartbeatDeps {
                     // Only when the words fit one note: a guess would close the wrong one.
                     if let [note] = fits.as_slice() {
                         if self.notes.remove(&note.id, &scope).await.unwrap_or(false) {
+                            did.push(GooseActivity::note_closed(member, &note.text, now));
                             tracing::info!(
                                 target: "giap::trace",
                                 kind = "heartbeat_act",
@@ -7178,6 +7205,13 @@ impl HeartbeatDeps {
                             created_at: now,
                         };
                         let _ = self.notes.add(told).await;
+                        did.push(GooseActivity::watch_paused(
+                            member,
+                            &watch.title,
+                            watch.failures,
+                            &watch.id,
+                            now,
+                        ));
                         tracing::info!(
                             target: "giap::trace",
                             kind = "heartbeat_act",
@@ -7187,8 +7221,11 @@ impl HeartbeatDeps {
                         );
                     }
                 }
+                // Looked into by the loop itself, which holds the model.
+                HeartbeatAct::LookInto { .. } => {}
             }
         }
+        did
     }
 }
 
@@ -7229,6 +7266,13 @@ async fn run_proactive_reviewer(
         Ok(role) => role,
         Err(e) => {
             tracing::error!(error = %e, "proactive reviewer: shipped role does not parse");
+            return;
+        }
+    };
+    let errand_role = match review::errand_role() {
+        Ok(role) => role,
+        Err(e) => {
+            tracing::error!(error = %e, "proactive reviewer: the errand role does not parse");
             return;
         }
     };
@@ -7462,14 +7506,11 @@ async fn run_proactive_reviewer(
         };
 
         let run = orchestrator.spawn(spec).await;
-        watcher.abort();
-        drop(lease);
-        // Spends the interval (failures too, or retries churn) and frees the model early.
-        drop(slot);
 
         let run = match run {
             Ok(run) => run,
             Err(e) => {
+                watcher.abort();
                 tracing::warn!(error = %e, "proactive reviewer: the run did not start");
                 continue;
             }
@@ -7480,13 +7521,22 @@ async fn run_proactive_reviewer(
         let reminders_today = heartbeat
             .reminders_set_since(audience.profile_id(), acted_at - chrono::Duration::days(1))
             .await;
+        let errands_today = heartbeat
+            .activity
+            .count_since(
+                audience.profile_id(),
+                pond_core::shared::domain::goose_activity::ActivityKind::Errand,
+                acted_at - chrono::Duration::days(1),
+            )
+            .await
+            .unwrap_or(review::MAX_ERRANDS_PER_DAY);
         let yielded = review::interpret_heartbeat(
             &run,
             &audience,
             acted_at,
             &ledger,
             proposals_today,
-            review::ActAllowance::for_heartbeat(reminders_today, zone),
+            review::ActAllowance::for_heartbeat(reminders_today, zone).with_errands(errands_today),
         );
         for refusal in &yielded.refusals {
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
@@ -7503,7 +7553,7 @@ async fn run_proactive_reviewer(
             error = run.error.as_deref().unwrap_or(""),
             "a heartbeat ended"
         );
-        heartbeat
+        let mut did = heartbeat
             .carry_out(
                 audience.profile_id(),
                 &yielded.acts,
@@ -7512,6 +7562,55 @@ async fn run_proactive_reviewer(
                 zone,
             )
             .await;
+
+        // What it looks into runs here, while the review still holds the model and its lease.
+        for act in &yielded.acts {
+            let review::HeartbeatAct::LookInto { text, why } = act else {
+                continue;
+            };
+            if cancel.is_cancelled() {
+                break;
+            }
+            let brief = review::errand_brief(text, why, chrono::Utc::now(), zone);
+            let spec = match review::plan_errand(&errand_role, &audience, &session_id, &brief) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "heartbeat: an errand was refused");
+                    continue;
+                }
+            };
+            let started = std::time::Instant::now();
+            let errand = orchestrator.spawn(spec).await;
+            let answer = errand
+                .as_ref()
+                .ok()
+                .and_then(|run| run.result_for_parent())
+                .map(str::trim)
+                .filter(|answer| !answer.is_empty());
+            // Counts and the run's state only: neither the question nor the answer is logged.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "heartbeat_errand",
+                status = ?errand.as_ref().map(|run| run.status).ok(),
+                answered = answer.is_some(),
+                ms = started.elapsed().as_millis() as u64,
+                "the heartbeat looked something into"
+            );
+            if let Some(answer) = answer {
+                did.push(
+                    pond_core::shared::domain::goose_activity::GooseActivity::errand(
+                        audience.profile_id(),
+                        text,
+                        answer,
+                        chrono::Utc::now(),
+                    ),
+                );
+            }
+        }
+        watcher.abort();
+        drop(lease);
+        // Spends the interval (failures too, or retries churn) and frees the model.
+        drop(slot);
 
         // WARN: all-refused is a defect in a run that answered; one cut short for a turn is not,
         // and a run with nothing to say returns an empty array.
@@ -7556,7 +7655,37 @@ async fn run_proactive_reviewer(
                 failed = report.failed.len(),
                 "proposal made"
             );
+            did.push(
+                pond_core::shared::domain::goose_activity::GooseActivity::suggestion(
+                    audience.profile_id(),
+                    &proposal.summary(),
+                    proposal.id(),
+                    acted_at,
+                ),
+            );
         }
+
+        // What it did is kept for the member to read and take back, and told in one notice.
+        for entry in &did {
+            if let Err(e) = heartbeat.activity.add(entry).await {
+                tracing::warn!(error = %e, "heartbeat: what it did could not be recorded");
+            }
+        }
+        if let Some(notice) = pond_server::system_notices::goose_activity_notification(&did) {
+            let report = sender.send_to_profile(audience.profile_id(), notice).await;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "heartbeat_told",
+                did = did.len(),
+                queued = report.queued.len(),
+                failed = report.failed.len(),
+                "the member was told what the heartbeat did"
+            );
+        }
+        let _ = heartbeat
+            .activity
+            .prune(acted_at - pond_core::shared::domain::goose_activity::ACTIVITY_KEPT)
+            .await;
     }
 }
 
