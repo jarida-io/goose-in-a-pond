@@ -38,6 +38,15 @@ const LEARNED_FILE: &str = "learned.json";
 /// How long a switch to the built-in network waits before stopping the tunnel, so the answer
 /// reaches a phone that asked through it.
 const HANDOVER_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// Waits before each new attempt when ngrok refuses or drops a session: it refuses a session
+/// opened right after the last one closed, and a dropped tunnel should come back on its own.
+const RETRY_AFTER: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(3),
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+];
+/// How long a tunnel has to run before a drop no longer counts against its attempts.
+const STEADY_FOR: std::time::Duration = std::time::Duration::from_secs(120);
 /// ngrok's agent endpoint, which the session dials; checked against the network mode first.
 const NGROK_AGENT: &str = "https://connect.ngrok-agent.com";
 const LONGEST_ERROR: usize = 300;
@@ -328,8 +337,31 @@ impl Tunnel {
         };
         let tunnel = self.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) = tunnel.run(&token, &config, router).await {
-                tunnel.fail(redact(&format!("{error:#}"), &token));
+            let mut attempt = 0;
+            loop {
+                let started = std::time::Instant::now();
+                let Err(error) = tunnel.run(&token, &config, router.clone()).await else {
+                    return;
+                };
+                let reason = redact(&format!("{error:#}"), &token);
+                // A tunnel that ran a while has earned fresh attempts after it drops.
+                if started.elapsed() >= STEADY_FOR {
+                    attempt = 0;
+                }
+                let Some(wait) = RETRY_AFTER.get(attempt) else {
+                    return tunnel.fail(reason);
+                };
+                attempt += 1;
+                tracing::warn!(
+                    target: "giap::trace",
+                    kind = "remote_tunnel_retry",
+                    attempt,
+                    %reason,
+                    "the ngrok session ended; trying again in {}s",
+                    wait.as_secs()
+                );
+                tunnel.set_status(Status::Starting);
+                tokio::time::sleep(*wait).await;
             }
         });
         *running = Some(task);
@@ -609,6 +641,10 @@ pub fn management(tunnel: Arc<Tunnel>, credential: pond_api::host_guard::HostCre
             "/api/v1/remote-access/ngrok/token",
             put(set_token).delete(forget_token),
         )
+        .route(
+            "/api/v1/remote-access/route",
+            get(host_route_status).put(host_choose_route),
+        )
         .with_state(tunnel)
         .route_layer(middleware::from_fn_with_state(credential, host_only))
         .layer(middleware::from_fn(pond_api::middleware::log_requests))
@@ -657,6 +693,18 @@ async fn describe(tunnel: &Tunnel) -> Response {
             format!("{error:#}"),
         ),
     }
+}
+
+async fn host_route_status(State(tunnel): State<Arc<Tunnel>>) -> Response {
+    describe_for_phone(&tunnel, true).await
+}
+
+/// The Pond's own screen switching routes: the phone's rules, from home.
+async fn host_choose_route(
+    State(tunnel): State<Arc<Tunnel>>,
+    Json(choice): Json<RouteChoice>,
+) -> Response {
+    apply_route(&tunnel, choice, true, "pond").await
 }
 
 async fn status(State(tunnel): State<Arc<Tunnel>>) -> Response {
@@ -863,6 +911,17 @@ async fn choose_route(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Re
             "Send {\"route\": \"built_in\" | \"ngrok\"}",
         );
     };
+    apply_route(&tunnel, choice, home, "phone").await
+}
+
+/// Switch the way in, keeping one on: the same rules for a phone and for the Pond's own screen,
+/// which is always at home.
+async fn apply_route(
+    tunnel: &Arc<Tunnel>,
+    choice: RouteChoice,
+    home: bool,
+    chosen_on: &'static str,
+) -> Response {
     let mut config = match tunnel.config() {
         Ok(config) => config,
         Err(error) => {
@@ -926,7 +985,8 @@ async fn choose_route(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Re
         route = ?choice.route,
         at_home = home,
         reserved = config.reserved(),
-        "a phone chose how it reaches the Pond from outside"
+        chosen_on,
+        "the household chose how phones reach the Pond from outside"
     );
     match choice.route {
         Route::Ngrok => {
@@ -957,7 +1017,7 @@ async fn choose_route(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Re
             });
         }
     }
-    describe_for_phone(&tunnel, home).await
+    describe_for_phone(tunnel, home).await
 }
 
 async fn phone_set_token(State(tunnel): State<Arc<Tunnel>>, request: Request) -> Response {

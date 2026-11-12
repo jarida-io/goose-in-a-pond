@@ -2216,6 +2216,16 @@ export type NgrokTunnelStatus =
   | { state: "running"; address: string }
   | { state: "failed"; reason: string };
 
+/** `GET /api/v1/remote-access/route`: which way phones reach the Pond from outside. */
+export interface RemoteRouteState {
+  route: "built_in" | "ngrok";
+  tokenSet: boolean;
+  reserved: boolean;
+  status: NgrokTunnelStatus;
+  fallback: string | null;
+  builtInRunning: boolean;
+}
+
 export interface NgrokTunnelState {
   config: NgrokTunnelConfig;
   /** A new address phones have not learned; the built-in network stands in meanwhile. */

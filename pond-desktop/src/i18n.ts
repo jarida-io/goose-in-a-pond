@@ -60,6 +60,8 @@ void i18n.use(initReactI18next).init({
     replacesTailnet: 'Starting the tunnel turns the built-in remote network off.',
     ngrokRunning: 'Your ngrok tunnel is running. Phones use one way in at a time, so it stops when you switch.',
     switchToBuiltIn: 'Stop the tunnel and use the built-in network',
+    switching: 'Switching the way phones reach this Pond…',
+    routeSwitchFailed: 'Could not switch. The way in that was on is still on; try again.',
     fallback: "ngrok gave the Pond a new address when the tunnel restarted, and phones away from home don't know it yet. The built-in network is back on meanwhile. Turn the tunnel off and on again here to use the new address; phones learn it the next time they're home.",
     switchFailed: 'The tunnel did not stop, so nothing changed. Try again, or stop it from the ngrok option.',
     unavailable: 'The tunnel settings could not be read.',

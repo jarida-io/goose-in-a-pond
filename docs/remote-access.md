@@ -177,7 +177,14 @@ fields with `422`. It answers:
 The alternative to the built-in remote network, chosen on **Pairing, Remote access**. The
 household signs up with ngrok, stores its authtoken on the Pond, and starts the tunnel; the
 Pond opens it from `crates/pond-server/src/remote_tunnel.rs`. Starting it turns the built-in
-network off: one way out at a time, except while the Pond falls back (below).
+network off: one way out at a time, except while the Pond falls back (below). Choosing the
+other route while remote access is on moves it there (`PUT /api/v1/remote-access/route` on the
+loopback dashboard, the phone's rules from home) instead of leaving both off.
+
+If ngrok refuses or drops the session, the Pond tries again after 3, 10 and 30 seconds
+(`remote_tunnel_retry`) before reporting `remote_tunnel_failed`. ngrok refuses a session opened
+right after the previous one closed, which a quick switch back and forth does. A tunnel that ran
+for two minutes before dropping gets its three attempts again.
 
 What stays the same for a phone: it pins the same key and checks the host name. ngrok never
 decrypts the traffic. The endpoint is a TCP address, or a TLS endpoint on a reserved domain,
