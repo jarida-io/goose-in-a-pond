@@ -121,8 +121,12 @@ async fn make_app(device_count: usize) -> Harness {
         profile_repo: profiles.clone(),
         device_registry: devices,
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
-        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
-        guest_device_access: Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -288,6 +292,7 @@ async fn compose_for(h: &Harness, member: &str, memory_id: &str, prompt: &str) {
             profile_id: Some(member.to_string()),
             prompt: prompt.to_string(),
             reason: "From something you told me, saved 3 days ago.".to_string(),
+            fact: "a private note".to_string(),
         }])
         .await
         .unwrap();

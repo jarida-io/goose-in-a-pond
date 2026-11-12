@@ -13,6 +13,8 @@ pub mod face_embedding_extractor;
 pub mod face_recognition;
 pub mod guest_device_access;
 pub mod guest_room_access;
+pub mod ideas;
+pub mod interests;
 pub mod lane_control;
 pub mod lane_run_log;
 pub mod last_action;

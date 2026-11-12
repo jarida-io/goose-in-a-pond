@@ -179,6 +179,64 @@ impl ReminderRepository for SqliteReminderRepository {
             .with_context(|| format!("disposing of reminder {id}"))?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn offer(&self, id: &str, at: DateTime<Utc>) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE reminders SET disposition = 'offered', decided_at = ?, offered_at = ? \
+             WHERE id = ? AND disposition = 'pending' AND profile_id IS NOT NULL",
+        )
+        .bind(sql_ts(at))
+        .bind(sql_ts(at))
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("offering reminder {id}"))?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn offered_to(&self, profile_id: &str) -> Result<Vec<CapturedReminder>> {
+        let sql = format!(
+            "SELECT {REMINDER_COLUMNS} FROM reminders \
+             WHERE disposition = 'offered' AND profile_id = ? ORDER BY said_at DESC, rowid DESC"
+        );
+        let rows: Vec<ReminderRow> = sqlx::query_as::<_, ReminderRow>(&sql)
+            .bind(profile_id)
+            .fetch_all(&self.pool)
+            .await
+            .context("listing offered reminders")?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row_to_reminder(row) {
+                Ok(reminder) => Some(reminder),
+                Err(e) => {
+                    tracing::warn!("[reminders] skipping an unreadable row: {e}");
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// `disposition = 'offered'` in the WHERE: an Add and a No racing settle it once.
+    async fn settle_offer(
+        &self,
+        profile_id: &str,
+        id: &str,
+        accepted: bool,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE reminders SET disposition = ?, decided_at = ? \
+             WHERE id = ? AND profile_id = ? AND disposition = 'offered'",
+        )
+        .bind(if accepted { "accepted" } else { "dismissed" })
+        .bind(sql_ts(at))
+        .bind(id)
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("settling the offer of reminder {id}"))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]

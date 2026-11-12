@@ -191,14 +191,7 @@ async fn a_room_starts_guest_inaccessible_and_can_be_toggled() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["guest_accessible"], true);
 
-    let (status, body) = send(
-        &h.lan,
-        Method::GET,
-        "/api/v1/rooms",
-        None,
-        &token,
-    )
-    .await;
+    let (status, body) = send(&h.lan, Method::GET, "/api/v1/rooms", None, &token).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let rooms = body["rooms"].as_array().unwrap();
     assert_eq!(rooms[0]["guest_accessible"], true);

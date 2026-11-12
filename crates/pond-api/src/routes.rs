@@ -210,6 +210,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(mark_notification_history_read),
         )
         .route("/models/download/control", post(download_control))
+        // A webhook connector's call: its token is the credential (PUBLIC_ROUTES).
+        .route(
+            "/hooks/in/{token}",
+            post(crate::connectors::hook_in).layer(axum::extract::DefaultBodyLimit::max(
+                crate::connectors::HOOK_BODY_LIMIT,
+            )),
+        )
         .route("/models/{category}/{name}/download", post(download_model))
         .route("/models/{category}/{name}/activate", post(activate_model));
 
@@ -328,10 +335,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/profiles", get(list_profiles))
         .route("/profiles/{id}", get(get_profile).delete(delete_profile))
         .route("/profiles/{id}/role", put(set_profile_role))
-        .route(
-            "/profiles/{id}/devices",
-            get(list_guest_device_access),
-        )
+        .route("/profiles/{id}/devices", get(list_guest_device_access))
         .route(
             "/profiles/{id}/devices/{device_id}",
             put(allow_guest_device).delete(revoke_guest_device),
@@ -715,6 +719,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .put(put_profile_threshold_handler)
                 .delete(delete_profile_threshold_handler),
         )
+        .merge(crate::me::routes())
         .route("/faces/debug/pairwise", get(face_pairwise_debug))
         .route("/faces/debug/eval", get(face_eval_debug))
         .route("/faces/models", get(list_face_models_handler))
@@ -1862,8 +1867,8 @@ async fn reset_onboarding(
     // (added as setup steps run) with no owner settled yet (that's fixed by completion, which
     // is also when the migration's backfill source, `primary_profile_id`, gets set); requiring
     // an owner before then would lock the claimant out of its own in-progress setup.
-    let onboarded = state.skip_onboarding
-        || state.onboarding_repo.is_complete().await.unwrap_or(true);
+    let onboarded =
+        state.skip_onboarding || state.onboarding_repo.is_complete().await.unwrap_or(true);
     let host_presented = crate::host_guard::presents_credential(
         credential.as_ref().map(|axum::Extension(c)| c),
         &headers,
@@ -1919,7 +1924,9 @@ async fn factory_reset(
     use pond_core::network::services::factory_reset::{
         FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
     };
-    use pond_core::user_data::services::household_permission::{may_reset_pond, PermissionDecision};
+    use pond_core::user_data::services::household_permission::{
+        may_reset_pond, PermissionDecision,
+    };
 
     let role = resolve_role_from_principal(&state, principal.as_ref()).await;
     if let PermissionDecision::Denied {
@@ -1967,7 +1974,8 @@ async fn factory_reset(
         }),
     };
 
-    let result = FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await;
+    let result =
+        FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await;
     if let Some(progress) = &state.factory_reset_progress {
         progress.clear();
     }
@@ -1994,7 +2002,10 @@ async fn factory_reset(
 async fn factory_reset_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     use pond_core::network::services::factory_reset::FactoryResetStep;
 
-    let step = state.factory_reset_progress.as_ref().and_then(|p| p.current());
+    let step = state
+        .factory_reset_progress
+        .as_ref()
+        .and_then(|p| p.current());
     Json(match step {
         Some(step) => json!({
             "active": true,
@@ -5697,7 +5708,9 @@ async fn unregister_device(
     use pond_core::user_data::ports::device_commissioning::{
         matter_bridged_endpoint, matter_node_id,
     };
-    use pond_core::user_data::services::household_permission::{may_remove_device, PermissionDecision};
+    use pond_core::user_data::services::household_permission::{
+        may_remove_device, PermissionDecision,
+    };
 
     let role = resolve_role_from_principal(&state, principal.as_ref()).await;
     if let PermissionDecision::Denied {
@@ -6809,7 +6822,7 @@ async fn refuse_primary_profile_that_is_not_a_member(
     }
 }
 
-async fn update_settings(
+pub(crate) async fn update_settings(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -7018,15 +7031,25 @@ async fn update_settings(
     // The only place a profile becomes Owner going forward (the migration backfill only covers
     // profiles that existed when it ran): naming the primary profile is naming the owner.
     if user_keys.contains("primary_profile_id") {
-        if let Some(primary) = merged.primary_profile_id.as_deref().filter(|id| !id.is_empty()) {
+        if let Some(primary) = merged
+            .primary_profile_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+        {
             match state.profile_repo.get(primary).await {
                 Ok(Some(profile)) if profile.role != Role::Owner => {
-                    if let Err(e) = state.profile_repo.set_role(primary, Role::Owner, None).await {
+                    if let Err(e) = state
+                        .profile_repo
+                        .set_role(primary, Role::Owner, None)
+                        .await
+                    {
                         tracing::warn!(error = %e, profile_id = %primary, "failed to promote the primary profile to owner");
                     }
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, profile_id = %primary, "could not read the primary profile to promote it"),
+                Err(e) => {
+                    tracing::warn!(error = %e, profile_id = %primary, "could not read the primary profile to promote it")
+                }
             }
         }
     }
@@ -7289,7 +7312,6 @@ fn weather_icon_key(description: &str) -> &'static str {
         "cloud"
     }
 }
-
 
 fn weather_short_weekday(date: &str) -> String {
     chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
@@ -14045,7 +14067,7 @@ async fn remove_extension_handler(
 }
 
 /// `PATCH /api/v1/extensions/{name}` — `{"enabled": bool}`; applies to future Goose sessions.
-async fn toggle_extension_handler(
+pub(crate) async fn toggle_extension_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
@@ -14160,7 +14182,7 @@ async fn list_marketplace_handler(State(state): State<Arc<AppState>>) -> axum::r
 
 /// `POST /api/v1/marketplace/{id}/install` — optional `{ "secrets": {…} }`; 428 lists missing ones.
 /// 409 refuses an entry the built-in web search covers while that search is on.
-async fn install_marketplace_handler(
+pub(crate) async fn install_marketplace_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     body: Option<Json<serde_json::Value>>,
@@ -14921,7 +14943,7 @@ pub(crate) fn sign_in_origin<'a>(
 /// Body: `provider`, optional `extension_id`, and optional `origin`, the origin the browser reaches
 /// this server at, which sets where the provider sends it back (see
 /// [`crate::oauth_callback::redirect_uri_for`]).
-async fn oauth_authorize_handler(
+pub(crate) async fn oauth_authorize_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
@@ -20957,7 +20979,13 @@ fn proven_device(
 /// else to defer to" trust `ProfileScope::Household` already carries elsewhere.
 async fn resolve_role(state: &Arc<AppState>, scope: &ProfileScope) -> Option<Role> {
     match scope {
-        ProfileScope::Owner(id) => state.profile_repo.get(id).await.ok().flatten().map(|p| p.role),
+        ProfileScope::Owner(id) => state
+            .profile_repo
+            .get(id)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.role),
         ProfileScope::Household => Some(Role::Owner),
         ProfileScope::Guest => None,
     }
@@ -21025,7 +21053,9 @@ async fn permission_denied(
 // ── Connecting a source ────────────────────────────────────────────────────
 
 /// Same stand-in as [`proposal_repo`]; takes the redactor because storage redacts on the way in.
-fn context_repo(state: &Arc<AppState>) -> pond_infra::sqlite_context::SqliteContextRepository {
+pub(crate) fn context_repo(
+    state: &Arc<AppState>,
+) -> pond_infra::sqlite_context::SqliteContextRepository {
     // A fresh `RuleRedactor` equals `main.rs`'s only while it is stateless and unconfigured.
     pond_infra::sqlite_context::SqliteContextRepository::new(
         state.db.system.clone(),
@@ -21034,7 +21064,7 @@ fn context_repo(state: &Arc<AppState>) -> pond_infra::sqlite_context::SqliteCont
 }
 
 #[derive(serde::Deserialize)]
-struct ConnectSourceRequest {
+pub(crate) struct ConnectSourceRequest {
     /// Kinds whose connector hasn't landed are refused via `SourceKind::availability`.
     kind: String,
     /// A sensor's `device_id` or a camera's `camera_id`; a value naming no device never ingests.
@@ -21049,7 +21079,7 @@ struct ConnectSourceRequest {
 /// App-password sign-in for an account source. Never echoed back.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConnectCredentials {
+pub(crate) struct ConnectCredentials {
     username: String,
     password: String,
     /// Only for the self-hosted presets (`nextcloud`, `custom`).
@@ -21097,7 +21127,7 @@ async fn context_source_owner(
 }
 
 /// `POST /api/v1/context/sources` -- connect a sensor or camera as personal context.
-async fn connect_context_source(
+pub(crate) async fn connect_context_source(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Json(body): Json<ConnectSourceRequest>,

@@ -45,6 +45,8 @@ const EVENT_BACKLOG: usize = 256;
 const TINY_FETCH_WAIT: Duration = Duration::from_secs(60);
 /// The model claimed at a wake is let go after this if no turn took it: a wake heard as noise.
 const EARLY_TURN_UNUSED_FOR: Duration = Duration::from_secs(30);
+/// How long after app activity the room avoids running Whisper on room speech.
+const APP_ACTIVE_QUIET: Duration = Duration::from_secs(120);
 
 /// The microphone and speaker the room would use, as serve's audio supervisor knows them.
 pub trait RoomAudio: Send + Sync {
@@ -170,6 +172,8 @@ struct Inner {
     ear: Mutex<Option<Arc<pond_adapters_ear::EarRig>>>,
     /// Deaf until then, as the ear and the status show it; never persisted.
     paused: Mutex<Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)>>,
+    /// Someone is using the app or sending messages until then, so Whisper stays unloaded.
+    app_active_until: Mutex<Option<std::time::Instant>>,
     /// The ear's Whisper prompt: the wake phrase and the members' names, rewritten as they change.
     prompt: voice_rig::WhisperPrompt,
 }
@@ -217,6 +221,7 @@ impl RoomVoice {
             memory_at_start: Mutex::new(None),
             ear: Mutex::new(None),
             paused: Mutex::new(None),
+            app_active_until: Mutex::new(None),
             prompt: Default::default(),
         });
         let task = tokio::spawn(supervise(inner.clone()));
@@ -367,6 +372,13 @@ impl RoomVoiceControl for RoomVoice {
     fn resume(&self) {
         self.inner.end_pause(None);
     }
+
+    fn note_user_activity(&self) {
+        *lock(&self.inner.app_active_until) = Some(std::time::Instant::now() + APP_ACTIVE_QUIET);
+        if let Some(whisper) = &self.inner.deps.whisper {
+            whisper.release_unheld("user_active");
+        }
+    }
 }
 
 /// The enrolled members the ear may recognise: everyone with a full run of prints.
@@ -452,6 +464,18 @@ fn speaker_context(deps: &RoomDeps) -> pond_core::shared::services::chat::Speake
 }
 
 impl Inner {
+    fn app_active(&self) -> bool {
+        lock(&self.app_active_until).is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    fn whisper_busy_or_active(&self) -> bool {
+        self.app_active()
+            || self.deps.runs.turns_in_flight() > 0
+            || pond_core::models::domain::inference_bus::inference_bus()
+                .state()
+                .has(|_| true)
+    }
+
     /// The pause in force, if it has not run out; only `end_pause` clears it, so its end is heard.
     fn paused_until(&self) -> Option<(std::time::Instant, chrono::DateTime<chrono::Utc>)> {
         lock(&self.paused).filter(|(until, _)| std::time::Instant::now() < *until)
@@ -730,23 +754,47 @@ async fn run_once(
             "room voice: tiny.en is still downloading; starting on the full model's copy"
         );
     }
-    let chosen = tokio::task::spawn_blocking(move || {
-        if hears {
-            match speech.wake() {
-                Ok(whisper) => return Ok((whisper, true)),
-                Err(e) => tracing::warn!(
-                    error = format!("{e:#}"),
-                    "room voice: no wake-only Whisper; using the full model"
-                ),
-            }
-        }
-        speech.full().map(|whisper| (whisper, false))
-    })
-    .await;
-    let (whisper, whisper_wake_only) = match chosen {
-        Ok(Ok(chosen)) => chosen,
-        Ok(Err(e)) => return Ran::Ended(Err(e)),
-        Err(e) => return Ran::Ended(Err(anyhow::anyhow!("loading Whisper panicked: {e}"))),
+    let whisper_wake_only = hears;
+    let whisper = voice_rig::WhisperHandle::OnDemand {
+        get: {
+            let speech = speech.clone();
+            Arc::new(move || {
+                if hears {
+                    match speech.wake() {
+                        Ok(whisper) => return Ok(whisper),
+                        Err(e) => tracing::warn!(
+                            error = format!("{e:#}"),
+                            "room voice: no wake-only Whisper; using the full model"
+                        ),
+                    }
+                }
+                speech.full()
+            })
+        },
+        skip_scan: {
+            let inner = Arc::downgrade(inner);
+            let speech = speech.clone();
+            Arc::new(move || {
+                let skip = inner
+                    .upgrade()
+                    .is_some_and(|inner| inner.whisper_busy_or_active());
+                if skip {
+                    speech.release_unheld("busy");
+                }
+                skip
+            })
+        },
+        skip_transcribe: {
+            let inner = Arc::downgrade(inner);
+            let speech = speech.clone();
+            Arc::new(move || {
+                let skip = hears && inner.upgrade().is_some_and(|inner| inner.app_active());
+                if skip {
+                    speech.release_unheld("user_active");
+                }
+                skip
+            })
+        },
     };
     // Its row is made at the first turn: a room switched on and off leaves no empty conversation.
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -1108,6 +1156,17 @@ mod tests {
         let off = room.set_enabled(false).await;
         assert!(!off.enabled);
         assert_eq!(off.state, RoomState::Off);
+        room.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn app_activity_marks_whisper_busy_without_changing_room_state() {
+        let room = RoomVoice::start(deps(Arc::new(RunSupervisor::default())), false, wake());
+        assert!(!room.inner.app_active());
+        room.note_user_activity();
+        assert!(room.inner.app_active());
+        assert!(room.inner.whisper_busy_or_active());
+        assert_eq!(room.status().state, RoomState::Off);
         room.shutdown().await;
     }
 }

@@ -126,8 +126,12 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(OneLamp),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
-        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
-        guest_device_access: Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone())),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone()),
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -258,7 +262,10 @@ async fn show(label: &str, router: &axum::Router, req: Request<Body>) -> serde_j
     let resp = router.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let body = body_json(resp).await;
-    println!("--- {label} ---\nHTTP {status}\n{}\n", serde_json::to_string_pretty(&body).unwrap());
+    println!(
+        "--- {label} ---\nHTTP {status}\n{}\n",
+        serde_json::to_string_pretty(&body).unwrap()
+    );
     body
 }
 
@@ -301,10 +308,16 @@ async fn household_roles_and_guest_device_access_over_http() {
     let body = show(
         "3b. PUT /profiles/{Ada}/devices/lamp-1 -> grant",
         &router,
-        put(&format!("/api/v1/profiles/{owner_id}/devices/lamp-1"), serde_json::json!({})),
+        put(
+            &format!("/api/v1/profiles/{owner_id}/devices/lamp-1"),
+            serde_json::json!({}),
+        ),
     )
     .await;
-    assert_eq!(body["device_ids"].as_array().unwrap(), &vec![serde_json::json!("lamp-1")]);
+    assert_eq!(
+        body["device_ids"].as_array().unwrap(),
+        &vec![serde_json::json!("lamp-1")]
+    );
 
     let resp = router
         .clone()
@@ -326,7 +339,12 @@ async fn household_roles_and_guest_device_access_over_http() {
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
-    let body = show("3d. DELETE /profiles/{Ada}/devices/lamp-1 -> revoke", &router, req).await;
+    let body = show(
+        "3d. DELETE /profiles/{Ada}/devices/lamp-1 -> revoke",
+        &router,
+        req,
+    )
+    .await;
     assert_eq!(body["device_ids"].as_array().unwrap().len(), 0);
 
     // 4. Try to demote Ada -- she's the only owner. Refused by the last-owner guard.

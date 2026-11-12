@@ -30,7 +30,12 @@ use tower::ServiceExt;
 
 const POND_NAME: &str = "The Kitchen Pond";
 
-async fn make_app() -> (axum::Router, Arc<Database>, Arc<MockCreditLedger>, tempfile::TempDir) {
+async fn make_app() -> (
+    axum::Router,
+    Arc<Database>,
+    Arc<MockCreditLedger>,
+    tempfile::TempDir,
+) {
     let tmp = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::init(tmp.path()).await.unwrap());
     let pool = db.system.clone();
@@ -74,8 +79,12 @@ async fn make_app() -> (axum::Router, Arc<Database>, Arc<MockCreditLedger>, temp
         profile_repo: Arc::new(SqliteProfileRepository::new(pool.clone())),
         device_registry: Arc::new(MockDeviceRegistry),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
-        guest_room_access: Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
-        guest_device_access: Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone())),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(pool.clone()),
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -249,7 +258,10 @@ async fn an_unnamed_pond_refuses_rather_than_let_an_empty_typed_name_match() {
         .fetch_one(&db.system)
         .await
         .unwrap();
-    assert_eq!(profiles.0, 1, "a refused reset must not touch the household");
+    assert_eq!(
+        profiles.0, 1,
+        "a refused reset must not touch the household"
+    );
 }
 
 #[tokio::test]
@@ -282,7 +294,10 @@ async fn a_mistyped_name_refuses_with_409_and_touches_nothing() {
         .fetch_one(&db.system)
         .await
         .unwrap();
-    assert_eq!(profiles.0, 1, "a refused reset must not touch the household");
+    assert_eq!(
+        profiles.0, 1,
+        "a refused reset must not touch the household"
+    );
 }
 
 #[tokio::test]
@@ -319,5 +334,8 @@ async fn a_held_mesh_credit_balance_refuses_with_409() {
         .fetch_one(&db.system)
         .await
         .unwrap();
-    assert_eq!(profiles.0, 1, "a refused reset must not touch the household");
+    assert_eq!(
+        profiles.0, 1,
+        "a refused reset must not touch the household"
+    );
 }
