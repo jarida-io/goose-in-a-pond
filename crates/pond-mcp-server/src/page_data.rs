@@ -166,6 +166,8 @@ pub struct PageData {
     pub forms: Vec<SearchForm>,
     /// The picture the page names for itself when shared (`og:image`), for a report to show.
     pub preview_image: Option<String>,
+    /// The feed of its new posts the page declares, when it is on the page's own site.
+    pub feed: Option<String>,
 }
 
 pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
@@ -181,7 +183,25 @@ pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
         links: links_of(document, base),
         forms: forms_of(document, base),
         preview_image: preview_of(document, base),
+        feed: feed_of(document, base),
     }
+}
+
+/// The feed a page declares in its head, on its own site: where its new posts are listed.
+fn feed_of(document: &scraper::Html, base: &Url) -> Option<String> {
+    static FEED: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]"#,
+        )
+    });
+    document
+        .select(&FEED)
+        .filter_map(|link| link.value().attr("href"))
+        .filter_map(|href| base.join(href.trim()).ok())
+        .find(|feed| {
+            matches!(feed.scheme(), "http" | "https") && feed.host_str() == base.host_str()
+        })
+        .map(|feed| feed.to_string())
 }
 
 pub(crate) fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
@@ -1102,6 +1122,44 @@ mod tests {
         let page = data(&html);
         assert_eq!(page.items.len(), 1);
         assert!(page.listed_links.is_empty());
+    }
+
+    #[test]
+    fn a_feed_read_as_a_page_gives_its_entries_as_items() {
+        let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Blog</title>
+            <item><title>Term dates for 2027</title><link>https://cars.example/blog/term-dates</link>
+              <description>The first term opens on 5 January.</description>
+              <pubDate>Thu, 12 Nov 2026 08:00:00 +0300</pubDate></item>
+            <item><title>Sports day moved</title><link>https://cars.example/blog/sports-day</link></item>
+            </channel></rss>"#;
+        let page = data(&crate::feed::as_html(rss).unwrap());
+        assert_eq!(page.items_from, Some(ItemSource::HtmlArticles));
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].title, "Term dates for 2027");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://cars.example/blog/term-dates")
+        );
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("The first term opens on 5 January.")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+    }
+
+    #[test]
+    fn a_page_names_the_feed_it_declares_on_its_own_site() {
+        let page = data(
+            r#"<html><head>
+            <link rel="alternate" type="application/rss+xml" href="https://elsewhere.example/feed.xml">
+            <link rel="alternate" type="application/atom+xml" href="/blog/feed.atom">
+            </head><body><p>Hello</p></body></html>"#,
+        );
+        assert_eq!(
+            page.feed.as_deref(),
+            Some("https://cars.example/blog/feed.atom")
+        );
+        assert_eq!(data("<html><body><p>No feed</p></body></html>").feed, None);
     }
 
     #[test]
