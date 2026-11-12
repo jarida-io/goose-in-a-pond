@@ -36,7 +36,7 @@ the client's address and the coordinator's host name, nothing else.
 Default-deny coordinator policy lets an approved phone reach only its own Pond's HTTPS
 port. Source-masking proxies and subnet routers are unsupported for pairing: listeners
 classify the actual TCP peer and never trust forwarding headers. Do not publish the
-companion listener on the public internet.
+companion listener on the public internet; the ngrok tunnel (below) has its own router and rules.
 
 ## Listeners
 
@@ -171,6 +171,89 @@ fields with `422`. It answers:
 | 403 | `invite_required`, `invite_invalid`, `invite_expired`, `invite_used`, `device_certificate_invalid`, `device_revoked`, `device_used` | the coordinator's admission refusal |
 | 503 | `registration_unavailable` | any other registration failure |
 | 503 | `enrollment_unavailable` | enrolling the Pond's own node failed |
+
+## ngrok: the household's own tunnel
+
+The alternative to the built-in remote network, chosen on **Pairing, Remote access**. The
+household signs up with ngrok, stores its authtoken on the Pond, and starts the tunnel; the
+Pond opens it from `crates/pond-server/src/remote_tunnel.rs`. Starting it turns the built-in
+network off: one way out at a time, except while the Pond falls back (below). Choosing the
+other route while remote access is on moves it there (`PUT /api/v1/remote-access/route` on the
+loopback dashboard, the phone's rules from home) instead of leaving both off.
+
+If ngrok refuses or drops the session, the Pond tries again after 3, 10 and 30 seconds
+(`remote_tunnel_retry`) before reporting `remote_tunnel_failed`. ngrok refuses a session opened
+right after the previous one closed, which a quick switch back and forth does. A tunnel that ran
+for two minutes before dropping gets its three attempts again.
+
+What stays the same for a phone: it pins the same key and checks the host name. ngrok never
+decrypts the traffic. The endpoint is a TCP address, or a TLS endpoint on a reserved domain,
+with no termination at ngrok, and the Pond terminates TLS itself under a certificate it issues
+from its identity key that names only the tunnel's host (`TunnelCertifier`). The certificate is
+held in memory and reissued each time the tunnel starts, since the host can change.
+
+What is different, because the tunnel has no machine identity:
+
+- Connections are accepted in process, never forwarded to `127.0.0.1:4443`, so no internet
+  caller can pass for the host. The caller's address is kept only when it is public; anything
+  else becomes `0.0.0.0`, which is never loopback, LAN or tailnet.
+- Requests are served by the companion router taken before LAN presence is layered, so a request
+  through the tunnel never renews remote access, and they carry `RemoteTunnel`.
+- Only `GET /health`, `GET /system/info` and `POST /handshake/refresh` answer without a token.
+  Pairing, onboarding and sign-in callbacks need a token over the tunnel like everything else,
+  and pairing still refuses any peer that is not on the LAN.
+- Every token is accepted only for a device seen on the household LAN within
+  `LAN_PRESENCE_WINDOW_DAYS` (30): the same rule after which the built-in network lapses.
+- The session to `connect.ngrok-agent.com` is checked like any other outbound call, filed under
+  `giap-remote-tunnel`, so `offline` and `allowlist` network modes refuse to start the tunnel.
+
+Plans: a TCP address works on ngrok's free plan once a payment method is on the account; a TLS
+endpoint needs a paid plan. Without a reserved TCP address ngrok assigns a new one at each start,
+and a phone learns it the next time it is home (from the pairing material, or an authenticated
+`GET /system/info`). The authtoken is kept in the encrypted secret store under
+`NGROK_AUTHTOKEN`; `<data_dir>/remote-tunnel/ngrok.json` (0600, in a 0700 directory) holds only
+the choices. `giap.sh doctor` says when the tunnel is turned on; failures are logged as
+`remote_tunnel_failed`.
+
+Goose On The Go tries `tunnel_address` when the LAN address and the tailnet address do not
+answer.
+
+### Choosing the route from a phone
+
+A paired phone can set ngrok up and switch routes from Goose On The Go's **ngrok tunnel** page,
+through `phone_management` in `remote_tunnel.rs`, merged into the companion API behind the bearer
+middleware (so it is reachable at home, over the tailnet and through the tunnel):
+
+| Route | Does |
+| --- | --- |
+| `GET /api/v1/remote-access/route` | `{route, atHome, tokenSet, endpoint, reservedAddress, reserved, status, fallback, builtInRunning}` |
+| `PUT /api/v1/remote-access/route` | `{route: "built_in" \| "ngrok", reservedAddress?}` |
+| `PUT /api/v1/remote-access/route/token` | `{authtoken}`, checked with one ngrok session before it is kept |
+| `DELETE /api/v1/remote-access/route/token` | forgets the token, stops the tunnel, turns the built-in network on |
+
+"At home" is the actual TCP peer on a directly attached network (`is_lan_peer`), never a request
+over the tailnet or the tunnel. The authtoken and the reserved address change only at home
+(`at_home_only`). Away from home a phone may switch to the built-in network, and to ngrok only
+with a reserved address (`needs_reserved_address`). Switching to the built-in network turns it on
+first and stops the tunnel two seconds later, so the answer reaches a phone that asked through the
+tunnel. Refusals are `{error, code}`.
+
+### Falling back when the address changes
+
+An unreserved address is new at every start, and a phone learns it only at home. The Pond keeps
+the address phones last learned in `<data_dir>/remote-tunnel/learned.json` (0600). When the tunnel
+comes up (`settle_address`):
+
+- the address is adopted, and the built-in network turned off, when the household chose ngrok at
+  home (the Pond's own screen, or a phone at home), when the address is reserved, when it is the
+  learned one, or when none was learned yet;
+- otherwise the Pond reports it as `fallback`, turns the built-in network back on, and keeps the
+  tunnel running, so phones away keep a way in. It is logged as `remote_route_fallback`.
+
+The fallback ends when the household switches to ngrok again at home, or chooses the built-in
+network. The other phones learn the new address the next time they are home. With a reserved
+address the address never changes, so there is no fallback; reserved TCP addresses are on ngrok's
+paid plans.
 
 ## Phone enrollment
 

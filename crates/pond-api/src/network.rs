@@ -21,6 +21,26 @@ pub struct CompanionTransport {
 #[derive(Clone, Default)]
 pub struct EmbeddedAddress(pub std::sync::Arc<std::sync::RwLock<Option<String>>>);
 
+/// The secret-store key the household's ngrok authtoken is kept under. The generic secrets API
+/// refuses it: only the pond's own remote-access routes may set or forget it.
+pub const NGROK_AUTHTOKEN: &str = "NGROK_AUTHTOKEN";
+
+/// `host:port` of the public tunnel (ngrok) while it runs, for paired phones away from home.
+#[derive(Clone, Default)]
+pub struct TunnelAddress(pub std::sync::Arc<std::sync::RwLock<Option<String>>>);
+
+impl TunnelAddress {
+    pub fn get(&self) -> Option<String> {
+        self.0.read().ok().and_then(|v| v.clone())
+    }
+
+    pub fn set(&self, address: Option<String>) {
+        if let Ok(mut current) = self.0.write() {
+            *current = address;
+        }
+    }
+}
+
 pub use pond_core::network::domain::interface::is_tailnet;
 
 /// Exclude tunnels and container-only networks from the home LAN boundary; the classification is

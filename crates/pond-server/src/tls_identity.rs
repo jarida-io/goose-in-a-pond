@@ -5,7 +5,9 @@
 //! hostname checks need. `tls/tailnet-identity.json` is what the embedded helper serves on
 //! the tailnet, and names only the node's tailnet addresses and node name: every tailnet node
 //! can read a certificate it is shown, so it must not learn the host name or LAN addresses
-//! from it. Both carry the same public key, so the pin is unchanged.
+//! from it. Both carry the same public key, so the pin is unchanged. A public tunnel's
+//! certificate ([`TunnelCertifier`]) is a third, held only in memory: it names only the
+//! tunnel's host, which changes with each tunnel session.
 
 use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -140,6 +142,13 @@ impl TlsIdentity {
         ))
     }
 
+    /// Issues certificates for a public tunnel's host from this identity's key.
+    pub fn tunnel_certifier(&self) -> TunnelCertifier {
+        TunnelCertifier {
+            key_pem: self.material.key_pem.clone(),
+        }
+    }
+
     /// PEM material for rustls. Never log or expose the returned private key.
     pub fn pem(&self) -> (Vec<u8>, Vec<u8>) {
         (
@@ -239,6 +248,22 @@ impl TlsIdentity {
         );
         validate(&material)?;
         Ok(Some(material))
+    }
+}
+
+/// Signs certificates for a public tunnel's host with the identity key, so a phone's pin holds.
+/// No `Debug`: it holds the private key.
+#[derive(Clone)]
+pub struct TunnelCertifier {
+    key_pem: String,
+}
+
+impl TunnelCertifier {
+    /// A certificate naming only `host`, and the key, as PEM. Never log the key.
+    pub fn issue(&self, host: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        let key = KeyPair::from_pem(&self.key_pem)?;
+        let cert = certificate(&key, &[host.to_string()])?;
+        Ok((cert.into_bytes(), self.key_pem.as_bytes().to_vec()))
     }
 }
 
@@ -400,6 +425,29 @@ pub fn pairing_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Anyone reaching the tunnel can read its certificate, so it names only the tunnel's host,
+    /// and it carries the pinned key so a phone's pin check passes.
+    #[test]
+    fn a_tunnel_certificate_names_only_its_host_and_keeps_the_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity =
+            TlsIdentity::load(dir.path(), &["pond.local".into(), "192.168.1.20".into()]).unwrap();
+        let (cert, key) = identity
+            .tunnel_certifier()
+            .issue("3.tcp.eu.ngrok.io")
+            .unwrap();
+        let material = Material {
+            key_pem: String::from_utf8(key).unwrap(),
+            cert_pem: String::from_utf8(cert).unwrap(),
+        };
+        validate(&material).unwrap();
+        assert_eq!(
+            san_names(&material.cert_pem).unwrap(),
+            ["3.tcp.eu.ngrok.io"]
+        );
+        assert_eq!(material.key_pem, identity.material.key_pem);
+    }
+
     #[test]
     fn restart_and_address_renewal_keep_the_same_key() {
         let dir = tempfile::tempdir().unwrap();

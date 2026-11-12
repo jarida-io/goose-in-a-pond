@@ -1,5 +1,8 @@
 import {
   RecoveryRequest,
+  type NgrokTunnelConfig,
+  type NgrokTunnelState,
+  type RemoteRouteState,
   ApiError,
   type AddExtensionRequest,
   type AgentRecipe,
@@ -563,6 +566,13 @@ export class PondApiClient {
   /** Whether this Pond was provisioned with a device certificate, which admits it without an invite. */
   remoteDevice(): Promise<{ provisioned: boolean; serial?: string; registered: boolean }> { return this.hostRequest('GET', '/api/v1/remote-access/device'); }
   disableRemoteAccess(): Promise<unknown> { return this.hostRequest('DELETE', '/api/v1/remote-access'); }
+  ngrokTunnel(): Promise<NgrokTunnelState> { return this.hostRequest('GET', '/api/v1/remote-access/ngrok'); }
+  configureNgrokTunnel(config: NgrokTunnelConfig): Promise<NgrokTunnelState> { return this.hostRequest('PUT', '/api/v1/remote-access/ngrok', config); }
+  setNgrokAuthtoken(authtoken: string): Promise<NgrokTunnelState> { return this.hostRequest('PUT', '/api/v1/remote-access/ngrok/token', { authtoken }); }
+  forgetNgrokAuthtoken(): Promise<NgrokTunnelState> { return this.hostRequest('DELETE', '/api/v1/remote-access/ngrok/token'); }
+  remoteRoute(): Promise<RemoteRouteState> { return this.hostRequest('GET', '/api/v1/remote-access/route'); }
+  /** Switch the way in and keep one on: the Pond starts the new route before stopping the old. */
+  chooseRemoteRoute(route: 'built_in' | 'ngrok'): Promise<RemoteRouteState> { return this.hostRequest('PUT', '/api/v1/remote-access/route', { route }); }
 
   // ── Health ────────────────────────────────────────────────
 
