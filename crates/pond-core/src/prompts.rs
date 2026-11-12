@@ -512,6 +512,8 @@ pub const PROMPT_HEARTBEAT: &str = "\
 - Is a reminder or to-do overdue, or due within a day and easy to miss?
 - Has a device or sensor read out of the ordinary?
 - Has a follow-up in your notes come due?
+- Is there one thing they are waiting on or planning that you could look up
+  for them now: a price, an opening time, whether something is still on?
 Say nothing when nothing needs them.
 ";
 
