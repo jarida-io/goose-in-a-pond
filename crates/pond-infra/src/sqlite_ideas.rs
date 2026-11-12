@@ -8,7 +8,8 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
 use pond_core::user_data::domain::idea::{
-    GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource, IdeaState,
+    card_label, GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource,
+    IdeaState,
 };
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaRun, IdeaTodo, TopicSeed};
 
@@ -63,12 +64,13 @@ fn idea_of(row: &SqliteRow) -> Result<Idea> {
     let facts: String = row.try_get("facts_json")?;
     let pitch: String = row.try_get("pitch")?;
     let hook: String = row.try_get("hook")?;
+    let grounded_in = serde_json::from_str::<Vec<Grounding>>(&grounded).unwrap_or_default();
     Ok(Idea {
         id: row.try_get("id")?,
         profile_id: row.try_get("profile_id")?,
         topic: row.try_get("topic")?,
         kind,
-        kind_label: kind.label().to_string(),
+        kind_label: card_label(kind, &grounded_in).to_string(),
         title: row.try_get("title")?,
         // An idea written before cards had a line of their own shows its pitch.
         hook: if hook.is_empty() { pitch.clone() } else { hook },
@@ -76,7 +78,7 @@ fn idea_of(row: &SqliteRow) -> Result<Idea> {
         why: row.try_get("why")?,
         facts: serde_json::from_str::<Vec<IdeaFact>>(&facts).unwrap_or_default(),
         notes: row.try_get("notes")?,
-        grounded_in: serde_json::from_str::<Vec<Grounding>>(&grounded).unwrap_or_default(),
+        grounded_in,
         sources: serde_json::from_str::<Vec<IdeaSource>>(&sources).unwrap_or_default(),
         picture: row.try_get("picture")?,
         goose_can: goose_can.and_then(|g| serde_json::from_str::<GooseCan>(&g).ok()),

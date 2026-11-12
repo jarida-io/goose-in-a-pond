@@ -264,6 +264,10 @@ impl NotKept {
                 "Write `content` as one sentence in the third person that names {who}, then \
                  send it again."
             ),
+            Self::Defect(FactDefect::TooLong) => format!(
+                "That holds more than one fact. Save each as its own short sentence that \
+                 names {who}."
+            ),
             Self::Defect(FactDefect::CalendarDate) => "A thing on one day is a reminder, not a \
                  memory: use add_reminder with `when`. Only a yearly date is kept, as `about` \
                  \"date\" or \"birthday\"."

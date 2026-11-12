@@ -4,7 +4,8 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 use crate::user_data::domain::idea::{
-    GooseCan, GooseKind, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaSource, IdeaState,
+    card_label, GooseCan, GooseKind, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaSource,
+    IdeaState,
 };
 use crate::user_data::domain::interest::{topic_key, Interest, MemberPortrait};
 use crate::user_data::domain::member_profile::About;
@@ -228,15 +229,79 @@ pub fn life_seed(
         })
 }
 
-/// An idea built on what a screenshot showed the member looking at.
+/// An idea built on what a screenshot showed the member looking at. Its search is the note's
+/// own subject: a model writing one reaches for the member's other tastes instead.
 pub fn screenshot_seed(note_id: &str, note: &str) -> IdeaSeed {
     IdeaSeed {
         from: SeedFrom::Screenshot(note_id.to_string()),
         kind: IdeaKind::Interest,
         label: note.to_string(),
         detail: String::new(),
-        query: None,
+        query: Some(shot_subject(note)).filter(|q| q.split_whitespace().count() >= 2),
     }
+}
+
+/// How a screenshot note opens, before what it names.
+const SHOT_LEAD_INS: [&str; 6] = [
+    "looking at ",
+    "reading about ",
+    "reading ",
+    "watching ",
+    "listening to ",
+    "saved ",
+];
+
+/// What a screenshot note names: the note without its lead-in, its article and any afterthought.
+pub fn shot_subject(note: &str) -> String {
+    let note = note.trim().trim_end_matches('.');
+    let lower = note.to_lowercase();
+    let mut rest = SHOT_LEAD_INS
+        .iter()
+        .find(|lead| lower.starts_with(**lead))
+        .map_or(note, |lead| note.get(lead.len()..).unwrap_or(note));
+    for article in ["the ", "a ", "an "] {
+        if rest.to_lowercase().starts_with(article) {
+            rest = rest.get(article.len()..).unwrap_or(rest);
+        }
+    }
+    // "Kang'o Jaramo, a location possibly related to tourism": the name is what was seen.
+    let named = rest.split(", ").next().unwrap_or(rest);
+    let subject = if named.split_whitespace().count() >= 2 {
+        named
+    } else {
+        rest
+    };
+    subject
+        .split_whitespace()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The names in a screenshot note: its capitalised words past the lead-in, lowercased.
+fn shot_names(note: &str) -> Vec<String> {
+    shot_subject(note)
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|word| word.chars().next().is_some_and(char::is_uppercase))
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether an idea is about what the screenshot showed: it says one of the note's names, or
+/// two when the note has three or more. A note with no names cannot be checked.
+fn stays_on_the_screenshot(note: &str, said: &str) -> bool {
+    let names = shot_names(note);
+    let needed = match names.len() {
+        0 => return true,
+        1 | 2 => 1,
+        _ => 2,
+    };
+    names
+        .iter()
+        .filter(|name| said.contains(name.as_str()))
+        .count()
+        >= needed
 }
 
 /// What kind of idea the seed asks for, as both prompts read it.
@@ -384,9 +449,10 @@ a named place, event, route, dish or guide, not a list of general tips.
 Reply with JSON only, exactly this shape:
 {\"query\":\"...\",\"private\":false}
 
-- query: 4 to 10 words. Name the place when the idea happens somewhere. Use \
-what {name} eats, likes and avoids as plain search words. Never a person's \
-name, an address or a health condition. No question mark, no quotes.
+- query: 4 to 10 words about what the idea builds on. Name the place when \
+the idea happens somewhere. For food, add what {name} eats and avoids as \
+plain search words; otherwise leave their tastes out. Never a person's name, \
+an address or a health condition. No question mark, no quotes.
 - private: true when what it builds on is a private matter the public web \
 cannot answer, such as {name}'s own company finances, staff or health \
 records; the query is then \"\".";
@@ -478,7 +544,8 @@ Reply with JSON only, exactly this shape:
 
 - title: the idea itself in at most 8 words, naming the actual place, dish, \
 event or thing the pages describe, as you would say it to a friend. Not a \
-question.
+question. When a page lists many, the idea is the one of them that fits \
+{name} best, by its name: never the list or its subject.
 - hook: one line of at most 15 words that makes {name} want to open it.
 - pitch: two or three short sentences for the page that opens: what it is and \
 what makes it good, with the specifics the pages give.
@@ -486,7 +553,8 @@ what makes it good, with the specifics the pages give.
 theirs it fits.
 - facts: two to four things worth seeing at a glance, each a label of one or \
 two words and a short value from the pages: where, when, how long, the cost, \
-how many it serves, how hard it is. Never where you read it.
+how many it serves, how hard it is. Never where you read it, and never what \
+the title already says.
 - sources: the numbers of the pages it rests on.
 - you_can: two to four steps {name} could take, each a short imperative under \
 80 characters.
@@ -637,6 +705,11 @@ pub fn parse_idea(
     {
         return None;
     }
+    if let SeedFrom::Screenshot(_) = seed.from {
+        if !stays_on_the_screenshot(&seed.label, &said) {
+            return None;
+        }
+    }
 
     let named: Vec<usize> = map
         .get("sources")
@@ -678,7 +751,7 @@ pub fn parse_idea(
         profile_id: profile_id.to_string(),
         topic: seed.label.clone(),
         kind,
-        kind_label: kind.label().to_string(),
+        kind_label: card_label(kind, std::slice::from_ref(&seed.grounding())).to_string(),
         title,
         hook,
         pitch,
@@ -1051,7 +1124,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(idea.why, "You took a screenshot of this.");
+        assert_eq!(idea.kind_label, "From a screenshot");
         assert_eq!(idea.grounded_in[0].kind, "screenshot");
+    }
+
+    #[test]
+    fn a_screenshot_is_searched_by_what_it_named_and_its_idea_stays_on_it() {
+        for (note, subject) in [
+            (
+                "Looking at the music video for Class Clown by TNT Kenya.",
+                "music video for Class Clown by TNT Kenya",
+            ),
+            (
+                "Reading about the cost of importing a Mazda to Kenya.",
+                "cost of importing a Mazda to Kenya",
+            ),
+            (
+                "Looking at Kang'o Jaramo, a location possibly related to wildlife or tourism.",
+                "Kang'o Jaramo",
+            ),
+            ("Saved Uhuru Gardens", "Uhuru Gardens"),
+        ] {
+            assert_eq!(shot_subject(note), subject);
+            assert_eq!(screenshot_seed("n", note).query.as_deref(), Some(subject));
+        }
+        // One word is no search: the model writes one.
+        assert_eq!(screenshot_seed("n", "Looking at sneakers").query, None);
+
+        let video = screenshot_seed(
+            "n",
+            "Looking at the music video for Class Clown by TNT Kenya.",
+        );
+        let known = IdeaProfile::default();
+        let off = r#"{"title":"Pan-Seared Teal with Orange Glaze","pitch":"A gourmet dish for an event in Kenya.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(off, "p", &known, &video, &pages(), Utc::now()).is_none());
+        let on = r#"{"title":"TNT Kenya's Class Clown, behind the scenes","pitch":"How the video was shot.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(on, "p", &known, &video, &pages(), Utc::now()).is_some());
     }
 
     #[test]

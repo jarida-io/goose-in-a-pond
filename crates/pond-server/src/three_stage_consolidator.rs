@@ -22,7 +22,7 @@ Think carefully about the thematic, semantic, and logical relationships between 
 Then output a JSON array of proposals.
 
 <actions>
-- merge: combine related or duplicate memories into one clear fact.
+- merge: combine memories that say the same thing into one clear fact.
   {\"action\":\"merge\",\"ids\":[\"id1\",\"id2\"],\"merged\":\"combined text\",\"segment\":\"...\",\"importance\":0.0-1.0,\"reason\":\"...\"}
 - split: break a compound memory into separate distinct facts, each properly categorized.
   {\"action\":\"split\",\"id\":\"SOURCE_ID\",\"new\":[{\"content\":\"fact 1\",\"segment\":\"...\",\"importance\":0.5},{\"content\":\"fact 2\",\"segment\":\"...\",\"importance\":0.6}],\"reason\":\"...\"}
@@ -36,8 +36,9 @@ Then output a JSON array of proposals.
 
 <rules>
 - Evaluate each memory by asking: does this help the assistant serve the user better?
-- MERGE memories that express the same fact in different words, and fold near-duplicates \
-into one sentence that keeps every detail. A merge always carries its merged text.
+- MERGE memories that express the same fact in different words into one short sentence of \
+at most 40 words. Memories about the same person or subject that say different things are \
+not duplicates: never join them into a summary. A merge always carries its merged text.
 - SPLIT memories that contain multiple unrelated facts crammed into one entry.
 - PRUNE: empty/vague content, general knowledge the assistant already has, \
 info duplicated in the system prompt (assistant name, timezone, personality), \

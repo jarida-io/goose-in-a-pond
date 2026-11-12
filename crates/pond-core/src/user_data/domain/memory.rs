@@ -108,6 +108,14 @@ impl MemorySegment {
         }
     }
 
+    /// The heading as the member reads it on their own page.
+    pub fn heading_to_member(&self) -> &'static str {
+        match self {
+            Self::Identity => "Who you are",
+            other => other.heading(),
+        }
+    }
+
     /// Default importance for this segment (0.0–1.0).
     pub fn default_importance(&self) -> f32 {
         match self {
@@ -347,12 +355,17 @@ impl MemoryFragment {
 
 /// Shortest trimmed content, in characters, that can carry a fact.
 pub const MIN_FACT_CONTENT_LEN: usize = 8;
+/// Longest content, in characters, that is still one fact: past it a note is a paragraph of
+/// several, which cannot be filed, corrected or forgotten one at a time.
+pub const MAX_FACT_CONTENT_LEN: usize = 300;
 
 /// Why a candidate memory was refused at write time: out of context it would mislead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactDefect {
     /// Nothing left after normalisation, or too short to carry a fact.
     TooShort,
+    /// Longer than [`MAX_FACT_CONTENT_LEN`]: several facts run together.
+    TooLong,
     /// A deictic or leading pronoun with no antecedent in the sentence ("the latter city").
     UnresolvedReference,
     /// First person ("my mother"): injected into context, "my" reads as the assistant's.
@@ -371,6 +384,7 @@ impl FactDefect {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TooShort => "too short",
+            Self::TooLong => "more than one fact",
             Self::UnresolvedReference => "unresolved reference",
             Self::FirstPerson => "first person",
             Self::EchoedExample => "echoed the prompt's own example",
@@ -557,6 +571,9 @@ pub fn fact_defect(content: &str) -> Option<FactDefect> {
     let trimmed = content.trim();
     if trimmed.chars().count() < MIN_FACT_CONTENT_LEN {
         return Some(FactDefect::TooShort);
+    }
+    if trimmed.chars().count() > MAX_FACT_CONTENT_LEN {
+        return Some(FactDefect::TooLong);
     }
     let tokens = split_tokens(trimmed);
     if tokens.is_empty() {
@@ -1616,6 +1633,19 @@ mod tests {
 
         assert!(frag.is_kept());
         assert_eq!(frag.decay_rate, Some(0.0));
+    }
+
+    #[test]
+    fn a_paragraph_is_refused_as_more_than_one_fact() {
+        let one = "Jerry Anyumba prefers the light to be set to a warm colour in the evening.";
+        assert_eq!(fact_defect(one), None);
+        let many = format!(
+            "Jerry Anyumba is an engineer in Nairobi. {}",
+            "He likes tea. ".repeat(25)
+        );
+        assert!(many.chars().count() > MAX_FACT_CONTENT_LEN);
+        assert_eq!(fact_defect(&many), Some(FactDefect::TooLong));
+        assert_eq!(FactDefect::TooLong.as_str(), "more than one fact");
     }
 
     #[test]
