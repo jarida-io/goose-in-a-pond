@@ -36,7 +36,7 @@ heartbeat and the scratchpad are now read and run, not only stored; and ideas ar
 
 ### Not done, and why
 
-- **What a browser render costs on the nano is not measured.** The board had 498 MB available with the model loaded and the gate is 900 MB, so the Pond refuses there. No browser is installed on the nano; the official `linux-arm64` headless shell starts on its glibc 2.35. Measuring a render beside the live Pond needs the owner's go-ahead.
+- **No browser is installed on the nano**, so script-built pages are not read there yet. A render was measured beside the loaded model: up to 307 MB and under 16 seconds a page, and the gate is 600 MB ([web-watch-build-plan.md](web-watch-build-plan.md) phase 7). `POST /api/v1/browser/install` downloads one when the household asks.
 - No click-and-type browser agent, no feeds or replaced-file watches, no model judging whether a watch's change matters, no robots.txt.
 - Screenshots are chosen by hand on the phone; syncing them automatically needs a native build.
 - A guest's turn whose personal tools are withheld still ends as "I could not produce a response".

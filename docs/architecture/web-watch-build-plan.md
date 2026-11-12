@@ -169,15 +169,43 @@ headless browser once and reads what the browser built with the usual reader.
 | A shell is a page with under 200 characters to read, scripts, and a mark that the scripts build it (`id="root"`, `__next`, "enable JavaScript", ...). A page with words is never sent to a browser | Code | Done |
 | One render: `--headless --dump-dom` with 8 s of virtual time for the page's scripts, 30 s at most, pictures and sound off, a fresh profile deleted afterwards, incognito, the browser's own sandbox on. One at a time; a second page is told to try again | Code | Done |
 | The browser is the pond's own download if there is one, else `chrome-headless-shell`, Chromium, Chrome or Edge found on the machine. No setup: it is looked for when a page needs it | Code | Done |
-| Memory gate: on a board that reports free memory, a browser starts only with 900 MB available. The refusal says how much was free | Code | Done |
+| Memory gate: on a board that reports free memory, a browser starts only with 600 MB available, set from the measurement below. The refusal says how much was free | Code | Done |
 | `POST /browser/install` downloads the stable headless shell for the machine from Chrome for Testing (about 130 MB) into `<data_dir>/browser`, unpacks it and checks that it runs; `GET /browser` shows the browser in use, whether a page could be rendered now and why not, and the download's progress; `DELETE /browser` removes the pond's own | Code | Done |
 | Household setting `browser_rendering_enabled` (on by default), in the desktop's Extensions & Tools; applied at once | Code | Done |
 | A shell that was not rendered is a failed read whose reason the model is given in words: turned off, no browser yet, too little memory free, busy, or the browser could not read it | Code | Done |
 | A real page built by a script is rendered by the installed Chrome in the tests on a Mac (under a second); the test is skipped where no browser is installed | Tests | Done |
 | The headless shell for `linux-arm64` (157.0.8103.78) starts on the nano's glibc 2.35 with no library missing | Measured on the nano | Done |
 
+### What a render costs on the nano
+
+Measured on the Orin Nano on 12 November 2026 with `scripts/jetson/render-cost/render_cost.sh`,
+beside the running pond with the chat model loaded (6.4 GB in use, about 900 MB available),
+using the pond's own flags and Chrome for Testing's headless shell 157.0.8103.78. Each render
+ran in its own memory-capped scope; memory was sampled ten times a second.
+
+| Page | Cap | Seconds | Peak memory | Lowest available memory |
+|---|---|---|---|---|
+| example.com | 700 MB | 2.8 | 307 MB | 830 MB |
+| react.dev/learn | 700 MB | 6.3 | 233 MB | 705 MB |
+| jumia.co.ke | 700 MB | 12.9 | 235 MB | 679 MB |
+| en.wikipedia.org/wiki/Kenya | 700 MB | 4.2 | 161 MB | 740 MB |
+| youtube.com | 700 MB | 9.4 | 266 MB | 651 MB |
+| youtube.com | 300 MB | 8.1 | 280 MB | 658 MB |
+| jumia.co.ke | 300 MB | 15.4 | 246 MB | 656 MB |
+| youtube.com | 200 MB | stopped at 30 s, nothing read | 199 MB | 690 MB |
+
+Available memory stood between 900 and 916 MB before each batch, so a render took at most 265 MB
+of it.
+
+- A render fits in about 300 MB, and still completes when held to 300 MB. Held to 200 MB the
+  browser does not finish within the 30 seconds the pond allows.
+- The pond stayed healthy throughout and nothing was killed.
+- The gate is therefore 600 MB: about the most a render took (307 MB), with 300 MB left for the pond. With
+  the picture encoder also loaded the board had 498 MB available, so the pond still refuses
+  then, and renders when the encoder is not held.
+- The peak is a sample every tenth of a second, so a shorter spike could be higher.
+
 Not done in phase 7:
-- **What a render costs on the nano is not measured.** The nano had 498 MB available with the model loaded, under the 900 MB gate, so the pond refuses there today rather than risk the model. The gate is a guess from desktop figures (about 390 MB for an idle headless Chromium). Measuring it means running the browser beside the live pond under a memory cap; that run was not allowed in this session and waits for you. The downloaded shell is still in `/tmp/chs` on the nano.
 - No browser is downloaded on its own: it is 130 MB, so the household starts it. The phone has no button for it yet; the route is there.
 - Clicking, typing and signing in with a browser are not built. The pond already follows same-site links, sends search forms, and sends other forms after a yes on the phone; a click-driven browser for a small model needs the memory answer first, and its tools would sit in every turn's prompt unless they are a group that is off by default.
 - The browser does its own networking, outside `pond-net`. It is only ever given an address the pond's own fetch already read from the public web, but scripts on that page make their own requests.

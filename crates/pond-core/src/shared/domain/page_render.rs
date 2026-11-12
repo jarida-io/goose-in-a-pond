@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Readable characters below which a page with scripts is taken for an unfilled shell.
 pub const SHELL_TEXT_CHARS: usize = 200;
-/// Memory the board must have free before a browser is started beside the model, in MB.
-pub const MIN_FREE_MB: u64 = 900;
+/// Memory the board must have free before a browser is started beside the model, in MB: on
+/// the Orin Nano a render took up to 307 MB, and 300 MB stays for the pond.
+pub const MIN_FREE_MB: u64 = 600;
 /// How long one render may take, start to finish.
 pub const RENDER_TIMEOUT_SECS: u64 = 30;
 /// How long the page's own scripts are given to finish, in the browser's virtual time.
