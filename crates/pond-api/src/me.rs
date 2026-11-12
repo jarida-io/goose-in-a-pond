@@ -69,6 +69,7 @@ async fn hub() -> Json<Value> {
         "connectors": crate::connectors::SERVED,
         "ideas": crate::ideas::SERVED,
         "catalog": crate::catalog::SERVED,
+        "cards": crate::context_cards::KINDS,
     }))
 }
 
@@ -84,6 +85,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .merge(crate::todos::routes())
         .merge(crate::cart::routes())
         .merge(crate::connectors::routes())
+        .merge(crate::context_cards::routes())
         .merge(crate::ideas::routes())
         .merge(crate::catalog::routes())
 }

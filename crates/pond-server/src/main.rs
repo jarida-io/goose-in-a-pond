@@ -4090,6 +4090,7 @@ async fn run_server(
         sessions: session_storage.clone(),
         provider: llm_provider.clone(),
         last_user_activity: last_user_activity.clone(),
+        settings: settings_repo.clone(),
     };
     my_goose_mind::spawn_portrait_job(mind.clone());
     my_goose_mind::spawn_memory_resort_job(mind.clone());

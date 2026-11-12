@@ -300,6 +300,64 @@ impl NewsBlocked {
     }
 }
 
+impl Story {
+    /// The story as a card sent to chat: what the member read, and what Goose works from.
+    pub fn as_card(&self) -> crate::shared::domain::context_card::ContextCard {
+        let content = format!("{}\n{}", self.dek, self.summary);
+        let mut notes = String::new();
+        if !self.why_you.is_empty() {
+            notes.push_str(&format!("Why you showed it: {}\n", self.why_you));
+        }
+        notes.push_str(&format!(
+            "It is about their interest in {}.\n",
+            self.interest.topic
+        ));
+        notes.push_str(&format!(
+            "Source: {} ({}), {}\n",
+            self.source_title, self.site, self.url
+        ));
+        for further in &self.further_sources {
+            notes.push_str(&format!("Also from: {} ({})\n", further.title, further.url));
+        }
+        if let Some(published) = self.published_at {
+            notes.push_str(&format!("Published {}.\n", published.format("%-d %B %Y")));
+        }
+        notes.push_str(&format!(
+            "You wrote it on {} from the page; what happened since is not in it.\n",
+            self.written_at.format("%-d %B %Y")
+        ));
+        crate::shared::domain::context_card::ContextCard::new(
+            "News".to_string(),
+            self.headline.clone(),
+            content,
+            notes,
+        )
+    }
+}
+
+impl Digest {
+    /// The digest as a card sent to chat.
+    pub fn as_card(&self) -> crate::shared::domain::context_card::ContextCard {
+        let mut content = self.intro.clone();
+        let mut notes = format!("Your digest for {}.\n", self.day.format("%-d %B %Y"));
+        for section in &self.sections {
+            content.push_str(&format!("\n\n{}\n{}", section.heading, section.body));
+            for reference in &section.references {
+                notes.push_str(&format!(
+                    "Source for \"{}\": {} ({})\n",
+                    section.heading, reference.title, reference.url
+                ));
+            }
+        }
+        crate::shared::domain::context_card::ContextCard::new(
+            "News digest".to_string(),
+            self.title.clone(),
+            content,
+            notes,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
