@@ -35,4 +35,5 @@ pub mod voice_agent;
 pub mod voice_control;
 pub mod web_form_confirm;
 pub mod web_watch_checker;
+pub mod web_watch_judge;
 pub mod wiki_images;

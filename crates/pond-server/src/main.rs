@@ -3694,20 +3694,25 @@ async fn run_server(
         )
     });
     // Members' web watches: checked in code, their owners told on their own devices.
+    let watch_repo: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository> = Arc::new(
+        pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(db.system.clone()),
+    );
+    let watch_notifier: Arc<dyn pond_core::shared::ports::web_watch::WatchNotifier> = Arc::new(
+        pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+            targeted_notification_sender.clone(),
+        )
+        .with_speech(spoken_watch_alerts.clone()),
+    );
+    // Rung by a check that holds changes for the model; the judge's lane job answers it.
+    let watch_judge_bell = Arc::new(tokio::sync::Notify::new());
     pond_mcp_server::web_watch_runner::spawn(
         Arc::new(
             pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
-                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
-                    db.system.clone(),
-                )),
+                watch_repo.clone(),
                 Arc::new(pond_mcp_server::web_watch_runner::PageReader),
-                Arc::new(
-                    pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
-                        targeted_notification_sender.clone(),
-                    )
-                    .with_speech(spoken_watch_alerts.clone()),
-                ),
-            ),
+                watch_notifier.clone(),
+            )
+            .waking(watch_judge_bell.clone()),
         ),
         settings_repo.clone(),
     );
@@ -4101,6 +4106,19 @@ async fn run_server(
     my_goose_mind::spawn_portrait_job(mind.clone());
     my_goose_mind::spawn_memory_resort_job(mind.clone());
     my_goose_mind::spawn_screenshot_notes_job(mind.clone());
+    my_goose_mind::spawn_watch_judge_job(mind.clone(), watch_repo, watch_notifier);
+    {
+        use pond_core::user_data::ports::lane_control::LaneControl;
+        let lane = mind.lane.clone();
+        tokio::spawn(async move {
+            loop {
+                watch_judge_bell.notified().await;
+                let _ = lane
+                    .wake(pond_core::user_data::services::inference_lane::LaneJob::WatchJudge)
+                    .await;
+            }
+        });
+    }
     my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────

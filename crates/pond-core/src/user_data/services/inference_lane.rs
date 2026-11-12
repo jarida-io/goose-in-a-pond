@@ -44,6 +44,8 @@ pub enum LaneJob {
     MemoryResort,
     /// Read the screenshots members sent for a one-line note each, then drop the pictures.
     ScreenshotNotes,
+    /// Ask which of a web watch's changes are what its owner asked to be told about.
+    WatchJudge,
 }
 
 impl LaneJob {
@@ -63,6 +65,7 @@ impl LaneJob {
         LaneJob::Ideas,
         LaneJob::MemoryResort,
         LaneJob::ScreenshotNotes,
+        LaneJob::WatchJudge,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -82,6 +85,7 @@ impl LaneJob {
             LaneJob::Ideas => "ideas",
             LaneJob::MemoryResort => "memory_resort",
             LaneJob::ScreenshotNotes => "screenshot_notes",
+            LaneJob::WatchJudge => "watch_judge",
         }
     }
 
@@ -102,6 +106,7 @@ impl LaneJob {
             LaneJob::Ideas => "Research ideas for members",
             LaneJob::MemoryResort => "File older memories into profiles",
             LaneJob::ScreenshotNotes => "Read members' screenshots for ideas",
+            LaneJob::WatchJudge => "Sort web watch changes by what was asked",
         }
     }
 
@@ -442,6 +447,7 @@ mod tests {
             LaneJob::Ideas,
             LaneJob::MemoryResort,
             LaneJob::ScreenshotNotes,
+            LaneJob::WatchJudge,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),
@@ -449,7 +455,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 14, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 15, "a job was added or removed");
     }
 
     #[test]
