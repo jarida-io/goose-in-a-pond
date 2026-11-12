@@ -159,7 +159,7 @@ When a hook fires, a reminder is pushed to the member's devices. An `ask` to-do 
 question, `category: "action_required"`, `data: {"action":"todo_checkin","todo_id","text"}`,
 which the phone shows with Done and Not yet buttons and answers through `/answer`. Goose asks
 again after `not_yet` (at the snooze, else the next morning), at most three times, then leaves
-the to-do open and stops asking. The chat model gets `todo` tools (add, list, done) so "remind me
+the to-do open and stops asking. The chat model gets `add_reminder`, `list_todos` and `complete_todo` so "remind me
 to ... when I get home" makes a row.
 
 A dated mention the Pond lifts from a chat ("call the garage on Friday", the `reminders` table) is

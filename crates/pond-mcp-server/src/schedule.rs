@@ -440,11 +440,11 @@ impl ScheduleMcpServer {
     }
 
     #[tool(description = "\
-Countdown timer: fires ONCE after a delay, then deletes itself (\"set a timer for 10 \
-minutes\"). Anything repeating: create_schedule. Reminding the person of a task: add_todo.")]
+A countdown from now, in minutes or hours: \"set a timer for 10 minutes\". It fires once. For \
+a time of day, a date, or to remind the person of a task, use add_reminder.")]
     async fn set_timer(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SetTimerParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("set_timer");
@@ -461,11 +461,25 @@ minutes\"). Anything repeating: create_schedule. Reminding the person of a task:
         };
 
         let Some(delta) = parse_duration(&raw) else {
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                "How long? Give a duration like \"10 minutes\", \"1h30m\" or \"90 seconds\" \
-                 as 'duration'. A timer set for the wrong moment is worse than one not set, \
-                 so this is not guessed.",
-            )]));
+            // A time of day or a date is a reminder the model sent to the wrong tool; with
+            // something to remind them of, it is kept as one rather than asked for again.
+            let about = [p.prompt.trim(), p.name.trim()]
+                .into_iter()
+                .find(|t| !t.is_empty());
+            if let (Some(about), false) = (about, raw.trim().is_empty()) {
+                let reminder = crate::todo_tools::AddTodoParams {
+                    text: about.to_string(),
+                    kind: Some("reminder".to_string()),
+                    when: Some(raw.trim().to_string()),
+                    ..Default::default()
+                };
+                return said(crate::todo_tools::add(&ctx.meta, reminder).await);
+            }
+            return said(
+                "No timer was set. A timer needs a length of time as `duration`: \"10 \
+                 minutes\", \"1h30m\", \"90 seconds\". For a time of day or a date, call \
+                 add_reminder with `when` instead.",
+            );
         };
 
         let fire_at = chrono::Utc::now() + delta;
@@ -514,7 +528,7 @@ minutes\"). Anything repeating: create_schedule. Reminding the person of a task:
     #[tool(description = "\
 Have Goose do work by itself again and again: \"every weekday at 7am give me the weather and \
 my day\". `when` is how often, in plain words; `prompt` is what to do each time. Only to \
-remind the person of something, use add_todo instead: it repeats too. To change an existing \
+remind the person of something, use add_reminder instead: it repeats too. To change an existing \
 schedule, pass its name as `id` with only the fields that change.")]
     async fn create_schedule(
         &self,
@@ -771,7 +785,7 @@ impl ServerHandler for ScheduleMcpServer {
             ))
             .with_instructions(
                 "GIAP Schedule MCP server — the person's to-dos and reminders, one-shot timers, repeating schedules, and event rules.\n\n\
-                 Tools: add_todo, list_todos, complete_todo (the person's own to-dos and reminders, \
+                 Tools: add_reminder, list_todos, complete_todo (the person's own reminders and to-dos, \
                  at a time, a repeat or a place), set_timer (a countdown, e.g. '10m', '1h30m'), \
                  create_schedule (something Goose does again and again; `when` in plain words, \
                  e.g. 'every weekday at 7am'; also changes one), \
