@@ -45,7 +45,7 @@ The `Makefile` targets forward to these commands.
 | C compiler | `xcode-select --install` | `apt install build-essential` |
 | cmake, pkg-config | `brew install cmake pkg-config` | `apt install cmake pkg-config` |
 | ALSA, D-Bus, OpenSSL headers | not needed | `apt install libasound2-dev libdbus-1-dev libssl-dev` |
-| Go (`native/pondnet/go.mod`: 1.27.3) | [go.dev](https://go.dev/dl/) | [go.dev](https://go.dev/dl/) |
+| Go (`native/pondnet/go.mod`: 1.27.4) | [go.dev](https://go.dev/dl/) | [go.dev](https://go.dev/dl/) |
 | Node | `bash scripts/giap.sh node` | `bash scripts/giap.sh node` |
 | Read access to `jarida-io/llama-cpp-rs-giap` | see [CONTRIBUTING](../CONTRIBUTING.md#prerequisites) | same |
 
@@ -362,3 +362,4 @@ See [the Jetson dev routine](jetson-dev-routine.md) for the workflow and its tra
 | Port 4000 already in use | the server falls back through 4009 on its own; read `<data_dir>/.runtime_api_port`, or pass `--port` |
 | Dashboard is a placeholder page | the server was built before the UI: `giap.sh build-ui`, then rebuild the server |
 | `npm test` or Electron fails oddly | Node outside the range: `bash scripts/giap.sh node` |
+| The service logs `room voice: not listening` with `NoMicSpeakerPair`, or `speaker failed to open`, though a speaker or Bluetooth headset works on the desktop | the unit has no `XDG_RUNTIME_DIR`, so it cannot reach the sound server (a hand-written or older unit). Add a drop-in, `/etc/systemd/system/goose-in-a-pond.service.d/sound.conf`, with `After=` and `Wants=user@<uid>.service` under `[Unit]` and `Environment="XDG_RUNTIME_DIR=/run/user/<uid>"` under `[Service]`, for the unit's `User=`; then `sudo systemctl daemon-reload` and restart |

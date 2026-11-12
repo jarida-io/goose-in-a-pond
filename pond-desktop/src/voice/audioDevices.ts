@@ -107,8 +107,10 @@ export function describeChoice(choice: AudioChoice): ChoiceLine {
       return { text: `${device.label}, your choice, ${state}.${hint}`, problem: silent };
     case "system_default":
       return { text: `${device.label}, the system default, ${state}.${hint}`, problem: silent };
-    case "plugged_in":
-      return { text: `${device.label}, plugged in, ${state}.${hint}`, problem: silent };
+    case "plugged_in": {
+      const how = device.kind === "bluetooth" ? "connected over Bluetooth" : "plugged in";
+      return { text: `${device.label}, ${how}, ${state}.${hint}`, problem: silent };
+    }
     case "fallback": {
       const pin = choice.pinned;
       if (pin && pin !== device.id) {
@@ -211,6 +213,7 @@ export function deviceOptions(choice: AudioChoice | undefined, pinned: string): 
   const devices = choice?.devices ?? [];
   for (const d of devices) {
     const parts: string[] = [];
+    if (d.kind === "bluetooth") parts.push("Bluetooth");
     if (d.is_default) parts.push("default");
     const tested = shortly(d.outcome);
     if (tested) parts.push(tested);

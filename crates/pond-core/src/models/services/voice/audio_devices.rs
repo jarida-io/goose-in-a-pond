@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::models::domain::audio_device::{
     choose, pair_order, probe_order, settles, AudioChoice, AudioDevice, AudioDirection,
-    ChoiceBasis, LevelChange, PairOutcome, ProbeOutcome, ProbedDevice,
+    ChoiceBasis, DeviceKind, LevelChange, PairOutcome, ProbeOutcome, ProbedDevice,
 };
 use crate::models::ports::audio_devices::AudioDeviceProber;
 
@@ -72,7 +72,8 @@ pub enum SoundTest {
     },
     /// Pairs were tried and no microphone heard any speaker.
     NotHeard { tried: usize },
-    /// There was no speaker or no microphone to pair.
+    /// There was no speaker or no microphone to pair, or a Bluetooth device is connected: a
+    /// headset plays into someone's ears, where no room microphone hears it.
     NotRun,
 }
 
@@ -124,7 +125,11 @@ impl AudioDeviceSelector {
         let speakers =
             self.pair_candidates(AudioDirection::Output, output_pin, req.mode, req.exclude);
         let mics = self.pair_candidates(AudioDirection::Input, input_pin, req.mode, req.exclude);
-        if speakers.is_empty() || mics.is_empty() {
+        let bluetooth = speakers
+            .iter()
+            .chain(&mics)
+            .any(|d| d.kind == DeviceKind::Bluetooth);
+        if speakers.is_empty() || mics.is_empty() || bluetooth {
             return SoundTest::NotRun;
         }
         let heard = |s: usize, m: usize, room_dbfs: f32, raised: Vec<LevelChange>| {
@@ -744,6 +749,18 @@ pub(crate) mod tests {
         };
         assert_eq!(output.device_id(), Some("default"));
         assert_eq!(output.basis, ChoiceBasis::Pinned);
+    }
+
+    #[test]
+    fn a_connected_bluetooth_headset_is_not_judged_by_a_room_sound_test() {
+        let mut fake = board(&[("sysdefault:CARD=Device", "sysdefault:CARD=Device")]);
+        fake.outputs.push(
+            AudioDevice::new("bluez_card.B0_F0_0C_5F_3E_F6", false, DeviceKind::Bluetooth)
+                .plugged_in(),
+        );
+        let p = Arc::new(fake);
+        assert_eq!(by_sound(&p, None, None), SoundTest::NotRun);
+        assert!(p.pairs_tried.lock().unwrap().is_empty());
     }
 
     #[test]

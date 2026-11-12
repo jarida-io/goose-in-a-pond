@@ -170,7 +170,7 @@ export function AudioDevicesPanel({ variant, withPickers = false, onStatus }: Pr
             <span className="adev__title">Find them by sound</span>
             <span className="adev__line">
               A short, soft sound checks that a speaker and a microphone hear each other. Off, they
-              are checked silently.
+              are checked silently, as a Bluetooth headset always is: the room cannot hear it.
             </span>
           </div>
           {settings && (
@@ -191,8 +191,9 @@ export function AudioDevicesPanel({ variant, withPickers = false, onStatus }: Pr
             <span className="adev__title">Set up the board's sound</span>
             <span className="adev__line">
               On a Linux board like the nano, the pair the pond picks becomes every program's
-              default, unmuted, and a level too low to be heard is turned up. A Mac's own settings
-              are never changed.
+              default, unmuted, and a level too low to be heard is turned up. A Bluetooth headset
+              the pond uses becomes the default either way, as that is the only way to reach it. A
+              Mac's own settings are never changed.
             </span>
           </div>
           {settings && (
