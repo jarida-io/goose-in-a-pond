@@ -11,7 +11,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use pond_core::security::domain::admin_card::{AdminPassword, ADMIN_PASSWORD_LEN};
 use pond_core::security::ports::admin_card::{AdminCardStore, CardCheck};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -74,10 +74,8 @@ impl FileAdminCardStore {
             *symbol = (rng.next_u32() & 31) as u8;
         }
         let password = AdminPassword::from_symbols(symbols).map_err(|e| anyhow!("{e}"))?;
-        let mut salt = [0u8; 16];
-        rng.fill_bytes(&mut salt);
-        let mut id = [0u8; 8];
-        rng.fill_bytes(&mut id);
+        let salt: [u8; 16] = rng.gen();
+        let id: [u8; 8] = rng.gen();
         let record = AdminCardRecord {
             version: ADMIN_CARD_VERSION,
             card_id: id.iter().map(|b| format!("{b:02x}")).collect(),
