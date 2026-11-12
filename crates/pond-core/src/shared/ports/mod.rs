@@ -1,3 +1,4 @@
+pub mod agent_notes;
 pub mod agent_prefill;
 pub mod cart;
 pub mod event_bus;

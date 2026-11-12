@@ -72,8 +72,21 @@ giap_role:
         "confidence": 0.0 to 1.0
       }
 
-    No other keys are allowed; an element carrying one is discarded whole.
     Never repeat a suggestion the brief says was already declined.
+
+    The brief may carry your checklist and your own notes to come back to. Go
+    through the checklist with your tools. An element may say what to do
+    with it, as "do":
+
+      "suggest"  the default: the person is shown the suggestion to approve
+      "remind"   put a reminder on their phone yourself. Add "text", what to
+                 remind them of, and "when", in plain words such as
+                 "tomorrow at 8am". Only for something already theirs: a
+                 plan, a to-do or a date they told you about
+      "note"     write yourself a follow-up for a later look. Add "text"
+      "done"     a note of yours is dealt with. Add "text", words from it
+
+    "remind", "note" and "done" need no "suggestion".
 "#;
 
 /// Build the shipped reviewer role; fallible so a recipe typo is a refusal, not a loop panic.
@@ -396,6 +409,40 @@ pub fn review_brief(now: DateTime<Utc>, recent: &[BusEventRef], ledger: &Feedbac
     brief
 }
 
+/// A heartbeat's brief: the review's, in the member's own time, with the checklist to go
+/// through and Goose's notes to come back to.
+pub fn heartbeat_brief(
+    now: DateTime<Utc>,
+    zone: chrono_tz::Tz,
+    recent: &[BusEventRef],
+    ledger: &FeedbackLedger,
+    checklist: &str,
+    notes: &[crate::shared::domain::agent_note::AgentNote],
+) -> String {
+    let mut brief = review_brief(now, recent, ledger);
+    brief.push_str(&format!(
+        "\nFor the person it is {}.\n",
+        now.with_timezone(&zone).format("%A %-d %B %Y, %H:%M")
+    ));
+    let checklist = crate::prompts::sanitize_document(checklist);
+    if !checklist.is_empty() {
+        brief.push_str("\nYour checklist:\n");
+        brief.push_str(&checklist);
+        brief.push('\n');
+    }
+    if !notes.is_empty() {
+        brief.push_str("\nYour notes to come back to:\n");
+        for note in notes {
+            brief.push_str(&format!(
+                "- {} (written {})\n",
+                note.text.trim(),
+                note.created_at.with_timezone(&zone).format("%-d %B")
+            ));
+        }
+    }
+    brief
+}
+
 // ── What the child said, and what becomes of it ─────────────────────────────
 
 /// One suggestion as the model writes it; nothing here is a capability. Deliberately not
@@ -410,12 +457,49 @@ pub struct ReviewerImpulse {
     pub signal: Option<String>,
     /// Required; `Proposal::from_parts` refuses a blank one.
     pub rationale: String,
-    /// What to ask the member about. Becomes a prompt and nothing else.
+    /// What to ask the member about. Becomes a prompt and nothing else. Blank only for an act.
+    #[serde(default)]
     pub suggestion: String,
     /// Defaults below [`MIN_PROPOSAL_CONFIDENCE`], so omitting it is a refusal.
     #[serde(default)]
     pub confidence: f32,
+    /// What to do with it: absent or "suggest" for a proposal, else one of the acts.
+    #[serde(default, rename = "do")]
+    pub act: Option<String>,
+    /// An act's words: what to remind of, the note, or words from the note that is done.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// When a reminder is for, in plain words.
+    #[serde(default)]
+    pub when: Option<String>,
 }
+
+/// Something the heartbeat does by itself. Each is small, the member's own or Goose's own, and
+/// undone with a tap; anything that reaches further is a proposal the member approves.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeartbeatAct {
+    /// A reminder on the member's own list, pushed to their phone at `due`.
+    Remind {
+        text: String,
+        due: DateTime<Utc>,
+        why: String,
+    },
+    /// A follow-up Goose writes for its own later look.
+    Note { text: String },
+    /// A note of Goose's that is dealt with, named by words from it.
+    Done { words: String },
+}
+
+/// Reminders one run may set.
+pub const MAX_REMINDERS_PER_RUN: usize = 2;
+/// Reminders the heartbeat may set for one member in a day.
+pub const MAX_REMINDERS_PER_DAY: usize = 3;
+/// Notes one run may write or close.
+pub const MAX_NOTES_PER_RUN: usize = 3;
+/// How far ahead a reminder the heartbeat sets may fall: it acts on what is near.
+pub const REMINDER_HORIZON: Duration = Duration::days(14);
+/// How often the heartbeat looks in, while the house is quiet.
+pub const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// The one action an impulse may become: always a prompt, never a model-chosen webhook or rule.
 pub fn impulse_action(suggestion: &str) -> TaskKind {
@@ -446,6 +530,8 @@ pub enum ImpulseRefused {
     RepeatedInThisRun { index: usize },
     /// The run cap or the day's remaining allowance is spent.
     OverCap { index: usize, allowance: usize },
+    /// An act that could not be carried out as written.
+    ActRefused { index: usize, why: &'static str },
 }
 
 /// What one review produced.
@@ -455,6 +541,8 @@ pub struct ReviewYield {
     pub proposals: Vec<Proposal>,
     /// Everything that did not make it, and why; kept so a silent reviewer can be diagnosed.
     pub refusals: Vec<ImpulseRefused>,
+    /// What the run does by itself, already checked and capped.
+    pub acts: Vec<HeartbeatAct>,
 }
 
 impl ReviewYield {
@@ -462,7 +550,82 @@ impl ReviewYield {
         Self {
             proposals: Vec::new(),
             refusals: vec![refusal],
+            acts: Vec::new(),
         }
+    }
+}
+
+/// What a run may still do by itself, beside the proposals it may make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActAllowance {
+    /// Reminders the heartbeat has set for this member in the last day.
+    pub reminders_today: usize,
+    /// Notes this run may write or close.
+    pub notes: usize,
+    /// The member's time zone, which "tomorrow at 8am" is read in.
+    pub zone: chrono_tz::Tz,
+}
+
+impl ActAllowance {
+    /// No acts at all: a review that only proposes.
+    pub fn none() -> Self {
+        Self {
+            reminders_today: MAX_REMINDERS_PER_DAY,
+            notes: 0,
+            zone: chrono_tz::UTC,
+        }
+    }
+
+    /// A heartbeat's, for a member who has had `reminders_today` set for them already.
+    pub fn for_heartbeat(reminders_today: usize, zone: chrono_tz::Tz) -> Self {
+        Self {
+            reminders_today,
+            notes: MAX_NOTES_PER_RUN,
+            zone,
+        }
+    }
+}
+
+/// The act an impulse asks for, checked: `Ok(None)` for a suggestion.
+fn act_of(
+    impulse: &ReviewerImpulse,
+    now: DateTime<Utc>,
+    zone: chrono_tz::Tz,
+) -> Result<Option<HeartbeatAct>, &'static str> {
+    use crate::shared::domain::agent_note::tidy;
+    let word = impulse
+        .act
+        .as_deref()
+        .map(|w| w.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let text = || {
+        impulse
+            .text
+            .as_deref()
+            .and_then(|t| tidy(t).ok())
+            .ok_or("it has no text")
+    };
+    match word.as_str() {
+        "" | "suggest" | "suggestion" | "ask" => Ok(None),
+        "remind" | "reminder" => {
+            let when = impulse.when.as_deref().unwrap_or_default();
+            let due = crate::shared::domain::when_said::due_from_words(when, now, zone)
+                .ok_or("its `when` names no time")?;
+            if due <= now {
+                return Err("its `when` has passed");
+            }
+            if due - now > REMINDER_HORIZON {
+                return Err("its `when` is too far off to set unasked");
+            }
+            Ok(Some(HeartbeatAct::Remind {
+                text: text()?,
+                due,
+                why: impulse.rationale.trim().to_string(),
+            }))
+        }
+        "note" => Ok(Some(HeartbeatAct::Note { text: text()? })),
+        "done" => Ok(Some(HeartbeatAct::Done { words: text()? })),
+        _ => Err("it asks for something the heartbeat does not do"),
     }
 }
 
@@ -475,6 +638,28 @@ pub fn interpret_answer(
     ledger: &FeedbackLedger,
     proposals_today: usize,
 ) -> ReviewYield {
+    interpret_heartbeat(
+        run,
+        audience,
+        now,
+        ledger,
+        proposals_today,
+        ActAllowance::none(),
+    )
+}
+
+/// [`interpret_answer`] for a heartbeat, which may also act within `allowance`.
+pub fn interpret_heartbeat(
+    run: &TaskRun,
+    audience: &ProposalAudience,
+    now: DateTime<Utc>,
+    ledger: &FeedbackLedger,
+    proposals_today: usize,
+    allowance: ActAllowance,
+) -> ReviewYield {
+    let reminders_left =
+        MAX_REMINDERS_PER_RUN.min(MAX_REMINDERS_PER_DAY.saturating_sub(allowance.reminders_today));
+    let mut acts: Vec<HeartbeatAct> = Vec::new();
     let Some(answer) = run.result_for_parent() else {
         return ReviewYield::refused(ImpulseRefused::NoAnswer);
     };
@@ -486,7 +671,7 @@ pub fn interpret_answer(
     };
 
     // The narrower of the two caps, and the day's remainder can be zero.
-    let allowance =
+    let allowance_for_proposals =
         MAX_PROPOSALS_PER_RUN.min(MAX_PROPOSALS_PER_DAY.saturating_sub(proposals_today));
 
     let mut proposals: Vec<Proposal> = Vec::new();
@@ -494,10 +679,6 @@ pub fn interpret_answer(
     let mut seen: BTreeSet<ProposalShape> = BTreeSet::new();
 
     for (index, element) in elements.into_iter().enumerate() {
-        if proposals.len() >= allowance {
-            refusals.push(ImpulseRefused::OverCap { index, allowance });
-            continue;
-        }
         // Per element, so one malformed suggestion doesn't cost the others.
         let impulse = match serde_json::from_value::<ReviewerImpulse>(element) {
             Ok(impulse) => impulse,
@@ -513,6 +694,52 @@ pub fn interpret_answer(
             refusals.push(ImpulseRefused::LowConfidence {
                 index,
                 confidence: impulse.confidence,
+            });
+            continue;
+        }
+        match act_of(&impulse, now, allowance.zone) {
+            Err(why) => {
+                refusals.push(ImpulseRefused::ActRefused { index, why });
+                continue;
+            }
+            Ok(Some(act)) => {
+                let (made, cap) = match act {
+                    HeartbeatAct::Remind { .. } => (
+                        acts.iter()
+                            .filter(|a| matches!(a, HeartbeatAct::Remind { .. }))
+                            .count(),
+                        reminders_left,
+                    ),
+                    HeartbeatAct::Note { .. } | HeartbeatAct::Done { .. } => (
+                        acts.iter()
+                            .filter(|a| !matches!(a, HeartbeatAct::Remind { .. }))
+                            .count(),
+                        allowance.notes,
+                    ),
+                };
+                if made >= cap {
+                    refusals.push(ImpulseRefused::OverCap {
+                        index,
+                        allowance: cap,
+                    });
+                } else if !acts.contains(&act) {
+                    acts.push(act);
+                }
+                continue;
+            }
+            Ok(None) => {}
+        }
+        if impulse.suggestion.trim().is_empty() {
+            refusals.push(ImpulseRefused::Unreadable {
+                index,
+                message: "a suggestion with no words".to_string(),
+            });
+            continue;
+        }
+        if proposals.len() >= allowance_for_proposals {
+            refusals.push(ImpulseRefused::OverCap {
+                index,
+                allowance: allowance_for_proposals,
             });
             continue;
         }
@@ -538,6 +765,7 @@ pub fn interpret_answer(
     ReviewYield {
         proposals,
         refusals,
+        acts,
     }
 }
 
@@ -768,6 +996,177 @@ mod tests {
                   "rationale":"the delivery window closes at six",
                   "suggestion":"{suggestion}","confidence":{confidence}}}]"#
         )
+    }
+
+    // ── The heartbeat's acts ───────────────────────────────────────────────
+
+    const NAIROBI: chrono_tz::Tz = chrono_tz::Africa::Nairobi;
+
+    /// Monday 9 November 2026, 10:00 in Nairobi.
+    fn monday_morning() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-09T07:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn heartbeat(body: &str, reminders_today: usize) -> ReviewYield {
+        interpret_heartbeat(
+            &answer(body),
+            &audience(),
+            monday_morning(),
+            &FeedbackLedger::empty(),
+            0,
+            ActAllowance::for_heartbeat(reminders_today, NAIROBI),
+        )
+    }
+
+    fn act(body: &str) -> String {
+        format!(
+            r#"{{"trigger_kind":"time","rationale":"rain is forecast for the hike","confidence":0.8,{body}}}"#
+        )
+    }
+
+    #[test]
+    fn a_heartbeat_sets_a_reminder_writes_a_note_and_closes_one() {
+        let out = heartbeat(
+            &format!(
+                "[{},{},{}]",
+                act(r#""do":"remind","text":" pack a rain jacket ","when":"tomorrow at 8am""#),
+                act(r#""do":"note","text":"Look at the pump reading again on Friday.""#),
+                act(r#""do":"done","text":"pump reading""#),
+            ),
+            0,
+        );
+        assert!(out.proposals.is_empty());
+        assert_eq!(out.refusals, vec![]);
+        assert_eq!(
+            out.acts,
+            vec![
+                HeartbeatAct::Remind {
+                    text: "pack a rain jacket".into(),
+                    due: DateTime::parse_from_rfc3339("2026-11-10T08:00:00+03:00")
+                        .unwrap()
+                        .with_timezone(&Utc),
+                    why: "rain is forecast for the hike".into(),
+                },
+                HeartbeatAct::Note {
+                    text: "Look at the pump reading again on Friday.".into()
+                },
+                HeartbeatAct::Done {
+                    words: "pump reading".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_act_that_cannot_be_carried_out_is_refused_beside_a_suggestion_that_stands() {
+        let out = heartbeat(
+            &format!(
+                "[{},{},{},{},{}]",
+                act(r#""do":"remind","text":"call the garage","when":"sometime soon""#),
+                act(r#""do":"remind","text":"renew the logbook","when":"19 March""#),
+                act(r#""do":"remind","when":"tomorrow at 8am""#),
+                act(r#""do":"unlock","text":"the front door""#),
+                act(r#""suggestion":"Ask whether to move the hike to Sunday.""#),
+            ),
+            0,
+        );
+        assert!(out.acts.is_empty());
+        assert_eq!(out.proposals.len(), 1);
+        let whys: Vec<&str> = out
+            .refusals
+            .iter()
+            .filter_map(|r| match r {
+                ImpulseRefused::ActRefused { why, .. } => Some(*why),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            whys,
+            vec![
+                "its `when` names no time",
+                "its `when` is too far off to set unasked",
+                "it has no text",
+                "it asks for something the heartbeat does not do",
+            ]
+        );
+    }
+
+    #[test]
+    fn reminders_are_capped_by_the_run_and_by_the_day() {
+        let three = format!(
+            "[{},{},{}]",
+            act(r#""do":"remind","text":"one","when":"tomorrow at 8am""#),
+            act(r#""do":"remind","text":"two","when":"tomorrow at 9am""#),
+            act(r#""do":"remind","text":"three","when":"tomorrow at 10am""#),
+        );
+        let out = heartbeat(&three, 0);
+        assert_eq!(out.acts.len(), MAX_REMINDERS_PER_RUN);
+        assert_eq!(
+            out.refusals,
+            vec![ImpulseRefused::OverCap {
+                index: 2,
+                allowance: MAX_REMINDERS_PER_RUN
+            }]
+        );
+
+        let out = heartbeat(&three, MAX_REMINDERS_PER_DAY - 1);
+        assert_eq!(out.acts.len(), 1, "one left of the day's allowance");
+        assert!(heartbeat(&three, MAX_REMINDERS_PER_DAY).acts.is_empty());
+    }
+
+    #[test]
+    fn a_review_that_only_proposes_carries_out_no_act() {
+        let body = format!(
+            "[{},{}]",
+            act(r#""do":"remind","text":"pack a rain jacket","when":"tomorrow at 8am""#),
+            act(r#""do":"note","text":"Look at the pump again.""#),
+        );
+        let out = interpret_answer(
+            &answer(&body),
+            &audience(),
+            monday_morning(),
+            &FeedbackLedger::empty(),
+            0,
+        );
+        assert!(out.acts.is_empty());
+        assert!(out.proposals.is_empty());
+        assert_eq!(out.refusals.len(), 2);
+    }
+
+    #[test]
+    fn a_heartbeat_brief_carries_the_local_time_the_checklist_and_the_notes() {
+        use crate::shared::domain::agent_note::{AgentNote, NoteKind};
+        let notes = [AgentNote {
+            id: "n1".into(),
+            profile_id: None,
+            kind: NoteKind::Note,
+            text: "Look at the pump reading again.".into(),
+            created_at: monday_morning() - Duration::days(2),
+        }];
+        let brief = heartbeat_brief(
+            monday_morning(),
+            NAIROBI,
+            &[],
+            &FeedbackLedger::empty(),
+            "- Is a reminder overdue?\n",
+            &notes,
+        );
+        assert!(brief.contains("For the person it is Monday 9 November 2026, 10:00."));
+        assert!(brief.contains("Your checklist:\n- Is a reminder overdue?\n"));
+        assert!(brief.contains("- Look at the pump reading again. (written 7 November)"));
+
+        let bare = heartbeat_brief(
+            monday_morning(),
+            NAIROBI,
+            &[],
+            &FeedbackLedger::empty(),
+            "  ",
+            &[],
+        );
+        assert!(!bare.contains("checklist"));
+        assert!(!bare.contains("notes to come back to"));
     }
 
     // ── The role ───────────────────────────────────────────────────────────

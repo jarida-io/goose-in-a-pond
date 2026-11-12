@@ -136,9 +136,11 @@ A lane job re-sorts every live row that has no `about`, ten at a time while the 
 model names each row's `about`, or says it is not a fact about a member; code applies the write
 policy. Rows that fail are archived with the reason, never deleted, and can be restored. The job
 resumes where it stopped. A row the model gives no usable answer for twice is left as it is: still
-recalled, shown under "Other". Of several older rows about one one-at-a-time thing, the newest
-stays and the rest are closed. A row consolidation merges comes out unfiled and is filed on the
-next pass.
+recalled, shown under "Other". The re-sort never closes one row in favour of another: on the nano
+the model filed three different preferences under `style`, and closing the older two as replaced
+hid facts that were still true. Several older rows may therefore share a one-at-a-time `about`
+until the member next states that fact, which closes them all. A row consolidation merges comes
+out unfiled and is filed on the next pass.
 
 ## Goose's own notes
 

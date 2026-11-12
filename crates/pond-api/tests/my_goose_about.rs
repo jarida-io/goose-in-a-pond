@@ -291,3 +291,85 @@ async fn what_the_re_sort_set_aside_is_listed_with_why_and_comes_back() {
     let (_, archived) = call(&pond, Method::GET, "/me/about/archived", json!({})).await;
     assert!(archived["facts"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn gooses_own_notes_are_listed_for_the_member_and_removed_by_them() {
+    use pond_core::shared::domain::agent_note::{AgentNote, NoteKind};
+    use pond_core::shared::ports::agent_notes::AgentNotesRepository;
+
+    let built = pond_api::test_support::app_state().await;
+    let mut state = built.state;
+    let member = state
+        .profile_repo
+        .create(CreateProfileRequest {
+            display_name: "Jerry".into(),
+            avatar_emoji: "x".into(),
+        })
+        .await
+        .unwrap()
+        .id;
+    let device_id = state
+        .device_registry
+        .register(RegisterDeviceRequest {
+            id: None,
+            name: "Phone".into(),
+            device_type: "gotg".into(),
+            hostname: None,
+            capabilities: vec![],
+            room_id: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    state.handshake = Arc::new(DeviceHandshake(device_id));
+    let notes = pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(state.db.system.clone());
+    for (id, owner, kind, text) in [
+        (
+            "l1",
+            Some(member.as_str()),
+            NoteKind::Lesson,
+            "Give prices in shillings.",
+        ),
+        (
+            "n1",
+            None,
+            NoteKind::Note,
+            "Look at the pump reading again.",
+        ),
+    ] {
+        notes
+            .add(AgentNote {
+                id: id.into(),
+                profile_id: owner.map(str::to_string),
+                kind,
+                text: text.into(),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+    let memories = state.memory_repo.clone();
+    let pond = Pond {
+        router: build_router(
+            Arc::new(state),
+            std::path::PathBuf::from("pond-desktop/dist"),
+        ),
+        memories,
+        member,
+        _dir: built.dir,
+    };
+
+    let (status, body) = call(&pond, Method::GET, "/me/notes", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["lessons"][0]["text"], "Give prices in shillings.");
+    assert_eq!(body["lessons"][0]["shared"], false);
+    assert_eq!(body["notes"][0]["text"], "Look at the pump reading again.");
+    assert_eq!(body["notes"][0]["shared"], true);
+
+    let (status, _) = call(&pond, Method::DELETE, "/me/notes/l1", json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(&pond, Method::DELETE, "/me/notes/l1", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, body) = call(&pond, Method::GET, "/me/notes", json!({})).await;
+    assert!(body["lessons"].as_array().unwrap().is_empty());
+}

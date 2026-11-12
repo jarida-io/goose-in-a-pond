@@ -2147,6 +2147,24 @@ impl GooseAdapter {
             .clone()
     }
 
+    /// A style template speaking as the soul and keeping memory by the scratchpad's rules: the
+    /// two documents a person edits. A document that is missing or unreadable leaves the
+    /// style's own block standing.
+    async fn as_goose(&self, template: &str) -> String {
+        let (soul, rules) = tokio::join!(
+            self.template_repo.get(pond_core::prompts::SOUL),
+            self.template_repo.get(pond_core::prompts::SCRATCHPAD),
+        );
+        let text = |row: anyhow::Result<
+            Option<pond_core::user_data::domain::prompt_template::PromptTemplate>,
+        >| row.ok().flatten().map(|t| t.content);
+        pond_core::prompts::with_agent_documents(
+            template,
+            text(soul).as_deref(),
+            text(rules).as_deref(),
+        )
+    }
+
     /// Memories relevant to `message`, with cosine similarity when known, and the embedder's
     /// `closest_memory` floor for those cosines. Never fails the turn.
     async fn topical_memories(
@@ -2954,6 +2972,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Voice = the instance flag (CLI --voice) or the request's (desktop voice pipeline).
         let voice_instance = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
@@ -3142,6 +3161,38 @@ impl GooseAdapter {
             }
             _ => String::new(),
         };
+
+        // Goose's own lessons for this member ride the same slot, once per conversation: what
+        // it learnt about how to work, which a new conversation would otherwise start without.
+        let lessons_for_user_msg = match pond_mcp_server::memory::agent_notes() {
+            Some(notes) if !turn_scope.excludes_everything() => {
+                let lessons = notes
+                    .list(
+                        &turn_scope,
+                        pond_core::shared::domain::agent_note::NoteKind::Lesson,
+                    )
+                    .await
+                    .unwrap_or_default();
+                let block = pond_core::shared::domain::agent_note::lessons_block(&lessons);
+                if block.is_empty()
+                    || self
+                        .earlier_user_texts(&goose_sid)
+                        .await
+                        .iter()
+                        .any(|text| text.contains(&block))
+                {
+                    String::new()
+                } else {
+                    block
+                }
+            }
+            _ => String::new(),
+        };
+        let member_notes_for_user_msg = [member_notes_for_user_msg, lessons_for_user_msg]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
@@ -5232,6 +5283,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Lean on purpose: compact (a child gets a window fraction), no prose tool list (the
         // envelope names them), no thinking (the drain's `as_concat_text()` drops it).
