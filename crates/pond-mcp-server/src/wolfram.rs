@@ -1027,10 +1027,13 @@ mod tests {
         .unwrap();
 
         // No secret store in a test binary: the real out-of-the-box, no-key path.
-        let result = server
+        let rmcp::model::CallToolResponse::Complete(result) = server
             .call_tool(params, ctx_for(Some("s-nokey")).await)
             .await
-            .expect("a missing key is not a tool error");
+            .expect("a missing key is not a tool error")
+        else {
+            panic!("wolfram answered with an input-required or task response");
+        };
         let text = only_text(&result);
         assert!(text.contains("Wolfram|Alpha"), "got: {text}");
         assert!(text.contains("developer.wolframalpha.com"), "got: {text}");

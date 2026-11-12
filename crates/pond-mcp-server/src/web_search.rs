@@ -20,7 +20,7 @@ use pond_core::shared::services::passages;
 use regex::Regex;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{Annotations, CallToolResult, ContentBlock, ErrorData, Meta, Role, TextContent},
+    model::{Annotations, CallToolResult, ContentBlock, ErrorData, MetaObject, Role, TextContent},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -1664,7 +1664,7 @@ pub fn result_from(
 /// `content` as a result history keeps only as a stub naming `domains`.
 fn transient(content: Vec<ContentBlock>, domains: &[String]) -> CallToolResult {
     let mut result = CallToolResult::success(content);
-    result.meta = Some(Meta(transient_meta(&web_search_stub(domains))));
+    result.meta = Some(MetaObject(transient_meta(&web_search_stub(domains))));
     result
 }
 
@@ -3574,7 +3574,11 @@ mod tests {
         }))
         .unwrap();
         // No secret store in a test binary: the key-removed path.
-        let result = server.call_tool(params, ctx).await.unwrap();
+        let rmcp::model::CallToolResponse::Complete(result) =
+            server.call_tool(params, ctx).await.unwrap()
+        else {
+            panic!("search_web answered with an input-required or task response");
+        };
         let copy = text_of(&result, 0);
         assert!(copy.contains("Web search is not set up"), "{copy}");
     }

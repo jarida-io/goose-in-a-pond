@@ -20,7 +20,7 @@ use pond_core::mcp::services::source_ledger::{self, MAX_CHAT_TURN_READS};
 use pond_core::shared::services::passages;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, MetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -256,7 +256,7 @@ whole, and what the page lists.")]
             "web page read"
         );
         let mut result = CallToolResult::success(vec![ContentBlock::text(reply.text)]);
-        result.meta = Some(Meta(transient_meta(&web_page_stub(&address))));
+        result.meta = Some(MetaObject(transient_meta(&web_page_stub(&address))));
         Ok(result)
     }
 }

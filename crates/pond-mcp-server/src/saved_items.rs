@@ -16,7 +16,7 @@ use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -129,7 +129,7 @@ listing, or find one they kept. save takes your last answer unless you give text
     }
 }
 
-async fn run(meta: &Meta, params: SavedItemsParams) -> String {
+async fn run(meta: &RequestMetaObject, params: SavedItemsParams) -> String {
     let what = "keeping that";
     let Some(deps) = SAVED_ITEM_DEPS.get().cloned() else {
         return format_dead_end(what, "Saving cards is not set up on this pond yet.");
@@ -399,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_deps_saving_is_refused() {
-        let text = run(&Meta::new(), params(serde_json::json!({}))).await;
+        let text = run(&RequestMetaObject::new(), params(serde_json::json!({}))).await;
         assert!(text.contains("not set up"), "{text}");
     }
 }

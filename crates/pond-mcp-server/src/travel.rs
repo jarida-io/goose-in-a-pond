@@ -12,8 +12,8 @@ use pond_core::user_data::services::nearby::{self, NEAR_HOME_KM};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -292,7 +292,11 @@ and pays in the app. Omit pickup for their current location. Never claim a ride 
 
 impl TravelMcpServer {
     /// The body of `get_ride_link`, apart from the rmcp wrapper so tests can call it.
-    pub async fn ride_result(&self, meta: &Meta, params: &RideParams) -> CallToolResult {
+    pub async fn ride_result(
+        &self,
+        meta: &RequestMetaObject,
+        params: &RideParams,
+    ) -> CallToolResult {
         let destination = text_param(&params.destination, &params.extra, DESTINATION_KEYS);
         let pickup = text_param(&params.pickup, &params.extra, PICKUP_KEYS);
         let app = RideApp::parse(
@@ -596,7 +600,7 @@ impl TravelMcpServer {
     /// The body of `get_directions_link`, apart from the rmcp wrapper so tests can call it.
     pub async fn directions_result(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: &DirectionsParams,
     ) -> CallToolResult {
         match directions(params) {
@@ -612,7 +616,7 @@ impl TravelMcpServer {
     /// Push `link` to the speaker's own phones. `None` when delivery isn't wired; otherwise the
     /// line saying where it went. Only one member is ever pushed to (see [`Self::speaker`]): a
     /// broadcast would put one person's trip on every phone.
-    async fn deliver(&self, meta: &Meta, link: PhoneLink) -> Option<String> {
+    async fn deliver(&self, meta: &RequestMetaObject, link: PhoneLink) -> Option<String> {
         let (Some(_), Some(notifier)) = (self.authority.get(), self.notifier.get()) else {
             return None;
         };
@@ -658,7 +662,7 @@ impl TravelMcpServer {
 
     /// The household member speaking in this call, or why there is none. An unidentified
     /// speaker in a one-member household can only be that member; a guest is nobody's.
-    async fn speaker(&self, meta: &Meta) -> Result<String, &'static str> {
+    async fn speaker(&self, meta: &RequestMetaObject) -> Result<String, &'static str> {
         const NOT_ONE_MEMBER: &str = "the speaker is not identified as one household member";
         let authority = self
             .authority
@@ -676,7 +680,11 @@ impl TravelMcpServer {
     }
 
     /// The body of `book_ride`, apart from the rmcp wrapper so tests can call it.
-    pub async fn book_result(&self, meta: &Meta, params: &BookRideParams) -> CallToolResult {
+    pub async fn book_result(
+        &self,
+        meta: &RequestMetaObject,
+        params: &BookRideParams,
+    ) -> CallToolResult {
         let fail = |text: String| CallToolResult::error(vec![ContentBlock::text(text)]);
         let Some(accounts) = self.ride_accounts.get() else {
             return fail(
@@ -793,7 +801,7 @@ fn extra_str<'a>(extra: &'a HashMap<String, serde_json::Value>, keys: &[&str]) -
 
 #[tool_handler]
 impl ServerHandler for TravelMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1066,7 +1074,7 @@ mod tests {
     async fn a_resolved_ride_names_the_match_and_books_nothing() {
         let out = text(
             &server()
-                .ride_result(&Meta::new(), &ride(Some("JKIA"), None, None))
+                .ride_result(&RequestMetaObject::new(), &ride(Some("JKIA"), None, None))
                 .await,
         );
         assert!(out.contains("https://m.uber.com/ul/?action=setPickup&pickup=my_location"));
@@ -1082,7 +1090,10 @@ mod tests {
     async fn a_named_pickup_is_resolved_too() {
         let out = text(
             &server()
-                .ride_result(&Meta::new(), &ride(Some("JKIA"), Some("Westlands"), None))
+                .ride_result(
+                    &RequestMetaObject::new(),
+                    &ride(Some("JKIA"), Some("Westlands"), None),
+                )
                 .await,
         );
         assert!(out.contains("pickup[latitude]=-1.267600"), "{out}");
@@ -1092,7 +1103,10 @@ mod tests {
     #[tokio::test]
     async fn an_unmatched_destination_leaves_the_dropoff_empty_and_says_so() {
         let result = server()
-            .ride_result(&Meta::new(), &ride(Some("my aunt's place"), None, None))
+            .ride_result(
+                &RequestMetaObject::new(),
+                &ride(Some("my aunt's place"), None, None),
+            )
             .await;
         let out = text(&result);
         assert_ne!(result.is_error, Some(true));
@@ -1104,7 +1118,10 @@ mod tests {
     async fn the_namesake_near_home_beats_the_geocoders_first_match() {
         let out = text(
             &server()
-                .ride_result(&Meta::new(), &ride(Some("Westlands"), None, None))
+                .ride_result(
+                    &RequestMetaObject::new(),
+                    &ride(Some("Westlands"), None, None),
+                )
                 .await,
         );
         assert!(out.contains("dropoff[latitude]=-1.267600"), "{out}");
@@ -1116,7 +1133,7 @@ mod tests {
     #[tokio::test]
     async fn a_place_matching_only_far_from_home_is_no_match() {
         let result = server()
-            .ride_result(&Meta::new(), &ride(Some("Kisumu"), None, None))
+            .ride_result(&RequestMetaObject::new(), &ride(Some("Kisumu"), None, None))
             .await;
         let out = text(&result);
         assert!(!out.contains("dropoff["), "{out}");
@@ -1131,7 +1148,10 @@ mod tests {
         let out = text(
             &TravelMcpServer::new(Some(Arc::new(Places::default())))
                 .with_home(Some(Arc::new(Home(None))))
-                .ride_result(&Meta::new(), &ride(Some("Westlands"), None, None))
+                .ride_result(
+                    &RequestMetaObject::new(),
+                    &ride(Some("Westlands"), None, None),
+                )
                 .await,
         );
         assert!(out.contains("Westlands, Jamaica"), "{out}");
@@ -1146,10 +1166,13 @@ mod tests {
         let places = Arc::new(Places::default());
         let server = TravelMcpServer::new(Some(places.clone())).with_home(Some(nairobi()));
         server
-            .ride_result(&Meta::new(), &ride(Some("Westlands"), None, None))
+            .ride_result(
+                &RequestMetaObject::new(),
+                &ride(Some("Westlands"), None, None),
+            )
             .await;
         server
-            .ride_result(&Meta::new(), &ride(Some("JKIA"), None, None))
+            .ride_result(&RequestMetaObject::new(), &ride(Some("JKIA"), None, None))
             .await;
         assert_eq!(
             places.asked(),
@@ -1165,7 +1188,7 @@ mod tests {
     async fn without_a_place_lookup_the_link_still_opens_uber() {
         let out = text(
             &TravelMcpServer::new(None)
-                .ride_result(&Meta::new(), &ride(Some("JKIA"), None, None))
+                .ride_result(&RequestMetaObject::new(), &ride(Some("JKIA"), None, None))
                 .await,
         );
         assert!(out.contains("pickup=my_location"), "{out}");
@@ -1175,7 +1198,10 @@ mod tests {
     #[tokio::test]
     async fn bolt_is_an_error_that_makes_no_link() {
         let result = server()
-            .ride_result(&Meta::new(), &ride(Some("JKIA"), None, Some("bolt")))
+            .ride_result(
+                &RequestMetaObject::new(),
+                &ride(Some("JKIA"), None, Some("bolt")),
+            )
             .await;
         assert_eq!(result.is_error, Some(true));
         let out = text(&result);
@@ -1190,7 +1216,7 @@ mod tests {
         let out = text(
             &server()
                 .directions_result(
-                    &Meta::new(),
+                    &RequestMetaObject::new(),
                     &DirectionsParams {
                         extra,
                         ..Default::default()
@@ -1205,7 +1231,7 @@ mod tests {
     #[tokio::test]
     async fn directions_without_a_destination_are_an_error() {
         let result = server()
-            .directions_result(&Meta::new(), &DirectionsParams::default())
+            .directions_result(&RequestMetaObject::new(), &DirectionsParams::default())
             .await;
         assert_eq!(result.is_error, Some(true));
     }
@@ -1246,8 +1272,8 @@ mod delivery_tests {
         async fn audit(&self, _s: &str, _a: &str, _d: &PolicyDecision) {}
     }
 
-    fn meta() -> Meta {
-        let mut m = Meta::new();
+    fn meta() -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::session_meta::SESSION_ID_META_KEY.to_string(),
             serde_json::json!("engine-1"),
@@ -1394,7 +1420,7 @@ mod delivery_tests {
         let notifier = Arc::new(MockMemberNotifier::new().with_devices("liz", &["liz-phone"]));
         let out = text(
             &server(Some(ProfileScope::Owner("liz".into())), notifier.clone())
-                .directions_result(&Meta::new(), &directions_to("Kisumu"))
+                .directions_result(&RequestMetaObject::new(), &directions_to("Kisumu"))
                 .await,
         );
         assert!(notifier.sent().is_empty());
@@ -1507,8 +1533,8 @@ mod booking_tests {
         }
     }
 
-    fn meta() -> Meta {
-        let mut m = Meta::new();
+    fn meta() -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::session_meta::SESSION_ID_META_KEY.to_string(),
             serde_json::json!("engine-1"),

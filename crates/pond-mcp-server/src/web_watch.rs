@@ -17,7 +17,7 @@ use pond_core::shared::services::cart_watch::{self, AddRefusal, NewCartItem};
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -169,7 +169,7 @@ match appears or drops in price.")]
     }
 }
 
-async fn run(meta: &Meta, params: WebWatchParams) -> String {
+async fn run(meta: &RequestMetaObject, params: WebWatchParams) -> String {
     let what = "watching that page";
     let Some(deps) = WEB_WATCH_DEPS.get().cloned() else {
         return format_dead_end(what, "Watching pages is not set up on this pond yet.");
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn without_deps_or_a_member_a_watch_is_refused() {
         let text = run(
-            &Meta::new(),
+            &RequestMetaObject::new(),
             params(serde_json::json!({"url": "c.example"})),
         )
         .await;

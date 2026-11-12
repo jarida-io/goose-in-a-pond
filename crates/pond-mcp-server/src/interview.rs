@@ -15,8 +15,8 @@ use pond_core::user_data::services::profile_interview::InterviewService;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -357,7 +357,10 @@ impl InterviewMcpServer {
 
     /// The member speaking in this call's session. In a household of one, an unidentified
     /// speaker can only be that member.
-    async fn member(&self, meta: &Meta) -> Result<(Arc<InterviewService>, String), Refusal> {
+    async fn member(
+        &self,
+        meta: &RequestMetaObject,
+    ) -> Result<(Arc<InterviewService>, String), Refusal> {
         let (service, authority) = self.deps()?;
         let session = crate::session_meta::session_from_meta(meta).ok_or(Refusal::NotAMember)?;
         let (scope, _) = authority
@@ -375,7 +378,7 @@ impl InterviewMcpServer {
             .ok_or(Refusal::NotAMember)
     }
 
-    async fn run_status(&self, meta: &Meta) -> Result<String, Refusal> {
+    async fn run_status(&self, meta: &RequestMetaObject) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         let interview = service
             .get(&member)
@@ -386,7 +389,11 @@ impl InterviewMcpServer {
         Ok(describe(&interview))
     }
 
-    async fn run_record(&self, meta: &Meta, p: RecordParams) -> Result<String, Refusal> {
+    async fn run_record(
+        &self,
+        meta: &RequestMetaObject,
+        p: RecordParams,
+    ) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         let (interview, next) = service
             .record(&member, &p.topic, &p.answer, Utc::now())
@@ -396,7 +403,7 @@ impl InterviewMcpServer {
         Ok(format!("Noted. {}", progress(&interview, next)))
     }
 
-    async fn run_skip(&self, meta: &Meta, p: TopicParams) -> Result<String, Refusal> {
+    async fn run_skip(&self, meta: &RequestMetaObject, p: TopicParams) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         let (interview, next) = service
             .skip(&member, &p.topic, Utc::now())
@@ -409,7 +416,7 @@ impl InterviewMcpServer {
         ))
     }
 
-    async fn run_stop(&self, meta: &Meta) -> Result<String, Refusal> {
+    async fn run_stop(&self, meta: &RequestMetaObject) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         service
             .stop(&member, Utc::now())
@@ -419,7 +426,11 @@ impl InterviewMcpServer {
         Ok("Stopped. Nothing was saved, and they can carry on another time.".to_string())
     }
 
-    async fn run_propose(&self, meta: &Meta, p: ProposeParams) -> Result<String, Refusal> {
+    async fn run_propose(
+        &self,
+        meta: &RequestMetaObject,
+        p: ProposeParams,
+    ) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         // A note with no topic replaces nothing; the draft comes from the record either way.
         let (drafts, _unplaced): (Vec<(String, String)>, usize) = p.drafts();
@@ -451,7 +462,7 @@ impl InterviewMcpServer {
         Ok(out)
     }
 
-    async fn run_save(&self, meta: &Meta) -> Result<String, Refusal> {
+    async fn run_save(&self, meta: &RequestMetaObject) -> Result<String, Refusal> {
         let (service, member) = self.member(meta).await?;
         let saved = service
             .approve(&member, false, Utc::now())
@@ -502,7 +513,7 @@ fn describe(i: &Interview) -> String {
 
 #[tool_handler]
 impl ServerHandler for InterviewMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -557,8 +568,8 @@ mod tests {
         async fn audit(&self, _: &str, _: &str, _: &PolicyDecision) {}
     }
 
-    fn meta(engine_session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta(engine_session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::SESSION_ID_META_KEY.to_string(),
             serde_json::Value::String(engine_session.to_string()),
@@ -624,7 +635,10 @@ mod tests {
                 Err(Refusal::NotAMember)
             );
         }
-        assert_eq!(srv.run_status(&Meta::new()).await, Err(Refusal::NotAMember));
+        assert_eq!(
+            srv.run_status(&RequestMetaObject::new()).await,
+            Err(Refusal::NotAMember)
+        );
 
         srv.run_skip(
             &meta("s-amina"),

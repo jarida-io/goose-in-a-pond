@@ -14,8 +14,8 @@ use pond_core::user_data::services::memory_relevance::keyword_terms;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -122,7 +122,7 @@ impl ContextMcpServer {
     }
 
     /// Resolve the caller's scope, or say why not.
-    async fn scope_for(&self, meta: &Meta) -> Result<ProfileScope, Refusal> {
+    async fn scope_for(&self, meta: &RequestMetaObject) -> Result<ProfileScope, Refusal> {
         let authority = self.authority.as_ref().ok_or(Refusal::Unresolved)?;
         let session = crate::session_meta::session_from_meta(meta).ok_or(Refusal::Unresolved)?;
         let (scope, _source) = authority
@@ -138,7 +138,7 @@ impl ContextMcpServer {
     /// The body of `search_context`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_search(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: SearchContextParams,
     ) -> Result<Vec<ContextItem>, Refusal> {
         let scope = self.scope_for(meta).await?;
@@ -182,7 +182,7 @@ impl ContextMcpServer {
     /// The body of `recall`: answers across all sources, each line carrying its provenance.
     pub async fn run_recall(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         query: &str,
         limit: usize,
     ) -> Result<Vec<String>, Refusal> {
@@ -201,7 +201,7 @@ impl ContextMcpServer {
     /// The body of `get_recent_context`.
     pub async fn run_recent(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: RecentContextParams,
     ) -> Result<Vec<ContextItem>, Refusal> {
         let scope = self.scope_for(meta).await?;
@@ -298,7 +298,7 @@ fn to_result(outcome: Result<Vec<ContextItem>, Refusal>) -> CallToolResult {
 
 #[tool_handler]
 impl ServerHandler for ContextMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -530,8 +530,8 @@ mod tests {
         async fn audit(&self, _session: &str, _action: &str, _decision: &PolicyDecision) {}
     }
 
-    fn meta_for(session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta_for(session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::session_meta::SESSION_ID_META_KEY.to_string(),
             Value::String(session.to_string()),
@@ -612,7 +612,7 @@ mod tests {
         let server = server_for(Some(ProfileScope::Household));
         assert_eq!(
             server
-                .run_recent(&Meta::new(), RecentContextParams::default())
+                .run_recent(&RequestMetaObject::new(), RecentContextParams::default())
                 .await
                 .expect_err("a call with no engine session has no caller"),
             Refusal::Unresolved

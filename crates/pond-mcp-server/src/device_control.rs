@@ -13,8 +13,8 @@ use pond_core::user_data::ports::last_action::{LastActionRepository, LastDeviceA
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -126,7 +126,7 @@ impl DeviceControlMcpServer {
     /// The calling member, if the live turn behind this call resolves to one. `None` for an
     /// unidentified speaker or a household-wide context -- their commands are still carried out,
     /// just never remembered for "undo" (there is nobody specific to remember them for).
-    fn owner_for(&self, meta: &Meta) -> Option<String> {
+    fn owner_for(&self, meta: &RequestMetaObject) -> Option<String> {
         let session = crate::session_from_meta(meta)?;
         let turns = self
             .turns
@@ -456,7 +456,7 @@ impl DeviceControlMcpServer {
     /// The body of `set_device_state`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_set_device_state(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         p: SetDeviceStateParams,
     ) -> Result<CallToolResult, ErrorData> {
         let device_id = p.device_id.trim();
@@ -919,7 +919,10 @@ impl DeviceControlMcpServer {
     }
 
     /// The body of `undo_last_action`, apart from the rmcp wrapper so tests can call it.
-    pub async fn run_undo_last_action(&self, meta: &Meta) -> Result<CallToolResult, ErrorData> {
+    pub async fn run_undo_last_action(
+        &self,
+        meta: &RequestMetaObject,
+    ) -> Result<CallToolResult, ErrorData> {
         let Some(last_action) = self.last_action.clone() else {
             return Ok(guidance("There's nothing to undo.".to_string()));
         };
@@ -1042,7 +1045,7 @@ pub(crate) fn resolve_device(input: &str, devices: &[Device]) -> DeviceResolutio
 
 #[tool_handler]
 impl ServerHandler for DeviceControlMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1734,8 +1737,8 @@ mod tests {
         }
     }
 
-    fn meta_for(session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta_for(session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::session_meta::SESSION_ID_META_KEY.to_string(),
             serde_json::Value::String(session.to_string()),
