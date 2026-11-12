@@ -33,10 +33,11 @@ heartbeat and the scratchpad are now read and run, not only stored; and ideas ar
 - The heartbeat ran with its checklist; nothing needed doing, and one impulse was refused by the daily cap.
 - Ideas with the new prompts: three written in 85 seconds.
 - `scripts/jetson/shots-live/shots_live.py`: the trail page became one line in 6 seconds, the bank screen was skipped; the vision tower (354 MB) loads on demand.
+- `scripts/jetson/render-live/render_live.py`: a page that arrives as an empty shell was rendered by the pond's own browser inside a chat turn.
 
 ### Not done, and why
 
-- **No browser is installed on the nano**, so script-built pages are not read there yet. A render was measured beside the loaded model: up to 307 MB and under 16 seconds a page, and the gate is 600 MB ([web-watch-build-plan.md](web-watch-build-plan.md) phase 7). `POST /api/v1/browser/install` downloads one when the household asks.
+- **Script-built pages are read on the nano** since the household had the pond download its own headless browser. A render costs up to 307 MB and under 16 seconds, the gate is 600 MB, and one was seen live inside a chat turn (9.9 seconds). The model's answer from that page was thin; see [web-watch-build-plan.md](web-watch-build-plan.md) phase 7.
 - No click-and-type browser agent, no feeds or replaced-file watches, no model judging whether a watch's change matters, no robots.txt.
 - Screenshots are chosen by hand on the phone; syncing them automatically needs a native build.
 - A guest's turn whose personal tools are withheld still ends as "I could not produce a response".
