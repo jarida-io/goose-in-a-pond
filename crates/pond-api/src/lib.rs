@@ -22,6 +22,7 @@ pub(crate) mod image_normalize;
 pub mod insecure_dev;
 mod interests;
 mod me;
+mod member_interview;
 pub(crate) mod member_notes;
 pub mod middleware;
 pub mod model_acquisition;

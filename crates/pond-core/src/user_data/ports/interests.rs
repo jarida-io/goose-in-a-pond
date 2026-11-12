@@ -8,6 +8,7 @@ use crate::user_data::domain::interest::{
     Interest, InterestInput, InterestPatch, MemberPortrait, Observed, ObservedInterest, Origin,
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
+use crate::user_data::services::member_interview::MemberInterview;
 
 /// Every read and write is one member's: no method reaches another member's rows.
 #[async_trait]
@@ -65,4 +66,14 @@ pub trait InterestRepository: Send + Sync {
 
     /// Stamps `updated_at` with the time of the write.
     async fn save_interview(&self, profile_id: &str, interview: &InterestInterview) -> Result<()>;
+
+    /// The one structured interview; `None` before the member ever started it.
+    async fn member_interview(&self, profile_id: &str) -> Result<Option<MemberInterview>>;
+
+    /// Stamps `updated_at` with the time of the write.
+    async fn save_member_interview(
+        &self,
+        profile_id: &str,
+        interview: &MemberInterview,
+    ) -> Result<()>;
 }

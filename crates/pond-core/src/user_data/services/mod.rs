@@ -8,6 +8,7 @@ pub mod inference_lane;
 pub mod interest_interview;
 pub mod location;
 pub mod member_attribution;
+pub mod member_interview;
 pub mod member_portrait;
 pub mod memory_cleanup;
 pub mod memory_consolidation;

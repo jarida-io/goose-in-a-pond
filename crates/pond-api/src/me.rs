@@ -62,6 +62,7 @@ async fn hub() -> Json<Value> {
         "version": 1,
         "about": crate::about_me::SERVED,
         "interests": crate::interests::SERVED,
+        "interview": true,
         "news": crate::news::SERVED,
         "todos": crate::todos::SERVED,
         "cart": crate::cart::SERVED,
@@ -78,6 +79,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .merge(crate::about_me::routes())
         .merge(crate::agent_notes::routes())
         .merge(crate::interests::routes())
+        .merge(crate::member_interview::routes())
         .merge(crate::news::routes())
         .merge(crate::todos::routes())
         .merge(crate::cart::routes())
