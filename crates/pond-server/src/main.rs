@@ -7621,15 +7621,12 @@ async fn run_proactive_reviewer(
             && yielded.acts.is_empty()
             && !yielded.refusals.is_empty()
         {
-            if yielded
-                .refusals
-                .contains(&review::ImpulseRefused::NotAJsonArray)
-            {
-                tracing::info!(
-                    shape = %review::answer_shape(run.result.as_deref().unwrap_or(""), 240),
-                    "proactive reviewer: the answer held no impulses"
-                );
-            }
+            // The outline of an answer nothing came of, its words masked: which keys the model
+            // used is what a fix to the role needs.
+            tracing::info!(
+                shape = %review::answer_shape(run.result.as_deref().unwrap_or(""), 320),
+                "proactive reviewer: nothing in the answer was kept"
+            );
             tracing::warn!(
                 refused = yielded.refusals.len(),
                 first = ?yielded.refusals.first(),

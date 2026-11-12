@@ -35,7 +35,7 @@ pub const PROACTIVE_REVIEWER_ROLE: &str = "proactive-reviewer";
 pub const REVIEWER_ROLE_RECIPE: &str = r#"
 version: 1.0.0
 title: Proactive reviewer
-description: Looks over what has happened lately and says what might be worth mentioning.
+description: Looks in on the household while it is quiet and does the small things that help.
 giap_role:
   tool_groups:
     - giap-memory
@@ -46,16 +46,10 @@ giap_role:
   max_turns: 6
   context_fraction: 0.35
   instructions: |
-    You are reviewing what has happened in this household recently and deciding
-    whether anything is worth raising with the person you are working for.
-    Keep your thinking concise and focused. Be specific, relevant, and actionable:
-    connect actual events, sensors, weather forecasts, or memories to helpful
-    suggestions rather than generic observations.
-
-    You cannot turn anything on, schedule anything or send anything. What you
-    suggest is shown to the person, who decides; the few small things you may
-    do yourself are listed at the end. Suggesting something they did not want
-    costs more than saying nothing, so when in doubt, say nothing.
+    You are looking in on this household for the person you work for, while
+    the house is quiet. Go through your checklist and what has happened, and
+    do what helps them. Keep your thinking short. Be specific: connect actual
+    events, readings, forecasts and memories to what you do.
 
     You have no clock and no calendar. The current time is stated in the brief;
     do not guess at it and do not use any other time.
@@ -64,47 +58,43 @@ giap_role:
     message must be the answer.
 
     Answer with a JSON array and nothing else: no words before or after it. An
-    empty array, [], is a complete and common answer. Each element:
+    empty array, [], is a complete and common answer. Every element starts
+    with "do" and is one of these.
 
-      {
-        "trigger_kind": "camera" | "sensor" | "device" | "time" | "presence",
-        "source_id": "the device, camera or sensor it came from, or omit",
-        "signal": "the reading or event type, or omit",
-        "rationale": "why this matters to this person, in one sentence",
-        "suggestion": "what you would do for them if they say yes, as one instruction to yourself",
-        "confidence": 0.0 to 1.0
-      }
+    Things you do yourself, now:
 
-    A suggestion is work they can approve: "Turn the porch light off at
-    midnight". A question, a greeting or a remark on what happened is not one.
-    When all you would suggest is to check, look up or find something out,
-    do not ask: do it yourself with "look_into", described at the end.
+      {"do": "look_into", "text": "the question in full", "why": "one sentence"}
+        Find something out for them and tell them the answer: a price,
+        opening hours, the weather for a plan of theirs, whether something on
+        their list is still on, what a page now says. It only reads.
+      {"do": "remind", "text": "what to remind them of", "when": "tomorrow at 8am",
+       "why": "one sentence", "confidence": 0.0 to 1.0}
+        Put a reminder on their phone. Only for something already theirs: a
+        plan, a to-do or a date they told you about.
+      {"do": "note", "text": "a follow-up for your own later look"}
+      {"do": "done", "text": "words from a note of yours that is dealt with"}
+      {"do": "pause_watch", "text": "words from the title of a web watch the brief says keeps failing",
+       "confidence": 0.0 to 1.0}
+
+    Something only they can decide, shown to them to approve:
+
+      {"do": "suggest",
+       "trigger_kind": "camera" | "sensor" | "device" | "time" | "presence",
+       "source_id": "the device, camera or sensor it came from, or omit",
+       "signal": "the reading or event type, or omit",
+       "rationale": "why this matters to this person, in one sentence",
+       "suggestion": "what you would do for them if they say yes, as one instruction to yourself",
+       "confidence": 0.0 to 1.0}
+        Only for what changes a device, spends, sends or schedules: "Turn the
+        porch light off at midnight". Never a question, a greeting or a
+        remark on what happened.
+
+    Do rather than ask. When all it takes is finding something out, use
+    "look_into", never "suggest". Asking for something they did not want
+    costs more than saying nothing, so when in doubt, leave it out.
     Someone being at home, arriving, leaving or moving about is ordinary:
-    never raise it by itself.
-
-    Never repeat a suggestion the brief says was already declined.
-
-    The brief may carry your checklist and your own notes to come back to. Go
-    through the checklist with your tools. An element may say what to do
-    with it, as "do":
-
-      "suggest"  the default: the person is shown the suggestion to approve
-      "remind"   put a reminder on their phone yourself. Add "text", what to
-                 remind them of, and "when", in plain words such as
-                 "tomorrow at 8am". Only for something already theirs: a
-                 plan, a to-do or a date they told you about
-      "note"     write yourself a follow-up for a later look. Add "text"
-      "done"     a note of yours is dealt with. Add "text", words from it
-      "pause_watch"  stop checking one of their web watches that the brief
-                 says keeps failing. Add "text", words from its title
-      "look_into"  find something out for them yourself, after this review:
-                 a price, opening hours, whether something on their list is
-                 still on, what a page now says. Add "text", the question in
-                 full as one instruction. It only reads; they are told what
-                 you found
-
-    "remind", "note", "done", "pause_watch" and "look_into" need no
-    "suggestion". "note" and "done" need only "do" and "text".
+    never raise it by itself. Never repeat a suggestion the brief says was
+    already declined.
 "#;
 
 /// The role name an errand runs under.
@@ -329,8 +319,8 @@ pub fn heartbeat_refusal(run_in_flight: bool) -> Option<ReviewSkip> {
 
 /// What a heartbeat's brief ends with once the day's suggestions are spent, so the run does not
 /// spend its answer on ones that will be refused.
-pub const SUGGESTIONS_SPENT: &str = "\nYou have asked them enough for today: make no suggestion \
-     in this answer. The small things you may do yourself are still open to you.\n";
+pub const SUGGESTIONS_SPENT: &str = "\nYou have asked them enough for today: no \"suggest\" \
+     element in this answer. What you do yourself is still open to you.\n";
 
 /// Must an in-flight review be cancelled? Reuses `saw_activity_since_start` from the run's
 /// start, which also sees the out-of-process voice child; on an Orin the review holds the GPU.
@@ -604,7 +594,7 @@ pub struct ReviewerImpulse {
     #[serde(default)]
     pub signal: Option<String>,
     /// Blank only for an act; `Proposal::from_parts` refuses a blank one.
-    #[serde(default)]
+    #[serde(default, alias = "why")]
     pub rationale: String,
     /// What to ask the member about. Becomes a prompt and nothing else. Blank only for an act.
     #[serde(default)]
@@ -903,11 +893,12 @@ pub fn interpret_heartbeat(
                 continue;
             }
         };
-        // A note is Goose's own and reaches nobody, so it needs no confidence.
-        let reaches_the_member = !impulse.act.as_deref().is_some_and(|word| {
-            ["note", "done"].contains(&word.trim().to_ascii_lowercase().as_str())
+        // A note is Goose's own and a look-up only reads, each within its own cap: neither
+        // needs a confidence. What lands on the member's phone or list does.
+        let needs_confidence = !impulse.act.as_deref().is_some_and(|word| {
+            ["note", "done", "look_into"].contains(&word.trim().to_ascii_lowercase().as_str())
         });
-        if reaches_the_member
+        if needs_confidence
             && !(impulse.confidence.is_finite() && impulse.confidence >= MIN_PROPOSAL_CONFIDENCE)
         {
             refusals.push(ImpulseRefused::LowConfidence {
@@ -2161,6 +2152,68 @@ mod tests {
     }
 
     #[test]
+    fn a_look_up_needs_only_its_question_and_says_why_in_either_word() {
+        let run = |body: &str| {
+            interpret_heartbeat(
+                &answer(body),
+                &audience(),
+                Utc::now(),
+                &FeedbackLedger::empty(),
+                MAX_PROPOSALS_PER_DAY,
+                ActAllowance::for_heartbeat(0, chrono_tz::UTC).with_errands(0),
+            )
+        };
+        let out = run(
+            r#"[{"do":"look_into","text":"When the pool opens","why":"they swim on Fridays"}]"#,
+        );
+        assert_eq!(
+            out.acts,
+            vec![HeartbeatAct::LookInto {
+                text: "When the pool opens".to_string(),
+                why: "they swim on Fridays".to_string(),
+            }],
+            "{:?}",
+            out.refusals
+        );
+        // The shape the role shows for a suggestion is still a suggestion.
+        let asked = interpret_answer(
+            &answer(
+                r#"[{"do":"suggest","trigger_kind":"time","rationale":"the bins go out tomorrow",
+                    "suggestion":"Put the bins out tonight","confidence":0.9}]"#,
+            ),
+            &audience(),
+            Utc::now(),
+            &FeedbackLedger::empty(),
+            0,
+        );
+        assert_eq!(asked.proposals.len(), 1, "{:?}", asked.refusals);
+    }
+
+    #[test]
+    fn the_role_shows_every_act_it_may_take_with_do_first() {
+        let role = role();
+        for act in [
+            "look_into",
+            "remind",
+            "note",
+            "done",
+            "pause_watch",
+            "suggest",
+        ] {
+            assert!(
+                role.instructions()
+                    .contains(&format!("{{\"do\": \"{act}\"")),
+                "{act} is not shown as an element"
+            );
+        }
+        let (doing, asking) = (
+            role.instructions().find("\"do\": \"look_into\"").unwrap(),
+            role.instructions().find("\"do\": \"suggest\"").unwrap(),
+        );
+        assert!(doing < asking, "doing is shown before asking");
+    }
+
+    #[test]
     fn an_errand_reads_and_never_writes() {
         let role = errand_role().unwrap();
         assert_eq!(role.name(), ERRAND_ROLE);
@@ -2220,7 +2273,7 @@ mod tests {
             }]
         ));
         assert_eq!(out.acts.len(), 1);
-        assert!(SUGGESTIONS_SPENT.contains("make no suggestion"));
+        assert!(SUGGESTIONS_SPENT.contains("no \"suggest\" element"));
     }
 
     #[test]
