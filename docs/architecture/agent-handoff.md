@@ -7,6 +7,49 @@
 
 ---
 
+## 0. Where things stand after 12 November 2026
+
+This section is newer than the rest of the document and wins where they disagree. In
+particular: the scratchpad template is named `scratchpad`, not `memory`; the soul, the
+heartbeat and the scratchpad are now read and run, not only stored; and ideas are short cards.
+
+### What landed, all on the fork's `main` and deployed to the nano
+
+| Part | What is true now | Where to read |
+|---|---|---|
+| Tools in plain words | Schedules, reminders and timers take "every weekday at 7", "tomorrow at 6 pm"; a schedule is found by describing it; `world_clock` takes city names. Reminders never worked before: `schedule.rs` composed its to-do router without `#[tool_handler(router = self.tool_router)]`, so those tools were never listed | `crates/pond-mcp-server/src/schedule.rs`, `todo_tools.rs`, `tests/composed_routers_are_served.rs` |
+| Memories around the person | A closed list of 22 words a fact is filed under, one write policy (`member_profile::admit`), one-at-a-time words that replace, a re-sort of older rows that files or archives and never deletes | [member-memory.md](member-memory.md) |
+| Soul, heartbeat, scratchpad | The soul leads every prompt preset; the heartbeat runs hourly with its checklist and may add a reminder, write a note, pause a web watch that keeps failing or push a notice, within caps; Goose keeps lessons and follow-ups with `note_to_self` | [agent-documents.md](agent-documents.md) |
+| One interview | Eight fixed sections asked in code, taps first, one follow-up at most, one model call only for typed words, nothing kept until approved | [my-goose-hub.md](my-goose-hub.md) section 0c |
+| Ideas | A short card (kind, title, one line) with its own page (facts, steps, sources, Goose's notes). One everyday idea a run (recipe, outing, date or solo date, something to do, holiday) written against the profile; an idea naming an allergen is dropped in code | my-goose-hub.md section 6 |
+| Cards sent to chat | `"card": {"kind","id"}` on `/chat/stream` for an idea, story, digest, to-do, watched link or web watch; the Pond reads the card as the speaker and the turn carries its content and Goose's notes | my-goose-hub.md section 6a |
+| Screenshots, opt-in | Off by default. A screenshot waits in memory, is read once for one line, and is dropped; money, logins, private conversations and documents are skipped | my-goose-hub.md section 6b |
+| Web watches | One rule read off the whole page: words appear or go away, a number goes below or above a value. Clock times and view counts are not updates | [web-watch-build-plan.md](web-watch-build-plan.md) phase 11 |
+| A browser for script-built pages | A page that arrives as an empty shell is rendered once by a headless Chromium and read as usual, when a browser is found and memory allows | web-watch-build-plan.md phase 7 |
+
+### Checked on the nano with Gemma 4 E4B
+
+- `scripts/jetson/tools-live/tools_live.py`: 6 of 6. `scripts/jetson/memory-live/memory_live.py`: 6 of 6.
+- The heartbeat ran with its checklist; nothing needed doing, and one impulse was refused by the daily cap.
+- Ideas with the new prompts: three written in 85 seconds.
+- `scripts/jetson/shots-live/shots_live.py`: the trail page became one line in 6 seconds, the bank screen was skipped; the vision tower (354 MB) loads on demand.
+
+### Not done, and why
+
+- **What a browser render costs on the nano is not measured.** The board had 498 MB available with the model loaded and the gate is 900 MB, so the Pond refuses there. No browser is installed on the nano; the official `linux-arm64` headless shell starts on its glibc 2.35. Measuring a render beside the live Pond needs the owner's go-ahead.
+- No click-and-type browser agent, no feeds or replaced-file watches, no model judging whether a watch's change matters, no robots.txt.
+- Screenshots are chosen by hand on the phone; syncing them automatically needs a native build.
+- A guest's turn whose personal tools are withheld still ends as "I could not produce a response".
+- The heartbeat pauses a web watch only when it has failed three checks in a row; it never starts or resumes one by itself.
+
+### Traps found this week
+
+- A tool that is not offered looks exactly like a model that will not call it. Read `GET /api/v1/agent/tools` before tuning a prompt.
+- E4B picks a tool by its name, says it saved something it did not, and names a schedule by describing it.
+- A phone paired by the test handshake is bound to nobody, so it is a guest; in a household of one it acts as that member and what it saves is shared with the household.
+- Any change to a tool's words moves the pinned sizes in `prefix_oracle.rs` (now 20,890 and 21,692 bytes).
+- The model wrote `Source: Page 1` as an idea's fact until the prompt forbade naming the pages and code dropped such facts.
+
 ## 1. Executive Summary & Work Delivered
 
 Over the recent workstreams, we implemented, verified, and deployed four major architectural enhancements:

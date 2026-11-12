@@ -85,8 +85,10 @@ giap_role:
                  plan, a to-do or a date they told you about
       "note"     write yourself a follow-up for a later look. Add "text"
       "done"     a note of yours is dealt with. Add "text", words from it
+      "pause_watch"  stop checking one of their web watches that the brief
+                 says keeps failing. Add "text", words from its title
 
-    "remind", "note" and "done" need no "suggestion".
+    "remind", "note", "done" and "pause_watch" need no "suggestion".
 "#;
 
 /// Build the shipped reviewer role; fallible so a recipe typo is a refusal, not a loop panic.
@@ -418,6 +420,7 @@ pub fn heartbeat_brief(
     ledger: &FeedbackLedger,
     checklist: &str,
     notes: &[crate::shared::domain::agent_note::AgentNote],
+    watches: &[WatchLine],
 ) -> String {
     let mut brief = review_brief(now, recent, ledger);
     brief.push_str(&format!(
@@ -437,6 +440,17 @@ pub fn heartbeat_brief(
                 "- {} (written {})\n",
                 note.text.trim(),
                 note.created_at.with_timezone(&zone).format("%-d %B")
+            ));
+        }
+    }
+    let failing: Vec<&WatchLine> = watches.iter().filter(|w| w.may_be_paused()).collect();
+    if !failing.is_empty() {
+        brief.push_str("\nTheir web watches that keep failing:\n");
+        for watch in failing {
+            brief.push_str(&format!(
+                "- {} ({} failed checks in a row)\n",
+                watch.title.trim(),
+                watch.failures
             ));
         }
     }
@@ -488,6 +502,9 @@ pub enum HeartbeatAct {
     Note { text: String },
     /// A note of Goose's that is dealt with, named by words from it.
     Done { words: String },
+    /// A web watch of the member's that keeps failing is paused, named by words from its title.
+    /// Starting or resuming a watch is never an act: the member approves that.
+    PauseWatch { words: String },
 }
 
 /// Reminders one run may set.
@@ -496,6 +513,43 @@ pub const MAX_REMINDERS_PER_RUN: usize = 2;
 pub const MAX_REMINDERS_PER_DAY: usize = 3;
 /// Notes one run may write or close.
 pub const MAX_NOTES_PER_RUN: usize = 3;
+/// Web watches one run may pause.
+pub const MAX_WATCHES_PAUSED_PER_RUN: usize = 1;
+
+/// One of the member's web watches, as the heartbeat's brief lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchLine {
+    pub title: String,
+    pub paused: bool,
+    /// Failed checks in a row.
+    pub failures: u32,
+}
+
+impl WatchLine {
+    /// Whether the heartbeat may pause it: checking a page that keeps refusing helps nobody.
+    pub fn may_be_paused(&self) -> bool {
+        !self.paused && self.failures >= crate::shared::domain::web_watch::FAILURES_BEFORE_TELLING
+    }
+}
+
+/// The member's watch a pause names by `words` from its title, when exactly one failing watch
+/// has them all.
+pub fn watch_to_pause<'a>(watches: &'a [WatchLine], words: &str) -> Option<&'a WatchLine> {
+    let wanted: Vec<String> = words
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut found = watches.iter().filter(|w| {
+        let title = w.title.to_lowercase();
+        w.may_be_paused() && wanted.iter().all(|word| title.contains(word))
+    });
+    let first = found.next()?;
+    found.next().is_none().then_some(first)
+}
 /// How far ahead a reminder the heartbeat sets may fall: it acts on what is near.
 pub const REMINDER_HORIZON: Duration = Duration::days(14);
 /// How often the heartbeat looks in, while the house is quiet.
@@ -562,6 +616,8 @@ pub struct ActAllowance {
     pub reminders_today: usize,
     /// Notes this run may write or close.
     pub notes: usize,
+    /// Web watches this run may pause.
+    pub watches: usize,
     /// The member's time zone, which "tomorrow at 8am" is read in.
     pub zone: chrono_tz::Tz,
 }
@@ -572,6 +628,7 @@ impl ActAllowance {
         Self {
             reminders_today: MAX_REMINDERS_PER_DAY,
             notes: 0,
+            watches: 0,
             zone: chrono_tz::UTC,
         }
     }
@@ -581,6 +638,7 @@ impl ActAllowance {
         Self {
             reminders_today,
             notes: MAX_NOTES_PER_RUN,
+            watches: MAX_WATCHES_PAUSED_PER_RUN,
             zone,
         }
     }
@@ -625,6 +683,9 @@ fn act_of(
         }
         "note" => Ok(Some(HeartbeatAct::Note { text: text()? })),
         "done" => Ok(Some(HeartbeatAct::Done { words: text()? })),
+        "pause_watch" | "pause watch" | "stop_watch" => {
+            Ok(Some(HeartbeatAct::PauseWatch { words: text()? }))
+        }
         _ => Err("it asks for something the heartbeat does not do"),
     }
 }
@@ -712,9 +773,17 @@ pub fn interpret_heartbeat(
                     ),
                     HeartbeatAct::Note { .. } | HeartbeatAct::Done { .. } => (
                         acts.iter()
-                            .filter(|a| !matches!(a, HeartbeatAct::Remind { .. }))
+                            .filter(|a| {
+                                matches!(a, HeartbeatAct::Note { .. } | HeartbeatAct::Done { .. })
+                            })
                             .count(),
                         allowance.notes,
+                    ),
+                    HeartbeatAct::PauseWatch { .. } => (
+                        acts.iter()
+                            .filter(|a| matches!(a, HeartbeatAct::PauseWatch { .. }))
+                            .count(),
+                        allowance.watches,
                     ),
                 };
                 if made >= cap {
@@ -1152,10 +1221,26 @@ mod tests {
             &FeedbackLedger::empty(),
             "- Is a reminder overdue?\n",
             &notes,
+            &[
+                WatchLine {
+                    title: "Used cars".into(),
+                    paused: false,
+                    failures: 4,
+                },
+                WatchLine {
+                    title: "Rates".into(),
+                    paused: false,
+                    failures: 0,
+                },
+            ],
         );
         assert!(brief.contains("For the person it is Monday 9 November 2026, 10:00."));
         assert!(brief.contains("Your checklist:\n- Is a reminder overdue?\n"));
         assert!(brief.contains("- Look at the pump reading again. (written 7 November)"));
+        assert!(brief.contains(
+            "Their web watches that keep failing:\n- Used cars (4 failed checks in a row)\n"
+        ));
+        assert!(!brief.contains("Rates"), "a watch that works is not listed");
 
         let bare = heartbeat_brief(
             monday_morning(),
@@ -1164,9 +1249,82 @@ mod tests {
             &FeedbackLedger::empty(),
             "  ",
             &[],
+            &[],
         );
         assert!(!bare.contains("checklist"));
         assert!(!bare.contains("notes to come back to"));
+        assert!(!bare.contains("web watches"));
+    }
+
+    #[test]
+    fn a_heartbeat_pauses_one_failing_watch_it_can_name_and_no_other() {
+        let body = format!(
+            "[{},{}]",
+            act(r#""do":"pause_watch","text":"used cars""#),
+            act(r#""do":"pause_watch","text":"rates""#),
+        );
+        let out = heartbeat(&body, 0);
+        assert_eq!(
+            out.acts,
+            vec![HeartbeatAct::PauseWatch {
+                words: "used cars".into()
+            }],
+            "one a run"
+        );
+        assert_eq!(out.refusals.len(), 1);
+
+        let watches = [
+            WatchLine {
+                title: "Used cars in Nairobi".into(),
+                paused: false,
+                failures: 3,
+            },
+            WatchLine {
+                title: "Used cars in Mombasa".into(),
+                paused: false,
+                failures: 5,
+            },
+            WatchLine {
+                title: "Today's rates".into(),
+                paused: false,
+                failures: 1,
+            },
+            WatchLine {
+                title: "Bike shop".into(),
+                paused: true,
+                failures: 9,
+            },
+        ];
+        assert_eq!(
+            watch_to_pause(&watches, "Nairobi cars").map(|w| w.title.as_str()),
+            Some("Used cars in Nairobi")
+        );
+        assert_eq!(
+            watch_to_pause(&watches, "used cars"),
+            None,
+            "two fit: neither"
+        );
+        assert_eq!(
+            watch_to_pause(&watches, "rates"),
+            None,
+            "it is not failing enough"
+        );
+        assert_eq!(
+            watch_to_pause(&watches, "bike"),
+            None,
+            "it is paused already"
+        );
+        assert_eq!(watch_to_pause(&watches, "  "), None);
+
+        // A review that only proposes pauses nothing.
+        let proposing = interpret_answer(
+            &answer(&body),
+            &audience(),
+            monday_morning(),
+            &FeedbackLedger::empty(),
+            0,
+        );
+        assert!(proposing.acts.is_empty());
     }
 
     // ── The role ───────────────────────────────────────────────────────────
