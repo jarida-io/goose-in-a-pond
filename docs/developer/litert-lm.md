@@ -186,7 +186,8 @@ After deciding, pond-server checks the places goose's backend searches (`GOOSE_L
 `litert-lm/` beside the executable, the executable's directory, `<data dir>/engine/data/litert-lm/lib`)
 and, when none holds the library, logs which it searched (a `WARN` when LiteRT-LM models are on
 disk). The catalogue then lists every LiteRT-LM model as unavailable (`litert_library_missing`), the
-dashboard disables it with "Needs the LiteRT-LM library: run giap.sh litert build", and the pond
+dashboard disables it with "Needs the LiteRT-LM library, which this Pond does not have yet" (the
+build command is in the log, not the dashboard), and the pond
 refuses to download or switch to one with a 409
 ([models.md](models.md#an-engine-this-pond-cannot-run)). Install the package, then restart the
 pond: the check runs once, at startup.
