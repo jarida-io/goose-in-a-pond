@@ -40,8 +40,8 @@ searched paths when there is none and LiteRT-LM models are on disk. Without it:
   client that predates the field reads its absence as available.
 - `POST /models/{category}/{name}/activate` and `POST /models/{category}/{name}/download` answer
   `409 {"error": ..., "reason": "litert_library_missing"}` and change nothing.
-- The dashboard keeps such a model listed but disabled, with "Needs the LiteRT-LM library: run
-  giap.sh litert build" (`unavailableNote` in `pond-desktop/src/sections/models/modelsView.ts`, the string in
+- The dashboard keeps such a model listed but disabled, with "Needs the LiteRT-LM library, which
+  this Pond does not have yet" (`unavailableNote` in `pond-desktop/src/sections/models/modelsView.ts`, the string in
   `pond-desktop/src/i18n.ts`) in the chat's model switcher, the Models rows and pick cards; the settings chat
   picker leaves it out.
 
