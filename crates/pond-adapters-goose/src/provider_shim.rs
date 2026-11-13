@@ -863,18 +863,23 @@ impl Provider for GiapProviderShim {
         let local = !provider_relocates_tool_images(self.inner.get_name());
         // Recordings of earlier turns go to the model as sound whenever it can take them in:
         // with memory short, only those the engine's cache already holds what it heard of.
-        let heard_messages = crate::held_recordings::resolve(
-            scrubbed_messages
-                .as_deref()
-                .or(stripped_messages.as_deref())
-                .unwrap_or(messages),
-            |files| {
+        let unheard_messages = scrubbed_messages
+            .as_deref()
+            .or(stripped_messages.as_deref())
+            .unwrap_or(messages);
+        // Goose's own side calls carry no tools and are not the chat: they read notes.
+        let side_call = goose_providers::request_context::replaces_history()
+            || (tools.is_empty() && !tools_disabled());
+        let heard_messages = if side_call {
+            crate::held_recordings::as_notes(unheard_messages)
+        } else {
+            crate::held_recordings::resolve(unheard_messages, |files| {
                 local
                     && !image_failed_before
                     && (!hearing_short
                         || goose::providers::local_inference::cache_holds_media(files))
-            },
-        );
+            })
+        };
         let base_messages: &[Message] = heard_messages
             .as_deref()
             .or(scrubbed_messages.as_deref())

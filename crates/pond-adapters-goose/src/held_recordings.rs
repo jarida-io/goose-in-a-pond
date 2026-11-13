@@ -71,6 +71,29 @@ fn reference(part: &MessageContent) -> Option<&str> {
     }
 }
 
+/// `messages` with every reference replaced by a note, for a call that is not the chat itself
+/// (a summary, a compaction): it has no use for the sound, and would load the encoder for it.
+/// Nothing is forgotten. `None` when no message carries a reference.
+pub(crate) fn as_notes(messages: &[Message]) -> Option<Vec<Message>> {
+    messages
+        .iter()
+        .any(|m| m.content.iter().any(|part| reference(part).is_some()))
+        .then(|| {
+            messages
+                .iter()
+                .map(|m| {
+                    let mut noted = m.clone();
+                    for part in &mut noted.content {
+                        if reference(part).is_some() {
+                            *part = MessageContent::text(HISTORY_VOICE_NOTE_PLACEHOLDER);
+                        }
+                    }
+                    noted
+                })
+                .collect()
+        })
+}
+
 /// `messages` with each reference replaced by its recording, for the model to hear. This turn's
 /// was admitted when it arrived; the earlier ones go as sound when `hearable` says the model can
 /// take them in now, given what the engine's cache knows them by. One that cannot, or is no
@@ -222,5 +245,23 @@ mod tests {
             .as_concat_text()
             .contains(HISTORY_VOICE_NOTE_PLACEHOLDER));
         assert!(resolve(&[Message::user().with_text("plain")], |_| true).is_none());
+    }
+
+    #[test]
+    fn a_side_call_reads_notes_and_the_chat_keeps_its_recordings() {
+        let first = clip(5);
+        let messages = vec![
+            spoken("one", &hold(&first, "audio/wav")),
+            Message::assistant().with_text("answer"),
+        ];
+        let noted = as_notes(&messages).expect("a reference was found");
+        assert!(audio_of(&noted[0]).is_empty());
+        assert!(noted[0]
+            .as_concat_text()
+            .contains(HISTORY_VOICE_NOTE_PLACEHOLDER));
+        assert!(as_notes(&[Message::user().with_text("plain")]).is_none());
+
+        let resolved = resolve(&messages, |_| true).expect("a reference was found");
+        assert_eq!(audio_of(&resolved[0]), [(first, "audio/wav".to_string())]);
     }
 }
