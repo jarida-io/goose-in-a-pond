@@ -134,13 +134,6 @@ const PROSODY_PUNCT: &[char] = &[
 /// was not merely losing prosody, it was handing Kokoro a different sentence
 /// from the one it was given, at every clause boundary in every utterance.
 ///
-/// (The docstring this replaces claimed espeak returned one string per
-/// sentence and that the streaming path could rely on it as a sentence split.
-/// It returns one element regardless of input. Nothing downstream depended on
-/// the claim — `ReplySplitter` in `pond-voice` had already done the real
-/// split — but it is worth naming, because it is the reason nobody looked
-/// here.)
-///
 /// ## What this does instead
 ///
 /// Cut the source into runs of speech and runs of punctuation, phonemize the

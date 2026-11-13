@@ -631,7 +631,7 @@ export class PondApiClient {
     const res = await fetch(`${this.base}/api/v1/tts`, {
       method: "POST",
       headers: this.headers("POST", await this.hostHeaders()),
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, last: true }),
     });
     if (!res.ok) {
       let msg = res.statusText;

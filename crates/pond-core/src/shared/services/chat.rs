@@ -316,7 +316,7 @@ impl Drop for WorkingTone {
 // TTS text handling is in `pond-voice` so the desktop shell (separate workspace) shares it.
 use pond_voice::text::{ReplySplitter, SpeechUnit};
 
-use crate::models::services::voice::speech_pipeline::{SpeechPipeline, SENTENCE_HOLD};
+use crate::models::services::voice::speech_pipeline::SpeechPipeline;
 
 /// Re-exported to keep pond-core's public API path.
 pub use pond_voice::text::filter_thinking;
@@ -1324,7 +1324,7 @@ impl ChatService {
         }
     }
 
-    /// Stream, speak by sentence, and persist a confirmed turn; don't `speak()` the result again.
+    /// Stream, speak and persist a confirmed turn; don't `speak()` the result again.
     /// Speculative transcripts must use the non-persisting `stream_response_inner` instead.
     pub async fn chat_stream_once(&self, message: String) -> Result<String> {
         let fired_at = std::time::Instant::now();
@@ -1450,26 +1450,7 @@ impl ChatService {
             loop {
                 let mut units: Vec<SpeechUnit> = Vec::new();
                 let mut done = false;
-                let event = if splitter.pending().trim().is_empty() {
-                    stream.next().await
-                } else {
-                    match tokio::time::timeout(SENTENCE_HOLD, stream.next()).await {
-                        Ok(event) => event,
-                        Err(_) => {
-                            // Stalled: say the sentences already whole rather than wait for more.
-                            for unit in splitter.pause(pipeline.pace()) {
-                                if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
-                                    barge_in = self.watch_for_barge_in(tx);
-                                }
-                                if !pipeline.say(unit).await {
-                                    break;
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                };
-                let Some(event_result) = event else {
+                let Some(event_result) = stream.next().await else {
                     break;
                 };
                 match event_result? {
@@ -1479,8 +1460,8 @@ impl ChatService {
                         tool: tool.clone(),
                         id: id.clone(),
                     });
-                    // The model has paused for the tool: say the sentences it finished first.
-                    units = splitter.pause(pipeline.pace());
+                    // The model has stopped writing for the tool: say what it wrote first.
+                    units = splitter.pause();
                 }
                 AgentStreamEvent::Text { content } => {
                     // Strip all thinking/reasoning tags — not meant for TTS or transcript.
@@ -1500,12 +1481,12 @@ impl ChatService {
                         });
                         spoken_first = true;
                     }
-                    // Emitted before buffering so an unfinished sentence still reaches the UI.
+                    // Emitted before buffering so text not yet spoken still reaches the UI.
                     self.emit_event(WorkflowEvent::Token {
                         content: content.clone(),
                     });
                     full_text.push_str(&content);
-                    units = splitter.push(&content, pipeline.pace());
+                    units = splitter.push(&content);
                 }
                 AgentStreamEvent::Done { usage, stats, .. } => {
                     turn_usage = usage;
@@ -1524,7 +1505,7 @@ impl ChatService {
                             content: tail.clone(),
                         });
                         full_text.push_str(&tail);
-                        units = splitter.push(&tail, pipeline.pace());
+                        units = splitter.push(&tail);
                     }
                     units.extend(splitter.finish());
                     done = true;
@@ -1576,7 +1557,7 @@ impl ChatService {
                     content: tail.clone(),
                 });
                 full_text.push_str(&tail);
-                units = splitter.push(&tail, pipeline.pace());
+                units = splitter.push(&tail);
             }
             units.extend(splitter.finish());
             for unit in units {
@@ -4181,7 +4162,8 @@ mod tests {
                 let dropped = SetOnDrop(self.first_stream_dropped.clone());
                 let stream = async_stream::stream! {
                     let _dropped = dropped;
-                    yield Ok(E::Text { content: "Monday will be sunny. ".to_string() });
+                    // More than one pass holds, so its start is said while the rest is written.
+                    yield Ok(E::Text { content: "Monday will be sunny. ".repeat(10) });
                     tokio::time::sleep(Duration::from_millis(1_500)).await;
                     yield Ok(E::Text { content: "Tuesday brings rain. ".to_string() });
                     yield Ok(E::Done { session_id, model_role, usage: None, stats: None });

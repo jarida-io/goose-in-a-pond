@@ -300,19 +300,16 @@ export function playPingTone(): void {
 // ── Speech Units ──────────────────────────────────────────────────
 // Port of `ReplySplitter` in `crates/pond-voice/src/text.rs`; keep the two in step.
 
-const ABBREV_WORD_RE = /^(?:dr|mr|mrs|ms|prof|st|jr|sr|vs|etc|approx|dept|govt|inc|ltd|corp|min|max|temp|est|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|e\.g|i\.e|u\.s|a\.m|p\.m)$/i;
-/** A unit is cut before it passes this many estimated Kokoro tokens. */
+/** The most a unit holds, in estimated Kokoro tokens: past about 200 Kokoro speaks faster. */
 export const UNIT_TOKEN_BUDGET = 200;
-const MIN_CLAUSE_WORDS = 3;
-const CLOSERS = `"')]\u201d\u2019`;
-const TERMINALS = ".?!\u2026";
+const UNIT_CHARS = Math.floor((UNIT_TOKEN_BUDGET * 10) / 11);
+const CLOSERS = `"')]”’`;
 
-/** What ends a speech unit; the pond's Kokoro picks the pause after it from the unit's last mark. */
-export type Boundary = "word" | "clause" | "list" | "sentence" | "paragraph" | "end";
-
+/** Text the pond's Kokoro says in one pass, and whether more of the same speech follows it. */
 export interface SpeechUnit {
   text: string;
-  boundary: Boundary;
+  /** Nothing follows: the pond ends the audio at rest instead of in the gap before more. */
+  last: boolean;
 }
 
 /** Kokoro tokens for `text`, roughly: espeak IPA runs about 1.1 symbols per character. */
@@ -320,172 +317,60 @@ export function estimateTokens(text: string): number {
   return Math.ceil((Array.from(text).length * 11) / 10);
 }
 
-function isAbbrevSuffix(prefix: string): boolean {
-  const last = prefix.trim().split(/\s+/).pop()?.replace(/^[^0-9A-Za-z]+/, "") ?? "";
-  if (!last) return false;
-  return ABBREV_WORD_RE.test(last) || /^[A-Za-z]$/.test(last);
-}
-
-function endsInMark(text: string): boolean {
-  let t = text;
-  while (t && CLOSERS.includes(t[t.length - 1])) t = t.slice(0, -1);
-  return /[.,;:!?\u2026\u2014]$/.test(t);
-}
-
-function isListItem(line: string): boolean {
-  return /^\s*(?:[-*+\u2022] |\d{1,3}[.)] )/.test(line);
-}
-
-function couldBecomeListItem(rest: string): boolean {
-  const r = rest.replace(/^[ \t]+/, "");
-  return r.length < 3 && /^[\d\-*+.)\u2022]*$/.test(r);
-}
-
-interface Cut {
-  end: number;
-  resume: number;
-  boundary: Boundary;
-}
-
-function wsEnd(text: string, from: number): number {
-  const m = /^\s*/.exec(text.slice(from));
-  return from + (m ? m[0].length : 0);
-}
-
-/** Synthesis slower than this, in seconds of work per second of speech, cannot gain on the speaker. */
-const GAINS_BELOW = 0.9;
-/** Seconds of synthesis per second of speech, smoothed; null until one is measured. */
-let synthPerAudio: number | null = null;
-
-/** Record how long a unit took to come back against how long it plays. */
-export function noteSynthesis(tookSecs: number, audioSecs: number): void {
-  if (audioSecs <= 0) return;
-  const now = tookSecs / audioSecs;
-  synthPerAudio = synthPerAudio === null ? now : synthPerAudio * 0.7 + now * 0.3;
-}
-
 /**
- * Whether a unit cut at a clause mark buys anything. An engine slower than the speech it makes
- * owes the rest of the sentence either way, so the cut only moves that wait into the sentence.
- * Unmeasured, the engine is taken as too slow.
+ * Where a text too long for one unit ends its first: the last sentence or line end that fits,
+ * failing that the last space. Gives the unit's end and where the next one starts.
  */
-export function synthesisGains(): boolean {
-  return synthPerAudio !== null && synthPerAudio < GAINS_BELOW;
-}
-
-/** For tests: forget what was measured. */
-export function forgetSynthesisPace(): void {
-  synthPerAudio = null;
-}
-
-/** The first place `text` can end a unit, or null until more text says where. */
-function nextCut(text: string, first: boolean, behind: boolean, settled: boolean, gains: boolean): Cut | null {
-  let words = 0;
-  let inWord = false;
-  let lineStart = 0;
-  let lastClause: number | null = null;
-  let lastSpace: number | null = null;
-
-  for (let i = 0; i < text.length; i++) {
+function fittingCut(text: string): [number, number] {
+  let limit = text.length;
+  let count = 0;
+  for (let i = 0; i < text.length; count += 1) {
+    if (count === UNIT_CHARS) { limit = i; break; }
+    i += (text.codePointAt(i) ?? 0) > 0xffff ? 2 : 1;
+  }
+  const pastSpace = (from: number): number => from + (/^\s*/.exec(text.slice(from))?.[0].length ?? 0);
+  let best: [number, number] | null = null;
+  let lastSpace: [number, number] | null = null;
+  for (let i = 0; i < limit; i += 1) {
     const ch = text[i];
-    if (/\s/.test(ch)) {
-      if (inWord) {
-        inWord = false;
-        words++;
-      }
-      lastSpace = i;
-    } else {
-      inWord = true;
-    }
-
-    if (estimateTokens(text.slice(0, i)) > UNIT_TOKEN_BUDGET) {
-      if (lastClause !== null) return { end: lastClause, resume: lastClause, boundary: "clause" };
-      if (lastSpace === null) return null;
-      return { end: lastSpace, resume: lastSpace, boundary: "word" };
-    }
-
-    const next = text[i + 1];
-    const prev = text[i - 1];
-    if (TERMINALS.includes(ch)) {
-      if (ch === ".") {
-        const digitBefore = prev !== undefined && /\d/.test(prev);
-        if (digitBefore && (next === undefined || /\d/.test(next))) continue;
-        if (isAbbrevSuffix(text.slice(0, i))) continue;
-        const marker = text.slice(lineStart, i).trimStart();
-        if (marker && marker.length <= 3 && /^\d+$/.test(marker)) continue;
-      }
-      let end = i + 1;
-      while (end < text.length && ".?!".includes(text[end])) end++;
-      while (end < text.length && CLOSERS.includes(text[end])) end++;
-      const after = wsEnd(text, end);
-      if (after === end) {
-        if (end === text.length && settled) return { end, resume: end, boundary: "sentence" };
-        if (end === text.length) return null;
-        continue;
-      }
-      if (after === text.length && !settled) return null;
-      const newlines = (text.slice(end, after).match(/\n/g) ?? []).length;
-      let boundary: Boundary = "sentence";
-      if (newlines >= 2) boundary = "paragraph";
-      else if (newlines === 1 && (isListItem(text.slice(lineStart)) || isListItem(text.slice(after)))) boundary = "list";
-      return { end, resume: after, boundary };
-    }
-    if (",;:\u2014".includes(ch)) {
-      const digitsAround = prev !== undefined && /\d/.test(prev) && next !== undefined && /\d/.test(next);
-      if ((ch === "," || ch === ":") && digitsAround) continue;
-      if (next === undefined || !/\s/.test(next)) continue;
-      const end = i + 1;
-      if (/^[ \t]*\n/.test(text.slice(end))) continue;
-      if (words + (inWord ? 1 : 0) < MIN_CLAUSE_WORDS) continue;
-      lastClause = end;
-      if (gains && (first || behind)) return { end, resume: end, boundary: "clause" };
-      continue;
-    }
     if (ch === "\n") {
-      const after = wsEnd(text, i);
-      if (after === text.length && !settled) return null;
-      const line = text.slice(lineStart, i);
-      if ((text.slice(i, after).match(/\n/g) ?? []).length >= 2) {
-        return { end: i, resume: after, boundary: "paragraph" };
-      }
-      const rest = text.slice(after);
-      if (!settled && !rest.includes("\n") && couldBecomeListItem(rest)) return null;
-      if (line.trim() && (isListItem(line) || isListItem(rest))) {
-        return { end: i, resume: after, boundary: "list" };
-      }
-      lineStart = i + 1;
+      if (text.slice(0, i).trim()) best = [i, pastSpace(i)];
+      // A full stop after a digit is a decimal or a list number.
+    } else if (".?!…".includes(ch) && !(ch === "." && /[0-9]/.test(text[i - 1] ?? ""))) {
+      let end = i + 1;
+      while (end < text.length && ".?!".includes(text[end])) end += 1;
+      while (end < text.length && CLOSERS.includes(text[end])) end += 1;
+      if (end <= limit && /\s/.test(text[end] ?? "")) best = [end, pastSpace(end)];
+    } else if (/\s/.test(ch) && i > 0) {
+      lastSpace = [i, pastSpace(i)];
     }
   }
-  return null;
+  return best ?? lastSpace ?? [limit, limit];
 }
 
 /**
- * Splits a reply into speech units as it streams. With an engine that `gains` on the speaker the
- * first ends early, at its first clause mark after three words, and later ones are whole
- * sentences unless the caller is `behind`; with one that does not, every unit is a whole sentence.
+ * Holds a reply as it streams. Kokoro shapes the pauses of whatever it is given in one pass, so
+ * the text is kept whole: it is given up when the model stops writing, and before that only once
+ * it is more than one pass holds.
  */
 export class ReplySplitter {
   private buf = "";
-  private saidOne = false;
-  private gains = true;
 
-  /** Add streamed text and take the units now ready to say. */
-  push(text: string, behind = false, gains = true): SpeechUnit[] {
+  /** Add streamed text and take the units that are already full. */
+  push(text: string): SpeechUnit[] {
     this.buf += text;
-    this.gains = gains;
-    return this.drain(behind, "streaming");
+    return this.fullUnits();
   }
 
-  /** The stream paused: say the sentences already whole and keep an unfinished one. */
-  pause(behind = false, gains = true): SpeechUnit[] {
-    this.gains = gains;
-    return this.drain(behind, "paused");
+  /** The model stopped writing to use a tool: everything it has written so far. */
+  pause(): SpeechUnit[] {
+    return this.takeAll();
   }
 
-  /** The stream is over: whatever is left, the last unit marked "end". */
+  /** The stream is over: whatever is left, the last unit closing the speech. */
   finish(): SpeechUnit[] {
-    const units = this.drain(false, "ended");
-    if (units.length) units[units.length - 1].boundary = "end";
+    const units = this.takeAll();
+    if (units.length) units[units.length - 1].last = true;
     return units;
   }
 
@@ -493,34 +378,50 @@ export class ReplySplitter {
     return this.buf;
   }
 
-  private drain(behind: boolean, flush: "streaming" | "paused" | "ended"): SpeechUnit[] {
+  private fullUnits(): SpeechUnit[] {
     const units: SpeechUnit[] = [];
     for (;;) {
       this.buf = this.buf.replace(/^\s+/, "");
-      if (!this.buf) break;
-      let cut = nextCut(this.buf, !this.saidOne, behind, flush !== "streaming", this.gains);
-      if (!cut) {
-        if (flush !== "ended") break;
-        cut = { end: this.buf.length, resume: this.buf.length, boundary: "sentence" };
-      }
-      let text = this.buf.slice(0, cut.end).trim();
-      this.buf = this.buf.slice(cut.resume);
-      if (cut.boundary === "list" && !endsInMark(text)) text += ",";
-      if (text) {
-        units.push({ text, boundary: cut.boundary });
-        this.saidOne = true;
-      }
+      if (estimateTokens(this.buf) <= UNIT_TOKEN_BUDGET) break;
+      const [end, resume] = fittingCut(this.buf);
+      const text = this.buf.slice(0, end).trim();
+      this.buf = this.buf.slice(resume);
+      if (text) units.push({ text, last: false });
     }
+    return units;
+  }
+
+  private takeAll(): SpeechUnit[] {
+    const units = this.fullUnits();
+    const rest = this.buf.trim();
+    this.buf = "";
+    if (rest) units.push({ text: rest, last: false });
     return units;
   }
 }
 
-/** A whole text as speech units: sentences, since nothing is still arriving to wait for. */
+/** A whole text as speech units: one, unless it is more than a pass holds. */
 export function splitText(text: string): SpeechUnit[] {
   const s = new ReplySplitter();
-  const units = [...s.push(text, false, false), ...s.finish()];
-  if (units.length) units[units.length - 1].boundary = "end";
-  return units;
+  return [...s.push(text), ...s.finish()];
+}
+
+/**
+ * How long to hold `readySecs` of audio so each unit still owed, given as the seconds its
+ * synthesis and its speech take, is ready when the audio before it ends. An engine slower than
+ * its own speech would otherwise stop between units. Port of `hold_secs` in
+ * `crates/pond-core/src/models/services/voice/speech_pipeline.rs`.
+ */
+export function holdSecs(readySecs: number, owed: readonly (readonly [number, number])[]): number {
+  let work = 0;
+  let audio = readySecs;
+  let hold = 0;
+  for (const [synth, speech] of owed) {
+    work += synth;
+    hold = Math.max(hold, work - audio);
+    audio += speech;
+  }
+  return hold;
 }
 
 // ── Markdown Stripping (for TTS) ─────────────────────────────────
