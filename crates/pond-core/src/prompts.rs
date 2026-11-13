@@ -197,11 +197,12 @@ pub const PROMPT_BALANCED: &str = "\
 You are {{assistant_name}}, {{user_name}}'s personal agentic assistant — a \
 copilot that acts, not only answers. This pond is {{user_name}}'s: Goose In A \
 Pond, on their own hardware, no data ever leaving it.
+You hear through this pond's microphones, speak through its voice, see through its cameras, and organize this home's days.
 Personality: {{personality}}. Timezone: {{timezone}}.{{location}}
 </identity>
 
 <instructions>
-Help with writing, research, reasoning, planning, coding and everyday tasks. \
+Help with writing, research, reasoning, planning, coding, home organization and everyday tasks. \
 Concise, practical answers. No pipeline artifacts.
 Your reply is the answer, not the route to it. Angle-bracket tags, tool calls \
 and system reminders are plumbing — never mention them; if you fell short, say \
@@ -240,7 +241,8 @@ about the user, corrections replace.
 </memory-rules>
 {% endif %}
 <output-quality>
-Never invent URLs, numbers, dates or quotes — {% if tools_offered %}use a tool or {% endif %}say you don't know.
+Never invent URLs, numbers, dates or quotes — {% if tools_offered %}use a tool or {% endif %}say you don't know. \
+Ground factual claims in tool evidence or context; distinguish verified facts from deduction.
 </output-quality>
 
 {%- if thinking_enabled %}
@@ -472,6 +474,122 @@ pub fn vision_capability_section(compact: bool) -> &'static str {
     }
 }
 
+// ── Goose's own documents: soul, heartbeat, scratchpad ───────────────────────
+
+/// The name of the soul's row: who Goose is, in every prompt style.
+pub const SOUL: &str = "soul";
+/// The name of the heartbeat's row: what Goose checks by itself while the house is quiet.
+pub const HEARTBEAT: &str = "heartbeat";
+/// The name of the scratchpad's row: the rules Goose keeps memory by. Its lessons and notes are
+/// rows of their own (`AgentNote`), since Goose writes those and a person writes these.
+pub const SCRATCHPAD: &str = "scratchpad";
+
+/// The documents, which are not prompt styles: `Settings.prompt_style` never names one.
+pub const AGENT_DOCUMENTS: &[&str] = &[SOUL, HEARTBEAT, SCRATCHPAD];
+
+/// Longest soul, rules or checklist kept, in characters: each rides a prompt.
+pub const AGENT_DOCUMENT_CHARS: usize = 1_500;
+
+/// Who Goose is. It replaces the `<identity>` block of whichever style is in use, so the
+/// styles differ in manner and never in who is speaking.
+pub const PROMPT_SOUL: &str = "\
+<identity>
+You are {{assistant_name}}, {{user_name}}'s personal agentic assistant — a \
+copilot that acts, not only answers. This pond is {{user_name}}'s: Goose In A \
+Pond, on their own hardware, no data ever leaving it.
+You hear through this pond's microphones, speak through its voice, see through \
+its cameras, and help run this home's days. You keep a profile of each person \
+here, and notes of your own; you look in on the house by yourself and say so \
+only when something needs them.
+Personality: {{personality}}. Timezone: {{timezone}}.{{location}}
+</identity>
+";
+
+/// What Goose looks at when it wakes by itself. A checklist of questions, never tool names:
+/// the run is told what it may read, and code performs what it decides.
+pub const PROMPT_HEARTBEAT: &str = "\
+- Does today's or tomorrow's weather touch a reminder, to-do or plan of theirs?
+- Is a reminder or to-do overdue, or due within a day and easy to miss?
+- Has a device or sensor read out of the ordinary?
+- Has a follow-up in your notes come due?
+- Is there one thing they are waiting on or planning that you could look up
+  for them now: a price, an opening time, whether something is still on?
+Say nothing when nothing needs them.
+";
+
+/// The rules Goose keeps memory by. It replaces the `<memory-rules>` block of whichever style
+/// is in use.
+pub const PROMPT_SCRATCHPAD: &str = "\
+<memory-rules>
+<memories> holds what is known of the person: use it, and recall_memories for \
+what it lacks. Never guess a fact about them.
+save_memory keeps only what they say about themselves that will hold for \
+months: one sentence naming them, with what it is about. A new fact replaces \
+the old by itself.
+Never keep a question they asked, a task, a mood, a plan for one day (that is \
+add_reminder), or anything you or a web page said. Health, money and beliefs \
+only when they ask.
+\"Forget that\": forget_memory, then say it is done.
+Say something is remembered, changed or forgotten only after the tool said so \
+this turn.
+A lesson about how to work, or a follow-up of your own: note_to_self. Facts \
+about people never go there.
+</memory-rules>
+";
+
+fn block_span(text: &str, tag: &str) -> Option<(usize, usize)> {
+    let start = text.find(&format!("<{tag}>"))?;
+    let close = format!("</{tag}>");
+    let end = start + text[start..].find(&close)? + close.len();
+    Some((start, end))
+}
+
+/// `template` with its `<tag>` block replaced by `document`'s, when both have one. A document
+/// written without the tags is wrapped in them; an empty one leaves the template as it is.
+fn with_block(template: &str, tag: &str, document: &str) -> String {
+    let document = sanitize_document(document);
+    if document.is_empty() {
+        return template.to_string();
+    }
+    let Some((start, end)) = block_span(template, tag) else {
+        return template.to_string();
+    };
+    let block = match block_span(&document, tag) {
+        Some((from, to)) => document[from..to].to_string(),
+        None => format!("<{tag}>\n{document}\n</{tag}>"),
+    };
+    format!("{}{block}{}", &template[..start], &template[end..])
+}
+
+/// A document as it may ride a prompt: trimmed, and no longer than [`AGENT_DOCUMENT_CHARS`].
+pub fn sanitize_document(document: &str) -> String {
+    document
+        .trim()
+        .chars()
+        .take(AGENT_DOCUMENT_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// A style template speaking as the soul and keeping memory by the scratchpad's rules.
+/// Either may be `None` or empty, and the style's own block then stands.
+pub fn with_agent_documents(template: &str, soul: Option<&str>, rules: Option<&str>) -> String {
+    let template = match soul {
+        Some(soul) => with_block(template, "identity", soul),
+        None => template.to_string(),
+    };
+    match rules {
+        Some(rules) => with_block(&template, "memory-rules", rules),
+        None => template,
+    }
+}
+
+/// Whether `name` is a prompt style a person may pick, rather than one of Goose's documents.
+pub fn is_prompt_style(name: &str) -> bool {
+    !AGENT_DOCUMENTS.contains(&name)
+}
+
 // ── Built-in template lookup ─────────────────────────────────────────────
 
 /// Every built-in template as `(name, content, description)`: the ONE table, since copies made
@@ -496,6 +614,17 @@ pub const BUILTIN_PROMPT_TEMPLATES: &[(&str, &str, &str)] = &[
         "warm",
         PROMPT_WARM,
         "Conversational, family-friendly, personality-forward.",
+    ),
+    (SOUL, PROMPT_SOUL, "Who Goose is, in every style."),
+    (
+        HEARTBEAT,
+        PROMPT_HEARTBEAT,
+        "What Goose checks by itself while the house is quiet.",
+    ),
+    (
+        SCRATCHPAD,
+        PROMPT_SCRATCHPAD,
+        "The rules Goose keeps memory by.",
     ),
 ];
 
@@ -812,6 +941,86 @@ pub fn build_system_prompt_from_template_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Goose's documents ─────────────────────────────────────────────────────
+
+    #[test]
+    fn every_style_speaks_as_the_soul_and_keeps_memory_by_the_rules() {
+        let soul = "<identity>\nYou are {{assistant_name}}, a goose of few words.\n</identity>";
+        let rules = "<memory-rules>\nSave nothing without asking.\n</memory-rules>";
+        for style in [
+            PROMPT_BALANCED,
+            PROMPT_CONCISE,
+            PROMPT_TECHNICAL,
+            PROMPT_WARM,
+        ] {
+            let out = with_agent_documents(style, Some(soul), Some(rules));
+            assert_eq!(out.matches("<identity>").count(), 1);
+            assert!(out.contains("a goose of few words"));
+            assert!(!out.contains("personal agentic assistant"));
+            assert_eq!(out.matches("<memory-rules>").count(), 1);
+            assert!(out.contains("Save nothing without asking."));
+            assert!(
+                out.contains("<instructions>") && out.contains("<output-quality>"),
+                "the rest of the style stands"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_empty_document_leaves_the_style_as_it_is() {
+        assert_eq!(
+            with_agent_documents(PROMPT_BALANCED, None, None),
+            PROMPT_BALANCED
+        );
+        assert_eq!(
+            with_agent_documents(PROMPT_BALANCED, Some("  \n "), Some("")),
+            PROMPT_BALANCED
+        );
+    }
+
+    #[test]
+    fn a_document_written_without_its_tags_is_wrapped_and_a_long_one_is_cut() {
+        let out = with_agent_documents(PROMPT_BALANCED, Some("You are a quiet goose."), None);
+        assert!(out.contains("<identity>\nYou are a quiet goose.\n</identity>"));
+
+        let long = "a".repeat(AGENT_DOCUMENT_CHARS * 2);
+        let out = with_agent_documents(PROMPT_BALANCED, Some(&long), None);
+        let (start, end) = block_span(&out, "identity").unwrap();
+        assert!(end - start < AGENT_DOCUMENT_CHARS + 40);
+    }
+
+    #[test]
+    fn the_shipped_soul_and_rules_fit_their_blocks_and_render() {
+        let settings = Settings::default();
+        let template =
+            with_agent_documents(PROMPT_BALANCED, Some(PROMPT_SOUL), Some(PROMPT_SCRATCHPAD));
+        let state = PromptState {
+            tools_offered: true,
+            ..PromptState::default()
+        };
+        let out = render_jinja_template(&template, &settings, Some(&state), None);
+        assert!(
+            !out.contains("{{"),
+            "a placeholder was left unrendered: {out}"
+        );
+        assert!(out.contains("note_to_self"));
+        assert!(out.contains("add_reminder"));
+        for document in [PROMPT_SOUL, PROMPT_HEARTBEAT, PROMPT_SCRATCHPAD] {
+            assert!(document.chars().count() <= AGENT_DOCUMENT_CHARS);
+        }
+    }
+
+    #[test]
+    fn a_document_is_not_a_style_a_person_may_pick() {
+        for name in ["balanced", "concise", "technical", "warm"] {
+            assert!(is_prompt_style(name));
+        }
+        for name in AGENT_DOCUMENTS {
+            assert!(!is_prompt_style(name));
+            assert!(builtin_template_content(name).is_some());
+        }
+    }
 
     // ── sanitize_field ────────────────────────────────────────────────────────
 

@@ -35,6 +35,8 @@ pub struct SessionControls {
     system_override: Mutex<Option<String>>,
     /// Whether the model can look at tool-result images now (encoder ready); unset promotes.
     pictures_readable: AtomicU8,
+    /// Set per turn when memory is too short to load the encoder that hears a recording.
+    hearing_short: std::sync::atomic::AtomicBool,
     /// How many image-bearing requests the engine refused for this session.
     /// Goose stores the failed picture; without this, later text turns replay it and fail too.
     image_failures: AtomicU32,
@@ -127,6 +129,14 @@ impl SessionControls {
             },
             Ordering::SeqCst,
         );
+    }
+
+    pub fn set_hearing_short(&self, short: bool) {
+        self.hearing_short.store(short, Ordering::SeqCst);
+    }
+
+    fn hearing_short(&self) -> bool {
+        self.hearing_short.load(Ordering::SeqCst)
     }
 
     /// `false` only when a turn said the model cannot look; unknown fails open to promotion.
@@ -463,7 +473,6 @@ fn promote_tool_result_images(
 /// Replace history pictures with the placeholder for a session whose engine refused one.
 /// Keeps the current turn's picture and never touches tool messages (pairing is validated).
 fn scrub_history_images(messages: &[Message]) -> Option<Vec<Message>> {
-    use pond_core::models::services::context::image_history::history_image_placeholder;
     let current = messages
         .iter()
         .rposition(|m| m.role == rmcp::model::Role::User && !crate::goose_agent::has_tool_parts(m));
@@ -477,7 +486,7 @@ fn scrub_history_images(messages: &[Message]) -> Option<Vec<Message>> {
                 && crate::goose_agent::image_part_count(m) > 0
             {
                 changed = true;
-                crate::goose_agent::cap_message_images(m, 0, history_image_placeholder(0))
+                crate::goose_agent::cap_message_images(m, 0, &m.as_concat_text())
             } else {
                 m.clone()
             }
@@ -850,8 +859,30 @@ impl Provider for GiapProviderShim {
         } else {
             None
         };
-        let base_messages: &[Message] = scrubbed_messages
+        let hearing_short = session.as_ref().is_some_and(|s| s.hearing_short());
+        let local = !provider_relocates_tool_images(self.inner.get_name());
+        // Recordings of earlier turns go to the model as sound whenever it can take them in:
+        // with memory short, only those the engine's cache already holds what it heard of.
+        let unheard_messages = scrubbed_messages
             .as_deref()
+            .or(stripped_messages.as_deref())
+            .unwrap_or(messages);
+        // Goose's own side calls carry no tools and are not the chat: they read notes.
+        let side_call = goose_providers::request_context::replaces_history()
+            || (tools.is_empty() && !tools_disabled());
+        let heard_messages = if side_call {
+            crate::held_recordings::as_notes(unheard_messages)
+        } else {
+            crate::held_recordings::resolve(unheard_messages, |files| {
+                local
+                    && !image_failed_before
+                    && (!hearing_short
+                        || goose::providers::local_inference::cache_holds_media(files))
+            })
+        };
+        let base_messages: &[Message] = heard_messages
+            .as_deref()
+            .or(scrubbed_messages.as_deref())
             .or(stripped_messages.as_deref())
             .unwrap_or(messages);
         // Built from the messages the provider will actually receive.

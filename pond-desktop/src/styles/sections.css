@@ -1224,6 +1224,14 @@
   --mem-knowledge-bg: rgba(20, 184, 166, 0.08);
   --mem-context:      #9ca3af;
   --mem-context-bg:   rgba(156, 163, 175, 0.08);
+  --mem-food_health:    #e11d48;
+  --mem-food_health-bg: rgba(225, 29, 72, 0.08);
+  --mem-place:          #0ea5e9;
+  --mem-place-bg:       rgba(14, 165, 233, 0.08);
+  --mem-date:           #d97706;
+  --mem-date-bg:        rgba(217, 119, 6, 0.08);
+  --mem-instruction:    #4f46e5;
+  --mem-instruction-bg: rgba(79, 70, 229, 0.08);
 }
 
 /* Add form */
@@ -1425,6 +1433,10 @@
 .mem-seg-badge--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-seg-badge--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-seg-badge--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
+.mem-seg-badge--food_health { background: var(--mem-food_health-bg);  color: var(--mem-food_health); }
+.mem-seg-badge--place       { background: var(--mem-place-bg);        color: var(--mem-place); }
+.mem-seg-badge--date        { background: var(--mem-date-bg);         color: var(--mem-date); }
+.mem-seg-badge--instruction { background: var(--mem-instruction-bg);  color: var(--mem-instruction); }
 .mem-seg-badge--none        { background: var(--grey-100);            color: var(--grey-500); }
 
 /* Segment icon color variants */
@@ -1436,6 +1448,10 @@
 .mem-card__seg-icon--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-card__seg-icon--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-card__seg-icon--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
+.mem-card__seg-icon--food_health { background: var(--mem-food_health-bg);  color: var(--mem-food_health); }
+.mem-card__seg-icon--place       { background: var(--mem-place-bg);        color: var(--mem-place); }
+.mem-card__seg-icon--date        { background: var(--mem-date-bg);         color: var(--mem-date); }
+.mem-card__seg-icon--instruction { background: var(--mem-instruction-bg);  color: var(--mem-instruction); }
 .mem-card__seg-icon--none        { background: var(--grey-100);            color: var(--grey-400); }
 
 /* Kept marker: the permanent tier, the only tier worth a badge */

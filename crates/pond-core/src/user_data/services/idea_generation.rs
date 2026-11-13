@@ -1,12 +1,14 @@
 //! Ideas: which seeds a run researches, the prompts that turn a seed into a search and the pages
 //! it finds into an idea, and reading the model's replies. Nothing here calls a model or the web.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 
 use crate::user_data::domain::idea::{
-    GooseCan, GooseKind, GoosePlan, Grounding, Idea, IdeaSource, IdeaState,
+    card_label, GooseCan, GooseKind, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaSource,
+    IdeaState,
 };
 use crate::user_data::domain::interest::{topic_key, Interest, MemberPortrait};
+use crate::user_data::domain::member_profile::About;
 use crate::user_data::ports::ideas::TopicSeed;
 use crate::user_data::services::model_json::{object_in, text_of, texts_of};
 
@@ -14,17 +16,102 @@ use crate::user_data::services::model_json::{object_in, text_of, texts_of};
 pub const IDEAS_EVERY: Duration = Duration::hours(24);
 /// How long a topic rests after an idea built on it.
 pub const TOPIC_REST: Duration = Duration::days(7);
-/// Seeds one run researches.
+/// How long a kind of everyday idea (a recipe, an outing, a date) rests after one was written.
+pub const KIND_REST: Duration = Duration::days(3);
+/// How long a kind of everyday idea rests after the member turned one down.
+pub const DECLINED_KIND_REST: Duration = Duration::days(10);
+/// How long an interest or a piece of work rests after the member turned down an idea on it.
+pub const DECLINED_TOPIC_REST: Duration = Duration::days(30);
+/// Seeds one run researches from the member's interests and work, beside one everyday idea.
 pub const SEEDS_PER_RUN: usize = 2;
 /// Pages read per seed.
 pub const PAGES_PER_SEED: usize = 3;
 /// Characters of each page the idea prompt shows.
-pub const PAGE_CHARS: usize = 2_000;
+pub const PAGE_CHARS: usize = 4_000;
 /// Below this self-score an idea is not worth the member's time.
 const MIN_SCORE: f64 = 0.3;
 const MAX_TITLE_CHARS: usize = 90;
+const MAX_HOOK_CHARS: usize = 140;
 const MAX_STEP_CHARS: usize = 100;
 const MAX_STEPS: usize = 4;
+const MAX_FACTS: usize = 4;
+const MAX_NOTES_CHARS: usize = 1_500;
+/// Profile facts one prompt shows.
+const PROFILE_LINES: usize = 16;
+
+/// What the Pond knows of the member that an idea has to fit.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IdeaProfile {
+    /// Where the household is, as its settings name it.
+    pub place: Option<String>,
+    /// The member's live profile facts.
+    pub facts: Vec<(About, String)>,
+}
+
+/// The facts an idea is written against, the ones that rule things out first.
+const FITTING: [About; 15] = [
+    About::Allergy,
+    About::Diet,
+    About::Health,
+    About::Instruction,
+    About::Dislikes,
+    About::Partner,
+    About::Child,
+    About::Pet,
+    About::Family,
+    About::Home,
+    About::Place,
+    About::Likes,
+    About::Routine,
+    About::Goal,
+    About::Now,
+];
+
+impl IdeaProfile {
+    fn has(&self, about: About) -> bool {
+        self.facts.iter().any(|(word, _)| *word == about)
+    }
+
+    /// The facts as prompt lines; empty when the Pond knows none that bear on an idea.
+    pub fn as_prompt_lines(&self) -> String {
+        FITTING
+            .iter()
+            .flat_map(|about| {
+                self.facts
+                    .iter()
+                    .filter(move |(word, _)| word == about)
+                    .map(|(_, fact)| format!("- {fact}"))
+            })
+            .take(PROFILE_LINES)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// What the member is allergic to, as lowercase word stems an idea must not name.
+    pub fn allergens(&self) -> Vec<String> {
+        self.facts
+            .iter()
+            .filter(|(about, _)| *about == About::Allergy)
+            .filter_map(|(_, fact)| {
+                let lower = fact.to_lowercase();
+                let at = lower.find("allergic to ")?;
+                Some(lower[at + "allergic to ".len()..].to_string())
+            })
+            .flat_map(|list| {
+                list.trim_end_matches(['.', '!'])
+                    .replace(" and ", ",")
+                    .replace(" or ", ",")
+                    .split(',')
+                    .map(|item| {
+                        let item = item.trim().trim_start_matches("the ").trim();
+                        item.strip_suffix('s').unwrap_or(item).to_string()
+                    })
+                    .filter(|item| item.chars().count() >= 3)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+}
 
 /// Where a seed came from, so the run marks it used and the idea says what it builds on.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,11 +122,16 @@ pub enum SeedFrom {
     Interest(String),
     /// Something the portrait says the member is working on.
     WorkingOn,
+    /// An everyday idea of the seed's kind, built on the member's profile.
+    Life,
+    /// A note from a screenshot the member took, by the note's id.
+    Screenshot(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdeaSeed {
     pub from: SeedFrom,
+    pub kind: IdeaKind,
     /// What the idea builds on, as the member would name it.
     pub label: String,
     /// The detail that makes it theirs: facets, the topic map's reason.
@@ -53,7 +145,8 @@ impl IdeaSeed {
         Grounding {
             kind: match self.from {
                 SeedFrom::TopicMap(_) | SeedFrom::Interest(_) => "interest",
-                SeedFrom::WorkingOn => "memory",
+                SeedFrom::WorkingOn | SeedFrom::Life => "memory",
+                SeedFrom::Screenshot(_) => "screenshot",
             }
             .to_string(),
             label: self.label.clone(),
@@ -68,6 +161,193 @@ pub fn ideas_are_due(
     now: DateTime<Utc>,
 ) -> bool {
     requested_after_finish || last_finished.is_none_or(|at| now - at >= IDEAS_EVERY)
+}
+
+/// The day it is in the household's zone, else in UTC.
+pub fn local_day(now: DateTime<Utc>, zone: &str) -> NaiveDate {
+    match zone.trim().parse::<chrono_tz::Tz>() {
+        Ok(zone) => now.with_timezone(&zone).date_naive(),
+        Err(_) => now.date_naive(),
+    }
+}
+
+/// The order everyday ideas take turns in; the day picks where the turn starts.
+const LIFE_KINDS: [IdeaKind; 5] = [
+    IdeaKind::Recipe,
+    IdeaKind::Outing,
+    IdeaKind::Date,
+    IdeaKind::Activity,
+    IdeaKind::Trip,
+];
+
+/// What an everyday idea is kept under, so its kind rests after one is written.
+pub fn life_label(kind: IdeaKind) -> &'static str {
+    match kind {
+        IdeaKind::Recipe => "A nutritious recipe",
+        IdeaKind::Outing => "Getting outside",
+        IdeaKind::Date => "A date",
+        IdeaKind::SoloDate => "A date with yourself",
+        IdeaKind::Activity => "Something fun to do",
+        IdeaKind::Trip => "A holiday",
+        IdeaKind::Interest | IdeaKind::Project => "",
+    }
+}
+
+/// Today's everyday idea: the next kind in turn that has not been written in the last few
+/// days. A date is with their partner when the profile names one, else with themselves.
+pub fn life_seed(
+    profile: &IdeaProfile,
+    rested_kinds: &[String],
+    today: NaiveDate,
+) -> Option<IdeaSeed> {
+    let rested: std::collections::HashSet<String> =
+        rested_kinds.iter().map(|t| topic_key(t)).collect();
+    let start = today.ordinal0() as usize % LIFE_KINDS.len();
+    (0..LIFE_KINDS.len())
+        .map(|turn| LIFE_KINDS[(start + turn) % LIFE_KINDS.len()])
+        .map(|kind| match kind {
+            IdeaKind::Date if !profile.has(About::Partner) => IdeaKind::SoloDate,
+            other => other,
+        })
+        .find(|kind| {
+            // Either date rests the other: one a few days is enough.
+            let dates = [IdeaKind::Date, IdeaKind::SoloDate];
+            if dates.contains(kind) {
+                dates
+                    .iter()
+                    .all(|d| !rested.contains(&topic_key(life_label(*d))))
+            } else {
+                !rested.contains(&topic_key(life_label(*kind)))
+            }
+        })
+        .map(|kind| IdeaSeed {
+            from: SeedFrom::Life,
+            kind,
+            label: life_label(kind).to_string(),
+            detail: String::new(),
+            query: None,
+        })
+}
+
+/// An idea built on what a screenshot showed the member looking at. Its search is the note's
+/// own subject: a model writing one reaches for the member's other tastes instead.
+pub fn screenshot_seed(note_id: &str, note: &str) -> IdeaSeed {
+    IdeaSeed {
+        from: SeedFrom::Screenshot(note_id.to_string()),
+        kind: IdeaKind::Interest,
+        label: note.to_string(),
+        detail: String::new(),
+        query: Some(shot_subject(note)).filter(|q| q.split_whitespace().count() >= 2),
+    }
+}
+
+/// How a screenshot note opens, before what it names.
+const SHOT_LEAD_INS: [&str; 6] = [
+    "looking at ",
+    "reading about ",
+    "reading ",
+    "watching ",
+    "listening to ",
+    "saved ",
+];
+
+/// What a screenshot note names: the note without its lead-in, its article and any afterthought.
+pub fn shot_subject(note: &str) -> String {
+    let note = note.trim().trim_end_matches('.');
+    let lower = note.to_lowercase();
+    let mut rest = SHOT_LEAD_INS
+        .iter()
+        .find(|lead| lower.starts_with(**lead))
+        .map_or(note, |lead| note.get(lead.len()..).unwrap_or(note));
+    for article in ["the ", "a ", "an "] {
+        if rest.to_lowercase().starts_with(article) {
+            rest = rest.get(article.len()..).unwrap_or(rest);
+        }
+    }
+    // "Kang'o Jaramo, a location possibly related to tourism": the name is what was seen.
+    let named = rest.split(", ").next().unwrap_or(rest);
+    let subject = if named.split_whitespace().count() >= 2 {
+        named
+    } else {
+        rest
+    };
+    subject
+        .split_whitespace()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The names in a screenshot note: its capitalised words past the lead-in, lowercased.
+fn shot_names(note: &str) -> Vec<String> {
+    shot_subject(note)
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
+        .filter(|word| word.chars().next().is_some_and(char::is_uppercase))
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether an idea is about what the screenshot showed: it says one of the note's names, or
+/// two when the note has three or more. A note with no names cannot be checked.
+fn stays_on_the_screenshot(note: &str, said: &str) -> bool {
+    let names = shot_names(note);
+    let needed = match names.len() {
+        0 => return true,
+        1 | 2 => 1,
+        _ => 2,
+    };
+    names
+        .iter()
+        .filter(|name| said.contains(name.as_str()))
+        .count()
+        >= needed
+}
+
+/// What kind of idea the seed asks for, as both prompts read it.
+pub fn kind_guidance(kind: IdeaKind, name: &str, place: Option<&str>) -> String {
+    let near = match place.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(place) => format!(" in or near {place}"),
+        None => String::new(),
+    };
+    match kind {
+        IdeaKind::Outing => format!(
+            "somewhere to go outdoors{near}: a walk, a hike, a park, a viewpoint, a market. \
+             One named place."
+        ),
+        IdeaKind::Activity => format!(
+            "something to do for fun{near}, alone or with others: bowling, a class, a game \
+             night, live music, a match, a film. One named thing with a place or a time."
+        ),
+        IdeaKind::Date => format!(
+            "a date for {name} and their partner{near}: one specific plan for an evening or \
+             an afternoon. If the facts say {name} is not seeing anyone, make it a date with \
+             themselves and answer with kind \"solo_date\"."
+        ),
+        IdeaKind::SoloDate => format!(
+            "a date {name} takes themselves on{near}: one specific plan for an evening or an \
+             afternoon alone that feels like a treat."
+        ),
+        IdeaKind::Trip => format!(
+            "a holiday or a weekend away that suits {name} and whoever they live with: one \
+             destination{}, with the season it is best in.",
+            match place.map(str::trim).filter(|p| !p.is_empty()) {
+                Some(place) => format!(" reachable from {place}"),
+                None => String::new(),
+            }
+        ),
+        IdeaKind::Recipe => format!(
+            "one dish to cook that is nutritious and fits what {name} eats. It must respect \
+             every diet, allergy and health fact below."
+        ),
+        IdeaKind::Interest => format!(
+            "something new and specific about this interest that {name} could act on this week."
+        ),
+        IdeaKind::Project => format!(
+            "something that moves this piece of {name}'s work forward: a tool, a guide, a \
+             release, a technique."
+        ),
+    }
 }
 
 /// The seeds for one run: the topic map's best unused topic and something the member is working
@@ -88,6 +368,7 @@ pub fn pick_seeds(
         .filter(|t| fresh(&t.subject))
         .map(|t| IdeaSeed {
             from: SeedFrom::TopicMap(t.id.clone()),
+            kind: IdeaKind::Interest,
             label: t.subject.clone(),
             detail: [t.area.as_str(), t.why.as_str()]
                 .iter()
@@ -104,6 +385,7 @@ pub fn pick_seeds(
         .filter(|w| fresh(w))
         .map(|w| IdeaSeed {
             from: SeedFrom::WorkingOn,
+            kind: IdeaKind::Project,
             label: w,
             detail: String::new(),
             query: None,
@@ -113,6 +395,7 @@ pub fn pick_seeds(
         .filter(|i| i.feeds_research() && fresh(&i.topic))
         .map(|i| IdeaSeed {
             from: SeedFrom::Interest(i.id.clone()),
+            kind: IdeaKind::Interest,
             label: i.topic.clone(),
             detail: i.facets.join(", "),
             query: None,
@@ -143,6 +426,7 @@ pub fn pick_seeds(
                 .skip(1)
                 .map(|t| IdeaSeed {
                     from: SeedFrom::TopicMap(t.id.clone()),
+                    kind: IdeaKind::Interest,
                     label: t.subject.clone(),
                     detail: t.why.clone(),
                     query: Some(t.query.clone()).filter(|q| !q.trim().is_empty()),
@@ -157,37 +441,65 @@ pub fn pick_seeds(
 }
 
 const QUERY_SYSTEM: &str = "\
-You write one web search for {name}. Using the portrait of {name} and the \
-seed below, write the search most likely to find something new, specific and \
-useful that {name} could act on this week about the seed: a price movement, a \
-release, an event, a technique, an opening, a deadline.
+You write one web search for the Pond, which is looking for an idea for {name}. \
+Below: the kind of idea, what it builds on, and what the Pond knows about {name}. \
+Write the search most likely to find one specific, real thing {name} could do: \
+a named place, event, route, dish or guide, not a list of general tips.
 
 Reply with JSON only, exactly this shape:
 {\"query\":\"...\",\"private\":false}
 
-- query: 4 to 10 words, specific and technical: the exact names, models, \
-places, versions or terms that narrow it, with {name}'s city or country where \
-it matters. No question mark, no quotes.
-- private: true when the seed is a private matter the public web cannot \
-answer, such as {name}'s own company finances, staff or health records; the \
-query is then \"\".";
+- query: 4 to 10 words about what the idea builds on. Name the place when \
+the idea happens somewhere. For food, add what {name} eats and avoids as \
+plain search words; otherwise leave their tastes out. Never a person's name, \
+an address or a health condition. No question mark, no quotes.
+- private: true when what it builds on is a private matter the public web \
+cannot answer, such as {name}'s own company finances, staff or health \
+records; the query is then \"\".";
 
 pub fn render_query_system(name: &str) -> String {
     QUERY_SYSTEM.replace("{name}", name)
 }
 
-pub fn build_query_message(portrait: Option<&MemberPortrait>, seed: &IdeaSeed) -> String {
-    let mut out = String::from("Portrait:\n");
-    match portrait {
-        Some(p) => out.push_str(&p.as_prompt_lines()),
-        None => out.push_str("None yet."),
+/// What both prompts are told about the seed and the member.
+fn brief(
+    name: &str,
+    profile: &IdeaProfile,
+    portrait: Option<&MemberPortrait>,
+    seed: &IdeaSeed,
+) -> String {
+    let mut out = format!(
+        "Kind of idea: {}",
+        kind_guidance(seed.kind, name, profile.place.as_deref())
+    );
+    if let SeedFrom::Screenshot(_) = seed.from {
+        out.push_str(&format!(
+            "\nBuilds on: a screenshot {name} took. What it showed: {}",
+            seed.label
+        ));
+    } else if seed.from != SeedFrom::Life {
+        out.push_str(&format!("\nBuilds on: {}", seed.label));
+        if !seed.detail.is_empty() {
+            out.push_str(&format!(" ({})", seed.detail));
+        }
     }
-    out.push_str(&format!("\n\nSeed: {}", seed.label));
-    if !seed.detail.is_empty() {
-        out.push_str(&format!(" ({})", seed.detail));
+    let facts = profile.as_prompt_lines();
+    if !facts.is_empty() {
+        out.push_str(&format!("\n\nAbout {name}:\n{facts}"));
     }
-    out.push_str("\n\nJSON:");
+    if let Some(portrait) = portrait {
+        out.push_str(&format!("\n\nPortrait:\n{}", portrait.as_prompt_lines()));
+    }
     out
+}
+
+pub fn build_query_message(
+    name: &str,
+    profile: &IdeaProfile,
+    portrait: Option<&MemberPortrait>,
+    seed: &IdeaSeed,
+) -> String {
+    format!("{}\n\nJSON:", brief(name, profile, portrait, seed))
 }
 
 /// The search to run, or `None` for a private seed or an unusable reply.
@@ -215,61 +527,71 @@ pub struct ReadPage {
 }
 
 const IDEA_SYSTEM: &str = "\
-You write one idea for {name} from pages the Pond just read for them.
+You write one idea for {name} from pages the Pond just read for them. It shows \
+as a short card that opens to a fuller page, so write it tight and make it \
+sound worth doing.
 
-Use only these sources, given below: the portrait of {name}, the seed (what the \
-idea builds on), and the text of the numbered pages. Every fact in the idea \
-must come from the pages.
-
-A good idea is:
-- new to {name}: not something the portrait shows they already know;
-- specific to {name}: tied to the seed and to their details in the portrait \
-(their places, budgets, dates, names);
-- sourced: built on what the pages say;
-- doable: something {name} or the Pond can act on soon. Never a question.
+Use only what is below: the kind of idea, what it builds on, what the Pond \
+knows about {name}, and the numbered pages. Every fact in the idea must come \
+from the pages. Never go against a fact about {name}: nothing they are \
+allergic to, do not eat, dislike, or asked not to hear about.
 
 Reply with JSON only, exactly this shape:
-{\"title\":\"...\",\"pitch\":\"...\",\"why\":\"...\",\"sources\":[1],\
-\"you_can\":[\"...\"],\"goose_can\":{\"kind\":\"research\",\"label\":\"...\",\
-\"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
+{\"title\":\"...\",\"hook\":\"...\",\"pitch\":\"...\",\"why\":\"...\",\
+\"facts\":[{\"label\":\"...\",\"value\":\"...\"}],\"sources\":[1],\
+\"you_can\":[\"...\"],\"notes\":\"...\",\"goose_can\":{\"kind\":\"todo\",\
+\"label\":\"...\",\"prompt\":\"...\",\"listing_url\":\"\"},\"score\":0.0}
 
-- title: the idea as a concrete suggestion, under 80 characters, not a question.
-- pitch: two or three sentences: what the pages say, with the specific \
-numbers, names and dates, and what {name} could do with it.
-- why: one line to {name}, starting \"You\", naming the specific thing about \
-them it builds on.
+- title: the idea itself in at most 8 words, naming the actual place, dish, \
+event or thing the pages describe, as you would say it to a friend. Not a \
+question. When a page lists many, the idea is the one of them that fits \
+{name} best, by its name: never the list or its subject.
+- hook: one line of at most 15 words that makes {name} want to open it.
+- pitch: two or three short sentences for the page that opens: what it is and \
+what makes it good, with the specifics the pages give.
+- why: one line to {name}, starting \"You\", naming the fact or interest of \
+theirs it fits.
+- facts: two to four things worth seeing at a glance, each a label of one or \
+two words and a short value from the pages: where, when, how long, the cost, \
+how many it serves, how hard it is. Never where you read it, and never what \
+the title already says.
 - sources: the numbers of the pages it rests on.
 - you_can: two to four steps {name} could take, each a short imperative under \
 80 characters.
-- goose_can: what the Pond could do for {name}, or null.
-  - kind: \"research\" (a deeper report), \"watch\" (keep checking a page of \
-listings), \"schedule\" (look this up again each week), \"todo\" (put the \
-first step on their list) or \"chat\" (talk it through).
-  - label: the button's words, under 30 characters.
-  - prompt: for research or schedule, what the Pond should look up; else \"\".
+- notes: for your own use when {name} asks about this idea later, not shown \
+on the card. Every useful detail from the pages that did not fit above, as \
+plain sentences: opening hours, prices, booking, the route, what to bring, \
+and for a dish its ingredients with amounts and its method.
+- goose_can: what the Pond can do for {name}, or null. The Pond is the \
+household's own assistant, with to-dos and reminders, schedules, web research \
+and watches on web pages.
+  - kind: \"todo\" (put the steps on their to-do list), \"schedule\" (run a \
+prompt for them on a recurring day), \"chat\" (talk it through), \"research\" \
+(look into it in depth and report), or \"watch\" (watch a page that lists \
+things for sale or to book).
+  - label: the button's action words, under 30 characters.
+  - prompt: for research or schedule, what the Pond should look up or run; \
+else \"\".
   - listing_url: for watch only, the address of a numbered page that lists \
-items for sale or rent; else \"\".
+items; else \"\".
 - score: 0 to 1, how new, specific and doable this is for {name}.
-If the pages hold nothing new and doable for {name}, reply {\"title\":\"\"}.";
+Write as if you know it yourself: never say \"page\", \"the pages\" or a \
+page's number outside sources.
+If the pages hold nothing that fits {name} and the kind of idea, or no one \
+specific thing to name, reply {\"title\":\"\"}.";
 
 pub fn render_idea_system(name: &str) -> String {
     IDEA_SYSTEM.replace("{name}", name)
 }
 
 pub fn build_idea_message(
+    name: &str,
+    profile: &IdeaProfile,
     portrait: Option<&MemberPortrait>,
     seed: &IdeaSeed,
     pages: &[ReadPage],
 ) -> String {
-    let mut out = String::from("Portrait:\n");
-    match portrait {
-        Some(p) => out.push_str(&p.as_prompt_lines()),
-        None => out.push_str("None yet."),
-    }
-    out.push_str(&format!("\n\nSeed: {}", seed.label));
-    if !seed.detail.is_empty() {
-        out.push_str(&format!(" ({})", seed.detail));
-    }
+    let mut out = brief(name, profile, portrait, seed);
     out.push_str("\n\nPages:\n");
     for (i, page) in pages.iter().enumerate() {
         let text: String = page.text.chars().take(PAGE_CHARS).collect();
@@ -285,6 +607,34 @@ pub fn build_idea_message(
     out
 }
 
+/// `text` cut to `max` characters at a word.
+fn clipped_at_word(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    let end = cut.rfind(' ').unwrap_or(cut.len());
+    cut[..end]
+        .trim_end_matches([',', ';', ':', ' '])
+        .to_string()
+}
+
+/// A fact that points at the reading rather than the thing: "Source: Page 1".
+fn says_where_it_was_read(fact: &IdeaFact) -> bool {
+    let label = fact.label.to_lowercase();
+    let value = fact.value.to_lowercase();
+    ["source", "sources", "page", "link", "url", "website"].contains(&label.as_str())
+        || value.starts_with("page ")
+        || value.starts_with("http")
+}
+
+/// The first sentence of `text`, for an idea whose reply gave no hook.
+fn first_sentence(text: &str) -> &str {
+    let end = text.find(". ").map(|at| at + 1).unwrap_or(text.len());
+    text[..end].trim()
+}
+
 fn clipped(text: &str, max: usize) -> String {
     text.chars()
         .take(max)
@@ -293,11 +643,13 @@ fn clipped(text: &str, max: usize) -> String {
         .to_string()
 }
 
-/// The idea the reply describes, or `None` when the model found nothing, wrote a question, or
-/// scored it too low. Sources are the pages it names; a watch needs a page it read.
+/// The idea the reply describes, or `None` when the model found nothing, wrote a question,
+/// scored it too low, or named something the member is allergic to. Sources are the pages it
+/// names; a watch needs a page it read.
 pub fn parse_idea(
     raw: &str,
     profile_id: &str,
+    profile: &IdeaProfile,
     seed: &IdeaSeed,
     pages: &[ReadPage],
     now: DateTime<Utc>,
@@ -312,7 +664,52 @@ pub fn parse_idea(
     if score < MIN_SCORE {
         return None;
     }
-    let why = text_of(&map, "why").unwrap_or_else(|| format!("You follow {}.", seed.label));
+    let why = text_of(&map, "why").unwrap_or_else(|| match seed.from {
+        SeedFrom::Life => String::new(),
+        SeedFrom::Screenshot(_) => "You took a screenshot of this.".to_string(),
+        _ => format!("You follow {}.", seed.label),
+    });
+    let hook = clipped_at_word(
+        &text_of(&map, "hook").unwrap_or_else(|| first_sentence(&pitch).to_string()),
+        MAX_HOOK_CHARS,
+    );
+    let facts: Vec<IdeaFact> = map
+        .get("facts")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.as_object())
+        .filter_map(|f| {
+            Some(IdeaFact {
+                label: clipped(&text_of(f, "label")?, 24),
+                value: clipped_at_word(&text_of(f, "value")?, 80),
+            })
+        })
+        .filter(|fact| !says_where_it_was_read(fact))
+        .take(MAX_FACTS)
+        .collect();
+    let notes = clipped_at_word(&text_of(&map, "notes").unwrap_or_default(), MAX_NOTES_CHARS);
+    // The one switch a reply may make: a date turns out to be with themselves.
+    let kind = match (
+        seed.kind,
+        text_of(&map, "kind").and_then(|k| IdeaKind::parse(&k)),
+    ) {
+        (IdeaKind::Date, Some(IdeaKind::SoloDate)) => IdeaKind::SoloDate,
+        (kind, _) => kind,
+    };
+    let said = format!("{title} {hook} {pitch} {notes}").to_lowercase();
+    if profile
+        .allergens()
+        .iter()
+        .any(|allergen| said.contains(allergen.as_str()))
+    {
+        return None;
+    }
+    if let SeedFrom::Screenshot(_) = seed.from {
+        if !stays_on_the_screenshot(&seed.label, &said) {
+            return None;
+        }
+    }
 
     let named: Vec<usize> = map
         .get("sources")
@@ -353,10 +750,18 @@ pub fn parse_idea(
         id: uuid::Uuid::new_v4().to_string(),
         profile_id: profile_id.to_string(),
         topic: seed.label.clone(),
+        kind,
+        kind_label: card_label(kind, std::slice::from_ref(&seed.grounding())).to_string(),
         title,
+        hook,
         pitch,
         why,
-        grounded_in: vec![seed.grounding()],
+        facts,
+        notes,
+        grounded_in: match seed.from {
+            SeedFrom::Life => Vec::new(),
+            _ => vec![seed.grounding()],
+        },
         sources: cited
             .into_iter()
             .map(|p| IdeaSource {
@@ -554,6 +959,7 @@ mod tests {
     fn seed() -> IdeaSeed {
         IdeaSeed {
             from: SeedFrom::Interest("i2".into()),
+            kind: IdeaKind::Interest,
             label: "Toyota Fielder".into(),
             detail: String::new(),
             query: None,
@@ -567,7 +973,15 @@ mod tests {
             "you_can":["Set a ceiling of KSh 1.1M","Ask for CVT service history"],
             "goose_can":{"kind":"watch","label":"Watch Fielder listings","prompt":"","listing_url":"https://example.com/fielders"},
             "score":0.8}"#;
-        let idea = parse_idea(raw, "p", &seed(), &pages(), Utc::now()).unwrap();
+        let idea = parse_idea(
+            raw,
+            "p",
+            &IdeaProfile::default(),
+            &seed(),
+            &pages(),
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(idea.sources.len(), 1);
         assert_eq!(idea.sources[0].url, "https://example.com/fielders");
         assert_eq!(idea.goose_can.unwrap().kind, GooseKind::Watch);
@@ -577,13 +991,233 @@ mod tests {
         );
         assert_eq!(idea.grounded_in[0].label, "Toyota Fielder");
         assert_eq!(idea.you_can.len(), 2);
+        assert_eq!(idea.kind, IdeaKind::Interest);
+        assert_eq!(idea.kind_label, "From your interests");
+        // No hook in the reply: the card's line is the pitch's first sentence.
+        assert_eq!(idea.hook, "Prices soften after the import rush.");
+    }
+
+    fn profile(facts: &[(About, &str)]) -> IdeaProfile {
+        IdeaProfile {
+            place: Some("Nairobi, Kenya".into()),
+            facts: facts
+                .iter()
+                .map(|(about, fact)| (*about, fact.to_string()))
+                .collect(),
+        }
+    }
+
+    fn day(ordinal0: u32) -> NaiveDate {
+        NaiveDate::from_yo_opt(2026, ordinal0 + 1).unwrap()
+    }
+
+    #[test]
+    fn everyday_ideas_take_turns_and_a_kind_rests_after_one() {
+        let nobody = profile(&[]);
+        let kinds: Vec<IdeaKind> = (0..5)
+            .map(|d| life_seed(&nobody, &[], day(d)).unwrap().kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                IdeaKind::Recipe,
+                IdeaKind::Outing,
+                IdeaKind::SoloDate,
+                IdeaKind::Activity,
+                IdeaKind::Trip
+            ]
+        );
+        // A recipe written this week: the day's turn passes to the next kind.
+        let seed = life_seed(&nobody, &["A nutritious recipe".to_string()], day(0)).unwrap();
+        assert_eq!(seed.kind, IdeaKind::Outing);
+        assert_eq!(seed.label, "Getting outside");
+        assert_eq!(seed.from, SeedFrom::Life);
+        let all: Vec<String> = [
+            IdeaKind::Recipe,
+            IdeaKind::Outing,
+            IdeaKind::Date,
+            IdeaKind::Activity,
+            IdeaKind::Trip,
+        ]
+        .iter()
+        .map(|k| life_label(*k).to_string())
+        .collect();
+        assert_eq!(life_seed(&nobody, &all, day(0)), None);
+    }
+
+    #[test]
+    fn a_date_is_with_their_partner_only_when_the_profile_names_one() {
+        let single = profile(&[]);
+        let dating = profile(&[(About::Partner, "Jerry's partner is Amina.")]);
+        assert_eq!(
+            life_seed(&single, &[], day(2)).unwrap().kind,
+            IdeaKind::SoloDate
+        );
+        let seed = life_seed(&dating, &[], day(2)).unwrap();
+        assert_eq!(seed.kind, IdeaKind::Date);
+        // A solo date written this week rests the date as well.
+        let after = life_seed(&dating, &["A date with yourself".to_string()], day(2)).unwrap();
+        assert_eq!(after.kind, IdeaKind::Activity);
+
+        // The reply may say the date is with themselves; it may not change any other kind.
+        let raw = r#"{"kind":"solo_date","title":"Dinner for one at the terrace","pitch":"A set menu.","sources":[1],"score":0.8}"#;
+        let idea = parse_idea(raw, "p", &dating, &seed, &pages(), Utc::now()).unwrap();
+        assert_eq!(idea.kind, IdeaKind::SoloDate);
+        assert_eq!(idea.kind_label, "Solo date");
+        assert!(
+            idea.grounded_in.is_empty(),
+            "an everyday idea builds on no one topic"
+        );
+        let recipe = life_seed(&single, &[], day(0)).unwrap();
+        let idea = parse_idea(raw, "p", &single, &recipe, &pages(), Utc::now()).unwrap();
+        assert_eq!(idea.kind, IdeaKind::Recipe);
+    }
+
+    #[test]
+    fn the_brief_names_the_kind_the_place_and_the_facts_an_idea_must_fit() {
+        let known = profile(&[
+            (About::Likes, "Jerry enjoys cooking."),
+            (About::Work, "Jerry runs Jarida."),
+            (
+                About::Allergy,
+                "Jerry is allergic to peanuts and shellfish.",
+            ),
+            (About::Diet, "Jerry is vegetarian."),
+        ]);
+        let recipe = life_seed(&known, &[], day(0)).unwrap();
+        let message = build_query_message("Jerry", &known, None, &recipe);
+        assert!(message.starts_with("Kind of idea: one dish to cook that is nutritious"));
+        assert!(!message.contains("Builds on:"));
+        assert!(message.contains(
+            "About Jerry:\n- Jerry is allergic to peanuts and shellfish.\n- Jerry is vegetarian.\n\
+             - Jerry enjoys cooking."
+        ));
+        assert!(
+            !message.contains("Jarida"),
+            "work is not what an idea must fit"
+        );
+
+        let outing = life_seed(&known, &[], day(1)).unwrap();
+        let message = build_idea_message("Jerry", &known, None, &outing, &pages());
+        assert!(message.contains("somewhere to go outdoors in or near Nairobi, Kenya"));
+        assert!(message.contains("[1] Used car prices in Kenya"));
+
+        let message = build_query_message("Jerry", &IdeaProfile::default(), None, &seed());
+        assert!(message.contains("Builds on: Toyota Fielder"));
+        assert!(!message.contains("About Jerry"));
+
+        let shot = screenshot_seed("n1", "Looking at the Ngong Hills hiking trail");
+        let message = build_query_message("Jerry", &IdeaProfile::default(), None, &shot);
+        assert!(message.contains(
+            "Builds on: a screenshot Jerry took. What it showed: Looking at the Ngong Hills \
+             hiking trail"
+        ));
+        assert_eq!(shot.grounding().kind, "screenshot");
+        let raw = r#"{"title":"Walk the Ngong Hills loop","pitch":"An 11 km ridge walk.","sources":[1],"score":0.8}"#;
+        let idea = parse_idea(
+            raw,
+            "p",
+            &IdeaProfile::default(),
+            &shot,
+            &pages(),
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(idea.why, "You took a screenshot of this.");
+        assert_eq!(idea.kind_label, "From a screenshot");
+        assert_eq!(idea.grounded_in[0].kind, "screenshot");
+    }
+
+    #[test]
+    fn a_screenshot_is_searched_by_what_it_named_and_its_idea_stays_on_it() {
+        for (note, subject) in [
+            (
+                "Looking at the music video for Class Clown by TNT Kenya.",
+                "music video for Class Clown by TNT Kenya",
+            ),
+            (
+                "Reading about the cost of importing a Mazda to Kenya.",
+                "cost of importing a Mazda to Kenya",
+            ),
+            (
+                "Looking at Kang'o Jaramo, a location possibly related to wildlife or tourism.",
+                "Kang'o Jaramo",
+            ),
+            ("Saved Uhuru Gardens", "Uhuru Gardens"),
+        ] {
+            assert_eq!(shot_subject(note), subject);
+            assert_eq!(screenshot_seed("n", note).query.as_deref(), Some(subject));
+        }
+        // One word is no search: the model writes one.
+        assert_eq!(screenshot_seed("n", "Looking at sneakers").query, None);
+
+        let video = screenshot_seed(
+            "n",
+            "Looking at the music video for Class Clown by TNT Kenya.",
+        );
+        let known = IdeaProfile::default();
+        let off = r#"{"title":"Pan-Seared Teal with Orange Glaze","pitch":"A gourmet dish for an event in Kenya.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(off, "p", &known, &video, &pages(), Utc::now()).is_none());
+        let on = r#"{"title":"TNT Kenya's Class Clown, behind the scenes","pitch":"How the video was shot.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(on, "p", &known, &video, &pages(), Utc::now()).is_some());
+    }
+
+    #[test]
+    fn an_idea_naming_something_they_are_allergic_to_is_dropped() {
+        let known = profile(&[(
+            About::Allergy,
+            "Jerry is allergic to peanuts and shellfish.",
+        )]);
+        assert_eq!(known.allergens(), vec!["peanut", "shellfish"]);
+        let recipe = life_seed(&known, &[], day(0)).unwrap();
+        let with = r#"{"title":"Peanut noodle bowl","pitch":"Ready in 20 minutes.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(with, "p", &known, &recipe, &pages(), Utc::now()).is_none());
+        let in_notes = r#"{"title":"Noodle bowl","pitch":"Ready in 20 minutes.","notes":"Top with crushed peanuts.","sources":[1],"score":0.9}"#;
+        assert!(parse_idea(in_notes, "p", &known, &recipe, &pages(), Utc::now()).is_none());
+        let without = r#"{"title":"Lentil dal","hook":"Dinner in 35 minutes, with what is in the cupboard.",
+            "pitch":"Red lentils and spinach.","facts":[{"label":"Serves","value":"4"},{"label":"","value":"x"}],
+            "notes":"Soak the lentils for 20 minutes.","sources":[1],"score":0.9}"#;
+        let idea = parse_idea(without, "p", &known, &recipe, &pages(), Utc::now()).unwrap();
+        assert_eq!(
+            idea.hook,
+            "Dinner in 35 minutes, with what is in the cupboard."
+        );
+        assert_eq!(idea.facts.len(), 1);
+        assert_eq!(idea.facts[0].label, "Serves");
+        let pointing = r#"{"title":"Lentil dal","pitch":"Red lentils and spinach.",
+            "facts":[{"label":"Source","value":"Page 1"},{"label":"Recipe","value":"Page 2 of the list"},
+                     {"label":"Time","value":"35 minutes"}],"sources":[1],"score":0.9}"#;
+        let pointed = parse_idea(pointing, "p", &known, &recipe, &pages(), Utc::now()).unwrap();
+        assert_eq!(
+            pointed.facts.len(),
+            1,
+            "facts about the reading are left out"
+        );
+        assert_eq!(pointed.facts[0].label, "Time");
+        assert_eq!(idea.notes, "Soak the lentils for 20 minutes.");
+
+        let card = idea.as_card();
+        assert_eq!(card.kind, "Recipe");
+        assert!(card.content.contains("Serves: 4"));
+        assert!(card.notes.starts_with("Soak the lentils for 20 minutes."));
+        assert!(card
+            .notes
+            .contains("Source: Used car prices in Kenya (https://example.com/prices)"));
     }
 
     #[test]
     fn a_watch_on_a_page_never_read_becomes_research() {
         let raw = r#"{"title":"Catch the dip","pitch":"Prices soften.","why":"You shop.","sources":[1],
             "you_can":[],"goose_can":{"kind":"watch","label":"Watch","prompt":"","listing_url":"https://elsewhere.com/x"},"score":0.7}"#;
-        let idea = parse_idea(raw, "p", &seed(), &pages(), Utc::now()).unwrap();
+        let idea = parse_idea(
+            raw,
+            "p",
+            &IdeaProfile::default(),
+            &seed(),
+            &pages(),
+            Utc::now(),
+        )
+        .unwrap();
         assert_eq!(idea.goose_can.unwrap().kind, GooseKind::Research);
         assert_eq!(idea.goose_plan.listing_url, None);
         assert_eq!(idea.goose_plan.prompt.as_deref(), Some("Catch the dip"));
@@ -598,7 +1232,15 @@ mod tests {
             "no json",
         ] {
             assert!(
-                parse_idea(raw, "p", &seed(), &pages(), Utc::now()).is_none(),
+                parse_idea(
+                    raw,
+                    "p",
+                    &IdeaProfile::default(),
+                    &seed(),
+                    &pages(),
+                    Utc::now()
+                )
+                .is_none(),
                 "{raw}"
             );
         }
@@ -616,9 +1258,13 @@ mod tests {
     #[test]
     fn the_prompts_name_their_sources_and_define_every_field() {
         let idea = render_idea_system("Jerry");
-        assert!(idea.contains("Use only these sources"));
+        assert!(idea.contains("Use only what is below"));
+        assert!(idea.contains("Never go against a fact about Jerry"));
         for field in [
             "title:",
+            "hook:",
+            "facts:",
+            "notes:",
             "pitch:",
             "why:",
             "sources:",
@@ -629,6 +1275,7 @@ mod tests {
             assert!(idea.contains(field), "{field}");
         }
         let query = render_query_system("Jerry");
-        assert!(query.contains("private matter the public web cannot"));
+        assert!(query.contains("private matter the public web cannot answer"));
+        assert!(query.contains("Never a person's name, an address or a health condition"));
     }
 }

@@ -3,7 +3,7 @@
 //! its forms. Many listing sites build their text with scripts but still send their items in
 //! the first HTML, so items are read before any browser would be needed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use pond_core::mcp::services::page_addresses::{FormField, FormMethod, SearchForm};
@@ -30,7 +30,7 @@ const MAX_LINK_TEXT_BYTES: usize = 80;
 const MAX_JSON_NODES: usize = 200_000;
 const MAX_JSON_DEPTH: usize = 48;
 
-/// schema.org types that are a thing on offer.
+/// schema.org types that are a thing on offer, an article, or an announcement.
 pub(crate) const ITEM_TYPES: &[&str] = &[
     "Car",
     "Vehicle",
@@ -39,6 +39,15 @@ pub(crate) const ITEM_TYPES: &[&str] = &[
     "IndividualProduct",
     "ProductModel",
     "Offer",
+    "Article",
+    "NewsArticle",
+    "BlogPosting",
+    "TechArticle",
+    "SocialMediaPosting",
+    "Event",
+    "JobPosting",
+    "SoftwareApplication",
+    "SoftwareSourceCode",
 ];
 
 const TITLE_KEYS: &[&str] = &[
@@ -101,7 +110,7 @@ const IMAGE_KEYS: &[&str] = &[
     "photos",
 ];
 
-/// One thing a page lists: a car, a product, an offer.
+/// One thing a page lists: a car, a product, an article, or an update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Item {
     pub title: String,
@@ -111,6 +120,7 @@ pub struct Item {
     pub year: Option<String>,
     pub link: Option<String>,
     pub image: Option<String>,
+    pub snippet: Option<String>,
 }
 
 /// Where a page's items came from.
@@ -119,6 +129,10 @@ pub enum ItemSource {
     JsonLd,
     NextData,
     NuxtData,
+    HtmlArticles,
+    ContentSections,
+    /// A run of links that share a shape: a forum's front page, search results, an index.
+    LinkList,
 }
 
 impl ItemSource {
@@ -127,6 +141,9 @@ impl ItemSource {
             ItemSource::JsonLd => "json_ld",
             ItemSource::NextData => "next_data",
             ItemSource::NuxtData => "nuxt_data",
+            ItemSource::HtmlArticles => "html_articles",
+            ItemSource::ContentSections => "content_sections",
+            ItemSource::LinkList => "link_list",
         }
     }
 }
@@ -142,21 +159,49 @@ pub struct Link {
 pub struct PageData {
     pub items: Vec<Item>,
     pub items_from: Option<ItemSource>,
+    /// What the page lists as plain links when nothing marks them as items. Kept apart from
+    /// `items`, so a watch that compares a page's sections is not handed a different list.
+    pub listed_links: Vec<Item>,
     pub links: Vec<Link>,
     pub forms: Vec<SearchForm>,
     /// The picture the page names for itself when shared (`og:image`), for a report to show.
     pub preview_image: Option<String>,
+    /// The feed of its new posts the page declares, when it is on the page's own site.
+    pub feed: Option<String>,
 }
 
 pub fn page_data(document: &scraper::Html, base: &Url) -> PageData {
     let (items, items_from) = items_of(document, base);
+    let listed_links = match items.is_empty() {
+        true => link_list(document, base),
+        false => Vec::new(),
+    };
     PageData {
         items,
         items_from,
+        listed_links,
         links: links_of(document, base),
         forms: forms_of(document, base),
         preview_image: preview_of(document, base),
+        feed: feed_of(document, base),
     }
+}
+
+/// The feed a page declares in its head, on its own site: where its new posts are listed.
+fn feed_of(document: &scraper::Html, base: &Url) -> Option<String> {
+    static FEED: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]"#,
+        )
+    });
+    document
+        .select(&FEED)
+        .filter_map(|link| link.value().attr("href"))
+        .filter_map(|href| base.join(href.trim()).ok())
+        .find(|feed| {
+            matches!(feed.scheme(), "http" | "https") && feed.host_str() == base.host_str()
+        })
+        .map(|feed| feed.to_string())
 }
 
 pub(crate) fn preview_of(document: &scraper::Html, base: &Url) -> Option<String> {
@@ -221,7 +266,198 @@ fn items_of(document: &scraper::Html, base: &Url) -> (Vec<Item>, Option<ItemSour
             return (items, Some(ItemSource::NuxtData));
         }
     }
+    let articles = html_articles(document, base);
+    if !articles.is_empty() {
+        return (articles, Some(ItemSource::HtmlArticles));
+    }
     (Vec::new(), None)
+}
+
+fn html_articles(document: &scraper::Html, base: &Url) -> Vec<Item> {
+    static ARTICLE: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"article, [role="article"], .post, .blog-post, .entry, .news-item, .release-entry, .release"#,
+        )
+    });
+    static TITLE: LazyLock<scraper::Selector> = LazyLock::new(|| {
+        selector(
+            r#"h1 a, h2 a, h3 a, h4 a, h1, h2, h3, h4, .entry-title a, .post-title a, .title a"#,
+        )
+    });
+    static LINK: LazyLock<scraper::Selector> = LazyLock::new(|| selector(r#"a[href]"#));
+    static TIME: LazyLock<scraper::Selector> =
+        LazyLock::new(|| selector(r#"time, .date, [datetime]"#));
+    static SNIPPET: LazyLock<scraper::Selector> =
+        LazyLock::new(|| selector(r#"p, .summary, .excerpt, .description, .entry-summary"#));
+    static IMG: LazyLock<scraper::Selector> = LazyLock::new(|| selector(r#"img[src]"#));
+
+    let mut items = Vec::new();
+    for element in document.select(&ARTICLE).take(MAX_ITEMS) {
+        let title_elem = element.select(&TITLE).next();
+        let title = title_elem
+            .map(|e| e.text().collect::<String>())
+            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty());
+        let Some(title) = title else { continue };
+
+        let link = title_elem
+            .and_then(|e| e.value().attr("href"))
+            .or_else(|| element.select(&LINK).find_map(|e| e.value().attr("href")))
+            .and_then(|l| absolute(l, base));
+
+        let time_text = element.select(&TIME).next().and_then(|e| {
+            e.value()
+                .attr("datetime")
+                .map(str::to_string)
+                .or_else(|| Some(e.text().collect::<String>()))
+        });
+        let year = time_text.as_deref().and_then(year_in);
+
+        let snippet = element
+            .select(&SNIPPET)
+            .map(|e| e.text().collect::<String>())
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|s| !s.is_empty() && s != &title)
+            .map(|s| clip(&s));
+
+        let image = element
+            .select(&IMG)
+            .find_map(|e| e.value().attr("src"))
+            .and_then(|s| absolute(s, base));
+
+        items.push(Item {
+            title: clip(&title),
+            price: None,
+            currency: None,
+            mileage: None,
+            year,
+            link,
+            image,
+            snippet,
+        });
+    }
+    distinct(items)
+}
+
+/// Fewest links of one shape that make a list rather than a few related links.
+const MIN_LISTED: usize = 5;
+/// Fewest words a listed link's text has: a menu's entries are one or two.
+const MIN_LISTED_WORDS: usize = 3;
+/// Ancestors of a link that name its shape.
+const SHAPE_DEPTH: usize = 3;
+
+/// A page that is mostly a list of links to its own things, with nothing that marks them as
+/// articles: the largest run of links that sit in the same place in the same kind of row. A
+/// menu, a footer and a tag cloud are left out by where they are and how short their words are.
+fn link_list(document: &scraper::Html, base: &Url) -> Vec<Item> {
+    static ANCHOR: LazyLock<scraper::Selector> = LazyLock::new(|| selector("a[href]"));
+    let shape = |anchor: scraper::ElementRef<'_>| -> String {
+        let mut parts: Vec<String> = anchor
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .take(SHAPE_DEPTH)
+            .map(|e| {
+                let class = e.value().classes().next().unwrap_or_default();
+                format!("{}.{class}", e.value().name())
+            })
+            .collect();
+        parts.push(format!(
+            "a.{}",
+            anchor.value().classes().next().unwrap_or_default()
+        ));
+        parts.join(">")
+    };
+
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<(scraper::ElementRef<'_>, String, String)>> =
+        HashMap::new();
+    for anchor in document.select(&ANCHOR) {
+        let in_furniture = anchor
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .any(|e| web_search::is_boilerplate(e.value(), false));
+        if in_furniture {
+            continue;
+        }
+        let text = anchor
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        let Some(link) = anchor
+            .value()
+            .attr("href")
+            .and_then(|h| absolute(h.trim(), base))
+        else {
+            continue;
+        };
+        let key = shape(anchor);
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push((anchor, text, link));
+    }
+    // A run is a list when most of its links are worded like titles; a menu's are not. Of
+    // the lists, the one with the most words wins, so a column of "3 hours ago" links loses
+    // to the titles beside it; of equals, the one that comes first on the page.
+    let titled = |key: &String| -> usize {
+        groups[key]
+            .iter()
+            .filter(|(_, text, _)| text.split_whitespace().count() >= MIN_LISTED_WORDS)
+            .count()
+    };
+    let words = |key: &String| -> usize { groups[key].iter().map(|(_, text, _)| text.len()).sum() };
+    let listed: Vec<&String> = order
+        .iter()
+        .filter(|key| titled(key) >= MIN_LISTED && titled(key) * 2 > groups[*key].len())
+        .collect();
+    let Some(most) = listed.iter().map(|key| words(key)).max() else {
+        return Vec::new();
+    };
+    let Some(best) = listed.into_iter().find(|key| words(key) == most) else {
+        return Vec::new();
+    };
+
+    let rows = &groups[best];
+    let mut items = Vec::new();
+    for (anchor, title, link) in rows.iter().take(MAX_ITEMS) {
+        // The row is the nearest ancestor that holds this link and no other of the run.
+        let row = anchor
+            .ancestors()
+            .filter_map(scraper::ElementRef::wrap)
+            .take(SHAPE_DEPTH + 1)
+            .take_while(|e| {
+                rows.iter()
+                    .filter(|(other, _, _)| other.ancestors().any(|a| a.id() == e.id()))
+                    .count()
+                    == 1
+            })
+            .last();
+        let snippet = row
+            .map(|e| {
+                e.text()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|all| all.replacen(title.as_str(), "", 1).trim().to_string())
+            .filter(|rest| rest.chars().any(char::is_alphanumeric))
+            .map(|rest| clip(&rest));
+        items.push(Item {
+            title: clip(title),
+            link: Some(link.clone()),
+            snippet,
+            ..Item::default()
+        });
+    }
+    distinct(items)
 }
 
 fn distinct(items: Vec<Item>) -> Vec<Item> {
@@ -323,6 +559,10 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         "modelDate",
         "productionDate",
         "dateVehicleFirstRegistered",
+        "datePublished",
+        "dateCreated",
+        "dateModified",
+        "startDate",
     ]
     .iter()
     .find_map(|k| text_of(object.get(*k)))
@@ -335,6 +575,12 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         .get("image")
         .and_then(image_of)
         .and_then(|u| absolute(&u, base));
+    let snippet = text_of(
+        object
+            .get("description")
+            .or_else(|| object.get("articleBody"))
+            .or_else(|| object.get("summary")),
+    );
     Some(Item {
         title: clip(&title),
         price,
@@ -343,6 +589,7 @@ pub(crate) fn ld_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         year,
         link,
         image,
+        snippet,
     })
 }
 
@@ -435,6 +682,10 @@ fn state_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
     let image = key(object, IMAGE_KEYS)
         .and_then(image_of)
         .and_then(|u| absolute(&u, base));
+    let snippet = text_of(key(
+        object,
+        &["snippet", "description", "summary", "excerpt", "text"],
+    ));
     Some(Item {
         title: clip(&title),
         price,
@@ -443,6 +694,7 @@ fn state_item(object: &Map<String, Value>, base: &Url) -> Option<Item> {
         year,
         link,
         image,
+        snippet,
     })
 }
 
@@ -770,6 +1022,146 @@ mod tests {
         page_data(&document, &Url::parse("https://cars.example/used").unwrap())
     }
 
+    /// A forum's front page as a browser builds it: rows of one shape, no article markup.
+    fn forum(rows: usize) -> String {
+        let mut html = String::from(
+            "<html><body><nav><a href=\"/new\">New stories today</a><a href=\"/ask\">Ask a \
+             question here</a><a href=\"/show\">Show your own work</a><a href=\"/jobs\">Jobs \
+             going right now</a><a href=\"/top\">Top of the week</a></nav><main>",
+        );
+        for n in 1..=rows {
+            html.push_str(&format!(
+                "<div class=\"Story\"><div class=\"Story_data\"><a class=\"Story_title\" \
+                 href=\"https://news.example/item/{n}\"><span>Story number {n} about a thing\
+                 </span></a><span class=\"Story_meta\">{} points, 3 hours ago</span></div>\
+                 <a class=\"Story_comments\" href=\"/item/{n}/comments\">12 comments</a></div>",
+                n * 10
+            ));
+        }
+        html.push_str(
+            "</main><footer><a href=\"/about\">About this small site</a></footer></body></html>",
+        );
+        html
+    }
+
+    #[test]
+    fn a_page_that_is_a_list_of_links_is_read_as_its_entries_in_order() {
+        let page = data(&forum(7));
+        assert!(page.items.is_empty(), "nothing marks them as items");
+        let titles: Vec<&str> = page.listed_links.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles.len(), 7);
+        assert_eq!(titles[0], "Story number 1 about a thing");
+        assert_eq!(titles[6], "Story number 7 about a thing");
+        assert_eq!(
+            page.listed_links[0].link.as_deref(),
+            Some("https://news.example/item/1")
+        );
+        assert_eq!(
+            page.listed_links[1].snippet.as_deref(),
+            Some("20 points, 3 hours ago 12 comments"),
+            "the rest of its own row, and nothing of the next"
+        );
+    }
+
+    #[test]
+    fn a_menu_a_footer_and_a_few_links_are_not_a_list() {
+        assert!(
+            data(&forum(4)).listed_links.is_empty(),
+            "four links are not a list"
+        );
+        let menu = "<html><body><main><ul>\
+            <li><a href=\"/a\">Home</a></li><li><a href=\"/b\">About us</a></li>\
+            <li><a href=\"/c\">Contact</a></li><li><a href=\"/d\">Blog</a></li>\
+            <li><a href=\"/e\">Shop</a></li><li><a href=\"/f\">Help</a></li></ul></main></body></html>";
+        assert!(
+            data(menu).listed_links.is_empty(),
+            "one or two words each is a menu"
+        );
+    }
+
+    #[test]
+    fn a_list_keeps_its_short_titles_and_beats_a_column_of_passing_links() {
+        let mut html = String::from("<html><body><table>");
+        for (n, title) in [
+            "Rust 1.100",
+            "A long title about a thing",
+            "Another long title here now",
+            "Yet another story to read",
+            "The fifth story of the day",
+            "Story six goes on and on",
+        ]
+        .iter()
+        .enumerate()
+        {
+            html.push_str(&format!(
+                "<tr class=\"row\"><td class=\"title\"><a href=\"https://x.example/{n}\">{title}</a>\
+                 </td><td class=\"age\"><a href=\"/item/{n}\">{n} hours ago</a></td></tr>"
+            ));
+        }
+        html.push_str("</table></body></html>");
+        let titles: Vec<String> = data(&html)
+            .listed_links
+            .into_iter()
+            .map(|i| i.title)
+            .collect();
+        assert_eq!(titles.len(), 6);
+        assert_eq!(
+            titles[0], "Rust 1.100",
+            "a two-word title in a list of titles stays"
+        );
+        assert!(!titles.iter().any(|t| t.ends_with("hours ago")));
+    }
+
+    #[test]
+    fn a_page_with_items_of_its_own_keeps_them_and_lists_no_links() {
+        let mut html = forum(8);
+        html = html.replace(
+            "<main>",
+            "<main><article><h2><a href=\"/post/1\">A proper article here</a></h2><p>Words.</p></article>",
+        );
+        let page = data(&html);
+        assert_eq!(page.items.len(), 1);
+        assert!(page.listed_links.is_empty());
+    }
+
+    #[test]
+    fn a_feed_read_as_a_page_gives_its_entries_as_items() {
+        let rss = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Blog</title>
+            <item><title>Term dates for 2027</title><link>https://cars.example/blog/term-dates</link>
+              <description>The first term opens on 5 January.</description>
+              <pubDate>Thu, 12 Nov 2026 08:00:00 +0300</pubDate></item>
+            <item><title>Sports day moved</title><link>https://cars.example/blog/sports-day</link></item>
+            </channel></rss>"#;
+        let page = data(&crate::feed::as_html(rss).unwrap());
+        assert_eq!(page.items_from, Some(ItemSource::HtmlArticles));
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].title, "Term dates for 2027");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://cars.example/blog/term-dates")
+        );
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("The first term opens on 5 January.")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+    }
+
+    #[test]
+    fn a_page_names_the_feed_it_declares_on_its_own_site() {
+        let page = data(
+            r#"<html><head>
+            <link rel="alternate" type="application/rss+xml" href="https://elsewhere.example/feed.xml">
+            <link rel="alternate" type="application/atom+xml" href="/blog/feed.atom">
+            </head><body><p>Hello</p></body></html>"#,
+        );
+        assert_eq!(
+            page.feed.as_deref(),
+            Some("https://cars.example/blog/feed.atom")
+        );
+        assert_eq!(data("<html><body><p>No feed</p></body></html>").feed, None);
+    }
+
     #[test]
     fn a_json_ld_list_of_cars_reads_as_items() {
         let page = data(
@@ -925,5 +1317,63 @@ mod tests {
         assert!(!is_private("hotel", "text", ""));
         assert!(!is_private("scorecard_min", "text", ""));
         assert!(!is_private("q", "search", "off"));
+    }
+
+    #[test]
+    fn json_ld_blog_posts_and_articles_read_as_items() {
+        let page = data(
+            r#"<html><head><script type="application/ld+json">
+            {"@context":"https://schema.org","@type":"BlogPosting",
+             "headline":"Announcing Model v3.0",
+             "description":"Our new multimodal model is now available.",
+             "datePublished":"2026-11-01",
+             "url":"https://blog.example/v3"}
+            </script></head><body></body></html>"#,
+        );
+        assert_eq!(page.items_from, Some(ItemSource::JsonLd));
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].title, "Announcing Model v3.0");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://blog.example/v3")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("Our new multimodal model is now available.")
+        );
+    }
+
+    #[test]
+    fn html_articles_read_as_items() {
+        let page = data(
+            r#"<html><body>
+            <main>
+              <article class="post">
+                <h2><a href="/posts/first">First Post</a></h2>
+                <time datetime="2026-10-15">Oct 15, 2026</time>
+                <p>Welcome to our new publication feed.</p>
+              </article>
+              <article class="post">
+                <h2><a href="/posts/second">Second Post</a></h2>
+                <time datetime="2026-11-02">Nov 02, 2026</time>
+                <p>Updates on distributed training techniques.</p>
+              </article>
+            </main>
+            </body></html>"#,
+        );
+        assert_eq!(page.items_from, Some(ItemSource::HtmlArticles));
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].title, "First Post");
+        assert_eq!(
+            page.items[0].link.as_deref(),
+            Some("https://cars.example/posts/first")
+        );
+        assert_eq!(page.items[0].year.as_deref(), Some("2026"));
+        assert_eq!(
+            page.items[0].snippet.as_deref(),
+            Some("Welcome to our new publication feed.")
+        );
+        assert_eq!(page.items[1].title, "Second Post");
     }
 }

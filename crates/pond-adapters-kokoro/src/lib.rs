@@ -9,7 +9,7 @@ use pond_audio_out::{
 use pond_core::models::ports::voice_output::VoiceOutput;
 use pond_core::shared::domain::agent::ThrottledAudioLevelSink;
 use pond_voice::dsp::{encode_wav_pcm16, f32_to_pcm16, speech_bounds};
-use pond_voice::text::{split_text, Boundary, SpeechUnit};
+use pond_voice::text::{split_text, SpeechUnit, UNIT_GAP_SECS};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +32,7 @@ pub const MIN_SPEED: f32 = 0.5;
 pub const MAX_SPEED: f32 = 2.0;
 
 /// Kept of Kokoro's own silence before a chunk's first sound and after its last. The model puts
-/// ~0.3 s before and ~0.5 s after every forward pass, which made every unit boundary ~0.8 s long.
+/// ~0.3 s before and ~0.5 s after every forward pass, which made every join of two ~0.8 s long.
 const LEAD_KEEP_SECS: f32 = 0.03;
 const TAIL_KEEP_SECS: f32 = 0.05;
 /// Fade at a trimmed edge, so the cut never clicks.
@@ -217,38 +217,50 @@ impl KokoroOutput {
         self.ensure_loaded().await
     }
 
-    /// Mono f32 at [`SAMPLE_RATE`], ending in the pause `unit` calls for; empty for text that
-    /// phonemizes to nothing.
+    /// Mono f32 at [`SAMPLE_RATE`], ending at rest for the last unit of its speech and in
+    /// [`UNIT_GAP_SECS`] otherwise; empty for text that phonemizes to nothing.
     pub async fn synth_samples(&self, unit: &SpeechUnit) -> Result<Vec<f32>> {
-        self.synth_samples_with(&unit.text, unit.boundary, None)
-            .await
+        self.synth_samples_with(&unit.text, unit.last, None).await
     }
 
     /// `text` in `voice` as a WAV, leaving the selected voice untouched: a turn reads the
-    /// selection between sentences, so swapping it for a preview would race that turn.
+    /// selection between units, so swapping it for a preview would race that turn.
     pub async fn synth_wav_in_voice(&self, voice: &str, text: &str) -> Result<Vec<u8>> {
         let style = Arc::new(StyleTable::load(&self.config.voices_dir, voice)?);
-        let samples = self
-            .synth_samples_with(text, Boundary::End, Some(style))
-            .await?;
+        let samples = self.synth_samples_with(text, true, Some(style)).await?;
         if samples.is_empty() {
             return Ok(Vec::new());
         }
         Ok(encode_wav_pcm16(&f32_to_pcm16(&samples), SAMPLE_RATE))
     }
 
-    /// `style` is the voice to use; `None` is the selected one. Each forward pass is cut to its
-    /// speech and followed by the pause its end calls for, `after` for the last one.
+    /// `style` is the voice to use; `None` is the selected one. A text longer than one pass is
+    /// said in as few as hold it; each pass is cut to its speech, then a gap unless it is `last`.
     async fn synth_samples_with(
         &self,
         text: &str,
-        after: Boundary,
+        last: bool,
         style: Option<Arc<StyleTable>>,
     ) -> Result<Vec<f32>> {
         let vocab = self.vocab.clone();
         let owned = text.to_string();
         let chunks = off_the_runtime(move || {
-            let (chunks, dropped) = tokenizer::chunk(&owned, &vocab)?;
+            let mut chunks = Vec::new();
+            let mut dropped = 0;
+            for part in split_text(&owned) {
+                let (passes, lost) = tokenizer::chunk(&part.text, &vocab)?;
+                dropped += lost;
+                let n = passes.len();
+                for (k, pass) in passes.into_iter().enumerate() {
+                    let gap = match (k + 1 == n, part.last) {
+                        (false, _) => WORD_GAP_SECS,
+                        (true, false) => UNIT_GAP_SECS,
+                        (true, true) if last => 0.0,
+                        (true, true) => UNIT_GAP_SECS,
+                    };
+                    chunks.push((pass, gap));
+                }
+            }
             if dropped > 0 {
                 // Not fatal, but the word will sound wrong: the model never learned that phoneme.
                 tracing::warn!(
@@ -276,12 +288,8 @@ impl KokoroOutput {
                 anyhow::bail!("the Kokoro engine was unloaded before synthesis");
             };
             let mut samples = Vec::new();
-            for (k, chunk) in chunks.iter().enumerate() {
-                let end = match chunks.get(k + 1) {
-                    Some(_) => Boundary::from_text_end(&chunk.phonemes),
-                    None => after,
-                };
-                push_checked(&mut samples, chunk, end, speed, |part| {
+            for (chunk, gap) in &chunks {
+                push_checked(&mut samples, chunk, *gap, speed, |part| {
                     engine.synthesize(part, style.style_for(part.tokens.len()), speed)
                 })?;
             }
@@ -359,57 +367,25 @@ impl KokoroOutput {
             .context("a Kokoro bus claim panicked")
     }
 
-    /// Plays `units` where `hold` holds the bus, synthesising each while the one before it plays.
+    /// Plays `units` where `hold` holds the bus, in one stretch: all are synthesised first, since
+    /// an engine slower than its speech would stop between units.
     async fn say_units(&self, units: Vec<SpeechUnit>, hold: Hold) -> Result<()> {
-        if let [unit] = units.as_slice() {
+        let mut wavs = Vec::with_capacity(units.len());
+        for unit in &units {
+            if self.speech_interrupted.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let wav = self.synth_wav(unit).await?;
             if !wav.is_empty() {
-                self.play_held(wav, hold).await?;
+                wavs.push(wav);
             }
-            return Ok(());
         }
-
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let interrupted = self.speech_interrupted.clone();
-        let utterance = self.utterance.clone();
-        let sink = self.audio_level_sink.clone();
-        let playing = self.playing.clone();
-
-        let playback_handle = tokio::spawn(async move {
-            while let Some(audio) = audio_rx.recv().await {
-                if audio.is_empty() {
-                    continue;
-                }
-                if interrupted.load(Ordering::Relaxed) {
-                    break;
-                }
-                let hold = hold.clone();
-                let interrupted = interrupted.clone();
-                let utterance = utterance.clone();
-                let sink = sink.clone();
-                let playing = Playing::start(&playing);
-                let res = tokio::task::spawn_blocking(move || {
-                    let _playing = playing;
-                    hold.play(audio, &interrupted, &utterance, sink.as_deref())
-                })
-                .await;
-                if res.is_err() {
-                    break;
-                }
-            }
-        });
-
-        for unit in units {
+        for wav in wavs {
             if self.speech_interrupted.load(Ordering::Relaxed) {
                 break;
             }
-            let wav = self.synth_wav(&unit).await?;
-            if !wav.is_empty() && audio_tx.send(wav).await.is_err() {
-                break;
-            }
+            self.play_held(wav, hold.clone()).await?;
         }
-        drop(audio_tx);
-        let _ = playback_handle.await;
         Ok(())
     }
 
@@ -607,7 +583,7 @@ pub fn model_size_mb(quality: &str) -> u64 {
 mod tests {
     use super::*;
 
-    /// A turn's tokens are pumped on the same runtime that synthesises its clauses.
+    /// A turn's tokens are pumped on the same runtime that synthesises its speech.
     #[test]
     fn synthesis_leaves_the_runtime_free_to_stream_tokens() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -653,24 +629,18 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_keeps_its_speech_and_ends_in_its_own_pause() {
+    fn a_unit_keeps_its_speech_and_ends_in_the_gap_before_the_next() {
         let mut out = Vec::new();
-        push_paced(&mut out, &forward_pass(1.0), Boundary::Sentence, 1.0);
-        let want = LEAD_KEEP_SECS + 1.0 + TAIL_KEEP_SECS + Boundary::Sentence.pause_secs();
+        push_paced(&mut out, &forward_pass(1.0), UNIT_GAP_SECS, 1.0);
+        let want = LEAD_KEEP_SECS + 1.0 + TAIL_KEEP_SECS + UNIT_GAP_SECS;
         assert!(
             (secs(out.len()) - want).abs() < 0.02,
             "{} vs {want}",
             secs(out.len())
         );
 
-        let mut para = Vec::new();
-        push_paced(&mut para, &forward_pass(1.0), Boundary::Paragraph, 1.0);
-        assert!(
-            para.len() > out.len(),
-            "a paragraph rests longer than a sentence"
-        );
         let mut last = Vec::new();
-        push_paced(&mut last, &forward_pass(1.0), Boundary::End, 1.0);
+        push_paced(&mut last, &forward_pass(1.0), 0.0, 1.0);
         assert!(
             last.len() < out.len(),
             "nothing is added after the last unit"
@@ -693,7 +663,7 @@ mod tests {
             let whole = chunk_of(GOOSE);
             let mut asked = Vec::new();
             let mut out = Vec::new();
-            let pass = push_checked(&mut out, &whole, Boundary::Sentence, 1.0, |part| {
+            let pass = push_checked(&mut out, &whole, UNIT_GAP_SECS, 1.0, |part| {
                 asked.push(part.phonemes.clone());
                 Ok(if part.tokens.len() == whole.tokens.len() {
                     broken.clone()
@@ -720,20 +690,16 @@ mod tests {
     #[test]
     fn a_half_that_fails_again_is_logged_as_lost_not_hidden() {
         let mut out = Vec::new();
-        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), UNIT_GAP_SECS, 1.0, |_| {
             Ok(vec![f32::NAN; 24_000])
         })
         .unwrap();
         assert_eq!(pass, Pass::Lost);
         assert!(out.iter().all(|v| *v == 0.0), "no NaN reaches the speaker");
         let mut out = Vec::new();
-        let pass = push_checked(
-            &mut out,
-            &chunk_of("ˈoʊkˌeɪ."),
-            Boundary::End,
-            1.0,
-            |_| Ok(vec![0.0; 24_000]),
-        )
+        let pass = push_checked(&mut out, &chunk_of("ˈoʊkˌeɪ."), 0.0, 1.0, |_| {
+            Ok(vec![0.0; 24_000])
+        })
         .unwrap();
         assert_eq!(pass, Pass::Lost, "a one-word unit cannot be split");
     }
@@ -742,7 +708,7 @@ mod tests {
     fn a_good_pass_is_said_once() {
         let mut calls = 0;
         let mut out = Vec::new();
-        let pass = push_checked(&mut out, &chunk_of(GOOSE), Boundary::Sentence, 1.0, |_| {
+        let pass = push_checked(&mut out, &chunk_of(GOOSE), UNIT_GAP_SECS, 1.0, |_| {
             calls += 1;
             Ok(forward_pass(1.0))
         })
@@ -753,9 +719,9 @@ mod tests {
     #[test]
     fn pauses_shrink_with_the_speed_like_the_models_own() {
         let mut slow = Vec::new();
-        push_paced(&mut slow, &[], Boundary::Sentence, 0.8);
+        push_paced(&mut slow, &[], UNIT_GAP_SECS, 0.8);
         let mut fast = Vec::new();
-        push_paced(&mut fast, &[], Boundary::Sentence, 1.25);
+        push_paced(&mut fast, &[], UNIT_GAP_SECS, 1.25);
         assert!((secs(slow.len()) - 0.625).abs() < 0.001);
         assert!((secs(fast.len()) - 0.4).abs() < 0.001);
     }
@@ -764,7 +730,7 @@ mod tests {
     fn a_trimmed_edge_starts_and_ends_at_rest() {
         let mut out = Vec::new();
         let loud = vec![0.5f32; SAMPLE_RATE as usize / 2];
-        push_paced(&mut out, &loud, Boundary::End, 1.0);
+        push_paced(&mut out, &loud, 0.0, 1.0);
         assert_eq!(out[0], 0.0);
         assert!(out.last().unwrap().abs() < 0.01);
     }
@@ -907,9 +873,13 @@ mod tests {
     }
 }
 
-/// Append `audio` cut to its speech, then the silence `end` calls for at `speed`: the model's own
-/// pauses shrink as it speeds up, so the ones put between units do too.
-fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
+/// Silence where one pass became two inside a phrase: a word's, or a clause mark's own.
+const WORD_GAP_SECS: f32 = 0.10;
+const CLAUSE_GAP_SECS: f32 = 0.30;
+
+/// Append `audio` cut to its speech, then `gap_secs` of silence at `speed`: the model's own
+/// pauses shrink as it speeds up, so the ones put between passes do too.
+fn push_paced(out: &mut Vec<f32>, audio: &[f32], gap_secs: f32, speed: f32) {
     if let Some(range) = speech_bounds(audio, SAMPLE_RATE, LEAD_KEEP_SECS, TAIL_KEEP_SECS) {
         let start = out.len();
         out.extend_from_slice(&audio[range]);
@@ -921,7 +891,7 @@ fn push_paced(out: &mut Vec<f32>, audio: &[f32], end: Boundary, speed: f32) {
             out[len - 1 - i] *= gain;
         }
     }
-    let pause = (end.pause_secs() / speed.max(MIN_SPEED) * SAMPLE_RATE as f32) as usize;
+    let pause = (gap_secs / speed.max(MIN_SPEED) * SAMPLE_RATE as f32) as usize;
     out.resize(out.len() + pause, 0.0);
 }
 
@@ -954,13 +924,13 @@ enum Pass {
 fn push_checked(
     out: &mut Vec<f32>,
     chunk: &tokenizer::Chunk,
-    end: Boundary,
+    gap_secs: f32,
     speed: f32,
     mut synth: impl FnMut(&tokenizer::Chunk) -> Result<Vec<f32>>,
 ) -> Result<Pass> {
     let audio = synth(chunk)?;
     let Some(why) = unusable(&audio) else {
-        push_paced(out, &audio, end, speed);
+        push_paced(out, &audio, gap_secs, speed);
         return Ok(Pass::Clean);
     };
     let Some((first, second)) = tokenizer::halves(chunk) else {
@@ -970,7 +940,7 @@ fn push_checked(
             tokens = chunk.tokens.len(),
             "Kokoro gave no usable audio for a unit too short to split; it is not said"
         );
-        push_paced(out, &[], end, speed);
+        push_paced(out, &[], gap_secs, speed);
         return Ok(Pass::Lost);
     };
     tracing::warn!(
@@ -979,8 +949,12 @@ fn push_checked(
         "Kokoro gave no usable audio for a unit; saying it again in two halves"
     );
     let mut pass = Pass::Rescued;
-    let mid = Boundary::from_text_end(&first.phonemes);
-    for (part, part_end) in [(&first, mid), (&second, end)] {
+    let mid = if first.phonemes.trim_end().ends_with([',', ';', ':']) {
+        CLAUSE_GAP_SECS
+    } else {
+        WORD_GAP_SECS
+    };
+    for (part, part_end) in [(&first, mid), (&second, gap_secs)] {
         let audio = synth(part)?;
         match unusable(&audio) {
             None => push_paced(out, &audio, part_end, speed),

@@ -1,13 +1,18 @@
 //! REST API under `/api/v1/`; protected routes take a Bearer token from `POST /api/v1/handshake`.
 
+mod about_me;
+mod agent_notes;
 pub mod audio_devices;
+mod browser;
 mod camera;
+mod goose_activity;
 pub use pond_infra::hf_cleanup as cleanup;
 pub(crate) mod audio_normalize;
 mod cart;
 mod catalog;
 pub mod connections;
 mod connectors;
+mod context_cards;
 pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
@@ -20,6 +25,7 @@ pub(crate) mod image_normalize;
 pub mod insecure_dev;
 mod interests;
 mod me;
+mod member_interview;
 pub(crate) mod member_notes;
 pub mod middleware;
 pub mod model_acquisition;
@@ -38,6 +44,7 @@ pub mod room_voice;
 pub mod routes;
 pub mod runs;
 pub mod saved_items;
+mod screenshots;
 pub mod speech_model;
 pub mod spoken_code;
 pub mod spotify_focus;

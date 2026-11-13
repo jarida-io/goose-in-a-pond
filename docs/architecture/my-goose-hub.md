@@ -25,9 +25,108 @@ else Goose can do. This document is the contract between the Pond and the phone.
 
 ## 0. What this Pond serves
 
-`GET /me/hub` → `{"version":1,"interests":bool,"news":bool,"todos":bool,"cart":bool,
-"connectors":bool,"ideas":bool,"catalog":bool}`. A Pond without the route answers 404 and the phone
+`GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"activity":bool,
+"catalog":bool,"cards":[kind]}`. A Pond without the route answers 404 and the phone
 keeps its older My Goose.
+
+## 0a. About you: the member's profile
+
+What the Pond remembers about the member, under headings, with the member's own hand on it. The
+headings, the closed `about` list and the write policy are in
+[member-memory.md](member-memory.md).
+
+```
+Fact = { "id", "content": "Jerry is allergic to peanuts.", "about": "allergy"|null,
+  "sensitive": bool,      // allergy, health, partner: never put in a notice's words
+  "shared": bool,         // a household row: shown, not the member's to change
+  "created_at", "expires_at"|null }   // expires_at: a passing ("now") fact
+```
+
+- `GET /me/about` → `{"headings":[{"segment","heading","facts":[Fact]}], "to_file": n,
+  "words":[{"about","heading","one_at_a_time":bool}]}`. Headings come in profile order and only
+  when they hold a fact; `to_file` counts older rows the re-sort has yet to file (shown under
+  "Other"); `words` is the list a picker offers.
+- `POST /me/about` `{content, about, shared?}` → Fact, `201`. The same sentence again answers `200`
+  with the row already there. A one-at-a-time `about` closes the member's old row. A word
+  outside the list is `400`.
+- `PATCH /me/about/{id}` `{content?, about?}` → Fact; `DELETE /me/about/{id}` → `204`. Only the
+  member's own rows; a shared row or another member's is `404`.
+- `GET /me/about/archived` → `{"facts":[Fact + "why"]}`: rows the re-sort set aside, each with
+  its reason. `POST /me/about/{id}/restore` → Fact (`409` when the row is not archived).
+
+## 0b. Goose's own notes
+
+`GET /me/notes` → `{"lessons":[Note], "notes":[Note]}`, `Note = {"id","text","created_at",
+"shared": bool}`: what Goose wrote down for itself about working for this member, and its open
+follow-ups. `DELETE /me/notes/{id}` → `204`. A member does not write them; Goose does
+([agent-documents.md](agent-documents.md)). The soul, the heartbeat's checklist and the
+scratchpad's rules are read and saved with `GET/PUT /prompts/{soul|heartbeat|scratchpad}` and
+`POST /prompts/{name}/reset`.
+
+## 0b-1. What Goose did by itself
+
+`GET /me/goose/activity` → `{"activity":[Entry], "unseen": n, "seen_at": time|null}`, newest
+first, at most 60. `Entry = {"id","kind","summary","detail": text|null,"at","can_undo": bool,
+"undone": bool}`. `kind` is `reminder` (one it set on their list), `note` and `note_closed`
+(its own follow-ups), `watch_paused` (a watch whose checks kept failing), `suggestion` (something
+it asked them to approve) or `errand` (something it looked up; `detail` is what it found).
+`summary` is one line written for the member.
+
+- `POST /me/goose/activity/seen` → `204`: the member has read the list down to now.
+- `POST /me/goose/activity/{id}/undo` → `{"undone":true}`: the reminder is removed, the note
+  deleted or the watch resumed. `409` for an entry that cannot be taken back or already was,
+  `404` for one that is not theirs.
+
+Only the heartbeat writes entries, after the thing is done. A run that did something the member
+should hear of (a reminder, a paused watch, an errand) sends one notification, category
+`update`, with `{"open":"goose_activity"}`; its own notes and its suggestions do not, the first
+being for itself and the second having a notification of their own. Entries are kept 30 days.
+
+What the heartbeat may do alone is small and reversible or read-only: set a reminder for
+something already theirs (two a run, a few a day), write and close its own notes, pause a watch
+that keeps failing, and look one thing up a run (four a day) with reading tools only. Anything
+that changes a device, spends, sends or schedules is still a suggestion they approve.
+
+## 0c. The interview
+
+One interview a member, about three minutes: eight fixed sections (you, your people, food and
+health, your days, for fun, news, off limits, how Goose talks to you), each one question with
+tap answers. A section asks at most one follow-up, chosen in code from the answer ("What are
+their names?", "What are you allergic to?"). Every section can be skipped and the interview
+resumes where it stopped. Table: `member_interviews` (migration 0094).
+
+No model writes a question, so an answer returns the next one at once. Taps become facts from
+sentences written in code. Only what the member typed goes to one model call after the last
+answer; an interview of taps alone never calls a model, and a call that fails still leaves
+every tap written up. Every drafted fact passes the profile's write policy
+([member-memory.md](member-memory.md)); the draft repeats nothing the profile holds, never
+offers "has a partner" where the Pond already knows who, and holds one fact for each
+one-at-a-time word. Nothing is kept until the member approves.
+
+```
+Interview = { "status": "not_started|asking|thinking|review|done",
+              "turns": [InterviewTurn],            // as in section 1; the last is the open question
+              "heading": "Food and health"|null,   // the section being asked
+              "progress": {"done": 2, "total": 8},
+              "sections": [{"id","heading"}],
+              "facts": [{"id":"f1","about","content"}],   // the draft, once in review
+              "interests": [Interest],                    // the draft; ids d1, d2, ...
+              "news": "digest|tiles|both|none"|null }
+```
+
+- `GET /me/interview` → Interview. While `thinking` the phone polls it every 1.5 s.
+- `POST /me/interview` `{}` → starts, resumes, or begins again once done
+- `POST /me/interview/answer` `{"choices"?: [string], "text"?, "skip"?: true}` → Interview with
+  the next question, `thinking` when the last answer leaves typed words to write up, or
+  `review` at once. `422` for an answer with none of the three, `409` when nothing is asked.
+- `POST /me/interview/finish` `{}` → stops asking and writes up what there is
+- `POST /me/interview/approve` `{"facts":[ids], "interests":[ids], "edits"?: {factId: sentence},
+  "news"?: bool}` → `{"facts": n, "interests": n, "news": bool}`, status `done`. Facts go to
+  the profile (source `interview`), interests are confirmed with origin `interview`, and unless
+  `"news": false` the news answer sets the member's `tiles` and `digest`.
+
+The interests interview below and the setup interview in chat remain for older phones.
 
 ## 1. Interests, the interview that builds them, and the portrait
 
@@ -159,7 +258,7 @@ When a hook fires, a reminder is pushed to the member's devices. An `ask` to-do 
 question, `category: "action_required"`, `data: {"action":"todo_checkin","todo_id","text"}`,
 which the phone shows with Done and Not yet buttons and answers through `/answer`. Goose asks
 again after `not_yet` (at the snooze, else the next morning), at most three times, then leaves
-the to-do open and stops asking. The chat model gets `todo` tools (add, list, done) so "remind me
+the to-do open and stops asking. The chat model gets `add_reminder`, `list_todos` and `complete_todo` so "remind me
 to ... when I get home" makes a row.
 
 A dated mention the Pond lifts from a chat ("call the garage on Friday", the `reminders` table) is
@@ -217,25 +316,100 @@ or MCP server; the phone draws its setup from the fields with no app release.
 
 ## 6. Ideas
 
+An idea is a short card that opens to its own page.
+
 ```
-Idea = { "id", "title", "pitch": "two or three sentences",
-  "why": "the specific thing about the member it builds on",
-  "grounded_in": [{"kind":"interest|memory|conversation","label"}],
+Idea = { "id",
+  "kind": "outing|activity|date|solo_date|trip|recipe|interest|project",
+  "kind_label": "Recipe",                      // the card's small label
+  "title": "at most eight words",
+  "hook": "the card's one line",
+  "pitch": "two or three short sentences, for the page",
+  "why": "the fact or interest of the member it fits",
+  "facts": [{"label": "Serves", "value": "4"}],   // two to four, seen at a glance on the page
+  "notes": "what Goose kept to work from",        // the page may show it under "Goose's notes"
+  "grounded_in": [{"kind":"interest|memory|conversation|screenshot","label"}],
   "sources": [{"title","url","site"}], "picture": path|null,
   "goose_can": {"label", "kind": "research|watch|todo|schedule|chat"}|null,
   "you_can": ["step", ...],
   "state": "new|working|done|dismissed", "progress": {"task_id"}|null, "created_at" }
 ```
 
-- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`
+- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`; `GET /me/ideas/{id}` → Idea
 - `POST /me/ideas/{id}/goose` → Idea: Goose starts its part (a research task, a watch, a
   schedule, a to-do) and the idea moves to `working`
 - `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos
 - `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202
 
-Ideas replace the one-question-per-memory suggestions. Once a day on the lane, the Pond picks one
-or two interests or things the member is working on, searches for something new about them,
-reads the pages, and writes an idea that is specific to the member, sourced, and doable.
+Once a day on the lane, and when the member asks, the Pond writes up to three ideas for each
+member: one everyday idea and up to two from their interests and what they are working on.
+Each is searched for, read from the pages found, and written by the model as JSON.
+
+The everyday kinds take turns by the day, and a kind rests three days after one is written: a
+nutritious recipe, somewhere to go outdoors, a date (with their partner when the profile names
+one, else with themselves), something fun to do, a holiday. They are written against the
+member's profile ([member-memory.md](member-memory.md)): what they eat, are allergic to,
+dislike and asked not to hear about, who they live with, where the household is. An idea that
+names something the member is allergic to is dropped in code, whatever the model wrote. A
+search never carries a person's name, an address or a health condition.
+
+"Not for me" is heard: the kind of everyday idea turned down rests ten days rather than three,
+and the interest or piece of work an idea was built on rests thirty days rather than seven.
+
+## 6a. Cards sent to chat
+
+Anything the member reads as a card can be sent to chat, where Goose works from what they read
+and from its own notes on it. The phone names the card; the Pond reads it as the speaker and
+puts both in the turn, so no client writes what the model is told and a card id never reaches
+another member's card.
+
+```
+Card = { "kind": "Recipe", "title", "content": "what the member read",
+         "notes": "what Goose kept: sources, details that did not fit, why it was shown" }
+```
+
+- `GET /me/cards/{kind}/{id}` → Card, for `kind` one of `idea`, `news` (a story), `digest`,
+  `todo`, `cart`, `watch` (a web watch). `GET /me/hub` lists the kinds this Pond serves under `"cards"`.
+- `POST /chat/stream` takes `"card": {"kind","id"}` beside the message. The turn's
+  `<system-context>` then carries the card and the notes; later turns of the conversation see
+  it in the history. A card that is not the speaker's is left out and the turn runs without it.
+
+An idea's notes are written with the idea, from the pages it was read from. A story's and a
+digest's are its sources, why it was shown and when it was written; a to-do's and a watched
+link's are their state. Chat suggestions carry their grounding the same way
+(`suggestion_context`).
+
+## 6b. Ideas from screenshots (opt-in)
+
+Off until the member turns it on. With it on, the phone sends the member's recent screenshots
+and one idea a run may build on what one of them showed.
+
+- The Pond looks at a screenshot once and keeps one line about what the member seems
+  interested in ("Looking at the Ngong Hills hiking trail"). **The picture is never stored**:
+  it waits in memory, at most six a member, until the lane reads it, and is dropped whether or
+  not a line came of it. A restart forgets any still waiting.
+- A screen showing banking or payments, passwords or codes, a private conversation or email,
+  an identity document, medical or legal records, or someone's personal details is skipped
+  whole: the model is told to skip it, and a line that still carries an email address, a long
+  number or the vocabulary of such a screen is refused in code. The line is never logged.
+- The member sees every note, deletes any one or all of them, and turning it off forgets every
+  screenshot still waiting. At most forty notes are kept; a note seeds an idea for fourteen
+  days, once.
+- It needs a model that reads pictures; `available` says whether this Pond's does.
+
+```
+Screenshots = { "enabled": bool, "available": bool, "pending": n, "max_pending": 6,
+                "notes": [{"id","note","taken_at"|null,"created_at","used_at"|null}] }
+```
+
+- `GET /me/screenshots` → Screenshots; `PUT /me/screenshots` `{"enabled": bool}` → Screenshots
+- `POST /me/screenshots` `{"image": base64, "mime_type": "image/jpeg|image/png|image/webp",
+  "taken_at"?}` → `202 {"pending": n}`. `409` while off or when the model reads no pictures,
+  `413` over about 1.5 MB, `415` another type, `429` when six are waiting.
+- `DELETE /me/screenshots/{id}` → 204; `DELETE /me/screenshots` → `{"deleted": n, "dropped": n}`
+
+The choice is the member preference `ideas_from_screenshots`. An idea built on a note says so:
+`grounded_in: [{"kind":"screenshot","label": the note}]`.
 
 ## 7. What else Goose can do
 

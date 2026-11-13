@@ -67,6 +67,10 @@ fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
 
 /// The ranked fragments that fit `budget`, estimated at four characters a token; the first
 /// always fits.
+/// Standing facts a conversation starts with: enough for a few instructions, a name, a diet
+/// and the allergies, few enough to stay a handful of lines.
+const STANDING_FACTS_SHOWN: usize = 8;
+
 fn fragments_within<'a>(
     ranked: impl IntoIterator<Item = &'a MemoryFragment>,
     budget: usize,
@@ -1179,10 +1183,11 @@ impl GooseAdapter {
                     _ => *n,
                 })
                 .collect();
-            // Same cap as the live trimmer, so a restart neither gains nor loses images.
+            // The live trimmer's plan: a restart keeps at most what a live session could hold.
             replay_images =
                 pond_core::models::services::context::image_history::plan_history_images(
                     &plannable,
+                    profile.context_window_tokens,
                 );
         }
 
@@ -2143,6 +2148,24 @@ impl GooseAdapter {
             .clone()
     }
 
+    /// A style template speaking as the soul and keeping memory by the scratchpad's rules: the
+    /// two documents a person edits. A document that is missing or unreadable leaves the
+    /// style's own block standing.
+    async fn as_goose(&self, template: &str) -> String {
+        let (soul, rules) = tokio::join!(
+            self.template_repo.get(pond_core::prompts::SOUL),
+            self.template_repo.get(pond_core::prompts::SCRATCHPAD),
+        );
+        let text = |row: anyhow::Result<
+            Option<pond_core::user_data::domain::prompt_template::PromptTemplate>,
+        >| row.ok().flatten().map(|t| t.content);
+        pond_core::prompts::with_agent_documents(
+            template,
+            text(soul).as_deref(),
+            text(rules).as_deref(),
+        )
+    }
+
     /// Memories relevant to `message`, with cosine similarity when known, and the embedder's
     /// `closest_memory` floor for those cosines. Never fails the turn.
     async fn topical_memories(
@@ -2552,15 +2575,14 @@ impl GooseAdapter {
 
     /// Before the turn's first reply: reduces any transient tool result an earlier turn left
     /// (a crash, a cancel the sweep missed) to its stub, and caps history images that keep
-    /// pixels; the pending turn's image isn't in history yet. One write for both, and none when
+    /// pixels once they pass what the window keeps; the pending turn's image isn't in history
+    /// yet. One write for both, and none when
     /// nothing changes: `replace_conversation` rewrites every row to eMMC.
     async fn rewrite_history_at_turn_start(
         &self,
         goose_sid: &str,
         sweep: &crate::transient_history::TurnSweep,
     ) {
-        use pond_core::models::services::context::image_history::history_image_placeholder;
-
         let _held = sweep.lock().await;
         let Ok(session) = self.session_manager.get_session(goose_sid, true).await else {
             return;
@@ -2577,23 +2599,14 @@ impl GooseAdapter {
         }
         let (source, unheard) = strip_history_audio(source);
 
+        let (_, window) = self.window_and_provider().await;
         // Tool-part messages are never rewritten: providers reject re-keyed tool responses.
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, window.tokens);
         if dropped == 0 && redacted == 0 && unheard == 0 {
             return;
         }
 
-        let rebuilt: Vec<Message> = source
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                if had[i] > keep[i] {
-                    cap_message_images(m, keep[i], &history_image_placeholder(keep[i]))
-                } else {
-                    m.clone()
-                }
-            })
-            .collect();
+        let rebuilt = capped_history(&source, &had, &keep);
 
         let capped = goose::conversation::Conversation::new_unvalidated(rebuilt);
         if let Err(e) = self
@@ -2950,6 +2963,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Voice = the instance flag (CLI --voice) or the request's (desktop voice pipeline).
         let voice_instance = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
@@ -3139,6 +3153,38 @@ impl GooseAdapter {
             _ => String::new(),
         };
 
+        // Goose's own lessons for this member ride the same slot, once per conversation: what
+        // it learnt about how to work, which a new conversation would otherwise start without.
+        let lessons_for_user_msg = match pond_mcp_server::memory::agent_notes() {
+            Some(notes) if !turn_scope.excludes_everything() => {
+                let lessons = notes
+                    .list(
+                        &turn_scope,
+                        pond_core::shared::domain::agent_note::NoteKind::Lesson,
+                    )
+                    .await
+                    .unwrap_or_default();
+                let block = pond_core::shared::domain::agent_note::lessons_block(&lessons);
+                if block.is_empty()
+                    || self
+                        .earlier_user_texts(&goose_sid)
+                        .await
+                        .iter()
+                        .any(|text| text.contains(&block))
+                {
+                    String::new()
+                } else {
+                    block
+                }
+            }
+            _ => String::new(),
+        };
+        let member_notes_for_user_msg = [member_notes_for_user_msg, lessons_for_user_msg]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
         let mut skill_selection_signal = String::new();
@@ -3169,7 +3215,18 @@ impl GooseAdapter {
         // A preamble budget (clamped window): injected memories are re-prefilled every turn.
         let compaction_profile = &turn_profile;
 
-        if !memory_candidates.is_empty() {
+        // What every conversation of this member's starts with, whatever the message is about:
+        // their standing instructions, name, diet, allergies and how they like to be answered.
+        let standing: Vec<MemoryFragment> = if turn_scope.excludes_everything() {
+            Vec::new()
+        } else {
+            self.memory_repo
+                .always_shown(&turn_scope, STANDING_FACTS_SHOWN)
+                .await
+                .unwrap_or_default()
+        };
+
+        if !memory_candidates.is_empty() || !standing.is_empty() {
             // Blended ranking, so a topical memory can displace the high-importance identity block,
             // and the memory closest to the message keeps a seat however old it is.
             memory_candidates = pond_core::user_data::services::memory_relevance::select_for_turn(
@@ -3184,26 +3241,33 @@ impl GooseAdapter {
             let (budgeted, tokens_used) =
                 fragments_within(memory_candidates.iter().map(|(m, _)| m), token_budget);
 
-            if !budgeted.is_empty() {
-                use pond_core::models::services::context::memory_block;
-                let rendered: Vec<String> = budgeted
+            let mut offered: Vec<&MemoryFragment> = standing.iter().collect();
+            offered.extend(
+                budgeted
                     .iter()
-                    .map(|m| {
-                        let seg = m
-                            .segment
-                            .as_ref()
-                            .map(|s| format!("{:?}", s).to_lowercase());
-                        memory_block::line(seg.as_deref(), &m.content)
-                    })
-                    .collect();
+                    .copied()
+                    .filter(|m| !standing.iter().any(|s| s.id == m.id)),
+            );
+            if !offered.is_empty() {
+                use pond_core::models::services::context::memory_block;
+                use pond_core::user_data::domain::member_profile::{profile_order, render_profile};
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
-                let fresh = memory_block::not_yet_shown(&rendered, &earlier);
+                let mut fresh: Vec<MemoryFragment> = offered
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        let l = memory_block::line(None, &m.content);
+                        !earlier.iter().any(|text| memory_block::shown_in(&l, text))
+                    })
+                    .cloned()
+                    .collect();
 
                 tracing::debug!(
                     fragments_injected = fresh.len(),
-                    fragments_already_shown = rendered.len() - fresh.len(),
+                    fragments_already_shown = offered.len() - fresh.len(),
+                    fragments_standing = standing.len(),
                     fragments_available = memory_candidates.len(),
                     closest_floor = ?closest_floor,
                     lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
@@ -3217,11 +3281,8 @@ impl GooseAdapter {
                     effective_ctx,
                 );
 
-                memory_block_for_user_msg = fresh
-                    .iter()
-                    .map(|line| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                profile_order(&mut fresh);
+                memory_block_for_user_msg = render_profile(&fresh);
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
@@ -3488,15 +3549,15 @@ impl GooseAdapter {
                reports them as recognized. Use `configure_vision_bus` to adjust FPS (1-30) or \
                sensitivity, and `create_vision_automation` / `list_vision_automations` / \
                `delete_vision_automation` for motion, person, or `face:<profile_id>` triggers.\n\
-             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_todo` when the \
+             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_reminder` when the \
                person asks to be reminded of something or to put something on their to-dos, at a \
                time, on a repeat or at a place ('remind me to call Emmanuel when I get home', \
                'add renew the logbook to my to-dos'); `list_todos` and `complete_todo` read and \
                tick off that list. Use `set_timer` only for a countdown ('set a timer for 10 \
-               minutes'), `create_schedule` for recurring 6-field cron jobs you run yourself \
-               (`sec min hr dom mon dow`), and `list_schedules` / `update_schedule` / \
-               `schedule_action` (`delete` | `pause` | `resume` | `run_now`) to inspect or \
-               control them. If a group is listed under ADDITIONAL CAPABILITIES, \
+               minutes'), `create_schedule` for something you do yourself again and again \
+               (`when` in plain words: 'every weekday at 7am'; pass a schedule's name as `id` \
+               to change it), and `list_schedules` / `schedule_action` (`delete` | `pause` | \
+               `resume` | `run_now`) to inspect or control them by name. If a group is listed under ADDITIONAL CAPABILITIES, \
                enable it first with `giap-device__enable_capability_group`."
                     .to_string(),
             );
@@ -3504,6 +3565,13 @@ impl GooseAdapter {
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
+        }
+        // An unidentified speaker's personal tools are withheld below; told so, the model says
+        // it rather than reaching for a tool that is not there.
+        if turn_scope.excludes_everything() {
+            shim_appendix.push(
+                pond_core::models::services::prompt_builder::UNKNOWN_SPEAKER_RULE.to_string(),
+            );
         }
         self.shim_controls
             .session(&goose_sid)
@@ -3681,6 +3749,12 @@ impl GooseAdapter {
         } else {
             None
         };
+        // Earlier recordings go to the model as sound; with memory short, only those its cache
+        // still holds, since the encoder could not load to hear the others again.
+        session_controls.set_hearing_short(matches!(
+            self.hearing_room(&settings.chat_provider, &settings.chat_model),
+            pond_core::models::domain::audio_input::HearingRoom::Short { .. }
+        ));
         let image_failures_at_start = session_controls.image_failures();
         let gpu_memory_failures_at_start = session_controls.gpu_memory_failures();
         let pictures = self.pictures.clone();
@@ -3737,8 +3811,8 @@ impl GooseAdapter {
         let guard_controls = session_controls.clone();
 
         // ── History rewrite ──────────────────────────────────────────────
-        // Goose owns compaction; the image cap stays because each replayed image re-runs the
-        // mmproj encoder (0.7-2.7 s), a cost goose can't see. The sweep travels with the stream
+        // Goose owns compaction; the image cap stays because a cold rebuild runs the mmproj
+        // encoder on every image kept (0.7-2.7 s each), a cost goose can't see. The sweep travels with the stream
         // and clears this turn's transient results however the turn ends.
         let turn_sweep = self
             .transient_sweeps
@@ -4318,6 +4392,14 @@ impl GooseAdapter {
                                     .map(|t| now.duration_since(t).as_millis() as u64);
                                 let engine_ttft = pu.stats.as_ref().and_then(|s| s.time_to_first_token_ms);
                                 let engine_prefill = pu.stats.as_ref().and_then(|s| s.prefill_ms);
+                                let prompt_tokens =
+                                    pu.usage.input_tokens.unwrap_or(0).max(0) as u32;
+                                // What the cache served; the rest of the prompt was decoded.
+                                let reused_tokens = pu
+                                    .stats
+                                    .as_ref()
+                                    .and_then(|s| s.reused_prefix_tokens)
+                                    .map_or(0, |n| n as u32);
                                 tracing::info!(
                                     target: "giap::trace",
                                     kind = "inference",
@@ -4327,7 +4409,9 @@ impl GooseAdapter {
                                     since_turn_ms = now.duration_since(turn_start).as_millis() as u64,
                                     engine_ttft_ms = engine_ttft.unwrap_or(0),
                                     engine_prefill_ms = engine_prefill.unwrap_or(0),
-                                    prompt_tokens = pu.usage.input_tokens.unwrap_or(0).max(0) as u32,
+                                    prompt_tokens,
+                                    reused_tokens,
+                                    decoded_tokens = prompt_tokens.saturating_sub(reused_tokens),
                                     output_tokens = pu.usage.output_tokens.unwrap_or(0).max(0) as u32,
                                     tools_before = tools_since_inference,
                                     reengagement = attempt as u32,
@@ -5213,6 +5297,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Lean on purpose: compact (a child gets a window fraction), no prose tool list (the
         // envelope names them), no thinking (the drain's `as_concat_text()` drops it).
@@ -5557,34 +5642,38 @@ fn attach_images(
         .fold(msg, |m, img| m.with_image(&img.data, &img.mime_type))
 }
 
-/// After the text, like images, so the system prefix stays byte-identical.
+/// After the text, like images, so the system prefix stays byte-identical. The message carries
+/// a reference: the recording itself stays in memory (`held_recordings`), off Goose's disk.
 fn attach_audio(
     msg: Message,
     audio: &[pond_core::models::domain::message::AudioAttachment],
 ) -> Message {
-    audio
-        .iter()
-        .fold(msg, |m, clip| m.with_audio(&clip.data, &clip.mime_type))
+    use crate::held_recordings::{hold, HELD_RECORDING_MIME};
+    audio.iter().fold(msg, |m, clip| {
+        m.with_audio(hold(&clip.data, &clip.mime_type), HELD_RECORDING_MIME)
+    })
 }
 
-/// Every recording in `source` becomes a note: heard on its own turn, never replayed, since each
-/// replay would load the encoder and re-run the audio tower for 25 tokens a second.
+/// A recording stored whole in `source`, as builds before `held_recordings` stored them, becomes
+/// a note: nothing holds it in memory, and it should not stay on disk.
 fn strip_history_audio(source: Vec<Message>) -> (Vec<Message>, usize) {
+    use crate::held_recordings::HELD_RECORDING_MIME;
     use goose::conversation::message::MessageContent as C;
     use pond_core::models::domain::audio_input::HISTORY_VOICE_NOTE_PLACEHOLDER;
 
+    let stored_whole = |c: &C| matches!(c, C::Audio(a) if a.mime_type != HELD_RECORDING_MIME);
     let mut stripped = 0usize;
     let messages = source
         .into_iter()
         .map(|mut m| {
-            if !m.content.iter().any(|c| matches!(c, C::Audio(_))) {
+            if !m.content.iter().any(stored_whole) {
                 return m;
             }
             m.content = m
                 .content
                 .into_iter()
                 .map(|c| match c {
-                    C::Audio(_) => {
+                    c if stored_whole(&c) => {
                         stripped += 1;
                         C::text(HISTORY_VOICE_NOTE_PLACEHOLDER)
                     }
@@ -5675,9 +5764,25 @@ pub(crate) fn cap_message_images(original: &Message, keep: usize, text: &str) ->
     capped
 }
 
+/// `source` with each message cut to the images its plan keeps. A message keeps its own words:
+/// they hold what was asked about the picture, and the turn's context block.
+fn capped_history(source: &[Message], had: &[usize], keep: &[usize]) -> Vec<Message> {
+    source
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if had[i] > keep[i] {
+                cap_message_images(m, keep[i], &m.as_concat_text())
+            } else {
+                m.clone()
+            }
+        })
+        .collect()
+}
+
 /// Returns `(had, keep, dropped_total)`, aligned with `source`; tool messages count as zero.
 /// `dropped_total == 0` means the conversation already fits and must stay byte-identical.
-fn plan_image_cap(source: &[Message]) -> (Vec<usize>, Vec<usize>, usize) {
+fn plan_image_cap(source: &[Message], window_tokens: usize) -> (Vec<usize>, Vec<usize>, usize) {
     use pond_core::models::services::context::image_history::{
         dropped_image_count, plan_history_images,
     };
@@ -5692,7 +5797,7 @@ fn plan_image_cap(source: &[Message]) -> (Vec<usize>, Vec<usize>, usize) {
             }
         })
         .collect();
-    let keep = plan_history_images(&had);
+    let keep = plan_history_images(&had, window_tokens);
     let dropped = dropped_image_count(&had, &keep);
     (had, keep, dropped)
 }
@@ -8450,6 +8555,64 @@ mod tests {
         assert_eq!(again, out);
     }
 
+    #[test]
+    fn a_message_that_loses_its_picture_keeps_what_was_asked_about_it() {
+        use pond_core::models::services::context::image_history::HISTORY_IMAGE_PLACEHOLDER;
+
+        let asked = "<system-context>\nToday is Friday.\n</system-context>\nWhat colour is this?";
+        let source = vec![
+            Message::user()
+                .with_text(asked)
+                .with_image("aGVsbG8=", "image/png"),
+            Message::assistant().with_text("Red."),
+            Message::user()
+                .with_text("And this one?")
+                .with_image("d29ybGQ=", "image/png"),
+        ];
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
+        assert_eq!((dropped, keep.clone()), (1, vec![0, 0, 1]));
+
+        let capped = capped_history(&source, &had, &keep);
+        assert_eq!(image_part_count(&capped[0]), 0);
+        assert_eq!(
+            capped[0].as_concat_text(),
+            format!("{asked}\n{HISTORY_IMAGE_PLACEHOLDER}")
+        );
+        assert_eq!(capped[1..], source[1..]);
+
+        // A wide window keeps both pictures, and so rewrites nothing.
+        assert_eq!(plan_image_cap(&source, 65_536).2, 0);
+    }
+
+    #[test]
+    fn a_turns_recording_is_stored_as_a_reference_and_left_in_history() {
+        use crate::held_recordings::HELD_RECORDING_MIME;
+        use goose::conversation::message::MessageContent as C;
+
+        let clip = pond_core::models::domain::message::AudioAttachment {
+            data: "UklGRiQAAABXQVZF".to_string(),
+            mime_type: "audio/wav".to_string(),
+            name: None,
+            heard_as: None,
+        };
+        let msg = attach_audio(Message::user().with_text("listen"), &[clip.clone()]);
+        let stored: Vec<_> = msg
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                C::Audio(a) => Some((a.data.clone(), a.mime_type.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].1, HELD_RECORDING_MIME);
+        assert_ne!(stored[0].0, clip.data, "the recording itself was stored");
+
+        let (kept, stripped) = strip_history_audio(vec![msg.clone()]);
+        assert_eq!(stripped, 0);
+        assert_eq!(kept, vec![msg]);
+    }
+
     /// The Jetson's E4B turns of 2026-10-27 read "Ran into this error: Execution error: null
     /// result from llama cpp." Once the shim has counted the turn out of GPU memory, the household
     /// reads what happened and what to do instead.
@@ -8597,7 +8760,7 @@ mod tests {
             Message::assistant().with_text("hello"),
             Message::user().with_text("bye"),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(had, vec![0, 0, 0]);
         assert_eq!(keep, vec![0, 0, 0]);
         assert_eq!(dropped, 0);
@@ -8607,7 +8770,7 @@ mod tests {
     #[test]
     fn a_single_historical_image_is_left_alone() {
         let source = vec![user_with_images("look", &["AAAA"])];
-        let (_, _, dropped) = plan_image_cap(&source);
+        let (_, _, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(dropped, 0);
     }
 
@@ -8618,7 +8781,7 @@ mod tests {
             Message::assistant().with_text("ok"),
             user_with_images("second", &["BBBB", "CCCC"]),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(had, vec![1, 0, 2]);
         assert_eq!(keep, vec![0, 0, 1], "newest-first, leading image kept");
         assert_eq!(dropped, 2);
@@ -8644,7 +8807,7 @@ mod tests {
             response,
             user_with_images("second", &["BBBB"]),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(
             &had[1..3],
             &[0, 0],
@@ -8718,7 +8881,7 @@ mod tests {
     fn capping_is_idempotent() {
         let original = user_with_images("look", &["AAAA", "BBBB"]);
         let once = cap_message_images(&original, 0, "look");
-        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&once));
+        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&once), 8_192);
         assert_eq!(had, vec![0]);
         assert_eq!(keep, vec![0]);
         assert_eq!(dropped, 0, "nothing left to drop on a second pass");
@@ -8734,7 +8897,7 @@ mod tests {
 
         // Stage 1: newest turn, budget 1: keep the leading image, one placeholder.
         let original = user_with_images("look at these", &["AAAA", "BBBB"]);
-        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&original));
+        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&original), 8_192);
         assert_eq!((had[0], keep[0], dropped), (2, 1, 1));
         let stage1 = cap_message_images(&original, keep[0], &original.as_concat_text());
         assert_eq!(image_parts(&stage1).len(), 1);
@@ -8753,7 +8916,7 @@ mod tests {
             trim_msg(0, &source[0].as_concat_text()),
             trim_msg(1, &source[1].as_concat_text()),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!((had[0], keep[0]), (1, 0), "the older turn loses its image");
         assert_eq!((had[1], keep[1]), (1, 1), "the newest turn keeps its own");
         assert_eq!(dropped, 1);

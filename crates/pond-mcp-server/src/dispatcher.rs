@@ -324,11 +324,11 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Human-readable name for the task." },
-                "cron": { "type": "string", "description": "6-field cron: sec min hr dom mon dow. E.g. '0 0 8 * * *' for daily 8 AM." },
-                "prompt": { "type": "string", "description": "The prompt to run on each fire." },
-                "timezone": { "type": "string", "description": "IANA timezone (e.g. 'Africa/Nairobi')." }
+                "when": { "type": "string", "description": "How often and at what time, as a person says it: 'every weekday at 7am', 'every 2 hours'." },
+                "prompt": { "type": "string", "description": "What Goose should do each time." },
+                "timezone": { "type": "string", "description": "A city or zone, only for another place's time." }
             },
-            "required": ["name", "cron", "prompt"]
+            "required": ["when", "prompt"]
         }),
         "giap-schedule__list_schedules" => json!({ "type": "object", "properties": {} }),
         "giap-schedule__update_schedule" => json!({

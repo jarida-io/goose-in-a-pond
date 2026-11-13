@@ -66,6 +66,8 @@ pub enum OpenScreen {
     Cart { cart_id: String },
     /// My Goose's to-dos, at one to-do when there is an id.
     Todos { todo_id: Option<String> },
+    /// My Goose's list of what Goose did by itself.
+    GooseActivity,
 }
 
 impl OpenScreen {
@@ -142,6 +144,7 @@ impl OpenScreen {
                 }
                 "todos"
             }
+            Self::GooseActivity => "goose_activity",
         };
         fields.insert("open".into(), screen.into());
         fields

@@ -14,6 +14,7 @@ use pond_core::user_data::domain::interest::{
 };
 use pond_core::user_data::domain::interest_interview::{InterestInterview, InterviewStatus};
 use pond_core::user_data::ports::interests::InterestRepository;
+use pond_core::user_data::services::member_interview::MemberInterview;
 
 pub struct SqliteInterestRepository {
     pool: Pool<Sqlite>,
@@ -485,6 +486,50 @@ impl InterestRepository for SqliteInterestRepository {
         .context("save a member's interests interview")?;
         Ok(())
     }
+
+    async fn member_interview(&self, profile_id: &str) -> Result<Option<MemberInterview>> {
+        let row = sqlx::query(
+            "SELECT status, body_json, updated_at FROM member_interviews WHERE profile_id = ?",
+        )
+        .bind(profile_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("read a member's interview")?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let status: String = row.try_get("status")?;
+        let body: String = row.try_get("body_json")?;
+        let updated_at: String = row.try_get("updated_at")?;
+        // A body this build cannot read is an interview to begin again, not an error.
+        let mut interview: MemberInterview = serde_json::from_str(&body).unwrap_or_default();
+        if interview.status != InterviewStatus::NotStarted {
+            interview.status = InterviewStatus::parse(&status);
+        }
+        interview.updated_at = Some(parse_time(&updated_at)?);
+        Ok(Some(interview))
+    }
+
+    async fn save_member_interview(
+        &self,
+        profile_id: &str,
+        interview: &MemberInterview,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO member_interviews (profile_id, status, body_json, updated_at) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(profile_id) DO UPDATE SET status = excluded.status, \
+             body_json = excluded.body_json, updated_at = excluded.updated_at",
+        )
+        .bind(profile_id)
+        .bind(interview.status.as_str())
+        .bind(json_of(interview))
+        .bind(stamp(Utc::now()))
+        .execute(&self.pool)
+        .await
+        .context("save a member's interview")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -688,6 +733,30 @@ mod tests {
         repo.save_interview("jerry", &interview).await.unwrap();
         let back = repo.interview("jerry").await.unwrap().unwrap();
         assert_eq!(back.status, InterviewStatus::Thinking);
+        assert!(back.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_member_interview_round_trips_with_its_answers() {
+        use pond_core::user_data::services::member_interview::{answer, begin, AnswerIn};
+        let repo = repo().await;
+        assert!(repo.member_interview("jerry").await.unwrap().is_none());
+        let (started, _) = begin(None, Utc::now());
+        let midway = answer(
+            started,
+            AnswerIn {
+                choices: vec!["Retired".into()],
+                ..AnswerIn::default()
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        repo.save_member_interview("jerry", &midway).await.unwrap();
+        let back = repo.member_interview("jerry").await.unwrap().unwrap();
+        assert_eq!(back.status, InterviewStatus::Asking);
+        assert_eq!(back.section, 1);
+        assert_eq!(back.answers, midway.answers);
+        assert_eq!(back.turns.len(), midway.turns.len());
         assert!(back.updated_at.is_some());
     }
 }

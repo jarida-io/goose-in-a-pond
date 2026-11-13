@@ -177,9 +177,9 @@ A turn, where Silero is available (`crates/pond-server/src/voice_rig.rs` picks):
 (`pond-adapters-ear` running `pond-ear` on its own thread, fed the mic and, through
 `pond_audio_out::tap`, everything played) hears the wake word, either its "hey goose" CNN or
 Whisper on each speech segment, and endpoints the request with Silero on echo-cancelled audio →
-Whisper transcribes it → think → tokens split into sentences (a short first clause, and clauses
-when synthesis falls behind) and spoken by Kokoro while the reply
-streams (`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
+Whisper transcribes it → think → the reply is handed to Kokoro whole once the model stops
+writing (only a reply longer than one Kokoro pass is cut, at a sentence end) and spoken
+(`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
 interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word, only when the
 reply ended with a question (`asks_for_an_answer`). With
 `vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,

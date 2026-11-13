@@ -14,13 +14,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
-use pond_core::mcp::domain::transient_result::{transient_meta, web_page_stub};
 use pond_core::mcp::services::page_addresses::{self, MAX_LINK_DEPTH};
 use pond_core::mcp::services::source_ledger::{self, MAX_CHAT_TURN_READS};
 use pond_core::shared::services::passages;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -242,8 +241,14 @@ whole, and what the page lists.")]
             host = %web_search::domain_of(&page.address),
             lines = page.lines.len(),
             parts = page.parts.len(),
-            items = page.data.items.len(),
-            items_from = page.data.items_from.map(|f| f.as_str()).unwrap_or("none"),
+            items = page.data.items.len().max(page.data.listed_links.len()),
+            items_from = page
+                .data
+                .items_from
+                .or((!page.data.listed_links.is_empty())
+                    .then_some(page_data::ItemSource::LinkList))
+                .map(|f| f.as_str())
+                .unwrap_or("none"),
             links = page.data.links.len(),
             forms = page.data.forms.len(),
             depth,
@@ -255,9 +260,9 @@ whole, and what the page lists.")]
             ms = started.elapsed().as_millis() as u64,
             "web page read"
         );
-        let mut result = CallToolResult::success(vec![ContentBlock::text(reply.text)]);
-        result.meta = Some(Meta(transient_meta(&web_page_stub(&address))));
-        Ok(result)
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            reply.text,
+        )]))
     }
 }
 
@@ -466,6 +471,8 @@ pub enum FetchFailure {
     Status(u16),
     StoppedArriving,
     NotAPage(String),
+    /// The page is a shell that scripts fill in, and it could not be read with a browser.
+    NeedsBrowser(pond_core::shared::domain::page_render::NotRendered),
 }
 
 impl FetchFailure {
@@ -495,6 +502,7 @@ impl FetchFailure {
                 what,
                 &format!("That address is a file ({mime}), not a web page."),
             ),
+            FetchFailure::NeedsBrowser(why) => format_dead_end(what, &why.words()),
         }
     }
 }
@@ -505,6 +513,10 @@ pub struct WatchedPage {
     pub address: String,
     pub title: String,
     pub items: Vec<page_data::Item>,
+    /// Whether the items are the page's own (its data or its articles), not its sections or links.
+    pub items_are_its_own: bool,
+    /// The feed of its new posts the page declares.
+    pub feed: Option<String>,
 }
 
 /// Reads a watched page fresh, past the cache, for its items. The address was resolved when the
@@ -514,14 +526,39 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
         .ok_or_else(|| FetchFailure::Unreachable("the page client could not be built".into()))?;
     let (final_address, body) = fetch_page(client, address).await?;
     let parsing = tokio::task::spawn_blocking(move || {
-        let (title, _, data) = match body {
+        let (title, lines, data) = match body {
             Body::Html(html) => parse_html(&html, &final_address),
-            Body::Text(_) => (String::new(), Vec::new(), PageData::default()),
+            Body::Text(text) => (
+                String::new(),
+                text.lines()
+                    .map(|l| Line {
+                        text: l.trim().to_string(),
+                        section: None,
+                        heading: false,
+                    })
+                    .filter(|l| !l.text.is_empty())
+                    .collect(),
+                PageData::default(),
+            ),
+        };
+        let items_are_its_own = !data.items.is_empty();
+        let feed = data.feed.clone();
+        // Sections before plain links, so a page already watched by its sections keeps its list.
+        let items = if !data.items.is_empty() {
+            data.items
+        } else {
+            let sections = items_from_sections(&title, &final_address, &lines);
+            match sections.is_empty() {
+                true => data.listed_links,
+                false => sections,
+            }
         };
         WatchedPage {
             address: final_address,
             title,
-            items: data.items,
+            items,
+            items_are_its_own,
+            feed,
         }
     });
     match tokio::time::timeout(EXTRACT_DEADLINE, parsing).await {
@@ -530,6 +567,63 @@ pub async fn read_watched(address: &str) -> Result<WatchedPage, FetchFailure> {
             "the page was too large to read in time".into(),
         )),
     }
+}
+
+fn items_from_sections(page_title: &str, address: &str, lines: &[Line]) -> Vec<page_data::Item> {
+    let mut items = Vec::new();
+    let mut current_heading: Option<String> = None;
+    let mut current_snippet: Vec<String> = Vec::new();
+
+    let flush =
+        |items: &mut Vec<page_data::Item>, heading: Option<String>, snippet: Vec<String>| {
+            let title = heading.unwrap_or_else(|| {
+                if page_title.trim().is_empty() {
+                    web_search::domain_of(address)
+                } else {
+                    page_title.to_string()
+                }
+            });
+            let snippet_text = snippet.join(" ");
+            let snippet = (!snippet_text.is_empty()).then(|| {
+                web_search::defang(&snippet_text)
+                    .chars()
+                    .take(300)
+                    .collect()
+            });
+            items.push(page_data::Item {
+                title,
+                link: Some(address.to_string()),
+                snippet,
+                ..Default::default()
+            });
+        };
+
+    for line in lines {
+        if line.heading {
+            if current_heading.is_some() || !current_snippet.is_empty() {
+                flush(
+                    &mut items,
+                    current_heading.take(),
+                    std::mem::take(&mut current_snippet),
+                );
+            }
+            current_heading = Some(line.text.clone());
+        } else if current_snippet.len() < 3 {
+            current_snippet.push(line.text.clone());
+        }
+    }
+    if current_heading.is_some() || !current_snippet.is_empty() {
+        flush(&mut items, current_heading, current_snippet);
+    }
+    if items.is_empty() && !page_title.trim().is_empty() {
+        items.push(page_data::Item {
+            title: page_title.to_string(),
+            link: Some(address.to_string()),
+            ..Default::default()
+        });
+    }
+    items.truncate(page_data::MAX_ITEMS);
+    items
 }
 
 /// A page as the news reads it: where it ended, its title, its text as lines, and what its head
@@ -652,18 +746,31 @@ async fn fetch_page_as(
         .and_then(|ct| ct.split(';').next())
         .map(|m| m.trim().to_ascii_lowercase())
         .unwrap_or_default();
+    let feed = crate::feed::may_be_feed(&mime);
     let plain = match mime.as_str() {
         "text/html" | "application/xhtml+xml" | "" => false,
         "text/plain" | "text/markdown" => true,
+        _ if feed => false,
         other => return Err(FetchFailure::NotAPage(other.to_string())),
     };
     let body = web_search::read_capped(response, web_search::PAGE_BYTE_CAP)
         .await
         .ok_or(FetchFailure::StoppedArriving)?;
+    if feed {
+        // A feed is read as the page of articles it describes; other XML is still a file.
+        return match crate::feed::as_html(&body) {
+            Some(html) => Ok((final_address, Body::Html(html))),
+            None => Err(FetchFailure::NotAPage(mime)),
+        };
+    }
     let body = if plain {
         Body::Text(body)
     } else {
-        Body::Html(body)
+        Body::Html(
+            crate::page_render::filled(&final_address, body)
+                .await
+                .map_err(FetchFailure::NeedsBrowser)?,
+        )
     };
     Ok((final_address, body))
 }
@@ -1000,6 +1107,7 @@ impl Page {
             .data
             .items
             .iter()
+            .chain(&self.data.listed_links)
             .filter_map(|i| i.link.clone().map(|l| (l, i.title.clone())));
         let links = self
             .data
@@ -1088,7 +1196,11 @@ impl Page {
 
     /// The page's listed items, those the question names first, within [`ITEMS_BYTES`].
     fn items_text(&self, question: &str) -> String {
-        let items = &self.data.items;
+        let from_data = !self.data.items.is_empty();
+        let items = match from_data {
+            true => &self.data.items,
+            false => &self.data.listed_links,
+        };
         if items.is_empty() {
             return String::new();
         }
@@ -1116,7 +1228,11 @@ impl Page {
         }
         shown.sort_unstable();
         let mut out = format!(
-            "\nListed on this page, from its own data ({} of {}):",
+            "\nListed on this page, {} ({} of {}):",
+            match from_data {
+                true => "from its own data",
+                false => "in the page's order",
+            },
             shown.len(),
             items.len()
         );
@@ -1394,6 +1510,8 @@ mod tests {
                 ),
             ],
             items_from: Some(page_data::ItemSource::JsonLd),
+            listed_links: Vec::new(),
+            feed: None,
             links: vec![
                 page_data::Link {
                     address: "https://cars.example/finance".into(),

@@ -8,12 +8,14 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::shared::domain::web_watch::{
-    backoff_hours, compare, Comparison, WatchChange, CHANGE_HISTORY_DAYS, FAILURES_BEFORE_TELLING,
+    backoff_hours, compare, ChangeKind, Comparison, WatchChange, CHANGE_HISTORY_DAYS,
+    FAILURES_BEFORE_TELLING,
 };
 use crate::shared::ports::web_watch::{
     CheckOutcome, NoticeKind, WatchNotice, WatchNotifier, WatchPageReader, WatchReadError,
     WebWatch, WebWatchRepository,
 };
+use crate::shared::services::web_watch_judge::needs_judging;
 
 /// Watches checked in one pass at most, so a pass stays short.
 const MAX_DUE_PER_PASS: usize = 8;
@@ -25,6 +27,8 @@ pub struct WebWatchChecker {
     repo: Arc<dyn WebWatchRepository>,
     reader: Arc<dyn WatchPageReader>,
     notifier: Arc<dyn WatchNotifier>,
+    /// Woken when a check holds changes for the model to judge.
+    judge: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl WebWatchChecker {
@@ -37,7 +41,13 @@ impl WebWatchChecker {
             repo,
             reader,
             notifier,
+            judge: None,
         }
+    }
+
+    pub fn waking(mut self, judge: Arc<tokio::sync::Notify>) -> Self {
+        self.judge = Some(judge);
+        self
     }
 
     /// Checks every watch due at `now`; returns how many were checked.
@@ -65,6 +75,20 @@ impl WebWatchChecker {
                         Comparison::Changes(changes) => changes,
                         _ => Vec::new(),
                     };
+                    // In its owner's words alone, a watch has no rule code can check: every
+                    // change waits for the model to say whether it was asked for.
+                    let held = needs_judging(watch) && !changes.is_empty();
+                    let changes: Vec<WatchChange> = if held {
+                        changes
+                            .into_iter()
+                            .map(|change| WatchChange {
+                                matched: false,
+                                ..change
+                            })
+                            .collect()
+                    } else {
+                        changes
+                    };
                     let notice = match_notice(watch, &changes);
                     let outcome = CheckOutcome {
                         items: Some(items),
@@ -72,6 +96,7 @@ impl WebWatchChecker {
                         checked_at: now,
                         next_check_at: now + Duration::hours(watch.interval_hours.into()),
                         changes,
+                        held,
                     };
                     (outcome, notice)
                 }
@@ -89,6 +114,11 @@ impl WebWatchChecker {
         self.repo.record_check(&watch.id, &outcome).await?;
         if let Some(notice) = notice {
             self.notifier.notify(notice).await?;
+        }
+        if outcome.held {
+            if let Some(wake) = &self.judge {
+                wake.notify_one();
+            }
         }
         Ok(())
     }
@@ -117,6 +147,7 @@ impl WebWatchChecker {
             checked_at: now,
             next_check_at: now + Duration::hours(wait.into()),
             changes: Vec::new(),
+            held: false,
         };
         (outcome, notice)
     }
@@ -193,10 +224,15 @@ fn match_notice(watch: &WebWatch, changes: &[WatchChange]) -> Option<WatchNotice
     if lines.is_empty() {
         return None;
     }
+    // What a rule was set to tell is the news itself, not a match among items.
+    let told = changes
+        .iter()
+        .any(|c| c.matched && c.kind == ChangeKind::Condition);
     Some(WatchNotice {
         owner: watch.owner.clone(),
         kind: NoticeKind::Match,
         title: match lines.len() {
+            _ if told => watch.title.clone(),
             1 => format!("A match on {}", watch.title),
             n => format!("{n} matches on {}", watch.title),
         },
@@ -231,6 +267,7 @@ mod tests {
     struct Store {
         watches: Mutex<Vec<WebWatch>>,
         changes: Mutex<Vec<StoredChange>>,
+        held: Mutex<Vec<i64>>,
     }
 
     #[async_trait]
@@ -283,8 +320,11 @@ mod tests {
                     watch_id: watch.id.clone(),
                     found_at: outcome.checked_at,
                     change: change.clone(),
-                    digested: change.matched,
+                    digested: change.matched || outcome.held,
                 });
+                if outcome.held {
+                    self.held.lock().unwrap().push(id);
+                }
             }
             Ok(())
         }
@@ -344,6 +384,27 @@ mod tests {
             let n = changes.len();
             changes.retain(|c| c.found_at >= before);
             Ok((n - changes.len()) as u64)
+        }
+        async fn held(&self, limit: usize) -> Result<Vec<StoredChange>> {
+            let held = self.held.lock().unwrap();
+            Ok(self
+                .changes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| held.contains(&c.id))
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+        async fn judged(&self, judged: &[i64], told: &[i64]) -> Result<()> {
+            self.held.lock().unwrap().retain(|id| !judged.contains(id));
+            for change in self.changes.lock().unwrap().iter_mut() {
+                if judged.contains(&change.id) {
+                    change.change.matched = told.contains(&change.id);
+                }
+            }
+            Ok(())
         }
     }
 
@@ -408,6 +469,94 @@ mod tests {
         told: Arc<Told>,
     ) -> WebWatchChecker {
         WebWatchChecker::new(store, Arc::new(Pages(Mutex::new(pages))), told)
+    }
+
+    #[tokio::test]
+    async fn a_rule_coming_true_is_pushed_once_and_nothing_else_on_the_page_is() {
+        use crate::shared::domain::web_watch::TellWhen;
+        let now = Utc::now();
+        let section = |text: &str| WatchItem {
+            title: "Trail bike".into(),
+            link: Some("https://shop.example/bike".into()),
+            snippet: Some(text.into()),
+            ..Default::default()
+        };
+        let mut bike = watch(now);
+        bike.title = "Trail bike 29er".into();
+        bike.filters = WatchFilters {
+            tell_when: TellWhen::Disappears {
+                phrase: "sold out".into(),
+            },
+            ..Default::default()
+        };
+        bike.items = Some(vec![section("KES 85,000. Sold out")]);
+        let store = Arc::new(Store::default());
+        store.create(&bike).await.unwrap();
+        let told = Arc::new(Told::default());
+        let checker = checker(
+            store.clone(),
+            vec![
+                Ok(vec![section("KES 85,000. Sold out. Free delivery")]),
+                Ok(vec![section("KES 85,000. In stock. Free delivery")]),
+                Ok(vec![section("KES 85,000. In stock. Two left")]),
+            ],
+            told.clone(),
+        );
+        for pass in 0..3 {
+            assert_eq!(
+                checker
+                    .check_due(now + Duration::hours(6 * pass))
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        let notices = told.0.lock().unwrap();
+        assert_eq!(notices.len(), 1, "told once, when it came true");
+        assert_eq!(notices[0].title, "Trail bike 29er");
+        assert_eq!(notices[0].body, "\"sold out\" is no longer on the page");
+        assert_eq!(notices[0].kind, NoticeKind::Match);
+        drop(notices);
+        assert_eq!(
+            checker.send_digests(now).await.unwrap(),
+            0,
+            "other changes on the page are not kept for a digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watch_in_its_owners_words_alone_holds_its_changes_for_the_model() {
+        let now = Utc::now();
+        let store = Arc::new(Store::default());
+        let asked = WebWatch {
+            looking_for: "tell me when a story mentioning Zig appears".into(),
+            filters: WatchFilters::default(),
+            ..watch(now)
+        };
+        store.create(&asked).await.unwrap();
+        let told = Arc::new(Told::default());
+        let woken = Arc::new(tokio::sync::Notify::new());
+        let page = vec![
+            car("Zig 0.16 released", "0", 2),
+            car("A history of Lisp", "0", 3),
+        ];
+        let checker = checker(store.clone(), vec![Ok(page)], told.clone()).waking(woken.clone());
+        assert_eq!(checker.check_due(now).await.unwrap(), 1);
+
+        assert!(
+            told.0.lock().unwrap().is_empty(),
+            "nothing is pushed unjudged"
+        );
+        let held = store.held(10).await.unwrap();
+        assert_eq!(held.len(), 3, "two new and the one gone");
+        assert!(held.iter().all(|c| !c.change.matched));
+        assert_eq!(checker.send_digests(now).await.unwrap(), 0, "nor digested");
+        tokio::time::timeout(std::time::Duration::from_millis(50), woken.notified())
+            .await
+            .expect("the judge is woken");
+
+        store.judged(&[1, 2, 3], &[1]).await.unwrap();
+        assert!(store.held(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

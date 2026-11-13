@@ -43,6 +43,7 @@ tokio-util = "0.7"
 # The encoder's identity check: its sha256 is its Hugging Face LFS oid. The same major the
 # other workspace crates hash with, so no second copy is built.
 sha2 = "0.10"
+base64.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

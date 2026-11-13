@@ -4,6 +4,7 @@ pub mod giap_registration;
 pub mod goose_agent;
 #[cfg(test)]
 mod goose_nudges;
+mod held_recordings;
 pub mod litert_model;
 pub mod logging;
 pub mod mesh_provider;

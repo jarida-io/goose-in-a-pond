@@ -706,6 +706,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .delete(delete_profile_threshold_handler),
         )
         .merge(crate::me::routes())
+        .merge(crate::browser::routes())
         .route("/faces/debug/pairwise", get(face_pairwise_debug))
         .route("/faces/debug/eval", get(face_eval_debug))
         .route("/faces/models", get(list_face_models_handler))
@@ -1899,6 +1900,10 @@ struct ChatRequest {
     /// Grounding context when this turn was initiated from a suggestion card.
     #[serde(default)]
     suggestion_context: Option<pond_core::user_data::domain::suggestion::SuggestionContext>,
+    /// A card the member sent to chat (an idea, a news story, a to-do), by kind and id. The
+    /// Pond reads it as the speaker; the turn carries its content and Goose's notes on it.
+    #[serde(default)]
+    card: Option<crate::context_cards::CardRef>,
     /// The member asked for deep research: the pond starts a research task on the message.
     #[serde(default)]
     deep_research: bool,
@@ -2145,6 +2150,9 @@ async fn revoke_model(
 #[derive(Deserialize)]
 struct TtsRequest {
     text: String,
+    /// Nothing follows this text: its audio ends at rest instead of in the gap before more.
+    #[serde(default)]
+    last: bool,
 }
 
 /// A browser plays what `/tts` returns as soon as it has it, so other audio is paused before it goes
@@ -2230,7 +2238,11 @@ async fn tts_synthesise(
     }
 
     if let Some(tts) = &state.tts {
-        match tts.synthesize(text).await {
+        let unit = pond_voice::text::SpeechUnit {
+            text: text.to_string(),
+            last: req.last,
+        };
+        match tts.synthesize_unit(&unit).await {
             Ok(Some(wav_bytes)) => {
                 quiet_while_a_browser_plays(&wav_bytes).await;
                 return Response::builder()
@@ -2611,7 +2623,8 @@ async fn prepare_turn_audio(
 
 type Transcriber = Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>;
 
-/// Whisper, when memory is too short to load the encoder that would hear a voice note.
+/// Whisper, when memory is too short to load the encoder that would hear a voice note, and
+/// still too short once what reloads on its own has been given back.
 async fn words_instead_of_hearing(
     state: &Arc<AppState>,
     provider: &str,
@@ -2619,16 +2632,31 @@ async fn words_instead_of_hearing(
 ) -> Option<Transcriber> {
     use pond_core::models::domain::audio_input::HearingRoom;
     let transcribe = state.transcribe_audio.clone()?;
-    let agent = state.agent.clone();
-    let (provider, model) = (provider.to_string(), model.to_string());
-    let room = tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
-        .await
-        .unwrap_or(HearingRoom::Unknown);
+    let room = || {
+        let agent = state.agent.clone();
+        let (provider, model) = (provider.to_string(), model.to_string());
+        async move {
+            tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
+                .await
+                .unwrap_or(HearingRoom::Unknown)
+        }
+    };
+    if !matches!(room().await, HearingRoom::Short { .. }) {
+        return None;
+    }
+    let freed = make_room_to_hear(state).await;
     let HearingRoom::Short {
         available_mb,
         needed_mb,
-    } = room
+    } = room().await
     else {
+        tracing::info!(
+            target: "giap::audio",
+            kind = "voice_note_room_made",
+            freed = ?freed,
+            "memory was short for the encoder until these were given back; the model hears the \
+             voice note"
+        );
         return None;
     };
     tracing::info!(
@@ -2636,9 +2664,25 @@ async fn words_instead_of_hearing(
         kind = "voice_note_as_words",
         available_mb,
         needed_mb,
+        freed = ?freed,
         "too little memory to load the encoder; the voice note goes as words"
     );
     Some(transcribe)
+}
+
+/// Gives back the memory of what loads again by itself when next needed: the Memory model and
+/// the voice the pond speaks in. Returns what was given back.
+async fn make_room_to_hear(state: &Arc<AppState>) -> Vec<&'static str> {
+    let mut freed = Vec::new();
+    if state.embedder.unload().await {
+        freed.push("memory_model");
+    }
+    if let Some(tts) = state.tts_control.as_ref() {
+        if tts.is_loaded().await && tts.unload().await.is_ok() {
+            freed.push("voice");
+        }
+    }
+    freed
 }
 
 async fn transcribe_voice_note(
@@ -3489,6 +3533,27 @@ async fn drive_turn(
 
     use pond_core::shared::domain::agent::AgentRequest;
 
+    // Read as the speaker, so a card id can never reach another member's card.
+    let card_context = match (&req.card, turn_scope.owner_id()) {
+        (Some(card), Some(member)) => crate::context_cards::resolve(state, member, card)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, kind = %card.kind, "a turn's card could not be read");
+                None
+            })
+            .map(pond_core::user_data::domain::suggestion::SuggestionContext::Card),
+        _ => None,
+    };
+    if req.card.is_some() {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "turn_card",
+            card = req.card.as_ref().map(|c| c.kind.as_str()).unwrap_or_default(),
+            found = card_context.is_some(),
+            "a turn came with a card"
+        );
+    }
+
     // The speaker's own setup interview runs in this session: its state, and only its tools.
     let interview = interview_turn_for(state, &session_id, &turn_scope).await;
     let tool_group_allowlist = match &interview {
@@ -3513,7 +3578,7 @@ async fn drive_turn(
         profile_context: profile_context_for(state, &turn_scope).await,
         tool_group_allowlist,
         warmup: false,
-        suggestion_context: req.suggestion_context.clone(),
+        suggestion_context: card_context.or_else(|| req.suggestion_context.clone()),
         deep_research_task: deep_research_task.clone(),
         interview: interview.map(|turn| turn.context),
         device_place: req.device_place.clone(),
@@ -6762,6 +6827,7 @@ pub(crate) async fn update_settings(
 
     // Privacy controls must apply now, not at the next restart.
     pond_core::models::domain::mic_gate::set_mic_enabled(merged.mic_enabled);
+    pond_core::shared::domain::page_render::set_enabled(merged.browser_rendering_enabled);
     if current.voice_room_enabled != merged.voice_room_enabled {
         if let Some(room) = &state.room_voice {
             room.set_enabled(merged.voice_room_enabled).await;
@@ -15881,6 +15947,8 @@ async fn save_memory(
         lifecycle: Some(pond_core::user_data::domain::memory::MemoryLifecycle::Active),
         superseded_by: None,
         corrects: None,
+        about: None,
+        valid_until: None,
     };
     match state.memory_repo.add(fragment.clone()).await {
         Ok(()) => (StatusCode::CREATED, Json(json!(fragment))).into_response(),
@@ -18700,6 +18768,7 @@ async fn run_recipe(
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
         suggestion_context: None,
+        card: None,
         deep_research: false,
         deep_research_answer: None,
         deep_research_for: None,

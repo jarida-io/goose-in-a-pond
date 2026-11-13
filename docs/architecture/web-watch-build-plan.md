@@ -26,10 +26,12 @@ Last update: 2026-11-09: phases 1, 2, 4, 5, 6, 8 and 9 merged on the fork.
 | 4 | Exploration: 30-minute budget on the card, one site per step, compare step writes options | Merged | fork #5 |
 | 5 | Saved items: typed cards, collections, share switch, "Watch price", search tool | Merged | fork #6 |
 | 6 | Images: Wikimedia Commons and preview images, the pond's copy, the credit | Merged | fork #7 |
-| 7 | Lightpanda: aarch64 build against glibc 2.35, nano measurement, on-demand process | Needs a nano session | |
+| 7 | A browser for pages that scripts build: Chromium's headless shell, run once a page, on demand (Lightpanda set aside: its arm64 binary needs glibc 2.38) | Merged; the nano measurement waits for you | fork #19 |
 | 8 | POST forms confirmed on the phone; spoken alerts opt-in per member with quiet hours | Merged | fork #10 |
 | 9 | Desktop screens: watches, saved collections, report pictures, options and source chips | Merged | fork #9 |
 | 10 | Site sign-in, after PAI-2 P9 (Pond Keychain) | Waits for P9 | |
+| 12 | Lists and feeds: a page that is a list of links is read as its entries in order; RSS and Atom feeds are read as pages; a new watch uses the feed a page declares | Merged | fork #23 |
+| 11 | General watches: tell me when words appear or go away, or a number goes below or above a value; passing changes (clock times, "3 hours ago", view counts) no longer count as updates; a watch as a card sent to chat | Merged | fork #18 |
 
 ## Phase 2: watches, what landed
 
@@ -156,6 +158,128 @@ Not done in phase 9:
 - A report forgets that an option was saved once its sheet closes, so a second Save makes a second card.
 - A `Saved { item_id }` notice screen: the pond does not send one yet.
 - The chips follow the model's `[title](link)` words. Ledger numbers, with the line used and the date read in the chip's card, come with the chips phase.
+
+## Phase 7: reading pages that need a browser, what landed
+
+Some pages arrive as an empty shell that scripts fill in. Every read (the page tool, watches,
+the news, ideas, research) goes through one fetch; that fetch now hands such a shell to a
+headless browser once and reads what the browser built with the usual reader.
+
+| Step | Kind | Status |
+|---|---|---|
+| A shell is a page with under 200 characters to read, scripts, and a mark that the scripts build it (`id="root"`, `__next`, "enable JavaScript", ...). A page with words is never sent to a browser | Code | Done |
+| One render: `--headless --dump-dom` with 8 s of virtual time for the page's scripts, 30 s at most, pictures and sound off, a fresh profile deleted afterwards, incognito, the browser's own sandbox on. One at a time; a second page is told to try again | Code | Done |
+| The browser is the pond's own download if there is one, else `chrome-headless-shell`, Chromium, Chrome or Edge found on the machine. No setup: it is looked for when a page needs it | Code | Done |
+| Memory gate: on a board that reports free memory, a browser starts only with 600 MB available, set from the measurement below. The refusal says how much was free | Code | Done |
+| `POST /browser/install` downloads the stable headless shell for the machine from Chrome for Testing (about 130 MB) into `<data_dir>/browser`, unpacks it and checks that it runs; `GET /browser` shows the browser in use, whether a page could be rendered now and why not, and the download's progress; `DELETE /browser` removes the pond's own | Code | Done |
+| Household setting `browser_rendering_enabled` (on by default), in the desktop's Extensions & Tools; applied at once | Code | Done |
+| A shell that was not rendered is a failed read whose reason the model is given in words: turned off, no browser yet, too little memory free, busy, or the browser could not read it | Code | Done |
+| A real page built by a script is rendered by the installed Chrome in the tests on a Mac (under a second); the test is skipped where no browser is installed | Tests | Done |
+| The headless shell for `linux-arm64` (157.0.8103.78) starts on the nano's glibc 2.35 with no library missing | Measured on the nano | Done |
+
+### What a render costs on the nano
+
+Measured on the Orin Nano on 12 November 2026 with `scripts/jetson/render-cost/render_cost.sh`,
+beside the running pond with the chat model loaded (6.4 GB in use, about 900 MB available),
+using the pond's own flags and Chrome for Testing's headless shell 157.0.8103.78. Each render
+ran in its own memory-capped scope; memory was sampled ten times a second.
+
+| Page | Cap | Seconds | Peak memory | Lowest available memory |
+|---|---|---|---|---|
+| example.com | 700 MB | 2.8 | 307 MB | 830 MB |
+| react.dev/learn | 700 MB | 6.3 | 233 MB | 705 MB |
+| jumia.co.ke | 700 MB | 12.9 | 235 MB | 679 MB |
+| en.wikipedia.org/wiki/Kenya | 700 MB | 4.2 | 161 MB | 740 MB |
+| youtube.com | 700 MB | 9.4 | 266 MB | 651 MB |
+| youtube.com | 300 MB | 8.1 | 280 MB | 658 MB |
+| jumia.co.ke | 300 MB | 15.4 | 246 MB | 656 MB |
+| youtube.com | 200 MB | stopped at 30 s, nothing read | 199 MB | 690 MB |
+
+Available memory stood between 900 and 916 MB before each batch, so a render took at most 265 MB
+of it.
+
+- A render fits in about 300 MB, and still completes when held to 300 MB. Held to 200 MB the
+  browser does not finish within the 30 seconds the pond allows.
+- The pond stayed healthy throughout and nothing was killed.
+- The gate is therefore 600 MB: about the most a render took (307 MB), with 300 MB left for the pond. With
+  the picture encoder also loaded the board had 498 MB available, so the pond still refuses
+  then, and renders when the encoder is not held.
+- The peak is a sample every tenth of a second, so a shorter spike could be higher.
+
+### On the nano
+
+The household asked for the download on 12 November 2026. `POST /browser/install` fetched the
+headless shell (128 MB) into `/var/lib/goose-in-a-pond/browser`, unpacked it, checked that it
+runs, and `GET /browser` answered `ready` with 685 MB free against the 600 MB it needs.
+
+`scripts/jetson/render-live/render_live.py` then asked the pond, in a conversation with
+Gemma 4 E4B, to read a page that arrives as an empty shell (Hacker News search). The pond's
+log shows the one render: `web_page_rendered ok=true bytes=42524 ms=9876`. The turn took 42
+seconds, the pond stayed healthy, and 715 MB was available afterwards. The answer was drawn
+from the rendered page but was thin: asked for the first three story titles, the model quoted
+one passage and said it could find no more. What the reader picks out of a rendered list for
+a question is the next thing to look at; the browser did its part.
+
+Not done in phase 7:
+- No browser is downloaded on its own: it is 130 MB, so the household starts it. The phone has no button for it yet; the route is there. A newer build of the browser is not fetched either; `DELETE /browser` then `POST /browser/install` replaces it.
+- Clicking, typing and signing in with a browser are not built. The pond already follows same-site links, sends search forms, and sends other forms after a yes on the phone; a click-driven browser for a small model needs the memory answer first, and its tools would sit in every turn's prompt unless they are a group that is off by default.
+- The browser does its own networking, outside `pond-net`. It is only ever given an address the pond's own fetch already read from the public web, but scripts on that page make their own requests.
+- robots.txt is not read, and fetches are not spaced per site beyond each job's own limits.
+
+## Phase 11: general watches, what landed
+
+A watch was a listing's: new items, updates and price drops among the items a page lists. It
+now also takes one rule read off the whole page, in code, with no model in a check.
+
+| Step | Kind | Status |
+|---|---|---|
+| `TellWhen` on a watch's filters: `new_or_changed` (default), `appears {phrase}`, `disappears {phrase}`, `below {phrase, value}`, `above {phrase, value}`. Stored in the filters' JSON, so no migration and older watches read as the default | Code | Done |
+| A rule reports only itself, once, when it comes true between two checks: the phrase was absent and is there, was there and is gone, or the number crossed the value. Nothing else on that page is kept for the digest | Code | Done |
+| The number is the one written within 60 characters after the phrase; with no phrase, the page's first price | Code | Done |
+| A section whose words did not change is not an update: clock times, "3 hours ago", "just now" and counts of views, likes and comments are set aside before comparing. A version number still counts | Code | Done |
+| `web_watch` tool: `when`, `phrase`, `value`. Setting a rule up says how the page stands now ("USD/KES is 129.4 now"), and refuses a number rule whose number is not on the page | Code | Done |
+| Routes: a watch's view carries `filters.tell_when`, the rule in words (`filters_words`) and `standing`; `PATCH /web-watches/{id}` takes the rule in `filters` | Code | Done |
+| A watch is a card that can be sent to chat (`"card": {"kind": "watch", "id"}`), with what it tells about, how the page stood and its recent changes as Goose's notes | Code | Done |
+| The tool block is 226 bytes larger (20,664 to 20,890) for the three fields | Measured | Done |
+
+Not done in phase 11:
+- Feeds came with phase 12.
+- A file that is replaced (a PDF) is not watched: only pages the reader turns into text.
+- No model judges whether a change matters. Every check is code, so "tell me when the timetable changes in a way that affects mornings" is not possible yet; the rules above are.
+- A change is not confirmed by a second read, so a page that shows different sections on every visit can report updates. Its owner can switch that watch to a rule.
+- Checks run no more often than hourly, as before.
+- The phone and desktop screens do not offer the rule yet; it is set from a conversation.
+
+## Phase 12: lists and feeds, what landed
+
+| Step | Kind | Status |
+|---|---|---|
+| A page with no items of its own (no structured data, no articles) is read for the largest run of links that sit in the same place in the same kind of row. Titles win over a column of "3 hours ago" links, a short title inside a list of titles stays, and a menu, a footer and a handful of links are not a list | Code | Done |
+| The page tool shows that list in the page's order ("Listed on this page, in the page's order"), so "the first three stories" has an answer. Tried on the Hacker News front page: 30 of 30 stories, in order | Code, tried on a real page | Done |
+| A watch falls back to that list only where a page has neither items nor sections, so a page already watched keeps the list it had and a page with no headings can now be watched | Code | Done |
+| An RSS or Atom address is read as a page of articles (each entry an item with its link, date and plain-text summary); other XML is still refused as a file. Tried on a real Atom feed (10 entries) and a real RSS feed (45) | Code, tried on real feeds | Done |
+| A page names the feed it declares on its own site, and a watch started on a page with no items of its own watches that feed instead | Code | Done |
+
+Not done in phase 12:
+- Neither has been exercised on the nano in a conversation yet.
+- A feed is not discovered for a page that already has articles or structured items; those are watched as before.
+- JSON Feed is not read.
+
+## Phase 13: a watch in the member's words, what landed
+
+Found on a phone: "watch this page and tell me when a story mentioning Zig appears" started a
+watch with no rule, which pushed every new story as a match while the reply promised only Zig.
+
+| Step | Kind | Status |
+|---|---|---|
+| A watch with its owner's words and no rule or filters holds every change a check finds: none is pushed or digested until judged | Code | Done |
+| A lane job (`watch_judge`) shows the model their words and the numbered changes, twelve a call, and reads back which to tell. Those are pushed as one notice and count as matches; the rest stay in the watch's history untold | Code and model | Done |
+| A change no model judged within two hours is told as it is, so an alert is never lost | Code | Done |
+| The tool tells the model what such a watch will do, so its reply promises what happens | Code | Done |
+
+Not done in phase 13:
+- A watch with filters or a rule is still judged by code alone, as before.
+- The judgement is not shown on the watch's page: a change reads as told or not.
 
 ## What waits on you
 

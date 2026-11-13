@@ -2,169 +2,55 @@
 //!
 //! TypeScript ports of these functions live under `pond-desktop/src/`; keep them in step.
 
-fn is_abbrev_suffix(prefix: &str) -> bool {
-    let Some(last) = prefix.split_whitespace().next_back() else {
-        return false;
-    };
-    let clean = last.trim_start_matches(|c: char| !c.is_alphanumeric());
-    if clean.is_empty() {
-        return false;
-    }
-    let lower = clean.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "dr" | "mr"
-            | "mrs"
-            | "ms"
-            | "prof"
-            | "st"
-            | "jr"
-            | "sr"
-            | "vs"
-            | "etc"
-            | "approx"
-            | "dept"
-            | "govt"
-            | "inc"
-            | "ltd"
-            | "corp"
-            | "min"
-            | "max"
-            | "temp"
-            | "est"
-            | "jan"
-            | "feb"
-            | "mar"
-            | "apr"
-            | "jun"
-            | "jul"
-            | "aug"
-            | "sep"
-            | "sept"
-            | "oct"
-            | "nov"
-            | "dec"
-            | "e.g"
-            | "i.e"
-            | "u.s"
-            | "a.m"
-            | "p.m"
-    ) || (clean.len() == 1 && clean.chars().all(|c| c.is_ascii_alphabetic()))
-}
-
-/// What ends a speech unit, which decides the silence played after it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Boundary {
-    /// A cut inside a phrase, where no mark came in time.
-    Word,
-    Clause,
-    /// The end of a line in a list.
-    ListLine,
-    Sentence,
-    Paragraph,
-    /// The last unit of the text: what follows it is not speech.
-    End,
-}
-
-impl Boundary {
-    /// Silence after a unit, at speed 1.0. Inside one forward pass Kokoro pauses ~0.35 s at a
-    /// comma and ~0.5-0.6 s at a full stop, so units joined by these sound like one passage.
-    pub fn pause_secs(self) -> f32 {
-        match self {
-            Self::Word => 0.10,
-            Self::Clause => 0.30,
-            Self::ListLine => 0.40,
-            Self::Sentence => 0.50,
-            Self::Paragraph => 0.80,
-            Self::End => 0.0,
-        }
-    }
-
-    /// The boundary a unit's last mark implies, for text that arrives without one (`/tts`).
-    pub fn from_text_end(text: &str) -> Self {
-        let last = text
-            .trim_end()
-            .trim_end_matches(['"', '\'', ')', ']', '\u{201d}', '\u{2019}'])
-            .chars()
-            .next_back();
-        match last {
-            Some('.' | '?' | '!' | '\u{2026}') => Self::Sentence,
-            Some(',' | ';' | ':' | '\u{2014}') => Self::Clause,
-            _ => Self::Word,
-        }
-    }
-}
-
-/// Text to say and what follows it.
+/// Text Kokoro says in one pass, and whether more of the same speech follows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechUnit {
     pub text: String,
-    pub boundary: Boundary,
+    /// Nothing follows: the audio ends at rest instead of in [`UNIT_GAP_SECS`].
+    pub last: bool,
 }
 
 impl SpeechUnit {
-    pub fn new(text: impl Into<String>, boundary: Boundary) -> Self {
+    /// A unit more speech may follow: text that arrives alone (`/tts`) says nothing either way.
+    pub fn from_text(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            boundary,
+            last: false,
         }
     }
 
-    /// A unit with nothing said about what follows it: its own last mark decides.
-    pub fn from_text(text: impl Into<String>) -> Self {
-        let text = text.into();
-        let boundary = Boundary::from_text_end(&text);
-        Self { text, boundary }
+    /// The unit that ends its speech.
+    pub fn closing(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            last: true,
+        }
     }
 }
+
+/// Silence after a unit that another follows, at speed 1.0: about what Kokoro leaves at a full
+/// stop inside a pass, so two passes sound like one passage.
+pub const UNIT_GAP_SECS: f32 = 0.5;
 
 /// Kokoro tokens for `text`, roughly: espeak IPA runs about 1.1 symbols per character of English.
 pub fn estimate_tokens(text: &str) -> usize {
     (text.chars().count() * 11).div_ceil(10)
 }
 
-/// A unit is cut before it passes this many estimated tokens; Kokoro is most even at 100-200.
+/// The most a unit holds, in estimated tokens. Kokoro takes 510, but past about 200 it speaks
+/// faster and costs more for each second of speech.
 pub const UNIT_TOKEN_BUDGET: usize = 200;
-/// A clause mark ends a unit only after this many words, so "Sure," stays with its sentence.
-const MIN_CLAUSE_WORDS: usize = 3;
-/// How much a sentence is assumed to grow past a clause mark, when deciding whether to cut there.
-const CLAUSE_LOOKAHEAD_TOKENS: usize = 40;
+/// The characters [`UNIT_TOKEN_BUDGET`] comes to.
+const UNIT_CHARS: usize = UNIT_TOKEN_BUDGET * 10 / 11;
 /// Kept after a sentence's last mark, like the quote in `He said "go."`.
 const CLOSERS: &[char] = &['"', '\'', ')', ']', '\u{201d}', '\u{2019}'];
 
-/// How far ahead of the speaker synthesis is, for deciding whether a sentence can wait to be whole.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pace {
-    /// Seconds of audio waiting to play, less the synthesis still owed for units handed over.
-    pub slack_secs: f32,
-    /// Seconds of synthesis per token, as measured.
-    pub synth_secs_per_token: f32,
-}
-
-impl Pace {
-    /// Time to spare: whole sentences, with only the first unit cut short.
-    pub const UNHURRIED: Pace = Pace {
-        slack_secs: f32::INFINITY,
-        synth_secs_per_token: 0.06,
-    };
-    /// Nothing queued: any clause mark gets sound out sooner.
-    pub const BEHIND: Pace = Pace {
-        slack_secs: f32::NEG_INFINITY,
-        synth_secs_per_token: 0.06,
-    };
-
-    /// Whether `tokens` more can be synthesised before the queued audio runs out.
-    pub fn can_wait_for(&self, tokens: usize) -> bool {
-        self.slack_secs >= tokens as f32 * self.synth_secs_per_token
-    }
-}
-
-/// Splits a reply into speech units as it streams: the first ends early, at its first clause mark
-/// after three words, and later ones are whole sentences unless synthesis has fallen behind.
+/// Holds a reply as it streams. Kokoro shapes the pauses of whatever it is given in one pass, so
+/// the text is kept whole: it is given up when the model stops writing, and before that only once
+/// it is more than one pass holds.
 #[derive(Debug, Default)]
 pub struct ReplySplitter {
     buf: String,
-    said_one: bool,
 }
 
 impl ReplySplitter {
@@ -172,23 +58,22 @@ impl ReplySplitter {
         Self::default()
     }
 
-    /// Add streamed text and take the units now ready to say.
-    pub fn push(&mut self, text: &str, pace: Pace) -> Vec<SpeechUnit> {
+    /// Add streamed text and take the units that are already full.
+    pub fn push(&mut self, text: &str) -> Vec<SpeechUnit> {
         self.buf.push_str(text);
-        self.drain(pace, Flush::Streaming)
+        self.full_units()
     }
 
-    /// The stream paused (a tool is running): say the sentences already whole, judging their
-    /// breaks by what has arrived, and keep an unfinished one for when it resumes.
-    pub fn pause(&mut self, pace: Pace) -> Vec<SpeechUnit> {
-        self.drain(pace, Flush::Paused)
+    /// The model stopped writing to use a tool: everything it has written so far.
+    pub fn pause(&mut self) -> Vec<SpeechUnit> {
+        self.take_all()
     }
 
-    /// The stream is over: whatever is left, the last unit marked [`Boundary::End`].
+    /// The stream is over: whatever is left, the last unit closing the speech.
     pub fn finish(&mut self) -> Vec<SpeechUnit> {
-        let mut units = self.drain(Pace::UNHURRIED, Flush::Ended);
+        let mut units = self.take_all();
         if let Some(last) = units.last_mut() {
-            last.boundary = Boundary::End;
+            last.last = true;
         }
         units
     }
@@ -198,86 +83,72 @@ impl ReplySplitter {
         &self.buf
     }
 
-    fn drain(&mut self, pace: Pace, flush: Flush) -> Vec<SpeechUnit> {
+    fn full_units(&mut self) -> Vec<SpeechUnit> {
         let mut units = Vec::new();
-        let settled = flush != Flush::Streaming;
         loop {
             let skip = self.buf.len() - self.buf.trim_start().len();
             self.buf.drain(..skip);
-            if self.buf.is_empty() {
+            if estimate_tokens(&self.buf) <= UNIT_TOKEN_BUDGET {
                 break;
             }
-            let cut = match next_cut(&self.buf, !self.said_one, pace, settled) {
-                Some(cut) => cut,
-                None if flush == Flush::Ended => Cut {
-                    end: self.buf.len(),
-                    resume: self.buf.len(),
-                    boundary: Boundary::from_text_end(&self.buf),
-                },
-                None => break,
-            };
-            let mut text = self.buf[..cut.end].trim().to_string();
-            self.buf.drain(..cut.resume);
-            if cut.boundary == Boundary::ListLine && !ends_in_mark(&text) {
-                text.push(',');
-            }
+            let (end, resume) = fitting_cut(&self.buf);
+            let text = self.buf[..end].trim().to_string();
+            self.buf.drain(..resume);
             if !text.is_empty() {
-                units.push(SpeechUnit::new(text, cut.boundary));
-                self.said_one = true;
+                units.push(SpeechUnit::from_text(text));
             }
+        }
+        units
+    }
+
+    fn take_all(&mut self) -> Vec<SpeechUnit> {
+        let mut units = self.full_units();
+        let rest = std::mem::take(&mut self.buf);
+        if !rest.trim().is_empty() {
+            units.push(SpeechUnit::from_text(rest.trim()));
         }
         units
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flush {
-    /// More text is coming any moment: wait to see what follows a mark.
-    Streaming,
-    /// More may come later: judge marks by what has arrived.
-    Paused,
-    /// Nothing more is coming.
-    Ended,
-}
-
-/// A whole text as speech units, with no time pressure past the first unit.
+/// A whole text as speech units: one, unless it is more than a pass holds.
 pub fn split_text(text: &str) -> Vec<SpeechUnit> {
     let mut splitter = ReplySplitter::new();
-    let mut units = splitter.push(text, Pace::UNHURRIED);
-    units.extend(splitter.finish());
-    if let Some(last) = units.last_mut() {
-        last.boundary = Boundary::End;
-    }
-    units
+    splitter.buf.push_str(text);
+    splitter.finish()
 }
 
-/// Take the next unit to synthesise, joining it with the ones queued behind it in the same
-/// paragraph while the joined text stays in budget and can be ready before the queued audio ends.
-pub fn pack_units(
-    queue: &mut std::collections::VecDeque<SpeechUnit>,
-    pace: Pace,
-) -> Option<SpeechUnit> {
-    let mut unit = queue.pop_front()?;
-    while let Some(next) = queue.front() {
-        if matches!(unit.boundary, Boundary::Paragraph | Boundary::End) {
-            break;
+/// Where a text too long for one unit ends its first: the last sentence or line end that fits,
+/// failing that the last space. Gives the unit's end and where the next one starts.
+fn fitting_cut(text: &str) -> (usize, usize) {
+    let limit = text
+        .char_indices()
+        .nth(UNIT_CHARS)
+        .map_or(text.len(), |(i, _)| i);
+    let past_space = |from: usize| from + (text.len() - from - text[from..].trim_start().len());
+    let mut best = None;
+    let mut last_space = None;
+    let mut prev = None;
+    for (i, ch) in text[..limit].char_indices() {
+        match ch {
+            '\n' if !text[..i].trim().is_empty() => best = Some((i, past_space(i))),
+            // A full stop after a digit is a decimal or a list number.
+            '.' | '?' | '!' | '\u{2026}'
+                if !(ch == '.' && prev.is_some_and(|p: char| p.is_ascii_digit())) =>
+            {
+                let mut end = i + ch.len_utf8();
+                end += text[end..].len() - text[end..].trim_start_matches(['.', '?', '!']).len();
+                end += text[end..].len() - text[end..].trim_start_matches(CLOSERS).len();
+                if end <= limit && text[end..].starts_with(char::is_whitespace) {
+                    best = Some((end, past_space(end)));
+                }
+            }
+            _ if ch.is_whitespace() && i > 0 => last_space = Some((i, past_space(i))),
+            _ => {}
         }
-        // A list line stays a line, so the markdown pass still sees its marker.
-        let joint = if unit.boundary == Boundary::ListLine {
-            "\n"
-        } else {
-            " "
-        };
-        let tokens = estimate_tokens(&unit.text) + estimate_tokens(&next.text);
-        if tokens > UNIT_TOKEN_BUDGET || !pace.can_wait_for(tokens) {
-            break;
-        }
-        let next = queue.pop_front()?;
-        unit.text.push_str(joint);
-        unit.text.push_str(&next.text);
-        unit.boundary = next.boundary;
+        prev = Some(ch);
     }
-    Some(unit)
+    best.or(last_space).unwrap_or((limit, limit))
 }
 
 fn ends_in_mark(text: &str) -> bool {
@@ -299,176 +170,6 @@ fn is_list_item(line: &str) -> bool {
         && digits <= 3
         && matches!(line[digits..].chars().next(), Some('.' | ')'))
         && line[digits + 1..].starts_with(' ')
-}
-
-/// Whether more text could still make `rest` a list item.
-fn could_become_list_item(rest: &str) -> bool {
-    let rest = rest.trim_start_matches([' ', '\t']);
-    rest.len() < 3
-        && rest
-            .chars()
-            .all(|c| c.is_ascii_digit() || "-*+.)\u{2022}".contains(c))
-}
-
-struct Cut {
-    /// End of the unit's text in the buffer.
-    end: usize,
-    /// Where the next unit starts.
-    resume: usize,
-    boundary: Boundary,
-}
-
-/// The first place `text` can end a unit, or `None` until more text says where. `settled` means
-/// nothing more is about to arrive, so a mark at the end of `text` is judged on what is there.
-fn next_cut(text: &str, first: bool, pace: Pace, settled: bool) -> Option<Cut> {
-    let at_end = settled;
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let (mut words, mut in_word) = (0usize, false);
-    let mut line_start = 0usize;
-    let mut last_clause: Option<usize> = None;
-    let mut last_space: Option<usize> = None;
-    let ws_end = |from: usize| from + (text.len() - from - text[from..].trim_start().len());
-
-    for (k, &(i, ch)) in chars.iter().enumerate() {
-        if ch.is_whitespace() {
-            if in_word {
-                in_word = false;
-                words += 1;
-            }
-            last_space = Some(i);
-        } else {
-            in_word = true;
-        }
-
-        if estimate_tokens(&text[..i]) > UNIT_TOKEN_BUDGET {
-            let (end, boundary) = match last_clause {
-                Some(end) => (end, Boundary::Clause),
-                None => (last_space?, Boundary::Word),
-            };
-            return Some(Cut {
-                end,
-                resume: end,
-                boundary,
-            });
-        }
-
-        let next = chars.get(k + 1).map(|&(_, c)| c);
-        let prev = text[..i].chars().next_back();
-        match ch {
-            '.' | '?' | '!' | '\u{2026}' => {
-                if ch == '.' {
-                    let prefix = &text[..i];
-                    let digit_before = prev.is_some_and(|c| c.is_ascii_digit());
-                    if digit_before && (next.is_none_or(|c| c.is_ascii_digit())) {
-                        continue;
-                    }
-                    if is_abbrev_suffix(prefix) {
-                        continue;
-                    }
-                    let marker = text[line_start..i].trim_start();
-                    if !marker.is_empty()
-                        && marker.len() <= 3
-                        && marker.chars().all(|c| c.is_ascii_digit())
-                    {
-                        continue;
-                    }
-                }
-                let mut end = i + ch.len_utf8();
-                end += text[end..].len() - text[end..].trim_start_matches(['.', '?', '!']).len();
-                end += text[end..].len() - text[end..].trim_start_matches(CLOSERS).len();
-                let after = ws_end(end);
-                if after == end {
-                    if end == text.len() && at_end {
-                        return Some(Cut {
-                            end,
-                            resume: end,
-                            boundary: Boundary::Sentence,
-                        });
-                    }
-                    if end == text.len() {
-                        return None;
-                    }
-                    continue;
-                }
-                if after == text.len() && !at_end {
-                    return None;
-                }
-                let gap = &text[end..after];
-                let boundary = match gap.matches('\n').count() {
-                    0 => Boundary::Sentence,
-                    1 if is_list_item(&text[line_start..]) || is_list_item(&text[after..]) => {
-                        Boundary::ListLine
-                    }
-                    1 => Boundary::Sentence,
-                    _ => Boundary::Paragraph,
-                };
-                return Some(Cut {
-                    end,
-                    resume: after,
-                    boundary,
-                });
-            }
-            ',' | ';' | ':' | '\u{2014}' => {
-                let digits_around = prev.is_some_and(|c| c.is_ascii_digit())
-                    && next.is_some_and(|c| c.is_ascii_digit());
-                if matches!(ch, ',' | ':') && digits_around {
-                    continue;
-                }
-                // Only once whitespace follows: the next token may continue the number or word.
-                if !next.is_some_and(char::is_whitespace) {
-                    continue;
-                }
-                let end = i + ch.len_utf8();
-                // A mark that ends its line is the line's end, which the newline decides.
-                if text[end..]
-                    .trim_start_matches([' ', '\t'])
-                    .starts_with('\n')
-                {
-                    continue;
-                }
-                if words + usize::from(in_word) < MIN_CLAUSE_WORDS {
-                    continue;
-                }
-                last_clause = Some(end);
-                let lookahead = estimate_tokens(&text[..end]) + CLAUSE_LOOKAHEAD_TOKENS;
-                if first || !pace.can_wait_for(lookahead) {
-                    return Some(Cut {
-                        end,
-                        resume: end,
-                        boundary: Boundary::Clause,
-                    });
-                }
-            }
-            '\n' => {
-                let after = ws_end(i);
-                if after == text.len() && !at_end {
-                    return None;
-                }
-                let line = &text[line_start..i];
-                if text[i..after].matches('\n').count() >= 2 {
-                    return Some(Cut {
-                        end: i,
-                        resume: after,
-                        boundary: Boundary::Paragraph,
-                    });
-                }
-                let rest = &text[after..];
-                if !at_end && !rest.contains('\n') && could_become_list_item(rest) {
-                    return None;
-                }
-                if !line.trim().is_empty() && (is_list_item(line) || is_list_item(rest)) {
-                    return Some(Cut {
-                        end: i,
-                        resume: after,
-                        boundary: Boundary::ListLine,
-                    });
-                }
-                line_start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// The tags GIAP wraps its prompt and a turn's context in; any of them in a reply is an echo.
@@ -1583,384 +1284,173 @@ pub fn filter_thinking(chunk: &str, mut in_block: bool) -> (String, bool) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_units_last_mark_names_its_boundary() {
-        assert_eq!(
-            Boundary::from_text_end("It is 23 degrees."),
-            Boundary::Sentence
-        );
-        assert_eq!(Boundary::from_text_end("Is it? "), Boundary::Sentence);
-        assert_eq!(
-            Boundary::from_text_end("He said \"go.\""),
-            Boundary::Sentence
-        );
-        assert_eq!(Boundary::from_text_end("a long time,"), Boundary::Clause);
-        assert_eq!(Boundary::from_text_end("You will need:"), Boundary::Clause);
-        assert_eq!(
-            Boundary::from_text_end("The weather in Nairobi"),
-            Boundary::Word
-        );
-        assert_eq!(Boundary::from_text_end(""), Boundary::Word);
-    }
-
-    #[test]
-    fn pauses_rise_with_the_break_they_mark() {
-        let order = [
-            Boundary::End,
-            Boundary::Word,
-            Boundary::Clause,
-            Boundary::ListLine,
-            Boundary::Sentence,
-            Boundary::Paragraph,
-        ];
-        for pair in order.windows(2) {
-            assert!(pair[0].pause_secs() < pair[1].pause_secs(), "{pair:?}");
-        }
-    }
-
     fn texts(units: &[SpeechUnit]) -> Vec<&str> {
         units.iter().map(|u| u.text.as_str()).collect()
     }
 
-    fn boundaries(units: &[SpeechUnit]) -> Vec<Boundary> {
-        units.iter().map(|u| u.boundary).collect()
-    }
-
-    /// A reply as the model streams it: each word, then the space after it.
+    /// The reply as a model streams it: a word and its leading space at a time.
     fn tokens_of(reply: &str) -> Vec<String> {
-        reply
-            .split_inclusive(char::is_whitespace)
-            .flat_map(|w| {
-                let (word, space) = w.split_at(w.trim_end().len());
-                [word.to_string(), space.to_string()]
-            })
-            .filter(|t| !t.is_empty())
-            .collect()
+        let mut tokens = Vec::new();
+        for (k, word) in reply.split(' ').enumerate() {
+            tokens.push(if k == 0 {
+                word.to_string()
+            } else {
+                format!(" {word}")
+            });
+        }
+        tokens
     }
 
-    fn stream(reply: &str, pace: Pace) -> Vec<SpeechUnit> {
+    fn stream(reply: &str) -> Vec<SpeechUnit> {
         let mut splitter = ReplySplitter::new();
         let mut units = Vec::new();
         for token in tokens_of(reply) {
-            units.extend(splitter.push(&token, pace));
+            units.extend(splitter.push(&token));
         }
         units.extend(splitter.finish());
         units
     }
 
-    #[test]
-    fn a_whole_text_splits_at_sentences() {
-        let units = split_text("Hello world. How are you? I'm fine!\nNew paragraph.");
-        assert_eq!(
-            texts(&units),
-            [
-                "Hello world.",
-                "How are you?",
-                "I'm fine!",
-                "New paragraph."
-            ]
-        );
-        assert_eq!(
-            boundaries(&units),
-            [
-                Boundary::Sentence,
-                Boundary::Sentence,
-                Boundary::Sentence,
-                Boundary::End
-            ]
-        );
-    }
+    const SHORT: &str = "Sure, I can help with that. It is 23 degrees in Nairobi, with light \
+                         rain after four; take a jacket. Shall I remind you?";
+
+    const LONG: &str = "Bread needs four things: flour, water, salt and yeast. Mix them, then \
+                        leave the dough to rest for an hour, or longer if the kitchen is cold. \
+                        Shape it gently, so the air stays in. Bake it hot, at 230 degrees, until \
+                        the crust is dark and the loaf sounds hollow when you tap it. Let it cool \
+                        before you cut it, however good it smells.";
 
     #[test]
-    fn the_first_unit_ends_at_its_first_clause_after_three_words() {
-        let units = split_text("I would be glad to help with that, and here are the details.");
-        assert_eq!(
-            texts(&units),
-            [
-                "I would be glad to help with that,",
-                "and here are the details."
-            ]
-        );
-        assert_eq!(boundaries(&units), [Boundary::Clause, Boundary::End]);
-        assert_eq!(
-            texts(&split_text("Sure, let's start the project.")),
-            ["Sure, let's start the project."],
-            "a clause of two words stays with its sentence"
-        );
-    }
-
-    #[test]
-    fn later_sentences_stay_whole_while_there_is_time() {
-        let reply = "Sure. It is sunny, and the high is 26 degrees, with wind from the east.";
-        assert_eq!(
-            texts(&stream(reply, Pace::UNHURRIED)),
-            [
-                "Sure.",
-                "It is sunny, and the high is 26 degrees, with wind from the east."
-            ]
-        );
-    }
-
-    #[test]
-    fn later_sentences_split_at_clauses_when_synthesis_is_behind() {
-        let reply = "Sure. It is sunny, and the high is 26 degrees, with wind from the east.";
-        let units = stream(reply, Pace::BEHIND);
-        assert_eq!(
-            texts(&units),
-            [
-                "Sure.",
-                "It is sunny,",
-                "and the high is 26 degrees,",
-                "with wind from the east."
-            ]
-        );
-        assert_eq!(units[1].boundary, Boundary::Clause);
-    }
-
-    #[test]
-    fn a_clause_cut_waits_until_the_sentence_would_not_be_ready_in_time() {
-        let pace = |slack_secs| Pace {
-            slack_secs,
-            synth_secs_per_token: 0.06,
-        };
-        // "It is sunny," is ~13 tokens; with the 40-token lookahead it needs ~3.2 s of slack.
-        let reply = "Sure. It is sunny, and the high is 26 degrees.";
-        assert_eq!(stream(reply, pace(2.0)).len(), 3);
-        assert_eq!(stream(reply, pace(5.0)).len(), 2);
-    }
-
-    #[test]
-    fn numbers_and_abbreviations_do_not_end_units() {
-        for text in [
-            "There are 1,000 units ready.",
-            "The temperature is 25.3 degrees Celsius.",
-            "Dr. Smith arrived at 7:30 a.m. today.",
-        ] {
-            assert_eq!(texts(&stream(text, Pace::BEHIND)), [text]);
-        }
-    }
-
-    #[test]
-    fn marks_at_the_end_of_the_buffer_wait_for_what_follows() {
-        let mut s = ReplySplitter::new();
-        assert!(
-            s.push("The temperature is 25.", Pace::BEHIND).is_empty(),
-            "25.3 may follow"
-        );
-        assert!(s.push("3 degrees", Pace::BEHIND).is_empty());
-        let mut s = ReplySplitter::new();
-        assert!(s
-            .push("I would be glad to help with that,", Pace::BEHIND)
-            .is_empty());
-        let mut s = ReplySplitter::new();
-        assert!(s.push("First one.", Pace::UNHURRIED).is_empty());
-        assert!(
-            s.push("\n\n", Pace::UNHURRIED).is_empty(),
-            "the break is not over yet"
-        );
-        let units = s.push("Second", Pace::UNHURRIED);
-        assert_eq!(units, [SpeechUnit::new("First one.", Boundary::Paragraph)]);
-        assert_eq!(s.finish(), [SpeechUnit::new("Second", Boundary::End)]);
-    }
-
-    #[test]
-    fn a_pause_in_the_stream_says_the_sentences_already_whole() {
-        let mut s = ReplySplitter::new();
-        assert!(s
-            .push("Let me check the weather.", Pace::UNHURRIED)
-            .is_empty());
-        assert_eq!(
-            s.pause(Pace::UNHURRIED),
-            [SpeechUnit::new(
-                "Let me check the weather.",
-                Boundary::Sentence
-            )]
-        );
-        assert!(s.push(" It is", Pace::UNHURRIED).is_empty());
-        assert!(
-            s.pause(Pace::UNHURRIED).is_empty(),
-            "half a sentence waits for the rest"
-        );
-        assert_eq!(texts(&s.finish()), ["It is"]);
-    }
-
-    #[test]
-    fn the_first_unit_keeps_whole_sentences_without_midphrase_cuts() {
-        let reply =
-            "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon. Then";
-        let units = stream(reply, Pace::UNHURRIED);
-        assert_eq!(
-            texts(&units),
-            [
-                "The weather in Nairobi today is expected to be warm and mostly sunny all afternoon.",
-                "Then"
-            ]
-        );
-        assert_eq!(units[0].boundary, Boundary::Sentence);
-        assert_eq!(
-            texts(&stream(
-                "Here is a simple chapati recipe for about eight pieces. More.",
-                Pace::UNHURRIED
-            )),
-            [
-                "Here is a simple chapati recipe for about eight pieces.",
-                "More."
-            ],
-            "a mark ends the first unit naturally"
-        );
-    }
-
-    #[test]
-    fn a_number_starting_a_line_is_a_list_marker_not_a_sentence() {
-        let units = split_text("Here is how.\n1. Mix the flour, salt and sugar.\n2. Add the oil.");
-        assert_eq!(
-            texts(&units),
-            [
-                "Here is how.",
-                "1. Mix the flour, salt and sugar.",
-                "2. Add the oil."
-            ]
-        );
-        assert_eq!(
-            boundaries(&units),
-            [Boundary::ListLine, Boundary::ListLine, Boundary::End]
-        );
-    }
-
-    #[test]
-    fn list_lines_end_units_and_get_a_comma_when_unpunctuated() {
-        let units =
-            split_text("You will need:\n- 3 cups of flour\n- 1 teaspoon of salt\n\nMix them well.");
-        assert_eq!(
-            texts(&units),
-            [
-                "You will need:",
-                "- 3 cups of flour,",
-                "- 1 teaspoon of salt",
-                "Mix them well."
-            ]
-        );
-        assert_eq!(
-            boundaries(&units),
-            [
-                Boundary::ListLine,
-                Boundary::ListLine,
-                Boundary::Paragraph,
-                Boundary::End
-            ]
-        );
-    }
-
-    #[test]
-    fn a_wrapped_line_of_prose_is_not_a_break() {
-        let text = "This is a long sentence that the model\nwrapped onto a second line.";
-        assert_eq!(
-            texts(&split_text(&format!("Okay. {text}"))),
-            ["Okay.", text]
-        );
-        let header = "Weather Updates\nThe temperature is 25.3 degrees Celsius.";
-        assert_eq!(texts(&split_text(header)), [header]);
-    }
-
-    #[test]
-    fn a_blank_line_ends_a_unit_however_short_and_collapses_its_whitespace() {
-        let units = split_text("Ingredients\n\nTwo cups.\t\t\n\n   Then knead.");
-        assert_eq!(texts(&units), ["Ingredients", "Two cups.", "Then knead."]);
-        assert_eq!(
-            boundaries(&units),
-            [Boundary::Paragraph, Boundary::Paragraph, Boundary::End]
-        );
-    }
-
-    #[test]
-    fn a_sentence_past_the_budget_is_cut_at_its_last_clause() {
-        let clause = "and then the dough is folded over again";
-        let long = format!("Okay. {}.", [clause; 8].join(", "));
-        let units = stream(&long, Pace::UNHURRIED);
-        assert!(units.len() >= 3, "{:?}", texts(&units));
-        for unit in &units[1..units.len() - 1] {
+    fn a_reply_one_pass_holds_is_said_whole() {
+        let mut splitter = ReplySplitter::new();
+        for token in tokens_of(SHORT) {
             assert!(
-                estimate_tokens(&unit.text) <= UNIT_TOKEN_BUDGET,
-                "{}",
-                unit.text
+                splitter.push(&token).is_empty(),
+                "nothing is said while the model is still writing"
             );
-            assert_eq!(unit.boundary, Boundary::Clause, "{}", unit.text);
         }
+        assert_eq!(splitter.finish(), vec![SpeechUnit::closing(SHORT)]);
+        assert_eq!(split_text(SHORT), vec![SpeechUnit::closing(SHORT)]);
+    }
+
+    #[test]
+    fn a_reply_past_one_pass_gives_up_a_full_unit_while_it_streams() {
+        let mut splitter = ReplySplitter::new();
+        let mut early = Vec::new();
+        for token in tokens_of(LONG) {
+            early.extend(splitter.push(&token));
+        }
+        assert_eq!(
+            texts(&early),
+            vec![
+                "Bread needs four things: flour, water, salt and yeast. Mix them, then leave \
+                 the dough to rest for an hour, or longer if the kitchen is cold. Shape it \
+                 gently, so the air stays in."
+            ]
+        );
+        assert!(!early[0].last);
+        let rest = splitter.finish();
+        assert_eq!(
+            texts(&rest),
+            vec![
+                "Bake it hot, at 230 degrees, until the crust is dark and the loaf sounds \
+                 hollow when you tap it. Let it cool before you cut it, however good it smells."
+            ]
+        );
+        assert!(rest[0].last);
+    }
+
+    #[test]
+    fn every_unit_fits_a_pass_and_only_the_closing_one_is_last() {
+        let text = [LONG, LONG, SHORT].join(" ");
+        let units = split_text(&text);
+        assert!(units.len() >= 4, "{units:?}");
+        for (k, unit) in units.iter().enumerate() {
+            assert!(estimate_tokens(&unit.text) <= UNIT_TOKEN_BUDGET, "{unit:?}");
+            assert_eq!(unit.last, k == units.len() - 1);
+            assert!(
+                unit.text.ends_with(['.', '?']),
+                "a unit ends where a sentence does: {unit:?}"
+            );
+        }
+        assert_eq!(
+            texts(&units).join(" "),
+            text,
+            "nothing is lost or said twice"
+        );
     }
 
     #[test]
     fn a_streamed_reply_is_cut_where_the_whole_of_it_is() {
-        let reply = "Herons hunt by standing still for a long time, then striking fast. \
-                     They eat fish, frogs and insects, and some even bait the water with bread.\n\n\
-                     Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake.";
-        let streamed = stream(reply, Pace::UNHURRIED);
-        assert_eq!(streamed, split_text(reply));
-        assert_eq!(
-            texts(&streamed),
-            [
-                "Herons hunt by standing still for a long time,",
-                "then striking fast.",
-                "They eat fish, frogs and insects, and some even bait the water with bread.",
-                "Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake."
-            ]
-        );
-        assert_eq!(streamed[2].boundary, Boundary::Paragraph);
+        let text = [LONG, SHORT, LONG].join(" ");
+        assert_eq!(stream(&text), split_text(&text));
     }
 
     #[test]
-    fn queued_units_are_packed_within_a_paragraph_and_the_budget() {
-        let queue = || {
-            std::collections::VecDeque::from(vec![
-                SpeechUnit::new("Salt matters too.", Boundary::Sentence),
-                SpeechUnit::new("A little slows the yeast.", Boundary::Sentence),
-                SpeechUnit::new("Too much stops it.", Boundary::Paragraph),
-                SpeechUnit::new("Shall I go on?", Boundary::End),
-            ])
-        };
-        let mut q = queue();
-        let first = pack_units(&mut q, Pace::UNHURRIED).unwrap();
+    fn a_tool_pause_says_everything_written_so_far() {
+        let mut splitter = ReplySplitter::new();
+        assert!(splitter.push("Let me check the forecast").is_empty());
         assert_eq!(
-            first,
-            SpeechUnit::new(
-                "Salt matters too. A little slows the yeast. Too much stops it.",
-                Boundary::Paragraph
-            )
+            splitter.pause(),
+            vec![SpeechUnit::from_text("Let me check the forecast")]
         );
+        assert!(splitter.pending().is_empty());
+        assert!(splitter.push(" It is dry until six.").is_empty());
         assert_eq!(
-            pack_units(&mut q, Pace::UNHURRIED).unwrap().text,
-            "Shall I go on?"
+            splitter.finish(),
+            vec![SpeechUnit::closing("It is dry until six.")]
         );
-        assert!(pack_units(&mut q, Pace::UNHURRIED).is_none());
-
-        let mut q = queue();
-        assert_eq!(
-            pack_units(&mut q, Pace::BEHIND).unwrap().text,
-            "Salt matters too.",
-            "behind, the next unit goes alone so its audio comes sooner"
-        );
-
-        let long = "word ".repeat(UNIT_TOKEN_BUDGET / 6);
-        let mut q = std::collections::VecDeque::from(vec![
-            SpeechUnit::new(long.trim(), Boundary::Sentence),
-            SpeechUnit::new(long.trim(), Boundary::Sentence),
-        ]);
-        assert_eq!(
-            pack_units(&mut q, Pace::UNHURRIED).unwrap().text,
-            long.trim()
-        );
+        assert!(splitter.finish().is_empty());
     }
 
     #[test]
-    fn packed_list_lines_keep_their_own_lines() {
-        let mut q = std::collections::VecDeque::from(vec![
-            SpeechUnit::new("- 3 cups of flour,", Boundary::ListLine),
-            SpeechUnit::new("- 1 teaspoon of salt,", Boundary::ListLine),
-        ]);
-        let unit = pack_units(&mut q, Pace::UNHURRIED).unwrap();
-        assert_eq!(unit.text, "- 3 cups of flour,\n- 1 teaspoon of salt,");
+    fn a_long_list_is_cut_at_a_line_end() {
+        let lines: Vec<String> = (1..=14)
+            .map(|k| format!("{k}. item number {k} of the list"))
+            .collect();
+        let units = split_text(&lines.join("\n"));
+        assert!(units.len() > 1);
+        for unit in &units {
+            assert!(estimate_tokens(&unit.text) <= UNIT_TOKEN_BUDGET);
+            for line in unit.text.lines() {
+                assert!(lines.iter().any(|l| l == line), "a line was cut: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_number_does_not_end_a_unit() {
+        let text = format!(
+            "{} It costs 3. 5 or so, {}",
+            "word ".repeat(30),
+            "more ".repeat(20)
+        );
+        let first = &split_text(&text)[0].text;
+        assert!(!first.ends_with("3."), "{first:?}");
+    }
+
+    #[test]
+    fn a_sentence_longer_than_a_pass_is_cut_at_a_space() {
+        let text = "word ".repeat(80);
+        let units = split_text(&text);
+        assert!(units.len() > 1);
+        for unit in &units {
+            assert!(estimate_tokens(&unit.text) <= UNIT_TOKEN_BUDGET);
+            assert!(unit.text.split(' ').all(|w| w == "word"), "{unit:?}");
+        }
+        let run = "a".repeat(UNIT_CHARS * 2 + 5);
+        let units = split_text(&run);
+        assert_eq!(units.len(), 3);
+        assert_eq!(texts(&units).concat(), run);
+    }
+
+    #[test]
+    fn whole_lists_reach_the_markdown_pass_with_their_lines() {
+        let units = split_text("You will need:\n- 3 cups of flour\n- 1 teaspoon of salt");
+        assert_eq!(units.len(), 1);
         assert_eq!(
-            strip_markdown_for_speech(&unit.text),
-            "3 cups of flour, 1 teaspoon of salt,"
+            strip_markdown_for_speech(&units[0].text),
+            "You will need: 3 cups of flour, 1 teaspoon of salt"
         );
     }
 

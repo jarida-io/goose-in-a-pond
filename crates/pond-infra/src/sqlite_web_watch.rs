@@ -139,15 +139,18 @@ impl WebWatchRepository for SqliteWebWatchRepository {
         .await?;
         for change in &outcome.changes {
             sqlx::query(
-                "INSERT INTO web_watch_changes (watch_id, found_at, change, matched, digested) \
-                 VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO web_watch_changes \
+                 (watch_id, found_at, change, matched, digested, held) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(outcome.checked_at.to_rfc3339())
             .bind(serde_json::to_string(change)?)
             .bind(i64::from(change.matched))
-            // A match is pushed when found, so no digest repeats it.
-            .bind(i64::from(change.matched))
+            // A match is pushed when found, so no digest repeats it; a held change is told
+            // by its judgement or not at all.
+            .bind(i64::from(change.matched || outcome.held))
+            .bind(i64::from(outcome.held))
             .execute(&mut *tx)
             .await?;
         }
@@ -249,6 +252,30 @@ impl WebWatchRepository for SqliteWebWatchRepository {
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected())
+    }
+
+    async fn held(&self, limit: usize) -> Result<Vec<StoredChange>> {
+        let rows = sqlx::query(
+            "SELECT id, watch_id, found_at, change, digested FROM web_watch_changes \
+             WHERE held = 1 ORDER BY id LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(change_of).collect()
+    }
+
+    async fn judged(&self, judged: &[i64], told: &[i64]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for id in judged {
+            sqlx::query("UPDATE web_watch_changes SET held = 0, matched = ? WHERE id = ?")
+                .bind(i64::from(told.contains(id)))
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -352,6 +379,7 @@ mod tests {
             checked_at: now,
             next_check_at: now + Duration::hours(6),
             changes: vec![change("b", true), change("c", false)],
+            held: false,
         };
         repo.record_check("w1", &outcome).await.unwrap();
         let got = repo.get("w1").await.unwrap().unwrap();
@@ -398,5 +426,40 @@ mod tests {
         assert!(repo.get("w2").await.unwrap().is_none());
         assert!(repo.delete("amina", "w1").await.unwrap());
         assert!(repo.get("w1").await.unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn held_changes_reach_no_digest_and_a_judgement_releases_them() {
+        let (repo, _tmp) = repo().await;
+        let now = Utc::now();
+        repo.create(&watch("w1", "amina", now)).await.unwrap();
+        let outcome = CheckOutcome {
+            items: Some(vec![item("b"), item("c")]),
+            failures: 0,
+            checked_at: now,
+            next_check_at: now + Duration::hours(6),
+            changes: vec![change("b", false), change("c", false)],
+            held: true,
+        };
+        repo.record_check("w1", &outcome).await.unwrap();
+
+        let held = repo.held(10).await.unwrap();
+        assert_eq!(held.len(), 2);
+        assert!(repo.undigested("amina").await.unwrap().is_empty());
+        assert!(repo.owners_with_undigested().await.unwrap().is_empty());
+
+        repo.judged(&[held[0].id, held[1].id], &[held[0].id])
+            .await
+            .unwrap();
+        assert!(repo.held(10).await.unwrap().is_empty());
+        let (matched,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM web_watch_changes WHERE matched = 1")
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(matched, 1, "only what was asked for counts as a match");
+        assert!(
+            repo.undigested("amina").await.unwrap().is_empty(),
+            "the rest is untold"
+        );
     }
 }

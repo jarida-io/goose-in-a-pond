@@ -37,6 +37,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me/ideas", get(list))
         .route("/me/ideas/refresh", post(refresh))
+        .route("/me/ideas/{id}", get(read))
         .route("/me/ideas/{id}/goose", post(goose))
         .route("/me/ideas/{id}/mine", post(mine))
         .route("/me/ideas/{id}/dismiss", post(dismiss))
@@ -54,6 +55,16 @@ async fn list(
         "ideas": ideas,
         "state": if run.is_thinking(Utc::now()) { "thinking" } else { "idle" },
     })))
+}
+
+/// `GET /me/ideas/{id}`: the idea's own page.
+async fn read(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    let member = caller_member(&state, principal.as_ref()).await?;
+    Ok(Json(json!(the_idea(&state, &member, &id).await?)))
 }
 
 async fn refresh(
@@ -164,13 +175,16 @@ async fn goose(
             "Goose has nothing to do for this idea",
         ));
     };
-    let task_id = match part.kind {
+    let (state_to_set, task_id) = match part.kind {
         // The phone opens a chat about it; nothing starts on the Pond.
         GooseKind::Chat => return Ok(Json(json!(idea))),
-        GooseKind::Research => Some(start_research(&state, &member, &idea).await?),
+        GooseKind::Research => (
+            IdeaState::Working,
+            Some(start_research(&state, &member, &idea).await?),
+        ),
         GooseKind::Schedule => {
             start_schedule(&state, &idea).await?;
-            None
+            (IdeaState::Done, None)
         }
         GooseKind::Todo => {
             let first = idea
@@ -182,15 +196,15 @@ async fn goose(
                 .add_todo(&member, &idea.id, &first)
                 .await
                 .map_err(server_error)?;
-            None
+            (IdeaState::Working, None)
         }
         GooseKind::Watch => {
             start_watch(&state, &member, &idea).await?;
-            None
+            (IdeaState::Done, None)
         }
     };
     repo(&state)
-        .set_state(&member, &idea.id, IdeaState::Working, task_id.as_deref())
+        .set_state(&member, &idea.id, state_to_set, task_id.as_deref())
         .await
         .map_err(server_error)?;
     tracing::info!(
@@ -214,11 +228,12 @@ async fn start_research(state: &AppState, member: &str, idea: &Idea) -> Result<S
             "deep research is switched off on this Pond",
         ));
     }
-    let question = idea
-        .goose_plan
-        .prompt
-        .clone()
-        .unwrap_or_else(|| format!("{}: {}", idea.title, idea.pitch));
+    let question = idea.goose_plan.prompt.clone().unwrap_or_else(|| {
+        format!(
+            "{}: {}. Research practical execution steps, requirements, and resources for this household on Goose In A Pond.",
+            idea.title, idea.pitch
+        )
+    });
     let session_id = uuid::Uuid::new_v4().to_string();
     state
         .session_storage

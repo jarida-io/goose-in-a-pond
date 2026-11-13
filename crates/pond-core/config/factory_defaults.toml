@@ -29,6 +29,7 @@ active_llm_model = ""
 # ── Voice pipeline ────────────────────────────────────────────────────────
 wake_word = "hey goose"
 voice_room_enabled = true
+browser_rendering_enabled = true
 kws_energy_threshold = 0.003
 kws_post_trigger_silence_ms = 400
 kws_cooldown_ms = 2000
@@ -167,7 +168,7 @@ unprompted_speech_enabled = false
 quiet_hours_start = "22:00"
 quiet_hours_end = "07:00"
 unprompted_speech_categories = "alert"
-proactive_review_enabled = false
+proactive_review_enabled = true
 long_tasks_enabled = true
 agent_activations_enabled = true
 context_ingest_enabled = false

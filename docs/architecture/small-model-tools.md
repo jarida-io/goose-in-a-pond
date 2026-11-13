@@ -1307,9 +1307,10 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
    - when no line scores, part 1 and the outline.
 5. **Cache.** The last 8 pages read, for 10 minutes. A part asked for after a question costs no
    second fetch.
-6. **History.** The result is transient. History keeps "A web page's text is not kept after the
-   turn. Read it again with giap-knowledge__read_web_page: <address>", and the desktop's reloaded
-   line names the host.
+6. **History.** The result stays whole in history. Reducing it to a stub after the turn rewrote
+   the conversation behind the model's cache, and the next turn decoded everything after it again.
+   A conversation read before this kept "A web page's text is not kept after the turn. Read it
+   again with giap-knowledge__read_web_page: <address>", which the desktop still shows by host.
 
 ### 9.4 Who uses it
 

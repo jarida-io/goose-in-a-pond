@@ -24,7 +24,13 @@ impl GooseProviderAdapter {
 
     fn to_goose_message(msg: &ChatMessage) -> GooseMessage {
         match msg.role {
-            Role::User => GooseMessage::user().with_text(&msg.content),
+            // A side call may show the model a picture: a screenshot read for a note.
+            Role::User => msg
+                .images
+                .iter()
+                .fold(GooseMessage::user().with_text(&msg.content), |m, img| {
+                    m.with_image(&img.data, &img.mime_type)
+                }),
             Role::Assistant => GooseMessage::assistant().with_text(&msg.content),
             Role::System => {
                 // Goose has no System role (that text goes in `system`); fall back to User.
@@ -101,11 +107,19 @@ impl LlmProvider for GooseProviderAdapter {
             &goose_messages,
             &[], // no tools for direct completion
         );
+        let helper_completion = async {
+            if goose_providers::request_context::is_helper() {
+                completion.await
+            } else {
+                goose_providers::request_context::as_helper(true, completion).await
+            }
+        };
         let completed = match &call {
             Some(call) => {
-                goose_providers::request_context::stopping_when(call.stop_when(), completion).await
+                goose_providers::request_context::stopping_when(call.stop_when(), helper_completion)
+                    .await
             }
-            None => completion.await,
+            None => helper_completion.await,
         };
         lease.finished();
         if call.as_ref().is_some_and(|call| call.was_cut()) {

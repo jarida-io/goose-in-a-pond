@@ -7,20 +7,20 @@ markdown, and with symbols, units and abbreviations spelled out ("5km" as "5 kil
 ## Where it runs
 
 ```
-model tokens -> ThoughtFilter (reasoning removed) -> ReplySplitter::push(text, pipeline.pace())
-  -> SpeechPipeline: pack_units -> VoiceOutput::synthesize_unit(unit)
+model tokens -> ThoughtFilter (reasoning removed) -> ReplySplitter::push(text)
+  -> SpeechPipeline -> VoiceOutput::synthesize_unit(unit)
        tokenizer::chunk: strip_markdown_for_speech -> normalize_for_speech
                          -> phonemize (espeak-ng, per run of speech, punctuation kept)
                          -> vocab ids -> chunks of at most 510 tokens
-       each forward pass trimmed to its speech, then the pause the unit's boundary calls for
-  -> play
+       each forward pass trimmed to its speech, then a gap unless the unit is the last
+  -> held until what is still owed can follow, then played
 ```
 
 | Step | Function | Callers |
 |---|---|---|
-| Split a streaming reply into units | `ReplySplitter::push`, `pause` when the stream stalls or a tool starts, `finish` at its end | `ChatService::stream_response_inner` (voice loop) |
+| Hold a streaming reply and give it up as units | `ReplySplitter::push`, `pause` when a tool starts, `finish` at its end | `ChatService::stream_response_inner` (voice loop) |
 | Split a whole text into units | `split_text` | `Announcer::speak_text` (`crates/pond-audio-out/src/announce.rs`, spoken scheduled tasks, once their reply is complete), `KokoroOutput::speak` |
-| Synthesise and play one reply | `SpeechPipeline` (`crates/pond-core/src/models/services/voice/speech_pipeline.rs`) | the voice loop and `Announcer::speak_text` |
+| Synthesise and play one reply | `SpeechPipeline` (`crates/pond-core/src/models/services/voice/speech_pipeline.rs`) | the voice loop |
 | Markdown to plain text, then normalize | `strip_markdown_for_speech` -> `normalize_for_speech` | `tokenizer::chunk` in `crates/pond-adapters-kokoro/src/tokenizer.rs`, so every Kokoro synthesis: the voice loop, `AudioBus`, `POST /api/v1/tts`, voice previews |
 
 Normalization happens inside the Kokoro adapter, not in the callers, so every path gets it once.
@@ -29,46 +29,53 @@ UI and stored in history is the model's text, not the normalized one.
 
 ## Splitting into speech units
 
-A unit is a `SpeechUnit`: its text and the `Boundary` that ends it (`Word`, `Clause`, `ListLine`,
-`Sentence`, `Paragraph` or `End`). The first unit of a reply ends early, so the first sound does
-not wait on a whole sentence: Kokoro synthesises a unit whole, at about real time on the nano.
-Later units are whole sentences. A later sentence is cut at a clause mark only when the pipeline
-is behind: when the audio queued for the speaker, less the synthesis still owed, is shorter than
-the sentence so far plus 40 tokens would take (`Pace::can_wait_for`).
+Kokoro shapes the pauses of whatever it is given in one forward pass: about 0.35 s at a comma,
+0.5 to 0.6 s at a full stop. So the pond does not cut a reply at its punctuation. A reply is held
+while the model writes it and handed to Kokoro whole.
 
-| Rule | Detail |
+A unit is a `SpeechUnit`: its text, and `last` when nothing follows it. `ReplySplitter` gives one up:
+
+| When | What is given up |
 |---|---|
-| Sentence ends | `.`, `?`, `!` or an ellipsis, with any run of them and closing quotes or brackets, then whitespace. A mark at the end of the buffer waits for the next token, which says whether a paragraph or list line follows; a stall of 200 ms (`SENTENCE_HOLD`) or a tool call releases it with what has arrived |
-| Clause marks | `,` `;` `:` and em dash, once at least 3 words have accumulated, and only when whitespace follows. Always for the first unit; later only when behind. A mark that ends its line is left to the newline |
-| Numbers | `,` and `:` between digits do not split (`1,000`, `3:45`); `.` after a digit does not split when a digit follows or the buffer ends there (a decimal still streaming). A number of up to three digits starting a line, then `.`, is a list marker, not a sentence end |
-| Abbreviations | `.` after a known abbreviation (`Dr`, `Mr`, `etc`, `e.g`, `a.m`, month names and others in `is_abbrev_suffix`) or a single letter does not split |
-| Newlines | A blank line ends a unit after any words (`Paragraph`). A single newline ends one when its line or the next is a list item (`-`, `*`, `+`, bullet, `1.`, `1)`), and the unit gets a comma if it has no mark (`ListLine`). Any other single newline is a wrapped line |
-| First unit | Ends at its first clause mark after 3 words, or its sentence end |
-| Budget | A unit is cut before it passes 200 estimated tokens (`UNIT_TOKEN_BUDGET`, about 1.1 per character): at its last clause mark, else its last space |
+| The stream ends (`finish`) | Everything held, the final unit marked `last` |
+| The model stops writing to use a tool (`pause`) | Everything written so far |
+| The held text passes one pass (`push`) | The longest start of it that fits |
 
-`pack_units` joins units waiting behind a slow synthesis into one pass, within one paragraph and the
-budget, and only when the joined unit can still be ready before the queued audio runs out. Fewer,
-longer passes waste less: every pass synthesises its own edge silence.
+One pass holds 200 estimated tokens (`UNIT_TOKEN_BUDGET`, about 1.1 per character, so 181
+characters or some 11 s of speech). Kokoro takes 510, but on the nano its speech is even only to
+about 200: by 300 it speaks 5 to 8% faster and costs more work for each second of speech.
 
-## Pauses between units
+A text longer than a pass is the one place the pond picks a cut (`fitting_cut`): the last sentence
+end (`.`, `?`, `!` or an ellipsis, with closing quotes or brackets, then whitespace) or line end
+that fits; failing that the last space. A full stop after a digit is not an end, so a decimal or a
+list number stays with what follows it. `split_text` cuts a text that is all there the same way
+(announcements, greetings, the news).
+
+## The hold before the first sound
+
+Units are synthesised one at a time (`SpeechPipeline`). An engine slower than its own speech (the
+nano's Kokoro takes 1.25 to 1.4 s for each second) cannot have the second unit of a long reply
+ready when the first ends, and would stop between them. So a sound that starts from silence is
+held until the units still owed can follow it without a gap (`hold_secs`): the pipeline predicts
+each owed unit's synthesis and speech from the unit it has just measured, and logs the wait as
+`kind="speech_hold"`. A reply of one unit is never held, nor is one on an engine that keeps ahead.
+The working tone plays through the hold.
+
+Speech outside a turn (`Announcer`, `KokoroOutput::speak`) synthesises all of its units before it
+plays any: nobody is waiting on its first word.
+
+## Between units
 
 Each forward pass is trimmed to 30 ms before its first sound and 50 ms after its last (a frame
-counts as sound within 40 dB of the loudest and above -50 dBFS), and is followed by the pause its
-boundary calls for, divided by the speed. Kokoro puts about 0.3 s of near-silence before and 0.5 s
-after every pass, so before this each boundary was about 0.8 s whatever ended it.
+counts as sound within 40 dB of the loudest and above -50 dBFS): Kokoro puts about 0.3 s of
+near-silence before and 0.5 s after every pass. A unit that another follows then ends in 0.5 s of
+silence (`UNIT_GAP_SECS`, divided by the speed), about what Kokoro leaves at a full stop inside a
+pass; the `last` unit ends at rest.
 
-| Boundary | Pause | Inside one Kokoro pass, for comparison |
-|---|---|---|
-| `Word` (a cut inside a phrase) | 0.10 s | |
-| `Clause` | 0.30 s | about 0.35 s at a comma |
-| `ListLine` | 0.40 s | |
-| `Sentence` | 0.50 s | 0.5-0.6 s at a full stop |
-| `Paragraph` | 0.80 s | |
-| `End` | none | |
-
-`/tts` and other plain-text callers have no boundary to pass, so the text's last mark picks it
-(`Boundary::from_text_end`): a phone gets 0.5 s, not 0.8 s, at a paragraph end. The DAC wake
-pre-roll is played only before the first audio after idle, never between units of one reply.
+`POST /tts` takes `{text, last?}`. Without `last` the audio ends in the gap, so a caller that plays
+several units back to back needs no silence of its own, and sends `last: true` with the final one.
+A text longer than a pass is cut as above and comes back as one WAV. The DAC wake pre-roll is
+played only before the first audio after idle, never between units of one reply.
 
 The style row also sets the pace: Kokoro's voice packs hold one style per utterance length, row
 `n - 1` for `n` tokens, and a higher row speaks slower. Units past 125 tokens share row 124
@@ -186,16 +193,17 @@ Matched case-insensitively at the start of a word (start of text, or after white
 2. Add a test in the same file's `tests` module.
 3. Run `cargo test -p pond-voice`.
 
-The `tests` module has 115 tests, among them 53 `normalize_*`, 11 `markdown_*` and 6 `filter_*`,
-the splitter and packing tests, and the rest on wake-word matching and Whisper artifacts.
+The `tests` module covers these rules (`normalize_*`), markdown (`markdown_*`), the thinking
+filter (`filter_*`), the splitter, wake-word matching and Whisper artifacts.
 
 ## The browser voice path
 
 `pond-desktop/src/modes/voice/webAudioUtils.ts` carries TypeScript versions used by
 `WebVoiceBackend` before it posts each unit to `/api/v1/tts` (where Kokoro normalizes again):
 
-- `ReplySplitter` and `splitText` port the splitter. With no pipeline to ask, a caller passes
-  `behind` instead of a pace: `WebVoiceBackend` passes it while nothing is playing.
+- `ReplySplitter` and `splitText` port the splitter, and `holdSecs` the hold. `WebVoiceBackend`
+  times each `/api/v1/tts` request sent alone, and holds the first sound by what the units still
+  unanswered will take. Its thinking tone plays until that sound starts.
 - `stripMarkdown` ports `strip_markdown_for_speech`.
 - `normalizeForSpeech` is not a port: a short regex list covering times, a few units (kg, MB/s,
   KB/s, GB, MB, KB, ms, Hz), $, €, £, Kenyan shillings, e.g., i.e., Dr., Mr., Mrs., °C, °F, %, +, &,
