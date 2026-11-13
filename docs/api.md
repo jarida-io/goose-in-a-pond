@@ -977,7 +977,7 @@ Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 
 | Route | Request | Response |
 |---|---|---|
-| `POST /tts` | `{text}` | `audio/wav` bytes; `400` empty text, `503 {"error":"No TTS backend is running"}` |
+| `POST /tts` | `{text, last?}`; `last: true` when nothing follows this text, so its audio ends at rest instead of in the 0.5 s gap before more | `audio/wav` bytes; `400` empty text, `503 {"error":"No TTS backend is running"}` |
 | `POST /voice/tts/apply` | optional `{voice?, speed?, quality?}`; omitted fields come from settings | `{voice, speed, quality, downloaded_voice, downloaded_weights, engine_reloaded, installed_voices}` |
 | `POST /voice/sample` | exactly `{voice}` | `202 {"speaking": true}` |
 | `GET /voice/tts/status` | | `{available, loaded}` |

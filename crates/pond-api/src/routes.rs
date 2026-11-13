@@ -2150,6 +2150,9 @@ async fn revoke_model(
 #[derive(Deserialize)]
 struct TtsRequest {
     text: String,
+    /// Nothing follows this text: its audio ends at rest instead of in the gap before more.
+    #[serde(default)]
+    last: bool,
 }
 
 /// A browser plays what `/tts` returns as soon as it has it, so other audio is paused before it goes
@@ -2235,7 +2238,11 @@ async fn tts_synthesise(
     }
 
     if let Some(tts) = &state.tts {
-        match tts.synthesize(text).await {
+        let unit = pond_voice::text::SpeechUnit {
+            text: text.to_string(),
+            last: req.last,
+        };
+        match tts.synthesize_unit(&unit).await {
             Ok(Some(wav_bytes)) => {
                 quiet_while_a_browser_plays(&wav_bytes).await;
                 return Response::builder()
