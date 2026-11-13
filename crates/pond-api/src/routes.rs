@@ -2616,7 +2616,8 @@ async fn prepare_turn_audio(
 
 type Transcriber = Arc<dyn Fn(Vec<u8>) -> anyhow::Result<String> + Send + Sync>;
 
-/// Whisper, when memory is too short to load the encoder that would hear a voice note.
+/// Whisper, when memory is too short to load the encoder that would hear a voice note, and
+/// still too short once what reloads on its own has been given back.
 async fn words_instead_of_hearing(
     state: &Arc<AppState>,
     provider: &str,
@@ -2624,16 +2625,31 @@ async fn words_instead_of_hearing(
 ) -> Option<Transcriber> {
     use pond_core::models::domain::audio_input::HearingRoom;
     let transcribe = state.transcribe_audio.clone()?;
-    let agent = state.agent.clone();
-    let (provider, model) = (provider.to_string(), model.to_string());
-    let room = tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
-        .await
-        .unwrap_or(HearingRoom::Unknown);
+    let room = || {
+        let agent = state.agent.clone();
+        let (provider, model) = (provider.to_string(), model.to_string());
+        async move {
+            tokio::task::spawn_blocking(move || agent.hearing_room(&provider, &model))
+                .await
+                .unwrap_or(HearingRoom::Unknown)
+        }
+    };
+    if !matches!(room().await, HearingRoom::Short { .. }) {
+        return None;
+    }
+    let freed = make_room_to_hear(state).await;
     let HearingRoom::Short {
         available_mb,
         needed_mb,
-    } = room
+    } = room().await
     else {
+        tracing::info!(
+            target: "giap::audio",
+            kind = "voice_note_room_made",
+            freed = ?freed,
+            "memory was short for the encoder until these were given back; the model hears the \
+             voice note"
+        );
         return None;
     };
     tracing::info!(
@@ -2641,9 +2657,25 @@ async fn words_instead_of_hearing(
         kind = "voice_note_as_words",
         available_mb,
         needed_mb,
+        freed = ?freed,
         "too little memory to load the encoder; the voice note goes as words"
     );
     Some(transcribe)
+}
+
+/// Gives back the memory of what loads again by itself when next needed: the Memory model and
+/// the voice the pond speaks in. Returns what was given back.
+async fn make_room_to_hear(state: &Arc<AppState>) -> Vec<&'static str> {
+    let mut freed = Vec::new();
+    if state.embedder.unload().await {
+        freed.push("memory_model");
+    }
+    if let Some(tts) = state.tts_control.as_ref() {
+        if tts.is_loaded().await && tts.unload().await.is_ok() {
+            freed.push("voice");
+        }
+    }
+    freed
 }
 
 async fn transcribe_voice_note(

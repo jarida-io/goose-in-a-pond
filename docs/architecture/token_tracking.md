@@ -165,8 +165,9 @@ GIAP's own trimmer, `turn_trimmer::trim_history`, runs through `plan_replay` whe
 example after Goose's `sessions.db` was wiped). It strips stale `<system-context>` blocks,
 head+tail-truncates tool results to `TOOL_RESULT_MAX_BYTES` (1,500), splices the rolling summary,
 optionally re-cuts tool results older than the verbatim horizon, and drops the oldest complete
-turns until the estimate fits. Images are capped separately (`image_history`,
-`MAX_HISTORY_REPLAY_IMAGES = 1`).
+turns until the estimate fits. Images are capped separately (`image_history`): a window keeps
+one history image for each 8,192 tokens of it, eight at most, and when a conversation passes that
+the oldest lose their pixels down to half of it in one rewrite.
 
 The mistral.rs agent and the quarantined `pond-agent` budget history in characters through
 `available_history_chars`.
