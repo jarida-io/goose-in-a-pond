@@ -14,13 +14,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
-use pond_core::mcp::domain::transient_result::{transient_meta, web_page_stub};
 use pond_core::mcp::services::page_addresses::{self, MAX_LINK_DEPTH};
 use pond_core::mcp::services::source_ledger::{self, MAX_CHAT_TURN_READS};
 use pond_core::shared::services::passages;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -261,9 +260,9 @@ whole, and what the page lists.")]
             ms = started.elapsed().as_millis() as u64,
             "web page read"
         );
-        let mut result = CallToolResult::success(vec![ContentBlock::text(reply.text)]);
-        result.meta = Some(Meta(transient_meta(&web_page_stub(&address))));
-        Ok(result)
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            reply.text,
+        )]))
     }
 }
 

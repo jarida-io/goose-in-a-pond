@@ -4395,6 +4395,14 @@ impl GooseAdapter {
                                     .map(|t| now.duration_since(t).as_millis() as u64);
                                 let engine_ttft = pu.stats.as_ref().and_then(|s| s.time_to_first_token_ms);
                                 let engine_prefill = pu.stats.as_ref().and_then(|s| s.prefill_ms);
+                                let prompt_tokens =
+                                    pu.usage.input_tokens.unwrap_or(0).max(0) as u32;
+                                // What the cache served; the rest of the prompt was decoded.
+                                let reused_tokens = pu
+                                    .stats
+                                    .as_ref()
+                                    .and_then(|s| s.reused_prefix_tokens)
+                                    .map_or(0, |n| n as u32);
                                 tracing::info!(
                                     target: "giap::trace",
                                     kind = "inference",
@@ -4404,7 +4412,9 @@ impl GooseAdapter {
                                     since_turn_ms = now.duration_since(turn_start).as_millis() as u64,
                                     engine_ttft_ms = engine_ttft.unwrap_or(0),
                                     engine_prefill_ms = engine_prefill.unwrap_or(0),
-                                    prompt_tokens = pu.usage.input_tokens.unwrap_or(0).max(0) as u32,
+                                    prompt_tokens,
+                                    reused_tokens,
+                                    decoded_tokens = prompt_tokens.saturating_sub(reused_tokens),
                                     output_tokens = pu.usage.output_tokens.unwrap_or(0).max(0) as u32,
                                     tools_before = tools_since_inference,
                                     reengagement = attempt as u32,
