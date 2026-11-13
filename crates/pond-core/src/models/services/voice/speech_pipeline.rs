@@ -18,6 +18,14 @@ pub type SpokenObserver = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Seconds of synthesis per token before any is measured: the nano's q4f16 at about real time.
 const DEFAULT_SYNTH_SECS_PER_TOKEN: f32 = 0.06;
+/// Seconds of synthesis per second of speech before any is measured. Taken as too slow to gain
+/// on the speaker, so a slow board's first reply is not cut inside a sentence.
+const DEFAULT_SYNTH_PER_AUDIO: f32 = 1.0;
+/// Measured seconds of synthesis per second of speech, as `f32` bits and 0 until one is measured.
+type KnownPace = Arc<AtomicU32>;
+/// Kept across replies: a reply's first unit is cut before that reply has measured anything.
+static PROCESS_PACE: std::sync::LazyLock<KnownPace> =
+    std::sync::LazyLock::new(|| Arc::new(AtomicU32::new(0)));
 /// Weight of the newest measurement in the running synthesis rate.
 const RATE_SMOOTHING: f32 = 0.3;
 /// How long a whole sentence waits for the text after it, which says whether a paragraph ends
@@ -44,16 +52,18 @@ struct Meter {
     owed_tokens: AtomicU64,
     /// Measured seconds of synthesis per token, as `f32` bits.
     secs_per_token: AtomicU32,
+    synth_per_audio: KnownPace,
 }
 
 impl Meter {
-    fn new() -> Self {
+    fn new(synth_per_audio: KnownPace) -> Self {
         Self {
             epoch: Instant::now(),
             ready_ms: AtomicU64::new(0),
             playing_until_ms: AtomicU64::new(0),
             owed_tokens: AtomicU64::new(0),
             secs_per_token: AtomicU32::new(DEFAULT_SYNTH_SECS_PER_TOKEN.to_bits()),
+            synth_per_audio,
         }
     }
 
@@ -61,25 +71,50 @@ impl Meter {
         self.epoch.elapsed().as_millis() as u64
     }
 
-    fn pace(&self) -> Pace {
-        let spt = f32::from_bits(self.secs_per_token.load(Ordering::Relaxed));
+    /// The pace with only the audio waiting to play: what the unit synthesised next has to beat.
+    fn queued(&self) -> Pace {
         let playing = self
             .playing_until_ms
             .load(Ordering::Relaxed)
             .saturating_sub(self.now_ms());
-        let queued = (self.ready_ms.load(Ordering::Relaxed) + playing) as f32 / 1000.0;
+        let measured = f32::from_bits(self.synth_per_audio.load(Ordering::Relaxed));
         Pace {
-            slack_secs: queued,
-            synth_secs_per_token: spt,
+            slack_secs: (self.ready_ms.load(Ordering::Relaxed) + playing) as f32 / 1000.0,
+            synth_secs_per_token: f32::from_bits(self.secs_per_token.load(Ordering::Relaxed)),
+            synth_per_audio: if measured > 0.0 {
+                measured
+            } else {
+                DEFAULT_SYNTH_PER_AUDIO
+            },
         }
     }
 
-    fn synthesised(&self, tokens: usize, took_secs: f32) {
+    /// The pace for text still arriving: the units already handed over are synthesised first.
+    fn pace(&self) -> Pace {
+        let queued = self.queued();
+        let owed = self.owed_tokens.load(Ordering::Relaxed) as f32 * queued.synth_secs_per_token;
+        Pace {
+            slack_secs: queued.slack_secs - owed,
+            ..queued
+        }
+    }
+
+    fn synthesised(&self, tokens: usize, took_secs: f32, audio_secs: f32) {
         sub(&self.owed_tokens, tokens as u64);
         if tokens > 0 {
             let old = f32::from_bits(self.secs_per_token.load(Ordering::Relaxed));
             let new = old * (1.0 - RATE_SMOOTHING) + took_secs / tokens as f32 * RATE_SMOOTHING;
             self.secs_per_token.store(new.to_bits(), Ordering::Relaxed);
+        }
+        if audio_secs > 0.0 {
+            let now = took_secs / audio_secs;
+            let old = f32::from_bits(self.synth_per_audio.load(Ordering::Relaxed));
+            let new = if old > 0.0 {
+                old * (1.0 - RATE_SMOOTHING) + now * RATE_SMOOTHING
+            } else {
+                now
+            };
+            self.synth_per_audio.store(new.to_bits(), Ordering::Relaxed);
         }
     }
 }
@@ -107,7 +142,23 @@ impl SpeechPipeline {
         on_playback_start: Option<Box<dyn FnOnce() + Send>>,
         on_playback_done: Option<Box<dyn FnOnce() + Send>>,
     ) -> Self {
-        let meter = Arc::new(Meter::new());
+        Self::start_knowing(
+            PROCESS_PACE.clone(),
+            voice,
+            on_spoken,
+            on_playback_start,
+            on_playback_done,
+        )
+    }
+
+    fn start_knowing(
+        known: KnownPace,
+        voice: Arc<dyn VoiceOutput>,
+        on_spoken: Option<SpokenObserver>,
+        on_playback_start: Option<Box<dyn FnOnce() + Send>>,
+        on_playback_done: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Self {
+        let meter = Arc::new(Meter::new(known));
         let (units_tx, mut units_rx) = mpsc::channel::<SpeechUnit>(16);
         let (audio_tx, mut audio_rx) = mpsc::channel::<AudioItem>(16);
 
@@ -127,7 +178,7 @@ impl SpeechPipeline {
                     continue;
                 }
                 let before: usize = queue.iter().map(|u| estimate_tokens(&u.text)).sum();
-                let Some(unit) = pack_units(&mut queue, synth_meter.pace()) else {
+                let Some(unit) = pack_units(&mut queue, synth_meter.queued()) else {
                     continue;
                 };
                 let after: usize = queue.iter().map(|u| estimate_tokens(&u.text)).sum();
@@ -161,7 +212,11 @@ impl SpeechPipeline {
                     audio_ms,
                     "speech unit synthesised"
                 );
-                synth_meter.synthesised(tokens, started.elapsed().as_secs_f32());
+                synth_meter.synthesised(
+                    tokens,
+                    started.elapsed().as_secs_f32(),
+                    audio_ms as f32 / 1000.0,
+                );
                 if audio_tx.send(item).await.is_err() {
                     break;
                 }
@@ -328,6 +383,47 @@ mod tests {
             p.pace().slack_secs < ahead,
             "playing audio consumes slack over time"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn synthesis_still_owed_comes_off_the_slack() {
+        let v = voice(2_000, 5_000);
+        let p = SpeechPipeline::start(v, None, None, None);
+        p.say(SpeechUnit::new("The first sentence.", Boundary::Sentence))
+            .await;
+        tokio::time::sleep(Duration::from_millis(2_300)).await;
+        let before = p.pace().slack_secs;
+        let next = "A second sentence that will take the engine a while to make into sound.";
+        p.say(SpeechUnit::new(next, Boundary::Sentence)).await;
+        let owed = before - p.pace().slack_secs;
+        assert!(
+            owed >= estimate_tokens(next) as f32 * 0.04,
+            "the unit handed over is synthesised before anything cut now: {owed}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_engine_slower_than_its_speech_is_known_to_the_next_reply() {
+        let known = KnownPace::default();
+        let start =
+            |v: Arc<Timed>| SpeechPipeline::start_knowing(known.clone(), v, None, None, None);
+
+        let mut p = start(voice(1_340, 1_000));
+        assert!(
+            !p.pace().gains_on_the_speaker(),
+            "unmeasured, an engine is taken as unable to gain"
+        );
+        p.say(SpeechUnit::new("One sentence.", Boundary::End)).await;
+        p.finish().await;
+        let slow = p.pace().synth_per_audio;
+        assert!((1.3..=1.4).contains(&slow), "{slow}");
+        assert_eq!(start(voice(1, 1)).pace().synth_per_audio, slow);
+
+        let fast = KnownPace::default();
+        let mut p = SpeechPipeline::start_knowing(fast, voice(200, 1_000), None, None, None);
+        p.say(SpeechUnit::new("One sentence.", Boundary::End)).await;
+        p.finish().await;
+        assert!(p.pace().gains_on_the_speaker(), "{:?}", p.pace());
     }
 
     #[tokio::test(start_paused = true)]
