@@ -396,7 +396,8 @@ ever produce the engine's "[Image attached - image input is not supported...]".
   bytes on disk rather than a SQLite BLOB because pond_system.db is read on
   every turn and every session listing. `add_message` writes them, best-effort
   (a full disk loses a picture, never the conversation).
-  Replay is capped at `MAX_HISTORY_REPLAY_IMAGES = 1`, newest-first, with
+  Replay was capped at one image (`MAX_HISTORY_REPLAY_IMAGES = 1`; since then
+  `history_image_ceiling`, by the window), newest-first, with
   `[an image was attached here but is no longer available in this context]`
   for the rest. The cap is not timidity: ANY conversation containing an image
   makes that turn multimodal, and multimodal turns bypass KV retention — so
