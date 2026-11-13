@@ -30,20 +30,28 @@ UI and stored in history is the model's text, not the normalized one.
 ## Splitting into speech units
 
 A unit is a `SpeechUnit`: its text and the `Boundary` that ends it (`Word`, `Clause`, `ListLine`,
-`Sentence`, `Paragraph` or `End`). The first unit of a reply ends early, so the first sound does
-not wait on a whole sentence: Kokoro synthesises a unit whole, at about real time on the nano.
-Later units are whole sentences. A later sentence is cut at a clause mark only when the pipeline
-is behind: when the audio queued for the speaker, less the synthesis still owed, is shorter than
-the sentence so far plus 40 tokens would take (`Pace::can_wait_for`).
+`Sentence`, `Paragraph` or `End`). Kokoro synthesises a unit whole, so how a reply is cut depends
+on whether the engine gains on the speaker (`Pace::gains_on_the_speaker`: under 0.9 s of synthesis
+for each second of speech, as the pipeline measures it and carries from one reply to the next).
+
+- An engine that gains: the first unit ends early, so the first sound does not wait on a whole
+  sentence, and later units are whole sentences. A later sentence is cut at a clause mark only when
+  the pipeline is behind: when the audio queued for the speaker, less the synthesis still owed, is
+  shorter than the sentence so far plus 40 tokens would take (`Pace::can_wait_for`).
+- An engine that does not (the nano's Kokoro runs at 1.2 to 1.4): every unit is a whole sentence.
+  It owes the rest of the sentence either way, so a cut at a comma only moves that wait from the
+  sentence's end to its middle. Until one unit has been measured an engine is taken as this kind.
+
+A text that is all there (`split_text`: announcements, greetings, the news) is cut at sentences too.
 
 | Rule | Detail |
 |---|---|
 | Sentence ends | `.`, `?`, `!` or an ellipsis, with any run of them and closing quotes or brackets, then whitespace. A mark at the end of the buffer waits for the next token, which says whether a paragraph or list line follows; a stall of 200 ms (`SENTENCE_HOLD`) or a tool call releases it with what has arrived |
-| Clause marks | `,` `;` `:` and em dash, once at least 3 words have accumulated, and only when whitespace follows. Always for the first unit; later only when behind. A mark that ends its line is left to the newline |
+| Clause marks | `,` `;` `:` and em dash, once at least 3 words have accumulated, and only when whitespace follows. With an engine that gains on the speaker: always for the first unit, later only when behind. With one that does not: never. A mark that ends its line is left to the newline |
 | Numbers | `,` and `:` between digits do not split (`1,000`, `3:45`); `.` after a digit does not split when a digit follows or the buffer ends there (a decimal still streaming). A number of up to three digits starting a line, then `.`, is a list marker, not a sentence end |
 | Abbreviations | `.` after a known abbreviation (`Dr`, `Mr`, `etc`, `e.g`, `a.m`, month names and others in `is_abbrev_suffix`) or a single letter does not split |
 | Newlines | A blank line ends a unit after any words (`Paragraph`). A single newline ends one when its line or the next is a list item (`-`, `*`, `+`, bullet, `1.`, `1)`), and the unit gets a comma if it has no mark (`ListLine`). Any other single newline is a wrapped line |
-| First unit | Ends at its first clause mark after 3 words, or its sentence end |
+| First unit | Ends at its first clause mark after 3 words when the engine gains on the speaker, else at its sentence end |
 | Budget | A unit is cut before it passes 200 estimated tokens (`UNIT_TOKEN_BUDGET`, about 1.1 per character): at its last clause mark, else its last space |
 
 `pack_units` joins units waiting behind a slow synthesis into one pass, within one paragraph and the
@@ -195,7 +203,9 @@ the splitter and packing tests, and the rest on wake-word matching and Whisper a
 `WebVoiceBackend` before it posts each unit to `/api/v1/tts` (where Kokoro normalizes again):
 
 - `ReplySplitter` and `splitText` port the splitter. With no pipeline to ask, a caller passes
-  `behind` instead of a pace: `WebVoiceBackend` passes it while nothing is playing.
+  `behind` and `gains` instead of a pace: `WebVoiceBackend` passes `behind` while nothing is
+  playing, and `gains` from `synthesisGains`, which times each `/api/v1/tts` request sent alone
+  against the length of the speech it returns.
 - `stripMarkdown` ports `strip_markdown_for_speech`.
 - `normalizeForSpeech` is not a port: a short regex list covering times, a few units (kg, MB/s,
   KB/s, GB, MB, KB, ms, Hz), $, €, £, Kenyan shillings, e.g., i.e., Dr., Mr., Mrs., °C, °F, %, +, &,

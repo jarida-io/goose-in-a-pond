@@ -352,8 +352,34 @@ function wsEnd(text: string, from: number): number {
   return from + (m ? m[0].length : 0);
 }
 
+/** Synthesis slower than this, in seconds of work per second of speech, cannot gain on the speaker. */
+const GAINS_BELOW = 0.9;
+/** Seconds of synthesis per second of speech, smoothed; null until one is measured. */
+let synthPerAudio: number | null = null;
+
+/** Record how long a unit took to come back against how long it plays. */
+export function noteSynthesis(tookSecs: number, audioSecs: number): void {
+  if (audioSecs <= 0) return;
+  const now = tookSecs / audioSecs;
+  synthPerAudio = synthPerAudio === null ? now : synthPerAudio * 0.7 + now * 0.3;
+}
+
+/**
+ * Whether a unit cut at a clause mark buys anything. An engine slower than the speech it makes
+ * owes the rest of the sentence either way, so the cut only moves that wait into the sentence.
+ * Unmeasured, the engine is taken as too slow.
+ */
+export function synthesisGains(): boolean {
+  return synthPerAudio !== null && synthPerAudio < GAINS_BELOW;
+}
+
+/** For tests: forget what was measured. */
+export function forgetSynthesisPace(): void {
+  synthPerAudio = null;
+}
+
 /** The first place `text` can end a unit, or null until more text says where. */
-function nextCut(text: string, first: boolean, behind: boolean, settled: boolean): Cut | null {
+function nextCut(text: string, first: boolean, behind: boolean, settled: boolean, gains: boolean): Cut | null {
   let words = 0;
   let inWord = false;
   let lineStart = 0;
@@ -412,7 +438,7 @@ function nextCut(text: string, first: boolean, behind: boolean, settled: boolean
       if (/^[ \t]*\n/.test(text.slice(end))) continue;
       if (words + (inWord ? 1 : 0) < MIN_CLAUSE_WORDS) continue;
       lastClause = end;
-      if (first || behind) return { end, resume: end, boundary: "clause" };
+      if (gains && (first || behind)) return { end, resume: end, boundary: "clause" };
       continue;
     }
     if (ch === "\n") {
@@ -434,21 +460,25 @@ function nextCut(text: string, first: boolean, behind: boolean, settled: boolean
 }
 
 /**
- * Splits a reply into speech units as it streams: the first ends early, at its first clause
- * mark after three words, and later ones are whole sentences unless the caller is `behind`.
+ * Splits a reply into speech units as it streams. With an engine that `gains` on the speaker the
+ * first ends early, at its first clause mark after three words, and later ones are whole
+ * sentences unless the caller is `behind`; with one that does not, every unit is a whole sentence.
  */
 export class ReplySplitter {
   private buf = "";
   private saidOne = false;
+  private gains = true;
 
   /** Add streamed text and take the units now ready to say. */
-  push(text: string, behind = false): SpeechUnit[] {
+  push(text: string, behind = false, gains = true): SpeechUnit[] {
     this.buf += text;
+    this.gains = gains;
     return this.drain(behind, "streaming");
   }
 
   /** The stream paused: say the sentences already whole and keep an unfinished one. */
-  pause(behind = false): SpeechUnit[] {
+  pause(behind = false, gains = true): SpeechUnit[] {
+    this.gains = gains;
     return this.drain(behind, "paused");
   }
 
@@ -468,7 +498,7 @@ export class ReplySplitter {
     for (;;) {
       this.buf = this.buf.replace(/^\s+/, "");
       if (!this.buf) break;
-      let cut = nextCut(this.buf, !this.saidOne, behind, flush !== "streaming");
+      let cut = nextCut(this.buf, !this.saidOne, behind, flush !== "streaming", this.gains);
       if (!cut) {
         if (flush !== "ended") break;
         cut = { end: this.buf.length, resume: this.buf.length, boundary: "sentence" };
@@ -485,10 +515,10 @@ export class ReplySplitter {
   }
 }
 
-/** A whole text as speech units. */
+/** A whole text as speech units: sentences, since nothing is still arriving to wait for. */
 export function splitText(text: string): SpeechUnit[] {
   const s = new ReplySplitter();
-  const units = [...s.push(text), ...s.finish()];
+  const units = [...s.push(text, false, false), ...s.finish()];
   if (units.length) units[units.length - 1].boundary = "end";
   return units;
 }

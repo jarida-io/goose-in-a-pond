@@ -132,6 +132,10 @@ const CLAUSE_LOOKAHEAD_TOKENS: usize = 40;
 /// Kept after a sentence's last mark, like the quote in `He said "go."`.
 const CLOSERS: &[char] = &['"', '\'', ')', ']', '\u{201d}', '\u{2019}'];
 
+/// Synthesis slower than this, in seconds of work per second of speech, cannot gain on the
+/// speaker: 0.9 leaves it a tenth of each unit's length to bank.
+const GAINS_BELOW: f32 = 0.9;
+
 /// How far ahead of the speaker synthesis is, for deciding whether a sentence can wait to be whole.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pace {
@@ -139,6 +143,8 @@ pub struct Pace {
     pub slack_secs: f32,
     /// Seconds of synthesis per token, as measured.
     pub synth_secs_per_token: f32,
+    /// Seconds of synthesis per second of speech, as measured.
+    pub synth_per_audio: f32,
 }
 
 impl Pace {
@@ -146,25 +152,45 @@ impl Pace {
     pub const UNHURRIED: Pace = Pace {
         slack_secs: f32::INFINITY,
         synth_secs_per_token: 0.06,
+        synth_per_audio: 0.5,
     };
     /// Nothing queued: any clause mark gets sound out sooner.
     pub const BEHIND: Pace = Pace {
         slack_secs: f32::NEG_INFINITY,
         synth_secs_per_token: 0.06,
+        synth_per_audio: 0.5,
+    };
+    /// Whole sentences from the first: for a text that is all here, or an engine that cannot
+    /// gain on the speaker.
+    pub const WHOLE: Pace = Pace {
+        slack_secs: f32::INFINITY,
+        synth_secs_per_token: 0.06,
+        synth_per_audio: 1.0,
     };
 
     /// Whether `tokens` more can be synthesised before the queued audio runs out.
     pub fn can_wait_for(&self, tokens: usize) -> bool {
         self.slack_secs >= tokens as f32 * self.synth_secs_per_token
     }
+
+    /// Whether a unit cut at a clause mark buys anything. An engine slower than the speech it
+    /// makes owes the rest of the sentence either way, so the cut only moves that wait from the
+    /// sentence's end to its middle.
+    pub fn gains_on_the_speaker(&self) -> bool {
+        self.synth_per_audio < GAINS_BELOW
+    }
 }
 
-/// Splits a reply into speech units as it streams: the first ends early, at its first clause mark
-/// after three words, and later ones are whole sentences unless synthesis has fallen behind.
+/// Splits a reply into speech units as it streams. With an engine that gains on the speaker the
+/// first ends early, at its first clause mark after three words, and later ones are whole
+/// sentences unless synthesis has fallen behind; with one that does not, every unit is a whole
+/// sentence.
 #[derive(Debug, Default)]
 pub struct ReplySplitter {
     buf: String,
     said_one: bool,
+    /// The engine's pace when text last arrived, for the units [`Self::finish`] cuts.
+    synth_per_audio: Option<f32>,
 }
 
 impl ReplySplitter {
@@ -175,18 +201,26 @@ impl ReplySplitter {
     /// Add streamed text and take the units now ready to say.
     pub fn push(&mut self, text: &str, pace: Pace) -> Vec<SpeechUnit> {
         self.buf.push_str(text);
+        self.synth_per_audio = Some(pace.synth_per_audio);
         self.drain(pace, Flush::Streaming)
     }
 
     /// The stream paused (a tool is running): say the sentences already whole, judging their
     /// breaks by what has arrived, and keep an unfinished one for when it resumes.
     pub fn pause(&mut self, pace: Pace) -> Vec<SpeechUnit> {
+        self.synth_per_audio = Some(pace.synth_per_audio);
         self.drain(pace, Flush::Paused)
     }
 
     /// The stream is over: whatever is left, the last unit marked [`Boundary::End`].
     pub fn finish(&mut self) -> Vec<SpeechUnit> {
-        let mut units = self.drain(Pace::UNHURRIED, Flush::Ended);
+        let pace = Pace {
+            synth_per_audio: self
+                .synth_per_audio
+                .unwrap_or(Pace::UNHURRIED.synth_per_audio),
+            ..Pace::UNHURRIED
+        };
+        let mut units = self.drain(pace, Flush::Ended);
         if let Some(last) = units.last_mut() {
             last.boundary = Boundary::End;
         }
@@ -240,10 +274,10 @@ enum Flush {
     Ended,
 }
 
-/// A whole text as speech units, with no time pressure past the first unit.
+/// A whole text as speech units: sentences, since nothing is still arriving to wait for.
 pub fn split_text(text: &str) -> Vec<SpeechUnit> {
     let mut splitter = ReplySplitter::new();
-    let mut units = splitter.push(text, Pace::UNHURRIED);
+    let mut units = splitter.push(text, Pace::WHOLE);
     units.extend(splitter.finish());
     if let Some(last) = units.last_mut() {
         last.boundary = Boundary::End;
@@ -431,7 +465,7 @@ fn next_cut(text: &str, first: bool, pace: Pace, settled: bool) -> Option<Cut> {
                 }
                 last_clause = Some(end);
                 let lookahead = estimate_tokens(&text[..end]) + CLAUSE_LOOKAHEAD_TOKENS;
-                if first || !pace.can_wait_for(lookahead) {
+                if pace.gains_on_the_speaker() && (first || !pace.can_wait_for(lookahead)) {
                     return Some(Cut {
                         end,
                         resume: end,
@@ -1673,7 +1707,10 @@ mod tests {
 
     #[test]
     fn the_first_unit_ends_at_its_first_clause_after_three_words() {
-        let units = split_text("I would be glad to help with that, and here are the details.");
+        let mut units = stream(
+            "I would be glad to help with that, and here are the details.",
+            Pace::UNHURRIED,
+        );
         assert_eq!(
             texts(&units),
             [
@@ -1682,10 +1719,76 @@ mod tests {
             ]
         );
         assert_eq!(boundaries(&units), [Boundary::Clause, Boundary::End]);
+        units = stream("Sure, let's start the project.", Pace::UNHURRIED);
         assert_eq!(
-            texts(&split_text("Sure, let's start the project.")),
+            texts(&units),
             ["Sure, let's start the project."],
             "a clause of two words stays with its sentence"
+        );
+    }
+
+    /// An engine slower than the speech it makes owes the rest of a sentence either way, so a
+    /// cut at a comma only puts that wait in the middle of the sentence.
+    #[test]
+    fn an_engine_that_cannot_gain_on_the_speaker_says_whole_sentences() {
+        let slow = |slack_secs| Pace {
+            slack_secs,
+            synth_secs_per_token: 0.08,
+            synth_per_audio: 1.34,
+        };
+        let reply = "I looked at your calendar, and you have two meetings tomorrow. \
+                     The first is at nine, and the second is at eleven thirty.";
+        let whole = [
+            "I looked at your calendar, and you have two meetings tomorrow.",
+            "The first is at nine, and the second is at eleven thirty.",
+        ];
+        // Nothing queued, which is where a slow engine always is.
+        assert_eq!(texts(&stream(reply, slow(f32::NEG_INFINITY))), whole);
+        assert_eq!(texts(&stream(reply, slow(0.0))), whole);
+
+        // The same holds when the stream stalls or ends with the sentence unfinished.
+        let mut s = ReplySplitter::new();
+        assert!(s
+            .push("I looked at your calendar, and you have", slow(0.0))
+            .is_empty());
+        assert!(s.pause(slow(0.0)).is_empty(), "a stall cuts nothing");
+        assert_eq!(
+            texts(&s.finish()),
+            ["I looked at your calendar, and you have"]
+        );
+
+        // Just under real time still gains, and keeps the early first unit.
+        let gaining = Pace {
+            synth_per_audio: 0.78,
+            ..Pace::BEHIND
+        };
+        assert_eq!(stream(reply, gaining)[0].text, "I looked at your calendar,");
+    }
+
+    #[test]
+    fn a_sentence_past_the_budget_is_still_cut_for_an_engine_that_cannot_gain() {
+        let long = format!(
+            "{} and that is the whole list.",
+            "one of the many things, ".repeat(12)
+        );
+        let units = stream(&long, Pace::WHOLE);
+        assert!(units.len() > 1, "a unit past the budget would be cut");
+        assert!(units
+            .iter()
+            .all(|u| estimate_tokens(&u.text) <= UNIT_TOKEN_BUDGET));
+        assert_eq!(units[0].boundary, Boundary::Clause);
+    }
+
+    #[test]
+    fn a_text_that_is_all_here_is_said_in_whole_sentences() {
+        assert_eq!(
+            texts(&split_text(
+                "I would be glad to help with that, and here are the details. Ask away."
+            )),
+            [
+                "I would be glad to help with that, and here are the details.",
+                "Ask away."
+            ]
         );
     }
 
@@ -1721,7 +1824,7 @@ mod tests {
     fn a_clause_cut_waits_until_the_sentence_would_not_be_ready_in_time() {
         let pace = |slack_secs| Pace {
             slack_secs,
-            synth_secs_per_token: 0.06,
+            ..Pace::UNHURRIED
         };
         // "It is sunny," is ~13 tokens; with the 40-token lookahead it needs ~3.2 s of slack.
         let reply = "Sure. It is sunny, and the high is 26 degrees.";
@@ -1894,7 +1997,6 @@ mod tests {
                      They eat fish, frogs and insects, and some even bait the water with bread.\n\n\
                      Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake.";
         let streamed = stream(reply, Pace::UNHURRIED);
-        assert_eq!(streamed, split_text(reply));
         assert_eq!(
             texts(&streamed),
             [

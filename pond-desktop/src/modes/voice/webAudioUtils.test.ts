@@ -1,15 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { ReplySplitter, splitText, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech, encodeWav, spokenClip } from "./webAudioUtils";
+import { ReplySplitter, splitText, noteSynthesis, synthesisGains, forgetSynthesisPace, estimateTokens, UNIT_TOKEN_BUDGET, normalizeForSpeech, stripMarkdown, stripMarkupForSpeech, encodeWav, spokenClip } from "./webAudioUtils";
 import type { SpeechUnit } from "./webAudioUtils";
 
 const texts = (units: SpeechUnit[]) => units.map((u) => u.text);
 const bounds = (units: SpeechUnit[]) => units.map((u) => u.boundary);
 
 /** A reply as the model streams it: each word, then the whitespace after it. */
-function stream(reply: string, behind = false): SpeechUnit[] {
+function stream(reply: string, behind = false, gains = true): SpeechUnit[] {
   const s = new ReplySplitter();
   const units: SpeechUnit[] = [];
-  for (const token of reply.match(/\S+|\s+/g) ?? []) units.push(...s.push(token, behind));
+  for (const token of reply.match(/\S+|\s+/g) ?? []) units.push(...s.push(token, behind, gains));
   return [...units, ...s.finish()];
 }
 
@@ -22,10 +22,49 @@ describe("ReplySplitter", () => {
   });
 
   it("ends the first unit at its first clause after three words", () => {
-    const units = splitText("I would be glad to help with that, and here are the details.");
+    const units = stream("I would be glad to help with that, and here are the details.");
     expect(texts(units)).toEqual(["I would be glad to help with that,", "and here are the details."]);
     expect(bounds(units)).toEqual(["clause", "end"]);
-    expect(texts(splitText("Sure, let's start the project."))).toEqual(["Sure, let's start the project."]);
+    expect(texts(stream("Sure, let's start the project."))).toEqual(["Sure, let's start the project."]);
+  });
+
+  it("says whole sentences when the engine cannot gain on the speaker", () => {
+    const reply =
+      "I looked at your calendar, and you have two meetings tomorrow. " +
+      "The first is at nine, and the second is at eleven thirty.";
+    const whole = [
+      "I looked at your calendar, and you have two meetings tomorrow.",
+      "The first is at nine, and the second is at eleven thirty.",
+    ];
+    // Nothing playing, which is where a slow engine always is.
+    expect(texts(stream(reply, true, false))).toEqual(whole);
+    expect(texts(stream(reply, false, false))).toEqual(whole);
+    expect(stream(reply, true, true)[0].text).toBe("I looked at your calendar,");
+
+    const s = new ReplySplitter();
+    expect(s.push("I looked at your calendar, and you have", true, false)).toEqual([]);
+    expect(s.pause(true, false)).toEqual([]);
+    expect(texts(s.finish())).toEqual(["I looked at your calendar, and you have"]);
+  });
+
+  it("says a text that is all here in whole sentences", () => {
+    expect(texts(splitText("I would be glad to help with that, and here are the details. Ask away."))).toEqual([
+      "I would be glad to help with that, and here are the details.",
+      "Ask away.",
+    ]);
+  });
+
+  it("takes an engine as too slow until it measures one that gains", () => {
+    forgetSynthesisPace();
+    expect(synthesisGains()).toBe(false);
+    noteSynthesis(1.34, 1.0);
+    expect(synthesisGains()).toBe(false);
+    forgetSynthesisPace();
+    noteSynthesis(0.2, 1.0);
+    expect(synthesisGains()).toBe(true);
+    noteSynthesis(0.5, 0);
+    expect(synthesisGains()).toBe(true);
+    forgetSynthesisPace();
   });
 
   it("keeps later sentences whole unless the caller is behind", () => {
@@ -127,7 +166,6 @@ describe("ReplySplitter", () => {
       "They eat fish, frogs and insects, and some even bait the water with bread.\n\n" +
       "Dr. Smith counted 1,000 of them at 7:30 a.m. near the lake.";
     const streamed = stream(reply);
-    expect(streamed).toEqual(splitText(reply));
     expect(texts(streamed)).toEqual([
       "Herons hunt by standing still for a long time,",
       "then striking fast.",

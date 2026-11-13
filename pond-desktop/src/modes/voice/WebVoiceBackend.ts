@@ -9,6 +9,7 @@ import {
   MIC_CONSTRAINTS,
   encodeWav, calculateRms, downsampleTo16k, getAudioContext, closeAudioContext,
   playPingTone, playThinkingTone, ReplySplitter, stripMarkdown, normalizeForSpeech,
+  noteSynthesis, synthesisGains,
   isWhisperArtifact, checkDismissal, getToolAnnouncement, getQuip,
   filterThinkingFull, createVadState, advanceVad, DEFAULT_VAD_CONFIG,
   registerTtsSource, clearTtsSource, stopTtsPlayback, isTtsInterrupted, resetTtsInterrupt,
@@ -59,6 +60,8 @@ export class WebVoiceBackend implements VoiceBackend {
   private pipelineActive = false;
   private abortController: AbortController | null = null;
   private ttsSource: AudioBufferSourceNode | null = null;
+  /** Speech requests not yet answered: only one sent alone times the engine and not the queue. */
+  private ttsInFlight = 0;
   /** Stops the working tone; null when none is playing, including when it's disabled in settings. */
   private stopThinkingFn: (() => void) | null = null;
   private recording: RecordingContext | null = null;
@@ -355,6 +358,9 @@ export class WebVoiceBackend implements VoiceBackend {
 
   private async fetchTtsBuffer(text: string, signal: AbortSignal, authToken?: string): Promise<AudioBuffer | null> {
     if (this.cancelled || signal.aborted || isTtsInterrupted()) return null;
+    const alone = this.ttsInFlight === 0;
+    this.ttsInFlight += 1;
+    const started = performance.now();
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...(await api.hostHeaders()) };
       if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
@@ -369,10 +375,14 @@ export class WebVoiceBackend implements VoiceBackend {
       const data = await res.arrayBuffer();
       if (this.cancelled || signal.aborted || isTtsInterrupted()) return null;
       const actx = getAudioContext();
-      return await actx.decodeAudioData(data);
+      const buf = await actx.decodeAudioData(data);
+      if (alone) noteSynthesis((performance.now() - started) / 1000, buf.duration);
+      return buf;
     } catch (err) {
       if ((err as Error).name !== "AbortError") console.warn("TTS error:", err);
       return null;
+    } finally {
+      this.ttsInFlight -= 1;
     }
   }
 
@@ -488,8 +498,9 @@ export class WebVoiceBackend implements VoiceBackend {
             thinkIn = blk;
             if (vis) {
               this.onAgentToken?.(vis, false);
-              // Nothing playing yet: any clause mark gets the first sound out sooner.
-              for (const u of splitter.push(vis, !playing)) enqueue(u.text);
+              // Nothing playing yet: any clause mark gets the first sound out sooner, from an
+              // engine quick enough to have the rest of the sentence ready in time.
+              for (const u of splitter.push(vis, !playing, synthesisGains())) enqueue(u.text);
             }
           }
 
