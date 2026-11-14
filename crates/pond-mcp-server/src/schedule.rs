@@ -417,11 +417,18 @@ impl ScheduleMcpServer {
             tasks
                 .iter()
                 .map(|t| {
+                    // A sensor rule fires on a reading, not a clock, so a zone would only mislead.
+                    let when = match &t.kind {
+                        TaskKind::SensorTrigger(_) => when_in_words(&t.cron),
+                        _ => format!(
+                            "{}, {} time",
+                            when_in_words(&t.cron),
+                            crate::format::zone_place(&t.timezone)
+                        ),
+                    };
                     format!(
-                        "- \"{}\" | {}, {} time | {} | {}",
+                        "- \"{}\" | {when} | {} | {}",
                         t.label,
-                        when_in_words(&t.cron),
-                        crate::format::zone_place(&t.timezone),
                         kind_words(&t.kind),
                         status_label(t),
                     )
