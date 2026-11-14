@@ -880,11 +880,13 @@ impl Provider for GiapProviderShim {
                         || goose::providers::local_inference::cache_holds_media(files))
             })
         };
-        let base_messages: &[Message] = heard_messages
+        let heard: &[Message] = heard_messages
             .as_deref()
             .or(scrubbed_messages.as_deref())
             .or(stripped_messages.as_deref())
             .unwrap_or(messages);
+        let reworded_messages = crate::readable_failures::reword(heard);
+        let base_messages: &[Message] = reworded_messages.as_deref().unwrap_or(heard);
         // Built from the messages the provider will actually receive.
         let promoted_messages = if provider_relocates_tool_images(self.inner.get_name()) {
             None

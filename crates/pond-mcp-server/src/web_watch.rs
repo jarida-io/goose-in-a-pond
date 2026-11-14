@@ -26,7 +26,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::format::format_dead_end;
+use crate::format::format_not_done;
 use crate::knowledge::KnowledgeMcpServer;
 use crate::page_data::Item;
 use crate::web_page::{read_watched, FetchFailure};
@@ -72,7 +72,8 @@ pub struct WebWatchParams {
     pub max_mileage: Option<Value>,
     /// new (default), appears, disappears, below or above
     #[schemars(with = "String")]
-    pub when: Option<String>,
+    #[serde(alias = "when")]
+    pub condition: Option<String>,
     /// The words to appear or disappear, or the label beside the number
     #[schemars(with = "String")]
     pub phrase: Option<String>,
@@ -150,7 +151,7 @@ impl WebWatchParams {
     /// page takes the place of the item filters: its owner asked for one thing.
     fn rule(&self) -> Result<TellWhen, &'static str> {
         let when = self
-            .when
+            .condition
             .as_deref()
             .map(|w| w.trim().to_lowercase())
             .unwrap_or_default();
@@ -243,7 +244,7 @@ impl Made {
     /// A refusal: `why` is advice for the model, `said` the short reason the person is given.
     fn refused(&mut self, what: &str, said: &str, why: &str) -> String {
         self.why_not = Some(said.to_string());
-        format_dead_end(what, why)
+        format_not_done(what, why)
     }
 }
 
@@ -275,7 +276,7 @@ async fn run(meta: &Meta, params: WebWatchParams, made: &mut Made) -> String {
     };
     result.unwrap_or_else(|e| {
         tracing::warn!(target: "giap::trace", kind = "web_watch_failed", error = %e);
-        format_dead_end(
+        format_not_done(
             what,
             "The pond couldn't save that just now; try again shortly.",
         )
@@ -486,7 +487,7 @@ async fn stop(deps: &WebWatchDeps, owner: &str, params: &WebWatchParams) -> anyh
                     || w.title.to_lowercase().contains(&asked)))
     });
     let Some(watch) = found else {
-        return Ok(format_dead_end(
+        return Ok(format_not_done(
             "stopping that watch",
             "They have no watch by that id. List them first to find its id.",
         ));
@@ -642,19 +643,19 @@ mod tests {
             Ok(TellWhen::NewOrChanged)
         );
         assert_eq!(
-            rule(serde_json::json!({"when": "Disappears", "phrase": " sold out "})),
+            rule(serde_json::json!({"condition": "Disappears", "phrase": " sold out "})),
             Ok(TellWhen::Disappears {
                 phrase: "sold out".into()
             })
         );
         assert_eq!(
-            rule(serde_json::json!({"when": "appears", "phrase": "registration open"})),
+            rule(serde_json::json!({"condition": "appears", "phrase": "registration open"})),
             Ok(TellWhen::Appears {
                 phrase: "registration open".into()
             })
         );
         assert_eq!(
-            rule(serde_json::json!({"when": "above", "phrase": "USD/KES", "value": "130"})),
+            rule(serde_json::json!({"condition": "above", "phrase": "USD/KES", "value": "130"})),
             Ok(TellWhen::Above {
                 phrase: "USD/KES".into(),
                 value: 130.0
@@ -662,14 +663,21 @@ mod tests {
         );
         // With no label, a number rule reads the page's first price.
         assert_eq!(
-            rule(serde_json::json!({"when": "under", "value": 4000})),
+            rule(serde_json::json!({"condition": "under", "value": 4000})),
             Ok(TellWhen::Below {
                 phrase: String::new(),
                 value: 4000.0
             })
         );
-        assert!(rule(serde_json::json!({"when": "appears"})).is_err());
-        assert!(rule(serde_json::json!({"when": "below", "phrase": "USD"})).is_err());
+        assert!(rule(serde_json::json!({"condition": "appears"})).is_err());
+        assert!(rule(serde_json::json!({"condition": "below", "phrase": "USD"})).is_err());
+        // The name it had before still reads, for a model or a bench that learned it.
+        assert_eq!(
+            rule(serde_json::json!({"when": "appears", "phrase": "sold out"})),
+            Ok(TellWhen::Appears {
+                phrase: "sold out".into()
+            })
+        );
     }
 
     #[test]

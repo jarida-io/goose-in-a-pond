@@ -237,7 +237,7 @@ now also takes one rule read off the whole page, in code, with no model in a che
 | A rule reports only itself, once, when it comes true between two checks: the phrase was absent and is there, was there and is gone, or the number crossed the value. Nothing else on that page is kept for the digest | Code | Done |
 | The number is the one written within 60 characters after the phrase; with no phrase, the page's first price | Code | Done |
 | A section whose words did not change is not an update: clock times, "3 hours ago", "just now" and counts of views, likes and comments are set aside before comparing. A version number still counts | Code | Done |
-| `web_watch` tool: `when`, `phrase`, `value`. Setting a rule up says how the page stands now ("USD/KES is 129.4 now"), and refuses a number rule whose number is not on the page | Code | Done |
+| `web_watch` tool: `condition` (read as `when` too), `phrase`, `value`. Setting a rule up says how the page stands now ("USD/KES is 129.4 now"), and refuses a number rule whose number is not on the page | Code | Done |
 | Routes: a watch's view carries `filters.tell_when`, the rule in words (`filters_words`) and `standing`; `PATCH /web-watches/{id}` takes the rule in `filters` | Code | Done |
 | A watch is a card that can be sent to chat (`"card": {"kind": "watch", "id"}`), with what it tells about, how the page stood and its recent changes as Goose's notes | Code | Done |
 | The tool block is 226 bytes larger (20,664 to 20,890) for the three fields | Measured | Done |

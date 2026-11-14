@@ -126,11 +126,11 @@ location for home rather than asking which city. Never guess weather.")]
                             "sunrise": data.sunrise,
                             "sunset": data.sunset,
                         });
-                        let hint = format!("[[[mcp-ui:weather:{}]]]\n", ui_data);
-                        let full_result = format!("{}{}", hint, data.as_context_block());
-                        Ok(CallToolResult::success(vec![ContentBlock::text(
-                            full_result,
-                        )]))
+                        Ok(crate::format::with_card(
+                            data.as_context_block(),
+                            "weather",
+                            &ui_data,
+                        ))
                     }
                     // Switched off or no place set: the same answer as no provider at all.
                     Err(e) if e.downcast_ref::<WeatherOff>().is_some() => {
@@ -280,7 +280,7 @@ impl WeatherMcpServer {
             location = %data.location_name,
             "weather: forecast fetched"
         );
-        // `[[[mcp-ui:…]]]` marker, or the desktop has no data to render a card.
+        // The screen's card, or the desktop has no data to render one.
         let ui_data = serde_json::json!({
             "location": data.location_name,
             "forecast": data.days.iter().map(|d| serde_json::json!({
@@ -296,11 +296,11 @@ impl WeatherMcpServer {
                 "sunset": d.sunset,
             })).collect::<Vec<_>>(),
         });
-        let hint = format!("[[[mcp-ui:weather:{}]]]\n", ui_data);
-        CallToolResult::success(vec![ContentBlock::text(format!(
-            "{hint}{header}{}",
-            data.as_context_block_from(today)
-        ))])
+        crate::format::with_card(
+            format!("{header}{}", data.as_context_block_from(today)),
+            "weather",
+            &ui_data,
+        )
     }
 
     /// The household's calendar date at `now`, on the timezone in settings.

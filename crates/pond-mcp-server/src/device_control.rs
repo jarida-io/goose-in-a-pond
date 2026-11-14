@@ -49,6 +49,7 @@ pub struct SetDeviceStateParams {
     /// Device id or name.
     #[serde(default)]
     pub device_id: String,
+    /// On (true) or off (false).
     #[serde(default)]
     pub power: Option<bool>,
     /// 0-100 percent.
@@ -57,6 +58,7 @@ pub struct SetDeviceStateParams {
     /// Degrees Celsius.
     #[serde(default)]
     pub target_temp: Option<f32>,
+    /// Locked (true) or unlocked (false).
     #[serde(default)]
     pub locked: Option<bool>,
     /// Hue degrees 0-360.
@@ -906,9 +908,8 @@ impl DeviceControlMcpServer {
         description = "Reverses the asking member's own most recent device change (power, \
                        brightness, lock, colour, fan, position...) back to what it was right \
                        before. Only one step back, and only their own last command -- undoing \
-                       twice in a row finds nothing left to undo rather than redoing it. Say \
-                       which device only if the member explicitly names one to undo; otherwise \
-                       call with no arguments and it finds the right one itself."
+                       twice in a row finds nothing left to undo rather than redoing it. Call \
+                       it with no arguments: it finds their last change itself."
     )]
     async fn undo_last_action(
         &self,

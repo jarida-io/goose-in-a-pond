@@ -25,7 +25,9 @@ pub struct SystemInfoParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct NotifyParams {
+    /// A few words heading it, e.g. "Laundry".
     pub title: String,
+    /// What to tell them, in a sentence.
     pub body: String,
 }
 
@@ -127,24 +129,12 @@ impl SystemMcpServer {
         &self,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let now = chrono::Local::now();
-        let text = format!(
-            "Current time: {}\nDate: {}\nTimezone: {}",
-            now.format("%H:%M:%S"),
-            now.format("%A, %B %d, %Y"),
-            now.format("%Z (UTC%:z)")
-        );
-        let ui_data = serde_json::json!({
-            "time": now.format("%H:%M").to_string(),
-            "timezone": now.format("%Z").to_string(),
-            "date": now.format("%A, %B %d, %Y").to_string(),
-            "utc_offset": now.format("%:z").to_string(),
-        });
-        let hint = format!("[[[mcp-ui:time:{}]]]\n", ui_data);
-        let full_result = format!("{}{}", hint, text);
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            full_result,
-        )]))
+        let zone = match &self.settings_repo {
+            Some(repo) => repo.get().await.ok().map(|s| s.timezone),
+            None => None,
+        };
+        let (text, ui_data) = time_now(chrono::Utc::now(), zone.as_deref());
+        Ok(crate::format::with_card(text, "time", &ui_data))
     }
 
     #[tool(description = "Get system info: OS, hostname, memory, and disk usage.")]
@@ -155,7 +145,18 @@ impl SystemMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         use sysinfo::{Disks, System};
 
-        let category = params.0.category.as_deref().unwrap_or("all");
+        // Any other word ("cpu", "storage", "everything") shows it all rather than nothing.
+        let asked = params
+            .0
+            .category
+            .as_deref()
+            .unwrap_or("all")
+            .trim()
+            .to_lowercase();
+        let category = match asked.as_str() {
+            "os" | "memory" | "disk" => asked.as_str(),
+            _ => "all",
+        };
         let mut sections: Vec<String> = Vec::new();
 
         let show_os = category == "all" || category == "os";
@@ -219,12 +220,11 @@ impl SystemMcpServer {
             "memory_total": format!("{:.0} GB", total_gb),
             "cpu": sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string()),
         });
-        let hint = format!("[[[mcp-ui:system:{}]]]\n", ui_data);
-        let plain_text = sections.join("\n\n");
-        let full_result = format!("{}{}", hint, plain_text);
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            full_result,
-        )]))
+        Ok(crate::format::with_card(
+            sections.join("\n\n"),
+            "system",
+            &ui_data,
+        ))
     }
 
     #[tool(description = "Send a desktop popup notification to the user.")]
@@ -304,6 +304,48 @@ impl ServerHandler for SystemMcpServer {
     }
 }
 
+/// The clock at `now` as words for the model and fields for the card, on the household's `zone`,
+/// else this machine's: a pond whose host runs on UTC still answers in household time.
+fn time_now(now: chrono::DateTime<chrono::Utc>, zone: Option<&str>) -> (String, serde_json::Value) {
+    use chrono::Offset;
+    let (clock, date, offset_secs, offset_iso, place) =
+        match zone.and_then(|z| z.trim().parse::<chrono_tz::Tz>().ok()) {
+            Some(tz) => {
+                let local = now.with_timezone(&tz);
+                (
+                    local.format("%H:%M").to_string(),
+                    local.format("%A %-d %B %Y").to_string(),
+                    local.offset().fix().local_minus_utc(),
+                    local.format("%:z").to_string(),
+                    Some(crate::format::zone_place(tz.name())),
+                )
+            }
+            None => {
+                let local = now.with_timezone(&chrono::Local);
+                (
+                    local.format("%H:%M").to_string(),
+                    local.format("%A %-d %B %Y").to_string(),
+                    local.offset().local_minus_utc(),
+                    local.format("%:z").to_string(),
+                    None,
+                )
+            }
+        };
+    let offset = crate::format::utc_offset_label(offset_secs);
+    let zone_words = match &place {
+        Some(place) => format!("{place} ({offset})"),
+        None => offset.clone(),
+    };
+    let text = format!("Time: {clock} | Date: {date} | Time zone: {zone_words}");
+    let card = serde_json::json!({
+        "time": clock,
+        "timezone": place.unwrap_or(offset),
+        "date": date,
+        "utc_offset": offset_iso,
+    });
+    (text, card)
+}
+
 // ── Spawn function for Goose builtin registry ──────────────────────────────
 
 use tokio::io::DuplexStream;
@@ -344,5 +386,25 @@ mod tests {
     #[test]
     fn server_default() {
         let _server = SystemMcpServer::default();
+    }
+
+    #[test]
+    fn the_time_is_the_households_whatever_the_machines_zone() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-14T11:05:42Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let (text, card) = time_now(now, Some("Africa/Nairobi"));
+        assert_eq!(
+            text,
+            "Time: 14:05 | Date: Saturday 14 November 2026 | Time zone: Nairobi (UTC+3)"
+        );
+        assert_eq!(card["time"], "14:05");
+        assert_eq!(card["utc_offset"], "+03:00");
+    }
+
+    #[test]
+    fn an_unreadable_zone_falls_back_to_the_machines_clock_by_its_offset() {
+        let (text, _) = time_now(chrono::Utc::now(), Some("Not/AZone"));
+        assert!(text.contains("Time zone: UTC"), "{text}");
     }
 }

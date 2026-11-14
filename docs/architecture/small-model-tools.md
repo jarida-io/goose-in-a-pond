@@ -395,10 +395,9 @@ question:    string, REQUIRED. "The calculation, as the user asked it."
 
 ## 6. Plan
 
-**Status (2026-10-23):** step 1 is half done: the SSE layer reads a card from the user-audience
-block the goose adapter passes as `AgentStreamEvent::ToolResult`'s `card` (`b433e647`), and
-`search_web` sends its card that way, but `prepend_knowledge_hint` and
-Wolfram's `with_ui_hint` still put `[[[mcp-ui:…]]]` in the model's text. Steps 2-7 are not started:
+**Status (2026-11-14):** step 1 is done: every card (weather, time, system, devices, memory,
+schedules, Wikipedia, Wolfram, search) is its own user-audience block (`format::with_card`), which
+the SSE layer reads as `AgentStreamEvent::ToolResult`'s `card`. Steps 2-7 are not started:
 there is no `calc.rs`, no `look_up` or `calculate`, and no arithmetic sentence in `prompts.rs`.
 
 Each step is its own commit and leaves the pond working. Gates per CLAUDE.md: fmt, the fast-crate

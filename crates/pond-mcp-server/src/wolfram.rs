@@ -231,7 +231,7 @@ impl KnowledgeMcpServer {
             }
         };
 
-        Ok(text_result(&render_query_result(&body, q.input, session)))
+        Ok(render_query_result(&body, q.input, session))
     }
 }
 
@@ -290,8 +290,8 @@ pub struct Pod {
     pub primary: bool,
 }
 
-/// Full Results payload as model text, prefixed with the `[[[mcp-ui:wolfram:...]]]` card hint.
-pub fn render_query_result(body: &Value, query: &str, session: Option<&str>) -> String {
+/// Full Results payload as the model's text, with the screen's card beside it.
+pub fn render_query_result(body: &Value, query: &str, session: Option<&str>) -> CallToolResult {
     let qr = &body["queryresult"];
     let pods = parse_pods(qr);
 
@@ -308,12 +308,12 @@ pub fn render_query_result(body: &Value, query: &str, session: Option<&str>) -> 
                 query,
                 render_explore_lines(&suggestions),
             );
-            return with_ui_hint(query, None, &[], &suggestions, &body_text);
+            return with_card(query, None, &[], &suggestions, body_text);
         }
-        return crate::format::format_no_results(
+        return text_result(&crate::format::format_no_results(
             &format!("a computed answer for '{}'", query),
             &["giap-knowledge__get_wikipedia_article"],
-        );
+        ));
     }
 
     let (shown, overflow) = pods.split_at(pods.len().min(MAX_PODS));
@@ -336,17 +336,24 @@ pub fn render_query_result(body: &Value, query: &str, session: Option<&str>) -> 
     let options = with_ids(session, options);
 
     let mut body_text = crate::format::truncate_to_budget(&lines.join("\n"), WOLFRAM_BUDGET);
-    if !options.is_empty() {
+    // Another reading or a further pod keeps the same wording, so re-asking would loop: only
+    // the screen's card, whose buttons carry the ids, can open those.
+    let rewordings: Vec<ExploreOption> = options
+        .iter()
+        .filter(|o| o.query != query)
+        .cloned()
+        .collect();
+    if !rewordings.is_empty() {
         body_text.push_str(&format!(
             "\n\nMore is available. To open one, call \
              giap-knowledge__compute_answer again with it, worded exactly as \
              written:\n{}",
-            render_explore_lines(&options),
+            render_explore_lines(&rewordings),
         ));
     }
     body_text.push_str(&format!("\n\nSource: {}", website_url(query)));
 
-    with_ui_hint(query, primary_of(shown), shown, &options, &body_text)
+    with_card(query, primary_of(shown), shown, &options, body_text)
 }
 
 fn render_explore_lines(options: &[ExploreOption]) -> String {
@@ -366,14 +373,15 @@ fn primary_of(pods: &[Pod]) -> Option<&Pod> {
     })
 }
 
-/// Prepend the MCP-UI hint, sanitised: `extract_ui_hint` ends the marker at the first `]]]`.
-fn with_ui_hint(
+/// `body_text` for the model and the card for the screen, its text sanitised: a `]]]` would end
+/// the marker early.
+fn with_card(
     query: &str,
     primary: Option<&Pod>,
     pods: &[Pod],
     options: &[ExploreOption],
-    body_text: &str,
-) -> String {
+    body_text: String,
+) -> CallToolResult {
     let ui = serde_json::json!({
         "query": sanitize(query),
         "primary": primary.map(|p| sanitize(&p.text)),
@@ -393,7 +401,7 @@ fn with_ui_hint(
         })).collect::<Vec<_>>(),
         "source_url": website_url(query),
     });
-    format!("[[[mcp-ui:wolfram:{}]]]\n{}", ui, body_text)
+    crate::format::with_card(body_text, "wolfram", &ui)
 }
 
 /// Neutralise `]]]` so a result cannot cut its own hint short.
@@ -613,8 +621,12 @@ mod tests {
 
     #[test]
     fn the_rendered_answer_carries_a_ui_hint_and_a_keyless_source() {
-        let out = render_query_result(&distance_payload(), "3 miles in km", S);
-        assert!(out.starts_with("[[[mcp-ui:wolfram:"), "got: {out}");
+        let result = render_query_result(&distance_payload(), "3 miles in km", S);
+        let card = card_text(&result).expect("an answer has a card");
+        assert!(card.starts_with("[[[mcp-ui:wolfram:"), "got: {card}");
+        assert!(!card.contains("appid"), "got: {card}");
+        let out = only_text(&result);
+        assert!(!out.contains("mcp-ui"), "the model reads no card: {out}");
         assert!(out.contains("4.828 km"));
         assert!(out.contains("wolframalpha.com/input?i="));
         // The website link is persisted, so it must never be the keyed API endpoint.
@@ -643,7 +655,7 @@ mod tests {
             "success": false, "pods": [],
             "didyoumeans": {"score": "0.4", "level": "medium", "val": "integrate x^2"}
         }});
-        let out = render_query_result(&body, "integrat x2", session);
+        let out = only_text(&render_query_result(&body, "integrat x2", session));
         assert!(out.contains("ask instead"), "got: {out}");
         // With no id to resolve, the replacement wording is all the model can act on.
         assert!(out.contains("integrate x^2"), "got: {out}");
@@ -656,7 +668,11 @@ mod tests {
     #[test]
     fn a_total_miss_hands_off_to_wikipedia_rather_than_apologising() {
         let body = json!({"queryresult": {"success": false, "pods": []}});
-        let out = render_query_result(&body, "how is Wangari Maathai remembered", S);
+        let out = only_text(&render_query_result(
+            &body,
+            "how is Wangari Maathai remembered",
+            S,
+        ));
         assert!(out.contains("NOT the answer"), "got: {out}");
         assert!(
             out.contains("giap-knowledge__get_wikipedia_article"),
@@ -666,7 +682,7 @@ mod tests {
 
     #[test]
     fn an_unattributed_call_is_offered_no_ids_at_all() {
-        let out = render_query_result(&mercury_payload(), "mercury", None);
+        let out = only_text(&render_query_result(&mercury_payload(), "mercury", None));
         assert!(
             out.contains("the planet"),
             "the answer still comes back: {out}"
@@ -740,7 +756,7 @@ mod tests {
             {"id": "Result", "title": "Result", "primary": true,
              "subpods": [{"plaintext": "matrix [[[1,2]]] rows"}]}
         ]}});
-        let out = render_query_result(&body, "matrix", S);
+        let out = card_text(&render_query_result(&body, "matrix", S)).expect("a card");
         let hint_end = out.find("]]]").expect("hint must terminate");
         let hint = &out["[[[mcp-ui:wolfram:".len()..hint_end];
         serde_json::from_str::<Value>(hint).expect("hint payload must be valid JSON");
@@ -784,9 +800,11 @@ mod tests {
                 {"input": "*C.mile-_*Word-", "desc": "a word"}
             ]}
         }});
+        let result = render_query_result(&body, "3 miles in km", Some("cap"));
         println!(
-            "{}",
-            render_query_result(&body, "3 miles in km", Some("cap"))
+            "{}\n{}",
+            card_text(&result).unwrap_or_default(),
+            only_text(&result)
         );
     }
 
@@ -864,7 +882,10 @@ mod tests {
 
         // 2. What came back is the answer, rendered, with a card hint on it.
         let text = only_text(&result);
-        assert!(text.starts_with("[[[mcp-ui:wolfram:"), "got: {text}");
+        assert!(
+            card_text(&result).is_some_and(|c| c.starts_with("[[[mcp-ui:wolfram:")),
+            "an answer carries its card"
+        );
         assert!(text.contains("4.828 km"), "got: {text}");
         // Wolfram's echo of the question is not the answer and must not lead.
         assert!(
@@ -1051,12 +1072,36 @@ mod tests {
     }
 
     /// The single text block out of a tool result.
+    /// What the model reads: the first block, as the card is the second.
     fn only_text(result: &CallToolResult) -> String {
         result
             .content
             .first()
             .and_then(|c| c.as_text())
             .map(|t| t.text.clone())
-            .expect("tool results in this module are a single text block")
+            .expect("a result opens with the model's text")
+    }
+
+    fn card_text(result: &CallToolResult) -> Option<String> {
+        result
+            .content
+            .get(1)
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+    }
+
+    #[test]
+    fn another_reading_of_the_same_words_is_offered_on_the_card_not_to_the_model() {
+        let result = render_query_result(&mercury_payload(), "mercury", S);
+        let out = only_text(&result);
+        assert!(
+            !out.contains("More is available"),
+            "re-asking would loop: {out}"
+        );
+        let card = card_text(&result).expect("a card");
+        assert!(
+            card.contains("\"explore\":[{"),
+            "the screen keeps them: {card}"
+        );
     }
 }

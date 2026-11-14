@@ -19,7 +19,8 @@ use serde::Deserialize;
 pub struct WikipediaQueryParams {
     /// Name, phrase, or question to look up.
     pub topic: Option<String>,
-    /// Max results, default 5, max 10 (search_wikipedia only).
+    /// Read and ignored: one article is fetched, so the model is not offered it.
+    #[schemars(skip)]
     pub limit: Option<u32>,
     /// Catch-all for any extra fields the model sends (e.g. "query", "title", "search").
     /// Not part of the advertised schema — exists purely to absorb unexpected keys.
@@ -124,26 +125,15 @@ verbatim.")]
         }
 
         match self.fetch_article_summary(&topic).await {
-            Ok(text) => {
-                let full_result = prepend_knowledge_hint(&topic, &text);
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    full_result,
-                )]))
-            }
+            Ok(text) => Ok(knowledge_result(&topic, text)),
             Err(WikiFetchError::NotFound) => {
                 eprintln!(
                     "[wikipedia] exact title not found, searching for '{}'",
                     topic
                 );
-                match self.search_and_fetch_best(&topic).await {
-                    Ok(text) => {
-                        let full_result = prepend_knowledge_hint(&topic, &text);
-                        Ok(CallToolResult::success(vec![ContentBlock::text(
-                            full_result,
-                        )]))
-                    }
-                    Err(e) => Err(e),
-                }
+                self.search_and_fetch_best(&topic)
+                    .await
+                    .map(|text| knowledge_result(&topic, text))
             }
             Err(WikiFetchError::Mcp(e)) => Err(e),
         }
@@ -193,9 +183,19 @@ In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 
 // ── MCP-UI hint helpers ───────────────────────────────────────────────────
 
-/// Prepend a `[[[mcp-ui:knowledge:{...}]]]` card hint to a Wikipedia article result.
-fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
-    // Article format: "# Title\n\nExtract...\n\nSource: URL"
+/// A Wikipedia result, with the screen's card when it is an article ("# Title\n\nExtract...\n\n
+/// Source: URL"); a miss is words alone.
+fn knowledge_result(topic: &str, text: String) -> CallToolResult {
+    match knowledge_card(topic, &text) {
+        Some(card) => crate::format::with_card(text, "knowledge", &card),
+        None => CallToolResult::success(vec![ContentBlock::text(text)]),
+    }
+}
+
+fn knowledge_card(topic: &str, text: &str) -> Option<serde_json::Value> {
+    if !text.starts_with("# ") {
+        return None;
+    }
     let title = text
         .strip_prefix("# ")
         .and_then(|s| s.split('\n').next())
@@ -210,13 +210,12 @@ fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
     let body_end = text.rfind("\n\nSource:").unwrap_or(text.len());
     let summary: String = text[body_start..body_end].chars().take(300).collect();
 
-    let ui_data = serde_json::json!({
+    Some(serde_json::json!({
         "title": title,
         "summary": summary,
         "source_url": source_url,
         "topic": topic,
-    });
-    format!("[[[mcp-ui:knowledge:{}]]]\n{}", ui_data, text)
+    }))
 }
 
 // ── Wikipedia helpers (outside the #[tool_router] block) ───────────────────
@@ -648,17 +647,30 @@ mod tests {
     }
 
     #[test]
-    fn prepend_knowledge_hint_extracts_source_url() {
+    fn the_article_card_carries_its_source_url() {
         let text = "# Nairobi\n\nNairobi is the capital of Kenya.\n\nSource: https://en.wikipedia.org/wiki/Nairobi";
-        let result = prepend_knowledge_hint("Nairobi", text);
-        assert!(result.contains("\"source_url\":\"https://en.wikipedia.org/wiki/Nairobi\""));
+        let card = knowledge_card("Nairobi", text).expect("an article has a card");
+        assert_eq!(card["source_url"], "https://en.wikipedia.org/wiki/Nairobi");
     }
 
     #[test]
-    fn prepend_knowledge_hint_missing_source_uses_empty_string() {
+    fn an_article_without_a_source_line_has_an_empty_url() {
         let text = "# Test\n\nSome article with no source line.";
-        let result = prepend_knowledge_hint("Test", text);
-        assert!(result.contains("\"source_url\":\"\""));
+        assert_eq!(knowledge_card("Test", text).unwrap()["source_url"], "");
+    }
+
+    #[test]
+    fn a_miss_has_no_card_and_the_model_reads_each_fact_once() {
+        assert!(knowledge_card("Zzz", "No results for Zzz.").is_none());
+        let text = "# Nairobi\n\nNairobi is the capital of Kenya.";
+        let result = knowledge_result("Nairobi", text.to_string());
+        let texts: Vec<&str> = result
+            .content
+            .iter()
+            .filter_map(|b| b.as_text().map(|t| t.text.as_str()))
+            .collect();
+        assert_eq!(texts[0], text);
+        assert!(texts[1].starts_with("[[[mcp-ui:knowledge:"), "{}", texts[1]);
     }
 
     #[test]

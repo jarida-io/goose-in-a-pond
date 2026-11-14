@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::format::format_dead_end;
+use crate::format::format_not_done;
 use crate::schedule::ScheduleMcpServer;
 
 /// A `when` this far in the past is a slip of the clock, not a time that has gone.
@@ -176,7 +176,7 @@ async fn add_to_heartbeat(p: AddToHeartbeatParams) -> CallToolResult {
     };
     let refuse = |said: &str, why: &str| {
         crate::format::with_receipt(
-            format_dead_end(what, why),
+            format_not_done(what, why),
             Receipt::not_set("standing", asked.clone(), said),
         )
     };
@@ -428,7 +428,7 @@ pub(crate) async fn add(meta: &Meta, p: AddTodoParams) -> Added {
     };
     // `why` is advice for the model; `said` is the short reason the person is given.
     let refuse = |said: &str, why: &str| Added {
-        text: format_dead_end(what, why),
+        text: format_not_done(what, why),
         receipt: Receipt::not_set(listed_as, asked.clone(), said),
     };
     let Some(repo) = TODO_DEPS.get().cloned() else {
@@ -636,10 +636,10 @@ fn line(todo: &Todo) -> String {
 async fn list(meta: &Meta, p: ListTodosParams) -> String {
     let what = "reading their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
-        return format_dead_end(what, "To-dos are not set up on this Pond yet.");
+        return format_not_done(what, "To-dos are not set up on this Pond yet.");
     };
     let Some(owner) = speaker(meta).await else {
-        return format_dead_end(
+        return format_not_done(
             what,
             "Only a household member the Pond knows keeps a to-do list.",
         );
@@ -653,7 +653,7 @@ async fn list(meta: &Meta, p: ListTodosParams) -> String {
         }
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            format_dead_end(what, "The Pond could not read their list just now.")
+            format_not_done(what, "The Pond could not read their list just now.")
         }
     }
 }
@@ -661,10 +661,10 @@ async fn list(meta: &Meta, p: ListTodosParams) -> String {
 async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
     let what = "ticking that off";
     let Some(repo) = TODO_DEPS.get().cloned() else {
-        return format_dead_end(what, "To-dos are not set up on this Pond yet.");
+        return format_not_done(what, "To-dos are not set up on this Pond yet.");
     };
     let Some(owner) = speaker(meta).await else {
-        return format_dead_end(
+        return format_not_done(
             what,
             "Only a household member the Pond knows keeps a to-do list.",
         );
@@ -673,7 +673,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
         Ok(open) => open,
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            return format_dead_end(what, "The Pond could not read their list just now.");
+            return format_not_done(what, "The Pond could not read their list just now.");
         }
     };
     let by_id =
@@ -693,14 +693,14 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
     let todo = match found.as_slice() {
         [one] => (*one).clone(),
         [] => {
-            return format_dead_end(
+            return format_not_done(
                 what,
                 "No open to-do of theirs matches. Call list_todos and pass the `id`.",
             )
         }
         many => {
             let lines: Vec<String> = many.iter().map(|t| line(t)).collect();
-            return format_dead_end(
+            return format_not_done(
                 what,
                 &format!(
                     "Several open to-dos match; pass the `id` of the one they mean:\n{}",
@@ -712,7 +712,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
     let mut done = todo;
     let tz = household_zone().await;
     if done.answer(Answer::Done, None, Utc::now(), tz).is_err() {
-        return format_dead_end(what, "That to-do is already closed.");
+        return format_not_done(what, "That to-do is already closed.");
     }
     match repo.update(&done, false).await {
         Ok(()) => format!(
@@ -721,7 +721,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
         ),
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            format_dead_end(what, "The Pond could not save that just now.")
+            format_not_done(what, "The Pond could not save that just now.")
         }
     }
 }

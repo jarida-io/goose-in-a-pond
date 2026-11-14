@@ -14,6 +14,7 @@ pub mod mtp_drafter;
 pub mod orchestrator;
 pub mod provider_adapter;
 pub mod provider_shim;
+mod readable_failures;
 pub mod registry_rows;
 pub mod shutdown;
 pub mod token_counter;

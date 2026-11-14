@@ -41,6 +41,7 @@ pub fn all_tools() -> Vec<(&'static str, Tool)> {
         "giap-toolkit",
         crate::toolkit::ToolkitMcpServer::tool_defs(),
     );
+    push("giap-vision", crate::vision::VisionMcpServer::tool_defs());
     push(
         "giap-context",
         crate::context::ContextMcpServer::tool_defs(),
@@ -113,7 +114,9 @@ mod tests {
     use super::*;
 
     /// Groups registered by default; `giap-context`, `giap-orchestrator` and `giap-travel` are off.
+    /// `giap-vision` is registered on every pond.
     const DEFAULT_GROUPS: &[&str] = &[
+        "giap-vision",
         "giap-memory",
         "giap-weather",
         "giap-system",
@@ -171,14 +174,14 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            21_401,
-            "the default tool block is now {total} raw bytes, was 21,401. That is \
+            28_416,
+            "the default tool block is now {total} raw bytes, was 28,416. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 36, "tool count moved");
+        assert_eq!(entries.len(), 45, "tool count moved");
     }
 
     /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
@@ -215,8 +218,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 22_203,
-            "the block with every key stored is now {total} raw bytes, was 22,203"
+            total, 29_218,
+            "the block with every key stored is now {total} raw bytes, was 29,218"
         );
     }
 
