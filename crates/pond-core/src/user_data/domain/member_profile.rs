@@ -383,12 +383,31 @@ pub fn closed_by<'a>(
 /// A profile as the model reads it: each heading on its own line, its facts under it. `rows`
 /// are taken in the order given; [`profile_order`] them first for a whole profile.
 pub fn render_profile(rows: &[MemoryFragment]) -> String {
+    render_profile_led_by(rows, None)
+}
+
+/// [`render_profile`] with the row `lead` names read first: its heading opens the block and it
+/// opens its heading, because a small model weighs the first lines most.
+pub fn render_profile_led_by(rows: &[MemoryFragment], lead: Option<&str>) -> String {
+    let lead = lead.and_then(|id| rows.iter().find(|row| row.id == id));
+    let lead_segment = lead.map(|row| row.segment.as_ref());
+    let segments = lead_segment.into_iter().chain(
+        MemorySegment::ALL
+            .iter()
+            .map(Some)
+            .chain([None])
+            .filter(|segment| Some(*segment) != lead_segment),
+    );
     let mut out = String::new();
-    for segment in MemorySegment::ALL.iter().map(Some).chain([None]) {
-        let facts: Vec<&MemoryFragment> = rows
+    for segment in segments {
+        let mut facts: Vec<&MemoryFragment> = rows
             .iter()
             .filter(|row| row.segment.as_ref() == segment)
             .collect();
+        if let Some(i) = lead.and_then(|lead| facts.iter().position(|f| std::ptr::eq(*f, lead))) {
+            let first = facts.remove(i);
+            facts.insert(0, first);
+        }
         if facts.is_empty() {
             continue;
         }
@@ -561,6 +580,31 @@ mod tests {
              Other\n- An unfiled note."
         );
         assert_eq!(render_profile(&[]), "");
+    }
+
+    #[test]
+    fn the_closest_memory_opens_the_block_and_its_heading() {
+        let with_id = |id: &str, about: About, content: &str| {
+            let mut fragment = row(about, content);
+            fragment.id = id.into();
+            fragment
+        };
+        let mut rows = vec![
+            with_id("allergy", About::Allergy, "Jerry is allergic to peanuts."),
+            with_id("phone", About::Likes, "Jerry uses an iPhone."),
+            with_id("hiking", About::Likes, "Jerry likes hiking."),
+        ];
+        profile_order(&mut rows);
+        let rendered = render_profile_led_by(&rows, Some("phone"));
+        assert!(
+            rendered.starts_with("Preferences\n- Jerry uses an iPhone.\n"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("- Jerry likes hiking.\nFood and health\n- Jerry is allergic"));
+        assert_eq!(
+            render_profile_led_by(&rows, Some("not shown")),
+            render_profile(&rows)
+        );
     }
 
     #[test]

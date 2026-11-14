@@ -3236,6 +3236,11 @@ impl GooseAdapter {
                 closest_floor,
                 chrono::Utc::now(),
             );
+            // Only a seated memory clears the floor at the front, so this names it or nothing.
+            let seat_id = memory_candidates
+                .first()
+                .filter(|(_, s)| matches!((s, closest_floor), (Some(s), Some(f)) if *s >= f))
+                .map(|(m, _)| m.id.clone());
 
             let token_budget =
                 memory_token_budget(compaction_profile.memory_token_budget, is_voice);
@@ -3251,7 +3256,9 @@ impl GooseAdapter {
             );
             if !offered.is_empty() {
                 use pond_core::models::services::context::memory_block;
-                use pond_core::user_data::domain::member_profile::{profile_order, render_profile};
+                use pond_core::user_data::domain::member_profile::{
+                    profile_order, render_profile_led_by,
+                };
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
@@ -3283,7 +3290,7 @@ impl GooseAdapter {
                 );
 
                 profile_order(&mut fresh);
-                memory_block_for_user_msg = render_profile(&fresh);
+                memory_block_for_user_msg = render_profile_led_by(&fresh, seat_id.as_deref());
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
