@@ -57,7 +57,10 @@ fn source_table(corpus: Corpus) -> (&'static str, &'static str) {
 /// `profile_id` means "unknown owner" (unlike memory's "shared"), so those are never live.
 fn liveness_sql(corpus: Corpus) -> &'static str {
     match corpus {
-        Corpus::Memory => "AND (s.lifecycle IS NULL OR s.lifecycle = 'active')",
+        Corpus::Memory => {
+            "AND (s.lifecycle IS NULL OR s.lifecycle = 'active') \
+             AND (s.valid_until IS NULL OR s.valid_until > datetime('now'))"
+        }
         Corpus::Context => "",
         Corpus::Summary => {
             "AND s.rolling_summary IS NOT NULL AND s.rolling_summary != '' \
@@ -1296,6 +1299,44 @@ mod write_through_tests {
             ids,
             vec!["live"],
             "an archived memory came back from the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_memory_past_its_time_is_not_recalled() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+
+        for id in ["lasting", "passing", "passed"] {
+            add_memory_with_vector(&db.system, id, &[1.0, 0.0]).await;
+            index_whole(&index, id, &[1.0, 0.0]).await;
+        }
+        sqlx::query(
+            "UPDATE memory_fragments SET valid_until = datetime('now', '+1 day') \
+             WHERE id = 'passing'",
+        )
+        .execute(&db.system)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE memory_fragments SET valid_until = datetime('now', '-1 day') \
+             WHERE id = 'passed'",
+        )
+        .execute(&db.system)
+        .await
+        .unwrap();
+
+        let hits = index
+            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["lasting", "passing"],
+            "an expired fact was recalled"
         );
     }
 
