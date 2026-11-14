@@ -411,23 +411,25 @@ async fn the_coverage_number_leaves_the_process() {
     let liz = member(&h).await;
 
     // Four memories: one current, one under a stale model (needs re-embedding), two unindexed.
+    // The member's own profile is a personal-detail row too, indexed here.
     for id in ["m1", "m2", "m3", "m4"] {
         add_memory(&h, id, &liz).await;
     }
     add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
     add_vector(&h, Corpus::Memory, "m2", "some-older-embedder").await;
+    add_vector(&h, Corpus::Personal, &format!("profile:{liz}"), STUB_MODEL).await;
 
     let (status, body) = health(&h).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["indexed"], true);
     assert_eq!(body["model_id"], STUB_MODEL);
     assert_eq!(body["dims"], 4);
-    assert_eq!(body["rows"], 4);
-    assert_eq!(body["matching"], 1);
+    assert_eq!(body["rows"], 5);
+    assert_eq!(body["matching"], 2);
     assert_eq!(body["mismatched"], 1);
     assert_eq!(body["missing"], 2);
     assert_eq!(
-        body["coverage"], 0.25,
+        body["coverage"], 0.4,
         "the fraction is what a person actually reads. A pond at 2% looked fine for six phases \
          because nothing ever computed this: {body}"
     );
@@ -498,6 +500,7 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
     // A healthy corpus alongside: it is what makes the overall figure look fine.
     add_memory(&h, "m1", &liz).await;
     add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
+    add_vector(&h, Corpus::Personal, &format!("profile:{liz}"), STUB_MODEL).await;
 
     for id in ["s1", "s2", "s3"] {
         add_unattributed_summary(&h, id).await;
@@ -569,7 +572,8 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
     // Now "missing", which the slot re-embeds; the source row survives, so nothing is lost.
     let (_, after) = health(&h).await;
     assert_eq!(after["matching"], 0);
-    assert_eq!(after["missing"], 1);
+    // The memory, and the member's profile, which no vector ever covered.
+    assert_eq!(after["missing"], 2);
     assert_eq!(corpus_row(&after, "memory")["rows"], 1);
 
     let (_, again) = rebuild(&h).await;
