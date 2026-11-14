@@ -3558,8 +3558,7 @@ impl GooseAdapter {
                minutes'), `create_schedule` for something you do yourself again and again \
                (`when` in plain words: 'every weekday at 7am'; pass a schedule's name as `id` \
                to change it), and `list_schedules` / `schedule_action` (`delete` | `pause` | \
-               `resume` | `run_now`) to inspect or control them by name. If a group is listed under ADDITIONAL CAPABILITIES, \
-               enable it first with `giap-device__enable_capability_group`."
+               `resume` | `run_now`) to inspect or control them by name."
                     .to_string(),
             );
         }
