@@ -216,6 +216,7 @@ const SCAFFOLD_OPENS: &[&str] = &[
     "<tool-usage>",
     "<tool-failure>",
     "<memory-rules>",
+    "<filling-gaps>",
     "<output-quality>",
     "<voice-mode>",
     "<vision>",

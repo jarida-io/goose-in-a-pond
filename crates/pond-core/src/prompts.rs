@@ -242,6 +242,17 @@ Memory tools: save shared personal facts at once, recall before answering \
 about the user, corrections replace.
 </memory-rules>
 {% endif %}
+<filling-gaps>
+{% if compact_prompt %}Vague or missing: piece it together step by step — <memories>, \
+<personal-context>{% if tools_offered %}, memory and context tools, the web (weigh every \
+result), then other tools{% endif %}. Still short? Fill it from what you know and say it may \
+not be factual, pieced together from what little you knew.{% else %}Something vague or \
+missing: piece it together step by step, in this order — <memories> and \
+<personal-context>{% if tools_offered %}, then your memory and context tools; then the web, \
+weighing every result a search returns; then any other tool that could hold it{% endif %}. \
+Only when all of those come up short, fill the gap from what you know and say so: it may not \
+be factual, pieced together from what little you knew.{% endif %}
+</filling-gaps>
 <output-quality>
 Never invent URLs, numbers, dates or quotes — {% if tools_offered %}use a tool or {% endif %}say you don't know. \
 Ground factual claims in tool evidence or context; distinguish verified facts from deduction.
@@ -250,7 +261,8 @@ Ground factual claims in tool evidence or context; distinguish verified facts fr
 {%- if thinking_enabled %}
 
 <thinking>
-Think first only for multi-step reasoning, comparison or planning; else just answer. \
+Think in steps: what is asked, what you have, what is missing, what to do next. Anything \
+more than a simple request takes several steps; a simple one takes one, then just answer. \
 Under {{reasoning_budget_words}} words.
 </thinking>
 {%- endif %}
@@ -303,12 +315,19 @@ again. Else try another tool that applies, never repeat a call identically.
 Memory tools: save personal info immediately, recall before lookups, corrections override.
 </memory-rules>
 {% endif %}
+<filling-gaps>
+Vague or missing: piece it together step by step — <memories>, <personal-context>\
+{% if tools_offered %}, memory and context tools, the web (weigh every result), then any \
+other tool that could hold it{% endif %}. All short? Fill the gap from what you know and say \
+it may not be factual, pieced together from what little you knew.
+</filling-gaps>
 <output-quality>
 Never fabricate — {% if tools_offered %}use a tool or {% endif %}say you don't know. Synthesize, do not parrot.
 </output-quality>
 {%- if thinking_enabled %}
 <thinking>
-Hard problems: reason first, under {{reasoning_budget_words}} words. Simple ones: just answer.
+Think in steps: asked, have, missing, next. Complex: several steps, under \
+{{reasoning_budget_words}} words. Simple: one step, then just answer.
 </thinking>
 {%- endif %}
 {% if voice_mode %}
@@ -365,14 +384,27 @@ Memory tools: save personal info immediately, recall before lookups, corrections
 override previous entries.
 </memory-rules>
 {% endif %}
+<filling-gaps>
+{% if compact_prompt %}Underspecified or missing: infer it step by step — <memories>, \
+<personal-context>{% if tools_offered %}, memory and context tools, the web (weigh every \
+result), then other tools{% endif %}. Still short? Use prior knowledge and state it may not be \
+factual, pieced together from what little you knew.{% else %}Underspecified request or missing \
+fact: infer it step by step, sources in this order — <memories> and \
+<personal-context>{% if tools_offered %}; the memory and context tools; the web, weighing \
+every result a search returns; then any other tool that could hold it{% endif %}. Only when \
+all of those come up short, fill the gap from prior knowledge and state it: it may not be \
+factual, pieced together from what little you knew.{% endif %}
+</filling-gaps>
 <output-quality>
 Never fabricate URLs, statistics, dates or quotes — {% if tools_offered %}use a tool or \
 {% endif %}say you don't know. Synthesize and cite; never parrot raw output.
 </output-quality>
 {%- if thinking_enabled %}
 <thinking>
-Multi-step, comparison or plan: reason it through, weigh trade-offs, surface \
-uncertainty. Already determined: just answer. At most {{reasoning_budget_words}} words.
+Reason in explicit steps: what is asked, what is known, what is missing, the next action; \
+weigh trade-offs, surface uncertainty. Multi-part or unclear: as many steps as it takes. \
+Simple or already determined: one step, then just answer. At most \
+{{reasoning_budget_words}} words.
 </thinking>
 {%- endif %}
 {% if voice_mode %}
@@ -431,14 +463,26 @@ Memory tools: I save what you share right away, check memories before looking \
 things up, and corrections replace the old note.
 </memory-rules>
 {% endif %}
+<filling-gaps>
+{% if compact_prompt %}Vague or missing? I piece it together step by step — <memories>, \
+<personal-context>{% if tools_offered %}, my memory and context tools, the web (every result), \
+then other tools{% endif %}. Still short? I fill it from what I know and tell you it may not \
+be factual, pieced together from what little I knew.{% else %}If something's vague or \
+missing, I piece it together step by step: first <memories> and \
+<personal-context>{% if tools_offered %}, then my memory and context tools, then the web, \
+weighing every result a search gives me, then any other tool that could know{% endif %}. Only \
+if all of that comes up short do I fill the gap from what I know, and I tell you it may not \
+be factual, pieced together from what little I knew.{% endif %}
+</filling-gaps>
 <output-quality>
 I never make up URLs, numbers, dates or quotes — I look it up or say I don't \
 know, and I summarize naturally, never dump raw info.
 </output-quality>
 {%- if thinking_enabled %}
 <thinking>
-Tricky, comparative or multi-step: I think it through first, under \
-{{reasoning_budget_words}} words. Straightforward: just answer.
+I think in steps: what you asked, what I have, what's missing, what to do next. Anything \
+involved gets several steps, under {{reasoning_budget_words}} words; something simple gets \
+one, then I just answer.
 </thinking>
 {%- endif %}
 {% if voice_mode %}
@@ -1480,6 +1524,7 @@ mod tests {
         "context-handling",
         "tool-usage",
         "memory-rules",
+        "filling-gaps",
         "output-quality",
         "thinking",
         "voice-mode",
@@ -1705,12 +1750,13 @@ mod tests {
         }
     }
 
-    /// Chars for the bare style (no thinking, no vision): ~600 tokens, the part authors control.
-    const COMPACT_BASE_BUDGET: usize = 2400;
+    /// Chars for the bare style (no thinking, no vision): ~675 tokens, the part authors control.
+    /// It carries `<filling-gaps>`, the order the household wants a gap filled in.
+    const COMPACT_BASE_BUDGET: usize = 2700;
 
-    /// Chars for any reachable shape (~800 tokens; fits the 8192 `LOCAL_PROMPT_CLAMP` beside
+    /// Chars for any reachable shape (~850 tokens; fits the 8192 `LOCAL_PROMPT_CLAMP` beside
     /// ~2,386 tokens of "relevant"-mode schemas). `<vision>` is config, not author verbosity.
-    const COMPACT_SHAPE_CEILING: usize = 3200;
+    const COMPACT_SHAPE_CEILING: usize = 3400;
 
     /// A shape a pond can actually be in, and the flags that put it there.
     struct Shape {

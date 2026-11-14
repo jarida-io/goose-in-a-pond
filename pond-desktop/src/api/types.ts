@@ -956,7 +956,7 @@ export interface PromptTemplate {
 }
 
 /** Mirrors `FACTORY_VERSION` in pond-core `user_data/domain/prompt_template.rs`; bump both. */
-export const PROMPT_FACTORY_VERSION = 1;
+export const PROMPT_FACTORY_VERSION = 7;
 
 /** True when the user's edit predates the current built-in; notice only, never overwrite it. */
 export function promptTemplateIsOutdated(t: PromptTemplate): boolean {
