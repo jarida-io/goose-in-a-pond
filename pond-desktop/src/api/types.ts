@@ -628,8 +628,18 @@ export interface MemoryFragment {
 // Mirrors `context_index_health` / `rebuild_context_index` (pond-api routes.rs). No index or
 // embedder answers 200 with `indexed: false` and the counts absent, not zero.
 
-/** The three stores the index covers, spelled as the server spells them. */
-export type ContextCorpus = "memory" | "context" | "summary";
+/** The stores the index covers, spelled as the server spells them. */
+export type ContextCorpus =
+  | "memory"
+  | "context"
+  | "summary"
+  | "personal"
+  | "message"
+  | "digest"
+  | "story"
+  | "report"
+  | "notice"
+  | "idea";
 
 /** One store's share of the index. `coverage` is null when `rows` is 0 (0/0): render it as
  *  "nothing to index", never as a percentage. */

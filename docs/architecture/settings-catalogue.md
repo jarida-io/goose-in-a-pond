@@ -183,7 +183,7 @@ gives it a control, and the server-side rule if any.
 | `ext_sensor_enabled` | `true` |  |
 | `ext_travel_enabled` | `false` |  |
 | `ext_orchestrator_enabled` | `false` |  |
-| `ext_context_enabled` | `false` | Rust classifies it headless |
+| `ext_context_enabled` | `true` | Rust classifies it headless |
 | `tool_selection_mode` | `"all"` | rule: one of `all`, `relevant`, `minimal` |
 | `tool_model` | `null` |  |
 | `searxng_url` | `null` | no Rust reader found (`search_web` does not read it); the catalogue marks it live; rule: `http(s)://` URL with a host, blank allowed |

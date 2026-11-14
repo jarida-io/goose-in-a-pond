@@ -1,4 +1,4 @@
-//! The personal-context vector index over three corpora that keep their own stores.
+//! The personal-context vector index over corpora that keep their own stores.
 //! It holds no text: WAL can't delete a row and its vector atomically, so orphans hold nothing.
 
 use anyhow::Result;
@@ -16,6 +16,21 @@ pub enum Corpus {
     Context,
     /// `sessions.rolling_summary` — a model's compression of a conversation.
     Summary,
+    /// A member's profile, places, interests, news topics, portrait, saved items and screenshot
+    /// notes, each row id prefixed with its table.
+    Personal,
+    /// `session_messages`: what a member said and what the pond replied.
+    Message,
+    /// `news_digests`.
+    Digest,
+    /// `news_stories`.
+    Story,
+    /// `long_task_artifacts` other than raw data.
+    Report,
+    /// `notification_history`.
+    Notice,
+    /// `ideas` not dismissed.
+    Idea,
 }
 
 impl Corpus {
@@ -24,20 +39,55 @@ impl Corpus {
             Corpus::Memory => "memory",
             Corpus::Context => "context",
             Corpus::Summary => "summary",
+            Corpus::Personal => "personal",
+            Corpus::Message => "message",
+            Corpus::Digest => "digest",
+            Corpus::Story => "story",
+            Corpus::Report => "report",
+            Corpus::Notice => "notice",
+            Corpus::Idea => "idea",
         }
     }
 
     pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "memory" => Some(Corpus::Memory),
-            "context" => Some(Corpus::Context),
-            "summary" => Some(Corpus::Summary),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|corpus| corpus.as_str() == raw)
     }
 
     /// Every corpus, so a sweep cannot silently forget one.
-    pub const ALL: [Corpus; 3] = [Corpus::Memory, Corpus::Context, Corpus::Summary];
+    pub const ALL: [Corpus; 10] = [
+        Corpus::Memory,
+        Corpus::Context,
+        Corpus::Summary,
+        Corpus::Personal,
+        Corpus::Message,
+        Corpus::Digest,
+        Corpus::Story,
+        Corpus::Report,
+        Corpus::Notice,
+        Corpus::Idea,
+    ];
+
+    /// Whether long rows are split into passages; memories and summaries are a few sentences.
+    pub fn chunked(self) -> bool {
+        !matches!(self, Corpus::Memory | Corpus::Summary)
+    }
+}
+
+/// What a turn's own retrieval leaves out: corpora it already shows, and its own conversation,
+/// whose words are in front of the model already.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exclusions {
+    pub corpora: Vec<Corpus>,
+    pub session_id: Option<String>,
+}
+
+/// A row the embedding slot owes a vector: its id, text, and the revision the vector is stamped
+/// with, so an edit makes it stale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaleRow {
+    pub row_id: String,
+    pub text: String,
+    pub rev: Option<String>,
 }
 
 /// One vector on its way into the index.
@@ -155,6 +205,20 @@ pub trait VectorIndex: Send + Sync {
         model_id: &str,
         scope: &ProfileScope,
         limit: usize,
+    ) -> Result<Vec<ResolvedHit>> {
+        self.search_resolved_excluding(query, model_id, scope, limit, &Exclusions::default())
+            .await
+    }
+
+    /// [`Self::search_resolved`] without what `exclusions` names, left out in SQL so it takes no
+    /// top-K slot.
+    async fn search_resolved_excluding(
+        &self,
+        query: &[f32],
+        model_id: &str,
+        scope: &ProfileScope,
+        limit: usize,
+        exclusions: &Exclusions,
     ) -> Result<Vec<ResolvedHit>>;
 
     /// Rows with no current vector for `model_id`, found by `LEFT JOIN`, not a durable queue.
@@ -165,13 +229,13 @@ pub trait VectorIndex: Send + Sync {
         limit: usize,
     ) -> Result<Vec<String>>;
 
-    /// Like [`Self::needs_embedding`], with each row's text, for the embedding slot.
+    /// Like [`Self::needs_embedding`], with each row's text and revision, for the embedding slot.
     async fn needs_embedding_with_text(
         &self,
         corpus: Corpus,
         model_id: &str,
         limit: usize,
-    ) -> Result<Vec<(String, String)>>;
+    ) -> Result<Vec<StaleRow>>;
 
     /// Delete index rows whose source row is gone. Returns how many.
     async fn prune_orphans(&self) -> Result<u64>;

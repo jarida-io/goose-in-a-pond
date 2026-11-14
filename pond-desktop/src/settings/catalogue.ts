@@ -426,7 +426,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "ext_sensor_enabled", label: "Sensors", description: "Let it read what the sensors in this home have recorded.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_travel_enabled", label: "Travel", description: "Let it make map directions and Uber links you open on your phone.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_orchestrator_enabled", label: "Delegation", description: "Let it hand part of a job to a helper working on its own.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "ext_context_enabled", label: "Personal context", description: "Let it read the notes and documents this home has given it.", control: { kind: "toggle" }, consumer: "live", proposed: true },
+          { key: "ext_context_enabled", label: "Personal context", description: "Let it search past conversations, digests, reports, notifications, ideas and your personal details.", control: { kind: "toggle" }, consumer: "live", proposed: true },
         ],
       },
       {

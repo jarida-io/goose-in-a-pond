@@ -18,7 +18,7 @@ pipe. For third-party servers see [Building Extensions](extensions.md).
 | `giap-device-control` | `device_control.rs` | `describe_device`, `get_device_state`, `set_device_state` | `ext_device_enabled` |
 | `giap-sensors` | `sensors.rs` | `get_sensor_reading`, `get_sensor_history`, `list_sensors` | `ext_sensor_enabled` |
 | `giap-travel` | `travel.rs` | `get_directions_link`, `book_ride`, `get_ride_link` | `ext_travel_enabled` (off by default) |
-| `giap-context` | `context.rs` | `search_context`, `recall`, `get_recent_context` | `ext_context_enabled` (off by default) |
+| `giap-context` | `context.rs` | `search_context`, `recall`, `get_recent_context` | `ext_context_enabled` (on by default) |
 | `giap-orchestrator` | `orchestrator.rs` | `delegate`, `check_task` | `ext_orchestrator_enabled` (off by default) |
 
 38 tools. Registration is in `register_giap_extensions`

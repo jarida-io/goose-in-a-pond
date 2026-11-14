@@ -6,6 +6,7 @@ use goose::config::GooseMode;
 use goose::conversation::message::Message;
 use goose::providers::base::Provider;
 use goose::session::SessionManager;
+use pond_core::context::vector_index::VectorIndex;
 use pond_core::mcp::domain::tool_outcome::receipt_from_meta;
 use pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
@@ -100,6 +101,8 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
+    /// The `<personal-context>` block, whole, or empty.
+    personal_context: &'a str,
     /// The user's words are in the attached audio, which the model hears.
     heard: bool,
     /// Where the person's phone is now (`device_place_note`), when their app shares it.
@@ -148,6 +151,10 @@ impl TurnEnvelope<'_> {
             msg.push_str("<memories>\n");
             msg.push_str(self.memories);
             msg.push_str("\n</memories>\n");
+        }
+        if !self.personal_context.is_empty() {
+            msg.push_str(self.personal_context);
+            msg.push('\n');
         }
         msg.push_str(&pond_core::models::services::answer_contract::answer_contract());
         msg.push('\n');
@@ -582,6 +589,8 @@ pub struct GooseAdapter {
     memory_repo: Arc<dyn MemoryRepository>,
     /// Memory-search embedder; `None` (fastembed failed or disabled) falls back to keyword LIKE.
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// The shared index a turn draws its strong matches from; `None` means none ride a turn.
+    turn_index: Option<Arc<dyn VectorIndex>>,
     /// Only source of `ModelRecord.context_length` (governor rung 3); `None` only on CLI paths.
     model_repo: Option<Arc<dyn ModelRepository>>,
     llamafile_url: String,
@@ -740,6 +749,7 @@ impl GooseAdapter {
             skill_repo,
             memory_repo,
             embedding_provider: None,
+            turn_index: None,
             model_repo: None,
             llamafile_url,
             data_dir,
@@ -2174,10 +2184,14 @@ impl GooseAdapter {
         message: &str,
         scope: &ProfileScope,
         limit: usize,
-    ) -> (Vec<(MemoryFragment, Option<f32>)>, Option<f32>) {
+    ) -> (
+        Vec<(MemoryFragment, Option<f32>)>,
+        Option<f32>,
+        Option<Vec<f32>>,
+    ) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
-            return (Vec::new(), None);
+            return (Vec::new(), None, None);
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
@@ -2203,7 +2217,7 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
-                            return (hits, closest_floor);
+                            return (hits, closest_floor, Some(query_vector));
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -2214,17 +2228,17 @@ impl GooseAdapter {
 
         let keywords = pond_core::user_data::services::memory_relevance::keyword_terms(message);
         if keywords.is_empty() {
-            return (vec![], None);
+            return (vec![], None, None);
         }
         match self
             .memory_repo
             .search_by_content(&keywords, scope, limit)
             .await
         {
-            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None),
+            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None, None),
             Err(e) => {
                 tracing::warn!("memory: keyword search failed: {e}");
-                (vec![], None)
+                (vec![], None, None)
             }
         }
     }
@@ -2667,6 +2681,48 @@ impl GooseAdapter {
         self
     }
 
+    /// The index a turn's `<personal-context>` comes from, searched with the memory query's vector.
+    pub fn with_turn_index(mut self, index: Arc<dyn VectorIndex>) -> Self {
+        self.turn_index = Some(index);
+        self
+    }
+
+    /// The strong matches for a turn from every corpus but memories, which the turn shows
+    /// already, and its own conversation, whose words the model has.
+    async fn turn_recollections(
+        &self,
+        query_vector: Option<&[f32]>,
+        floor: Option<f32>,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
+        session_id: &str,
+        is_voice: bool,
+    ) -> Vec<pond_core::context::retrieval_service::Recollection> {
+        use pond_core::context::retrieval_service::{
+            for_turn, PersonalContextRetrieval, TURN_HITS,
+        };
+        use pond_core::context::vector_index::{Corpus, Exclusions};
+        let (Some(index), Some(embedder), Some(vector), Some(floor)) = (
+            self.turn_index.as_ref(),
+            self.embedding_provider.as_ref(),
+            query_vector,
+            floor,
+        ) else {
+            return Vec::new();
+        };
+        if !scope.allows_personal_data() {
+            return Vec::new();
+        }
+        let exclusions = Exclusions {
+            corpora: vec![Corpus::Memory],
+            session_id: Some(session_id.to_string()),
+        };
+        let hits = PersonalContextRetrieval::new(index.clone(), embedder.clone())
+            .recall_near(vector, scope, TURN_HITS * 4, &exclusions)
+            .await;
+        // A spoken answer has room for one.
+        for_turn(hits, floor, if is_voice { 1 } else { TURN_HITS })
+    }
+
     /// Model catalog, so the governor can use `ModelRecord.context_length` over the name heuristic.
     pub fn with_model_repo(mut self, repo: Arc<dyn ModelRepository>) -> Self {
         self.model_repo = Some(repo);
@@ -2937,11 +2993,11 @@ impl GooseAdapter {
                         self.topical_memories(request.message_or_heard(), &turn_scope, limit)
                             .await
                     }
-                    None => (vec![], None),
+                    None => (vec![], None, None),
                 }
             },
         );
-        let (relevant_memories, closest_floor) = relevant_memories;
+        let (relevant_memories, closest_floor, query_vector) = relevant_memories;
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -3216,6 +3272,23 @@ impl GooseAdapter {
         // A preamble budget (clamped window): injected memories are re-prefilled every turn.
         let compaction_profile = &turn_profile;
 
+        // Strong matches from the rest of the index take a share of the memory budget, not more.
+        let recall_started = std::time::Instant::now();
+        let recollections = self
+            .turn_recollections(
+                query_vector.as_deref(),
+                closest_floor,
+                &turn_scope,
+                &request.session_id,
+                is_voice,
+            )
+            .await;
+        let recall_ms = recall_started.elapsed().as_millis() as u64;
+        let budget_split = pond_core::context::retrieval::split_preamble_budget(
+            memory_token_budget(compaction_profile.memory_token_budget, is_voice),
+            !recollections.is_empty(),
+        );
+
         // What every conversation of this member's starts with, whatever the message is about:
         // their standing instructions, name, diet, allergies and how they like to be answered.
         let standing: Vec<MemoryFragment> = if turn_scope.excludes_everything() {
@@ -3236,9 +3309,13 @@ impl GooseAdapter {
                 closest_floor,
                 chrono::Utc::now(),
             );
+            // Only a seated memory clears the floor at the front, so this names it or nothing.
+            let seat_id = memory_candidates
+                .first()
+                .filter(|(_, s)| matches!((s, closest_floor), (Some(s), Some(f)) if *s >= f))
+                .map(|(m, _)| m.id.clone());
 
-            let token_budget =
-                memory_token_budget(compaction_profile.memory_token_budget, is_voice);
+            let token_budget = budget_split.memory_tokens;
             let (budgeted, tokens_used) =
                 fragments_within(memory_candidates.iter().map(|(m, _)| m), token_budget);
 
@@ -3251,7 +3328,9 @@ impl GooseAdapter {
             );
             if !offered.is_empty() {
                 use pond_core::models::services::context::memory_block;
-                use pond_core::user_data::domain::member_profile::{profile_order, render_profile};
+                use pond_core::user_data::domain::member_profile::{
+                    profile_order, render_profile_led_by,
+                };
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
@@ -3283,7 +3362,7 @@ impl GooseAdapter {
                 );
 
                 profile_order(&mut fresh);
-                memory_block_for_user_msg = render_profile(&fresh);
+                memory_block_for_user_msg = render_profile_led_by(&fresh, seat_id.as_deref());
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
@@ -3294,6 +3373,36 @@ impl GooseAdapter {
                     }
                 });
             }
+        }
+
+        let mut personal_context_for_user_msg = String::new();
+        let matched = recollections.len();
+        let mut fresh = Vec::new();
+        if !recollections.is_empty() {
+            use pond_core::context::retrieval_service::{render_turn_block, turn_line};
+            // Its start is enough to know a line from an earlier envelope, however it was cut.
+            let earlier = self.earlier_user_texts(&goose_sid).await;
+            fresh = recollections
+                .into_iter()
+                .filter(|hit| {
+                    let line = turn_line(hit, 60);
+                    let start = line.trim_end_matches('…');
+                    !earlier.iter().any(|text| text.contains(start))
+                })
+                .collect();
+            personal_context_for_user_msg = render_turn_block(&fresh, budget_split.context_tokens);
+        }
+        if self.turn_index.is_some() && query_vector.is_some() {
+            tracing::info!(
+                kind = "personal_context",
+                matched,
+                shown = fresh.len(),
+                corpora = ?fresh.iter().map(|h| h.corpus.as_str()).collect::<Vec<_>>(),
+                top_score = ?fresh.iter().map(|h| h.score).reduce(f32::max),
+                token_budget = budget_split.context_tokens,
+                recall_ms,
+                "turn recall"
+            );
         }
 
         // ── 4b. Upcoming schedules & vision runtime context ─────────────────
@@ -3783,6 +3892,7 @@ impl GooseAdapter {
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
+            personal_context: &personal_context_for_user_msg,
             heard: request.audio.iter().any(|clip| clip.heard_as.is_some()),
             device_place: request
                 .device_place
@@ -8315,6 +8425,28 @@ mod tests {
             Some(goose::conversation::message::MessageContent::Text(_))
         ));
         assert_eq!(image_parts(&msg).len(), 1);
+    }
+
+    #[test]
+    fn strong_matches_follow_the_memories_inside_the_context() {
+        let envelope = TurnEnvelope {
+            message: "when is the train?",
+            memories: "Preferences\n- Jerry likes trains.",
+            personal_context: "<personal-context>\n- (from a notification I sent) The train \
+                               leaves at 8.\n</personal-context>",
+            ..Default::default()
+        }
+        .render();
+        let memories = envelope.find("</memories>").unwrap();
+        let context = envelope.find("<personal-context>").unwrap();
+        let end = envelope.find("</system-context>").unwrap();
+        assert!(memories < context && context < end, "{envelope}");
+        let bare = TurnEnvelope {
+            message: "hi",
+            ..Default::default()
+        }
+        .render();
+        assert!(!bare.contains("personal-context"));
     }
 
     /// A heard room turn carries no text of its own words; only it gets the note, which never

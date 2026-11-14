@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::context::chunking::{self, Chunk};
 use crate::context::ports::ContextRepository;
-use crate::context::vector_index::{Corpus, VectorEntry, VectorIndex};
+use crate::context::vector_index::{Corpus, StaleRow, VectorEntry, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider as _;
 use crate::models::services::active_embedder::{ActiveEmbedder, EmbedLease};
 use crate::user_data::ports::memory_repository::MemoryRepository;
@@ -29,8 +29,20 @@ const BYTES_PER_TOKEN: usize = 4;
 /// Weight of the newest batch in the speed estimate; a choice.
 const SPEED_SMOOTHING: f64 = 0.3;
 
-/// The order corpora are walked in: memory is what recall reads first.
-const ORDER: [Corpus; 3] = [Corpus::Memory, Corpus::Summary, Corpus::Context];
+/// The order corpora are walked in: memory is what recall reads first, and messages, the longest
+/// backlog, go last so a first fill doesn't hold the rest back.
+const ORDER: [Corpus; 10] = [
+    Corpus::Memory,
+    Corpus::Personal,
+    Corpus::Summary,
+    Corpus::Context,
+    Corpus::Notice,
+    Corpus::Digest,
+    Corpus::Story,
+    Corpus::Report,
+    Corpus::Idea,
+    Corpus::Message,
+];
 
 pub fn estimate_tokens(text: &str) -> usize {
     (text.len() / BYTES_PER_TOKEN).max(1)
@@ -125,6 +137,9 @@ pub struct PassReport {
     pub memories: usize,
     pub summaries: usize,
     pub context_items: usize,
+    /// Rows of every other corpus: personal details, messages, digests, stories, reports,
+    /// notifications and ideas.
+    pub other_rows: usize,
     /// Rows that could not be embedded or stored; each is tried again after a switch or a bell.
     pub failed: usize,
     pub batches: usize,
@@ -138,6 +153,7 @@ impl PassReport {
             memories: 0,
             summaries: 0,
             context_items: 0,
+            other_rows: 0,
             failed: 0,
             batches: 0,
             orphans_pruned: 0,
@@ -145,7 +161,7 @@ impl PassReport {
     }
 
     pub fn embedded(&self) -> usize {
-        self.memories + self.summaries + self.context_items
+        self.memories + self.summaries + self.context_items + self.other_rows
     }
 
     fn ended(mut self, end: PassEnd) -> Self {
@@ -154,14 +170,14 @@ impl PassReport {
     }
 }
 
-/// One row to embed: its passages are the whole text, or a long context item's chunks.
+/// One row to embed: its passages are the whole text, or a long row's chunks.
 struct Work {
     corpus: Corpus,
     row_id: String,
-    /// A summary's revision, read with its text.
+    /// The row's revision, read with its text.
     rev: Option<String>,
     text: String,
-    /// More than one only for a long context item.
+    /// More than one only for a long row of a chunked corpus.
     spans: Vec<Chunk>,
     tokens: usize,
 }
@@ -169,7 +185,7 @@ struct Work {
 impl Work {
     fn new(corpus: Corpus, row_id: String, text: String, rev: Option<String>) -> Self {
         let spans = match corpus {
-            Corpus::Context => chunking::chunk(
+            corpus if corpus.chunked() => chunking::chunk(
                 &text,
                 chunking::DEFAULT_CHUNK_BYTES,
                 chunking::DEFAULT_OVERLAP_BYTES,
@@ -339,6 +355,7 @@ impl EmbeddingSlot {
                 memories = report.memories,
                 summaries = report.summaries,
                 context_items = report.context_items,
+                other_rows = report.other_rows,
                 failed = report.failed,
                 batches = report.batches,
                 "embedding slot: backlog embedded"
@@ -380,8 +397,8 @@ async fn read_corpus(
             let mut seen = HashSet::with_capacity(rows.len());
             Ok(rows
                 .into_iter()
-                .filter(|(id, _)| seen.insert(id.clone()))
-                .map(|(id, text)| Work::new(corpus, id, text, None))
+                .filter(|row| seen.insert(row.row_id.clone()))
+                .map(|StaleRow { row_id, text, rev }| Work::new(corpus, row_id, text, rev))
                 .collect())
         }
     }
@@ -518,6 +535,7 @@ impl Pass<'_, '_> {
                             Corpus::Memory => self.report.memories += 1,
                             Corpus::Summary => self.report.summaries += 1,
                             Corpus::Context => self.report.context_items += 1,
+                            _ => self.report.other_rows += 1,
                         }
                     }
                     Err(e) => {
@@ -587,7 +605,39 @@ impl Pass<'_, '_> {
                             chunk_span: Some((span.start as i64, span.len as i64)),
                             model_id: self.model_id.to_string(),
                             vector,
-                            source_rev: None,
+                            source_rev: work.rev.clone(),
+                        })
+                        .await?;
+                }
+                Ok(())
+            }
+            // These rows keep no vector of their own: the index is their only copy.
+            corpus => {
+                self.stores.index.remove(corpus, id).await?;
+                if work.spans.len() == 1 {
+                    return self
+                        .stores
+                        .index
+                        .upsert(&VectorEntry::whole(
+                            corpus,
+                            work.row_id.clone(),
+                            self.model_id.to_string(),
+                            first.clone(),
+                            work.rev.clone(),
+                        ))
+                        .await;
+                }
+                for (ix, (span, vector)) in work.spans.iter().zip(vectors).enumerate() {
+                    self.stores
+                        .index
+                        .upsert(&VectorEntry {
+                            corpus,
+                            row_id: work.row_id.clone(),
+                            chunk_ix: ix as i64,
+                            chunk_span: Some((span.start as i64, span.len as i64)),
+                            model_id: self.model_id.to_string(),
+                            vector,
+                            source_rev: work.rev.clone(),
                         })
                         .await?;
                 }
@@ -685,7 +735,7 @@ async fn tidy(index: &dyn VectorIndex, model_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::vector_index::{IndexHealth, ResolvedHit, VectorHit};
+    use crate::context::vector_index::{Exclusions, IndexHealth, ResolvedHit, VectorHit};
     use crate::models::domain::embedding_models::EmbedderChoice;
     use crate::models::ports::embedding::EmbeddingProvider;
     use crate::user_data::domain::memory::MemoryFragment;
@@ -694,6 +744,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn the_slot_walks_every_corpus_once() {
+        let mut walked = ORDER.to_vec();
+        walked.sort();
+        assert_eq!(walked, Corpus::ALL.to_vec());
+    }
 
     const MODEL: &str = "test-model";
     const DIMS: usize = 3;
@@ -773,12 +830,13 @@ mod tests {
         ) -> Result<Vec<VectorHit>> {
             Ok(vec![])
         }
-        async fn search_resolved(
+        async fn search_resolved_excluding(
             &self,
             _q: &[f32],
             _m: &str,
             _s: &ProfileScope,
             _l: usize,
+            _x: &Exclusions,
         ) -> Result<Vec<ResolvedHit>> {
             Ok(vec![])
         }
@@ -790,8 +848,16 @@ mod tests {
             c: Corpus,
             m: &str,
             l: usize,
-        ) -> Result<Vec<(String, String)>> {
-            Ok(self.stale(c, m, l))
+        ) -> Result<Vec<StaleRow>> {
+            Ok(self
+                .stale(c, m, l)
+                .into_iter()
+                .map(|(row_id, text)| StaleRow {
+                    row_id,
+                    text,
+                    rev: None,
+                })
+                .collect())
         }
         async fn prune_orphans(&self) -> Result<u64> {
             self.tidied.fetch_add(1, Ordering::SeqCst);
