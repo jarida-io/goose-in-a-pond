@@ -113,10 +113,11 @@ pub fn total_bytes(entries: &[PrefixEntry]) -> usize {
 mod tests {
     use super::*;
 
-    /// Groups registered by default; `giap-context`, `giap-orchestrator` and `giap-travel` are off.
+    /// Groups registered by default; `giap-orchestrator` and `giap-travel` are off.
     /// `giap-vision` is registered on every pond.
     const DEFAULT_GROUPS: &[&str] = &[
         "giap-vision",
+        "giap-context",
         "giap-memory",
         "giap-weather",
         "giap-system",
@@ -174,14 +175,14 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            28_416,
-            "the default tool block is now {total} raw bytes, was 28,416. That is \
+            30_179,
+            "the default tool block is now {total} raw bytes, was 30,179. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 45, "tool count moved");
+        assert_eq!(entries.len(), 48, "tool count moved");
     }
 
     /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
@@ -218,8 +219,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 29_218,
-            "the block with every key stored is now {total} raw bytes, was 29,218"
+            total, 30_981,
+            "the block with every key stored is now {total} raw bytes, was 30,981"
         );
     }
 
