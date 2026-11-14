@@ -747,7 +747,9 @@ real test.
 
 - **Ranking.** The ranker fuses plain and boosted BM25 by reciprocal rank (k = 60). When two or
   fewer pages were read, it quotes up to four passages a page within 2,400 bytes; otherwise
-  two a page within 1,800.
+  two a page within 2,200. Each source's best passage comes first, clipped to an even share of
+  the room, so a turn hears up to six sources; a deep-research step hears up to thirty within
+  9,000 bytes.
 - **Extraction.** It ports Mozilla Readability's unlikely-candidate rule, with its retry
   without the class test when a page yields under 500 characters, and adds:
   - a "most popular / trending" rail pattern;
@@ -864,9 +866,9 @@ only with local places on (§8.10.5).
 | parameter | sent | why |
 |---|---|---|
 | `q` | the question, cut to 75 words and 600 characters | the endpoint's limits; web search's are 50 and 400, and that path keeps them |
-| `count` | 8 | the guide gives 5 for a factual question; 8 leaves a local question room for pages and places. The token budget, not the count, decides what comes back |
-| `maximum_number_of_urls` | 5 | the copy rarely quotes more than three sources; five gives the ranker a choice |
-| `maximum_number_of_tokens` | 2048 | the guide's figure for a factual question, and the binding limit. About four times what the copy keeps (1,800 to 2,400 bytes), so the question still chooses the passages (R3) |
+| `count` | 8; 30 in a deep-research step | 8 leaves a local question room for pages and places; a wider reach weighs as many as it may quote. The token budget, not the count, decides what comes back |
+| `maximum_number_of_urls` | 6; 30 in a deep-research step | the household's choice (2026-11-15): six sources a turn, thirty a research step. Brave allows 50 |
+| `maximum_number_of_tokens` | 2048; 16384 in a deep-research step | the guide's figures for a factual question and for broad research, and the binding limit. About four times what a turn's copy keeps (2,200 to 2,400 bytes), so the question still chooses the passages (R3) |
 | `maximum_number_of_tokens_per_url` | 1024 | one page cannot fill the whole context |
 | `safesearch` | `moderate` | unset means no filtering at all; the web search path sends the same |
 | `enable_source_metadata` | `true` | adds `site_name`, the title of last resort for an untitled page |
@@ -923,7 +925,8 @@ turn cannot wait that long, and a timeout falls back (§8.10.4).
   - Places: one line each, at most 200 bytes, the part at most 700 bytes, all charged to the
     copy's budget.
   - Sources: §8.8's budgets, keyed by the number of sources. Two or fewer give four passages a
-    source within 2,400 bytes; more give two within 1,800.
+    source within 2,400 bytes; more give two within 2,200, each source's best passage first, so
+    up to six sources are quoted (thirty within 9,000 bytes in a deep-research step).
   - No URLs and no Markdown (R4), and `[[[` is defanged. Every line is quoted text, a source
     line or the `Places:` label, so nothing is copyable as an answer the tool did not find (R6).
 

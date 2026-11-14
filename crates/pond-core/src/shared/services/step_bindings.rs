@@ -1,7 +1,7 @@
 //! Which long-task step a runner's root session is working on. A helper's tool call resolves to
 //! that root through [`ChildSessionRegistry`], so it reaches its own task without naming one, and
 //! its report waits here for the runner. Leases unbind on drop; never persisted.
-use crate::shared::domain::long_task::{StepKey, StepOutcome};
+use crate::shared::domain::long_task::{LongTaskKind, StepKey, StepOutcome};
 use crate::shared::services::child_sessions::ChildSessionRegistry;
 use crate::user_data::domain::profile::ProfileScope;
 use std::collections::HashMap;
@@ -34,6 +34,8 @@ pub struct StepBinding {
     /// The task owner's scope: a helper reads and writes nothing wider.
     pub scope: ProfileScope,
     pub work: StepWork,
+    /// A research task's helpers search wider than a chat turn does.
+    pub kind: LongTaskKind,
 }
 
 struct Entry {
@@ -227,6 +229,7 @@ mod tests {
             task_id: "task-1".to_string(),
             scope: ProfileScope::Owner("member-1".to_string()),
             work: StepWork::Do(StepKey::parse("read-part-1").unwrap()),
+            kind: LongTaskKind::General,
         }
     }
 

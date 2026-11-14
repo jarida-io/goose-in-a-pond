@@ -35,8 +35,58 @@ pub(crate) mod bounded_html;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-/// Results asked of Brave.
+/// Results asked of Brave's web search at least; a wider reach asks for more, up to its cap.
 const RESULT_COUNT: usize = 8;
+
+/// Brave's documented maximum for web search's `count`.
+const BRAVE_WEB_MAX_COUNT: usize = 20;
+
+/// How far one search looks: the sources it asks for and quotes, the page text it asks Brave
+/// for, and the room the model's copy has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reach {
+    sources: usize,
+    context_tokens: usize,
+    copy_bytes: usize,
+}
+
+/// A chat turn: six sources the household asked for, in a copy small enough that the answer
+/// after it still starts quickly on the Orin.
+const TURN_REACH: Reach = Reach {
+    sources: 6,
+    context_tokens: LLM_CONTEXT_MAX_TOKENS,
+    copy_bytes: RESULT_BUDGET,
+};
+
+/// A deep-research step, which runs while the house is quiet: thirty sources, with the guide's
+/// token figure for broad research.
+const RESEARCH_REACH: Reach = Reach {
+    sources: 30,
+    context_tokens: 16_384,
+    copy_bytes: 9_000,
+};
+
+/// The reach for the session behind this call: wide for a deep-research step's helper.
+fn reach_for(meta: &rmcp::model::Meta) -> Reach {
+    use pond_core::shared::domain::long_task::LongTaskKind;
+    use pond_core::shared::services::child_sessions::process_child_sessions;
+    use pond_core::shared::services::step_bindings::process_step_bindings;
+    let research = crate::session_from_meta(meta)
+        .and_then(|session| {
+            process_step_bindings().binding_for_helper(&session, &process_child_sessions())
+        })
+        .is_some_and(|binding| binding.kind == LongTaskKind::Research);
+    if research {
+        RESEARCH_REACH
+    } else {
+        TURN_REACH
+    }
+}
+
+/// Hits asked of Brave's web search for `reach`.
+fn web_count(reach: Reach) -> usize {
+    RESULT_COUNT.max(reach.sources).min(BRAVE_WEB_MAX_COUNT)
+}
 
 /// Brave's own limits on `q` for web search.
 const BRAVE_MAX_QUERY_CHARS: usize = 400;
@@ -46,12 +96,9 @@ const BRAVE_MAX_QUERY_WORDS: usize = 50;
 const LLM_CONTEXT_MAX_QUERY_CHARS: usize = 600;
 const LLM_CONTEXT_MAX_QUERY_WORDS: usize = 75;
 
-/// Results LLM Context weighs before choosing its text: the guide's 5 for a factual question,
-/// plus a few so a local question's places and pages both have room.
+/// Results LLM Context weighs before choosing its text, at least: room for a local question's
+/// places and pages both. A wider reach weighs as many as it may quote.
 const LLM_CONTEXT_COUNT: usize = 8;
-
-/// Pages it may quote; the copy names at most this many sources either way.
-const LLM_CONTEXT_MAX_URLS: usize = 5;
 
 /// Tokens of page text it returns: the guide's figure for a factual question. The binding limit,
 /// and about four times what the copy keeps, so the ranker has a choice.
@@ -120,8 +167,8 @@ const MIN_BLOCK_CHARS: usize = 40;
 /// A heading as it prefixes the blocks under it.
 const MAX_HEADING_BYTES: usize = 80;
 
-/// The model's copy, whole, in bytes: about 450 tokens.
-const RESULT_BUDGET: usize = 1_800;
+/// The model's copy in a chat turn, whole, in bytes: about 550 tokens, room for six sources.
+const RESULT_BUDGET: usize = 2_200;
 
 /// Passages quoted from one source, so one site cannot fill the answer.
 const MAX_PASSAGES_PER_SOURCE: usize = 2;
@@ -279,7 +326,7 @@ Search the web for anything current, local or specific that the encyclopedia wil
 news, opening hours, prices, products, businesses, recent results.")]
     async fn search_web(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SearchWebParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool(TOOL_NAME);
@@ -308,6 +355,7 @@ news, opening hours, prices, products, businesses, recent results.")]
             board: web_search_status::global(),
             town: town.as_deref(),
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+            reach: reach_for(&ctx.meta),
         }
         .run(&key, &question)
         .await)
@@ -328,6 +376,7 @@ pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {
         board: web_search_status::global(),
         town: town.as_deref(),
         context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+        reach: TURN_REACH,
     }
     .search(&key, question)
     .await
@@ -479,6 +528,7 @@ struct WebSearch<'a> {
     town: Option<&'a str>,
     /// How long LLM Context may take before the fallback runs.
     context_timeout: Duration,
+    reach: Reach,
 }
 
 /// What one LLM Context request came to.
@@ -494,33 +544,36 @@ impl WebSearch<'_> {
     async fn run(&self, key: &str, question: &str) -> CallToolResult {
         let local_sent = self.town_header().is_some();
         let fallback = match self.llm_context(key, question).await {
-            ContextAnswer::Grounded(context) => match context_result(question, &context) {
-                Some(result) => {
-                    note_sources(
-                        context
-                            .sources
-                            .iter()
-                            .map(|s| (s.hit.url.as_str(), s.hit.title.as_str()))
-                            .chain(
-                                context
-                                    .places
-                                    .iter()
-                                    .map(|p| (p.url.as_str(), p.name.as_str())),
-                            ),
-                    );
-                    tracing::info!(
-                        target: "giap::trace",
-                        kind = "web_search",
-                        source = "llm_context",
-                        results = context.sources.len(),
-                        places = context.places.len(),
-                        local_sent,
-                        "web search answered"
-                    );
-                    return result;
+            ContextAnswer::Grounded(context) => {
+                match context_result(question, &context, self.reach) {
+                    Some(result) => {
+                        note_sources(
+                            context
+                                .sources
+                                .iter()
+                                .map(|s| (s.hit.url.as_str(), s.hit.title.as_str()))
+                                .chain(
+                                    context
+                                        .places
+                                        .iter()
+                                        .map(|p| (p.url.as_str(), p.name.as_str())),
+                                ),
+                        );
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "web_search",
+                            source = "llm_context",
+                            reach = self.reach.sources,
+                            results = context.sources.len(),
+                            places = context.places.len(),
+                            local_sent,
+                            "web search answered"
+                        );
+                        return result;
+                    }
+                    None => "nothing_quotable",
                 }
-                None => "nothing_quotable",
-            },
+            }
             ContextAnswer::Miss(miss) => return text_result(&miss),
             ContextAnswer::Fallback(reason) => reason,
         };
@@ -542,12 +595,13 @@ impl WebSearch<'_> {
             None => vec![None; hits.len()],
         };
         let pages = extract_off_thread(bodies).await;
-        let result = result_from(question, &hits, &pages);
+        let result = result_within(question, &hits, &pages, self.reach);
         tracing::info!(
             target: "giap::trace",
             kind = "web_search",
             source = "pages",
             fallback,
+            reach = self.reach.sources,
             results = hits.len(),
             pages_read = pages.iter().filter(|p| p.is_some()).count(),
             "web search answered"
@@ -563,7 +617,7 @@ impl WebSearch<'_> {
 
     /// One LLM Context request. Records what the answer said of the key, as a search does.
     async fn llm_context(&self, key: &str, question: &str) -> ContextAnswer {
-        let Some(url) = llm_context_url(self.brave_base, question) else {
+        let Some(url) = llm_context_url(self.brave_base, question, self.reach) else {
             return ContextAnswer::Fallback("address");
         };
         let town = self.town_header();
@@ -614,7 +668,7 @@ impl WebSearch<'_> {
         let Ok(body) = response.json::<LlmContextResponse>().await else {
             return ContextAnswer::Fallback("unreadable");
         };
-        let context = LlmContext::from_response(body);
+        let context = LlmContext::from_response(body, self.reach.sources);
         if context.is_empty() {
             return ContextAnswer::Fallback("empty");
         }
@@ -623,7 +677,7 @@ impl WebSearch<'_> {
 
     /// Brave's results, or the model's text for a miss. Records what the answer said of the key.
     async fn search(&self, key: &str, question: &str) -> Result<Vec<WebHit>, String> {
-        let url = brave_url(self.brave_base, question)
+        let url = brave_url(self.brave_base, question, self.reach)
             .ok_or_else(|| search_failed("the search address could not be built"))?;
         let response = crate::http::traced_get_with(self.brave, url.as_str(), |b| {
             b.header(BRAVE_TOKEN_HEADER, key)
@@ -654,7 +708,7 @@ impl WebSearch<'_> {
             .unwrap_or_default()
             .into_iter()
             .filter(|r| !r.url.trim().is_empty())
-            .take(RESULT_COUNT)
+            .take(web_count(self.reach))
             .map(|r| WebHit {
                 title: plain_text(&r.title),
                 url: r.url.trim().to_string(),
@@ -672,9 +726,9 @@ impl WebSearch<'_> {
 }
 
 /// The search request, per section 8.3 step 1. No `country`: Kenya is not a documented value.
-fn brave_url(base: &str, question: &str) -> Option<reqwest::Url> {
+fn brave_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::Url> {
     let q = brave_query(question, BRAVE_MAX_QUERY_WORDS, BRAVE_MAX_QUERY_CHARS);
-    let count = RESULT_COUNT.to_string();
+    let count = web_count(reach).to_string();
     reqwest::Url::parse_with_params(
         &format!("{}{BRAVE_WEB_SEARCH_PATH}", base.trim_end_matches('/')),
         [
@@ -690,15 +744,15 @@ fn brave_url(base: &str, question: &str) -> Option<reqwest::Url> {
 
 /// The LLM Context request, per section 8.10. No `country`, as for web search; no
 /// `enable_local`, so local recall runs exactly when a town is sent.
-fn llm_context_url(base: &str, question: &str) -> Option<reqwest::Url> {
+fn llm_context_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::Url> {
     let q = brave_query(
         question,
         LLM_CONTEXT_MAX_QUERY_WORDS,
         LLM_CONTEXT_MAX_QUERY_CHARS,
     );
-    let count = LLM_CONTEXT_COUNT.to_string();
-    let urls = LLM_CONTEXT_MAX_URLS.to_string();
-    let tokens = LLM_CONTEXT_MAX_TOKENS.to_string();
+    let count = LLM_CONTEXT_COUNT.max(reach.sources).to_string();
+    let urls = reach.sources.to_string();
+    let tokens = reach.context_tokens.to_string();
     let per_url = LLM_CONTEXT_MAX_TOKENS_PER_URL.to_string();
     reqwest::Url::parse_with_params(
         &format!("{}{BRAVE_LLM_CONTEXT_PATH}", base.trim_end_matches('/')),
@@ -919,7 +973,7 @@ impl LlmContext {
         self.sources.is_empty() && self.places.is_empty()
     }
 
-    fn from_response(body: LlmContextResponse) -> Self {
+    fn from_response(body: LlmContextResponse, max_sources: usize) -> Self {
         let meta = body.sources.unwrap_or_default();
         let grounding = body.grounding.unwrap_or_default();
         let sources = grounding
@@ -927,7 +981,7 @@ impl LlmContext {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|item| context_source(item, &meta))
-            .take(LLM_CONTEXT_MAX_URLS)
+            .take(max_sources)
             .collect();
         let mut places: Vec<ContextPlace> = Vec::new();
         for item in grounding
@@ -1209,8 +1263,8 @@ struct ContextCopy {
 
 /// The tool result for an LLM Context answer: the model's copy, then the card, marked transient;
 /// `None` when nothing in it is quotable.
-fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult> {
-    let copy = context_copy(question, context)?;
+fn context_result(question: &str, context: &LlmContext, reach: Reach) -> Option<CallToolResult> {
+    let copy = context_copy(question, context, reach)?;
     let hits: Vec<WebHit> = context.sources.iter().map(|s| s.hit.clone()).collect();
     let places: Vec<CardPlace> = context
         .places
@@ -1233,7 +1287,7 @@ fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult
 
 /// The plain-text answer for the model: the places part first, as local recall answers a local
 /// question, then the sources' passages within what is left of the budget.
-fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
+fn context_copy(question: &str, context: &LlmContext, reach: Reach) -> Option<ContextCopy> {
     let mut texts: Vec<String> = Vec::new();
     let mut owners: Vec<Owner> = Vec::new();
     for (i, source) in context.sources.iter().enumerate() {
@@ -1278,7 +1332,7 @@ fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
         .collect();
 
     let read = context.sources.len();
-    let (per_source_cap, budget) = selection_limits(read);
+    let limits = selection_limits(read, reach);
     let header = format!("Web results for: {}\n{WEB_TEXT_NOTICE}", echo(question));
     let mut used = header.len();
     let mut out = header;
@@ -1319,28 +1373,18 @@ fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
     }
 
     let hits: Vec<&WebHit> = context.sources.iter().map(|s| &s.hit).collect();
-    let mut chosen: Vec<(usize, String)> = Vec::new();
-    let mut per_source: HashMap<usize, usize> = HashMap::new();
-    for index in order {
-        let Owner::Source(source) = owners[index] else {
-            continue;
-        };
-        let quoted = per_source.get(&source).copied().unwrap_or(0);
-        if quoted >= per_source_cap {
-            continue;
-        }
-        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
-        let mut cost = passage.len() + 1;
-        if quoted == 0 {
-            cost += source_line(hits[source]).len() + 1;
-        }
-        if used + cost > budget {
-            continue;
-        }
-        used += cost;
-        per_source.insert(source, quoted + 1);
-        chosen.push((index, passage));
-    }
+    let mut chosen = choose_passages(
+        &order,
+        &texts,
+        |index| match owners[index] {
+            Owner::Source(source) => Some(source),
+            Owner::Place(_) => None,
+        },
+        |source| source_line(hits[source]).len(),
+        limits,
+        used,
+        reach.sources,
+    );
     if chosen.is_empty() && place_lines.is_empty() {
         return None;
     }
@@ -1650,7 +1694,17 @@ pub fn result_from(
     hits: &[WebHit],
     pages: &[Option<Vec<String>>],
 ) -> CallToolResult {
-    let (copy, quoted) = match model_copy_quoting(question, hits, pages) {
+    result_within(question, hits, pages, TURN_REACH)
+}
+
+/// [`result_from`] with the copy sized for `reach`.
+fn result_within(
+    question: &str,
+    hits: &[WebHit],
+    pages: &[Option<Vec<String>>],
+    reach: Reach,
+) -> CallToolResult {
+    let (copy, quoted) = match model_copy_quoting(question, hits, pages, reach) {
         Some((copy, quoted)) => (copy, quoted),
         None => (nothing_found(question), (0..hits.len()).collect()),
     };
@@ -1671,7 +1725,7 @@ fn transient(content: Vec<ContentBlock>, domains: &[String]) -> CallToolResult {
 /// The plain-text answer for the model, within [`selection_limits`]; `None` if nothing quotable.
 #[cfg(test)]
 fn model_copy(question: &str, hits: &[WebHit], pages: &[Option<Vec<String>>]) -> Option<String> {
-    model_copy_quoting(question, hits, pages).map(|(copy, _)| copy)
+    model_copy_quoting(question, hits, pages, TURN_REACH).map(|(copy, _)| copy)
 }
 
 /// The plain-text answer for the model and the hits it quoted, in the copy's order; `None` if
@@ -1680,6 +1734,7 @@ fn model_copy_quoting(
     question: &str,
     hits: &[WebHit],
     pages: &[Option<Vec<String>>],
+    reach: Reach,
 ) -> Option<(String, Vec<usize>)> {
     // A source whose page was read speaks with its page; only an unread one with Brave's text.
     let mut texts: Vec<String> = Vec::new();
@@ -1717,29 +1772,16 @@ fn model_copy_quoting(
         ranked.iter().map(|r| r.index).collect()
     };
 
-    let (per_source_cap, budget) = selection_limits(read);
     let header = format!("Web results for: {}\n{WEB_TEXT_NOTICE}", echo(question));
-    let mut used = header.len();
-    let mut chosen: Vec<(usize, String)> = Vec::new();
-    let mut per_source: HashMap<usize, usize> = HashMap::new();
-    for index in order {
-        let source = source_of[index];
-        let quoted = per_source.get(&source).copied().unwrap_or(0);
-        if quoted >= per_source_cap {
-            continue;
-        }
-        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
-        let mut cost = passage.len() + 1;
-        if quoted == 0 {
-            cost += source_line(&hits[source]).len() + 1;
-        }
-        if used + cost > budget {
-            continue;
-        }
-        used += cost;
-        per_source.insert(source, quoted + 1);
-        chosen.push((index, passage));
-    }
+    let mut chosen = choose_passages(
+        &order,
+        &texts,
+        |index| Some(source_of[index]),
+        |source| source_line(&hits[source]).len(),
+        selection_limits(read, reach),
+        header.len(),
+        reach.sources,
+    );
     if chosen.is_empty() {
         return None;
     }
@@ -1765,12 +1807,79 @@ fn model_copy_quoting(
 
 /// Passages per source and the copy's byte budget, given how many pages were read: with few
 /// read pages, a page's third and fourth passages are worth more than nothing.
-fn selection_limits(pages_read: usize) -> (usize, usize) {
+fn selection_limits(pages_read: usize, reach: Reach) -> (usize, usize) {
     if pages_read <= WIDE_WHEN_READ_AT_MOST {
-        (WIDE_PASSAGES_PER_SOURCE, WIDE_RESULT_BUDGET)
+        (
+            WIDE_PASSAGES_PER_SOURCE,
+            reach.copy_bytes.max(WIDE_RESULT_BUDGET),
+        )
     } else {
-        (MAX_PASSAGES_PER_SOURCE, RESULT_BUDGET)
+        (MAX_PASSAGES_PER_SOURCE, reach.copy_bytes)
     }
+}
+
+/// Less room than this quotes nothing from a source: half a clause misleads more than it tells.
+const MIN_PASSAGE_BYTES: usize = 80;
+
+/// The passages to quote, as (text index, clipped passage). Each of the first `sources` sources
+/// by rank gets its best passage, clipped to an even share of the room, before any source gets a
+/// second, so a wide search is heard across its sources rather than from the top two.
+fn choose_passages(
+    order: &[usize],
+    texts: &[String],
+    source_of: impl Fn(usize) -> Option<usize>,
+    source_line_len: impl Fn(usize) -> usize,
+    (per_source_cap, budget): (usize, usize),
+    mut used: usize,
+    sources: usize,
+) -> Vec<(usize, String)> {
+    let mut firsts: Vec<(usize, usize)> = Vec::new();
+    for &index in order {
+        let Some(source) = source_of(index) else {
+            continue;
+        };
+        if firsts.len() < sources && !firsts.iter().any(|&(_, s)| s == source) {
+            firsts.push((index, source));
+        }
+    }
+    let share = budget.saturating_sub(used) / firsts.len().max(1);
+    let mut chosen: Vec<(usize, String)> = Vec::new();
+    let mut per_source: HashMap<usize, usize> = HashMap::new();
+    for (index, source) in firsts {
+        let line = source_line_len(source) + 1;
+        let room = share.saturating_sub(line + 1).min(MAX_PASSAGE_BYTES);
+        if room < MIN_PASSAGE_BYTES {
+            continue;
+        }
+        let passage = passages::clip(&texts[index], room);
+        let cost = line + passage.len() + 1;
+        if used + cost > budget {
+            continue;
+        }
+        used += cost;
+        per_source.insert(source, 1);
+        chosen.push((index, passage));
+    }
+    for &index in order {
+        let Some(source) = source_of(index) else {
+            continue;
+        };
+        let Some(&quoted) = per_source.get(&source) else {
+            continue;
+        };
+        if quoted >= per_source_cap || chosen.iter().any(|(i, _)| *i == index) {
+            continue;
+        }
+        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
+        let cost = passage.len() + 1;
+        if used + cost > budget {
+            continue;
+        }
+        used += cost;
+        per_source.insert(source, quoted + 1);
+        chosen.push((index, passage));
+    }
+    chosen
 }
 
 /// `Title (domain[, age])`.
@@ -2666,6 +2775,7 @@ mod tests {
             board,
             town,
             context_timeout: Duration::from_millis(1_500),
+            reach: TURN_REACH,
         }
     }
 
@@ -2816,6 +2926,7 @@ mod tests {
             board,
             town: None,
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+            reach: TURN_REACH,
         }
         .run("test-key-123", "junction mall hours")
         .await;
@@ -2944,7 +3055,7 @@ mod tests {
             "the capped page: {copy}"
         );
         assert!(!copy.contains("BRAVE TEXT FOR THE BIG PAGE"), "{copy}");
-        assert!(copy.len() <= selection_limits(2).1);
+        assert!(copy.len() <= selection_limits(2, TURN_REACH).1);
         assert_eq!(result.content.len(), 2, "the card rides along");
     }
 
@@ -3002,7 +3113,7 @@ mod tests {
     }
 
     fn context_of(body: &str) -> LlmContext {
-        LlmContext::from_response(serde_json::from_str(body).unwrap())
+        LlmContext::from_response(serde_json::from_str(body).unwrap(), TURN_REACH.sources)
     }
 
     const CONTEXT_PATH: &str = "/res/v1/llm/context";
@@ -3042,7 +3153,7 @@ mod tests {
         for param in [
             "q=What+time+does+Nairobi+National+Park+close%3F",
             "count=8",
-            "maximum_number_of_urls=5",
+            "maximum_number_of_urls=6",
             "maximum_number_of_tokens=2048",
             "maximum_number_of_tokens_per_url=1024",
             "safesearch=moderate",
@@ -3069,6 +3180,111 @@ mod tests {
             !lower.contains("x-loc-"),
             "a location went with local places off: {head}"
         );
+    }
+
+    #[test]
+    fn a_research_step_asks_for_thirty_sources_and_a_turn_for_six() {
+        let question = "Rainfall in Kiambu this season";
+        let research = llm_context_url("http://stub", question, RESEARCH_REACH).unwrap();
+        let query = research.query().unwrap();
+        for param in [
+            "count=30",
+            "maximum_number_of_urls=30",
+            "maximum_number_of_tokens=16384",
+        ] {
+            assert!(query.contains(param), "{param} missing: {query}");
+        }
+        let web = brave_url("http://stub", question, RESEARCH_REACH).unwrap();
+        assert!(
+            web.query().unwrap().contains("count=20"),
+            "web search asks for more than Brave's documented 20: {web}"
+        );
+        let turn = llm_context_url("http://stub", question, TURN_REACH).unwrap();
+        assert!(turn.query().unwrap().contains("maximum_number_of_urls=6"));
+    }
+
+    fn rain_sources(n: usize) -> (Vec<WebHit>, Vec<Option<Vec<String>>>) {
+        let hits = (1..=n)
+            .map(|i| {
+                hit(
+                    &format!("Rain report {i}"),
+                    &format!("https://site{i}.example/rain"),
+                    "",
+                )
+            })
+            .collect();
+        let pages = (1..=n)
+            .map(|i| {
+                Some(vec![format!(
+                    "Site {i} measured Kiambu rainfall this season at {i}0 millimetres. "
+                )
+                .repeat(10)])
+            })
+            .collect();
+        (hits, pages)
+    }
+
+    #[test]
+    fn a_turn_hears_six_sources_and_a_research_step_thirty() {
+        let question = "Kiambu rainfall this season";
+        let (hits, pages) = rain_sources(8);
+        let (copy, quoted) = model_copy_quoting(question, &hits, &pages, TURN_REACH).unwrap();
+        assert_eq!(quoted.len(), 6, "{copy}");
+        assert!(copy.len() <= TURN_REACH.copy_bytes, "{} bytes", copy.len());
+
+        let (hits, pages) = rain_sources(40);
+        let (copy, quoted) = model_copy_quoting(question, &hits, &pages, RESEARCH_REACH).unwrap();
+        assert_eq!(quoted.len(), 30, "{copy}");
+        assert!(
+            copy.len() <= RESEARCH_REACH.copy_bytes,
+            "{} bytes",
+            copy.len()
+        );
+    }
+
+    #[test]
+    fn a_deep_research_helper_searches_wide_and_every_other_caller_as_a_turn() {
+        use pond_core::shared::domain::long_task::{LongTaskKind, StepKey};
+        use pond_core::shared::services::child_sessions::process_child_sessions;
+        use pond_core::shared::services::step_bindings::{
+            process_step_bindings, StepBinding, StepWork,
+        };
+        use pond_core::user_data::domain::profile::ProfileScope;
+        let meta = |session: &str| {
+            let mut m = rmcp::model::Meta::new();
+            m.0.insert(
+                crate::SESSION_ID_META_KEY.to_string(),
+                Value::String(session.to_string()),
+            );
+            m
+        };
+        let bind = |root: &str, kind: LongTaskKind| {
+            process_step_bindings().bind(
+                root,
+                StepBinding {
+                    task_id: format!("task-{root}"),
+                    scope: ProfileScope::Household,
+                    work: StepWork::Do(StepKey::parse("read-part-1").unwrap()),
+                    kind,
+                },
+            )
+        };
+        let _research = bind("root-reach-research", LongTaskKind::Research);
+        let _research_helper = process_child_sessions().bind(
+            "engine-reach-research",
+            "root-reach-research",
+            ProfileScope::Household,
+        );
+        let _general = bind("root-reach-general", LongTaskKind::General);
+        let _general_helper = process_child_sessions().bind(
+            "engine-reach-general",
+            "root-reach-general",
+            ProfileScope::Household,
+        );
+        assert_eq!(reach_for(&meta("engine-reach-research")), RESEARCH_REACH);
+        assert_eq!(reach_for(&meta("engine-reach-general")), TURN_REACH);
+        assert_eq!(reach_for(&meta("20261115_1")), TURN_REACH);
+        assert_eq!(reach_for(&rmcp::model::Meta::new()), TURN_REACH);
     }
 
     #[tokio::test]
@@ -3213,7 +3429,12 @@ mod tests {
     #[test]
     fn the_context_copy_puts_places_first_then_ranked_passages() {
         let context = context_of(&context_body());
-        let copy = context_copy("What time does Nairobi National Park close?", &context).unwrap();
+        let copy = context_copy(
+            "What time does Nairobi National Park close?",
+            &context,
+            TURN_REACH,
+        )
+        .unwrap();
         let lines: Vec<&str> = copy.text.lines().collect();
         assert_eq!(
             lines[0],
@@ -3236,7 +3457,7 @@ mod tests {
         );
         assert!(!copy.text.contains("://"), "{}", copy.text);
         assert!(!copy.text.contains("www."), "{}", copy.text);
-        assert!(copy.text.len() <= selection_limits(2).1);
+        assert!(copy.text.len() <= selection_limits(2, TURN_REACH).1);
         assert_eq!(
             copy.domains,
             [
@@ -3251,7 +3472,8 @@ mod tests {
     #[test]
     fn a_place_line_takes_its_best_ranked_snippet() {
         let context = context_of(&context_body());
-        let copy = context_copy("Java House opening hours on Sunday", &context).unwrap();
+        let copy =
+            context_copy("Java House opening hours on Sunday", &context, TURN_REACH).unwrap();
         assert_eq!(copy.place_snippets[0], "day: Sunday; hours: 8 am - 9 pm");
         assert!(
             copy.text
@@ -3288,7 +3510,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let copy = context_copy("When do the park gates close?", &context).unwrap();
+        let copy = context_copy("When do the park gates close?", &context, TURN_REACH).unwrap();
         assert!(
             copy.text.len() <= RESULT_BUDGET,
             "{} bytes",
@@ -3316,8 +3538,12 @@ mod tests {
     #[test]
     fn the_context_card_carries_places_and_the_copy_does_not_carry_the_card() {
         let context = context_of(&context_body());
-        let result =
-            context_result("What time does Nairobi National Park close?", &context).unwrap();
+        let result = context_result(
+            "What time does Nairobi National Park close?",
+            &context,
+            TURN_REACH,
+        )
+        .unwrap();
         assert_eq!(result.content.len(), 2);
         let visible = agent_visible_text(&result);
         assert!(!visible.contains("mcp-ui"), "{visible}");
@@ -3367,7 +3593,7 @@ mod tests {
     #[test]
     fn both_paths_mark_the_result_transient_with_domains_only() {
         let context = context_of(&context_body());
-        let grounded = context_result("When does the park close?", &context).unwrap();
+        let grounded = context_result("When does the park close?", &context, TURN_REACH).unwrap();
         assert_eq!(
             stub_of(&grounded).as_deref(),
             Some(
@@ -3627,6 +3853,7 @@ mod tests {
                 board,
                 town,
                 context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+                reach: TURN_REACH,
             };
             match search.llm_context(&key, question).await {
                 ContextAnswer::Grounded(context) => {
@@ -3635,7 +3862,8 @@ mod tests {
                         context.sources.len(),
                         context.places.len()
                     );
-                    let copy = context_copy(question, &context).expect("a quotable copy");
+                    let copy =
+                        context_copy(question, &context, TURN_REACH).expect("a quotable copy");
                     assert!(copy.text.len() <= RESULT_BUDGET.max(WIDE_RESULT_BUDGET));
                     assert!(!copy.text.contains("://"), "{}", copy.text);
                 }
@@ -3890,7 +4118,11 @@ mod tests {
             let copy = model_copy(page.question, &hits, &pages).expect("something quotable");
             eprintln!("{copy}");
 
-            assert!(copy.len() <= selection_limits(1).1, "{} bytes", copy.len());
+            assert!(
+                copy.len() <= selection_limits(1, TURN_REACH).1,
+                "{} bytes",
+                copy.len()
+            );
             assert!(
                 !copy.contains("://"),
                 "the model's copy carries no URL: {copy}"

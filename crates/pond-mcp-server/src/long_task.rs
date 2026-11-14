@@ -1764,6 +1764,7 @@ mod tests {
                     task_id: task_id.to_string(),
                     scope: ProfileScope::Household,
                     work,
+                    kind: pond_core::shared::domain::long_task::LongTaskKind::General,
                 },
             );
             (

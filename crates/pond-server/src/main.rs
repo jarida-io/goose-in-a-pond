@@ -8317,6 +8317,7 @@ impl LongTaskHelpers {
                 task_id: task.id().to_string(),
                 scope: task.scope().clone(),
                 work,
+                kind: task.kind(),
             },
         );
         // The planner's hand-back is its plan, so only a step's helpers are asked to report.
