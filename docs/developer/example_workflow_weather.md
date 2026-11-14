@@ -14,7 +14,7 @@ user: "what's the weather?"
       WeatherProvider::current()                 crates/pond-adapters-weather/src/lib.rs
         OpenMeteoWeatherAdapter (15 min cache)   crates/pond-adapters-weather/src/open_meteo.rs
           traced_send -> egress gate -> api.open-meteo.com
-    result: [[[mcp-ui:weather:{...}]]] line + a text block for the model
+    result: a text block for the model + a [[[mcp-ui:weather:{...}]]] block for the user alone
   desktop renders the weather card; the model answers from the text
 ```
 
@@ -66,8 +66,10 @@ exposes two tools:
   `city`, `place`, `loc` and `where`.
 - With no provider (weather not set up), the tool returns `CallToolResult::error` saying so, so the
   model does not try another way.
-- A success starts with a `[[[mcp-ui:weather:<json>]]]` line, which the desktop turns into a card,
-  then the context block. The card is also served as the MCP App resource
+- A success is the context block, for the model, and a `[[[mcp-ui:weather:<json>]]]` block annotated
+  for the user alone (`format::with_card`), which goose drops before the model and the desktop turns
+  into a card. The context block is the shape other tools follow: a bracketed header, then
+  `Label: value | Label: value`. The card is also served as the MCP App resource
   `ui://giap-weather/weather-card.html` (`crates/pond-mcp-server/apps/weather-card.html`), which
   `GET /api/v1/agent/tools` advertises on `get_current_weather`.
 - Both tools ask for the same `weather` card with different payloads: `get_current_weather` sends one

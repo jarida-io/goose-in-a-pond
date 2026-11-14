@@ -404,6 +404,11 @@ impl VisionMcpServer {
 
 #[tool_router]
 impl VisionMcpServer {
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
+    pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
+        Self::tool_router().list_all()
+    }
+
     pub fn new(
         camera_storage: Arc<dyn CameraStorage + Send + Sync>,
         settings_repo: Arc<dyn SettingsRepository + Send + Sync>,

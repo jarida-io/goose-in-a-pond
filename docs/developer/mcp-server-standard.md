@@ -99,17 +99,26 @@ helpers in `crates/pond-mcp-server/src/format.rs`:
 Budgets in use: Wikipedia extracts 4,000 bytes, `search_web` 1,800 (2,400 wide), `read_web_page`
 1,800 of quoted lines or one 3,200-byte part, `compute_answer` 1,800.
 
-A result that a desktop card renders starts with a `[[[mcp-ui:<kind>:<json>]]]` line (weather,
-knowledge). The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`
+A result that a desktop card renders carries the card as its own block, annotated for the user
+alone: `format::with_card(text, kind, data)` (or `format::card`). Goose drops that block before the
+provider, so the model reads each fact once, in the text. The text is short and structured, the way
+weather's is (a bracketed header, then `Label: value | Label: value`), in the household's time and
+units, with names rather than ids and no cron, JSON or ISO stamps. The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`
 (`crates/pond-mcp-server/apps/`), listed by `all_app_resources()`.
 
 ## Failures
 
 - **A miss or an upstream error**: `CallToolResult::success` with text from the helpers above, so the
   model chains to another tool or answers.
+- **A write or action that failed**: `format_not_done(what, why)`, "Not done: what. Why."
 - **A failure no other tool can fix** (weather with no location set): `CallToolResult::error` with
   the reason in plain words.
-- **`ErrorData`** only for protocol errors. The model reports it as a technical fault.
+- **`ErrorData`** only for protocol errors.
+
+The engine never shows the model `is_error`, so the provider shim
+(`pond-adapters-goose/src/readable_failures.rs`) rewords every failed result as it is sent: it opens
+with "Not done:", and rmcp's "failed to deserialize parameters" becomes the field, what it takes and
+"call it again". The prompt's tool rules name that opening.
 
 ## Egress
 

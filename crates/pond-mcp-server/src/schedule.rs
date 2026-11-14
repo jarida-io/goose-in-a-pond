@@ -130,6 +130,7 @@ pub struct ScheduleUpsertParams {
     /// To change an existing schedule: its name or id. Omit to create a new one.
     #[serde(default)]
     pub id: String,
+    /// A short name for the list, e.g. "Morning news".
     pub name: Option<String>,
     /// How often and at what time, as a person says it: "every weekday at 7am", "every Monday
     /// and Thursday at 18:00", "every 2 hours", "on the 1st of every month at 9am".
@@ -191,6 +192,16 @@ fn kind_label(kind: &TaskKind) -> &'static str {
         TaskKind::Webhook { .. } => "webhook",
         TaskKind::SensorTrigger(_) => "sensor-rule",
         TaskKind::Routine { .. } => "routine",
+    }
+}
+
+/// What kind of schedule it is, in the words the list is read in.
+fn kind_words(kind: &TaskKind) -> &'static str {
+    match kind {
+        TaskKind::AgentPrompt { .. } => "Goose does a task",
+        TaskKind::Webhook { .. } => "calls a web address",
+        TaskKind::SensorTrigger(_) => "a sensor rule",
+        TaskKind::Routine { .. } => "a routine",
     }
 }
 
@@ -407,13 +418,12 @@ impl ScheduleMcpServer {
                 .iter()
                 .map(|t| {
                     format!(
-                        "- \"{}\": {}, {} time ({}, {}) [id {}]",
+                        "- \"{}\" | {}, {} time | {} | {}",
                         t.label,
                         when_in_words(&t.cron),
-                        t.timezone,
-                        kind_label(&t.kind),
+                        crate::format::zone_place(&t.timezone),
+                        kind_words(&t.kind),
                         status_label(t),
-                        t.id
                     )
                 })
                 .collect::<Vec<_>>()
@@ -441,7 +451,7 @@ impl ScheduleMcpServer {
             })
             .collect();
         let ui_data = serde_json::json!({ "schedules": ui_schedules });
-        said(format!("[[[mcp-ui:schedule:{ui_data}]]]\n{text}"))
+        Ok(crate::format::with_card(text, "schedule", &ui_data))
     }
 
     #[tool(description = "\
@@ -648,8 +658,9 @@ schedule, pass its name as `id` with only the fields that change.")]
                 Ok(schedule) => Ok(with_receipt(
                     format!(
                         "Scheduled \"{}\": {words}, {} time. Each time Goose is asked: \
-                         \"{prompt}\" [id {}]",
-                        schedule.label, schedule.timezone, schedule.id,
+                         \"{prompt}\"",
+                        schedule.label,
+                        crate::format::zone_place(&schedule.timezone),
                     ),
                     Receipt::set(
                         "schedule",
@@ -710,11 +721,10 @@ schedule, pass its name as `id` with only the fields that change.")]
                 };
                 Ok(with_receipt(
                     format!(
-                        "Changed \"{}\": {}, {} time ({does}) [id {}]",
+                        "Changed \"{}\": {}, {} time ({does})",
                         schedule.label,
                         when_in_words(&schedule.cron),
-                        schedule.timezone,
-                        schedule.id,
+                        crate::format::zone_place(&schedule.timezone),
                     ),
                     Receipt::set(
                         "schedule",

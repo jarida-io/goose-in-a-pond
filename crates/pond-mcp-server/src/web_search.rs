@@ -20,7 +20,7 @@ use pond_core::shared::services::passages;
 use regex::Regex;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{Annotations, CallToolResult, ContentBlock, ErrorData, Meta, Role, TextContent},
+    model::{CallToolResult, ContentBlock, ErrorData, Meta},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -1885,11 +1885,7 @@ fn card_block_with(question: &str, hits: &[WebHit], places: &[CardPlace]) -> Con
             })
             .collect();
     }
-    let marker = format!("[[[mcp-ui:search:{card}]]]");
-    ContentBlock::Text(
-        TextContent::new(marker)
-            .with_annotations(Annotations::default().with_audience(vec![Role::User])),
-    )
+    crate::format::card("search", &card)
 }
 
 /// Neutralise `]]]`, which would end the card's marker early.
@@ -1905,6 +1901,7 @@ pub(crate) fn defang(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::Role;
     use std::io::{Read, Write};
 
     /// The encyclopedia tool a miss points at.

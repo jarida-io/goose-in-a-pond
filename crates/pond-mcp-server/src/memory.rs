@@ -464,11 +464,7 @@ impl MemoryMcpServer {
                 })
                 .collect();
             let ui_data = serde_json::json!({ "memories": ui_memories });
-            let hint = format!("[[[mcp-ui:memory:{}]]]\n", ui_data);
-            let full_result = format!("{}{}", hint, text);
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                full_result,
-            )]));
+            return Ok(crate::format::with_card(text, "memory", &ui_data));
         }
 
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
@@ -507,14 +503,14 @@ impl MemoryMcpServer {
                     "save_memory was offered something the write policy does not keep"
                 );
                 return Ok(said(format!(
-                    "Nothing was saved: it {}. {}",
+                    "Not done: nothing was saved ({}). {}",
                     why.as_str(),
                     why.advice(&name)
                 )));
             }
         };
         let Some(about) = about else {
-            return Ok(said("Nothing was saved."));
+            return Ok(said("Not done: nothing was saved."));
         };
 
         let owner = scope.owner_id().map(str::to_string);
@@ -611,9 +607,11 @@ impl MemoryMcpServer {
             "about": about.as_str(),
             "saved": true,
         });
-        Ok(said(format!(
-            "[[[mcp-ui:memory_saved:{ui_data}]]]\n{plain_text}"
-        )))
+        Ok(crate::format::with_card(
+            plain_text,
+            "memory_saved",
+            &ui_data,
+        ))
     }
 
     /// The body of `forget_memory`, apart from the rmcp wrapper so tests can call it.
@@ -1137,7 +1135,7 @@ mod tests {
             save("", "likes"),
         ] {
             let got = text(&server.run_save(&meta, refused).await.unwrap());
-            assert!(got.contains("Nothing was saved"), "{got}");
+            assert!(got.contains("Not done: nothing was saved"), "{got}");
         }
         assert_eq!(live(&pond).await.len(), before, "a refused save was kept");
 
@@ -1182,7 +1180,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(got.contains("Nothing was saved"), "{got}");
+        assert!(got.contains("Not done: nothing was saved"), "{got}");
         assert!(got.contains("names Wanjiru Kamau"), "{got}");
 
         let got = text(

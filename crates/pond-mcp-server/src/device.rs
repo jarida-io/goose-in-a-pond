@@ -119,11 +119,7 @@ impl DeviceMcpServer {
                         })
                         .collect();
                     let ui_data = serde_json::json!({ "devices": ui_devices });
-                    let hint = format!("[[[mcp-ui:devices:{}]]]\n", ui_data);
-                    let full_result = format!("{}{}", hint, text);
-                    return Ok(CallToolResult::success(vec![ContentBlock::text(
-                        full_result,
-                    )]));
+                    return Ok(crate::format::with_card(text, "devices", &ui_data));
                 }
 
                 Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
