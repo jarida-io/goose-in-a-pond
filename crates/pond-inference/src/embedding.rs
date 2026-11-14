@@ -36,6 +36,8 @@ const EG2_THREADS: i32 = 4;
 /// Where a model's layers and compute run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
+    /// Every layer on the CPU, out of pinned memory (`no_host`): the token table stays in the
+    /// mapped file, which the system can reclaim, and the rest is repacked in ordinary memory.
     Cpu,
     /// Every layer on the GPU, the token table mapped rather than pinned (`no_host`), which kept
     /// 136 MB out of NvMap in P0.
@@ -250,7 +252,9 @@ fn check_output_width(spec: &EmbeddingModelSpec, n_embd_out: i32) -> Result<()> 
 
 fn model_params(placement: Placement) -> LlamaModelParams {
     match placement {
-        Placement::Cpu => LlamaModelParams::default().with_n_gpu_layers(0),
+        Placement::Cpu => LlamaModelParams::default()
+            .with_n_gpu_layers(0)
+            .with_no_host(true),
         Placement::Gpu => LlamaModelParams::default()
             .with_n_gpu_layers(u32::MAX)
             .with_no_host(true),
@@ -682,7 +686,7 @@ mod tests {
         let gpu = context_params(&eg2.with_placement(Placement::Gpu), 512);
         assert!(gpu.op_offload());
         assert!(model_params(Placement::Gpu).no_host());
-        assert!(!model_params(Placement::Cpu).no_host());
+        assert!(model_params(Placement::Cpu).no_host());
     }
 
     #[test]
