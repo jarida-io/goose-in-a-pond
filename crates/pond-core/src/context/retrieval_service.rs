@@ -1,11 +1,12 @@
-//! One retrieval over `memory`, `context` and `summary`, scoped in [`VectorIndex`]'s SQL.
+//! One retrieval over every corpus, scoped in [`VectorIndex`]'s SQL.
 //! Each hit carries its corpus: a summary is lossy, not a said fact.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::context::vector_index::{Corpus, ResolvedHit, VectorIndex};
+use crate::context::retrieval::CONTEXT_BLOCK_TAG;
+use crate::context::vector_index::{Corpus, Exclusions, ResolvedHit, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::profile::ProfileScope;
 
@@ -15,7 +16,79 @@ pub fn provenance(corpus: Corpus) -> &'static str {
         Corpus::Memory => "you told me",
         Corpus::Context => "observed by this pond",
         Corpus::Summary => "from an earlier conversation",
+        Corpus::Personal => "from your profile",
+        Corpus::Message => "said in an earlier conversation",
+        Corpus::Digest => "from a news digest I wrote",
+        Corpus::Story => "from a news story I picked for you",
+        Corpus::Report => "from a long-task report",
+        Corpus::Notice => "from a notification I sent",
+        Corpus::Idea => "from an idea I suggested",
     }
+}
+
+/// Hits a turn carries at most; a choice, so a strong match never crowds out the message.
+pub const TURN_HITS: usize = 3;
+
+/// One line's longest text before the budget applies; about two sentences of a passage.
+const TURN_LINE_CHARS: usize = 480;
+
+/// The least of the first hit's text kept however tight the budget, so a cut line still says
+/// something.
+const TURN_LINE_MIN_CHARS: usize = 24;
+
+/// The turn's share of `hits`: those at or above `floor`, personal details first, then the
+/// closest, at most `limit`.
+pub fn for_turn(mut hits: Vec<Recollection>, floor: f32, limit: usize) -> Vec<Recollection> {
+    hits.retain(|hit| hit.score.is_finite() && hit.score >= floor);
+    hits.sort_by(|a, b| {
+        (b.corpus == Corpus::Personal)
+            .cmp(&(a.corpus == Corpus::Personal))
+            .then(b.score.total_cmp(&a.score))
+            .then_with(|| a.corpus.cmp(&b.corpus))
+            .then_with(|| a.row_id.cmp(&b.row_id))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+/// One hit as a block line: its provenance, then its text on one line, cut to `max_chars`.
+pub fn turn_line(hit: &Recollection, max_chars: usize) -> String {
+    let text = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = match text.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+        None => text,
+    };
+    format!("- ({}) {text}", provenance(hit.corpus))
+}
+
+/// The `<personal-context>` block for `hits` within `token_budget` (chars/4, as memories are
+/// counted): the first line is always kept, cut to fit; later ones only whole. Empty for none.
+pub fn render_turn_block(hits: &[Recollection], token_budget: usize) -> String {
+    let budget_chars = token_budget.saturating_mul(4);
+    let mut used = 0usize;
+    let mut lines: Vec<String> = Vec::new();
+    for hit in hits {
+        let room = budget_chars.saturating_sub(used);
+        let line = if lines.is_empty() {
+            let prefix = provenance(hit.corpus).chars().count() + "- () ".len();
+            let text_room = room.saturating_sub(prefix).max(TURN_LINE_MIN_CHARS);
+            turn_line(hit, TURN_LINE_CHARS.min(text_room))
+        } else {
+            turn_line(hit, TURN_LINE_CHARS)
+        };
+        if !lines.is_empty() && line.chars().count() > room {
+            break;
+        }
+        used += line.chars().count() + 1;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<{CONTEXT_BLOCK_TAG}>\n{}\n</{CONTEXT_BLOCK_TAG}>",
+        lines.join("\n")
+    )
 }
 
 /// A retrieval answer: the text, where it came from, and how well it matched.
@@ -65,6 +138,31 @@ impl PersonalContextRetrieval {
         }
     }
 
+    /// [`Self::recall`] for a query already embedded, as a turn's memory search embeds it.
+    pub async fn recall_near(
+        &self,
+        query_vector: &[f32],
+        scope: &ProfileScope,
+        limit: usize,
+        exclusions: &Exclusions,
+    ) -> Vec<Recollection> {
+        if query_vector.is_empty() || limit == 0 || scope.excludes_everything() {
+            return vec![];
+        }
+        let model_id = self.embedder.model_id();
+        match self
+            .index
+            .search_resolved_excluding(query_vector, &model_id, scope, limit, exclusions)
+            .await
+        {
+            Ok(hits) => recollections(hits),
+            Err(e) => {
+                tracing::warn!("personal-context recall for a turn failed: {e:#}");
+                vec![]
+            }
+        }
+    }
+
     async fn try_recall(
         &self,
         query: &str,
@@ -81,23 +179,28 @@ impl PersonalContextRetrieval {
             .search_resolved(&vector, &model_id, scope, limit)
             .await?;
 
-        Ok(hits
-            .into_iter()
-            .filter(|h| !h.text.trim().is_empty())
-            .map(|h| Recollection {
-                corpus: h.corpus,
-                row_id: h.row_id,
-                score: h.score,
-                text: h.text,
-            })
-            .collect())
+        Ok(recollections(hits))
     }
+}
+
+fn recollections(hits: Vec<ResolvedHit>) -> Vec<Recollection> {
+    hits.into_iter()
+        .filter(|h| !h.text.trim().is_empty())
+        .map(|h| Recollection {
+            corpus: h.corpus,
+            row_id: h.row_id,
+            score: h.score,
+            text: h.text,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::vector_index::{CorpusHealth, IndexHealth, VectorEntry, VectorHit};
+    use crate::context::vector_index::{
+        CorpusHealth, Exclusions, IndexHealth, StaleRow, VectorEntry, VectorHit,
+    };
     use async_trait::async_trait;
 
     /// The tie-break is `Corpus`'s declaration order; reordering variants changes it.
@@ -133,6 +236,55 @@ mod tests {
         );
     }
 
+    fn recollection(corpus: Corpus, id: &str, score: f32, text: &str) -> Recollection {
+        Recollection {
+            corpus,
+            row_id: id.into(),
+            score,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_turn_takes_strong_matches_personal_details_first() {
+        let hits = vec![
+            recollection(Corpus::Message, "m", 0.91, "We booked the Mombasa train."),
+            recollection(Corpus::Digest, "d", 0.70, "Below the floor."),
+            recollection(Corpus::Personal, "p", 0.80, "Interested in trains (keen)."),
+            recollection(Corpus::Report, "r", 0.85, "Train fares compared."),
+        ];
+        let kept = for_turn(hits, 0.77, 2);
+        let ids: Vec<&str> = kept.iter().map(|h| h.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["p", "m"]);
+    }
+
+    #[test]
+    fn the_block_keeps_the_first_hit_cut_to_the_budget_and_drops_what_does_not_fit() {
+        let long = "word ".repeat(200);
+        let hits = vec![
+            recollection(Corpus::Message, "m", 0.9, &long),
+            recollection(Corpus::Idea, "i", 0.8, "A second, short hit."),
+        ];
+        let block = render_turn_block(&hits, 20);
+        assert!(block.starts_with("<personal-context>\n- (said in an earlier conversation) word"));
+        assert!(block.ends_with("…\n</personal-context>"), "{block}");
+        assert!(!block.contains("second"), "{block}");
+        assert!(block.chars().count() <= 20 * 4 + 45, "{block}");
+
+        let roomy = render_turn_block(&hits, 1_000);
+        assert!(roomy.contains("- (from an idea I suggested) A second, short hit."));
+        assert_eq!(render_turn_block(&[], 1_000), "");
+    }
+
+    #[test]
+    fn a_line_is_one_line() {
+        let line = turn_line(
+            &recollection(Corpus::Notice, "n", 0.9, "Rain\n  at   noon"),
+            100,
+        );
+        assert_eq!(line, "- (from a notification I sent) Rain at noon");
+    }
+
     struct StubIndex(Vec<ResolvedHit>);
 
     #[async_trait]
@@ -155,12 +307,13 @@ mod tests {
         ) -> Result<Vec<VectorHit>> {
             Ok(vec![])
         }
-        async fn search_resolved(
+        async fn search_resolved_excluding(
             &self,
             _q: &[f32],
             _m: &str,
             scope: &ProfileScope,
             _l: usize,
+            _x: &Exclusions,
         ) -> Result<Vec<ResolvedHit>> {
             // Mirrors the real index refusing a guest in SQL.
             if scope.excludes_everything() {
@@ -176,7 +329,7 @@ mod tests {
             _c: Corpus,
             _m: &str,
             _l: usize,
-        ) -> Result<Vec<(String, String)>> {
+        ) -> Result<Vec<StaleRow>> {
             Ok(vec![])
         }
         async fn prune_orphans(&self) -> Result<u64> {

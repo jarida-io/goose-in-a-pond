@@ -771,6 +771,13 @@ const CORPUS_META: Record<ContextCorpus, { label: string; holds: string }> = {
   memory:  { label: "Memories",   holds: "facts the assistant extracted from conversation" },
   context: { label: "Context",    holds: "items ingested from sensors and sources" },
   summary: { label: "Summaries",  holds: "the rolling summary of each conversation" },
+  personal: { label: "Personal details", holds: "profiles, places, interests, topics, portraits, saved items and screenshot notes" },
+  message: { label: "Messages",   holds: "what members said and what the assistant replied" },
+  digest:  { label: "Digests",    holds: "each member's daily news digest" },
+  story:   { label: "News stories", holds: "the news tiles picked for each member" },
+  report:  { label: "Reports",    holds: "findings, drafts and notes from long tasks" },
+  notice:  { label: "Notifications", holds: "what the assistant sent to the household's phones" },
+  idea:    { label: "Ideas",      holds: "the idea cards suggested to each member" },
 };
 
 const STATE_TONE: Record<CoverageState, { fg: string; tint: string; icon: React.ReactNode }> = {

@@ -562,6 +562,8 @@ pub const PROMPT_SCRATCHPAD: &str = "\
 <memory-rules>
 <memories> holds what is known of the person: use it, and recall_memories for \
 what it lacks. Never guess a fact about them.
+<personal-context> holds earlier words, digests, reports and notes that match \
+this message, each saying where it came from.
 save_memory keeps only what they say about themselves that will hold for \
 months: one sentence naming them, with what it is about. A new fact replaces \
 the old by itself.
@@ -2326,6 +2328,7 @@ mod tests {
             [
                 "<system-context>",
                 "<memories>",
+                "<personal-context>",
                 "<user-message>",
                 "<conversation-summary>",
                 "<extension-notes name=\"x\">",

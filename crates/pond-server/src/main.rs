@@ -3286,6 +3286,7 @@ async fn run_server(
             false, // voice_mode — server mode, not voice
             true,  // model_provisioning — the serve process verifies add-ons on disk
             mesh_provider.clone(),
+            Some(vector_index.clone()),
         )
         .await
     };
@@ -6059,6 +6060,7 @@ async fn run_chat(
             voice_mode,
             false,                                    // model_provisioning — serve only
             Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: no mesh stack in CLI chat
+            None,                                     // turn_index
         )
         .await;
         // Steps run in serve; this process only takes `task_start` calls, which serve picks up.
@@ -10594,6 +10596,8 @@ async fn build_goose_backend(
     model_provisioning: bool,
     // Locked so mesh enabled at runtime applies next turn; CLI callers pass a permanent `None`.
     mesh_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    // Where a turn's strong matches come from; CLI paths have no embedder, so none.
+    turn_index: Option<Arc<dyn pond_core::context::vector_index::VectorIndex>>,
 ) -> (
     Arc<dyn Agent>,
     Option<Arc<dyn pond_core::mcp::ports::extension_manager::ExtensionManagerPort>>,
@@ -10747,6 +10751,10 @@ async fn build_goose_backend(
             // Without it, per-turn memory retrieval falls back to keyword LIKE search.
             let adapter = match embedding_provider {
                 Some(provider) => adapter.with_embedding_provider(provider),
+                None => adapter,
+            };
+            let adapter = match turn_index {
+                Some(index) => adapter.with_turn_index(index),
                 None => adapter,
             };
             // Else an Ollama model's context window is guessed from its name.
@@ -11403,6 +11411,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
@@ -11452,6 +11461,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
@@ -11529,6 +11539,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
