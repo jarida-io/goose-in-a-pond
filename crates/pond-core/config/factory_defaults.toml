@@ -180,4 +180,4 @@ agent_activations_enabled = true
 context_ingest_enabled = false
 spoken_pairing_codes = true
 ble_setup_enabled = true
-ext_context_enabled = false
+ext_context_enabled = true

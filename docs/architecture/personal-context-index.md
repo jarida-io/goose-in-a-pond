@@ -10,6 +10,18 @@ captioning (waiting on an encoder measured on the Orin, §1.8). See §7.**
 > and `search_stale_dimension`. A row is now re-embedded whenever the index holds no vector for it
 > under the current model; nothing is adopted.
 
+> Status (2026-11-14): the index covers seven more corpora on every pond: personal details
+> (profile, places, interests, news topics, portrait, saved items, screenshot notes), messages from
+> both sides of attributed conversations, news digests and stories, long-task reports, notifications
+> and ideas (`Corpus` in `pond-core/src/context/vector_index.rs`). Each reads through a source query
+> in `sqlite_vector_index.rs`, so no table changed. `ext_context_enabled` now ships on: the reason it
+> shipped off, a pond with no sources answering "nothing found", no longer holds. Phase G's passive
+> tier landed as `<personal-context>`: each turn carries up to three hits that clear the embedder's
+> `closest_memory` floor (one on a voice turn), personal details first, from every corpus but
+> memories and the turn's own conversation, in a third of the memory budget, searched with the
+> vector the memory search already made. Memories outside their `valid_until` no longer come back
+> from `recall`.
+
 > Status (2026-10-23): unchanged against the code. Context items still reach the model only through
 > the `giap-context` tools (`search_context`, `recall`, `get_recent_context`), behind
 > `ext_context_enabled`, which ships off; nothing captions media; `embedding_provider` still defaults

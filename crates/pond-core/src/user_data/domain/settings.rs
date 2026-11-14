@@ -1032,7 +1032,7 @@ impl Default for Settings {
             agent_activations_enabled: Self::default_agent_activations_enabled(),
             agent_prefill_retention_days: Self::default_agent_prefill_retention_days(),
             context_ingest_enabled: false,
-            ext_context_enabled: false,
+            ext_context_enabled: true,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
             ble_setup_enabled: Self::default_ble_setup_enabled(),
         }
@@ -1541,7 +1541,7 @@ impl Settings {
     }
 
     fn default_ext_context_enabled() -> bool {
-        factory_defaults::boolean("ext_context_enabled", false)
+        factory_defaults::boolean("ext_context_enabled", true)
     }
 }
 
@@ -2517,7 +2517,6 @@ mod tests {
 
     /// Only these `ext_*` toggles may ship off, each for the reason given here:
     /// - `ext_orchestrator_enabled`: consent to autonomous `GooseMode::Auto` agents.
-    /// - `ext_context_enabled`: consent, and two tool schemas in every turn's prompt.
     /// - `ext_travel_enabled`: three tool schemas per prompt, place names leave the pond, and it
     ///   lets members book rides.
     #[test]
@@ -2534,16 +2533,10 @@ mod tests {
         off.sort_unstable();
         assert_eq!(
             off,
-            vec![
-                "ext_context_enabled",
-                "ext_orchestrator_enabled",
-                "ext_travel_enabled"
-            ],
+            vec!["ext_orchestrator_enabled", "ext_travel_enabled"],
             "the set of extension toggles that ship OFF changed. Adding one is a deliberate \
              decision and belongs in this test's doc comment with its reason; losing \
-             `ext_orchestrator_enabled` means delegation is now on by default on every install, \
-             and losing `ext_context_enabled` means two personal-context tools are in every \
-             turn's prompt on every install"
+             `ext_orchestrator_enabled` means delegation is now on by default on every install"
         );
     }
 }

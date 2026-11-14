@@ -233,9 +233,11 @@ impl ContextMcpServer {
 
     #[tool(
         description = "Recall anything this household knows about a question -- what the member \
-        told you, what this pond observed, and summarised past conversations. Prefer it when \
-        you do not know which would answer. Lines carry provenance; pass it on, never present \
-        a summary as the member's words."
+        told you, what was said in past conversations and their summaries, the member's \
+        profile, places, interests and saved items, your digests, news stories, reports, \
+        notifications and ideas, and what this pond observed. Prefer it when you do not know \
+        which would answer. Lines carry provenance; pass it on, never present a summary as the \
+        member's words."
     )]
     async fn recall(
         &self,
@@ -324,7 +326,7 @@ use tokio::io::DuplexStream;
 struct ContextDeps {
     repo: Arc<dyn ContextRepository>,
     embedder: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
-    /// Unified retrieval across memory, context and summaries; `None` without an embedder.
+    /// Unified retrieval across every corpus; `None` without an embedder.
     retrieval: Option<Arc<PersonalContextRetrieval>>,
 }
 
