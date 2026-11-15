@@ -2258,6 +2258,10 @@ async fn chat(
     }
     let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    let session_id = match req.device_locked {
+        true => locked_turn_session(&state, session_id).await,
+        false => session_id,
+    };
     refuse_without_a_model(&state).await?;
     let storage = &state.session_storage;
 
@@ -2277,13 +2281,13 @@ async fn chat(
     let model_role = "chat";
 
     // Scope resolved exactly as /chat/stream does, so both endpoints agree on the speaker.
-    let scope = locked_turn_scope(
-        resolve_turn_scope(&state, &session_id, &device).await,
-        req.device_locked,
-        &session_id,
-    );
+    let scope = match req.device_locked {
+        true => locked_turn_scope(&session_id),
+        false => resolve_turn_scope(&state, &session_id, &device).await,
+    };
     let service = ChatService::new(state.agent.clone(), session_id.clone(), storage.clone())
-        .with_profile_scope(scope);
+        .with_profile_scope(scope)
+        .with_device_locked(req.device_locked);
 
     // As every turn path does before the model: wait out a quiet compaction in the way.
     if let Some(wait) = state.runs.quiet_passes().turn_arrives(&session_id) {
@@ -2673,6 +2677,13 @@ async fn chat_stream(
 
     if let Some(session_id) = req.session_id.as_deref() {
         refuse_another_members_session(&state, principal.as_ref(), session_id).await?;
+    }
+    if req.device_locked {
+        if let Some(session_id) = req.session_id.take() {
+            req.session_id = Some(locked_turn_session(&state, session_id).await);
+        }
+        // A research task would run as the phone's member, which a locked phone does not prove.
+        req.deep_research = false;
     }
 
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
@@ -3815,11 +3826,10 @@ async fn drive_turn(
     let model_role = "chat";
 
     // Shared with the AgentRequest so memory is written under the identity it was read under.
-    let turn_scope = locked_turn_scope(
-        resolve_turn_scope(state, &session_id, &device).await,
-        req.device_locked,
-        &session_id,
-    );
+    let turn_scope = match req.device_locked {
+        true => locked_turn_scope(&session_id),
+        false => resolve_turn_scope(state, &session_id, &device).await,
+    };
 
     let mut chat_service = pond_core::shared::services::chat::ChatService::new(
         state.agent.clone(),
@@ -21536,13 +21546,19 @@ async fn decide_proposal(
 
 /// Resolves whose turn this is, once, at the edge; every failure narrows rather than widens.
 /// `device` is a [`ProvenDevice`] because a paired device outranks every other identity proof.
+async fn resolve_turn_scope(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> ProfileScope {
+    resolve_turn_identity(state, session_id, device).await.scope
+}
+
 /// A turn from a locked phone is an unidentified speaker's, whoever the phone belongs to: the
-/// voice that woke it over the lock screen does not prove who is holding it. The member's own
-/// scope comes back with the next turn sent after the phone is unlocked.
-fn locked_turn_scope(scope: ProfileScope, locked: bool, session_id: &str) -> ProfileScope {
-    if !locked {
-        return scope;
-    }
+/// voice that woke it over the lock screen does not prove who is holding it. Taken in place of
+/// [`resolve_turn_scope`], so the conversation is not claimed for the phone's member either; the
+/// member's own scope comes back with the next turn sent after the phone is unlocked.
+fn locked_turn_scope(session_id: &str) -> ProfileScope {
     tracing::info!(
         kind = "turn_device_locked",
         session_id,
@@ -21551,12 +21567,33 @@ fn locked_turn_scope(scope: ProfileScope, locked: bool, session_id: &str) -> Pro
     ProfileScope::Guest
 }
 
-async fn resolve_turn_scope(
-    state: &Arc<AppState>,
-    session_id: &str,
-    device: &ProvenDevice,
-) -> ProfileScope {
-    resolve_turn_identity(state, session_id, device).await.scope
+/// The conversation a locked phone's turn runs in. A member's own conversation would replay
+/// their earlier answers to whoever holds the phone, so such a turn starts a new one instead.
+async fn locked_turn_session(state: &AppState, session_id: String) -> String {
+    match state
+        .session_storage
+        .get_session_identity(&session_id)
+        .await
+    {
+        Ok(identity) if identity.readable_by(&ProfileScope::Guest) => session_id,
+        read => {
+            if let Err(e) = read {
+                tracing::warn!(
+                    error = %e,
+                    session_id,
+                    "could not read whose conversation a locked phone asked in"
+                );
+            }
+            let fresh = Uuid::new_v4().to_string();
+            tracing::info!(
+                kind = "turn_device_locked_new_session",
+                asked = %session_id,
+                session_id = %fresh,
+                "a locked phone asked in a member's conversation; the turn starts a new one"
+            );
+            fresh
+        }
+    }
 }
 
 /// [`resolve_turn_scope`] with the evidence it rested on, for decisions a voice match may not make.

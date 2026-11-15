@@ -386,6 +386,8 @@ pub struct ChatService {
     model_name: Option<String>,
     /// Whose turns these are. See [`with_profile_scope`](Self::with_profile_scope).
     profile_scope: ProfileScope,
+    /// See [`with_device_locked`](Self::with_device_locked).
+    device_locked: bool,
     /// Mirrors `settings.voice_thinking_tone_enabled`; defaults true, like that setting.
     thinking_tone: bool,
     /// Whether reasoning text may be stored at all; off unless `with_thinking` turns it on.
@@ -536,6 +538,7 @@ impl ChatService {
             telemetry: None,
             model_name: None,
             profile_scope: ProfileScope::Household,
+            device_locked: false,
             thinking_tone: true,
             persist_thinking: false,
             thinking_blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -606,6 +609,13 @@ impl ChatService {
     /// Scope this session's turns are written under; must match `AgentRequest.profile_scope`.
     pub fn with_profile_scope(mut self, scope: ProfileScope) -> Self {
         self.profile_scope = scope;
+        self
+    }
+
+    /// The asking phone is locked, so [`chat_once`](Self::chat_once) tells the model why the
+    /// turn has no personal tools; the caller narrows the scope itself.
+    pub fn with_device_locked(mut self, locked: bool) -> Self {
+        self.device_locked = locked;
         self
     }
 
@@ -1056,7 +1066,7 @@ impl ChatService {
             deep_research_task: None,
             interview: None,
             device_place: None,
-            device_locked: false,
+            device_locked: self.device_locked,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -2461,6 +2471,25 @@ mod tests {
         let service = ChatService::new(agent, session_id.clone(), storage.clone());
         let result = service.chat_once("Hello!".to_string()).await.unwrap();
         assert_eq!(result, "Echo: Hello!");
+    }
+
+    #[tokio::test]
+    async fn a_locked_phones_single_turn_tells_the_model_the_phone_is_locked() {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("s".to_string()).await.unwrap();
+
+        let service = ChatService::new(agent.clone(), "s".to_string(), storage)
+            .with_profile_scope(ProfileScope::Guest)
+            .with_device_locked(true);
+        service
+            .chat_once("What's on today?".to_string())
+            .await
+            .unwrap();
+
+        let sent = agent.last_request().expect("the turn reached the agent");
+        assert!(sent.device_locked);
+        assert_eq!(sent.profile_scope, ProfileScope::Guest);
     }
 
     // ── activity events (Agent / Inference / Tool) ───────────────────────

@@ -959,7 +959,12 @@ screen. The turn then runs as an unidentified speaker's (`ProfileScope::Guest`, 
 in `routes.rs`), whoever the phone belongs to, since a voice over a lock screen does not prove who
 holds the phone: no memories or notes, no connected accounts, cameras, sensor history, rides or
 long tasks. Its `<system-context>` carries `LOCKED_DEVICE_NOTE`, so the model says to unlock for
-those. The server logs `kind=turn_device_locked`. `/chat` (not streamed) honours it too.
+those. The server logs `kind=turn_device_locked`. A locked turn never claims the conversation
+for the phone's member, and does not continue one that is a member's own, which would replay their
+earlier answers: it runs in a new conversation instead (`kind=turn_device_locked_new_session`), whose
+id the answer carries (`session_id` here, the `done` frame on `/chat/stream`). A conversation that is
+nobody's carries on. `deep_research` is ignored, since the task would run as the member. `/chat`
+(not streamed) honours all of it too.
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
