@@ -11,8 +11,10 @@ use axum::http::{Method, Request, StatusCode};
 use pond_api::build_router;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::user_data::domain::idea::{GooseCan, GooseKind, GoosePlan, Idea, IdeaState};
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
+use pond_core::user_data::ports::ideas::IdeaRepository;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -72,20 +74,23 @@ impl LlmProvider for ScriptedInterviewer {
 
 struct Pond {
     router: axum::Router,
+    member: String,
+    ideas: pond_infra::sqlite_ideas::SqliteIdeaRepository,
     _dir: tempfile::TempDir,
 }
 
 async fn a_pond(provider: Option<Arc<dyn LlmProvider>>) -> Pond {
     let built = pond_api::test_support::app_state().await;
     let mut state = built.state;
-    state
+    let member = state
         .profile_repo
         .create(CreateProfileRequest {
             display_name: "Jerry".into(),
             avatar_emoji: "x".into(),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .id;
     let device_id = state
         .device_registry
         .register(RegisterDeviceRequest {
@@ -101,7 +106,10 @@ async fn a_pond(provider: Option<Arc<dyn LlmProvider>>) -> Pond {
         .id;
     state.handshake = Arc::new(DeviceHandshake(device_id));
     state.llm_provider = Arc::new(tokio::sync::RwLock::new(provider));
+    let ideas = pond_infra::sqlite_ideas::SqliteIdeaRepository::new(state.db.system.clone());
     Pond {
+        member,
+        ideas,
         router: build_router(
             Arc::new(state),
             std::path::PathBuf::from("pond-desktop/dist"),
@@ -307,4 +315,42 @@ async fn ideas_and_the_portrait_read_empty_before_the_lane_writes_them() {
     assert_eq!(ideas["state"], "thinking");
     let (status, _) = call(&pond, Method::POST, "/me/ideas/nope/goose", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn taking_an_idea_on_yourself_leaves_goose_out_of_it() {
+    let pond = a_pond(None).await;
+    pond.ideas
+        .add(&Idea {
+            id: "idea-1".into(),
+            profile_id: pond.member.clone(),
+            topic: "Toyota Fielder".into(),
+            title: "Catch the January dip on Fielders".into(),
+            pitch: "Prices soften after the import rush.".into(),
+            why: "You are shopping for a Fielder.".into(),
+            grounded_in: vec![],
+            sources: vec![],
+            picture: None,
+            goose_can: Some(GooseCan {
+                label: "Watch the listings".into(),
+                kind: GooseKind::Watch,
+            }),
+            goose_plan: GoosePlan::default(),
+            you_can: vec!["Set a budget ceiling".into(), "Visit two yards".into()],
+            state: IdeaState::New,
+            progress: None,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let (status, taken) = call(&pond, Method::POST, "/me/ideas/idea-1/mine", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{taken}");
+    assert_eq!(taken["todos"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        taken["idea"]["state"], "done",
+        "working would show Goose as on it"
+    );
+    let (_, ideas) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
+    assert_eq!(ideas["ideas"][0]["state"], "done");
 }

@@ -338,7 +338,8 @@ Idea = { "id",
 - `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`; `GET /me/ideas/{id}` → Idea
 - `POST /me/ideas/{id}/goose` → Idea: Goose starts its part (a research task, a watch, a
   schedule, a to-do) and the idea moves to `working`
-- `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos
+- `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos,
+  and a new idea moves to `done`, so the phone lists them where its buttons were
 - `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202
 
 Once a day on the lane, and when the member asks, the Pond writes up to three ideas for each
