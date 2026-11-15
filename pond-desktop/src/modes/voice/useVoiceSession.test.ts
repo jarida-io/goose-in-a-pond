@@ -704,6 +704,28 @@ describe("useVoiceSession — audio-level reactivity", () => {
     cleanup();
   });
 
+  it("voice-waiting shows its message until the next state, token, tool call, error or done", async () => {
+    const useVoiceSession = await getHook();
+    _invoke = vi.fn().mockResolvedValue("s1");
+    const { result } = renderHook(() => useVoiceSession(), { wrapper });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(result.current.waitingMessage).toBeNull();
+    const clears: Array<[string, unknown]> = [
+      ["voice-state", "thinking"],
+      ["voice-token", { content: "Hi" }],
+      ["voice-tool-call", { tool: "t", id: "1" }],
+      ["voice-error", { message: "x" }],
+      ["voice-done", { session_id: "s1" }],
+    ];
+    for (const [name, payload] of clears) {
+      act(() => { emitShellEvent("voice-waiting", { reason: "making_room", message: "Your pond is busy." }); });
+      expect(result.current.waitingMessage).toBe("Your pond is busy.");
+      act(() => { emitShellEvent(name, payload); });
+      expect(result.current.waitingMessage).toBeNull();
+    }
+  });
+
   it("voice-audio-level updates audioLevel", async () => {
     const useVoiceSession = await getHook();
     _invoke = vi.fn().mockResolvedValue("s1");

@@ -60,6 +60,8 @@ export interface ShellEvents {
   "voice-tool-result": { tool: string; id: string; content: string };
   "voice-done": { session_id?: string };
   "voice-error": { message?: string } | string;
+  /** The pond must wait before this turn's reply can start; ends at the next state, token, tool call, error or done. */
+  "voice-waiting": { reason: string; message: string };
   "voice-audio-level": { rms: number };
   "voice-session-ended": {
     code: number | null;
@@ -100,6 +102,7 @@ export const SHELL_EVENTS = [
   "voice-tool-result",
   "voice-done",
   "voice-error",
+  "voice-waiting",
   "voice-audio-level",
   "voice-session-ended",
 ] as const satisfies readonly ShellEvent[];

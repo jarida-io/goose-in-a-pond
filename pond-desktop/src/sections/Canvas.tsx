@@ -8,7 +8,9 @@ import { useAppState, useAppDispatch } from "../state/useAppContext";
 import { api } from "../api/PondApiClient";
 import { spokenClip } from "../modes/voice/webAudioUtils";
 import { nextCardId } from "../state/reducer";
+import { readWaitReason } from "../api/types";
 import type { ChatEvent } from "../api/types";
+import { WaitingLine } from "../components/WaitingLine";
 import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 import { ScheduleDebriefCard } from "../components/ScheduleDebriefCard";
 import { GooseAvatar } from "../hub/views/chat/GooseAvatar";
@@ -92,6 +94,7 @@ export function Canvas() {
   const [voiceMode, setVoiceMode] = useState(false);
   const [layout, setLayout] = useState<"grid" | "stack">("grid");
   const [streaming, setStreaming] = useState(false);
+  const [wait, setWait] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | undefined>(undefined);
   /** Track in-flight tool calls so tool_result can update the right card */
@@ -294,6 +297,8 @@ export function Canvas() {
       for await (const event of turn) {
         const ev = event as ChatEvent;
 
+        if (ev.type !== "status" || !readWaitReason(ev.waiting)) setWait(null);
+
         if (ev.type === "text" && (ev.content ?? ev.token)) {
           const raw = ev.content ?? ev.token ?? "";
           setThread((t) => {
@@ -305,11 +310,8 @@ export function Canvas() {
           });
 
         } else if (ev.type === "status" && ev.content) {
-          setThread((t) => {
-            const last = t[t.length - 1];
-            if (!last || last.role !== "assistant") return t;
-            return [...t.slice(0, -1), { ...last, text: last.text || ev.content! }];
-          });
+          const waiting = readWaitReason(ev.waiting);
+          if (waiting) setWait(ev.content);
 
         } else if (ev.type === "tool_call" && ev.tool) {
           setThread((t) => {
@@ -398,6 +400,7 @@ export function Canvas() {
       });
     } finally {
       setStreaming(false);
+      setWait(null);
     }
   }
 
@@ -610,7 +613,9 @@ export function Canvas() {
                             {m.role === "assistant" && m.text && !m.error
                               ? <MarkdownText source={m.text} />
                               : m.text || (streaming && i === thread.length - 1
-                              ? <span className="stream-dots"><span /><span /><span /></span>
+                              ? wait
+                                ? <WaitingLine message={wait} />
+                                : <span className="stream-dots"><span /><span /><span /></span>
                               : "")}
                           </div>
                         )}

@@ -16,6 +16,7 @@ const NO_SPEECH_TIMEOUT_MS = 8_000;
 
 export interface VoicePipelineAPI {
   audioLevel: number;
+  waitingMessage: string | null;
   wakeWord: string;
   maxSecs: number;
   secsLeft: number;
@@ -30,6 +31,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
   const dispatch = useAppDispatch();
 
   const [audioLevel, setAudioLevel] = useState(0);
+  const [waitingMessage, setWaitingMessage] = useState<string | null>(null);
   const [wakeWord, setWakeWord] = useState("");
   const [maxSecs, setMaxSecs] = useState(30);
   const [secsLeft, setSecsLeft] = useState(30);
@@ -75,6 +77,8 @@ export function useVoicePipeline(): VoicePipelineAPI {
       backendRef.current = backend;
 
       backend.onAudioLevel = (level) => setAudioLevel(level);
+
+      backend.onWaiting = setWaitingMessage;
 
       backend.onStateChange = (s) => {
         dispatch({ type: "SET_VOICE_STATE", payload: s });
@@ -354,6 +358,7 @@ export function useVoicePipeline(): VoicePipelineAPI {
 
   return {
     audioLevel,
+    waitingMessage,
     wakeWord,
     maxSecs,
     secsLeft,

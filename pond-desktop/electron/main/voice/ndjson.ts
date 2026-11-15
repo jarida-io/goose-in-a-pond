@@ -89,6 +89,8 @@ export function classifyLine(line: string): Classified {
       });
     case "turn_complete":
       return ev("voice-done", { session_id: str(obj, "session_id") });
+    case "waiting":
+      return ev("voice-waiting", { reason: str(obj, "reason"), message: str(obj, "message") });
     case "error":
       return ev("voice-error", { message: str(obj, "message") });
     // Not the unrelated legacy `audio-level` event; this one belongs to useVoiceSession.
