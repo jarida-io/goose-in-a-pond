@@ -509,12 +509,28 @@ impl GgufEmbeddingProvider {
         let loaded = Arc::clone(&self.loaded);
         let spec = self.spec.clone();
         let model_path = self.model_path.clone();
+        // A turn waits on its query, so its time is logged apart from the slot's batches.
+        let one_query = texts.len() == 1 && prefix == self.spec.query_prefix;
+        let asked = std::time::Instant::now();
 
         tokio::task::spawn_blocking(move || {
             // Held across load and embed: the load must not race itself, nor a context be shared.
             let mut guard = loaded.blocking_lock();
+            let wait_ms = asked.elapsed().as_millis() as u64;
             let loaded = loaded_or_load(&mut guard, &spec, &model_path)?;
-            embed_sync(loaded, &spec, &texts, prefix)
+            let started = std::time::Instant::now();
+            let vectors = embed_sync(loaded, &spec, &texts, prefix);
+            if one_query {
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "query_embed",
+                    wait_ms,
+                    compute_ms = started.elapsed().as_millis() as u64,
+                    chars = texts[0].len(),
+                    "a query vector was made"
+                );
+            }
+            vectors
         })
         .await
         .map_err(|e| anyhow!("embedding spawn_blocking join error: {e}"))?
