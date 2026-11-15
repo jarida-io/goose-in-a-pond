@@ -4365,12 +4365,14 @@ milestone completion).**
   message; it took the seat, and E4B answered "You use an iPhone.". Two questions with no answer in
   the store found nothing above 0.62, took no seat, and E4B said it did not know.
 
-**2026-10-28 — news, videos, place details and pictures from Brave (touches PAI-2 and PAI-3; not a
+**2026-11-15 — news, videos, place details and pictures from Brave (touches PAI-2 and PAI-3; not a
 PAI milestone).** Design and decisions: [small-model-tools.md §8.11](../small-model-tools.md).
 
 - **PAI-2: what leaves the pond.**
-  - Every `search_web` call now sends two requests to Brave's one host, LLM Context and a web
-    search, with the same question. Both carry `X-Loc-City` only with local places on.
+  - A typed `search_web` call sends two requests to Brave's one host, LLM Context and a web
+    search, with the same question. Both carry `X-Loc-City` only with local places on. A spoken
+    call, a helper's, and one on a key Brave refused two requests at once for send LLM Context
+    alone, as before.
   - `show_pictures` sends what the user wants to see to Brave's image search. For a picture the
     user attached, that is the model's words about it, never the picture.
   - The desktop loads the cards' thumbnails from `https://imgs.search.brave.com/` alone, with no
@@ -4378,7 +4380,10 @@ PAI milestone).** Design and decisions: [small-model-tools.md §8.11](../small-m
     proxy the viewer's address, and the web search panel's privacy line says so.
   - Both tools' answers are transient (§8.10.6). The pictures stub reads "Pictures from the web are
     not kept after the turn. Sources: ...".
-- **PAI-3.** `show_pictures` adds 480 bytes to the keyed block of the tool prefix (14,394 to 14,874
-  raw bytes with every key stored), only while the Brave key is stored. A voice turn is never
-  offered it (`SCREEN_ONLY_TOOLS`), so a voice turn's prefix differs from a text turn's from
-  `show_pictures` on, the same way a withheld keyed tool's does.
+- **PAI-3.** `show_pictures` adds 480 bytes to the keyed block of the tool prefix (31,039 to
+  31,519 raw bytes with every key stored), only while the Brave key is stored. The default block,
+  with no key stored, is unchanged by it: 30,237 raw bytes, the 58 over the earlier pin of 30,179
+  being the `private` field the private-reminders change gave `create_schedule` and `set_timer`.
+  A voice turn and a helper are never offered `show_pictures` (`SCREEN_ONLY_TOOLS`), so a voice
+  turn's prefix differs from a text turn's from `show_pictures` on, the same way a withheld keyed
+  tool's does.

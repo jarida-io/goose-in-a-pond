@@ -1211,9 +1211,10 @@ revisits the first two rows, at Jerry's request:
 
 ### 8.11 News, videos, place details and pictures from Brave; reverse image search on the pond
 
-**Status: Draft, measurements owed.** Jerry made the decisions below on 2026-10-28, and they are
-built on `feat/web-search-media` (draft PR #698). Not yet run: bench E9 on the nano, a release
-build there, and a functional live Brave check (§8.11.7). Jerry decided:
+**Status: Built, measurements owed.** Jerry made the decisions below on 2026-10-28. They were
+built on `feat/web-search-media` (PR #698) and ported onto main's reach (§8.10, six sources a
+turn and thirty in research) on 2026-11-15. Not yet run: bench E9 on the nano, a release build
+there, and a functional live Brave check (§8.11.7). Jerry decided:
 
 | # | question | decided |
 |---|---|---|
@@ -1265,17 +1266,33 @@ Read 2026-10-28 from Brave's API reference and service pages (every page
 
 #### 8.11.2 The web search beside LLM Context
 
-`search_web` sends §8.3's web search (`q`, `count=8`, `extra_snippets`, `safesearch=moderate`,
-`text_decorations=false`) at the same moment as its LLM Context request, with the same
-`X-Loc-City` when local places are on.
+`search_web` sends §8.3's web search (`q`, `count` for the reach, `extra_snippets`,
+`safesearch=moderate`, `text_decorations=false`) at the same moment as its LLM Context request,
+with the same `X-Loc-City` when local places are on.
 
+- **Only where a screen shows the card.** The side search is skipped, and LLM Context asked
+  alone as before, when:
+  - the turn is spoken: the chat records each turn's screen per engine session
+    (`screenless_sessions`), and the tool reads it from `_meta`;
+  - the caller is a helper, a deep-research step's among them (a child session);
+  - Brave has refused one of two requests sent together on this key (below).
+
+  Where it is skipped, a fallback asks the web search after LLM Context, as §8.10.4 does.
 - **Timing.** Once LLM Context has a quotable answer, the turn waits for the web search at most
   one more second (`SIDE_SEARCH_GRACE`). A slow search costs the card its extras, never the turn.
   When LLM Context cannot answer, the same search is the fallback's search (§8.10.4), so a
   fallback no longer waits for a second round trip.
 - **The key's status.** Both answers are recorded once both are in: the search's first, then LLM
-  Context's, so the verdict on the answer the model reads stands. A verdict on the key from LLM
-  Context (401, 429) is still final, and the search's answer is not read.
+  Context's, so the verdict on the answer the model reads stands. A 401 from LLM Context is
+  final, and the search's answer is not read.
+- **Two requests at once on a one-a-second plan.** Brave answers the second with 429. A 429 on
+  one of the two is therefore read as the key's rate, never as the allowance:
+  - on the side search, the card has no extras, nothing is recorded, and a fallback asks the
+    search again on its own, whose answer then counts;
+  - on LLM Context, beside a search that answered, the search answers (fallback
+    `rate_limited`), and nothing is recorded;
+  - either way the key is asked one request at a time from then on, for the life of the
+    process (`OneAtATime`, held as a hash of the key). Only both refused is "allowance used up".
 - **What is read**, item by item, so one misshapen item never loses the answer:
   - `news`: at most 3. Title, link, description, publisher (`profile.name`, else the host), the
     date (`page_age` as `YYYY-MM-DD`, else Brave's relative age), a thumbnail, `breaking`;
@@ -1289,25 +1306,32 @@ Read 2026-10-28 from Brave's API reference and service pages (every page
   - News items join the ranked candidates as sources, with their dates. A news item whose page
     LLM Context already read is not repeated. The budget stays keyed by the pages LLM Context
     read (§8.8), so news does not narrow it.
+  - News counts toward the reach: the copy quotes at most the reach's sources (six in a turn),
+    pages and news together, chosen by rank, so a news story takes a page's place rather than
+    adding one.
+  - A quoted news story is noted for `read_web_page` (§9) as a page source is, so the model may
+    open it.
   - A place's details become short passages ("open Monday 07:00 to 22:00", "phone: ...",
     "address: ...", "rating: 4.3 of 5 from 120 reviews"). They go in front of the place LLM
     Context named, or make a new place up to five, and the ranker picks the line that answers.
-  - **Videos never reach the model.** A line saying they are on the screen would be false in a
-    voice turn, and the tool cannot tell a voice turn from a text one.
+  - **Videos never reach the model.** A line saying they are on the screen would be false
+    wherever no screen shows the card.
 - **The card** keeps its fields (§8.10.3) and gains, each only when non-empty:
   - `news: [{title, url, domain, publisher, date, thumbnail, breaking}]`;
   - `videos: [{title, url, domain, duration, creator, date, thumbnail}]`;
   - on a place, `address`, `hours`, `phone` and `rating`.
 
   `date`, `thumbnail`, `duration` and `creator` are `null` when unknown. `results` lists only the
-  web's pages; news is not repeated there.
-- **The fallback** quotes news as unread sources after the web results, and its card carries the
-  same extras.
+  web's pages; news is not repeated there. The card is written by `format::card`, as every card
+  is.
+- **The fallback** quotes news as unread sources after the web results, within the same reach,
+  and its card carries the same extras.
 - **History** is unchanged (§8.10.6): the result is transient, and the stub names the domains the
   copy quoted, news included.
 - **Trace:** `kind="web_search"` gains `news`, `videos` and `side_search`.
-- **Cost: $0.010 per question** that calls `search_web`, two Search requests, against $0.005
-  before. The monthly credit covers about 500 such questions.
+- **Cost: $0.010 per question** that calls `search_web` on a screen, two Search requests, against
+  $0.005 before. A spoken question, a helper's and a paced key's stay at $0.005. The web search
+  panel says so.
 
 #### 8.11.3 `show_pictures`
 
@@ -1320,8 +1344,13 @@ question:    string, REQUIRED. "What the user wants to see, in their own words. 
 ```
 
 - **Gate.** Offered only while the Brave key is stored, beside `search_web` (`TOOL_REQUIREMENTS`),
-  and **never in a voice turn**: a voice turn has no screen. `SCREEN_ONLY_TOOLS` joins the turn's
-  withheld set when `is_voice`, before the allow-set and the delegation authority.
+  and **never where there is no screen**:
+  - a voice turn: `SCREEN_ONLY_TOOLS` joins the turn's withheld set when `is_voice`, right after
+    the keyless set is read and before the allow-set and the delegation authority. A widen later
+    in the turn (`enable_tool_group`) does not hand it back;
+  - a helper: `TaskSpec::grants_tool` never grants a screen-only tool, so no orchestrator child
+    or long-task step is offered it;
+  - the tool itself answers a dead end when called from either, without asking Brave.
 - **Request.** `GET /res/v1/images/search`, `q` cut to 50 words and 400 characters, `count=20`,
   `safesearch=strict` (Brave's default, and the only filter besides `off`), `country=ALL`, the key
   header, 6 s. No location.
@@ -1333,8 +1362,8 @@ question:    string, REQUIRED. "What the user wants to see, in their own words. 
   > 4 pictures for "Show me pictures of the Maasai Mara" are on the user's screen, from kws.go.ke,
   > commons.wikimedia.org, magicalkenya.com and 1 other site. You have not seen them.
 
-- **The card**, `audience: ["user"]`: `[[[mcp-ui:pictures:{query, pictures: [{title, url, domain,
-  thumbnail, width, height}]}]]]`.
+- **The card**, `audience: ["user"]`, written by `format::card`: `[[[mcp-ui:pictures:{query,
+  pictures: [{title, url, domain, thumbnail, width, height}]}]]]`.
 - **History.** Transient like `search_web`; the stub reads "Pictures from the web are not kept after
   the turn. Sources: ...".
 - **Misses** are dead ends, so the model tells the user rather than trying another tool:
@@ -1376,21 +1405,25 @@ it.
 | the Summarizer, Answers | AI-written text, which R4 and R6 keep out of a result; the Summarizer is deprecated, and Answers needs its own plan and key at about $0.01 to $0.02 a question |
 | `show_videos` | decision 3 |
 
-#### 8.11.6 What was verified (Mac, 2026-10-28, with Jerry's OK)
+#### 8.11.6 What was verified (Mac, 2026-11-15)
 
-- `cargo test -p pond-mcp-server --lib`: 334 passed, three runs in a row. They cover the side
-  search against a stub Brave (news in the copy, videos only in the card, place details merged,
-  both requests carrying the town only with local places on, a slow search not holding a
-  grounded answer, the fallback reusing the search), `show_pictures` (the request, the card, the
-  line, the offensive flag, each status, the stub) and the prefix oracle's new size.
-- `cargo test -p pond-core`: all passed except the known `device_budget` race (§8.10.8), which
-  passes alone.
-- `cargo check -p pond-adapters-goose --tests` passed only with a one-line type annotation that is
-  not on the branch. Current main fails on macOS with E0275 at `goose_agent.rs`'s `entitled_tools`
-  `collect()`: objc2's impls overflow inference. Linux, CI and the nano are unaffected.
-- The desktop: `tsc` is clean, vitest passed 2,405 of 2,405, and Playwright passed 43 of 43 on
-  local Chrome: the pictures spec, plus the web search card and panel specs, with contrast in light
-  and dark. Lint was not run.
+- `cargo test -p pond-mcp-server`: 463 passed and 13 ignored; the two prefix oracle pins failed
+  until re-measured (PAI checklist, 2026-11-15). Beyond the branch's own tests, they cover news
+  counting toward a turn's six sources, a quoted news story opening in `read_web_page`, LLM
+  Context asked alone where no screen shows a card, a 429 on either request read as the key's
+  rate and the key then paced, a spoken turn and a helper having no screen, the card guard
+  reading `web_search/`, and `show_pictures` in the tool inventory (46 tools). They were not run
+  again after the re-pin and formatting: the disk was full.
+- `cargo test -p pond-core`: the tool group, orchestration (`grants_tool` never grants a
+  screen-only tool), screenless sessions, transient result and web search tests, 126, and the
+  checklist's own test.
+- The desktop: `tsc` is clean, and vitest passed 123 of 123 for the cards, ChatHub, the web search
+  panel and its wording. The whole suite passed 3,228 of 3,233; the five failures are on main
+  already (the Hub voice settings' faster long speech, the voice child's stop, and the one-switch
+  guard over Devices, NgrokTunnel and Household). ESLint is clean on the files touched.
+  Playwright was not run.
+- Not run, the disk being full: `cargo check` of `pond-adapters-goose`, `pond-api` and
+  `pond-server` with all targets, and `pond-adapters-goose`'s tests.
 
 #### 8.11.7 Owed
 
