@@ -13,7 +13,7 @@
 # crates/pond-api/build.rs), so the built binary needs no external files.
 #
 # Usage:
-#   bash scripts/jetson.sh docker-build          # lean: goose backend, ollama/llamafile providers
+#   bash scripts/jetson.sh docker-build          # lean: goose backend, ollama/llamafile providers, mesh
 #   bash scripts/jetson.sh docker-build --full   # + local-inference (in-process GGUF; heavy llama-cpp-2/candle build)
 #
 # NOTE — CUDA/GPU: not available here. A generic arm64 container has no CUDA
@@ -26,8 +26,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-FEATURES_ARGS=(--no-default-features --features goose-agent)
-LABEL="lean (goose backend; ollama/llamafile providers)"
+# mesh is in every pond-server build, the lean one included.
+FEATURES_ARGS=(--no-default-features --features goose-agent,mesh)
+LABEL="lean (goose backend; ollama/llamafile providers; mesh)"
 for arg in "$@"; do
   case "$arg" in
     --full) FEATURES_ARGS=(--features local-inference); LABEL="full (+ in-process GGUF)";;
