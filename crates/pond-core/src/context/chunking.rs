@@ -60,10 +60,58 @@ pub fn chunk(text: &str, size: usize, overlap: usize) -> Vec<Chunk> {
         });
 
         let next = end.saturating_sub(overlap).max(start + 1);
-        start = ceil_char_boundary(text, next);
+        start = word_start(text, ceil_char_boundary(text, next), end);
     }
 
     out
+}
+
+/// How far a cut word may run on and still be skipped; a longer run is a URL or a code, better
+/// shown cut than dropped.
+const WORD_BYTES: usize = 32;
+
+/// `at`, or the start of the next word when `at` cuts into a word that ends within
+/// [`WORD_BYTES`] and the next word starts before `limit`.
+pub fn word_start(text: &str, at: usize, limit: usize) -> usize {
+    let limit = floor_char_boundary(text, limit);
+    if at == 0 || at >= limit || !text.is_char_boundary(at) {
+        return at;
+    }
+    let cuts_a_word = text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_alphanumeric)
+        && text[at..].chars().next().is_some_and(char::is_alphanumeric);
+    if !cuts_a_word {
+        return at;
+    }
+    let rest = &text[at..limit];
+    let Some(gap) = rest
+        .char_indices()
+        .take_while(|(i, _)| *i <= WORD_BYTES)
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, _)| i)
+    else {
+        return at;
+    };
+    match rest[gap..].char_indices().find(|(_, c)| !c.is_whitespace()) {
+        Some((i, _)) => at + gap + i,
+        None => at,
+    }
+}
+
+/// `text` cut to at most `max_chars` chars, at a word break when one keeps at least half of it;
+/// `None` when it already fits.
+pub fn cut_at_word(text: &str, max_chars: usize) -> Option<&str> {
+    let (cut, _) = text.char_indices().nth(max_chars)?;
+    let head = &text[..cut];
+    if text[cut..].starts_with(char::is_whitespace) {
+        return Some(head.trim_end());
+    }
+    match head.rfind(char::is_whitespace) {
+        Some(at) if at * 2 >= cut => Some(head[..at].trim_end()),
+        _ => Some(head),
+    }
 }
 
 /// The nicest cut at or before `hard_end`, never before `start + 1`.
@@ -182,6 +230,49 @@ mod tests {
             t.len()
         );
         assert!(cover(&t, &c));
+    }
+
+    #[test]
+    fn a_later_passage_starts_on_a_word() {
+        // 42-byte sentences, so the overlap lands inside a word.
+        let t = "previous figures of twenty four for Ruto. ".repeat(40);
+        let c = chunk(&t, 500, 50);
+        assert!(c.len() > 1);
+        for p in &c[1..] {
+            assert!(
+                t[..p.start].ends_with(char::is_whitespace),
+                "passage starts mid-word: {:?}",
+                p.slice(&t).map(|s| &s[..20])
+            );
+        }
+        assert!(cover(&t, &c), "skipping a cut word left a hole");
+    }
+
+    #[test]
+    fn word_start_skips_only_a_cut_word() {
+        let t = "previous figures of 24%";
+        assert_eq!(&t[word_start(t, 3, t.len())..], "figures of 24%");
+        assert_eq!(word_start(t, 9, t.len()), 9, "already on a word");
+        assert_eq!(word_start(t, 8, t.len()), 8, "on the space, not in a word");
+        assert_eq!(word_start(t, 3, 8), 3, "the next word is past the limit");
+        let url = format!("x{} tail", "y".repeat(60));
+        assert_eq!(
+            word_start(&url, 1, url.len()),
+            1,
+            "a long run is kept, not dropped"
+        );
+    }
+
+    #[test]
+    fn cut_at_word_ends_on_a_whole_word() {
+        assert_eq!(cut_at_word("tied at 31% in the poll", 9), Some("tied at"));
+        assert_eq!(cut_at_word("tied at 31%", 7), Some("tied at"));
+        assert_eq!(cut_at_word("tied at 31%", 40), None);
+        assert_eq!(
+            cut_at_word("a verylongword", 6),
+            Some("a very"),
+            "keeps half at least"
+        );
     }
 
     #[test]
