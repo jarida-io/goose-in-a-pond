@@ -3,7 +3,9 @@
 use pond_core::models::domain::audio_device::{
     AudioDevice, AudioDeviceStatus, AudioDirection, ChoiceBasis,
 };
+use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::device_registry::{device_type_label, DeviceRegistry};
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
 use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
@@ -47,6 +49,8 @@ pub struct LoadSkillParams {
 #[derive(Clone)]
 pub struct DeviceMcpServer {
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
@@ -62,11 +66,15 @@ impl DeviceMcpServer {
 
     pub fn new(
         device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+        room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+        guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
         settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
         skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
     ) -> Self {
         Self {
             device_registry,
+            room_registry,
+            guest_room_access,
             settings_repo,
             skill_repo,
             tool_router: Self::tool_router(),
@@ -80,17 +88,53 @@ impl DeviceMcpServer {
     )]
     async fn list_registered_devices(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         match self.device_registry.list_devices().await {
             Ok(devices) => {
+                // A guest only ever sees what it may also control; a device with no room is
+                // off-limits by default since there's nothing to check it against.
+                let scope = ctx
+                    .extensions
+                    .get::<ProfileScope>()
+                    .cloned()
+                    .unwrap_or(ProfileScope::Household);
+                let devices = if matches!(scope, ProfileScope::Guest) {
+                    let accessible = self
+                        .guest_room_access
+                        .accessible_room_ids()
+                        .await
+                        .unwrap_or_default();
+                    devices
+                        .into_iter()
+                        .filter(|d| {
+                            d.room_id
+                                .as_deref()
+                                .is_some_and(|id| accessible.contains(id))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    devices
+                };
+
                 // The model answers in room names, so it is never handed an id to read out.
-                let rooms = room_names().await;
+                let rooms: std::collections::HashMap<String, String> =
+                    match self.room_registry.list_rooms().await {
+                        Ok(list) => list.into_iter().map(|r| (r.id, r.name)).collect(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "list_registered_devices: could not read the rooms");
+                            Default::default()
+                        }
+                    };
                 let room_of = |d: &pond_core::user_data::ports::device_registry::Device| {
                     room_name(d.room_id.as_deref(), &rooms)
                 };
                 let text = if devices.is_empty() {
-                    "No devices registered.".to_string()
+                    if matches!(scope, ProfileScope::Guest) {
+                        "No devices are available to a guest here.".to_string()
+                    } else {
+                        "No devices registered.".to_string()
+                    }
                 } else {
                     devices
                         .iter()
@@ -336,6 +380,8 @@ use tokio::io::DuplexStream;
 
 struct DeviceDeps {
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
 }
@@ -345,12 +391,6 @@ static DEVICE_DEPS: OnceLock<DeviceDeps> = OnceLock::new();
 /// What a device in no room is placed in, as the app and the dashboard name it.
 const UNASSIGNED: &str = "Unassigned";
 
-static ROOMS: OnceLock<Arc<dyn RoomRegistry + Send + Sync>> = OnceLock::new();
-
-/// Give the device server the household's rooms, so it names a device's room rather than its id.
-pub fn init_device_rooms(rooms: Arc<dyn RoomRegistry + Send + Sync>) {
-    let _ = ROOMS.set(rooms);
-}
 
 /// The name of the room `room_id` names, or "Unassigned" for none or one not found: never the id.
 fn room_name(room_id: Option<&str>, rooms: &std::collections::HashMap<String, String>) -> String {
@@ -361,27 +401,19 @@ fn room_name(room_id: Option<&str>, rooms: &std::collections::HashMap<String, St
 
 /// Room names by id. Empty without the registry or when it fails, which names every room
 /// "Unassigned" rather than showing an id; the failure is logged.
-async fn room_names() -> std::collections::HashMap<String, String> {
-    let Some(rooms) = ROOMS.get() else {
-        return Default::default();
-    };
-    match rooms.list_rooms().await {
-        Ok(list) => list.into_iter().map(|r| (r.id, r.name)).collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "list_registered_devices: could not read the rooms");
-            Default::default()
-        }
-    }
-}
 
 /// Initialize device server dependencies. Call once at startup.
 pub fn init_device_deps(
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
 ) {
     let _ = DEVICE_DEPS.set(DeviceDeps {
         device_registry,
+        room_registry,
+        guest_room_access,
         settings_repo,
         skill_repo,
     });
@@ -398,6 +430,8 @@ pub fn spawn_device_server(reader: DuplexStream, writer: DuplexStream) {
     };
     let server = DeviceMcpServer::new(
         deps.device_registry.clone(),
+        deps.room_registry.clone(),
+        deps.guest_room_access.clone(),
         deps.settings_repo.clone(),
         deps.skill_repo.clone(),
     );
@@ -448,6 +482,8 @@ mod tests {
         }
     }
 
+    use pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry;
+
     struct StubSettings;
     #[async_trait]
     impl SettingsRepository for StubSettings {
@@ -494,6 +530,8 @@ mod tests {
     fn test_server() -> DeviceMcpServer {
         DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             Arc::new(StubSettings),
             Arc::new(StubSkills),
         )
@@ -545,6 +583,8 @@ mod tests {
     fn test_server_with_skill() -> DeviceMcpServer {
         DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             Arc::new(StubSettings),
             Arc::new(StubSkillsWithData),
         )
@@ -660,6 +700,8 @@ mod tests {
         }));
         let server = DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             settings.clone(),
             Arc::new(StubSkills),
         );
@@ -751,6 +793,87 @@ mod tests {
         assert!(text.contains("morning-briefing: Summarizes the day each morning."));
     }
 
+    struct OneDeviceInKitchen;
+    #[async_trait]
+    impl DeviceRegistry for OneDeviceInKitchen {
+        async fn register(&self, _: RegisterDeviceRequest) -> anyhow::Result<Device> {
+            unimplemented!()
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![Device {
+                id: "d1".into(),
+                name: "Lamp".into(),
+                device_type: "light".into(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec![],
+                registered_at: String::new(),
+                last_seen: None,
+                is_online: true,
+                room_id: Some("room-1".into()),
+            }])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(None)
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct OneRoomNamedKitchen;
+    #[async_trait]
+    impl RoomRegistry for OneRoomNamedKitchen {
+        async fn create(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<pond_core::user_data::ports::room_registry::Room> {
+            unimplemented!()
+        }
+        async fn list_rooms(
+            &self,
+        ) -> anyhow::Result<Vec<pond_core::user_data::ports::room_registry::Room>> {
+            Ok(vec![pond_core::user_data::ports::room_registry::Room {
+                id: "room-1".into(),
+                name: "Kitchen".into(),
+                created_at: String::new(),
+            }])
+        }
+        async fn get_room(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<Option<pond_core::user_data::ports::room_registry::Room>> {
+            Ok(None)
+        }
+        async fn rename(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn list_registered_devices_resolves_room_id_to_name() {
+        let server = DeviceMcpServer::new(
+            Arc::new(OneDeviceInKitchen),
+            Arc::new(OneRoomNamedKitchen),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+            Arc::new(StubSettings),
+            Arc::new(StubSkills),
+        );
+        let ctx = make_ctx(server.clone()).await;
+        let result = server.list_registered_devices(ctx).await.unwrap();
+        let text = tool_text(&result);
+        assert!(
+            text.contains("\"room\":\"Kitchen\""),
+            "expected a resolved room name in the hint JSON, got: {text}"
+        );
+    }
+
     struct PairedPhoneRegistry;
     #[async_trait]
     impl DeviceRegistry for PairedPhoneRegistry {
@@ -786,6 +909,8 @@ mod tests {
     async fn a_paired_phone_is_listed_as_the_companion_phone_not_its_type_code() {
         let server = DeviceMcpServer::new(
             Arc::new(PairedPhoneRegistry),
+            Arc::new(OneRoomNamedKitchen),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             Arc::new(StubSettings),
             Arc::new(StubSkills),
         );

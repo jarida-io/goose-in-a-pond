@@ -1541,12 +1541,14 @@ describe("the host credential", () => {
     expect(sent("/health")).toEqual([undefined]);
   });
 
-  it("goes with an onboarding reset and with speech synthesis", async () => {
+  it("goes with an onboarding reset, a factory reset, and with speech synthesis", async () => {
     fetchMock.mockImplementation(async () => okJson({ onboarded: false, current_step: "Welcome" }));
     const api = client();
     await api.resetOnboarding();
+    await api.factoryReset("The Kitchen Pond");
     await api.synthesizeSpeech("hello");
     expect(sent("/onboard/reset")).toEqual([credential]);
+    expect(sent("/admin/factory-reset")).toEqual([credential]);
     expect(sent("/api/v1/tts")).toEqual([credential]);
   });
 
@@ -1612,5 +1614,30 @@ describe("web search", () => {
       "http://localhost:4000/api/v1/web-search/key",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+});
+
+describe("factoryReset", () => {
+  it("POSTs the typed name and returns the exported routines", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ routines: [{ id: "r1" }] }));
+    const result = await client().factoryReset("The Kitchen Pond");
+    expect(result).toEqual({ routines: [{ id: "r1" }] });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v1/admin/factory-reset");
+    expect(JSON.parse(String(init?.body))).toEqual({ pond_name: "The Kitchen Pond" });
+  });
+
+  it("surfaces a name mismatch by its error code, unmodified", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(409, "pond_name_mismatch"));
+    const err = await client().factoryReset("Wrong Name").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).message).toBe("pond_name_mismatch");
+  });
+
+  it("surfaces a held mesh-credit balance by its error code", async () => {
+    fetchMock.mockResolvedValueOnce(errJson(409, "payments_held"));
+    const err = await client().factoryReset("The Kitchen Pond").catch((e: unknown) => e);
+    expect((err as ApiError).message).toBe("payments_held");
   });
 });

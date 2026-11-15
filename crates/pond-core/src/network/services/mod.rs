@@ -2,6 +2,7 @@ pub mod advertising;
 pub mod connection_changes;
 pub mod device_resume_throttle;
 pub mod discovery;
+pub mod factory_reset;
 pub mod setup_claim;
 pub mod setup_guess_throttle;
 pub mod spoken_code;
