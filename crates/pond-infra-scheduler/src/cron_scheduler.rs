@@ -964,12 +964,13 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn delete_task(&self, id: &str) -> Result<()> {
-        let job_id = {
+        let (job_id, live) = {
             let mut guard = self.tasks.lock().await;
             let entry = guard
                 .remove(id)
                 .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
-            entry.job_id
+            let live: std::collections::HashSet<String> = guard.keys().cloned().collect();
+            (entry.job_id, live)
         };
 
         if job_id != uuid::Uuid::nil() {
@@ -977,6 +978,8 @@ impl SchedulerPort for CronSchedulerAdapter {
         }
 
         self.save().await?;
+        // Also drops runs left by schedules deleted before their history went with them.
+        self.run_history.keep_only(&live).await?;
         Ok(())
     }
 
@@ -1336,6 +1339,32 @@ mod tests {
 
         let tasks = sched.list_tasks().await.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_schedules_runs_go_with_it_and_older_orphans_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+        for id in ["gone", "kept"] {
+            sched
+                .create_task(create_req(id, "0 0 2 * * *"))
+                .await
+                .unwrap();
+            sched.run_history.record_start(id).await;
+        }
+        sched.run_history.record_start("deleted-long-ago").await;
+
+        sched.delete_task("gone").await.unwrap();
+
+        let reopened =
+            crate::run_history::JsonRunHistory::new(tmp.path().join("schedule_runs.json"), 50)
+                .await
+                .unwrap();
+        for history in [&*sched.run_history, &reopened] {
+            assert!(history.get_runs("gone", 10).await.is_empty());
+            assert!(history.get_runs("deleted-long-ago", 10).await.is_empty());
+            assert_eq!(history.get_runs("kept", 10).await.len(), 1);
+        }
     }
 
     #[tokio::test]
