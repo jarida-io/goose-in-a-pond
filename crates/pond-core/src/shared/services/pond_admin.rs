@@ -79,6 +79,7 @@ impl PondAdminService {
         areas.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.id.cmp(&b.id)));
         Ok(PondOverview {
             disk: storage.disk,
+            volume: storage.volume,
             data_dir_bytes: storage.data_dir_bytes,
             areas,
             databases: storage.databases,

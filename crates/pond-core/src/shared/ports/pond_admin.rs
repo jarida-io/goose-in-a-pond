@@ -12,7 +12,10 @@ use crate::shared::domain::pond_admin::{
 /// The data directory's size, per area root of `area_roots()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageReport {
+    /// The disk the pond's files are on: with an encrypted data volume, the one that holds it.
     pub disk: DiskSpace,
+    /// The data directory's own file system, when it is mounted separately (an encrypted volume).
+    pub volume: Option<DiskSpace>,
     pub data_dir_bytes: u64,
     /// Bytes under each root of `area_roots()`, in that order; a missing root is 0.
     pub area_root_bytes: Vec<u64>,

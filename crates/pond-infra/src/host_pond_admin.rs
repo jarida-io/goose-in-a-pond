@@ -259,6 +259,58 @@ fn disk_space(path: &Path) -> DiskSpace {
     }
 }
 
+/// The encrypted data volume's layout keeps downloads beside the data directory, in
+/// `<data dir>-public`, linked back at their old paths (scripts/lib/data-volume.sh). They are the
+/// pond's, so they are counted, and that sibling is the only place a link is followed to.
+fn public_sibling(data_dir: &Path) -> Option<PathBuf> {
+    let mut name = data_dir.file_name()?.to_os_string();
+    name.push("-public");
+    let sibling = data_dir.with_file_name(name);
+    sibling
+        .is_dir()
+        .then(|| fs::canonicalize(&sibling).ok())
+        .flatten()
+}
+
+/// `root` under the data directory, following a link on the way only into the public sibling.
+/// `None` for a link anywhere else, which the overview counts as nothing.
+fn measured_root(data_dir: &Path, public: Option<&Path>, root: &[&str]) -> Option<PathBuf> {
+    let mut at = data_dir.to_path_buf();
+    for segment in root {
+        at.push(segment);
+        let Ok(meta) = fs::symlink_metadata(&at) else {
+            return Some(at);
+        };
+        if meta.file_type().is_symlink() {
+            let target = fs::canonicalize(&at).ok()?;
+            if !public.is_some_and(|p| target.starts_with(p)) {
+                return None;
+            }
+            at = target;
+        }
+    }
+    Some(at)
+}
+
+/// The disk the pond's files are on, and the data directory's own file system when it is
+/// mounted separately: then `df` of the directory is the volume, and its parent is the disk.
+fn disk_and_volume(data_dir: &Path) -> (DiskSpace, Option<DiskSpace>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = data_dir.parent().filter(|p| !p.as_os_str().is_empty());
+        if let (Ok(dir), Some(Ok(up))) = (fs::metadata(data_dir), parent.map(fs::metadata)) {
+            if dir.dev() != up.dev() {
+                return (
+                    disk_space(parent.unwrap_or(data_dir)),
+                    Some(disk_space(data_dir)),
+                );
+            }
+        }
+    }
+    (disk_space(data_dir), None)
+}
+
 /// `< POWER_MODEL ID=0 NAME=15W >` lines, and the `< PM_CONFIG DEFAULT=1 >` line.
 pub fn parse_nvpmodel_conf(text: &str) -> (Vec<PowerMode>, Option<u32>) {
     let field = |line: &str, key: &str| -> Option<String> {
@@ -402,9 +454,12 @@ impl PondAdministrator for HostPondAdministrator {
     async fn storage(&self) -> Result<StorageReport, AdminError> {
         let counts = self.counts().await;
         self.blocking(move |dir| {
+            let public = public_sibling(&dir);
             let area_root_bytes = area_roots()
                 .iter()
-                .map(|(_, root)| tree_usage(&join(&dir, root)).0)
+                .map(|(_, root)| {
+                    measured_root(&dir, public.as_deref(), root).map_or(0, |at| tree_usage(&at).0)
+                })
                 .collect();
             let databases = database_names()
                 .iter()
@@ -416,9 +471,12 @@ impl PondAdministrator for HostPondAdministrator {
                         .sum(),
                 })
                 .collect();
+            let (disk, volume) = disk_and_volume(&dir);
             Ok(StorageReport {
-                disk: disk_space(&dir),
-                data_dir_bytes: tree_usage(&dir).0,
+                disk,
+                volume,
+                data_dir_bytes: tree_usage(&dir).0
+                    + public.as_deref().map_or(0, |p| tree_usage(p).0),
                 area_root_bytes,
                 databases,
                 counts,
@@ -509,6 +567,7 @@ impl PondAdministrator for HostPondAdministrator {
                 system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), false);
             }
             let load = sysinfo::System::load_average();
+            let (disk, volume) = disk_and_volume(&data_dir);
             HostHealth {
                 host: HostInfo {
                     hostname: sysinfo::System::host_name().unwrap_or_default(),
@@ -527,7 +586,8 @@ impl PondAdministrator for HostPondAdministrator {
                     swap_total_bytes: system.total_swap(),
                     swap_free_bytes: system.free_swap(),
                 },
-                disk: disk_space(&data_dir),
+                disk,
+                volume,
                 temperatures: temperatures(),
                 process: ProcessUsage {
                     rss_bytes: pid
@@ -680,6 +740,48 @@ mod tests {
 
     fn path(raw: &str) -> DataPath {
         DataPath::parse(raw).unwrap()
+    }
+
+    /// The encrypted layout: downloads live in `<data dir>-public`, linked back. They are counted
+    /// where they belong, and a link anywhere else still counts as nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_encrypted_layouts_downloads_are_counted_and_nothing_else_is_followed() {
+        let parent = tempfile::tempdir().unwrap();
+        let data = parent.path().join("pond-data");
+        let public = parent.path().join("pond-data-public");
+        std::fs::create_dir_all(&data).unwrap();
+        write(&public, "hf_cache/blob", 700);
+        write(&public, "models/model.gguf", 200);
+        write(&data, "logs/a.log", 10);
+        std::os::unix::fs::symlink(public.join("hf_cache"), data.join("hf_cache")).unwrap();
+        std::os::unix::fs::symlink(public.join("models"), data.join("models")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write(outside.path(), "attachments/big", 5_000);
+        std::os::unix::fs::symlink(outside.path().join("attachments"), data.join("attachments"))
+            .unwrap();
+
+        let admin = host(&data).await;
+        let report = admin.storage().await.unwrap();
+        let bytes_of = |root: &[&str]| {
+            area_roots()
+                .iter()
+                .zip(&report.area_root_bytes)
+                .find(|((_, r), _)| r.as_slice() == root)
+                .map(|(_, b)| *b)
+                .unwrap()
+        };
+        assert_eq!(bytes_of(&["hf_cache"]), 700);
+        assert_eq!(bytes_of(&["models"]), 200);
+        assert_eq!(
+            bytes_of(&["attachments"]),
+            0,
+            "a link out of the pond's folders is not followed"
+        );
+        // The data directory's own files (its databases among them) and the downloads beside it.
+        assert_eq!(report.data_dir_bytes, tree_usage(&data).0 + 700 + 200);
+        // Not a separate mount here, so there is no volume.
+        assert_eq!(report.volume, None);
     }
 
     #[tokio::test]
