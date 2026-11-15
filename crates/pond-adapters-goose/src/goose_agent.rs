@@ -2210,7 +2210,7 @@ impl GooseAdapter {
     ) -> (
         Vec<(MemoryFragment, Option<f32>)>,
         Option<f32>,
-        Option<Vec<f32>>,
+        Option<(Vec<f32>, u64)>,
     ) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
@@ -2218,6 +2218,7 @@ impl GooseAdapter {
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
+            let started = std::time::Instant::now();
             match query_vector_within(provider, message, QUERY_VECTOR_WAIT).await {
                 Ok(query_vector) => {
                     let closest_floor = provider.similarity_floors().map(|f| f.closest_memory);
@@ -2240,7 +2241,8 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
-                            return (hits, closest_floor, Some(query_vector));
+                            let query_ms = started.elapsed().as_millis() as u64;
+                            return (hits, closest_floor, Some((query_vector, query_ms)));
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -3020,7 +3022,11 @@ impl GooseAdapter {
                 }
             },
         );
-        let (relevant_memories, closest_floor, query_vector) = relevant_memories;
+        let (relevant_memories, closest_floor, query) = relevant_memories;
+        let (query_vector, query_ms) = match query {
+            Some((vector, ms)) => (Some(vector), Some(ms)),
+            None => (None, None),
+        };
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -3401,6 +3407,7 @@ impl GooseAdapter {
         let mut personal_context_for_user_msg = String::new();
         let matched = recollections.len();
         let mut fresh = Vec::new();
+        let mut shown = 0;
         if !recollections.is_empty() {
             use pond_core::context::retrieval_service::{render_turn_block, turn_line};
             // Its start is enough to know a line from an earlier envelope, however it was cut.
@@ -3413,16 +3420,19 @@ impl GooseAdapter {
                     !earlier.iter().any(|text| text.contains(start))
                 })
                 .collect();
-            personal_context_for_user_msg = render_turn_block(&fresh, budget_split.context_tokens);
+            (personal_context_for_user_msg, shown) =
+                render_turn_block(&fresh, budget_split.context_tokens);
+            fresh.truncate(shown);
         }
         if self.turn_index.is_some() && query_vector.is_some() {
             tracing::info!(
                 kind = "personal_context",
                 matched,
-                shown = fresh.len(),
+                shown,
                 corpora = ?fresh.iter().map(|h| h.corpus.as_str()).collect::<Vec<_>>(),
                 top_score = ?fresh.iter().map(|h| h.score).reduce(f32::max),
                 token_budget = budget_split.context_tokens,
+                query_ms,
                 recall_ms,
                 "turn recall"
             );
