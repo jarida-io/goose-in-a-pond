@@ -73,6 +73,44 @@ fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
 /// and the allergies, few enough to stay a handful of lines.
 const STANDING_FACTS_SHOWN: usize = 8;
 
+/// How long a turn waits for its query vector, about 3.5 times P0's 41 ms on the Orin's CPU. Past
+/// it the turn recalls by keyword and the embed finishes behind it, warming the next turn.
+const QUERY_VECTOR_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The query vector for `message`, or an error once `wait` passes; the embed keeps running then.
+async fn query_vector_within(
+    provider: &Arc<dyn EmbeddingProvider>,
+    message: &str,
+    wait: std::time::Duration,
+) -> Result<Vec<f32>> {
+    let provider = provider.clone();
+    let text = message.to_string();
+    let wait_ms = wait.as_millis() as u64;
+    let embed = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let vector = provider.embed_query(&text).await;
+        let took_ms = started.elapsed().as_millis() as u64;
+        if took_ms > wait_ms {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "query_vector_late",
+                took_ms,
+                wait_ms,
+                "a turn's query vector came after the turn stopped waiting for it"
+            );
+        }
+        vector
+    });
+    match tokio::time::timeout(wait, embed).await {
+        Ok(Ok(vector)) => vector,
+        Ok(Err(stopped)) => Err(anyhow!("the query embed stopped: {stopped}")),
+        Err(_) => Err(anyhow!(
+            "the query vector took longer than {} ms",
+            wait.as_millis()
+        )),
+    }
+}
+
 fn fragments_within<'a>(
     ranked: impl IntoIterator<Item = &'a MemoryFragment>,
     budget: usize,
@@ -2187,7 +2225,7 @@ impl GooseAdapter {
     ) -> (
         Vec<(MemoryFragment, Option<f32>)>,
         Option<f32>,
-        Option<Vec<f32>>,
+        Option<(Vec<f32>, u64)>,
     ) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
@@ -2195,7 +2233,8 @@ impl GooseAdapter {
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
-            match provider.embed_query(message).await {
+            let started = std::time::Instant::now();
+            match query_vector_within(provider, message, QUERY_VECTOR_WAIT).await {
                 Ok(query_vector) => {
                     let closest_floor = provider.similarity_floors().map(|f| f.closest_memory);
                     match self
@@ -2217,7 +2256,8 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
-                            return (hits, closest_floor, Some(query_vector));
+                            let query_ms = started.elapsed().as_millis() as u64;
+                            return (hits, closest_floor, Some((query_vector, query_ms)));
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -2997,7 +3037,11 @@ impl GooseAdapter {
                 }
             },
         );
-        let (relevant_memories, closest_floor, query_vector) = relevant_memories;
+        let (relevant_memories, closest_floor, query) = relevant_memories;
+        let (query_vector, query_ms) = match query {
+            Some((vector, ms)) => (Some(vector), Some(ms)),
+            None => (None, None),
+        };
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -3378,6 +3422,7 @@ impl GooseAdapter {
         let mut personal_context_for_user_msg = String::new();
         let matched = recollections.len();
         let mut fresh = Vec::new();
+        let mut shown = 0;
         if !recollections.is_empty() {
             use pond_core::context::retrieval_service::{render_turn_block, turn_line};
             // Its start is enough to know a line from an earlier envelope, however it was cut.
@@ -3390,16 +3435,19 @@ impl GooseAdapter {
                     !earlier.iter().any(|text| text.contains(start))
                 })
                 .collect();
-            personal_context_for_user_msg = render_turn_block(&fresh, budget_split.context_tokens);
+            (personal_context_for_user_msg, shown) =
+                render_turn_block(&fresh, budget_split.context_tokens);
+            fresh.truncate(shown);
         }
         if self.turn_index.is_some() && query_vector.is_some() {
             tracing::info!(
                 kind = "personal_context",
                 matched,
-                shown = fresh.len(),
+                shown,
                 corpora = ?fresh.iter().map(|h| h.corpus.as_str()).collect::<Vec<_>>(),
                 top_score = ?fresh.iter().map(|h| h.score).reduce(f32::max),
                 token_budget = budget_split.context_tokens,
+                query_ms,
                 recall_ms,
                 "turn recall"
             );
@@ -6209,6 +6257,42 @@ fn without(tools: HashSet<String>, withheld: &HashSet<String>) -> HashSet<String
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_slow_query_vector_gives_way_to_keywords_and_still_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Slow(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Slow {
+            async fn embed(&self, _: &str) -> Result<Vec<f32>> {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                self.0.store(true, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0])
+            }
+            fn dimensions(&self) -> usize {
+                2
+            }
+            fn model_id(&self) -> String {
+                "slow".into()
+            }
+        }
+        let finished = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(Slow(finished.clone()));
+
+        let started = std::time::Instant::now();
+        let waited =
+            query_vector_within(&provider, "q", std::time::Duration::from_millis(20)).await;
+        assert!(waited.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(150));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the embed was dropped, so nothing warmed"
+        );
+
+        let quick = query_vector_within(&provider, "q", std::time::Duration::from_secs(2)).await;
+        assert_eq!(quick.unwrap(), vec![1.0, 0.0]);
+    }
+
     use super::*;
 
     #[test]

@@ -26,6 +26,21 @@ pub fn provenance(corpus: Corpus) -> &'static str {
     }
 }
 
+/// A hit's provenance, told apart within personal details by the table its id names.
+pub fn label(corpus: Corpus, row_id: &str) -> &'static str {
+    if corpus != Corpus::Personal {
+        return provenance(corpus);
+    }
+    match row_id.split_once(':').map(|(kind, _)| kind) {
+        Some("interest") => "from your interests",
+        Some("topic") => "from the news topics I keep for you",
+        Some("portrait") => "from what I have pieced together about you",
+        Some("saved") => "something you saved",
+        Some("screenshot") => "from a screenshot you shared",
+        _ => provenance(corpus),
+    }
+}
+
 /// Hits a turn carries at most; a choice, so a strong match never crowds out the message.
 pub const TURN_HITS: usize = 3;
 
@@ -58,19 +73,20 @@ pub fn turn_line(hit: &Recollection, max_chars: usize) -> String {
         Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
         None => text,
     };
-    format!("- ({}) {text}", provenance(hit.corpus))
+    format!("- ({}) {text}", label(hit.corpus, &hit.row_id))
 }
 
 /// The `<personal-context>` block for `hits` within `token_budget` (chars/4, as memories are
 /// counted): the first line is always kept, cut to fit; later ones only whole. Empty for none.
-pub fn render_turn_block(hits: &[Recollection], token_budget: usize) -> String {
+/// Also returns how many hits it holds.
+pub fn render_turn_block(hits: &[Recollection], token_budget: usize) -> (String, usize) {
     let budget_chars = token_budget.saturating_mul(4);
     let mut used = 0usize;
     let mut lines: Vec<String> = Vec::new();
     for hit in hits {
         let room = budget_chars.saturating_sub(used);
         let line = if lines.is_empty() {
-            let prefix = provenance(hit.corpus).chars().count() + "- () ".len();
+            let prefix = label(hit.corpus, &hit.row_id).chars().count() + "- () ".len();
             let text_room = room.saturating_sub(prefix).max(TURN_LINE_MIN_CHARS);
             turn_line(hit, TURN_LINE_CHARS.min(text_room))
         } else {
@@ -83,12 +99,13 @@ pub fn render_turn_block(hits: &[Recollection], token_budget: usize) -> String {
         lines.push(line);
     }
     if lines.is_empty() {
-        return String::new();
+        return (String::new(), 0);
     }
-    format!(
+    let block = format!(
         "<{CONTEXT_BLOCK_TAG}>\n{}\n</{CONTEXT_BLOCK_TAG}>",
         lines.join("\n")
-    )
+    );
+    (block, lines.len())
 }
 
 /// A retrieval answer: the text, where it came from, and how well it matched.
@@ -103,7 +120,7 @@ pub struct Recollection {
 impl Recollection {
     /// The hit, introduced by its provenance.
     pub fn labelled(&self) -> String {
-        format!("({}) {}", provenance(self.corpus), self.text)
+        format!("({}) {}", label(self.corpus, &self.row_id), self.text)
     }
 }
 
@@ -265,15 +282,31 @@ mod tests {
             recollection(Corpus::Message, "m", 0.9, &long),
             recollection(Corpus::Idea, "i", 0.8, "A second, short hit."),
         ];
-        let block = render_turn_block(&hits, 20);
+        let (block, held) = render_turn_block(&hits, 20);
+        assert_eq!(held, 1);
         assert!(block.starts_with("<personal-context>\n- (said in an earlier conversation) word"));
         assert!(block.ends_with("…\n</personal-context>"), "{block}");
         assert!(!block.contains("second"), "{block}");
         assert!(block.chars().count() <= 20 * 4 + 45, "{block}");
 
-        let roomy = render_turn_block(&hits, 1_000);
+        let (roomy, held) = render_turn_block(&hits, 1_000);
+        assert_eq!(held, 2);
         assert!(roomy.contains("- (from an idea I suggested) A second, short hit."));
-        assert_eq!(render_turn_block(&[], 1_000), "");
+        assert_eq!(render_turn_block(&[], 1_000), (String::new(), 0));
+    }
+
+    #[test]
+    fn a_personal_detail_says_which_kind_it_is() {
+        assert_eq!(label(Corpus::Personal, "saved:abc"), "something you saved");
+        assert_eq!(
+            label(Corpus::Personal, "interest:abc"),
+            "from your interests"
+        );
+        assert_eq!(label(Corpus::Personal, "profile:abc"), "from your profile");
+        assert_eq!(
+            label(Corpus::Digest, "saved:abc"),
+            provenance(Corpus::Digest)
+        );
     }
 
     #[test]

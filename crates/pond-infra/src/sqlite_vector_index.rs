@@ -14,11 +14,85 @@ use pond_core::context::vector_index::{
 use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, Pool, Sqlite};
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub struct SqliteVectorIndex {
     pool: Pool<Sqlite>,
+    /// The vectors of the model last searched, so a turn scores them in memory: reading every row
+    /// through the driver each turn took 279 ms on the Orin with 5,800 passages.
+    cache: tokio::sync::Mutex<Option<Arc<VectorCache>>>,
+}
+
+/// Candidates checked against scope and liveness at a time; a later page is read only when hidden
+/// rows took the earlier pages' places.
+const VERIFY_PAGE: usize = 64;
+
+#[derive(Clone)]
+struct CachedVector {
+    span: Option<(i64, i64)>,
+    vector: Vec<f32>,
+    norm: f32,
+}
+
+/// One model's vectors as the table held them at (`count`, `max_rowid`, `newest`); any write
+/// moves that signature, whichever connection or process made it.
+#[derive(Clone, Default)]
+struct VectorCache {
+    model_id: String,
+    count: i64,
+    max_rowid: i64,
+    newest: String,
+    entries: HashMap<(Corpus, String, i64), CachedVector>,
+}
+
+impl VectorCache {
+    fn insert(&mut self, row: CachedRow) {
+        let (corpus, row_id, chunk_ix, start, len, blob) = row;
+        let Some(corpus) = Corpus::parse(&corpus) else {
+            return;
+        };
+        let vector = blob_to_vec(&blob);
+        let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let span = match (start, len) {
+            (Some(s), Some(l)) => Some((s, l)),
+            _ => None,
+        };
+        self.entries.insert(
+            (corpus, row_id, chunk_ix),
+            CachedVector { span, vector, norm },
+        );
+    }
+}
+
+type CachedRow = (String, String, i64, Option<i64>, Option<i64>, Vec<u8>);
+
+/// A scored row before its scope is checked: score, corpus, row id, best passage's span.
+type Candidate<'a> = (f32, Corpus, &'a str, Option<(i64, i64)>);
+
+/// `corpus IN (...)` over the corpora this build knows, so a retired corpus's rows neither load
+/// nor count.
+fn known_corpora_sql() -> String {
+    let names: Vec<String> = Corpus::ALL
+        .iter()
+        .map(|c| format!("'{}'", c.as_str()))
+        .collect();
+    format!("corpus IN ({})", names.join(", "))
+}
+
+/// A passage of `text` by the byte span its vector was made from; the whole text without one.
+fn passage(text: &str, span: Option<(i64, i64)>) -> String {
+    let Some((start, len)) = span else {
+        return text.to_string();
+    };
+    let start = (start.max(0) as usize).min(text.len());
+    let end = ((start as i64 + len.max(0)) as usize).min(text.len());
+    match text.get(start..end) {
+        Some(piece) => piece.to_string(),
+        None => String::from_utf8_lossy(&text.as_bytes()[start..end]).into_owned(),
+    }
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -274,7 +348,122 @@ fn source_rev_sql(corpus: Corpus) -> Option<&'static str> {
 
 impl SqliteVectorIndex {
     pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            cache: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// `model_id`'s vectors, read again only where the table changed since the last search.
+    async fn vectors_for(&self, model_id: &str) -> Result<Arc<VectorCache>> {
+        let known = known_corpora_sql();
+        let mut held = self.cache.lock().await;
+        let (count, max_rowid, newest): (i64, i64, String) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0), COALESCE(MAX(embedded_at), '') \
+             FROM vectors WHERE model_id = ? AND {known}"
+        ))
+        .bind(model_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let mut cache = match held.take() {
+            Some(cache) if cache.model_id == model_id => cache,
+            _ => Arc::new(VectorCache {
+                model_id: model_id.to_string(),
+                ..VectorCache::default()
+            }),
+        };
+        if (cache.count, cache.max_rowid, cache.newest.as_str())
+            != (count, max_rowid, newest.as_str())
+        {
+            let fresh = Arc::make_mut(&mut cache);
+            let changed: Vec<CachedRow> = sqlx::query_as(&format!(
+                "SELECT corpus, row_id, chunk_ix, chunk_start, chunk_len, vector FROM vectors \
+                 WHERE model_id = ? AND {known} AND (rowid > ? OR embedded_at > ?)"
+            ))
+            .bind(model_id)
+            .bind(fresh.max_rowid)
+            .bind(&fresh.newest)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in changed {
+                fresh.insert(row);
+            }
+            // More entries than rows means some were deleted, which no change column records.
+            if fresh.entries.len() as i64 != count {
+                fresh.entries.clear();
+                let all: Vec<CachedRow> = sqlx::query_as(&format!(
+                    "SELECT corpus, row_id, chunk_ix, chunk_start, chunk_len, vector FROM vectors \
+                     WHERE model_id = ? AND {known}"
+                ))
+                .bind(model_id)
+                .fetch_all(&self.pool)
+                .await?;
+                for row in all {
+                    fresh.insert(row);
+                }
+            }
+            fresh.count = count;
+            fresh.max_rowid = max_rowid;
+            fresh.newest = newest;
+        }
+        *held = Some(cache.clone());
+        Ok(cache)
+    }
+
+    /// The rows of `page` that `scope` may see and that are live, in `page`'s order, with their
+    /// passage text: the same predicates every query here uses, read for a page at a time.
+    async fn visible(
+        &self,
+        page: &[Candidate<'_>],
+        scope: &ProfileScope,
+        exclusions: &Exclusions,
+    ) -> Result<Vec<ResolvedHit>> {
+        let mut texts: HashMap<(Corpus, String), String> = HashMap::new();
+        for corpus in Corpus::ALL {
+            let ids: Vec<&str> = page
+                .iter()
+                .filter(|(_, c, _, _)| *c == corpus)
+                .map(|(_, _, id, _)| *id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let (table, id_col) = source_table(corpus);
+            let (scope_pred, bind) = scope_sql(corpus, scope);
+            let live = liveness_sql(corpus);
+            let (session_pred, session_bind) = session_sql(corpus, exclusions);
+            let text = text_sql(corpus);
+            let marks = vec!["?"; ids.len()].join(", ");
+            let sql = format!(
+                "SELECT s.{id_col}, {text} FROM {table} s \
+                 WHERE s.{id_col} IN ({marks}) {scope_pred} {live} {session_pred}"
+            );
+            let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+            for id in &ids {
+                q = q.bind(*id);
+            }
+            if let Some(b) = bind {
+                q = q.bind(b);
+            }
+            if let Some(b) = session_bind {
+                q = q.bind(b);
+            }
+            for (id, text) in q.fetch_all(&self.pool).await? {
+                texts.insert((corpus, id), text);
+            }
+        }
+        Ok(page
+            .iter()
+            .filter_map(|(score, corpus, id, span)| {
+                let text = texts.get(&(*corpus, id.to_string()))?;
+                Some(ResolvedHit {
+                    corpus: *corpus,
+                    row_id: id.to_string(),
+                    score: *score,
+                    text: passage(text, *span),
+                })
+            })
+            .collect())
     }
 
     /// Opens `pond_vectors.db`; `after_connect` ATTACHes `sys` because ATTACH is per-connection.
@@ -327,7 +516,8 @@ impl VectorIndex for SqliteVectorIndex {
         .bind(entry.vector.len() as i64)
         .bind(vec_to_blob(&entry.vector))
         .bind(&entry.source_rev)
-        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+        // To the nanosecond, so a vector rewritten in place still moves the search cache's mark.
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -433,70 +623,52 @@ impl VectorIndex for SqliteVectorIndex {
         if query.is_empty() || limit == 0 || scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let mut scored: Vec<ResolvedHit> = Vec::new();
-        for corpus in Corpus::ALL {
-            if exclusions.corpora.contains(&corpus) {
+        let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Ok(vec![]);
+        }
+        let cache = self.vectors_for(model_id).await?;
+
+        // Each row's best passage, so one long document can't flood the top-K.
+        let mut best: HashMap<(Corpus, &str), (f32, Option<(i64, i64)>)> = HashMap::new();
+        for ((corpus, row_id, _), cached) in &cache.entries {
+            // Wrong width is not a bad match but no match: skip it.
+            if exclusions.corpora.contains(corpus)
+                || cached.vector.len() != query.len()
+                || cached.norm == 0.0
+            {
                 continue;
             }
-            let (table, id_col) = source_table(corpus);
-            let (scope_pred, bind) = scope_sql(corpus, scope);
-            let live = liveness_sql(corpus);
-            let (session_pred, session_bind) = session_sql(corpus, exclusions);
-            let text = text_sql(corpus);
-            // Spans are byte offsets, but `substr` on TEXT counts characters (and is 1-indexed),
-            // so slice the BLOB at +1 and cast back. A NULL span is a whole-text vector.
-            let sql = format!(
-                "SELECT v.row_id, v.vector, \
-                        CASE WHEN v.chunk_start IS NULL OR v.chunk_len IS NULL THEN {text} \
-                             ELSE CAST(substr(CAST({text} AS BLOB), \
-                                              v.chunk_start + 1, v.chunk_len) AS TEXT) END \
-                 FROM vectors v \
-                 JOIN {table} s ON s.{id_col} = v.row_id \
-                 WHERE v.corpus = ? AND v.model_id = ? {scope_pred} {live} {session_pred}"
-            );
-            let mut q = sqlx::query_as::<_, (String, Vec<u8>, String)>(&sql)
-                .bind(corpus.as_str())
-                .bind(model_id);
-            if let Some(b) = bind {
-                q = q.bind(b);
+            let dot: f32 = query.iter().zip(&cached.vector).map(|(a, b)| a * b).sum();
+            let score = dot / (query_norm * cached.norm);
+            let slot = best
+                .entry((*corpus, row_id.as_str()))
+                .or_insert((f32::MIN, None));
+            if score > slot.0 {
+                *slot = (score, cached.span);
             }
-            if let Some(b) = session_bind {
-                q = q.bind(b);
-            }
-            // Keep only each row's best chunk, so one long document can't flood the top-K.
-            let mut best: std::collections::HashMap<String, ResolvedHit> =
-                std::collections::HashMap::new();
-            for (row_id, blob, text) in q.fetch_all(&self.pool).await? {
-                let Some(score) = cosine(query, &blob_to_vec(&blob)) else {
-                    continue;
-                };
-                match best.get(&row_id) {
-                    Some(existing) if existing.score >= score => {}
-                    _ => {
-                        best.insert(
-                            row_id.clone(),
-                            ResolvedHit {
-                                corpus,
-                                row_id,
-                                score,
-                                text,
-                            },
-                        );
-                    }
-                }
-            }
-            scored.extend(best.into_values());
         }
+        let mut ranked: Vec<Candidate<'_>> = best
+            .into_iter()
+            .map(|((corpus, row_id), (score, span))| (score, corpus, row_id, span))
+            .collect();
         // Score, then corpus order (the "memory wins ties" policy), then id for a stable order.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+        ranked.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.corpus.cmp(&b.corpus))
-                .then_with(|| a.row_id.cmp(&b.row_id))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(b.2))
         });
-        scored.truncate(limit);
-        Ok(scored)
+
+        let mut hits = Vec::new();
+        for page in ranked.chunks(VERIFY_PAGE) {
+            hits.extend(self.visible(page, scope, exclusions).await?);
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     async fn needs_embedding(
@@ -742,6 +914,77 @@ mod tests {
             vec!["m1".to_string()],
             "a rebuilt index must report the source row as needing embedding"
         );
+    }
+
+    #[tokio::test]
+    async fn a_search_sees_every_write_since_the_last_one() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        add_memory(&db.system, "m1", None).await;
+        add_memory(&db.system, "m2", None).await;
+        index.upsert(&entry("m1", vec![1.0, 0.0])).await.unwrap();
+        let ids = |hits: Vec<ResolvedHit>| -> Vec<String> {
+            hits.into_iter().map(|h| h.row_id).collect()
+        };
+        let search = || {
+            index.search_resolved(
+                &[0.0, 1.0],
+                "nomic-embed-text-v1.5",
+                &ProfileScope::Household,
+                5,
+            )
+        };
+        assert_eq!(ids(search().await.unwrap()), vec!["m1"]);
+
+        index.upsert(&entry("m2", vec![0.0, 1.0])).await.unwrap();
+        assert_eq!(
+            ids(search().await.unwrap()),
+            vec!["m2", "m1"],
+            "a new vector went unseen"
+        );
+
+        index.upsert(&entry("m1", vec![0.0, 2.0])).await.unwrap();
+        let hits = search().await.unwrap();
+        assert!(
+            hits.iter().all(|h| (h.score - 1.0).abs() < 1e-6),
+            "a rewritten vector kept its old score: {hits:?}"
+        );
+
+        index.remove(Corpus::Memory, "m2").await.unwrap();
+        assert_eq!(
+            ids(search().await.unwrap()),
+            vec!["m1"],
+            "a removed vector came back"
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_hidden_from_a_member_do_not_crowd_out_their_own() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        add_profile(&db.system, "jerry").await;
+        add_profile(&db.system, "mum").await;
+        for n in 0..(VERIFY_PAGE * 2) {
+            let id = format!("mum{n}");
+            add_memory(&db.system, &id, Some("mum")).await;
+            index.upsert(&entry(&id, vec![1.0, 0.0])).await.unwrap();
+        }
+        add_memory(&db.system, "mine", Some("jerry")).await;
+        index.upsert(&entry("mine", vec![0.9, 0.1])).await.unwrap();
+
+        let hits = index
+            .search_resolved(
+                &[1.0, 0.0],
+                "nomic-embed-text-v1.5",
+                &ProfileScope::Owner("jerry".into()),
+                1,
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["mine"]);
     }
 
     #[tokio::test]
