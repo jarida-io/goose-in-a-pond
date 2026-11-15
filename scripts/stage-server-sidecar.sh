@@ -26,11 +26,8 @@
 #      placeholder page instead of the real dashboard -- and that dashboard is
 #      what the Jetson and any phone on the LAN actually see, so this ordering
 #      matters well beyond the desktop app.
-#   2. Build pond-server in release with RUSTFLAGS explicitly EMPTIED, with
-#      the `mesh` feature always on -- the desktop app's own copy of
-#      pond-server (this sidecar) needs it compiled in for the Mesh screen to
-#      be anything but a permanent no-op; there is no non-mesh sidecar
-#      variant, so nobody has to remember a flag to get it.
+#   2. Build pond-server in release with RUSTFLAGS explicitly EMPTIED. Its
+#      default features include `mesh`, which the Mesh screen needs.
 #      .cargo/config.toml sets `-C target-cpu=native`, which bakes host-CPU
 #      instructions into the binary. A distributable binary built that way can
 #      SIGILL on a different CPU (per AGENTS.md, the same landmine CI
@@ -97,8 +94,8 @@ echo "==> [1/3] Building web UI (pond-desktop/dist) ..."
 [ -d "${DESKTOP_DIR}/dist" ] || fail "web UI build reported success but pond-desktop/dist is missing."
 
 # --- 2. Build pond-server (release, no host-CPU specialisation) ---------------
-echo "==> [2/3] Building pond-server (release, RUSTFLAGS emptied, mesh feature on) ..."
-( cd "${REPO_ROOT}" && SQLX_OFFLINE=true RUSTFLAGS="" cargo build --release -p pond-server --features mesh ) \
+echo "==> [2/3] Building pond-server (release, RUSTFLAGS emptied) ..."
+( cd "${REPO_ROOT}" && SQLX_OFFLINE=true RUSTFLAGS="" cargo build --release -p pond-server ) \
   || fail "cargo build of pond-server failed."
 [ -f "${RELEASE_BIN}" ] || fail "cargo reported success but ${RELEASE_BIN} is missing."
 

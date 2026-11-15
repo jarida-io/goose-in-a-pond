@@ -18,7 +18,7 @@ name = "embed-scores"
 required-features = ["local-inference"]
 
 [features]
-default = ["goose-agent", "local-inference", "vision-onnx", "face-onnx"]
+default = ["goose-agent", "local-inference", "vision-onnx", "face-onnx", "mesh"]
 # Enable the Goose agent backend (compiles Block's Goose from the submodule — slow first build).
 # Enabled by default. To build without Goose: cargo build -p pond-server --no-default-features
 goose-agent = ["dep:pond-adapters-goose"]
@@ -102,11 +102,10 @@ vision-onnx = ["dep:pond-adapters-vision-onnx"]
 # statically links a prebuilt ONNX Runtime — which fails outright on JetPack 6.
 # That is what pond-adapters-kokoro's own `system-ort` feature is for; its
 # Cargo.toml carries the full note.
-# Enable the private mesh transport (#132 Milestone 2): real libp2p
-# MeshTransport, gated behind settings.mesh_enabled at runtime. Kept optional
-# — full-feature libp2p (kad+gossipsub+relay+dcutr) is a materially heavier
-# compile than the rest of the default build.
-# cargo run -p pond-server --features mesh -- serve
+# The private mesh transport: real libp2p MeshTransport, switched at runtime by
+# settings.mesh_enabled. On by default so every build (desktop sidecar, Jetson,
+# giap.sh) can turn mesh on. Building without it means listing the other
+# defaults with --no-default-features.
 mesh = ["dep:pond-adapters-mesh-libp2p", "dep:pond-mesh-protocol", "dep:pond-adapters-mesh-inference"]
 # Enable Lightning settlement over Breez/Spark (#132 Milestone 5), gated
 # behind settings.lightning_enabled at runtime. Kept optional and separate

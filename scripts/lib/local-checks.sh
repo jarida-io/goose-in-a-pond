@@ -104,7 +104,7 @@ lc_check_rust() {
   lc_run cargo test --locked $test || return 1
   [ "$full" = true ] || return 0
   lc_run cargo check --locked -p pond-server -p pond-adapters-goose --all-targets || return 1
-  lc_run cargo check --locked -p pond-server --features mesh --all-targets
+  lc_run cargo check --locked -p pond-server --no-default-features --features goose-agent,local-inference,vision-onnx,face-onnx --all-targets
 }
 
 lc_check_desktop() {
