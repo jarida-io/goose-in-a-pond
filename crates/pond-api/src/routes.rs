@@ -2097,7 +2097,7 @@ async fn factory_reset(
         FactoryResetError, FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
     };
 
-    factory_reset_authority(
+    let requested_by = factory_reset_authority(
         &state,
         principal.as_ref(),
         credential.as_ref().map(|axum::Extension(c)| c),
@@ -2154,7 +2154,7 @@ async fn factory_reset(
     // Its own task: a caller that hangs up must not stop the erase halfway.
     let reset = tokio::spawn(async move {
         let _run = run;
-        FactoryResetService::execute(&ports, &typed, &actual).await
+        FactoryResetService::execute(&ports, &typed, &actual, requested_by.as_deref()).await
     });
     let result = reset.await.map_err(|error| {
         tracing::error!(%error, "factory reset: the reset task ended without an answer");

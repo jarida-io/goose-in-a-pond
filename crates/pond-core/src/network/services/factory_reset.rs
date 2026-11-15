@@ -20,7 +20,8 @@ use crate::user_data::ports::profile::ProfileRepository;
 use crate::user_data::ports::scheduler::SchedulerPort;
 use crate::user_data::services::onboarding::OnboardingService;
 
-/// Routines handed back to the caller so GOTG can save them before the Pond forgets them.
+/// Routines handed back to the caller so GOTG can save them before the Pond forgets them; only
+/// the caller's own private reminders among them.
 #[derive(Debug, Clone, Default)]
 pub struct FactoryResetExport {
     pub routines: Vec<Schedule>,
@@ -163,11 +164,13 @@ impl FactoryResetService {
     /// → speak → rearm → reset onboarding → forget Wi-Fi. Members are notified while their
     /// devices still resolve. Notifying, revoking, the goodbye, the rearm and the Wi-Fi are best
     /// effort; a failed erase or onboarding reset stops the reset there, resumes the schedules it
-    /// paused and keeps the Wi-Fi, and is returned, never reported as done.
+    /// paused and keeps the Wi-Fi, and is returned, never reported as done. `requested_by` is the
+    /// member who asked, or `None` for the host.
     pub async fn execute(
         ports: &FactoryResetPorts,
         typed_pond_name: &str,
         actual_pond_name: &str,
+        requested_by: Option<&str>,
     ) -> Result<FactoryResetExport, FactoryResetError> {
         if actual_pond_name.trim().is_empty() {
             return Err(FactoryResetRefusal::NoPondName.into());
@@ -189,6 +192,7 @@ impl FactoryResetService {
             }),
             None => Vec::new(),
         };
+        let routines = Self::exportable(routines, requested_by);
 
         Self::report(ports, FactoryResetStep::Pausing);
         let _quiet = Quieted::start(ports.quiet.clone()).await;
@@ -287,6 +291,19 @@ impl FactoryResetService {
             reason: format!("{error:#}"),
             export: FactoryResetExport { routines },
         }
+    }
+
+    /// What the caller may take away: a member's private reminder goes only to that member, and
+    /// the host, which is no member, takes none.
+    fn exportable(routines: Vec<Schedule>, requested_by: Option<&str>) -> Vec<Schedule> {
+        routines
+            .into_iter()
+            .filter(|task| {
+                task.kind
+                    .member()
+                    .is_none_or(|member| Some(member) == requested_by)
+            })
+            .collect()
     }
 
     /// Pauses every active schedule so none fires mid-erase, then waits a bounded time for runs
@@ -738,7 +755,8 @@ mod tests {
         )));
 
         let result =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         match result {
             Err(FactoryResetError::Failed {
@@ -772,7 +790,8 @@ mod tests {
         let log = Arc::new(CallLog::default());
         let ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
 
-        let result = FactoryResetService::execute(&ports, "Wrong Name", "The Kitchen Pond").await;
+        let result =
+            FactoryResetService::execute(&ports, "Wrong Name", "The Kitchen Pond", None).await;
 
         assert_eq!(refusal(result), FactoryResetRefusal::NameMismatch);
         assert!(
@@ -786,7 +805,7 @@ mod tests {
         let log = Arc::new(CallLog::default());
         let ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
 
-        let result = FactoryResetService::execute(&ports, "", "").await;
+        let result = FactoryResetService::execute(&ports, "", "", None).await;
 
         assert_eq!(refusal(result), FactoryResetRefusal::NoPondName);
         assert!(
@@ -807,7 +826,8 @@ mod tests {
         ports.credit_ledger = Arc::new(ledger);
 
         let result =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         assert_eq!(refusal(result), FactoryResetRefusal::PaymentsHeld);
         assert!(
@@ -841,6 +861,48 @@ mod tests {
         )
     }
 
+    fn reminder(id: &str, member: &str) -> Schedule {
+        schedule(
+            id,
+            crate::user_data::domain::schedule::TaskKind::MemberReminder {
+                profile_id: member.to_string(),
+                prompt: format!("remind {member} about the clinic results"),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn the_export_carries_no_other_members_private_reminders() {
+        for (requested_by, expected) in [
+            (Some("jerry"), vec!["his-reminder", "routine-1"]),
+            (None, vec!["routine-1"]),
+        ] {
+            let log = Arc::new(CallLog::default());
+            let mut ports = happy_ports(log.clone(), vec![], None).await;
+            ports.scheduler = Some(Arc::new(FakeScheduler::new(
+                log,
+                vec![
+                    routine("routine-1"),
+                    reminder("his-reminder", "jerry"),
+                    reminder("her-reminder", "amina"),
+                ],
+            )));
+
+            let export = FactoryResetService::execute(
+                &ports,
+                "The Kitchen Pond",
+                "The Kitchen Pond",
+                requested_by,
+            )
+            .await
+            .unwrap();
+
+            let mut ids: Vec<&str> = export.routines.iter().map(|t| t.id.as_str()).collect();
+            ids.sort();
+            assert_eq!(ids, expected, "asked by {requested_by:?}");
+        }
+    }
+
     #[tokio::test]
     async fn every_schedule_is_deleted_once_it_is_exported() {
         let log = Arc::new(CallLog::default());
@@ -851,9 +913,10 @@ mod tests {
         ));
         ports.scheduler = Some(scheduler.clone());
 
-        let export = FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
-            .await
-            .unwrap();
+        let export =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await
+                .unwrap();
 
         assert_eq!(
             export.routines.len(),
@@ -882,7 +945,7 @@ mod tests {
             vec![routine("routine-1")],
         )));
 
-        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
             .await
             .unwrap();
 
@@ -914,7 +977,8 @@ mod tests {
         ports.scheduler = Some(scheduler.clone());
 
         let result =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         assert!(
             matches!(
@@ -958,9 +1022,10 @@ mod tests {
         )));
         ports.member_notifier = Some(Arc::new(LoggingMemberNotifier(log.clone())));
 
-        let export = FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
-            .await
-            .unwrap();
+        let export =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await
+                .unwrap();
 
         assert_eq!(export.routines.len(), 1);
         assert_eq!(export.routines[0].id, "routine-1");
@@ -1009,7 +1074,8 @@ mod tests {
         ports.tts = Some(Arc::new(FailingVoiceOutput));
 
         let export =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         assert!(export.is_ok(), "a TTS failure must not abort the reset");
         assert!(log.calls().contains(&"onboarding.reset"));
@@ -1022,7 +1088,8 @@ mod tests {
         ports.member_notifier = Some(Arc::new(MockMemberNotifier::new().failing_next(1)));
 
         let export =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         assert!(
             export.is_ok(),
@@ -1060,7 +1127,7 @@ mod tests {
             .unwrap();
         ports.member_notifier = Some(notifier.clone());
 
-        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
             .await
             .unwrap();
 
@@ -1097,7 +1164,7 @@ mod tests {
         let progress = Arc::new(RecordingProgress::default());
         ports.progress = Some(progress.clone());
 
-        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
             .await
             .unwrap();
 
