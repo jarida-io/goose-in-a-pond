@@ -2479,7 +2479,11 @@ mod tests {
                 "Your pond is busy. Making room to hear you…".to_string()
             ))
         );
-        assert_eq!(session.image_failures(), 0, "memory, not the media, was short");
+        assert_eq!(
+            session.image_failures(),
+            0,
+            "memory, not the media, was short"
+        );
     }
 
     #[tokio::test]
@@ -2523,7 +2527,9 @@ mod tests {
         let last = seen.last().unwrap();
         assert!(!with_media(last), "nothing left needs the encoder");
         assert!(
-            last[0].as_concat_text().contains("no memory free to look at it"),
+            last[0]
+                .as_concat_text()
+                .contains("no memory free to look at it"),
             "{:?}",
             last[0]
         );
