@@ -13,6 +13,7 @@ llama-server, swapping only the knowledge tools, and score what a small model do
 """
 
 import argparse
+import base64
 import copy
 import difflib
 import json
@@ -149,7 +150,7 @@ def classify(case, out, family_map):
     accept = {expect, *case.get("accept", [])}
     if out.get("finish") == "error":
         return "error", fams, other
-    if expect in ("read", "compute", "web"):
+    if expect in ("read", "compute", "web", "pictures"):
         if fams & accept:
             return "ok", fams, other
         if fams:
@@ -191,6 +192,20 @@ def head_answer_ok(case, out):
 # ── E1 / E3 ──────────────────────────────────────────────────────────────────
 
 
+def user_message(template, case):
+    """The user's turn as the pond sends it: the envelope, then any attached picture."""
+    text = user_turn(template, case["q"])
+    picture = case.get("picture")
+    if not picture:
+        return {"role": "user", "content": text}
+    with open(os.path.join(HERE, "fixtures", "pictures", picture["path"]), "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"role": "user", "content": [
+        {"type": "text", "text": text},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + data}},
+    ]}
+
+
 def run_calls(server, payload, arms, cases, log):
     system, template = payload["messages"][0], payload["messages"][1]["content"]
     rows = []
@@ -198,7 +213,7 @@ def run_calls(server, payload, arms, cases, log):
         msgs0 = [dict(system, content=sys_override) if sys_override else system]
 
         def one(case, arm=arm, tools=tools, family_map=family_map, msgs0=msgs0):
-            msgs = msgs0 + [{"role": "user", "content": user_turn(template, case["q"])}]
+            msgs = msgs0 + [user_message(template, case)]
             # 200 tokens: a call is short, and a head answer is judged on its first sentence.
             # Thinking spends its budget before the call, so it gets room (E2B truncates silently).
             out = parse(server.chat(msgs, tools, max_tokens=1536 if THINK else 200))
@@ -269,6 +284,24 @@ def e6(server, cases, log):
     keep = [c for c in cases if c["id"][0] in "rcndox"] + web
     arms = [(name, with_tools(base["tools"], V.SCHEMAS[name]), V.FAMILY[name], None) for name in ("S0", "S1")]
     wanted = os.environ.get("E6_ARMS")
+    if wanted:
+        arms = [a for a in arms if a[0] in wanted.split(",")]
+    return run_calls(server, base, arms, keep, log)
+
+
+def e9(server, cases, log):
+    """Pictures for the screen beside web search: are "show me" asks sent to show_pictures, does it
+    take web questions (videos included, which reach the card through search_web), and does a call
+    about an attached picture say what is in it? Needs the model's vision projector loaded."""
+    base = load_payload("all")
+    web = json.load(open(os.path.join(HERE, "cases-web.json")))["cases"]
+    media = json.load(open(os.path.join(HERE, "cases-media.json")))["cases"]
+    if os.environ.get("NO_PICTURES") == "1":
+        media = [c for c in media if not c.get("picture")]
+    keep = [c for c in cases if c["id"][0] in "rcndox"] + web + media
+    arms = [(name, with_tools(base["tools"], V.SCHEMAS[name]), V.FAMILY[name], None)
+            for name in ("S0", "P1", "P1C")]
+    wanted = os.environ.get("E9_ARMS")
     if wanted:
         arms = [a for a in arms if a[0] in wanted.split(",")]
     return run_calls(server, base, arms, keep, log)
@@ -501,7 +534,7 @@ def readback(server, system, template, tools, arm, schema, renderer, case):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exp", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8"], required=True)
+    ap.add_argument("--exp", choices=["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"], required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--url", default="http://127.0.0.1:8095")
     ap.add_argument("--out", default=os.path.join(HERE, "results"))
@@ -514,7 +547,8 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     server = Server(a.url)
     log = lambda s: print(s, flush=True)  # noqa: E731
-    rows = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8}[a.exp](server, cases, log)
+    rows = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8,
+            "e9": e9}[a.exp](server, cases, log)
     path = os.path.join(a.out, "%s-%s.json" % (a.exp, a.model))
     json.dump({"model": a.model, "exp": a.exp, "rows": rows}, open(path, "w"), ensure_ascii=False, indent=1)
     print("wrote", path)

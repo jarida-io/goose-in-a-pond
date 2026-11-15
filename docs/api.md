@@ -969,7 +969,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
 | `tool_call` | `tool, id, input, working_notes?` | A tool call. `working_notes`, when present, is exactly the `text` streamed since the previous `tool_call` (or the turn's start): the model at work ("let me check the weather"), not the answer. Move it out of the answer into the turn's steps. The answer is the text after the last call, and it alone is persisted |
-| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
+| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search and its pictures): show it in the conversation in view, never store it; history keeps only a stub. The `search` card (pages, and where Brave adds them news, videos and place details) and the `pictures` card are specified in [small-model-tools.md §8.10.3 and §8.11](architecture/small-model-tools.md) |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
 | `review_revision` | `content, score, rounds` | A revised answer replaces the streamed text |

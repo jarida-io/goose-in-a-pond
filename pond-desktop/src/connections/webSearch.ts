@@ -9,7 +9,7 @@ export const BRAVE_DASHBOARD_HOST = "api-dashboard.search.brave.com";
 export const BRAVE_DASHBOARD_URL = `https://${BRAVE_DASHBOARD_HOST}`;
 
 export const PRIVACY_LINE =
-  "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites.";
+  "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites. Pictures in the results load from Brave's image server.";
 
 export type StatusTone = "ok" | "warn" | "muted";
 

@@ -69,7 +69,7 @@ pub struct KnowledgeMcpServer {
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool from all four routers, without constructing the server or its deps.
+    /// Every tool from all its routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
@@ -77,20 +77,22 @@ impl KnowledgeMcpServer {
         tools.extend(Self::web_page_tool_router().list_all());
         tools.extend(Self::web_watch_tool_router().list_all());
         tools.extend(Self::saved_items_tool_router().list_all());
+        tools.extend(Self::pictures_tool_router().list_all());
         tools
     }
 
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // One extension, four routers: `wolfram.rs`, `web_search.rs` and `web_page.rs` hold
-            // the others.
+            // One extension, seven routers: `wolfram.rs`, `web_search.rs` and its `pictures`
+            // module, `web_page.rs`, `web_watch.rs` and `saved_items.rs` hold the others.
             tool_router: Self::tool_router()
                 + Self::wolfram_tool_router()
                 + Self::web_search_tool_router()
                 + Self::web_page_tool_router()
                 + Self::web_watch_tool_router()
-                + Self::saved_items_tool_router(),
+                + Self::saved_items_tool_router()
+                + Self::pictures_tool_router(),
         }
     }
 
@@ -157,7 +159,7 @@ impl ServerHandler for KnowledgeMcpServer {
 
 /// Every tool these instructions name must be one this server lists.
 const KNOWLEDGE_INSTRUCTIONS: &str = "\
-GIAP Knowledge server: encyclopedia articles, computation, web search and web pages.
+GIAP Knowledge server: encyclopedia articles, computation, web search, web pages and pictures.
 
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
@@ -165,7 +167,8 @@ stored), read_web_page (one web page: a link the person gave, a source search_we
 link or search form a page it read listed), web_watch (keep checking any web page—listings, blogs, \
 news feeds, release notes, or notice boards—and tell the person when content updates, new articles appear, \
 or prices drop), saved_items (keep what \
-you made as a card in their collection, or find one they kept).
+you made as a card in their collection, or find one they kept), show_pictures (pictures from \
+the web on the person's screen; offered while a web search key is stored, never in a voice turn).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
@@ -177,7 +180,8 @@ A turn reads at most three pages; pick the most relevant. When the person wants 
 web pages or listings change—such as a car under a price, a blog for new posts, a project for releases, \
 or a site for updates—start web_watch on that page, with their keywords or criteria as filters. \
 When they ask to keep a recipe, a listing or a plan you gave, use \
-saved_items to save it; it takes your last answer, so do not repeat it.
+saved_items to save it; it takes your last answer, so do not repeat it. If the person wants to \
+see something, use show_pictures.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 

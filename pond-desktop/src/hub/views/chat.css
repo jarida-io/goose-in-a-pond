@@ -138,6 +138,16 @@
   display: flex;
 }
 
+/* The web's results for the person: pages, places, news, videos or pictures. */
+.ch-web-result {
+  width: min(420px, 100%);
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--grey-200);
+  border-radius: 14px;
+}
+
 /* Typing indicator */
 .ch-typing {
   display: flex;

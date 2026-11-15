@@ -11,6 +11,7 @@ const NAME_MAP: Record<string, string> = {
   // web
   search_web: "Web search",
   read_web_page: "Web page",
+  show_pictures: "Pictures",
   // schedule
   list_schedules: "Schedules",
   create_schedule: "Create Schedule",

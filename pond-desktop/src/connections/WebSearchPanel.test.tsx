@@ -97,7 +97,9 @@ describe("WebSearchPanel: what it always says", () => {
     expect(link.href).toBe("https://api-dashboard.search.brave.com/");
     expect(link.target).toBe("_blank");
     expect(link.rel).toContain("noopener");
-    expect(screen.getByText(/The free monthly credit covers about 1,000 searches/)).toBeTruthy();
+    expect(
+      screen.getByText(/The free monthly credit covers about 500 web searches, since each one asks Brave twice/),
+    ).toBeTruthy();
     expect(screen.getByText(/Brave asks for a card to confirm who you are\./)).toBeTruthy();
   });
 
@@ -486,7 +488,7 @@ describe("WebSearchPanel: where the question goes, with a town", () => {
   it("says nothing of a town while the switch is off", async () => {
     await openWith(NAIROBI);
     expect(screen.getByText(privacy).textContent).toBe(
-      "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites.",
+      "When the pond searches the web, your question is sent to Brave, and the top pages are read from their sites. Pictures in the results load from Brave's image server.",
     );
   });
 
