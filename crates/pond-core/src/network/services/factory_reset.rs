@@ -1,11 +1,6 @@
-//! Journey 7: wipe a Pond before handing it on. Orchestrates the full reset over ports only —
-//! the raw DB/file erase lives behind [`crate::network::ports::personal_data_wipe::PersonalDataWipe`]
-//! in pond-api/pond-infra, since pond-core has no business opening a SQLite pool directly.
-//!
-//! Permission (`may_reset_pond`) is checked by the caller, not here — same split as
-//! `reset_onboarding` in pond-api's `routes.rs`, which keeps the HTTP-shaped refusal response in
-//! the HTTP layer. By the time [`FactoryResetService::execute`] runs, the caller is already known
-//! to be the owner.
+//! Journey 7: wipe a Pond before handing it on, over ports only; the erase itself is
+//! [`crate::network::ports::personal_data_wipe::PersonalDataWipe`]. Who may reset is the caller's
+//! to check: by the time [`FactoryResetService::execute`] runs, the host or the main member asked.
 
 use std::sync::Arc;
 
@@ -25,7 +20,8 @@ use crate::user_data::ports::profile::ProfileRepository;
 use crate::user_data::ports::scheduler::SchedulerPort;
 use crate::user_data::services::onboarding::OnboardingService;
 
-/// Routines handed back to the caller so GOTG can save them before the Pond forgets them.
+/// Routines handed back to the caller so GOTG can save them before the Pond forgets them; only
+/// the caller's own private reminders among them.
 #[derive(Debug, Clone, Default)]
 pub struct FactoryResetExport {
     pub routines: Vec<Schedule>,
@@ -37,28 +33,36 @@ pub struct FactoryResetExport {
 #[serde(rename_all = "snake_case")]
 pub enum FactoryResetStep {
     Exporting,
+    Pausing,
     NotifyingHousehold,
     RevokingDevices,
     ErasingData,
     SpeakingGoodbye,
     ReopeningOnboarding,
+    ForgettingWifi,
 }
 
 impl FactoryResetStep {
     /// Every step in execution order; `position` and the status route's `total_steps` derive
     /// from it, same as `OnboardingStep::ALL`.
-    pub const ALL: [FactoryResetStep; 6] = [
+    pub const ALL: [FactoryResetStep; 8] = [
         Self::Exporting,
+        Self::Pausing,
         Self::NotifyingHousehold,
         Self::RevokingDevices,
         Self::ErasingData,
         Self::SpeakingGoodbye,
         Self::ReopeningOnboarding,
+        Self::ForgettingWifi,
     ];
 
     /// 1-based position within [`FactoryResetStep::ALL`].
     pub fn position(self) -> usize {
-        Self::ALL.iter().position(|s| *s == self).map(|i| i + 1).unwrap_or(0)
+        Self::ALL
+            .iter()
+            .position(|s| *s == self)
+            .map(|i| i + 1)
+            .unwrap_or(0)
     }
 }
 
@@ -67,6 +71,19 @@ impl FactoryResetStep {
 pub trait FactoryResetProgress: Send + Sync {
     fn report(&self, step: FactoryResetStep);
 }
+
+/// Driven port: quiets what could write household data while the reset erases it.
+#[async_trait::async_trait]
+pub trait FactoryResetQuiet: Send + Sync {
+    /// Stops background model work, the room's voice and new turns, then waits a bounded time
+    /// for what is already running.
+    async fn quiet(&self);
+    /// Undoes [`Self::quiet`]; called however the reset ends.
+    fn resume(&self);
+}
+
+/// Longest the reset waits for a schedule's run already going.
+const SCHEDULE_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Why a reset was refused before anything was touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +95,26 @@ pub enum FactoryResetRefusal {
     NameMismatch,
     /// A trusted peer holds a nonzero mesh-credit balance.
     PaymentsHeld,
+}
+
+/// Why a reset did not finish.
+#[derive(Debug)]
+pub enum FactoryResetError {
+    /// Refused before anything was touched.
+    Refused(FactoryResetRefusal),
+    /// A step the reset cannot go on without failed, and nothing after it ran: onboarding was not
+    /// reopened. `export` holds the routines read before it, which may be gone from the scheduler.
+    Failed {
+        step: FactoryResetStep,
+        reason: String,
+        export: FactoryResetExport,
+    },
+}
+
+impl From<FactoryResetRefusal> for FactoryResetError {
+    fn from(refusal: FactoryResetRefusal) -> Self {
+        Self::Refused(refusal)
+    }
 }
 
 /// Every port the reset touches. Most are `Option` because the step they back is best-effort —
@@ -97,31 +134,54 @@ pub struct FactoryResetPorts {
     pub credit_ledger: Arc<dyn crate::mesh::ports::credit_ledger::CreditLedger + Send + Sync>,
     pub data_wipe: Arc<dyn PersonalDataWipe>,
     pub progress: Option<Arc<dyn FactoryResetProgress>>,
+    pub quiet: Option<Arc<dyn FactoryResetQuiet>>,
+}
+
+/// Keeps the pond quiet until dropped, however the reset ends.
+struct Quieted(Option<Arc<dyn FactoryResetQuiet>>);
+
+impl Quieted {
+    async fn start(quiet: Option<Arc<dyn FactoryResetQuiet>>) -> Self {
+        if let Some(quiet) = &quiet {
+            quiet.quiet().await;
+        }
+        Self(quiet)
+    }
+}
+
+impl Drop for Quieted {
+    fn drop(&mut self) {
+        if let Some(quiet) = &self.0 {
+            quiet.resume();
+        }
+    }
 }
 
 pub struct FactoryResetService;
 
 impl FactoryResetService {
-    /// Runs the whole journey: refuse (name/payments) → export → notify → revoke → erase →
-    /// speak → rearm → reset onboarding. Notification happens before the erase step reaches
-    /// `profiles`/push tokens, even though the ticket's prose describes it last — see the module
-    /// doc on sequencing. Every step past the refusal checks is best-effort: a failed notify or
-    /// a silent TTS never leaves the Pond half-reset.
+    /// Runs the whole journey: refuse (name/payments) → export → pause → notify → revoke → erase
+    /// → speak → rearm → reset onboarding → forget Wi-Fi. Members are notified while their
+    /// devices still resolve. Notifying, revoking, the goodbye, the rearm and the Wi-Fi are best
+    /// effort; a failed erase or onboarding reset stops the reset there, resumes the schedules it
+    /// paused and keeps the Wi-Fi, and is returned, never reported as done. `requested_by` is the
+    /// member who asked, or `None` for the host.
     pub async fn execute(
         ports: &FactoryResetPorts,
         typed_pond_name: &str,
         actual_pond_name: &str,
-    ) -> Result<FactoryResetExport, FactoryResetRefusal> {
+        requested_by: Option<&str>,
+    ) -> Result<FactoryResetExport, FactoryResetError> {
         if actual_pond_name.trim().is_empty() {
-            return Err(FactoryResetRefusal::NoPondName);
+            return Err(FactoryResetRefusal::NoPondName.into());
         }
         if typed_pond_name != actual_pond_name {
-            return Err(FactoryResetRefusal::NameMismatch);
+            return Err(FactoryResetRefusal::NameMismatch.into());
         }
 
         // Fail safe: an unreadable ledger is treated as "money might be held", never as clear.
         if ports.credit_ledger.has_any_balance().await.unwrap_or(true) {
-            return Err(FactoryResetRefusal::PaymentsHeld);
+            return Err(FactoryResetRefusal::PaymentsHeld.into());
         }
 
         Self::report(ports, FactoryResetStep::Exporting);
@@ -132,7 +192,30 @@ impl FactoryResetService {
             }),
             None => Vec::new(),
         };
+        let routines = Self::exportable(routines, requested_by);
 
+        Self::report(ports, FactoryResetStep::Pausing);
+        let _quiet = Quieted::start(ports.quiet.clone()).await;
+        let paused = Self::pause_every_schedule(ports).await;
+
+        let finished = Self::erase_and_reopen(ports, routines).await;
+        if finished.is_err() {
+            Self::resume_schedules(ports, &paused).await;
+            return finished;
+        }
+
+        Self::report(ports, FactoryResetStep::ForgettingWifi);
+        if let Err(error) = ports.data_wipe.forget_networks().await {
+            tracing::warn!(error = %format!("{error:#}"), "factory reset: saved Wi-Fi networks were not forgotten");
+        }
+        finished
+    }
+
+    /// From the household notice to onboarding reopened; a step that must not fail stops it.
+    async fn erase_and_reopen(
+        ports: &FactoryResetPorts,
+        routines: Vec<Schedule>,
+    ) -> Result<FactoryResetExport, FactoryResetError> {
         // Snapshot every member's own language before `profiles` is erased — the household
         // notice is rendered now, even though it isn't sent until after revocation below.
         let household_languages: Vec<(String, String)> = ports
@@ -159,8 +242,12 @@ impl FactoryResetService {
         Self::revoke_every_device(ports).await;
 
         Self::report(ports, FactoryResetStep::ErasingData);
-        if let Err(error) = ports.data_wipe.wipe().await {
-            tracing::error!(%error, "factory reset: erasing household data failed");
+        let erased = match Self::delete_every_schedule(ports).await {
+            Ok(()) => ports.data_wipe.wipe().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = erased {
+            return Err(Self::failed(FactoryResetStep::ErasingData, error, routines));
         }
 
         Self::report(ports, FactoryResetStep::SpeakingGoodbye);
@@ -178,14 +265,111 @@ impl FactoryResetService {
 
         Self::report(ports, FactoryResetStep::ReopeningOnboarding);
         let onboarding = OnboardingService::new(ports.onboarding.clone());
-        if let Err(error) = onboarding.reset().await {
-            tracing::warn!(%error, "factory reset: could not reset onboarding state");
-        }
-        if let Err(error) = onboarding.start().await {
-            tracing::warn!(%error, "factory reset: could not restart onboarding");
+        let reopened = match onboarding.reset().await {
+            Ok(()) => onboarding.start().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = reopened {
+            return Err(Self::failed(
+                FactoryResetStep::ReopeningOnboarding,
+                error,
+                routines,
+            ));
         }
 
         Ok(FactoryResetExport { routines })
+    }
+
+    fn failed(
+        step: FactoryResetStep,
+        error: anyhow::Error,
+        routines: Vec<Schedule>,
+    ) -> FactoryResetError {
+        tracing::error!(?step, error = %format!("{error:#}"), "factory reset: stopped before it finished");
+        FactoryResetError::Failed {
+            step,
+            reason: format!("{error:#}"),
+            export: FactoryResetExport { routines },
+        }
+    }
+
+    /// What the caller may take away: a member's private reminder goes only to that member, and
+    /// the host, which is no member, takes none.
+    fn exportable(routines: Vec<Schedule>, requested_by: Option<&str>) -> Vec<Schedule> {
+        routines
+            .into_iter()
+            .filter(|task| {
+                task.kind
+                    .member()
+                    .is_none_or(|member| Some(member) == requested_by)
+            })
+            .collect()
+    }
+
+    /// Pauses every active schedule so none fires mid-erase, then waits a bounded time for runs
+    /// already going. The ones it paused, to resume if the reset stops.
+    async fn pause_every_schedule(ports: &FactoryResetPorts) -> Vec<String> {
+        let Some(scheduler) = &ports.scheduler else {
+            return Vec::new();
+        };
+        let tasks = scheduler.list_tasks().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "factory reset: could not list the schedules to pause");
+            Vec::new()
+        });
+        let mut paused = Vec::new();
+        for task in tasks.iter().filter(|task| !task.paused) {
+            match scheduler.pause_task(&task.id).await {
+                Ok(()) => paused.push(task.id.clone()),
+                Err(error) => {
+                    tracing::warn!(task = %task.id, %error, "factory reset: could not pause a schedule")
+                }
+            }
+        }
+        let deadline = tokio::time::Instant::now() + SCHEDULE_SETTLE;
+        while scheduler
+            .list_tasks()
+            .await
+            .is_ok_and(|tasks| tasks.iter().any(|task| task.currently_running))
+        {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!("factory reset: a schedule is still running; erasing beside it");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        paused
+    }
+
+    /// The paused schedules a stopped reset left in place.
+    async fn resume_schedules(ports: &FactoryResetPorts, paused: &[String]) {
+        let Some(scheduler) = &ports.scheduler else {
+            return;
+        };
+        let Ok(left) = scheduler.list_tasks().await else {
+            return;
+        };
+        for task in left.iter().filter(|task| paused.contains(&task.id)) {
+            if let Err(error) = scheduler.resume_task(&task.id).await {
+                tracing::warn!(task = %task.id, %error, "factory reset: could not resume a schedule");
+            }
+        }
+    }
+
+    /// Through the scheduler, so its routines stop firing now, not at the next start.
+    async fn delete_every_schedule(ports: &FactoryResetPorts) -> Result<()> {
+        let Some(scheduler) = &ports.scheduler else {
+            return Ok(());
+        };
+        for task in scheduler.list_tasks().await? {
+            if let Err(error) = scheduler.delete_task(&task.id).await {
+                tracing::warn!(task = %task.id, %error, "factory reset: could not delete a schedule");
+            }
+        }
+        let left = scheduler.list_tasks().await?.len();
+        if left > 0 {
+            anyhow::bail!("{left} schedules could not be deleted");
+        }
+        Ok(())
     }
 
     fn report(ports: &FactoryResetPorts, step: FactoryResetStep) {
@@ -195,10 +379,14 @@ impl FactoryResetService {
     }
 
     async fn revoke_every_device(ports: &FactoryResetPorts) {
-        let devices = ports.device_registry.list_devices().await.unwrap_or_else(|error| {
-            tracing::warn!(%error, "factory reset: could not list paired devices to revoke");
-            Vec::new()
-        });
+        let devices = ports
+            .device_registry
+            .list_devices()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "factory reset: could not list paired devices to revoke");
+                Vec::new()
+            });
         for device in &devices {
             if let Err(error) = ports.handshake.revoke_device(&device.id).await {
                 tracing::warn!(device_id = %device.id, %error, "factory reset: could not revoke a device's sessions");
@@ -272,7 +460,9 @@ mod tests {
     use crate::user_data::domain::onboarding::OnboardingStep;
     use crate::user_data::domain::profile::CreateProfileRequest;
     use crate::user_data::mocks::mock_profile::MockProfileRepository;
-    use crate::user_data::ports::device_registry::{Device, RegisterDeviceRequest, UpdateDeviceRequest};
+    use crate::user_data::ports::device_registry::{
+        Device, RegisterDeviceRequest, UpdateDeviceRequest,
+    };
     use crate::user_data::ports::scheduler::{CreateScheduleRequest, UpdateScheduleRequest};
     use std::sync::Mutex;
 
@@ -307,7 +497,12 @@ mod tests {
         }
     }
 
-    struct FakeScheduler(Arc<CallLog>, Vec<Schedule>);
+    struct FakeScheduler(Arc<CallLog>, Mutex<Vec<Schedule>>);
+    impl FakeScheduler {
+        fn new(log: Arc<CallLog>, tasks: Vec<Schedule>) -> Self {
+            Self(log, Mutex::new(tasks))
+        }
+    }
     #[async_trait::async_trait]
     impl SchedulerPort for FakeScheduler {
         async fn create_task(&self, _: CreateScheduleRequest) -> Result<Schedule> {
@@ -315,15 +510,28 @@ mod tests {
         }
         async fn list_tasks(&self) -> Result<Vec<Schedule>> {
             self.0.record("scheduler.list_tasks");
-            Ok(self.1.clone())
+            Ok(self.1.lock().unwrap().clone())
         }
-        async fn delete_task(&self, _: &str) -> Result<()> {
+        async fn delete_task(&self, id: &str) -> Result<()> {
+            self.0.record("scheduler.delete_task");
+            if id.starts_with("stuck") {
+                anyhow::bail!("schedules.json is read-only");
+            }
+            self.1.lock().unwrap().retain(|task| task.id != id);
             Ok(())
         }
-        async fn pause_task(&self, _: &str) -> Result<()> {
+        async fn pause_task(&self, id: &str) -> Result<()> {
+            self.0.record("scheduler.pause_task");
+            for task in self.1.lock().unwrap().iter_mut().filter(|t| t.id == id) {
+                task.paused = true;
+            }
             Ok(())
         }
-        async fn resume_task(&self, _: &str) -> Result<()> {
+        async fn resume_task(&self, id: &str) -> Result<()> {
+            self.0.record("scheduler.resume_task");
+            for task in self.1.lock().unwrap().iter_mut().filter(|t| t.id == id) {
+                task.paused = false;
+            }
             Ok(())
         }
         async fn run_now(&self, _: &str) -> Result<()> {
@@ -442,6 +650,21 @@ mod tests {
             self.0.record("data_wipe.wipe");
             Ok(())
         }
+        async fn forget_networks(&self) -> Result<()> {
+            self.0.record("data_wipe.forget_networks");
+            Ok(())
+        }
+    }
+
+    struct FakeQuiet(Arc<CallLog>);
+    #[async_trait::async_trait]
+    impl FactoryResetQuiet for FakeQuiet {
+        async fn quiet(&self) {
+            self.0.record("quiet.quiet");
+        }
+        fn resume(&self) {
+            self.0.record("quiet.resume");
+        }
     }
 
     fn device(id: &str) -> Device {
@@ -489,7 +712,7 @@ mod tests {
             setup_claims: Some(Arc::new(SetupClaimService::new(Arc::new(
                 MockSetupCodeStore::unclaimed(),
             )))),
-            scheduler: Some(Arc::new(FakeScheduler(log.clone(), Vec::new()))),
+            scheduler: Some(Arc::new(FakeScheduler::new(log.clone(), Vec::new()))),
             device_registry: Arc::new(FakeDeviceRegistry(log.clone(), devices.clone())),
             handshake: Arc::new(FakeHandshake(log.clone())),
             remote: Some(Arc::new(FakeRemote(log.clone(), Vec::new()))),
@@ -497,9 +720,69 @@ mod tests {
             member_notifier: Some(Arc::new(MockMemberNotifier::new())),
             tts: Some(Arc::new(FakeVoiceOutput(log.clone()))),
             credit_ledger: Arc::new(MockCreditLedger::new()),
-            data_wipe: Arc::new(FakeWipe(log)),
+            data_wipe: Arc::new(FakeWipe(log.clone())),
             progress: None,
+            quiet: Some(Arc::new(FakeQuiet(log))),
         }
+    }
+
+    fn refusal(result: Result<FactoryResetExport, FactoryResetError>) -> FactoryResetRefusal {
+        match result {
+            Err(FactoryResetError::Refused(refusal)) => refusal,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    struct BrokenWipe;
+    #[async_trait::async_trait]
+    impl PersonalDataWipe for BrokenWipe {
+        async fn wipe(&self) -> Result<()> {
+            anyhow::bail!("disk I/O error")
+        }
+        async fn forget_networks(&self) -> Result<()> {
+            panic!("a failed reset must keep the pond on its network")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_erase_stops_the_reset_before_onboarding_reopens() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
+        ports.data_wipe = Arc::new(BrokenWipe);
+        ports.scheduler = Some(Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine("routine-1")],
+        )));
+
+        let result =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
+
+        match result {
+            Err(FactoryResetError::Failed {
+                step,
+                reason,
+                export,
+            }) => {
+                assert_eq!(step, FactoryResetStep::ErasingData);
+                assert!(reason.contains("disk I/O error"), "{reason}");
+                assert_eq!(
+                    export.routines.len(),
+                    1,
+                    "the routines still reach the caller"
+                );
+            }
+            other => panic!("a failed erase must not read as done: {other:?}"),
+        }
+        let calls = log.calls();
+        assert!(
+            !calls.contains(&"onboarding.reset"),
+            "onboarding stays as it was"
+        );
+        assert!(
+            !calls.contains(&"tts.speak"),
+            "nothing after the erase runs"
+        );
     }
 
     #[tokio::test]
@@ -507,10 +790,14 @@ mod tests {
         let log = Arc::new(CallLog::default());
         let ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
 
-        let result = FactoryResetService::execute(&ports, "Wrong Name", "The Kitchen Pond").await;
+        let result =
+            FactoryResetService::execute(&ports, "Wrong Name", "The Kitchen Pond", None).await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::NameMismatch);
-        assert!(log.calls().is_empty(), "nothing should run before the name check");
+        assert_eq!(refusal(result), FactoryResetRefusal::NameMismatch);
+        assert!(
+            log.calls().is_empty(),
+            "nothing should run before the name check"
+        );
     }
 
     #[tokio::test]
@@ -518,10 +805,13 @@ mod tests {
         let log = Arc::new(CallLog::default());
         let ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
 
-        let result = FactoryResetService::execute(&ports, "", "").await;
+        let result = FactoryResetService::execute(&ports, "", "", None).await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::NoPondName);
-        assert!(log.calls().is_empty(), "nothing should run before the name check");
+        assert_eq!(refusal(result), FactoryResetRefusal::NoPondName);
+        assert!(
+            log.calls().is_empty(),
+            "nothing should run before the name check"
+        );
     }
 
     #[tokio::test]
@@ -536,23 +826,24 @@ mod tests {
         ports.credit_ledger = Arc::new(ledger);
 
         let result =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::PaymentsHeld);
-        assert!(log.calls().is_empty(), "nothing should run before the payment check");
+        assert_eq!(refusal(result), FactoryResetRefusal::PaymentsHeld);
+        assert!(
+            log.calls().is_empty(),
+            "nothing should run before the payment check"
+        );
     }
 
-    #[tokio::test]
-    async fn happy_path_runs_in_order_and_exports_routines() {
-        let log = Arc::new(CallLog::default());
-        let mut ports = happy_ports(log.clone(), vec![device("phone-1"), device("phone-2")], None).await;
-        let routine = Schedule {
-            id: "routine-1".to_string(),
+    fn schedule(id: &str, kind: crate::user_data::domain::schedule::TaskKind) -> Schedule {
+        Schedule {
+            id: id.to_string(),
             label: "Morning routine".to_string(),
             cron: "0 0 7 * * *".to_string(),
             fire_at: None,
             timezone: "UTC".to_string(),
-            kind: crate::user_data::domain::schedule::TaskKind::Routine { actions: vec![] },
+            kind,
             paused: false,
             currently_running: false,
             last_run: None,
@@ -560,12 +851,179 @@ mod tests {
             created_at: chrono::Utc::now(),
             ask_if_missed: false,
             missed_run: None,
+        }
+    }
+
+    fn routine(id: &str) -> Schedule {
+        schedule(
+            id,
+            crate::user_data::domain::schedule::TaskKind::Routine { actions: vec![] },
+        )
+    }
+
+    fn reminder(id: &str, member: &str) -> Schedule {
+        schedule(
+            id,
+            crate::user_data::domain::schedule::TaskKind::MemberReminder {
+                profile_id: member.to_string(),
+                prompt: format!("remind {member} about the clinic results"),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn the_export_carries_no_other_members_private_reminders() {
+        for (requested_by, expected) in [
+            (Some("jerry"), vec!["his-reminder", "routine-1"]),
+            (None, vec!["routine-1"]),
+        ] {
+            let log = Arc::new(CallLog::default());
+            let mut ports = happy_ports(log.clone(), vec![], None).await;
+            ports.scheduler = Some(Arc::new(FakeScheduler::new(
+                log,
+                vec![
+                    routine("routine-1"),
+                    reminder("his-reminder", "jerry"),
+                    reminder("her-reminder", "amina"),
+                ],
+            )));
+
+            let export = FactoryResetService::execute(
+                &ports,
+                "The Kitchen Pond",
+                "The Kitchen Pond",
+                requested_by,
+            )
+            .await
+            .unwrap();
+
+            let mut ids: Vec<&str> = export.routines.iter().map(|t| t.id.as_str()).collect();
+            ids.sort();
+            assert_eq!(ids, expected, "asked by {requested_by:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_schedule_is_deleted_once_it_is_exported() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log.clone(), vec![], None).await;
+        let scheduler = Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine("routine-1"), routine("routine-2")],
+        ));
+        ports.scheduler = Some(scheduler.clone());
+
+        let export =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            export.routines.len(),
+            2,
+            "the export is read before anything goes"
+        );
+        assert!(
+            scheduler.list_tasks().await.unwrap().is_empty(),
+            "a routine left behind keeps firing for the next household"
+        );
+        let calls = log.calls();
+        let deleted = calls
+            .iter()
+            .position(|c| *c == "scheduler.delete_task")
+            .unwrap();
+        let onboarding = calls.iter().position(|c| *c == "onboarding.reset").unwrap();
+        assert!(deleted < onboarding);
+    }
+
+    #[tokio::test]
+    async fn the_pond_goes_quiet_before_anything_is_erased_and_forgets_wifi_last() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
+        ports.scheduler = Some(Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine("routine-1")],
+        )));
+
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+            .await
+            .unwrap();
+
+        let calls = log.calls();
+        let at = |call: &str| {
+            calls
+                .iter()
+                .position(|c| *c == call)
+                .unwrap_or_else(|| panic!("{call} never ran: {calls:?}"))
         };
-        ports.scheduler = Some(Arc::new(FakeScheduler(log.clone(), vec![routine.clone()])));
+        assert!(at("quiet.quiet") < at("scheduler.pause_task"));
+        assert!(at("scheduler.pause_task") < at("handshake.revoke_device"));
+        assert!(at("handshake.revoke_device") < at("data_wipe.wipe"));
+        assert!(
+            at("onboarding.reset") < at("data_wipe.forget_networks"),
+            "the pond keeps its network until setup has reopened"
+        );
+        assert_eq!(calls.last(), Some(&"quiet.resume"));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_reset_resumes_what_it_paused_and_keeps_the_wifi() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log.clone(), vec![], None).await;
+        let scheduler = Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine("stuck-1"), routine("routine-2")],
+        ));
+        ports.scheduler = Some(scheduler.clone());
+
+        let result =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(FactoryResetError::Failed {
+                    step: FactoryResetStep::ErasingData,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let calls = log.calls();
+        let left = scheduler.list_tasks().await.unwrap();
+        assert_eq!(
+            left.len(),
+            1,
+            "the one that could not be deleted is still there"
+        );
+        assert!(
+            !left[0].paused,
+            "and fires again, as it did before the reset"
+        );
+        assert!(!calls.contains(&"data_wipe.wipe"));
+        assert!(!calls.contains(&"data_wipe.forget_networks"));
+        assert_eq!(calls.last(), Some(&"quiet.resume"));
+    }
+
+    #[tokio::test]
+    async fn happy_path_runs_in_order_and_exports_routines() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(
+            log.clone(),
+            vec![device("phone-1"), device("phone-2")],
+            None,
+        )
+        .await;
+        let routine = routine("routine-1");
+        ports.scheduler = Some(Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine.clone()],
+        )));
         ports.member_notifier = Some(Arc::new(LoggingMemberNotifier(log.clone())));
 
         let export =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
                 .await
                 .unwrap();
 
@@ -574,18 +1032,36 @@ mod tests {
 
         let calls = log.calls();
         // Export and the household snapshot happen before anything is revoked or erased.
-        let export_idx = calls.iter().position(|c| *c == "scheduler.list_tasks").unwrap();
-        let notify_idx = calls.iter().position(|c| *c == "member_notifier.notify_member").unwrap();
-        let revoke_idx = calls.iter().position(|c| *c == "handshake.revoke_device").unwrap();
+        let export_idx = calls
+            .iter()
+            .position(|c| *c == "scheduler.list_tasks")
+            .unwrap();
+        let notify_idx = calls
+            .iter()
+            .position(|c| *c == "member_notifier.notify_member")
+            .unwrap();
+        let revoke_idx = calls
+            .iter()
+            .position(|c| *c == "handshake.revoke_device")
+            .unwrap();
         let wipe_idx = calls.iter().position(|c| *c == "data_wipe.wipe").unwrap();
         let onboarding_idx = calls.iter().position(|c| *c == "onboarding.reset").unwrap();
-        assert!(export_idx < revoke_idx, "routines must be exported before devices are revoked");
+        assert!(
+            export_idx < revoke_idx,
+            "routines must be exported before devices are revoked"
+        );
         assert!(
             notify_idx < revoke_idx,
             "members must be notified while their devices still resolve, before revocation deletes them"
         );
-        assert!(revoke_idx < wipe_idx, "devices must be revoked before data is erased");
-        assert!(wipe_idx < onboarding_idx, "data must be erased before onboarding resets");
+        assert!(
+            revoke_idx < wipe_idx,
+            "devices must be revoked before data is erased"
+        );
+        assert!(
+            wipe_idx < onboarding_idx,
+            "data must be erased before onboarding resets"
+        );
         assert!(calls.contains(&"tts.speak"));
         assert!(calls.contains(&"remote.queue"));
         assert!(calls.contains(&"devices.unregister"));
@@ -598,7 +1074,8 @@ mod tests {
         ports.tts = Some(Arc::new(FailingVoiceOutput));
 
         let export =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
         assert!(export.is_ok(), "a TTS failure must not abort the reset");
         assert!(log.calls().contains(&"onboarding.reset"));
@@ -611,9 +1088,13 @@ mod tests {
         ports.member_notifier = Some(Arc::new(MockMemberNotifier::new().failing_next(1)));
 
         let export =
-            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
+                .await;
 
-        assert!(export.is_ok(), "a notification failure must not abort the reset");
+        assert!(
+            export.is_ok(),
+            "a notification failure must not abort the reset"
+        );
     }
 
     #[tokio::test]
@@ -646,16 +1127,26 @@ mod tests {
             .unwrap();
         ports.member_notifier = Some(notifier.clone());
 
-        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
             .await
             .unwrap();
 
         let sent = notifier.sent();
-        assert_eq!(sent.len(), 2, "each member gets their own copy, not one broadcast");
+        assert_eq!(
+            sent.len(),
+            2,
+            "each member gets their own copy, not one broadcast"
+        );
         let owner_copy = sent.iter().find(|(id, _)| *id == owner.id).unwrap();
         let member_copy = sent.iter().find(|(id, _)| *id == member.id).unwrap();
-        assert!(owner_copy.1.body.contains("kaya"), "the owner's copy is in their own language");
-        assert!(member_copy.1.body.contains("foyer"), "the member's copy is in their own language");
+        assert!(
+            owner_copy.1.body.contains("kaya"),
+            "the owner's copy is in their own language"
+        );
+        assert!(
+            member_copy.1.body.contains("foyer"),
+            "the member's copy is in their own language"
+        );
     }
 
     #[derive(Default)]
@@ -673,10 +1164,13 @@ mod tests {
         let progress = Arc::new(RecordingProgress::default());
         ports.progress = Some(progress.clone());
 
-        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond")
+        FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond", None)
             .await
             .unwrap();
 
-        assert_eq!(progress.0.lock().unwrap().clone(), FactoryResetStep::ALL.to_vec());
+        assert_eq!(
+            progress.0.lock().unwrap().clone(),
+            FactoryResetStep::ALL.to_vec()
+        );
     }
 }

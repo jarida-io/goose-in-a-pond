@@ -363,12 +363,14 @@ log or return it, and zeroizes its copy.
 
 ## Open questions
 
-- Answered: `POST /api/v1/admin/factory-reset` erases every household-personal table (devices,
-  profiles, sessions, memory — the full list is `pond-infra/src/db.rs`'s `SYSTEM_ERASE_TABLES`),
-  then forgets stored secrets and every saved Wi-Fi network (`SystemDataWipe`), revokes and
-  unregisters every paired device, notifies each member in their own language before their devices
-  are gone, then re-arms the setup code and reopens onboarding. Only shipped config (the model
-  catalog, prompt templates — `SYSTEM_KEEP_TABLES`) survives it.
+- Answered: `POST /api/v1/admin/factory-reset`, from the host or the main member, quiets the
+  pond, notifies each member in their own language, revokes every paired device, then deletes
+  every schedule and erases the household's files, the engine's sessions, the household tables of
+  `pond_logs.db` and `pond_system.db` (`pond-infra/src/db.rs`) and stored secrets
+  (`SystemDataWipe`). It re-arms the setup code, reopens onboarding, and asks the Wi-Fi station
+  to forget saved networks last, which the shared station still refuses. Only shipped config (the model
+  catalog, prompt templates — `SYSTEM_KEEP_TABLES`) survives it. The rules are in
+  [api.md](../api.md#factory-reset).
 - Answered by P5e: re-provisioning a claimed pond without anyone in earshot uses
   `credential: "device"` over BLE, a CPace run keyed on the stored refresh hash, so the token is
   never sent.

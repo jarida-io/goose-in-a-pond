@@ -146,9 +146,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Reset onboarding back to the first step ("Start over" in Settings).
         .route("/onboard/reset", post(reset_onboarding))
         // Wipe the Pond's household data and reopen onboarding ("Factory reset" in Settings).
-        // Under `/admin` to match the other My-Pond routes the mobile client groups it with,
-        // though unlike those it needs no admin-card unlock -- owner role + typed name already
-        // gate it (see `factory_reset` below).
+        // The host, the main member or a member with My Pond unlocked (`factory_reset_authority`).
         .route("/admin/factory-reset", post(factory_reset))
         .route("/admin/factory-reset/status", get(factory_reset_status))
         // The write is the wizard's; the read needs a token in every state, so the wizard can
@@ -2055,36 +2053,66 @@ struct FactoryResetRequest {
     pond_name: String,
 }
 
+/// Who may wipe the pond: the host, by the credential only its own account can read, or the
+/// main member or a member with My Pond unlocked. `Some(member)` when a member asked.
+async fn factory_reset_authority(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    credential: Option<&crate::host_guard::HostCredential>,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    if crate::host_guard::presents_credential(credential, headers) {
+        return Ok(None);
+    }
+    let lock = state.handshake.pairing_lock().await.map_err(|e| {
+        tracing::warn!(error = %e, "factory reset: could not read the pairing lock");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "pairing_lock_unavailable"})),
+        )
+    })?;
+    match crate::pond_admin::may_reset_pond(state, principal, lock.owner_profile_id.as_deref())
+        .await
+    {
+        Some(member) => Ok(Some(member)),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "factory_reset_main_member_only"})),
+        )),
+    }
+}
+
 /// Wipes the Pond's household data and reopens onboarding — the whole journey is
 /// `pond_core::network::services::factory_reset::FactoryResetService::execute`; this assembles
 /// its ports from `state` and turns a refusal into the matching HTTP status.
 async fn factory_reset(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    credential: Option<axum::Extension<crate::host_guard::HostCredential>>,
+    headers: axum::http::HeaderMap,
     remote: Option<
         axum::Extension<Arc<dyn pond_core::security::ports::remote_access::RemoteRevocation>>,
     >,
     body: Result<Json<FactoryResetRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::network::services::factory_reset::{
-        FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
-    };
-    use pond_core::user_data::services::household_permission::{
-        may_reset_pond, PermissionDecision,
+        FactoryResetError, FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
     };
 
-    let role = resolve_role_from_principal(&state, principal.as_ref()).await;
-    if let PermissionDecision::Denied {
-        reason,
-        grantable_by,
-    } = may_reset_pond(role)
-    {
-        return Err(permission_denied(&state, reason, grantable_by).await);
-    }
+    let requested_by = factory_reset_authority(
+        &state,
+        principal.as_ref(),
+        credential.as_ref().map(|axum::Extension(c)| c),
+        &headers,
+    )
+    .await?;
 
     let Json(request) = body.map_err(|_| bad_body())?;
 
-    let Some(data_wipe) = state.data_wipe.clone() else {
+    let (Some(data_wipe), Some(progress)) = (
+        state.data_wipe.clone(),
+        state.factory_reset_progress.clone(),
+    ) else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "factory_reset_unavailable"})),
@@ -2098,9 +2126,12 @@ async fn factory_reset(
         )
     })?;
 
-    if let Some(progress) = &state.factory_reset_progress {
-        progress.clear();
-    }
+    let Some(run) = progress.begin() else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "factory_reset_in_progress"})),
+        ));
+    };
 
     let ports = FactoryResetPorts {
         onboarding: state.onboarding_repo.clone(),
@@ -2114,30 +2145,49 @@ async fn factory_reset(
         tts: state.tts.clone(),
         credit_ledger: state.credit_ledger.clone(),
         data_wipe,
-        progress: state.factory_reset_progress.clone().map(|p| {
-            p as Arc<dyn pond_core::network::services::factory_reset::FactoryResetProgress>
-        }),
+        progress: Some(progress),
+        quiet: Some(Arc::new(crate::factory_reset::QuietPond::new(
+            state.clone(),
+        ))),
     };
 
-    let result =
-        FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await;
-    if let Some(progress) = &state.factory_reset_progress {
-        progress.clear();
-    }
+    let typed = request.pond_name;
+    let actual = settings.home_name;
+    // Its own task: a caller that hangs up must not stop the erase halfway.
+    let reset = tokio::spawn(async move {
+        let _run = run;
+        FactoryResetService::execute(&ports, &typed, &actual, requested_by.as_deref()).await
+    });
+    let result = reset.await.map_err(|error| {
+        tracing::error!(%error, "factory reset: the reset task ended without an answer");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "factory_reset_failed"})),
+        )
+    })?;
 
     match result {
         Ok(export) => Ok(Json(json!({ "routines": export.routines }))),
-        Err(FactoryResetRefusal::NoPondName) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "pond_has_no_name"})),
-        )),
-        Err(FactoryResetRefusal::NameMismatch) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "pond_name_mismatch"})),
-        )),
-        Err(FactoryResetRefusal::PaymentsHeld) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "payments_held"})),
+        Err(FactoryResetError::Refused(refusal)) => {
+            let code = match refusal {
+                FactoryResetRefusal::NoPondName => "pond_has_no_name",
+                FactoryResetRefusal::NameMismatch => "pond_name_mismatch",
+                FactoryResetRefusal::PaymentsHeld => "payments_held",
+            };
+            Err((StatusCode::CONFLICT, Json(json!({ "error": code }))))
+        }
+        Err(FactoryResetError::Failed {
+            step,
+            reason,
+            export,
+        }) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "factory_reset_failed",
+                "step": step,
+                "reason": reason,
+                "routines": export.routines,
+            })),
         )),
     }
 }

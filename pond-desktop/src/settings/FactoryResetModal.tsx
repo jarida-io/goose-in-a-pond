@@ -12,16 +12,22 @@ const REFUSAL_COPY: Record<string, string> = {
   payments_held:
     "This Pond is holding a mesh-credit balance with another Pond. Settle it before resetting.",
   factory_reset_unavailable: "Factory reset isn't available on this Pond yet.",
+  factory_reset_main_member_only:
+    "Only this Pond's main member, or someone who has unlocked My Pond, can reset it.",
+  factory_reset_in_progress: "A reset is already running on this Pond.",
+  factory_reset_failed: "The reset stopped before it finished, so setup was not reopened. Run it again.",
 };
 
 /** In execution order, matching `FactoryResetStep::ALL` on the server. */
 const RESET_STEPS: Array<{ key: FactoryResetStep; label: string }> = [
   { key: "exporting", label: "Saving your routines" },
+  { key: "pausing", label: "Pausing routines and background work" },
   { key: "notifying_household", label: "Letting the household know" },
   { key: "revoking_devices", label: "Signing out every device" },
   { key: "erasing_data", label: "Erasing data" },
   { key: "speaking_goodbye", label: "Saying goodbye" },
   { key: "reopening_onboarding", label: "Reopening setup" },
+  { key: "forgetting_wifi", label: "Forgetting Wi-Fi" },
 ];
 
 interface Props {

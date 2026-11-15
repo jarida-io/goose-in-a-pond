@@ -242,7 +242,7 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         Exposure::UntilOnboardedThenHostOnly,
     ),
     // Factory reset undoes setup, so unlike `/onboard/reset` it has no pre-onboarding exemption:
-    // only an owner's token may ever reach it.
+    // a token always, then the host credential or the main member (`factory_reset_authority`).
     (
         Method::POST,
         "/admin/factory-reset",
@@ -588,6 +588,25 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     response
 }
 
+/// While a factory reset runs, only its own routes and the health probe answer: anything else
+/// could write what the reset is erasing. A second reset reaches its handler and gets `409`.
+fn held_by_factory_reset(state: &crate::AppState, method: &Method, path: &str) -> bool {
+    let resetting = state
+        .factory_reset_progress
+        .as_ref()
+        .is_some_and(|progress| progress.running());
+    let Some(route) = path.strip_prefix("/api/v1") else {
+        return false;
+    };
+    resetting
+        && !matches!(
+            (method.as_str(), route),
+            ("GET", "/health")
+                | ("GET", "/admin/factory-reset/status")
+                | ("POST", "/admin/factory-reset")
+        )
+}
+
 /// Bearer-token auth; a `PUBLIC_ROUTES` entry skips it only if its exposure admits the peer.
 pub async fn auth_middleware(
     State(state): State<Arc<crate::AppState>>,
@@ -596,6 +615,14 @@ pub async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
+    if held_by_factory_reset(&state, req.method(), path.path()) {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "pond_resetting"})),
+        )
+            .into_response());
+    }
+
     // `ConnectInfo<SocketAddr>` comes from `main.rs`'s `into_make_service_with_connect_info`;
     // a request without it counts as remote, so failure narrows access.
     // A request on the plaintext development listener is never the host's own: a browser on
@@ -1475,7 +1502,7 @@ mod tests {
             "GET /test = HostOnly".to_string(),
             "GET /warmup = UntilOnboarded".to_string(),
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
-            // Unlike `/onboard/reset`, no pre-onboarding exemption: only an owner's token reaches it.
+            // Unlike `/onboard/reset`, no pre-onboarding exemption; the handler also asks who it is.
             "POST /admin/factory-reset = Authenticated".to_string(),
             "POST /connections/wifi/join = Authenticated".to_string(),
             "POST /devices/{id}/push-token = Authenticated".to_string(),

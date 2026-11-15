@@ -151,6 +151,18 @@ impl JsonRunHistory {
         runs
     }
 
+    /// Drops every run of a schedule not in `live`: a deleted schedule's runs hold its prompt's
+    /// answers, and nothing can show them once it is gone.
+    pub async fn keep_only(&self, live: &std::collections::HashSet<String>) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let before = guard.len();
+        guard.retain(|run| live.contains(&run.schedule_id));
+        if guard.len() == before {
+            return Ok(());
+        }
+        self.save_inner(&guard).await
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     fn prune(&self, runs: &mut Vec<ScheduleRun>) {
