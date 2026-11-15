@@ -52,6 +52,13 @@ const NGROK_AGENT: &str = "https://connect.ngrok-agent.com";
 const LONGEST_ERROR: usize = 300;
 /// Connections served at once; more are dropped, so scanners cannot exhaust an 8 GB board.
 const MAX_CONNECTIONS: usize = 64;
+/// One internet host may not hold every slot and lock paired phones out.
+const MAX_CONNECTIONS_PER_PEER: usize = 8;
+/// How often an HTTP/2 connection is pinged, and how long a ping may go unanswered.
+const H2_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+const H2_KEEP_ALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Route and token changes each open a real ngrok session, so a phone gets a few a minute.
+const ROUTE_CHANGES_PER_MINUTE: usize = 10;
 /// How long a caller has to finish the TLS handshake, and to send a request's headers.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -447,23 +454,65 @@ impl Tunnel {
         });
         self.settle_address(&address, reserved).await;
         let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+        let per_peer = PeerSlots::default();
         // Dropped with this task when the tunnel stops, which aborts every open connection.
         let mut connections = tokio::task::JoinSet::new();
         while let Some(conn) = tunnel.next().await {
             let conn = conn.map_err(|e| anyhow!("ngrok stopped accepting connections: {e}"))?;
             while connections.try_join_next().is_some() {}
+            let peer = public_peer(conn.remote_addr(), &lan_interfaces());
+            let Some(peer_slot) = per_peer.take(peer.ip()) else {
+                tracing::debug!("tunnel connection dropped: its peer already holds {MAX_CONNECTIONS_PER_PEER}");
+                continue;
+            };
             let Ok(slot) = slots.clone().try_acquire_owned() else {
                 tracing::debug!("tunnel connection dropped: {MAX_CONNECTIONS} already open");
                 continue;
             };
-            let peer = public_peer(conn.remote_addr(), &lan_interfaces());
             let (acceptor, router) = (acceptor.clone(), router.clone());
             connections.spawn(async move {
                 serve_connection(conn, peer, acceptor, router).await;
                 drop(slot);
+                drop(peer_slot);
             });
         }
         bail!("ngrok closed the tunnel")
+    }
+}
+
+/// Open tunnel connections per peer address; a slot gives its place back when dropped.
+#[derive(Clone, Default)]
+struct PeerSlots(Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>);
+
+struct PeerSlot {
+    slots: PeerSlots,
+    peer: IpAddr,
+}
+
+impl PeerSlots {
+    fn take(&self, peer: IpAddr) -> Option<PeerSlot> {
+        let mut open = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let held = open.entry(peer).or_insert(0);
+        if *held >= MAX_CONNECTIONS_PER_PEER {
+            return None;
+        }
+        *held += 1;
+        Some(PeerSlot {
+            slots: self.clone(),
+            peer,
+        })
+    }
+}
+
+impl Drop for PeerSlot {
+    fn drop(&mut self) {
+        let mut open = self.slots.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(held) = open.get_mut(&self.peer) {
+            *held -= 1;
+            if *held == 0 {
+                open.remove(&self.peer);
+            }
+        }
     }
 }
 
@@ -532,6 +581,11 @@ async fn serve_connection<C>(
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(HANDSHAKE_TIMEOUT);
+    builder
+        .http2()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(H2_KEEP_ALIVE)
+        .keep_alive_timeout(H2_KEEP_ALIVE_TIMEOUT);
     let served = builder
         .serve_connection(
             hyper_util::rt::TokioIo::new(stream),
@@ -826,6 +880,10 @@ struct RouteChoice {
 /// needs a reserved address, since an unreserved one is new at every start and only a phone at
 /// home can learn it.
 pub fn phone_management(tunnel: Arc<Tunnel>) -> Router {
+    let limiter = Arc::new(pond_api::middleware::RateLimiter::new(
+        ROUTE_CHANGES_PER_MINUTE,
+        std::time::Duration::from_secs(60),
+    ));
     Router::new()
         .route(
             "/api/v1/remote-access/route",
@@ -836,6 +894,25 @@ pub fn phone_management(tunnel: Arc<Tunnel>) -> Router {
             put(phone_set_token).delete(phone_forget_token),
         )
         .with_state(tunnel)
+        // Reads stay free: a phone polls the route while it waits for an address.
+        .route_layer(middleware::from_fn(move |request: Request, next: Next| {
+            let limiter = limiter.clone();
+            async move {
+                if request.method() != axum::http::Method::GET {
+                    let peer = request
+                        .extensions()
+                        .get::<ConnectInfo<SocketAddr>>()
+                        .ok_or(StatusCode::FORBIDDEN)?
+                        .0
+                        .ip()
+                        .to_string();
+                    if !limiter.check_rate_limit(&peer).await {
+                        return Err(StatusCode::TOO_MANY_REQUESTS);
+                    }
+                }
+                Ok::<_, StatusCode>(next.run(request).await)
+            }
+        }))
 }
 
 /// The caller is on the Pond's own network, where phones learn the tunnel's address.
@@ -922,7 +999,7 @@ async fn apply_route(
     home: bool,
     chosen_on: &'static str,
 ) -> Response {
-    let mut config = match tunnel.config() {
+    let saved = match tunnel.config() {
         Ok(config) => config,
         Err(error) => {
             tracing::warn!(error = %format!("{error:#}"), "could not read the ngrok settings");
@@ -933,6 +1010,7 @@ async fn apply_route(
             );
         }
     };
+    let mut config = saved.clone();
     if let Some(reserved) = choice.reserved_address {
         if !home {
             return refusal(
@@ -971,6 +1049,24 @@ async fn apply_route(
             format!("{error:#}"),
         );
     }
+    let tunnel_running = matches!(tunnel.status(), Status::Running { .. });
+    if matches!(choice.route, Route::Ngrok) && config == saved && tunnel_running {
+        // Restarting would cut the session this very request may be travelling through.
+        return describe_for_phone(tunnel, home).await;
+    }
+    if matches!(choice.route, Route::BuiltIn) {
+        // Turned on before the choice is saved, so a failure leaves ngrok chosen and running.
+        if let Some(built_in) = tunnel.built_in.get().filter(|b| !b.is_on()) {
+            if let Err(error) = built_in.turn_on().await {
+                tracing::warn!(%error, "could not turn the built-in network on");
+                return refusal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "built_in_unavailable",
+                    "The built-in network could not start; the tunnel is left running",
+                );
+            }
+        }
+    }
     if let Err(error) = tunnel.save_config(&config) {
         tracing::warn!(%error, "could not save the ngrok settings");
         return refusal(
@@ -993,20 +1089,19 @@ async fn apply_route(
             if home {
                 tunnel.adopt_next_address();
             }
-            tunnel.start(config).await;
+            if tunnel_running {
+                // Restarted after the answer, which may be travelling through the old session.
+                let restarting = tunnel.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(HANDOVER_DELAY).await;
+                    restarting.start(config).await;
+                });
+            } else {
+                tunnel.start(config).await;
+            }
         }
         Route::BuiltIn => {
             tunnel.set_fallback(None);
-            if let Some(built_in) = tunnel.built_in.get().filter(|b| !b.is_on()) {
-                if let Err(error) = built_in.turn_on().await {
-                    tracing::warn!(%error, "could not turn the built-in network on");
-                    return refusal(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "built_in_unavailable",
-                        "The built-in network could not start; the tunnel is left running",
-                    );
-                }
-            }
             // Stopped after the answer, which may be travelling through the tunnel.
             let stopping = tunnel.clone();
             tokio::spawn(async move {
@@ -1291,6 +1386,66 @@ mod tests {
         tunnel.settle_address("2.tcp.eu.ngrok.io:20002", true).await;
         assert_eq!(tunnel.fallback(), None);
         assert!(!built_in.is_on());
+    }
+
+    #[test]
+    fn one_peer_may_not_hold_every_slot() {
+        let slots = PeerSlots::default();
+        let busy: IpAddr = "203.0.113.9".parse().unwrap();
+        let held: Vec<_> = (0..MAX_CONNECTIONS_PER_PEER)
+            .map(|_| slots.take(busy).unwrap())
+            .collect();
+        assert!(slots.take(busy).is_none());
+        assert!(slots.take("198.51.100.4".parse().unwrap()).is_some());
+        drop(held);
+        assert!(slots.take(busy).is_some(), "a closed connection gives its place back");
+    }
+
+    struct BrokenBuiltIn;
+
+    #[async_trait::async_trait]
+    impl BuiltInNetwork for BrokenBuiltIn {
+        fn is_on(&self) -> bool {
+            false
+        }
+        async fn turn_on(&self) -> Result<()> {
+            anyhow::bail!("no coordinator")
+        }
+        async fn turn_off(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_built_in_network_that_will_not_start_leaves_ngrok_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity =
+            crate::tls_identity::TlsIdentity::load(dir.path(), &["pond.local".to_string()])
+                .unwrap();
+        let tunnel = Arc::new(Tunnel::new(dir.path(), None, identity.tunnel_certifier()));
+        tunnel.hand_over_to(Arc::new(BrokenBuiltIn));
+        let chosen = Config {
+            enabled: true,
+            ..Config::default()
+        };
+        tunnel.save_config(&chosen).unwrap();
+
+        let answer = apply_route(
+            &tunnel,
+            RouteChoice {
+                route: Route::BuiltIn,
+                reserved_address: None,
+            },
+            true,
+            "test",
+        )
+        .await;
+
+        assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            tunnel.config().unwrap().enabled,
+            "the saved choice must still match the tunnel that is left running"
+        );
     }
 
     #[test]
