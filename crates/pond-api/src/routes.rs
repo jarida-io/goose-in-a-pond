@@ -6491,10 +6491,13 @@ struct SetGuestAccessBody {
     accessible: bool,
 }
 
-/// `GET /api/v1/rooms` — every room the household has named.
+/// `GET /api/v1/rooms` — every room the household has named, each saying whether this caller
+/// may change its guest access, so a client offers the switch only to the owner.
 async fn list_rooms(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::may_manage_household_roles;
     let rooms = state.room_registry.list_rooms().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6506,9 +6509,16 @@ async fn list_rooms(
         .accessible_room_ids()
         .await
         .unwrap_or_default();
+    let editable =
+        may_manage_household_roles(resolve_role_from_principal(&state, principal.as_ref()).await)
+            .is_allowed();
     let list: Vec<Value> = rooms
         .iter()
-        .map(|r| room_json(r, accessible.contains(&r.id)))
+        .map(|r| {
+            let mut room = room_json(r, accessible.contains(&r.id));
+            room["guest_access_editable"] = json!(editable);
+            room
+        })
         .collect();
     Ok(Json(json!({ "rooms": list })))
 }
@@ -6671,11 +6681,14 @@ async fn rename_room(
 }
 
 /// `PUT /api/v1/rooms/{id}/guest-access` — grant or revoke guest access to a room's devices.
+/// Owner-only: it decides what anyone the pond cannot identify may switch.
 async fn set_room_guest_access(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     body: Result<Json<SetGuestAccessBody>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
     let Json(req) = body.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -13904,8 +13917,8 @@ fn qualify_tool_name(server: &str, tool: &str) -> String {
     }
 }
 
-/// Tools callable without an LLM turn; deny-by-default. No session reaches them, so identity
-/// guards pass in audit mode. Open to any paired client or MCP App: read-only/narrow only.
+/// Tools callable without an LLM turn; deny-by-default. No session reaches them, so the caller is
+/// who its paired device says. Open to any paired client or MCP App: read-only/narrow only.
 const DIRECT_DISPATCH_ALLOWLIST: &[&str] = &[
     "giap-device-control__set_device_state",
     // Read-only; the Devices card's power label (`powerStateOf`) needs it.
@@ -13914,9 +13927,11 @@ const DIRECT_DISPATCH_ALLOWLIST: &[&str] = &[
     "giap-weather__get_weather_forecast",
 ];
 
-/// Runs an allowlisted tool straight through the MCP registry, with no LLM turn.
+/// Runs an allowlisted tool straight through the MCP registry, with no LLM turn, as the caller
+/// `principal` proves: a guest's phone, or a device that belongs to nobody, is held as a guest.
 async fn dispatch_tool_direct(
     state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     qualified: &str,
     args: Value,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -13944,9 +13959,7 @@ async fn dispatch_tool_direct(
         )
     })?;
     let args = if args.is_null() { json!({}) } else { args };
-    // This path carries no caller identity (see the allowlist refusal above); it is reached only
-    // through authenticated HTTP routes a guest's chat turn never calls directly.
-    let scope = pond_core::user_data::domain::profile::ProfileScope::Household;
+    let scope = scope_from_principal(state, principal).await;
     match dispatcher.dispatch(qualified, args, &scope).await {
         Ok(result) => Ok(Json(json!({
             "tool": qualified,
@@ -13982,7 +13995,7 @@ async fn invoke_tool(
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
     let Some(key) = headers.get(crate::idempotency::HEADER) else {
-        return dispatch_tool_direct(&state, &qualified, req.args).await;
+        return dispatch_tool_direct(&state, principal.as_ref(), &qualified, req.args).await;
     };
     let key = key
         .to_str()
@@ -14010,7 +14023,8 @@ async fn invoke_tool(
         return Ok(Json(reply.clone()));
     }
     outcome.request = Some(request);
-    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    let Json(mut reply) =
+        dispatch_tool_direct(&state, principal.as_ref(), &qualified, req.args).await?;
     reply["idempotency_key"] = json!(key);
     // A failure is not kept: nothing ran, or the device refused and a resend may try it again.
     if reply["success"] == json!(true) {
@@ -14022,6 +14036,7 @@ async fn invoke_tool(
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
 async fn mcp_call_tool(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<McpToolCallRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -14032,6 +14047,7 @@ async fn mcp_call_tool(
     })?;
     dispatch_tool_direct(
         &state,
+        principal.as_ref(),
         &req.name,
         req.arguments.unwrap_or_else(|| json!({})),
     )
@@ -21662,6 +21678,14 @@ async fn resolve_role_from_principal(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Option<Role> {
+    resolve_role(state, &scope_from_principal(state, principal).await).await
+}
+
+/// The caller's scope from its paired device alone, for a handler with no chat session.
+async fn scope_from_principal(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> ProfileScope {
     let device = proven_device(principal);
     let device_rung = match device.id() {
         None => DeviceRung::NoDevice,
@@ -21671,12 +21695,12 @@ async fn resolve_role_from_principal(
         Ok(profiles) => profiles.len() > 1,
         Err(_) => true,
     };
-    let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
+    identity_resolution::resolve(&identity_resolution::ResolutionInputs {
         paired_device_profile: device_rung.profile_id(),
         session: &SessionIdentity::unknown(),
         household_has_multiple_members,
-    });
-    resolve_role(state, &resolved.scope).await
+    })
+    .scope
 }
 
 /// Real owner names, for refusals that should say who to ask, not just which role.

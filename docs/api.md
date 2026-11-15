@@ -383,6 +383,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
+| GET | /rooms | token +onb | | The household's rooms |
+| PUT | /rooms/{id}/guest-access | token +onb | owner | Open a room's devices to guests, or close them |
 
 ### Sensors, camera and rules
 
@@ -501,8 +503,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /agent/tools | token +onb | | Every MCP tool the agent has loaded |
-| POST | /tools/invoke | token +onb | | Run an MCP tool directly |
-| POST | /mcp/tools/call | token +onb | | MCP Apps `callServerTool()` |
+| POST | /tools/invoke | token +onb | as the caller | Run an MCP tool directly |
+| POST | /mcp/tools/call | token +onb | as the caller | MCP Apps `callServerTool()` |
 | GET | /mcp/resources | token +onb | | An MCP App `ui://` resource |
 | GET | /agent/extras | token +onb | | System prompt extras |
 | POST | /agent/extras | token +onb | | Create or replace an extra |
@@ -1241,6 +1243,8 @@ itself must keep calling the heartbeat.
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
 | `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+| `GET /rooms` | | `{rooms: [{id, name, created_at, guest_accessible, guest_access_editable}]}`; `guest_access_editable` says whether this caller may change `guest_accessible` |
+| `PUT /rooms/{id}/guest-access` | `{accessible}` | the room; `403` unless the caller is the owner, `404 room_not_found` |
 
 **`GET /devices/events`** follows device state as devices report it, so a phone need not read
 every device again to see a change. Each `device_state` event's data is
@@ -1534,6 +1538,11 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
 | `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept, nor one with `success: false` (a device that refused the command), so its resend runs again. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
+
+Both run the tool as the caller its paired device proves, as a chat turn would: a member's phone
+as that member, an invited guest's phone as that guest, and a device that belongs to nobody, in a
+household of more than one, as an unidentified guest. `set_device_state` then holds a guest to the
+rooms open to guests or the devices they were given.
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
 | `POST /agent/extras` | `UpsertExtraRequest {key, instruction, active? (true), sort_order? (0)}` | `{key, status: "ok"}` |
