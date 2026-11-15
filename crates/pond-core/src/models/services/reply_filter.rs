@@ -222,6 +222,7 @@ const SCAFFOLD_OPENS: &[&str] = &[
     "<vision>",
     "<conversation-summary>",
     "<home-devices>",
+    "<personal-context>",
 ];
 
 /// Every marker that can open a block; built once because `push` runs per token.
