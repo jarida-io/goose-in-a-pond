@@ -1870,7 +1870,7 @@ async fn name_main_member_from_phone(state: &Arc<AppState>, session_token: &str)
 
 /// Fills the main member's seat if it is empty; never takes it from somebody.
 async fn name_main_member(state: &Arc<AppState>, profile_id: &str) {
-    match state.handshake.set_pairing_owner(profile_id, false).await {
+    match crate::pairing_lock::seat_main_member(state, profile_id, false).await {
         Ok(true) => tracing::info!(
             kind = "pairing_owner_named",
             profile_id,
@@ -7250,6 +7250,48 @@ async fn refuse_primary_profile_that_is_not_a_member(
     }
 }
 
+/// Only the owner changes the household's primary member. A pond that names nobody yet, in
+/// settings or in the main member's seat, takes its first from whoever sets it up.
+async fn refuse_primary_profile_change_by_a_non_owner(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    patch: &Value,
+    current: &Settings,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::{
+        may_manage_household_roles, PermissionDecision,
+    };
+    let Some(asked) = patch.get("primary_profile_id") else {
+        return Ok(());
+    };
+    let asked = asked.as_str().unwrap_or_default();
+    let named = current.primary_profile_id.as_deref().unwrap_or_default();
+    if asked == named {
+        return Ok(());
+    }
+    let seat_empty = matches!(
+        state.handshake.pairing_lock().await,
+        Ok(lock) if lock.owner_profile_id.is_none()
+    );
+    if named.is_empty() && seat_empty {
+        return Ok(());
+    }
+    let role = resolve_role_from_principal(state, principal).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_manage_household_roles(role)
+    {
+        tracing::warn!(
+            kind = "primary_profile_refused",
+            reason,
+            "refused a change of the household's primary member from a non-owner"
+        );
+        return Err(permission_denied(state, reason, grantable_by).await);
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_settings(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -7312,6 +7354,8 @@ pub(crate) async fn update_settings(
     }
 
     refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
+    refuse_primary_profile_change_by_a_non_owner(&state, principal.as_ref(), &patch, &current)
+        .await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -7454,32 +7498,6 @@ pub(crate) async fn update_settings(
     // Must follow the write (marks existing rows); exempts these keys from DEFAULT_ADOPTIONS.
     if let Err(e) = state.settings_repo.mark_user_set(&user_keys).await {
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
-    }
-
-    // The only place a profile becomes Owner going forward (the migration backfill only covers
-    // profiles that existed when it ran): naming the primary profile is naming the owner.
-    if user_keys.contains("primary_profile_id") {
-        if let Some(primary) = merged
-            .primary_profile_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-        {
-            match state.profile_repo.get(primary).await {
-                Ok(Some(profile)) if profile.role != Role::Owner => {
-                    if let Err(e) = state
-                        .profile_repo
-                        .set_role(primary, Role::Owner, None)
-                        .await
-                    {
-                        tracing::warn!(error = %e, profile_id = %primary, "failed to promote the primary profile to owner");
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, profile_id = %primary, "could not read the primary profile to promote it")
-                }
-            }
-        }
     }
 
     if phrase_changed {
@@ -10297,8 +10315,8 @@ struct SetProfileRoleBody {
     guest_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// `PUT /api/v1/profiles/{id}/role` — owner-only; refused if it would leave the household
-/// without an owner.
+/// `PUT /api/v1/profiles/{id}/role` — owner-only. `owner` hands the main member's seat on; the
+/// owner's own role is refused any other value, which would leave the household without one.
 async fn set_profile_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -10343,20 +10361,43 @@ async fn set_profile_role(
             )
         })?;
 
-    if target.role == Role::Owner && req.role != Role::Owner {
-        let profiles = state.profile_repo.list().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-        let owners = profiles.iter().filter(|p| p.role == Role::Owner).count();
-        if owners <= 1 {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "this household would be left with no owner"})),
-            ));
+    let target_is_owner =
+        crate::pairing_lock::seated_role(&state, &id, target.role).await == Role::Owner;
+    // One owner, the main member: naming another hands the seat on, and the owner's own role
+    // changes only that way.
+    if req.role == Role::Owner {
+        if !target_is_owner {
+            crate::pairing_lock::seat_main_member(&state, &id, true)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                })?;
         }
+        let seated = state
+            .profile_repo
+            .get(&id)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "the new owner could not be read back"})),
+                )
+            })?;
+        return Ok(Json(profile_json(&seated)));
+    }
+    if target_is_owner {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this household would be left with no owner; make another member \
+                          the owner first",
+            })),
+        ));
     }
 
     let updated = state
@@ -21612,13 +21653,10 @@ fn proven_device(
 /// else to defer to" trust `ProfileScope::Household` already carries elsewhere.
 async fn resolve_role(state: &Arc<AppState>, scope: &ProfileScope) -> Option<Role> {
     match scope {
-        ProfileScope::Owner(id) => state
-            .profile_repo
-            .get(id)
-            .await
-            .ok()
-            .flatten()
-            .map(|p| p.role),
+        ProfileScope::Owner(id) => {
+            let stored = state.profile_repo.get(id).await.ok().flatten()?.role;
+            Some(crate::pairing_lock::seated_role(state, id, stored).await)
+        }
         ProfileScope::Household => Some(Role::Owner),
         ProfileScope::Guest => None,
     }

@@ -230,7 +230,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | PUT | /pairing/lock | token +onb | main member | Lock or unlock pairing |
 | PUT | /pairing/recovery-pin | token +onb | main member | Set the recovery PIN |
 | DELETE | /pairing/recovery-pin | token +onb | main member | Remove it |
-| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat to another member |
+| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat, and the owner role, to another member |
 | GET | /pairing/requests | token +onb | main member | The phones waiting to be let in |
 | POST | /pairing/requests/{id}/approve | token +onb | main member | Let a waiting phone in |
 | POST | /pairing/requests/{id}/decline | token +onb | main member | Turn it away |
@@ -261,7 +261,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /settings | token | | The whole `Settings` record |
-| PUT | /settings | wizard | | Partial update; answers with the merged record |
+| PUT | /settings | wizard | owner, to change `primary_profile_id` | Partial update; answers with the merged record |
 
 ### Chat and runs
 
@@ -936,6 +936,9 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
 | 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
 | 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
+| 403 | `{"error", "who_can_grant": "owner", "owners"}` when `primary_profile_id` changes and the caller is not the owner; a pond that names nobody yet, in settings or as its main member, takes its first from anyone. Nothing in the patch is saved |
+
+Naming `primary_profile_id` names no owner: the owner is the main member (see below).
 
 ## Chat and runs
 
@@ -1152,7 +1155,12 @@ A download or activation for a model whose engine this pond lacks is refused
 
 ## Profiles and session identity
 
-A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, created_at, updated_at}`.
+A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, role, guest_until, created_at, updated_at}`.
+`role` is `owner`, `member`, `guest` or `developer`. The owner is the pairing lock's main member,
+and there is one: handing the seat on with `PUT /pairing/owner`, or naming another member `owner`
+with `PUT /profiles/{id}/role`, makes the old owner a `member`, and the server sets the roles to
+follow the seat when it starts. Permission checks read the seat, so a stale stored `owner` grants
+nothing.
 
 | Route | Request | Response |
 |---|---|---|

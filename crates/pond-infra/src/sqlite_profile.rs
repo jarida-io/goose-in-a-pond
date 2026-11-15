@@ -182,6 +182,30 @@ impl ProfileRepository for SqliteProfileRepository {
             .ok_or_else(|| anyhow!("profile not found after update: {}", profile_id))
     }
 
+    async fn hand_ownership_to(&self, profile_id: &str) -> Result<()> {
+        let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut tx = self.pool.begin().await?;
+        let promoted = sqlx::query(
+            "UPDATE profiles SET role = 'owner', guest_until = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(&now_str)
+        .bind(profile_id)
+        .execute(&mut *tx)
+        .await?;
+        if promoted.rows_affected() == 0 {
+            return Err(anyhow!("profile not found: {}", profile_id));
+        }
+        sqlx::query(
+            "UPDATE profiles SET role = 'member', updated_at = ? WHERE role = 'owner' AND id != ?",
+        )
+        .bind(&now_str)
+        .bind(profile_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn delete(&self, profile_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM profiles WHERE id = ?")
             .bind(profile_id)
@@ -347,6 +371,40 @@ mod tests {
             updated.guest_until, None,
             "guest_until is meaningless for a non-guest role and must not be stored"
         );
+    }
+
+    #[tokio::test]
+    async fn handing_ownership_on_leaves_one_owner() {
+        let (repo, _tmp) = make_repo().await;
+        let first = repo
+            .create(CreateProfileRequest {
+                display_name: "Jerry".to_string(),
+                avatar_emoji: "X".to_string(),
+            })
+            .await
+            .unwrap();
+        let next = repo
+            .create(CreateProfileRequest {
+                display_name: "Liz".to_string(),
+                avatar_emoji: "Y".to_string(),
+            })
+            .await
+            .unwrap();
+        repo.set_role(&next.id, Role::Guest, Some(Utc::now()))
+            .await
+            .unwrap();
+
+        repo.hand_ownership_to(&next.id).await.unwrap();
+        let next = repo.get(&next.id).await.unwrap().unwrap();
+        assert_eq!(next.role, Role::Owner);
+        assert_eq!(next.guest_until, None);
+        assert_eq!(
+            repo.get(&first.id).await.unwrap().unwrap().role,
+            Role::Member
+        );
+
+        assert!(repo.hand_ownership_to("nobody").await.is_err());
+        assert_eq!(repo.get(&next.id).await.unwrap().unwrap().role, Role::Owner);
     }
 
     /// A pond as it stood before the roles migration: these profiles, this stored primary and
