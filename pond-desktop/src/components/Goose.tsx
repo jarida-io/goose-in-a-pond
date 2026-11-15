@@ -204,6 +204,26 @@ function paint(svg: SVGSVGElement, t: number, mood: GooseMood, listen: number, p
 
 const prefersStill = () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 
+// One clock for every goose on screen: a chat draws one beside each reply.
+type Frame = (now: number) => void;
+const frames = new Set<Frame>();
+let clock = 0;
+function runClock(now: number) {
+  frames.forEach((frame) => frame(now));
+  clock = frames.size ? requestAnimationFrame(runClock) : 0;
+}
+function onEveryFrame(frame: Frame): () => void {
+  frames.add(frame);
+  if (!clock) clock = requestAnimationFrame(runClock);
+  return () => {
+    frames.delete(frame);
+    if (!frames.size && clock) {
+      cancelAnimationFrame(clock);
+      clock = 0;
+    }
+  };
+}
+
 export function Goose({ state = "idle", size = 132, water = true, label, className }: GooseProps) {
   const id = `goose-${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
   const ref = useRef<SVGSVGElement>(null);
@@ -219,7 +239,6 @@ export function Goose({ state = "idle", size = 132, water = true, label, classNa
     const start = performance.now() / 1000;
     paint(svg, start, mood.current, listen, partsFrame(start, mood.current, listen));
     if (typeof requestAnimationFrame !== "function") return;
-    let raf = 0;
     let last = performance.now();
     const tick = (now: number) => {
       const dt = Math.min(0.1, (now - last) / 1000);
@@ -227,10 +246,24 @@ export function Goose({ state = "idle", size = 132, water = true, label, classNa
       const t = now / 1000;
       listen = easeListen(listen, mood.current, dt);
       paint(svg, t, mood.current, listen, partsFrame(t, mood.current, listen));
-      raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    if (typeof IntersectionObserver !== "function") return onEveryFrame(tick);
+    // A goose scrolled out of sight stops drawing until it is back.
+    let stop: (() => void) | null = null;
+    const seen = new IntersectionObserver(([entry]) => {
+      if (entry?.isIntersecting && !stop) {
+        last = performance.now();
+        stop = onEveryFrame(tick);
+      } else if (!entry?.isIntersecting && stop) {
+        stop();
+        stop = null;
+      }
+    });
+    seen.observe(svg);
+    return () => {
+      seen.disconnect();
+      stop?.();
+    };
   }, [water]);
 
   // Reduced motion runs no loop: each mood gets one resting frame.
