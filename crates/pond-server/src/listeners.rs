@@ -63,10 +63,20 @@ pub fn compose(
     // access. Revocation stays, so signing out over this listener still reaches the tailnet.
     let insecure = pond_api::insecure_dev::router(companion.clone());
     #[cfg(unix)]
-    let companion = companion.merge(embedded_network::companion_management(
-        embedded.clone(),
-        state,
-    ));
+    let companion = companion
+        .merge(embedded_network::companion_management(
+            embedded.clone(),
+            state.clone(),
+        ))
+        .merge(
+            remote_tunnel::phone_management(tunnel.clone())
+                .route_layer(axum::extract::DefaultBodyLimit::max(4096))
+                .route_layer(Extension(state.handshake.clone()))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state,
+                    pond_api::middleware::auth_middleware,
+                )),
+        );
     // Taken before presence is added: a request over the tailnet must never count as the
     // phone being at home. The middleware's LAN check says the same; this makes it structural.
     #[cfg(unix)]

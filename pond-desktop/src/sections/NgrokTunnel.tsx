@@ -128,6 +128,8 @@ export function NgrokTunnel({ onStarted, onStopped }: { onStarted?: () => void; 
         </div>}
     </fieldset>
 
+    {tunnel?.fallback ? <p role="status" style={{ margin: 0 }}>{t('tunnel.fallback')}</p> : null}
+
     {/* The same row the built-in network has, so remote access is switched the same way on either route. */}
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: 'var(--space-3) var(--space-4)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)' }}>
       <div style={{ display: 'grid', gap: 2 }}>

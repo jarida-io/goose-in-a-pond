@@ -24,6 +24,8 @@ export function RemoteProvider() {
   const [unread, setUnread] = useState<'signedOut' | 'failed' | null>(null);
   const [switching, setSwitching] = useState(false);
   const [switchFailed, setSwitchFailed] = useState(false);
+  // Bumped after a switch, so the panel shown re-reads the route the Pond has just started.
+  const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -42,13 +44,8 @@ export function RemoteProvider() {
     return () => { live = false; };
   }, []);
 
-  // One way out at a time: a running tunnel replaces the built-in network.
-  const ngrokStarted = () => {
-    setNgrokOn(true);
-    void api.remoteStatus()
-      .then((status) => (status.state === 'Running' ? api.disableRemoteAccess() : undefined))
-      .catch((error: unknown) => console.warn('[remote] could not turn the built-in network off', error));
-  };
+  // The Pond turns the built-in network off itself once the tunnel is up: one way out at a time.
+  const ngrokStarted = () => setNgrokOn(true);
 
   // Choosing the built-in network while the tunnel runs: stop the tunnel here, rather than send
   // the household back to the ngrok panel the choice just hid.
@@ -67,8 +64,31 @@ export function RemoteProvider() {
     }
   };
 
+  // Choosing the other route while remote access is on moves it there rather than turning it off.
+  // Without an authtoken there is nothing to move to yet, so the ngrok panel asks for one first.
+  const choose = async (value: Provider) => {
+    setProvider(value);
+    setSwitchFailed(false);
+    const wanted = value === 'ngrok' ? 'ngrok' : 'built_in';
+    try {
+      const now = await api.remoteRoute();
+      const on = now.route === 'ngrok' || now.builtInRunning;
+      if (!on || now.route === wanted || (wanted === 'ngrok' && !now.tokenSet)) return;
+      setSwitching(true);
+      const next = await api.chooseRemoteRoute(wanted);
+      setNgrokOn(next.route === 'ngrok');
+      setNgrokConfig((config) => (config ? { ...config, enabled: next.route === 'ngrok' } : config));
+      setGeneration((n) => n + 1);
+    } catch (error) {
+      console.warn('[remote] could not switch the way phones reach the Pond', error);
+      setSwitchFailed(true);
+    } finally {
+      setSwitching(false);
+    }
+  };
+
   const choice = (value: Provider, label: string, hint: string) => <label style={option}>
-    <input type="radio" name="remote-provider" checked={provider === value} onChange={() => setProvider(value)} style={{ marginTop: 3 }} />
+    <input type="radio" name="remote-provider" checked={provider === value} disabled={switching} onChange={() => void choose(value)} style={{ marginTop: 3 }} />
     <span style={{ display: 'grid', gap: 2 }}>
       <span style={{ fontWeight: 'var(--weight-semibold)' }}>{label}</span>
       <span style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }}>{hint}</span>
@@ -84,10 +104,12 @@ export function RemoteProvider() {
     {unread && provider === null
       ? <p role="status" style={{ margin: 0 }}>{unread === 'signedOut' ? t('tunnel.providerSignedOut') : t('tunnel.providerUnread')}</p>
       : null}
-    {provider === 'ngrok'
+    {switching ? <p role="status" style={{ margin: 0 }}>{t('tunnel.switching')}</p> : null}
+    {switchFailed && !(provider === 'tailnet' && ngrokOn) ? <p role="alert" style={{ margin: 0 }}>{t('tunnel.routeSwitchFailed')}</p> : null}
+    {switching ? null : provider === 'ngrok'
       ? <section style={{ display: 'grid', gap: 12 }}>
         <h3 style={{ margin: 0 }}>{t('tunnel.title')}</h3>
-        <NgrokTunnel onStarted={ngrokStarted} onStopped={() => setNgrokOn(false)} />
+        <NgrokTunnel key={generation} onStarted={ngrokStarted} onStopped={() => setNgrokOn(false)} />
       </section>
       : provider === 'tailnet'
         ? ngrokOn
@@ -96,7 +118,7 @@ export function RemoteProvider() {
             <Button variant="primary" isDisabled={switching} onPress={() => void stopNgrokForBuiltIn()}>{t('tunnel.switchToBuiltIn')}</Button>
             {switchFailed && <p role="alert" style={{ margin: 0 }}>{t('tunnel.switchFailed')}</p>}
           </div>
-          : <RemoteAccess />
+          : <RemoteAccess key={generation} />
         : null}
   </div>;
 }
