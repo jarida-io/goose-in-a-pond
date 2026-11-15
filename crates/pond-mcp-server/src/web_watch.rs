@@ -18,7 +18,7 @@ use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::domain::message_note::Receipt;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -248,7 +248,7 @@ impl Made {
     }
 }
 
-async fn run(meta: &Meta, params: WebWatchParams, made: &mut Made) -> String {
+async fn run(meta: &RequestMetaObject, params: WebWatchParams, made: &mut Made) -> String {
     let what = "watching that page";
     let Some(deps) = WEB_WATCH_DEPS.get().cloned() else {
         return made.refused(
@@ -730,7 +730,7 @@ mod tests {
     async fn without_deps_or_a_member_a_watch_is_refused() {
         let mut made = Made::default();
         let text = run(
-            &Meta::new(),
+            &RequestMetaObject::new(),
             params(serde_json::json!({"url": "c.example"})),
             &mut made,
         )

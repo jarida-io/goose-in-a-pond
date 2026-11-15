@@ -11,7 +11,9 @@ use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
-use rmcp::model::{CallToolRequestParams, CallToolResult as RmcpCallToolResult, RequestId};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult as RmcpCallToolResult, RequestId,
+};
 use rmcp::service::{Peer, RequestContext, RunningService};
 use rmcp::{RoleServer, ServerHandler};
 use std::sync::Arc;
@@ -86,9 +88,14 @@ impl<T: ServerHandler + Send + Sync> McpServerBridge for T {
         params: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<RmcpCallToolResult> {
-        ServerHandler::call_tool(self, params, ctx)
-            .await
-            .map_err(|e| anyhow!("MCP call_tool failed: {}", e))
+        match ServerHandler::call_tool(self, params, ctx).await {
+            Ok(CallToolResponse::Complete(result)) => Ok(result),
+            // GIAP's builtin servers neither ask the client for input nor create tasks.
+            Ok(_) => Err(anyhow!(
+                "MCP call_tool returned an input-required or task response, which builtin servers do not use"
+            )),
+            Err(e) => Err(anyhow!("MCP call_tool failed: {}", e)),
+        }
     }
 }
 

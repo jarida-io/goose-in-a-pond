@@ -18,7 +18,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        ProtocolVersion, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -858,7 +858,7 @@ schedule, pass its name as `id` with only the fields that change.")]
 // which drops the composed to-do tools from `list_tools`, so the model is never offered them.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ScheduleMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(

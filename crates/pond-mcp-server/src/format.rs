@@ -73,7 +73,7 @@ pub fn with_receipt(
 ) -> rmcp::model::CallToolResult {
     let mut result =
         rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text.into())]);
-    result.meta = Some(rmcp::model::Meta(
+    result.meta = Some(rmcp::model::MetaObject(
         pond_core::mcp::domain::tool_outcome::with_outcome(None, &receipt),
     ));
     result

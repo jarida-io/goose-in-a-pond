@@ -20,7 +20,7 @@ use pond_core::shared::services::passages;
 use regex::Regex;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -67,7 +67,7 @@ const RESEARCH_REACH: Reach = Reach {
 };
 
 /// The reach for the session behind this call: wide for a deep-research step's helper.
-fn reach_for(meta: &rmcp::model::Meta) -> Reach {
+fn reach_for(meta: &rmcp::model::RequestMetaObject) -> Reach {
     use pond_core::shared::domain::long_task::LongTaskKind;
     use pond_core::shared::services::child_sessions::process_child_sessions;
     use pond_core::shared::services::step_bindings::process_step_bindings;
@@ -1718,7 +1718,7 @@ fn result_within(
 /// `content` as a result history keeps only as a stub naming `domains`.
 fn transient(content: Vec<ContentBlock>, domains: &[String]) -> CallToolResult {
     let mut result = CallToolResult::success(content);
-    result.meta = Some(Meta(transient_meta(&web_search_stub(domains))));
+    result.meta = Some(MetaObject(transient_meta(&web_search_stub(domains))));
     result
 }
 
@@ -3251,7 +3251,7 @@ mod tests {
         };
         use pond_core::user_data::domain::profile::ProfileScope;
         let meta = |session: &str| {
-            let mut m = rmcp::model::Meta::new();
+            let mut m = rmcp::model::RequestMetaObject::new();
             m.0.insert(
                 crate::SESSION_ID_META_KEY.to_string(),
                 Value::String(session.to_string()),
@@ -3284,7 +3284,7 @@ mod tests {
         assert_eq!(reach_for(&meta("engine-reach-research")), RESEARCH_REACH);
         assert_eq!(reach_for(&meta("engine-reach-general")), TURN_REACH);
         assert_eq!(reach_for(&meta("20261115_1")), TURN_REACH);
-        assert_eq!(reach_for(&rmcp::model::Meta::new()), TURN_REACH);
+        assert_eq!(reach_for(&rmcp::model::RequestMetaObject::new()), TURN_REACH);
     }
 
     #[tokio::test]
@@ -3797,7 +3797,11 @@ mod tests {
         }))
         .unwrap();
         // No secret store in a test binary: the key-removed path.
-        let result = server.call_tool(params, ctx).await.unwrap();
+        let rmcp::model::CallToolResponse::Complete(result) =
+            server.call_tool(params, ctx).await.unwrap()
+        else {
+            panic!("search_web answered with an input-required or task response");
+        };
         let copy = text_of(&result, 0);
         assert!(copy.contains("Web search is not set up"), "{copy}");
     }

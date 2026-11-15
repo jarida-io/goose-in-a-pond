@@ -19,8 +19,8 @@ use pond_core::user_data::ports::profile::ProfileRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
+        ProtocolVersion, RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -246,7 +246,7 @@ impl MemoryMcpServer {
     /// The body of `note_to_self`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_note(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: NoteToSelfParams,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = match self.scope_for(meta) {
@@ -330,7 +330,7 @@ impl MemoryMcpServer {
 
     /// Whose memories this call may reach: the live turn's scope, which its injected memories were
     /// read at, else a helper's clamped one. Keyed by `_meta`, which the model cannot write.
-    fn scope_for(&self, meta: &Meta) -> Result<ProfileScope, Refusal> {
+    fn scope_for(&self, meta: &RequestMetaObject) -> Result<ProfileScope, Refusal> {
         let session = crate::session_from_meta(meta).ok_or(Refusal::Unresolved)?;
         // The adapter's registry, installed with the orchestrator's deps once the adapter exists.
         let turns = self
@@ -351,7 +351,7 @@ impl MemoryMcpServer {
     /// The body of `recall_memories`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_recall(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: RecallMemoriesParams,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = match self.scope_for(meta) {
@@ -473,7 +473,7 @@ impl MemoryMcpServer {
     /// The body of `save_memory`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_save(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: SaveMemoryParams,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = match self.scope_for(meta) {
@@ -617,7 +617,7 @@ impl MemoryMcpServer {
     /// The body of `forget_memory`, apart from the rmcp wrapper so tests can call it.
     pub async fn run_forget(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         params: ForgetMemoryParams,
     ) -> Result<CallToolResult, ErrorData> {
         let scope = match self.scope_for(meta) {
@@ -720,7 +720,7 @@ fn matching_words(rows: Vec<MemoryFragment>, what: &str) -> Vec<MemoryFragment> 
 
 #[tool_handler]
 impl ServerHandler for MemoryMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -963,8 +963,8 @@ mod tests {
         }
     }
 
-    fn meta_for(session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta_for(session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::session_meta::SESSION_ID_META_KEY.to_string(),
             serde_json::Value::String(session.to_string()),
@@ -1347,7 +1347,7 @@ mod tests {
         let server = pond.server(true);
 
         for (meta, expected) in [
-            (Meta::new(), Refusal::Unresolved),
+            (RequestMetaObject::new(), Refusal::Unresolved),
             (meta_for("engine-unknown"), Refusal::Unresolved),
             (meta_for("engine-ended"), Refusal::Unresolved),
             (meta_for("engine-guest"), Refusal::Guest),
