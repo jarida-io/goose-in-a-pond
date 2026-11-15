@@ -16,7 +16,8 @@ use crate::shared::domain::agent::{
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::shared::services::voice_control::{StopReason, VoiceControl};
-use crate::user_data::domain::session::SessionMessage;
+use crate::user_data::domain::message_note::{MessageNote, Receipt};
+use crate::user_data::domain::session::{SessionMessage, SessionSurface};
 use crate::user_data::ports::session_storage::SessionStorage;
 use anyhow::Result;
 use futures::StreamExt as _;
@@ -201,6 +202,19 @@ pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> 
     })
 }
 
+/// Whether the household's quiet hours cover `at`, read in its own time zone. `None` when a
+/// bound is unreadable: speech treats that as quiet, a held notice as not.
+pub fn household_quiet_at(
+    settings: &crate::user_data::domain::settings::Settings,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Option<bool> {
+    quiet_hours_cover(
+        &settings.quiet_hours_start,
+        &settings.quiet_hours_end,
+        LocalTimeOfDay::in_zone(&settings.timezone, at),
+    )
+}
+
 /// Whether `category` is in the comma-separated `enabled` list; any bad entry means less speech.
 fn category_is_speakable(enabled: &str, category: &str) -> bool {
     let wanted = category.trim().to_ascii_lowercase();
@@ -316,7 +330,7 @@ impl Drop for WorkingTone {
 // TTS text handling is in `pond-voice` so the desktop shell (separate workspace) shares it.
 use pond_voice::text::{ReplySplitter, SpeechUnit};
 
-use crate::models::services::voice::speech_pipeline::{SpeechPipeline, SENTENCE_HOLD};
+use crate::models::services::voice::speech_pipeline::SpeechPipeline;
 
 /// Re-exported to keep pond-core's public API path.
 pub use pond_voice::text::filter_thinking;
@@ -372,6 +386,8 @@ pub struct ChatService {
     model_name: Option<String>,
     /// Whose turns these are. See [`with_profile_scope`](Self::with_profile_scope).
     profile_scope: ProfileScope,
+    /// See [`with_device_locked`](Self::with_device_locked).
+    device_locked: bool,
     /// Mirrors `settings.voice_thinking_tone_enabled`; defaults true, like that setting.
     thinking_tone: bool,
     /// Whether reasoning text may be stored at all; off unless `with_thinking` turns it on.
@@ -391,6 +407,10 @@ pub struct ChatService {
     /// The session row is made at the first turn, so a loop nobody talks to leaves none.
     session_on_first_turn: bool,
     session_made: Arc<std::sync::atomic::AtomicBool>,
+    /// Where a session this service makes was started.
+    surface: Option<SessionSurface>,
+    /// What this turn's tools set or failed to set, kept with the reply when it is stored.
+    turn_receipts: Arc<std::sync::Mutex<Vec<Receipt>>>,
     /// Voice Match names the speaker: their context, and their own session.
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
@@ -518,6 +538,7 @@ impl ChatService {
             telemetry: None,
             model_name: None,
             profile_scope: ProfileScope::Household,
+            device_locked: false,
             thinking_tone: true,
             persist_thinking: false,
             thinking_blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -528,6 +549,8 @@ impl ChatService {
             spoken_observer: None,
             session_on_first_turn: false,
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            surface: None,
+            turn_receipts: Arc::new(std::sync::Mutex::new(Vec::new())),
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
             unrecognised_scope: None,
@@ -586,6 +609,13 @@ impl ChatService {
     /// Scope this session's turns are written under; must match `AgentRequest.profile_scope`.
     pub fn with_profile_scope(mut self, scope: ProfileScope) -> Self {
         self.profile_scope = scope;
+        self
+    }
+
+    /// The asking phone is locked, so [`chat_once`](Self::chat_once) tells the model why the
+    /// turn has no personal tools; the caller narrows the scope itself.
+    pub fn with_device_locked(mut self, locked: bool) -> Self {
+        self.device_locked = locked;
         self
     }
 
@@ -872,6 +902,30 @@ impl ChatService {
         self
     }
 
+    /// Hands over what the turn's tools set or failed to set, for the reply about to be stored.
+    pub fn note_turn_receipts(&self, receipts: Vec<Receipt>) {
+        self.turn_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(receipts);
+    }
+
+    /// Takes the turn's receipts as the note for its reply; nothing is left for the next turn.
+    fn take_turn_note(&self) -> MessageNote {
+        MessageNote {
+            receipts: std::mem::take(
+                &mut *self.turn_receipts.lock().unwrap_or_else(|e| e.into_inner()),
+            ),
+            ..MessageNote::default()
+        }
+    }
+
+    /// Names where a session made on the first turn was started.
+    pub fn with_surface(mut self, surface: SessionSurface) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
     /// Makes the session row the first time a turn needs it; a failure is left to the write.
     async fn ensure_session(&self) {
         use std::sync::atomic::Ordering;
@@ -881,7 +935,18 @@ impl ChatService {
         let made = match self.session_storage.get_session(&self.session_id()).await {
             Ok(_) => true,
             Err(_) => match self.session_storage.create_session(self.session_id()).await {
-                Ok(_) => true,
+                Ok(_) => {
+                    if let Some(surface) = self.surface {
+                        let marked = self
+                            .session_storage
+                            .mark_surface(&self.session_id(), surface, None)
+                            .await;
+                        if let Err(e) = marked {
+                            tracing::warn!(error = %e, "could not record where a session began");
+                        }
+                    }
+                    true
+                }
                 Err(e) => {
                     tracing::warn!(
                         session_id = %self.session_id(),
@@ -1001,6 +1066,7 @@ impl ChatService {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: self.device_locked,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -1171,7 +1237,8 @@ impl ChatService {
             self.session_id(),
             ChatMessage::assistant_with_tool_calls(assistant_text, tool_calls),
         )
-        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c));
+        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c))
+        .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), sm)
             .await?;
@@ -1324,7 +1391,7 @@ impl ChatService {
         }
     }
 
-    /// Stream, speak by sentence, and persist a confirmed turn; don't `speak()` the result again.
+    /// Stream, speak and persist a confirmed turn; don't `speak()` the result again.
     /// Speculative transcripts must use the non-persisting `stream_response_inner` instead.
     pub async fn chat_stream_once(&self, message: String) -> Result<String> {
         let fired_at = std::time::Instant::now();
@@ -1394,6 +1461,7 @@ impl ChatService {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
@@ -1450,26 +1518,7 @@ impl ChatService {
             loop {
                 let mut units: Vec<SpeechUnit> = Vec::new();
                 let mut done = false;
-                let event = if splitter.pending().trim().is_empty() {
-                    stream.next().await
-                } else {
-                    match tokio::time::timeout(SENTENCE_HOLD, stream.next()).await {
-                        Ok(event) => event,
-                        Err(_) => {
-                            // Stalled: say the sentences already whole rather than wait for more.
-                            for unit in splitter.pause(pipeline.pace()) {
-                                if let Some(tx) = barge_tx.take().filter(|_| energy_barge_in) {
-                                    barge_in = self.watch_for_barge_in(tx);
-                                }
-                                if !pipeline.say(unit).await {
-                                    break;
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                };
-                let Some(event_result) = event else {
+                let Some(event_result) = stream.next().await else {
                     break;
                 };
                 match event_result? {
@@ -1479,8 +1528,8 @@ impl ChatService {
                         tool: tool.clone(),
                         id: id.clone(),
                     });
-                    // The model has paused for the tool: say the sentences it finished first.
-                    units = splitter.pause(pipeline.pace());
+                    // The model has stopped writing for the tool: say what it wrote first.
+                    units = splitter.pause();
                 }
                 AgentStreamEvent::Text { content } => {
                     // Strip all thinking/reasoning tags — not meant for TTS or transcript.
@@ -1500,12 +1549,12 @@ impl ChatService {
                         });
                         spoken_first = true;
                     }
-                    // Emitted before buffering so an unfinished sentence still reaches the UI.
+                    // Emitted before buffering so text not yet spoken still reaches the UI.
                     self.emit_event(WorkflowEvent::Token {
                         content: content.clone(),
                     });
                     full_text.push_str(&content);
-                    units = splitter.push(&content, pipeline.pace());
+                    units = splitter.push(&content);
                 }
                 AgentStreamEvent::Done { usage, stats, .. } => {
                     turn_usage = usage;
@@ -1524,7 +1573,7 @@ impl ChatService {
                             content: tail.clone(),
                         });
                         full_text.push_str(&tail);
-                        units = splitter.push(&tail, pipeline.pace());
+                        units = splitter.push(&tail);
                     }
                     units.extend(splitter.finish());
                     done = true;
@@ -1533,8 +1582,13 @@ impl ChatService {
                     return Err(anyhow::anyhow!("Agent stream error: {}", content));
                 }
                 AgentStreamEvent::ToolResult {
-                    id, tool, content, ..
+                    id,
+                    tool,
+                    content,
+                    outcome,
+                    ..
                 } => {
+                    self.note_turn_receipts(outcome.into_iter().collect());
                     // Not spoken; truncated so a huge payload cannot bloat one NDJSON line.
                     let content = truncate_tool_result(content);
                     self.emit_event(WorkflowEvent::ToolResult { tool, id, content });
@@ -1576,7 +1630,7 @@ impl ChatService {
                     content: tail.clone(),
                 });
                 full_text.push_str(&tail);
-                units = splitter.push(&tail, pipeline.pace());
+                units = splitter.push(&tail);
             }
             units.extend(splitter.finish());
             for unit in units {
@@ -1761,7 +1815,8 @@ impl ChatService {
                     usage.map(|u| u.completion_tokens),
                 )
                 // `persist_assistant_turn`'s tuple can't carry this: its rows stay NULL, not zero.
-                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens));
+                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens))
+                .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;
@@ -2416,6 +2471,25 @@ mod tests {
         let service = ChatService::new(agent, session_id.clone(), storage.clone());
         let result = service.chat_once("Hello!".to_string()).await.unwrap();
         assert_eq!(result, "Echo: Hello!");
+    }
+
+    #[tokio::test]
+    async fn a_locked_phones_single_turn_tells_the_model_the_phone_is_locked() {
+        let agent = Arc::new(MockAgent::new());
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("s".to_string()).await.unwrap();
+
+        let service = ChatService::new(agent.clone(), "s".to_string(), storage)
+            .with_profile_scope(ProfileScope::Guest)
+            .with_device_locked(true);
+        service
+            .chat_once("What's on today?".to_string())
+            .await
+            .unwrap();
+
+        let sent = agent.last_request().expect("the turn reached the agent");
+        assert!(sent.device_locked);
+        assert_eq!(sent.profile_scope, ProfileScope::Guest);
     }
 
     // ── activity events (Agent / Inference / Tool) ───────────────────────
@@ -4181,7 +4255,8 @@ mod tests {
                 let dropped = SetOnDrop(self.first_stream_dropped.clone());
                 let stream = async_stream::stream! {
                     let _dropped = dropped;
-                    yield Ok(E::Text { content: "Monday will be sunny. ".to_string() });
+                    // More than one pass holds, so its start is said while the rest is written.
+                    yield Ok(E::Text { content: "Monday will be sunny. ".repeat(10) });
                     tokio::time::sleep(Duration::from_millis(1_500)).await;
                     yield Ok(E::Text { content: "Tuesday brings rain. ".to_string() });
                     yield Ok(E::Done { session_id, model_role, usage: None, stats: None });

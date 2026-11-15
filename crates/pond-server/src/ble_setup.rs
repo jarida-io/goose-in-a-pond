@@ -49,7 +49,8 @@ pub fn start(
         claims,
         state.settings_repo.clone(),
         Arc::new(HostNetwork),
-    );
+    )
+    .with_pairing_lock(state.handshake.clone());
     tokio::spawn(controller.run());
     radios
 }

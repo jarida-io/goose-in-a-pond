@@ -8,8 +8,7 @@
    cascade layer; base.css's `* { padding: 0 }` reset is unlayered, so per the
    CSS cascade-layers spec it wins over the layered rule regardless of
    specificity — silently zeroing every HeroUI button's padding. Re-declared
-   here at class specificity, matching the fix already applied to
-   `.switch__thumb` in base.css for the same reason. Shared by every
+   here at class specificity. Shared by every
    page-header primary action button (Devices, Mesh, …) since they all hit
    the same zeroed-padding bug. */
 .page-header-btn { padding: 0 12px; }
@@ -39,7 +38,7 @@
 .button--primary {
   background-color: var(--color-accent);
   border: 1px solid var(--color-accent-hover);
-  color: #fff;
+  color: var(--color-text-on-accent);
 }
 .button--primary:hover,
 .button--primary[data-hovered="true"] {
@@ -1224,6 +1223,14 @@
   --mem-knowledge-bg: rgba(20, 184, 166, 0.08);
   --mem-context:      #9ca3af;
   --mem-context-bg:   rgba(156, 163, 175, 0.08);
+  --mem-food_health:    #e11d48;
+  --mem-food_health-bg: rgba(225, 29, 72, 0.08);
+  --mem-place:          #0ea5e9;
+  --mem-place-bg:       rgba(14, 165, 233, 0.08);
+  --mem-date:           #d97706;
+  --mem-date-bg:        rgba(217, 119, 6, 0.08);
+  --mem-instruction:    #4f46e5;
+  --mem-instruction-bg: rgba(79, 70, 229, 0.08);
 }
 
 /* Add form */
@@ -1425,6 +1432,10 @@
 .mem-seg-badge--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-seg-badge--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-seg-badge--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
+.mem-seg-badge--food_health { background: var(--mem-food_health-bg);  color: var(--mem-food_health); }
+.mem-seg-badge--place       { background: var(--mem-place-bg);        color: var(--mem-place); }
+.mem-seg-badge--date        { background: var(--mem-date-bg);         color: var(--mem-date); }
+.mem-seg-badge--instruction { background: var(--mem-instruction-bg);  color: var(--mem-instruction); }
 .mem-seg-badge--none        { background: var(--grey-100);            color: var(--grey-500); }
 
 /* Segment icon color variants */
@@ -1436,6 +1447,10 @@
 .mem-card__seg-icon--routine     { background: var(--mem-routine-bg);      color: var(--mem-routine); }
 .mem-card__seg-icon--knowledge   { background: var(--mem-knowledge-bg);    color: var(--mem-knowledge); }
 .mem-card__seg-icon--context     { background: var(--mem-context-bg);      color: var(--mem-context); }
+.mem-card__seg-icon--food_health { background: var(--mem-food_health-bg);  color: var(--mem-food_health); }
+.mem-card__seg-icon--place       { background: var(--mem-place-bg);        color: var(--mem-place); }
+.mem-card__seg-icon--date        { background: var(--mem-date-bg);         color: var(--mem-date); }
+.mem-card__seg-icon--instruction { background: var(--mem-instruction-bg);  color: var(--mem-instruction); }
 .mem-card__seg-icon--none        { background: var(--grey-100);            color: var(--grey-400); }
 
 /* Kept marker: the permanent tier, the only tier worth a badge */
@@ -2252,6 +2267,19 @@
 .sched-history__toggle { background: none; border: none; cursor: pointer; font-size: 12px; color: var(--grey-500); display: flex; align-items: center; gap: 4px; padding: 0; font-family: var(--font-body); }
 .sched-history__list { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
 .sched-history__empty { font-size: 12px; color: var(--grey-400); }
+/* A history that could not be read says so, with a way to try again; it never reads as "no runs". */
+.sched-history__empty--error { color: var(--color-destructive, #DC2626); }
+.sched-history__retry {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--color-accent, #8C4BFF);
+  cursor: pointer;
+}
+.sched-history__retry:hover { text-decoration: underline; }
+.sched-history__retry:focus-visible { outline: 2px solid var(--color-accent, #8C4BFF); outline-offset: 2px; border-radius: 4px; }
 
 /* Schedules: modal */
 .sched-modal__overlay { position: fixed; inset: 0; background: rgba(23, 22, 22, 0.45); display: flex; align-items: center; justify-content: center; z-index: 1000; }
@@ -2292,6 +2320,28 @@
 .devices-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 @media (max-width: 1100px) { .devices-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 680px)  { .devices-grid { grid-template-columns: 1fr; } }
+
+/* room section: one per named room, plus a final "Unassigned" bucket */
+.room-section { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+.room-section__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.room-section__name {
+  font-family: var(--font-display); font-weight: 800; font-size: 16px;
+  color: var(--color-text); margin: 0;
+}
+.room-section__count {
+  font-size: 12px; font-weight: 600; color: var(--color-text-secondary);
+  background: var(--color-accent-subtle); padding: 3px 10px; border-radius: 999px;
+}
+.room-section__spacer { flex: 1; }
+.room-section__guest {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.room-section__actions { display: flex; gap: 2px; }
+@media (max-width: 680px) {
+  .room-section__head { gap: 8px; }
+}
 
 /* card base */
 .device-card {
@@ -3703,9 +3753,10 @@
   box-shadow: var(--shadow-ink);
 }
 
-.secret-modal__choice-option:focus-within {
-  outline: 3px solid var(--color-accent);
-  outline-offset: 2px;
+/* Keyboard focus only, drawn over the border: a mouse click on the radio is not a second ring. */
+.secret-modal__choice-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .secret-modal__choice-option input {
@@ -4693,6 +4744,85 @@
 .ui-search__label svg { flex-shrink: 0; }
 .ui-search__group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .ui-search__group + .ui-search__group { margin-top: 4px; }
+/* A place's details: the hours, address, phone and rating Brave's web search knows. */
+.ui-search__details {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--grey-700);
+  user-select: text;
+}
+/* A news or video row: its thumbnail, when Brave's proxy has one, beside the text naming it. */
+.ui-search__media { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.ui-search__media > .ui-search__hit { flex: 1; }
+.ui-search__thumb {
+  display: block;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--grey-200);
+  background: var(--grey-50);
+}
+.ui-search__thumb--news { width: 44px; height: 44px; }
+.ui-search__thumb--video { width: 88px; height: 50px; }
+.ui-search__frame { position: relative; flex-shrink: 0; line-height: 0; }
+/* White on 82% charcoal: 10.2:1 over a white picture, the worst case beneath it. */
+.ui-search__duration {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgb(23 22 22 / 0.82);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+.ui-search__breaking {
+  margin-right: 5px;
+  font-family: var(--font-body);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--grey-700);
+}
+
+/* ─── Pictures card ─── */
+.ui-pictures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+}
+.ui-pictures__item { min-width: 0; }
+.ui-pictures__link {
+  display: block;
+  border-radius: 6px;
+  line-height: 0;
+}
+.ui-pictures__link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ui-pictures__img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--grey-200);
+  background: var(--grey-50);
+}
+.ui-pictures__link:hover .ui-pictures__img { border-color: var(--border-ink); }
+@media (forced-colors: active) {
+  .ui-pictures__img, .ui-search__thumb { border-color: CanvasText; }
+}
+
 .ui-search__sr {
   position: absolute;
   width: 1px;
@@ -4840,14 +4970,15 @@
   margin-top: 4px;
   padding: 7px 16px;
   border-radius: 8px;
-  border: 1px solid var(--color-accent);
-  background: transparent;
-  color: var(--color-accent);
+  border: 1px solid var(--border-ink);
+  background: var(--color-surface);
+  /* The accent is never text: it measures under 4.5:1 for some household accents. */
+  color: var(--color-text);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   cursor: pointer;
 }
-.empty-state__cta:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.empty-state__cta:hover { background: var(--color-hover); }
 
 .muted { color: var(--grey-500); }
 
@@ -4904,8 +5035,9 @@
 .skeleton-line--short { height: 9px; opacity: 0.55; }
 .muted-12 { font-size: var(--text-sm); color: var(--grey-500); }
 
-/* ─── Toast notifications ─── */
-/* ─── Toast notification system ─── */
+/* ─── Toast notifications ───
+   A schedule or routine as it runs, in the corner, styled as a row of the notifications list:
+   `--tc` is the status's hue. No stripe and no pill; a tile, a coloured word, a moving foot line. */
 .toast-container {
   position: fixed;
   bottom: 24px;
@@ -4916,103 +5048,93 @@
   gap: 10px;
   pointer-events: none;
   width: 340px;
+  max-width: calc(100vw - 32px);
 }
 
 .toast-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  width: 100%;
-  padding: 14px 14px 14px 0;
+  --tc: var(--color-accent, #8C4BFF);
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: start;
+  padding: 14px 12px 14px 14px;
   background: var(--color-surface);
-  border: 1px solid var(--grey-200);
+  border: 1px solid var(--color-border, var(--grey-200));
   border-radius: 16px;
-  box-shadow: 0 8px 32px rgba(28, 28, 28, 0.14), 0 2px 8px rgba(28, 28, 28, 0.06);
+  box-shadow: 0 10px 30px rgba(28, 28, 28, 0.12), 0 2px 6px rgba(28, 28, 28, 0.05);
   pointer-events: all;
   animation: toast-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
   position: relative;
 }
+.toast-card[data-status="completed"] { --tc: var(--color-success, #34C759); }
+.toast-card[data-status="failed"]    { --tc: var(--color-destructive, #FF3B30); }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(12px) scale(0.96); }
   to   { opacity: 1; transform: translateY(0)    scale(1);    }
 }
 
-/* left accent bar */
-.toast-card__bar {
-  width: 4px;
-  align-self: stretch;
-  flex-shrink: 0;
-  border-radius: 0 2px 2px 0;
-  background: var(--grey-300);
-}
-.toast-card[data-status="running"]   .toast-card__bar { background: var(--color-accent, #8C4BFF); }
-.toast-card[data-status="completed"] .toast-card__bar { background: var(--color-success, #34C759); }
-.toast-card[data-status="failed"]    .toast-card__bar { background: var(--color-destructive, #FF3B30); }
-
-/* status icon */
+/* The tile carries the schedule's own picture, tinted and ringed in the status's hue. */
 .toast-card__icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
   display: grid;
   place-items: center;
-  flex-shrink: 0;
-  margin-top: 2px;
+  color: var(--tc);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--tc) 16%, transparent),
+    color-mix(in srgb, var(--tc) 9%, transparent)
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tc) 22%, transparent);
 }
-.toast-card[data-status="running"]   .toast-card__icon { background: rgba(140,75,255,0.10); color: var(--color-accent,#8C4BFF); }
-.toast-card[data-status="completed"] .toast-card__icon { background: rgba(52,199,89,0.12);  color: var(--color-success,#34C759); }
-.toast-card[data-status="failed"]    .toast-card__icon { background: rgba(255,59,48,0.10);  color: var(--color-destructive,#FF3B30); }
 
-/* spinner for running */
-.toast-card__spinner {
-  width: 18px; height: 18px;
-  border: 2.5px solid rgba(140,75,255,0.2);
-  border-top-color: var(--color-accent, #8C4BFF);
+/* Finished: a small tick or cross on the tile's corner, cut out of the card behind it. */
+.toast-card__mark {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  animation: toast-spin 0.7s linear infinite;
-  display: block;
-}
-@keyframes toast-spin {
-  to { transform: rotate(360deg); }
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--tc);
+  box-shadow: 0 0 0 2px var(--color-surface);
 }
 
-/* body */
-.toast-card__body { flex: 1; min-width: 0; }
+.toast-card__body { min-width: 0; }
 
 .toast-card__meta {
   display: flex;
   align-items: center;
-  gap: 5px;
-  color: var(--grey-500);
-  margin-bottom: 3px;
-}
-.toast-card__type {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--grey-500);
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary, var(--grey-500));
+  margin-bottom: 2px;
 }
 
-.toast-card__badge {
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 1px 7px;
-  border-radius: 999px;
-  white-space: nowrap;
+/* The status, as a word in its hue: "Running", "Done", "Failed". */
+.toast-card__status {
+  font-weight: 700;
+  color: var(--tc);
 }
-.toast-card__badge--running   { background: rgba(140,75,255,0.12); color: var(--color-accent,#8C4BFF); }
-.toast-card__badge--completed { background: rgba(52,199,89,0.12);  color: var(--color-success-fg); }
-.toast-card__badge--failed    { background: rgba(255,59,48,0.10);  color: var(--color-destructive,#FF3B30); }
+.toast-card__status::before {
+  content: "\00B7";
+  margin-right: 6px;
+  color: var(--color-text-secondary, var(--grey-500));
+}
+.toast-card[data-status="completed"] .toast-card__status { color: var(--color-success-fg, var(--tc)); }
 
 .toast-card__title {
   font-size: 14px;
   font-weight: 700;
-  color: var(--fg, #171616);
+  color: var(--color-text, #171616);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5021,45 +5143,133 @@
 
 .toast-card__preview {
   margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--grey-500);
-  line-height: 1.4;
+  font-size: 12.5px;
+  color: var(--color-text-secondary, var(--grey-500));
+  line-height: 1.45;
   overflow: hidden;
-  text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
 
+/* A quiet link with a chevron, as on the notifications list. */
 .toast-card__link {
-  display: inline-block;
-  margin-top: 8px;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: 8px 0 0 -6px;
+  padding: 3px 4px 3px 6px;
+  border-radius: 8px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--color-accent, #8C4BFF);
   background: none;
   border: none;
-  padding: 0;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.15s;
 }
-.toast-card__link:hover { text-decoration: underline; }
+.toast-card__link:hover { background: color-mix(in srgb, var(--color-accent, #8C4BFF) 10%, transparent); }
+.toast-card__link:focus-visible,
+.toast-card__close:focus-visible { outline: 2px solid var(--color-accent, #8C4BFF); outline-offset: 1px; }
 
-/* close button */
 .toast-card__close {
   display: grid;
   place-items: center;
-  width: 22px; height: 22px;
+  width: 24px;
+  height: 24px;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
-  color: var(--grey-400);
+  color: var(--color-text-secondary, var(--grey-400));
   cursor: pointer;
-  flex-shrink: 0;
   transition: background 0.12s, color 0.12s;
-  margin-top: 2px;
 }
-.toast-card__close:hover { background: var(--grey-100); color: var(--fg); }
+.toast-card__close:hover { background: color-mix(in srgb, var(--color-text, #171616) 7%, transparent); color: var(--color-text, #171616); }
+
+/* Running: a thin line moving along the foot of the card, in place of a spinner. */
+.toast-card__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--tc) 14%, transparent);
+  overflow: hidden;
+}
+.toast-card__progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: var(--tc);
+  border-radius: 2px;
+  animation: toast-run 1.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+@keyframes toast-run {
+  from { left: -40%; }
+  to   { left: 100%; }
+}
+
+/* Several running at once: their names, each after a small dot in the running hue. */
+.toast-card__runs {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+.toast-card__runs li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary, var(--grey-500));
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toast-card__runs li::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tc);
+  animation: toast-pulse 1.4s ease-in-out infinite;
+}
+@keyframes toast-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Finished runs beyond the few shown: one quiet line that opens the notifications. */
+.toast-more {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  pointer-events: all;
+  padding: 6px 8px 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border, var(--grey-200));
+  background: var(--color-surface);
+  box-shadow: 0 4px 14px rgba(28, 28, 28, 0.08);
+  font: 600 12px/1 inherit;
+  font-family: inherit;
+  color: var(--color-text-secondary, var(--grey-500));
+  cursor: pointer;
+}
+.toast-more:hover { color: var(--color-text, #171616); }
+.toast-more:focus-visible { outline: 2px solid var(--color-accent, #8C4BFF); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-card { animation: none; }
+  .toast-card__runs li::before { animation: none; }
+  .toast-card__progress::after { animation: none; left: 0; width: 100%; opacity: 0.6; }
+}
 
 /* ─── Schedule Calendar ─── */
 .sched-cal__wrap { position: relative; }
@@ -6247,3 +6457,60 @@
 .sched-or-recipe__tools caption { text-align: left; font-weight: 600; padding-bottom: 6px; }
 .sched-or-recipe__tools th, .sched-or-recipe__tools td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--color-border); }
 .sched-or-recipe__tools th[scope="row"] { font-weight: 400; }
+
+/* Notes under a message. Both chat UIs use them. --color-text-secondary is 5.45:1 or better on either
+   ground; a chip that was not set is an icon, words and the heavier line, never a hue. */
+.msg-note__from {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+.msg-note__chips {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.msg-note__chip {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--color-border-strong, var(--color-border));
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.msg-note__chip > svg { flex: 0 0 auto; margin-top: 2px; }
+.msg-note__chip > span { overflow-wrap: anywhere; }
+.msg-note__chip--problem { border: 2px solid var(--color-text); font-weight: 600; }
+.msg-note__reason { display: block; font-weight: 400; color: var(--color-text-secondary); }
+.msg-note__offer { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.msg-note__noticed { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--color-text-secondary); }
+.msg-note__offerActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.msg-note__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border-strong, var(--color-border));
+  border-radius: 9px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 700 13px var(--font-body, Quicksand, sans-serif);
+  cursor: pointer;
+}
+.msg-note__btn--primary { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
+.msg-note__btn:disabled { cursor: not-allowed; opacity: 0.6; }
+.msg-note__closed { font-size: 11.5px; font-weight: 700; color: var(--color-text-secondary); }
+.msg-note__spin { animation: msg-note-spin 0.9s linear infinite; }
+@keyframes msg-note-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .msg-note__spin { animation: none; } }

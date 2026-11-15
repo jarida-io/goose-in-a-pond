@@ -68,6 +68,16 @@ impl CreditLedger for SqliteCreditLedger {
         }
         Ok(())
     }
+
+    async fn has_any_balance(&self) -> Result<bool, CreditLedgerError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM mesh_credit_balances WHERE balance_millisats != 0 LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CreditLedgerError::General(e.to_string()))?;
+        Ok(row.is_some())
+    }
 }
 
 #[cfg(test)]
@@ -173,5 +183,18 @@ mod tests {
         assert_eq!(succeeded, starting_balance);
         assert_eq!(failed, attempts - starting_balance);
         assert_eq!(ledger.balance(peer).await.unwrap(), Millisats::new(0));
+    }
+
+    #[tokio::test]
+    async fn has_any_balance_is_false_until_a_peer_is_credited() {
+        let (ledger, _tmp) = make_ledger().await;
+        assert!(!ledger.has_any_balance().await.unwrap());
+
+        let peer = PeerId::from([8u8; 32]);
+        ledger.credit(peer, Millisats::new(1)).await.unwrap();
+        assert!(ledger.has_any_balance().await.unwrap());
+
+        ledger.debit(peer, Millisats::new(1)).await.unwrap();
+        assert!(!ledger.has_any_balance().await.unwrap());
     }
 }

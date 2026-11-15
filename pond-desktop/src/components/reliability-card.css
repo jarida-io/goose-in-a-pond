@@ -1,0 +1,20 @@
+/* Chrome, not content: a hairline and no offset. A failing line is heavier text, not a hue. */
+.rel { margin-top: var(--space-5); padding: var(--space-4); border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-surface); }
+.rel__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.rel__title { margin: 0; font-family: var(--font-heading); font-size: var(--text-md); font-weight: var(--weight-bold); font-style: italic; letter-spacing: -0.02em; color: var(--color-text); }
+.rel__switch { display: inline-flex; gap: var(--space-2); }
+.rel__day {
+  position: relative; min-height: 32px; padding: 0 var(--space-3);
+  border: 1px solid var(--color-border); border-radius: var(--radius-pill);
+  background: transparent; color: var(--color-text-secondary);
+  font-family: var(--font-body); font-size: var(--text-sm, 13px); cursor: pointer;
+}
+.rel__day::after { content: ""; position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); height: var(--tap-min, 44px); }
+.rel__day[aria-pressed="true"] { border: 2px solid var(--color-text); color: var(--color-text); font-weight: var(--weight-bold); }
+.rel__quiet { margin: var(--space-3) 0 0; font-size: 13px; line-height: 1.45; color: var(--color-text-secondary); }
+.rel__list { margin: var(--space-3) 0 0; display: flex; flex-direction: column; }
+.rel__row { display: flex; justify-content: space-between; gap: var(--space-4); padding: 6px 0; border-bottom: 1px solid var(--color-border); font-size: 13px; color: var(--color-text); }
+.rel__row:last-child { border-bottom: 0; }
+.rel__row dt { color: var(--color-text-secondary); }
+.rel__row dd { margin: 0; font-family: var(--font-mono); text-align: right; }
+.rel__row[data-problem] dd { font-weight: 800; }

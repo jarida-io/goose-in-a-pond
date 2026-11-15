@@ -42,8 +42,8 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `sessions` | One row per conversation | `title`, `title_source`, `title_through_message_id`; `profile_id` (FK `profiles`), `identification_source`, `identification_confidence`; `input_mode`; `total_prompt_tokens`, `total_completion_tokens`, `model_name`; `rolling_summary`, `rolling_summary_through_id`, `rolling_summary_updated_at`; batch-extraction cursor `extracted_through_id`, `extracted_at`, `extraction_attempts` |
-| `session_messages` | Messages in a session | `session_id` (FK, cascade), `role` (`user`/`assistant`/`system`/`tool`), `content`, `tool_call_id`, `tool_calls_json`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `liked`, `embedding` |
+| `sessions` | One row per conversation | `title`, `title_source`, `title_through_message_id`; `profile_id` (FK `profiles`), `identification_source`, `identification_confidence`; `surface` (where it began: `phone`, `desktop`, `cli`, `pond`, `room`, `schedule`, `goose`; first write wins), `surface_device_id`; `input_mode`; `total_prompt_tokens`, `total_completion_tokens`, `model_name`; `rolling_summary`, `rolling_summary_through_id`, `rolling_summary_updated_at`; batch-extraction cursor `extracted_through_id`, `extracted_at`, `extraction_attempts` |
+| `session_messages` | Messages in a session | `session_id` (FK, cascade), `role` (`user`/`assistant`/`system`/`tool`), `content`, `tool_call_id`, `tool_calls_json`, `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `liked`, `embedding`, `note_json` (a `MessageNote`: what produced the message, the turn's receipts, an offer) |
 | `session_thinking` | Reasoning text kept beside its message when `persist_thinking` is on | `message_id`, `session_id` (both FK, cascade), `block_index`, `content` |
 | `message_attachments` | Metadata for chat image attachments; the bytes live under `<data_dir>/attachments/<session_id>/` | `message_id`, `session_id` (FK, cascade), `ordinal`, `mime_type`, `byte_size`, `file_path` |
 | `engine_session_map` | GIAP session id to the Goose engine's own session id, so a restart resumes the same engine conversation | `session_id` (PK), `engine_session_id` |
@@ -55,12 +55,14 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 |---|---|---|
 | `onboarding_state` | Singleton (`CHECK(id=1)`) holding the wizard's current `OnboardingStep` | `current_step` |
 | `profiles` | Household members | `display_name`, `avatar_emoji`, `preferences` (JSON). Deleting a profile releases its sessions and expires its drafts and reminders (triggers `trg_profiles_delete_*`) |
-| `devices` | Paired clients and registered devices | `name`, `device_type`, `hostname`, `ip_address`, `capabilities` (JSON), `last_seen`, `room`, `profile_id` (FK, set null). `is_online` is stored but never read: `SqliteDeviceRegistry` derives it from `last_seen` within 300 s |
-| `pairing_codes` | Single-use pairing codes; only the SHA-256 hash is stored | `code_hash` (PK), `expires_at`, `consumed_at`, `profile_id` (FK, set null) |
+| `devices` | Paired clients and registered devices | `name`, `device_type`, `hostname`, `ip_address`, `capabilities` (JSON), `last_seen`, `room`, `profile_id` (FK, set null), `is_test` (a harness's device: no household notices, left out of the reliability report). `is_online` is stored but never read: `SqliteDeviceRegistry` derives it from `last_seen` within 300 s |
+| `pairing_codes` | Single-use pairing codes; only the SHA-256 hash is stored | `code_hash` (PK), `expires_at`, `consumed_at`, `profile_id` (FK, set null), `approved` (its phone passes the pairing lock), `is_test` |
+| `pairing_lock` | Singleton (`CHECK(id=1)`): whether pairing is locked, the main member, and the recovery PIN as a PBKDF2 verifier with its failed tries | `locked`, `owner_profile_id`, `pin_verifier`, `pin_failures`, `pin_locked_until` |
+| `pairing_requests` | Phones the lock held, waiting ten minutes for a yes; the claim secret is stored hashed | `client_id`, `client_type`, `device_name`, `profile_id`, `claim_hash`, `status` (`pending`, `approved`, `declined`, `claimed`), `expires_at` |
 | `handshake_challenges` | Short-lived per-handshake challenges | `client_id`, `challenge`, `client_type`, `expires_at`, `consumed_at` |
 | `session_tokens` | Issued bearer and refresh tokens, hashes only | `token_hash` (PK), `refresh_hash`, `device_id`, `client_id`, `client_type`, `expires_at`, `refresh_expires_at`, `last_seen_at`, `revoked_at` |
 | `push_tokens` | One FCM/APNs token per device | `device_id` (PK, FK cascade), `token`, `platform` |
-| `notifications` | Offline queue for targeted notifications; broadcasts are not queued | `device_id` (FK cascade), `category`, `title`, `body`, `data`, `delivered_at` |
+| `notifications` | Offline queue for targeted notifications, and the record of what became of each; broadcasts are not queued | `device_id` (FK cascade), `category`, `title`, `body`, `data`, `delivered_at`; `held` (waiting for quiet hours to end); `wakes`, `woken_at`, `fetched_at`, `shown_at`, `opened_at`, `spoken_at` |
 | `face_embeddings` | Per-member face vectors | `profile_id` (FK cascade), `embedding`, `model_dims`, `model_name` |
 | `face_profile_thresholds` | Per-member face match threshold | `profile_id` (PK, FK cascade), `match_threshold` |
 
@@ -68,7 +70,7 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `memory_fragments` | Curated long-term memory | `profile_id` (FK cascade; null = household-wide), `session_id` (FK set null), `content`, `source`, `tags` (JSON), `segment`, `importance`, `tier`, `decay_rate`, `access_count`, `last_accessed_at`, `lifecycle`, `superseded_by`, `corrects`, `embedding` |
+| `memory_fragments` | Curated long-term memory | `profile_id` (FK cascade; null = household-wide), `session_id` (FK set null), `content`, `source`, `tags` (JSON), `segment`, `importance`, `tier`, `decay_rate`, `access_count`, `last_accessed_at`, `lifecycle`, `superseded_by`, `corrects`, `about` (what it says of its member, from the closed list), `valid_until` (a passing fact's end), `resort_attempts`, `embedding` |
 | `memory_events` | Audit trail of memory lifecycle events | `event_kind`, `memory_id`, `session_id`, `data` |
 | `consolidation_runs` | One row per memory consolidation pass | `mode`, `memory_count`, `accepted`, `rejected`, `duration_ms`, `details` |
 | `memory_edges` | Edges between memories (`from_id`, `to_id`, `relation`). No code reads or writes it, and its foreign keys name a `memories` table that does not exist | |

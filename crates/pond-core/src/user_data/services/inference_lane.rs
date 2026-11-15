@@ -39,6 +39,13 @@ pub enum LaneJob {
     Portrait,
     /// Research an idea for a member from what they are into or working on.
     Ideas,
+    /// File memories kept before the profile under what each is about. It has no deadline,
+    /// and ends once every older row is filed.
+    MemoryResort,
+    /// Read the screenshots members sent for a one-line note each, then drop the pictures.
+    ScreenshotNotes,
+    /// Ask which of a web watch's changes are what its owner asked to be told about.
+    WatchJudge,
 }
 
 impl LaneJob {
@@ -56,6 +63,9 @@ impl LaneJob {
         LaneJob::NewsDigest,
         LaneJob::Portrait,
         LaneJob::Ideas,
+        LaneJob::MemoryResort,
+        LaneJob::ScreenshotNotes,
+        LaneJob::WatchJudge,
     ];
 
     /// Stable label for logs, metrics and `POST /lane/jobs/{job}/run`; renaming breaks scripts.
@@ -73,6 +83,9 @@ impl LaneJob {
             LaneJob::NewsDigest => "news_digest",
             LaneJob::Portrait => "portrait",
             LaneJob::Ideas => "ideas",
+            LaneJob::MemoryResort => "memory_resort",
+            LaneJob::ScreenshotNotes => "screenshot_notes",
+            LaneJob::WatchJudge => "watch_judge",
         }
     }
 
@@ -91,6 +104,9 @@ impl LaneJob {
             LaneJob::NewsDigest => "Write members' daily digests",
             LaneJob::Portrait => "Keep a portrait of each member",
             LaneJob::Ideas => "Research ideas for members",
+            LaneJob::MemoryResort => "File older memories into profiles",
+            LaneJob::ScreenshotNotes => "Read members' screenshots for ideas",
+            LaneJob::WatchJudge => "Sort web watch changes by what was asked",
         }
     }
 
@@ -429,6 +445,9 @@ mod tests {
             LaneJob::NewsDigest,
             LaneJob::Portrait,
             LaneJob::Ideas,
+            LaneJob::MemoryResort,
+            LaneJob::ScreenshotNotes,
+            LaneJob::WatchJudge,
         ] {
             assert!(
                 LaneJob::ALL.contains(&job),
@@ -436,7 +455,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 12, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 15, "a job was added or removed");
     }
 
     #[test]

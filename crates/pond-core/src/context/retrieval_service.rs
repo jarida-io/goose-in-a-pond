@@ -1,11 +1,13 @@
-//! One retrieval over `memory`, `context` and `summary`, scoped in [`VectorIndex`]'s SQL.
+//! One retrieval over every corpus, scoped in [`VectorIndex`]'s SQL.
 //! Each hit carries its corpus: a summary is lossy, not a said fact.
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::context::vector_index::{Corpus, ResolvedHit, VectorIndex};
+use crate::context::chunking;
+use crate::context::retrieval::CONTEXT_BLOCK_TAG;
+use crate::context::vector_index::{Corpus, Exclusions, ResolvedHit, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::user_data::domain::profile::ProfileScope;
 
@@ -15,7 +17,97 @@ pub fn provenance(corpus: Corpus) -> &'static str {
         Corpus::Memory => "you told me",
         Corpus::Context => "observed by this pond",
         Corpus::Summary => "from an earlier conversation",
+        Corpus::Personal => "from your profile",
+        Corpus::Message => "said in an earlier conversation",
+        Corpus::Digest => "from a news digest I wrote",
+        Corpus::Story => "from a news story I picked for you",
+        Corpus::Report => "from a long-task report",
+        Corpus::Notice => "from a notification I sent",
+        Corpus::Idea => "from an idea I suggested",
     }
+}
+
+/// A hit's provenance, told apart within personal details by the table its id names.
+pub fn label(corpus: Corpus, row_id: &str) -> &'static str {
+    if corpus != Corpus::Personal {
+        return provenance(corpus);
+    }
+    match row_id.split_once(':').map(|(kind, _)| kind) {
+        Some("interest") => "from your interests",
+        Some("topic") => "from the news topics I keep for you",
+        Some("portrait") => "from what I have pieced together about you",
+        Some("saved") => "something you saved",
+        Some("screenshot") => "from a screenshot you shared",
+        _ => provenance(corpus),
+    }
+}
+
+/// Hits a turn carries at most; a choice, so a strong match never crowds out the message.
+pub const TURN_HITS: usize = 3;
+
+/// One line's longest text before the budget applies; about two sentences of a passage.
+const TURN_LINE_CHARS: usize = 480;
+
+/// The least of the first hit's text kept however tight the budget, so a cut line still says
+/// something.
+const TURN_LINE_MIN_CHARS: usize = 24;
+
+/// The turn's share of `hits`: those at or above `floor`, personal details first, then the
+/// closest, at most `limit`.
+pub fn for_turn(mut hits: Vec<Recollection>, floor: f32, limit: usize) -> Vec<Recollection> {
+    hits.retain(|hit| hit.score.is_finite() && hit.score >= floor);
+    hits.sort_by(|a, b| {
+        (b.corpus == Corpus::Personal)
+            .cmp(&(a.corpus == Corpus::Personal))
+            .then(b.score.total_cmp(&a.score))
+            .then_with(|| a.corpus.cmp(&b.corpus))
+            .then_with(|| a.row_id.cmp(&b.row_id))
+    });
+    hits.truncate(limit);
+    hits
+}
+
+/// One hit as a block line: its provenance, then its text on one line, cut to `max_chars` at a
+/// word break.
+pub fn turn_line(hit: &Recollection, max_chars: usize) -> String {
+    let text = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = match chunking::cut_at_word(&text, max_chars) {
+        Some(head) => format!("{head}…"),
+        None => text,
+    };
+    format!("- ({}) {text}", label(hit.corpus, &hit.row_id))
+}
+
+/// The `<personal-context>` block for `hits` within `token_budget` (chars/4, as memories are
+/// counted): the first line is always kept, cut to fit; later ones only whole. Empty for none.
+/// Also returns how many hits it holds.
+pub fn render_turn_block(hits: &[Recollection], token_budget: usize) -> (String, usize) {
+    let budget_chars = token_budget.saturating_mul(4);
+    let mut used = 0usize;
+    let mut lines: Vec<String> = Vec::new();
+    for hit in hits {
+        let room = budget_chars.saturating_sub(used);
+        let line = if lines.is_empty() {
+            let prefix = label(hit.corpus, &hit.row_id).chars().count() + "- () ".len();
+            let text_room = room.saturating_sub(prefix).max(TURN_LINE_MIN_CHARS);
+            turn_line(hit, TURN_LINE_CHARS.min(text_room))
+        } else {
+            turn_line(hit, TURN_LINE_CHARS)
+        };
+        if !lines.is_empty() && line.chars().count() > room {
+            break;
+        }
+        used += line.chars().count() + 1;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return (String::new(), 0);
+    }
+    let block = format!(
+        "<{CONTEXT_BLOCK_TAG}>\n{}\n</{CONTEXT_BLOCK_TAG}>",
+        lines.join("\n")
+    );
+    (block, lines.len())
 }
 
 /// A retrieval answer: the text, where it came from, and how well it matched.
@@ -30,7 +122,7 @@ pub struct Recollection {
 impl Recollection {
     /// The hit, introduced by its provenance.
     pub fn labelled(&self) -> String {
-        format!("({}) {}", provenance(self.corpus), self.text)
+        format!("({}) {}", label(self.corpus, &self.row_id), self.text)
     }
 }
 
@@ -65,6 +157,31 @@ impl PersonalContextRetrieval {
         }
     }
 
+    /// [`Self::recall`] for a query already embedded, as a turn's memory search embeds it.
+    pub async fn recall_near(
+        &self,
+        query_vector: &[f32],
+        scope: &ProfileScope,
+        limit: usize,
+        exclusions: &Exclusions,
+    ) -> Vec<Recollection> {
+        if query_vector.is_empty() || limit == 0 || scope.excludes_everything() {
+            return vec![];
+        }
+        let model_id = self.embedder.model_id();
+        match self
+            .index
+            .search_resolved_excluding(query_vector, &model_id, scope, limit, exclusions)
+            .await
+        {
+            Ok(hits) => recollections(hits),
+            Err(e) => {
+                tracing::warn!("personal-context recall for a turn failed: {e:#}");
+                vec![]
+            }
+        }
+    }
+
     async fn try_recall(
         &self,
         query: &str,
@@ -81,23 +198,28 @@ impl PersonalContextRetrieval {
             .search_resolved(&vector, &model_id, scope, limit)
             .await?;
 
-        Ok(hits
-            .into_iter()
-            .filter(|h| !h.text.trim().is_empty())
-            .map(|h| Recollection {
-                corpus: h.corpus,
-                row_id: h.row_id,
-                score: h.score,
-                text: h.text,
-            })
-            .collect())
+        Ok(recollections(hits))
     }
+}
+
+fn recollections(hits: Vec<ResolvedHit>) -> Vec<Recollection> {
+    hits.into_iter()
+        .filter(|h| !h.text.trim().is_empty())
+        .map(|h| Recollection {
+            corpus: h.corpus,
+            row_id: h.row_id,
+            score: h.score,
+            text: h.text,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::vector_index::{CorpusHealth, IndexHealth, VectorEntry, VectorHit};
+    use crate::context::vector_index::{
+        CorpusHealth, Exclusions, IndexHealth, StaleRow, VectorEntry, VectorHit,
+    };
     use async_trait::async_trait;
 
     /// The tie-break is `Corpus`'s declaration order; reordering variants changes it.
@@ -133,6 +255,80 @@ mod tests {
         );
     }
 
+    fn recollection(corpus: Corpus, id: &str, score: f32, text: &str) -> Recollection {
+        Recollection {
+            corpus,
+            row_id: id.into(),
+            score,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_turn_takes_strong_matches_personal_details_first() {
+        let hits = vec![
+            recollection(Corpus::Message, "m", 0.91, "We booked the Mombasa train."),
+            recollection(Corpus::Digest, "d", 0.70, "Below the floor."),
+            recollection(Corpus::Personal, "p", 0.80, "Interested in trains (keen)."),
+            recollection(Corpus::Report, "r", 0.85, "Train fares compared."),
+        ];
+        let kept = for_turn(hits, 0.77, 2);
+        let ids: Vec<&str> = kept.iter().map(|h| h.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["p", "m"]);
+    }
+
+    #[test]
+    fn the_block_keeps_the_first_hit_cut_to_the_budget_and_drops_what_does_not_fit() {
+        let long = "word ".repeat(200);
+        let hits = vec![
+            recollection(Corpus::Message, "m", 0.9, &long),
+            recollection(Corpus::Idea, "i", 0.8, "A second, short hit."),
+        ];
+        let (block, held) = render_turn_block(&hits, 20);
+        assert_eq!(held, 1);
+        assert!(block.starts_with("<personal-context>\n- (said in an earlier conversation) word"));
+        assert!(block.ends_with("…\n</personal-context>"), "{block}");
+        assert!(!block.contains("second"), "{block}");
+        assert!(block.chars().count() <= 20 * 4 + 45, "{block}");
+
+        let (roomy, held) = render_turn_block(&hits, 1_000);
+        assert_eq!(held, 2);
+        assert!(roomy.contains("- (from an idea I suggested) A second, short hit."));
+        assert_eq!(render_turn_block(&[], 1_000), (String::new(), 0));
+    }
+
+    #[test]
+    fn a_personal_detail_says_which_kind_it_is() {
+        assert_eq!(label(Corpus::Personal, "saved:abc"), "something you saved");
+        assert_eq!(
+            label(Corpus::Personal, "interest:abc"),
+            "from your interests"
+        );
+        assert_eq!(label(Corpus::Personal, "profile:abc"), "from your profile");
+        assert_eq!(
+            label(Corpus::Digest, "saved:abc"),
+            provenance(Corpus::Digest)
+        );
+    }
+
+    #[test]
+    fn a_line_is_one_line() {
+        let line = turn_line(
+            &recollection(Corpus::Notice, "n", 0.9, "Rain\n  at   noon"),
+            100,
+        );
+        assert_eq!(line, "- (from a notification I sent) Rain at noon");
+
+        let cut = turn_line(
+            &recollection(Corpus::Story, "s", 0.9, "Ruto and Sifuna tied at 31%"),
+            21,
+        );
+        assert_eq!(
+            cut,
+            "- (from a news story I picked for you) Ruto and Sifuna tied…"
+        );
+    }
+
     struct StubIndex(Vec<ResolvedHit>);
 
     #[async_trait]
@@ -155,12 +351,13 @@ mod tests {
         ) -> Result<Vec<VectorHit>> {
             Ok(vec![])
         }
-        async fn search_resolved(
+        async fn search_resolved_excluding(
             &self,
             _q: &[f32],
             _m: &str,
             scope: &ProfileScope,
             _l: usize,
+            _x: &Exclusions,
         ) -> Result<Vec<ResolvedHit>> {
             // Mirrors the real index refusing a guest in SQL.
             if scope.excludes_everything() {
@@ -176,7 +373,7 @@ mod tests {
             _c: Corpus,
             _m: &str,
             _l: usize,
-        ) -> Result<Vec<(String, String)>> {
+        ) -> Result<Vec<StaleRow>> {
             Ok(vec![])
         }
         async fn prune_orphans(&self) -> Result<u64> {

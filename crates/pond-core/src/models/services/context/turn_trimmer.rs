@@ -2,7 +2,7 @@
 //! never calls a model or blocks, and tool results always travel with their turn.
 //!
 //! The real-prompt overshoot correction is load-bearing: no counter here is exact, and an
-//! image counts only its surrounding text (~250 tokens short; `MAX_HISTORY_REPLAY_IMAGES`
+//! image counts only its surrounding text (~250 tokens short; `history_image_ceiling`
 //! bounds that). Images are capped by the adapter after [`trim_history`], via
 //! `super::image_history`; do not add a second image rule here.
 

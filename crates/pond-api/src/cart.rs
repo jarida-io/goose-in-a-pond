@@ -40,7 +40,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
 
 type Caller = Option<Extension<Principal>>;
 
-fn repo(state: &AppState) -> Arc<dyn CartRepository> {
+pub(crate) fn repo(state: &AppState) -> Arc<dyn CartRepository> {
     Arc::new(SqliteCartRepository::new(state.db.system.clone()))
 }
 

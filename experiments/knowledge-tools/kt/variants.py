@@ -99,11 +99,41 @@ SEARCH_WEB = _fn(
     ["question"],
 )
 
+# E9: pictures for the user's screen, exactly as pond-mcp-server's show_pictures advertises it.
+# `P1` describes `question` in the user's words alone; `P1C` adds, to it and to search_web's, the
+# clause that asks the model to say what is in a picture the user attached (reverse image search,
+# done on the pond).
+PICTURE_CLAUSE = " For a picture they attached, say what is in it."
+SHOW_PICTURES_DESCRIPTION = (
+    "Show the user pictures from the web of what they want to see: a place, an animal, a plant, "
+    "a dish, a product. The pictures appear on their screen; you will not see them."
+)
+
+
+def _show_pictures(clause):
+    return _fn(
+        "giap-knowledge__show_pictures",
+        SHOW_PICTURES_DESCRIPTION,
+        {"question": {"description": "What the user wants to see, in their own words." + clause, "type": "string"}},
+        ["question"],
+    )
+
+
+SEARCH_WEB_C = _fn(
+    "giap-knowledge__search_web",
+    SEARCH_WEB["function"]["description"],
+    {"question": {"description": "The user's question, in their own words." + PICTURE_CLAUSE, "type": "string"}},
+    ["question"],
+)
+
 SCHEMAS = {
     "V0": V0_TOOLS, "V1": V1_TOOLS, "V2": V2_TOOLS, "V3": V3_TOOLS,
     # E6: web search beside the shipped knowledge tools, and beside the redesigned ones.
     "S0": V0_TOOLS + [SEARCH_WEB],
     "S1": V1_TOOLS + [SEARCH_WEB],
+    # E9: what ships (S0), with show_pictures, and with the picture clause on both.
+    "P1": V0_TOOLS + [SEARCH_WEB, _show_pictures("")],
+    "P1C": V0_TOOLS + [SEARCH_WEB_C, _show_pictures(PICTURE_CLAUSE)],
 }
 
 # Tool name -> knowledge family. look_up in V2 serves both, so it maps to a set.
@@ -116,7 +146,10 @@ FAMILY = {
            "giap-knowledge__search_web": {"web"}},
     "S1": {"giap-knowledge__look_up": {"read"}, "giap-knowledge__calculate": {"compute"},
            "giap-knowledge__search_web": {"web"}},
+    "P1": {"giap-knowledge__get_wikipedia_article": {"read"}, "giap-knowledge__compute_answer": {"compute"},
+           "giap-knowledge__search_web": {"web"}, "giap-knowledge__show_pictures": {"pictures"}},
 }
+FAMILY["P1C"] = FAMILY["P1"]
 
 # The tool a forced call uses, per schema and family, and how its argument is filled.
 FORCED = {

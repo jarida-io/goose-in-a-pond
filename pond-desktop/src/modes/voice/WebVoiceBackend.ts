@@ -9,11 +9,13 @@ import {
   MIC_CONSTRAINTS,
   encodeWav, calculateRms, downsampleTo16k, getAudioContext, closeAudioContext,
   playPingTone, playThinkingTone, ReplySplitter, stripMarkdown, normalizeForSpeech,
+  holdSecs,
   isWhisperArtifact, checkDismissal, getToolAnnouncement, getQuip,
   filterThinkingFull, createVadState, advanceVad, DEFAULT_VAD_CONFIG,
   registerTtsSource, clearTtsSource, stopTtsPlayback, isTtsInterrupted, resetTtsInterrupt,
   spokenClip,
 } from "./webAudioUtils";
+import type { SpeechUnit } from "./webAudioUtils";
 
 // ── Internal types ───────────────────────────────────────────────
 
@@ -37,6 +39,17 @@ const WAKE_TAIL_MS = 360;
 const WAKE_POST_TRIGGER_MS = 2000;
 const WAKE_MIN_SAMPLES = 800;
 const WAKE_CONT_SILENCE_MS = 600;
+/** The longest speech is held: past this a rate measured on one odd request is not believed. */
+const LONGEST_HOLD_SECS = 20;
+
+/** A unit sent to the pond's `/tts` and not yet played. */
+interface QueuedSpeech {
+  audio: Promise<AudioBuffer | null>;
+  chars: number;
+  answered: boolean;
+  /** Seconds of audio that came back; 0 until answered, or when there was none. */
+  secs: number;
+}
 
 // ── Class ────────────────────────────────────────────────────────
 
@@ -59,6 +72,11 @@ export class WebVoiceBackend implements VoiceBackend {
   private pipelineActive = false;
   private abortController: AbortController | null = null;
   private ttsSource: AudioBufferSourceNode | null = null;
+  /** Speech requests not yet answered: only one sent alone times the engine and not the queue. */
+  private ttsInFlight = 0;
+  /** Seconds the pond took, and seconds of speech it made, per character; 0 until measured. */
+  private synthPerChar = 0;
+  private speechPerChar = 0;
   /** Stops the working tone; null when none is playing, including when it's disabled in settings. */
   private stopThinkingFn: (() => void) | null = null;
   private recording: RecordingContext | null = null;
@@ -353,15 +371,18 @@ export class WebVoiceBackend implements VoiceBackend {
     return (!t || isWhisperArtifact(t)) ? null : t;
   }
 
-  private async fetchTtsBuffer(text: string, signal: AbortSignal, authToken?: string): Promise<AudioBuffer | null> {
+  private async fetchTtsBuffer(text: string, last: boolean, signal: AbortSignal, authToken?: string): Promise<AudioBuffer | null> {
     if (this.cancelled || signal.aborted || isTtsInterrupted()) return null;
+    const alone = this.ttsInFlight === 0;
+    this.ttsInFlight += 1;
+    const started = performance.now();
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...(await api.hostHeaders()) };
       if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
       const res = await fetch(`${this.serverUrl}/api/v1/tts`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, last }),
         signal,
       });
       if (!res.ok) { console.warn("TTS failed:", res.status); return null; }
@@ -369,10 +390,18 @@ export class WebVoiceBackend implements VoiceBackend {
       const data = await res.arrayBuffer();
       if (this.cancelled || signal.aborted || isTtsInterrupted()) return null;
       const actx = getAudioContext();
-      return await actx.decodeAudioData(data);
+      const buf = await actx.decodeAudioData(data);
+      // Only a request sent alone: one queued behind another also waited its turn at the pond.
+      if (alone && text.length > 0 && buf.duration > 0) {
+        this.synthPerChar = (performance.now() - started) / 1000 / text.length;
+        this.speechPerChar = buf.duration / text.length;
+      }
+      return buf;
     } catch (err) {
       if ((err as Error).name !== "AbortError") console.warn("TTS error:", err);
       return null;
+    } finally {
+      this.ttsInFlight -= 1;
     }
   }
 
@@ -390,8 +419,20 @@ export class WebVoiceBackend implements VoiceBackend {
     });
   }
 
+  /**
+   * Waits before `buf` plays so the units still being synthesised can follow it without a gap:
+   * a pond whose Kokoro is slower than its own speech would otherwise stop between them.
+   */
+  private async holdForWhatIsOwed(buf: AudioBuffer, behind: readonly QueuedSpeech[]): Promise<void> {
+    if (this.synthPerChar <= 0 || this.speechPerChar <= 0) return;
+    const owed = behind.map((q): [number, number] =>
+      q.answered ? [0, q.secs] : [q.chars * this.synthPerChar, q.chars * this.speechPerChar]);
+    const hold = Math.min(holdSecs(buf.duration, owed), LONGEST_HOLD_SECS);
+    if (hold > 0.05) await new Promise<void>((resolve) => setTimeout(resolve, hold * 1000));
+  }
+
   private async playTtsSentence(text: string, signal: AbortSignal, authToken?: string): Promise<void> {
-    const buf = await this.fetchTtsBuffer(text, signal, authToken);
+    const buf = await this.fetchTtsBuffer(text, true, signal, authToken);
     if (buf) {
       await this.playAudioBuffer(buf);
     }
@@ -434,30 +475,41 @@ export class WebVoiceBackend implements VoiceBackend {
     let sseBuf = "", thinkIn = false, firstSent = false;
     const splitter = new ReplySplitter();
     let ttftLogged = false;
-    const ttsQ: Promise<AudioBuffer | null>[] = [];
+    const ttsQ: QueuedSpeech[] = [];
     let playing = false;
 
-    const playNext = async (): Promise<void> => {
+    const playNext = async (fromSilence: boolean): Promise<void> => {
       if (this.cancelled || isTtsInterrupted() || !ttsQ.length) {
-        if (isTtsInterrupted()) ttsQ.length = 0; // drain remaining sentences
+        if (isTtsInterrupted()) ttsQ.length = 0; // drain what is left of the reply
         playing = false;
         return;
       }
       playing = true;
-      const nextPromise = ttsQ.shift()!;
-      const buf = await nextPromise;
+      const next = ttsQ.shift()!;
+      // A unit that had to be waited for starts from silence; one already here does not.
+      const waited = fromSilence || !next.answered;
+      const buf = await next.audio;
+      if (buf && waited) await this.holdForWhatIsOwed(buf, ttsQ);
       if (buf && !this.cancelled && !isTtsInterrupted()) {
+        if (!firstSent) { firstSent = true; onFirst(); }
+        this.onStateChange?.("speaking");
         await this.playAudioBuffer(buf);
       }
-      return playNext();
+      return playNext(false);
     };
 
-    const enqueue = (s: string): void => {
-      const cleaned = normalizeForSpeech(stripMarkdown(s));
+    const enqueue = (unit: SpeechUnit): void => {
+      const cleaned = normalizeForSpeech(stripMarkdown(unit.text));
       if (!cleaned.trim()) return;
-      if (!firstSent) { firstSent = true; onFirst(); }
-      ttsQ.push(this.fetchTtsBuffer(cleaned, controller.signal, opts.authToken));
-      if (!playing) { this.onStateChange?.("speaking"); void playNext(); }
+      const queued: QueuedSpeech = {
+        audio: this.fetchTtsBuffer(cleaned, unit.last, controller.signal, opts.authToken),
+        chars: cleaned.length,
+        answered: false,
+        secs: 0,
+      };
+      void queued.audio.then((buf) => { queued.answered = true; queued.secs = buf?.duration ?? 0; });
+      ttsQ.push(queued);
+      if (!playing) void playNext(true);
     };
 
     try {
@@ -488,15 +540,14 @@ export class WebVoiceBackend implements VoiceBackend {
             thinkIn = blk;
             if (vis) {
               this.onAgentToken?.(vis, false);
-              // Nothing playing yet: any clause mark gets the first sound out sooner.
-              for (const u of splitter.push(vis, !playing)) enqueue(u.text);
+              for (const u of splitter.push(vis)) enqueue(u);
             }
           }
 
           if (ev.type === "tool_call") {
             const tn = (ev.tool as string) ?? "tool";
-            for (const u of splitter.finish()) enqueue(u.text);
-            enqueue(getToolAnnouncement(tn));
+            for (const u of splitter.pause()) enqueue(u);
+            enqueue({ text: getToolAnnouncement(tn), last: false });
             this.onToolCall?.({ tool: tn, data: (ev.arguments as Record<string, unknown>) ?? {} });
           }
 
@@ -516,7 +567,7 @@ export class WebVoiceBackend implements VoiceBackend {
       }
     } finally { reader.releaseLock(); }
 
-    if (!this.cancelled) for (const u of splitter.finish()) enqueue(u.text);
+    if (!this.cancelled) for (const u of splitter.finish()) enqueue(u);
 
     // Wait for TTS queue to drain (exits immediately if interrupted)
     await new Promise<void>((resolve) => {

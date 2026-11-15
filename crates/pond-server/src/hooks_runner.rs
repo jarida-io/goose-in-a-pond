@@ -144,7 +144,7 @@ pub fn spawn_offer_notices(
                 .notify_member(&member, offer_notice(&reminder, due, now, tz))
                 .await;
             let outcome = match &delivery {
-                MemberDelivery::Reached(devices) => format!("reached {}", devices.len()),
+                MemberDelivery::Reached(devices) => format!("queued for {}", devices.len()),
                 MemberDelivery::NoPhone => "no_phone".to_string(),
                 MemberDelivery::Failed(why) => format!("failed: {why}"),
             };

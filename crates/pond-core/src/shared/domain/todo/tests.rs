@@ -719,6 +719,52 @@ fn todo(kind: TodoKind, ask: bool, asked: u32) -> Todo {
 }
 
 #[test]
+fn the_same_request_made_again_is_a_repeat_until_it_has_fired() {
+    let at = |raw: &str| Some(utc(raw));
+    let mut kept = todo(TodoKind::Reminder, false, 0);
+    kept.due_at = at("2026-11-09T14:00:00Z");
+    let mut again = Todo {
+        id: "t2".into(),
+        text: " Call the garage about the Fielder ".into(),
+        created_at: utc("2026-11-09T09:20:00Z"),
+        ..kept.clone()
+    };
+    assert!(kept.is_repeated_by(&again), "a turn re-run after a stop");
+
+    again.due_at = at("2026-11-09T14:11:00Z");
+    assert!(
+        !kept.is_repeated_by(&again),
+        "another time is another reminder"
+    );
+    again.due_at = kept.due_at;
+    again.created_at = utc("2026-11-09T11:00:00Z");
+    assert!(!kept.is_repeated_by(&again), "two hours on, they mean it");
+    again.created_at = utc("2026-11-09T09:20:00Z");
+    again.owner = "liz".into();
+    assert!(!kept.is_repeated_by(&again), "somebody else's");
+    again.owner = kept.owner.clone();
+
+    kept.state = TodoState::Done;
+    assert!(
+        !kept.is_repeated_by(&again),
+        "a done one is asked for afresh"
+    );
+    kept.state = TodoState::Open;
+    kept.hooks = vec![Hook::new(
+        HookSpec::Time {
+            at: utc("2026-11-09T14:00:00Z"),
+        },
+        "today at 17:00".into(),
+        utc("2026-11-09T09:00:00Z"),
+        chrono_tz::Africa::Nairobi,
+    )];
+    again.hooks = kept.hooks.clone();
+    assert!(kept.is_repeated_by(&again));
+    kept.hooks[0].last_fired_at = at("2026-11-09T14:00:00Z");
+    assert!(!kept.is_repeated_by(&again), "it already reminded them");
+}
+
+#[test]
 fn goose_asks_about_a_todo_three_times_and_only_reminds_about_a_reminder() {
     assert_eq!(
         todo(TodoKind::Todo, true, 0).push_kind(),

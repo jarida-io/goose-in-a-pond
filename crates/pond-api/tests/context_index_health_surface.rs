@@ -118,6 +118,7 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
     hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -142,6 +143,12 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         profile_repo: profiles.clone(),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Arc::new(embedder),
@@ -205,6 +212,8 @@ async fn make_app_with(wire_index: bool, embedder: ActiveEmbedder) -> Harness {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         api_port: 4000,
         weather_provider: None,
         peer_directory: Arc::new(
@@ -411,23 +420,25 @@ async fn the_coverage_number_leaves_the_process() {
     let liz = member(&h).await;
 
     // Four memories: one current, one under a stale model (needs re-embedding), two unindexed.
+    // The member's own profile is a personal-detail row too, indexed here.
     for id in ["m1", "m2", "m3", "m4"] {
         add_memory(&h, id, &liz).await;
     }
     add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
     add_vector(&h, Corpus::Memory, "m2", "some-older-embedder").await;
+    add_vector(&h, Corpus::Personal, &format!("profile:{liz}"), STUB_MODEL).await;
 
     let (status, body) = health(&h).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["indexed"], true);
     assert_eq!(body["model_id"], STUB_MODEL);
     assert_eq!(body["dims"], 4);
-    assert_eq!(body["rows"], 4);
-    assert_eq!(body["matching"], 1);
+    assert_eq!(body["rows"], 5);
+    assert_eq!(body["matching"], 2);
     assert_eq!(body["mismatched"], 1);
     assert_eq!(body["missing"], 2);
     assert_eq!(
-        body["coverage"], 0.25,
+        body["coverage"], 0.4,
         "the fraction is what a person actually reads. A pond at 2% looked fine for six phases \
          because nothing ever computed this: {body}"
     );
@@ -498,6 +509,7 @@ async fn a_corpus_excluded_by_its_predicate_is_not_reported_as_an_empty_one() {
     // A healthy corpus alongside: it is what makes the overall figure look fine.
     add_memory(&h, "m1", &liz).await;
     add_vector(&h, Corpus::Memory, "m1", STUB_MODEL).await;
+    add_vector(&h, Corpus::Personal, &format!("profile:{liz}"), STUB_MODEL).await;
 
     for id in ["s1", "s2", "s3"] {
         add_unattributed_summary(&h, id).await;
@@ -569,7 +581,8 @@ async fn rebuilding_reports_what_it_cleared_and_leaves_the_index_empty() {
     // Now "missing", which the slot re-embeds; the source row survives, so nothing is lost.
     let (_, after) = health(&h).await;
     assert_eq!(after["matching"], 0);
-    assert_eq!(after["missing"], 1);
+    // The memory, and the member's profile, which no vector ever covered.
+    assert_eq!(after["missing"], 2);
     assert_eq!(corpus_row(&after, "memory")["rows"], 1);
 
     let (_, again) = rebuild(&h).await;

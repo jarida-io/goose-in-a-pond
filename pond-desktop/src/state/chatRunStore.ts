@@ -21,9 +21,11 @@ import type {
   ContextWarning,
   ImageAttachment,
   ResearchAnswer,
+  MessageNote,
   SessionMessage,
   TurnStats,
 } from "../api/types";
+import { addReceipt, mergeStoredNote, readNote, readReceipt } from "./messageNote";
 import type { PreparedImage } from "../lib/imageAttach";
 
 // ── The message model ─────────────────────────────────────────────────────────
@@ -60,6 +62,8 @@ export interface Message extends StepsCarrier {
   images?: string[];
   /** session_messages.id; unset on a live turn until `done` backfills it, disabling its actions. */
   backendId?: string;
+  /** Where it came from, what the turn set up, an offer it makes. Receipts come only from stored or streamed data. */
+  note?: MessageNote;
   /** Agent messages only; mirrors the backend `liked` column, `null`/absent = no vote. */
   liked?: boolean | null;
 }
@@ -130,6 +134,7 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
         thinkingBlocks,
         backendId: m.id,
         liked: m.liked ?? null,
+        note: readNote(m.note),
       });
       started = [];
     } else {
@@ -139,6 +144,7 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
         role: "user",
         text: m.content,
         backendId: m.id,
+        note: readNote(m.note),
       });
     }
     // Against the bubble just pushed, so the bytes can find it by id.
@@ -488,6 +494,11 @@ async function consume(
       return;
     }
 
+    if (ev.type === "tool_result" && ev.receipt) {
+      const receipt = readReceipt(ev.receipt);
+      if (receipt) patchLastAgent((last) => ({ ...last, note: addReceipt(last.note, receipt) }));
+    }
+
     if (ev.type === "text" && (ev.content ?? ev.token)) {
       const raw = ev.content ?? ev.token ?? "";
       const [visible, newInBlock] = filterThinking(raw, state.inThinkBlock);
@@ -617,6 +628,7 @@ async function consume(
                   ...m,
                   backendId: lastAgent.id,
                   liked: lastAgent.liked ?? null,
+                  note: mergeStoredNote(m.note, readNote(lastAgent.note)),
                 };
               if (m.id === forUser && lastUser)
                 return { ...m, backendId: lastUser.id };

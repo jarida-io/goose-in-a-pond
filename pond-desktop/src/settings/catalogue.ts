@@ -164,8 +164,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "audio_input_device", label: "Microphone", description: "The microphone to listen through. Automatic uses one that works, and moves when it stops working.", control: { kind: "lookup", source: "audio-inputs", placeholder: "Automatic" }, consumer: "live" },
           { key: "audio_output_device", label: "Speaker", description: "The speaker to answer on. Automatic uses one that works, and follows headphones when they connect.", control: { kind: "lookup", source: "audio-outputs", placeholder: "Automatic" }, consumer: "live" },
-          { key: "audio_sound_test", label: "Find them by sound", description: "Play a short, soft sound to check that a speaker and a microphone hear each other. Off, the pond checks them silently.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "audio_manage_system", label: "Set up the board's sound", description: "On a Linux board like the nano, the pair the pond picks becomes every program's default, unmuted, and a level too low to be heard is turned up. A Mac's own settings are never changed.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "audio_sound_test", label: "Find them by sound", description: "Play a short, soft sound to check that a speaker and a microphone hear each other. Off, the pond checks them silently, as it always does a Bluetooth headset: the room cannot hear it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "audio_manage_system", label: "Set up the board's sound", description: "On a Linux board like the nano, the pair the pond picks becomes every program's default, unmuted, and a level too low to be heard is turned up. A Bluetooth headset the pond uses becomes the default either way, as that is the only way to reach it. A Mac's own settings are never changed.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -182,6 +182,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "voice_kws_energy_threshold", label: "Ignore sound quieter than", description: "How loud a sound must be before the pond bothers listening for its name.", control: { kind: "number", step: 0.001, min: 0, max: 1 }, consumer: "live", validate: range(0, 1) },
           { key: "voice_kws_post_trigger_silence_ms", label: "Stop after silence", description: "How long a pause means you have finished speaking.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
           { key: "voice_kws_cooldown_ms", label: "Wait before listening again", description: "How long to wait after answering before listening for its name again.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
+          { key: "lone_voice_sets_reminders", label: "A voice the Pond does not know may set reminders", description: "In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.", control: { kind: "toggle" }, consumer: "live" },
           {
             key: "voice_recording_duration_secs", label: "Recording length", description: "How long it records after you speak to it.",
             control: { kind: "number", min: 1, unit: "seconds" }, consumer: "app",
@@ -210,6 +211,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "voice_tts_quality", label: "Voice quality", description: "How much detail the voice is made with. Higher sounds smoother and takes longer.", control: { kind: "select", options: TTS_QUALITY }, consumer: "live" },
           // No `note`: notes mark unconnected controls; the Voice view's subtitle explains the tone.
           { key: "voice_thinking_tone_enabled", label: "Sound while it thinks", description: "Play a soft tone while it is thinking, so silence does not read as broken.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "voice_tts_gpu_enabled", label: "Faster long speech", description: "Make long answers and briefings on the graphics processor, where the Pond has one set up and memory to spare. Short replies are not affected.", control: { kind: "toggle" }, consumer: "live" },
           { key: "active_tts_model", label: "Speech model", ownedBy: "models", description: "The voice used for speaking. Chosen on the Models page.", control: { kind: "text", placeholder: "af_heart" }, consumer: "live" },
           { key: "voice_max_turns", label: "Steps before answering aloud", description: "How much work it may do before answering aloud. Fewer steps means a faster reply.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", proposed: true, validate: all(integer, range(0, 50)) },
         ],
@@ -399,6 +401,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Pairing",
         entries: [
           { key: "spoken_pairing_codes", label: "Say pairing codes aloud", description: "Let a phone on your home network ask the pond to read out a code for pairing. Only someone in the room can hear it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "unseen_phone_skip_days", label: "Stop notifying a phone not seen for", description: "A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
+          { key: "unseen_phone_remove_days", label: "Remove a phone not seen for", description: "A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
         ],
       },
     ],
@@ -416,12 +420,13 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "ext_schedule_enabled", label: "Schedules", description: "Let it create, pause and run things on a schedule.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_weather_enabled", label: "Weather", description: "Let it look up the weather.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_knowledge_enabled", label: "Knowledge", description: "Let it look things up in an encyclopedia.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "browser_rendering_enabled", label: "Read pages that need a browser", description: "Some pages show nothing until their scripts have run. The pond reads those with a headless browser, when it finds one and has the memory free.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_system_enabled", label: "System", description: "Let it read files and check on the device it runs on.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_device_enabled", label: "Devices", description: "Let it see and change the devices in this home.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_sensor_enabled", label: "Sensors", description: "Let it read what the sensors in this home have recorded.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_travel_enabled", label: "Travel", description: "Let it make map directions and Uber links you open on your phone.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_orchestrator_enabled", label: "Delegation", description: "Let it hand part of a job to a helper working on its own.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "ext_context_enabled", label: "Personal context", description: "Let it read the notes and documents this home has given it.", control: { kind: "toggle" }, consumer: "live", proposed: true },
+          { key: "ext_context_enabled", label: "Personal context", description: "Let it search past conversations, digests, reports, notifications, ideas and your personal details.", control: { kind: "toggle" }, consumer: "live", proposed: true },
         ],
       },
       {
@@ -489,6 +494,13 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "schedule_max_runs_per_task", label: "History per task", description: "How much history to keep for each scheduled job.", control: { kind: "number", min: 0, max: 10000 }, consumer: "live", validate: all(integer, range(0, 10000)) },
           { key: "schedule_result_notify", label: "Tell me when a task finishes", description: "Tell your phones when a scheduled job or rule finishes.", control: { kind: "toggle" }, consumer: "live" },
           { key: "system_notices_enabled", label: "Tell me when something needs attention", description: "Tell your phones about downloads, parts that did not start, a full disk and remote access. A removed device is always told.", control: { kind: "toggle" }, consumer: "live" },
+        ],
+      },
+      {
+        name: "Notices",
+        entries: [
+          { key: "speak_unfetched_reminders", label: "Say a reminder no phone picked up", description: "When no phone fetches a reminder within five minutes, the Pond says it once in the room, outside quiet hours.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "notices_wait_in_quiet_hours", label: "Hold notices in quiet hours", description: "In quiet hours, alerts and reminders set for that time still arrive; everything else waits for one notice when quiet hours end.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {

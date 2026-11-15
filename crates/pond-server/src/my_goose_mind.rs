@@ -1,6 +1,7 @@
 //! The background thinking behind My Goose, on the inference lane: each member's portrait (and
-//! the pictures of their interests), and the ideas researched for them. Both acquire the lane like
-//! every idle job and yield to a returning member between model calls.
+//! the pictures of their interests), the ideas researched for them, and the filing of older
+//! memories into their profiles. Each acquires the lane like every idle job and yields to a
+//! returning member between model calls.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,20 +10,31 @@ use chrono::Utc;
 
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::shared::domain::web_watch::WatchChange;
+use pond_core::shared::ports::web_watch::{
+    StoredChange, WatchNotifier, WebWatch, WebWatchRepository,
+};
+use pond_core::shared::services::web_watch_judge as judge;
 use pond_core::user_data::domain::interest::{topic_key, OFFERED_AT};
-use pond_core::user_data::domain::memory::MemorySegment;
+use pond_core::user_data::domain::memory::{
+    MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
+};
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::ideas::IdeaRepository;
 use pond_core::user_data::ports::interests::InterestRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::ports::screenshot_notes::ScreenshotNoteRepository;
 use pond_core::user_data::ports::session_storage::SessionStorage;
+use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::services::consolidation_schedule as sched;
 use pond_core::user_data::services::idea_generation::{
-    self as ideas, IdeaSeed, ReadPage, SeedFrom,
+    self as ideas, IdeaProfile, IdeaSeed, ReadPage, SeedFrom,
 };
 use pond_core::user_data::services::inference_lane::LaneJob;
 use pond_core::user_data::services::member_portrait as portrait;
+use pond_core::user_data::services::memory_resort::{self as resort, Verdict};
+use pond_core::user_data::services::screenshot_notes::{self as shots, ScreenshotNote, Seen};
 
 use crate::inference_lane_runner::{Cadence, InferenceLane, LaneSlot};
 
@@ -33,6 +45,12 @@ const IDEAS_POLL: Duration = Duration::from_secs(15 * 60);
 const PICTURES_PER_PASS: usize = 5;
 /// Search results tried per seed for readable pages.
 const HITS_TRIED: usize = 6;
+/// Memories read for the facts an idea has to fit.
+const PROFILE_ROWS: usize = 400;
+/// Ideas one run writes for a member at most.
+const IDEAS_PER_RUN: usize = 3;
+/// How often the screenshot job looks for pictures when nothing woke it.
+const SHOTS_POLL: Duration = Duration::from_secs(5 * 60);
 
 type Provider = Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>;
 
@@ -40,6 +58,12 @@ fn interest_repository(db: &pond_infra::db::Database) -> Arc<dyn InterestReposit
     Arc::new(pond_infra::sqlite_interests::SqliteInterestRepository::new(
         db.system.clone(),
     ))
+}
+
+fn screenshot_notes(db: &pond_infra::db::Database) -> Arc<dyn ScreenshotNoteRepository> {
+    Arc::new(
+        pond_infra::sqlite_screenshot_notes::SqliteScreenshotNoteRepository::new(db.system.clone()),
+    )
 }
 
 fn idea_repository(db: &pond_infra::db::Database) -> Arc<dyn IdeaRepository> {
@@ -58,6 +82,7 @@ pub struct MindDeps {
     pub sessions: Arc<dyn SessionStorage>,
     pub provider: Provider,
     pub last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
+    pub settings: Arc<dyn SettingsRepository + Send + Sync>,
 }
 
 impl MindDeps {
@@ -414,17 +439,64 @@ async fn think_of_ideas(
         .unwrap_or_default();
     let rows = interests.list(member).await.unwrap_or_default();
     let known = interests.portrait(member).await.ok().flatten();
-    let used = ideas_repo
+    let mut used = ideas_repo
         .topics_since(member, rest_since)
         .await
         .unwrap_or_default();
-    let seeds = ideas::pick_seeds(&topic_map, &rows, known.as_ref(), &used);
+    // "Not for me" is heard: what they turned down stays away for longer than what they saw.
+    used.extend(
+        ideas_repo
+            .declined_since(member, now - ideas::DECLINED_TOPIC_REST)
+            .await
+            .unwrap_or_default(),
+    );
+    let profile = idea_profile(deps, member).await;
+    let mut rested_kinds = ideas_repo
+        .topics_since(member, now - ideas::KIND_REST)
+        .await
+        .unwrap_or_default();
+    rested_kinds.extend(
+        ideas_repo
+            .declined_since(member, now - ideas::DECLINED_KIND_REST)
+            .await
+            .unwrap_or_default(),
+    );
+    // The household's own day decides whose turn it is among the everyday kinds.
+    let today = ideas::local_day(now, &profile.1);
+    let profile = profile.0;
+    let mut seeds: Vec<IdeaSeed> = ideas::life_seed(&profile, &rested_kinds, today)
+        .into_iter()
+        .collect();
+    // One idea a run may build on a screenshot, for a member who turned that on.
+    let notes = screenshot_notes(&deps.db);
+    let opted_in = deps
+        .profiles
+        .get(member)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|p| shots::is_on(&p.preferences));
+    if opted_in {
+        let fresh = notes
+            .unused_since(member, now - shots::SEED_FOR)
+            .await
+            .unwrap_or_default();
+        if let Some(note) = fresh.first() {
+            seeds.push(ideas::screenshot_seed(&note.id, &note.note));
+        }
+    }
+    let room = IDEAS_PER_RUN.saturating_sub(seeds.len());
+    seeds.extend(
+        ideas::pick_seeds(&topic_map, &rows, known.as_ref(), &used)
+            .into_iter()
+            .take(room),
+    );
     let mut made = 0;
     for seed in seeds {
         if slot.is_cancelled() {
             break;
         }
-        match idea_from(deps, slot, member, name, known.as_ref(), &seed).await {
+        match idea_from(deps, slot, member, name, &profile, known.as_ref(), &seed).await {
             Ok(Some(idea)) => {
                 if let Err(e) = ideas_repo.add(&idea).await {
                     tracing::warn!(error = %e, "[my-goose] an idea could not be stored");
@@ -440,11 +512,39 @@ async fn think_of_ideas(
             }
         }
         // Used whether or not an idea came of it, so the next run tries another topic.
-        if let SeedFrom::TopicMap(id) = &seed.from {
-            let _ = ideas_repo.mark_seed_used(member, id, Utc::now()).await;
+        match &seed.from {
+            SeedFrom::TopicMap(id) => {
+                let _ = ideas_repo.mark_seed_used(member, id, Utc::now()).await;
+            }
+            SeedFrom::Screenshot(id) => {
+                let _ = notes.mark_used(member, id, Utc::now()).await;
+            }
+            _ => {}
         }
     }
     made
+}
+
+/// What an idea has to fit: the member's live profile facts and where the household is, with
+/// the household's time zone.
+async fn idea_profile(deps: &MindDeps, member: &str) -> (IdeaProfile, String) {
+    let now = Utc::now();
+    let facts = deps
+        .memories
+        .search_recent(&ProfileScope::Owner(member.to_string()), PROFILE_ROWS)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.is_shown(now))
+        .filter_map(|row| Some((row.about?, row.content)))
+        .collect();
+    let settings = deps.settings.get().await.ok();
+    let place = settings
+        .as_ref()
+        .map(|s| s.weather_location_name.trim().to_string())
+        .filter(|place| !place.is_empty());
+    let zone = settings.map(|s| s.timezone).unwrap_or_default();
+    (IdeaProfile { place, facts }, zone)
 }
 
 /// One seed to one idea. `Err` when searching itself is unavailable.
@@ -453,6 +553,7 @@ async fn idea_from(
     slot: &LaneSlot<'_>,
     member: &str,
     name: &str,
+    profile: &IdeaProfile,
     known: Option<&pond_core::user_data::domain::interest::MemberPortrait>,
     seed: &IdeaSeed,
 ) -> Result<Option<pond_core::user_data::domain::idea::Idea>, String> {
@@ -462,7 +563,7 @@ async fn idea_from(
             .complete(
                 slot,
                 &ideas::render_query_system(name),
-                ideas::build_query_message(known, seed),
+                ideas::build_query_message(name, profile, known, seed),
             )
             .await
             .and_then(|reply| ideas::parse_query(&reply)),
@@ -498,13 +599,20 @@ async fn idea_from(
         .complete(
             slot,
             &ideas::render_idea_system(name),
-            ideas::build_idea_message(known, seed, &pages),
+            ideas::build_idea_message(name, profile, known, seed, &pages),
         )
         .await
     else {
         return Ok(None);
     };
-    let Some(mut idea) = ideas::parse_idea(&reply, member, seed, &pages, Utc::now()) else {
+    let Some(mut idea) = ideas::parse_idea(&reply, member, profile, seed, &pages, Utc::now())
+    else {
+        tracing::info!(
+            target: "giap::trace",
+            kind = "idea_not_kept",
+            idea_kind = seed.kind.as_str(),
+            "a seed's pages gave no idea that fits the member"
+        );
         return Ok(None);
     };
     if let Some(images) = pond_core::shared::services::report_images::installed() {
@@ -517,4 +625,523 @@ async fn idea_from(
             .map(|image| pond_core::user_data::domain::interest::picture_path(&image.key));
     }
     Ok(Some(idea))
+}
+
+// ── Screenshots ────────────────────────────────────────────────────────
+
+/// Reads each screenshot a member sent for one line about what it shows, then drops it. The
+/// pictures wait in memory only; a member who has since turned this off has theirs dropped
+/// unread.
+pub fn spawn_screenshot_notes_job(deps: MindDeps) {
+    let wake = deps.lane.claim(LaneJob::ScreenshotNotes);
+    let started_at = std::time::Instant::now();
+    let started_at_utc = Utc::now();
+    tokio::spawn(async move {
+        let notes = screenshot_notes(&deps.db);
+        loop {
+            let tick = crate::inference_lane_runner::wait_for_tick(SHOTS_POLL, &wake).await;
+            if shots::pending().is_empty() {
+                continue;
+            }
+            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
+            let cadence = Cadence::new(
+                SHOTS_POLL,
+                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
+                false,
+            );
+            let provider = deps.provider.read().await.clone();
+            let reads_pictures = provider.as_ref().is_some_and(|p| p.capabilities().vision);
+            let Some(slot) = deps
+                .lane
+                .acquire(
+                    LaneJob::ScreenshotNotes,
+                    reads_pictures,
+                    cadence,
+                    tick.waives(),
+                    saw_activity,
+                    idle_for,
+                )
+                .await
+            else {
+                continue;
+            };
+            while !slot.is_cancelled() {
+                let Some(shot) = shots::pending().next() else {
+                    break;
+                };
+                let profile = deps.profiles.get(&shot.member).await.ok().flatten();
+                let Some(profile) = profile.filter(|p| shots::is_on(&p.preferences)) else {
+                    continue;
+                };
+                let started = std::time::Instant::now();
+                let Some(provider) = provider.clone() else {
+                    break;
+                };
+                let message =
+                    ChatMessage::user_with_images(shots::USER_MESSAGE, vec![shot.image.clone()]);
+                let system = shots::render_system(&profile.display_name);
+                let reply = tokio::select! {
+                    _ = slot.cancelled() => None,
+                    reply = provider.complete(&system, vec![message]) => {
+                        reply.ok().map(|r| r.content)
+                    }
+                };
+                let Some(reply) = reply else {
+                    // The member came back, or the call failed: once more later, then let go.
+                    let kept = shots::pending().put_back(shot);
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "screenshot_seen",
+                        outcome = if kept { "later" } else { "let_go" },
+                        "a screenshot was not read"
+                    );
+                    break;
+                };
+                let outcome = match shots::parse_reply(&reply) {
+                    Seen::Note(note) => {
+                        let kept = notes
+                            .add(&ScreenshotNote {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                profile_id: shot.member.clone(),
+                                note,
+                                taken_at: shot.taken_at,
+                                created_at: Utc::now(),
+                                used_at: None,
+                            })
+                            .await;
+                        match kept {
+                            Ok(true) => "note",
+                            Ok(false) => "repeat",
+                            Err(e) => {
+                                tracing::warn!(error = %e, "[my-goose] a screenshot note could not be kept");
+                                "failed"
+                            }
+                        }
+                    }
+                    Seen::Skipped(_) => "skipped",
+                    Seen::Unusable => "unusable",
+                };
+                // The line is never logged: only what became of the screenshot.
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "screenshot_seen",
+                    outcome,
+                    ms = started.elapsed().as_millis() as u64,
+                    "a screenshot was read and dropped"
+                );
+            }
+            drop(slot);
+        }
+    });
+}
+
+// ── The watch judge ────────────────────────────────────────────────────
+
+/// Held changes read at once: enough for every watch a pass could have checked.
+const HELD_LOOKAHEAD: usize = judge::CHANGES_PER_CALL * 8;
+
+/// Release `changes` of one watch: `told` are pushed to its owner as one notice, the rest stay
+/// in its history untold.
+async fn release_watch_changes(
+    watches: &dyn WebWatchRepository,
+    notifier: &dyn WatchNotifier,
+    watch: &WebWatch,
+    changes: &[StoredChange],
+    told: &[usize],
+) {
+    let ids: Vec<i64> = changes.iter().map(|c| c.id).collect();
+    let told_ids: Vec<i64> = told.iter().filter_map(|i| ids.get(*i).copied()).collect();
+    if let Err(e) = watches.judged(&ids, &told_ids).await {
+        tracing::warn!(error = %e, "[watch judge] a judgement could not be kept");
+        return;
+    }
+    let lines: Vec<&WatchChange> = told
+        .iter()
+        .filter_map(|i| changes.get(*i).map(|c| &c.change))
+        .collect();
+    if let Some(notice) = judge::notice(watch, &lines) {
+        if let Err(e) = notifier.notify(notice).await {
+            tracing::warn!(error = %e, "[watch judge] the owner could not be told");
+        }
+    }
+}
+
+/// Asks the model which of a watch's held changes are what its owner asked for, tells them of
+/// those and lets the rest go. A change no model could judge in time is told anyway.
+pub fn spawn_watch_judge_job(
+    deps: MindDeps,
+    watches: Arc<dyn WebWatchRepository>,
+    notifier: Arc<dyn WatchNotifier>,
+) {
+    let wake = deps.lane.claim(LaneJob::WatchJudge);
+    let started_at = std::time::Instant::now();
+    let started_at_utc = Utc::now();
+    tokio::spawn(async move {
+        loop {
+            let tick = crate::inference_lane_runner::wait_for_tick(judge::JUDGE_POLL, &wake).await;
+            let held = watches.held(HELD_LOOKAHEAD).await.unwrap_or_default();
+            if held.is_empty() {
+                continue;
+            }
+            let mut by_watch: std::collections::BTreeMap<String, Vec<StoredChange>> =
+                std::collections::BTreeMap::new();
+            for change in held {
+                by_watch
+                    .entry(change.watch_id.clone())
+                    .or_default()
+                    .push(change);
+            }
+            let now = Utc::now();
+            let mut waiting: Vec<(WebWatch, Vec<StoredChange>)> = Vec::new();
+            for (watch_id, changes) in by_watch {
+                let Some(watch) = watches.get(&watch_id).await.ok().flatten() else {
+                    continue;
+                };
+                let (late, rest): (Vec<StoredChange>, Vec<StoredChange>) = changes
+                    .into_iter()
+                    .partition(|change| judge::waited_out(change, now));
+                if !late.is_empty() {
+                    let all: Vec<usize> = (0..late.len()).collect();
+                    release_watch_changes(watches.as_ref(), notifier.as_ref(), &watch, &late, &all)
+                        .await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "watch_changes_judged",
+                        changes = late.len(),
+                        told = late.len(),
+                        by = "wait",
+                        "held changes were told unjudged: no model was free in time"
+                    );
+                }
+                if !rest.is_empty() {
+                    waiting.push((watch, rest));
+                }
+            }
+            if waiting.is_empty() {
+                continue;
+            }
+            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
+            let cadence = Cadence::new(
+                judge::JUDGE_POLL,
+                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
+                false,
+            );
+            let enabled = deps.provider.read().await.is_some();
+            let Some(slot) = deps
+                .lane
+                .acquire(
+                    LaneJob::WatchJudge,
+                    enabled,
+                    cadence,
+                    tick.waives(),
+                    saw_activity,
+                    idle_for,
+                )
+                .await
+            else {
+                continue;
+            };
+            'watches: for (watch, changes) in waiting {
+                let name = deps
+                    .profiles
+                    .get(&watch.owner)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.display_name.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "the person".to_string());
+                for batch in changes.chunks(judge::CHANGES_PER_CALL) {
+                    if slot.is_cancelled() {
+                        break 'watches;
+                    }
+                    let started = std::time::Instant::now();
+                    let shown: Vec<WatchChange> = batch.iter().map(|c| c.change.clone()).collect();
+                    let Some(reply) = deps
+                        .complete(
+                            &slot,
+                            &judge::render_system(&name),
+                            judge::build_user_message(&watch, &shown),
+                        )
+                        .await
+                    else {
+                        break 'watches;
+                    };
+                    // An unusable reply leaves them held, to be asked about again.
+                    let Some(told) = judge::parse_reply(&reply, batch.len()) else {
+                        continue;
+                    };
+                    release_watch_changes(
+                        watches.as_ref(),
+                        notifier.as_ref(),
+                        &watch,
+                        batch,
+                        &told,
+                    )
+                    .await;
+                    // Counts only: what a member watches stays out of the log.
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "watch_changes_judged",
+                        changes = batch.len(),
+                        told = told.len(),
+                        by = "model",
+                        ms = started.elapsed().as_millis() as u64,
+                        "a watch's changes were sorted by what its owner asked for"
+                    );
+                }
+            }
+            drop(slot);
+        }
+    });
+}
+
+// ── The re-sort ────────────────────────────────────────────────────────
+
+/// Unfiled rows read at once, to find the next member's batch among them.
+const RESORT_LOOKAHEAD: usize = resort::NOTES_PER_CALL * 4;
+
+/// Files memories kept before the profile under what each is about, a batch a model call, for
+/// as long as the house stays quiet. It has nothing to do once every older row is filed.
+pub fn spawn_memory_resort_job(deps: MindDeps) {
+    let wake = deps.lane.claim(LaneJob::MemoryResort);
+    let started_at = std::time::Instant::now();
+    let started_at_utc = Utc::now();
+    tokio::spawn(async move {
+        loop {
+            let tick =
+                crate::inference_lane_runner::wait_for_tick(resort::RESORT_POLL, &wake).await;
+            if deps
+                .memories
+                .unfiled(1)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                continue;
+            }
+            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
+            let cadence = Cadence::new(
+                resort::RESORT_POLL,
+                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
+                false,
+            );
+            let enabled = deps.provider.read().await.is_some();
+            let Some(slot) = deps
+                .lane
+                .acquire(
+                    LaneJob::MemoryResort,
+                    enabled,
+                    cadence,
+                    tick.waives(),
+                    saw_activity,
+                    idle_for,
+                )
+                .await
+            else {
+                continue;
+            };
+            while !slot.is_cancelled() {
+                let pending = deps
+                    .memories
+                    .unfiled(RESORT_LOOKAHEAD)
+                    .await
+                    .unwrap_or_default();
+                let Some(owner) = pending.first().map(|row| row.profile_id.clone()) else {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "memory_resort_done",
+                        "every older memory is filed or archived"
+                    );
+                    break;
+                };
+                let batch: Vec<MemoryFragment> = pending
+                    .into_iter()
+                    .filter(|row| row.profile_id == owner)
+                    .take(resort::NOTES_PER_CALL)
+                    .collect();
+                if !resort_batch(&deps, &slot, owner.as_deref(), &batch).await {
+                    break;
+                }
+            }
+            drop(slot);
+        }
+    });
+}
+
+/// Replace a note that runs several facts together with its sentences, unfiled, and archive
+/// the note. Archived even when no sentence survives, so it is not unpacked again.
+async fn unpack_paragraph(deps: &MindDeps, row: &MemoryFragment, name: Option<&str>) {
+    let mut pieces = 0usize;
+    for sentence in resort::unpacked(&row.content, name) {
+        let mut piece = MemoryFragment::from_extraction(
+            uuid::Uuid::new_v4().to_string(),
+            None,
+            sentence,
+            row.segment.clone().unwrap_or(MemorySegment::Knowledge),
+            row.importance.unwrap_or(0.5),
+            None,
+        );
+        piece.profile_id = row.profile_id.clone();
+        let id = piece.id.clone();
+        if let Err(e) = deps.memories.add(piece).await {
+            tracing::warn!(error = %e, "[re-sort] a sentence of a paragraph could not be kept");
+            continue;
+        }
+        pieces += 1;
+        let _ = deps
+            .memories
+            .log_event(
+                MemoryEventKind::Consolidated,
+                &id,
+                None,
+                Some(&format!(
+                    "{{\"resort\":\"unpacked\",\"from\":\"{}\"}}",
+                    row.id
+                )),
+            )
+            .await;
+    }
+    if let Err(e) = deps
+        .memories
+        .update_lifecycle(&row.id, MemoryLifecycle::Archived)
+        .await
+    {
+        tracing::warn!(error = %e, "[re-sort] a paragraph could not be archived");
+        return;
+    }
+    let _ = deps
+        .memories
+        .log_event(
+            MemoryEventKind::Archived,
+            &row.id,
+            None,
+            Some(&format!("{{\"resort\":\"unpacked\",\"into\":{pieces}}}")),
+        )
+        .await;
+    tracing::info!(
+        target: "giap::trace",
+        kind = "memory_paragraph_unpacked",
+        sentences = pieces,
+        "a memory that ran several facts together was split into its sentences"
+    );
+}
+
+/// File one member's batch. `false` when the model gave no reply, so the pass stops instead of
+/// counting an attempt against rows it never judged.
+async fn resort_batch(
+    deps: &MindDeps,
+    slot: &LaneSlot<'_>,
+    owner: Option<&str>,
+    batch: &[MemoryFragment],
+) -> bool {
+    let (name, aliases) = match owner {
+        Some(id) => {
+            let profile = deps.profiles.get(id).await.ok().flatten();
+            let mut names: Vec<String> = profile
+                .iter()
+                .flat_map(|p| {
+                    [
+                        Some(p.display_name.trim().to_string()),
+                        p.preferences
+                            .get("preferred_name")
+                            .map(|n| n.trim().to_string()),
+                    ]
+                })
+                .flatten()
+                .filter(|n| !n.is_empty())
+                .collect();
+            names.dedup();
+            let name = names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "the user".to_string());
+            (name, names)
+        }
+        None => ("the household".to_string(), Vec::new()),
+    };
+    let started = std::time::Instant::now();
+    // A paragraph is not asked about: its sentences come round as notes of their own.
+    let (paragraphs, batch): (Vec<&MemoryFragment>, Vec<&MemoryFragment>) = batch
+        .iter()
+        .partition(|row| resort::is_a_paragraph(&row.content));
+    for row in &paragraphs {
+        unpack_paragraph(deps, row, owner.map(|_| name.as_str())).await;
+    }
+    if batch.is_empty() {
+        return true;
+    }
+    let batch: Vec<MemoryFragment> = batch.into_iter().cloned().collect();
+    let batch = batch.as_slice();
+    let Some(reply) = deps
+        .complete(
+            slot,
+            &resort::render_system(&name),
+            resort::build_user_message(batch),
+        )
+        .await
+    else {
+        return false;
+    };
+    let said = resort::parse_reply(&reply, batch.len());
+    let (mut filed, mut archived, mut unanswered) = (0usize, 0usize, 0usize);
+    for (row, said) in batch.iter().zip(said) {
+        match resort::verdict(row, said, &aliases) {
+            Verdict::File(about) => {
+                if let Err(e) = deps.memories.file_row(&row.id, about).await {
+                    tracing::warn!(error = %e, "[re-sort] a memory could not be filed");
+                    continue;
+                }
+                filed += 1;
+                let _ = deps
+                    .memories
+                    .log_event(
+                        MemoryEventKind::Consolidated,
+                        &row.id,
+                        None,
+                        Some(&format!(
+                            "{{\"resort\":\"filed\",\"about\":\"{}\"}}",
+                            about.as_str()
+                        )),
+                    )
+                    .await;
+            }
+            Verdict::Archive(reason) => {
+                if let Err(e) = deps
+                    .memories
+                    .update_lifecycle(&row.id, MemoryLifecycle::Archived)
+                    .await
+                {
+                    tracing::warn!(error = %e, "[re-sort] a memory could not be archived");
+                    continue;
+                }
+                archived += 1;
+                let _ = deps
+                    .memories
+                    .log_event(
+                        MemoryEventKind::Archived,
+                        &row.id,
+                        None,
+                        Some(&format!("{{\"resort\":\"{reason}\"}}")),
+                    )
+                    .await;
+            }
+            Verdict::Unanswered => {
+                unanswered += 1;
+                let _ = deps.memories.note_unfiled_attempt(&row.id).await;
+            }
+        }
+    }
+    // Counts only: a memory's words never reach the on-disk log.
+    tracing::info!(
+        target: "giap::trace",
+        kind = "memory_resort_batch",
+        notes = batch.len(),
+        filed,
+        archived,
+        unanswered,
+        ms = started.elapsed().as_millis() as u64,
+        "older memories were filed into a profile"
+    );
+    true
 }

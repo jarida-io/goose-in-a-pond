@@ -13,4 +13,13 @@ pub trait SecretRepository: Send + Sync {
     async fn list_keys(&self) -> Result<Vec<String>>;
     /// Check if a secret exists without retrieving its value.
     async fn has(&self, key: &str) -> Result<bool>;
+
+    /// Delete every stored secret (factory reset). Default loops `list_keys`/`delete`; an adapter
+    /// backed by a single file should override this with one rewrite instead of one per key.
+    async fn clear_all(&self) -> Result<()> {
+        for key in self.list_keys().await? {
+            self.delete(&key).await?;
+        }
+        Ok(())
+    }
 }

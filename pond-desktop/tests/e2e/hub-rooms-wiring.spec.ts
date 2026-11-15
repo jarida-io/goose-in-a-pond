@@ -129,7 +129,7 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
 
     await expect(page.getByText("Jetson Orin Nano")).toBeVisible({ timeout: 5_000 });
 
-    const toggles = page.locator(".htoggle");
+    const toggles = page.getByRole("switch");
     await toggles.first().click();
     await page.waitForTimeout(500);
 

@@ -5,13 +5,20 @@ use async_trait::async_trait;
 use pond_adapters_weather::WeatherProvider;
 use pond_core::mcp::ports::tools::tool_dispatcher::{ToolCallResult, ToolDispatcher};
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::user_data::domain::profile::{ProfileScope, Role};
 use pond_core::user_data::ports::device_control::DeviceControlPort;
 use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::user_data::ports::guest_device_access::GuestDeviceAccess;
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
-use rmcp::model::{CallToolRequestParams, CallToolResult as RmcpCallToolResult, RequestId};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult as RmcpCallToolResult, RequestId,
+};
 use rmcp::service::{Peer, RequestContext, RunningService};
 use rmcp::{RoleServer, ServerHandler};
 use std::sync::Arc;
@@ -86,9 +93,14 @@ impl<T: ServerHandler + Send + Sync> McpServerBridge for T {
         params: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<RmcpCallToolResult> {
-        ServerHandler::call_tool(self, params, ctx)
-            .await
-            .map_err(|e| anyhow!("MCP call_tool failed: {}", e))
+        match ServerHandler::call_tool(self, params, ctx).await {
+            Ok(CallToolResponse::Complete(result)) => Ok(result),
+            // GIAP's builtin servers neither ask the client for input nor create tasks.
+            Ok(_) => Err(anyhow!(
+                "MCP call_tool returned an input-required or task response, which builtin servers do not use"
+            )),
+            Err(e) => Err(anyhow!("MCP call_tool failed: {}", e)),
+        }
     }
 }
 
@@ -99,6 +111,8 @@ pub struct McpToolDispatcher {
     peer: Peer<RoleServer>,
     /// Keeps the peer-providing service alive.
     _peer_service: RunningService<RoleServer, SystemMcpServer>,
+    /// Resolves a scope's role once per call, so tool handlers don't each need their own lookup.
+    profile_repo: Arc<dyn ProfileRepository>,
 }
 
 impl McpToolDispatcher {
@@ -110,9 +124,13 @@ impl McpToolDispatcher {
         scheduler: Option<Arc<dyn SchedulerPort>>,
         settings_repo: Arc<dyn SettingsRepository>,
         device_registry: Arc<dyn DeviceRegistry>,
+        room_registry: Arc<dyn RoomRegistry>,
         skill_repo: Arc<dyn UserSkillRepository>,
         embedding_provider: Option<Arc<dyn EmbeddingProvider + Send + Sync>>,
         device_control: Arc<dyn DeviceControlPort>,
+        guest_room_access: Arc<dyn GuestRoomAccess>,
+        guest_device_access: Arc<dyn GuestDeviceAccess>,
+        profile_repo: Arc<dyn ProfileRepository>,
     ) -> Self {
         let http_client = crate::build_http_client();
 
@@ -121,9 +139,21 @@ impl McpToolDispatcher {
         let memory_server = MemoryMcpServer::new(memory_repo, embedding_provider);
         let schedule_server = scheduler.map(|s| ScheduleMcpServer::new(s, settings_repo.clone()));
         let system_server = SystemMcpServer::new();
-        let device_server =
-            DeviceMcpServer::new(device_registry.clone(), settings_repo.clone(), skill_repo);
-        let device_control_server = DeviceControlMcpServer::new(device_control, device_registry);
+        let device_server = DeviceMcpServer::new(
+            device_registry.clone(),
+            room_registry,
+            guest_room_access.clone(),
+            settings_repo.clone(),
+            skill_repo,
+            profile_repo.clone(),
+        );
+        let device_control_server = DeviceControlMcpServer::new(
+            device_control,
+            device_registry,
+            guest_room_access,
+            guest_device_access,
+            profile_repo.clone(),
+        );
         // rmcp mints a `Peer` only from a running service; the dep-free system server backs it.
         let (_client_stream, server_stream) = tokio::io::duplex(64);
         let running = rmcp::service::serve_directly(SystemMcpServer::new(), server_stream, None);
@@ -167,6 +197,24 @@ impl McpToolDispatcher {
             servers,
             peer,
             _peer_service: running,
+            profile_repo,
+        }
+    }
+
+    /// Maps an already-resolved scope to a role, the same mapping `pond-api`'s
+    /// `resolve_role` uses: `Guest` (an unidentified voice) has no profile, hence no role;
+    /// `Household` (a sole-member pond) is trusted as the owner.
+    async fn resolve_role(&self, scope: &ProfileScope) -> Option<Role> {
+        match scope {
+            ProfileScope::Owner(id) => self
+                .profile_repo
+                .get(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.role),
+            ProfileScope::Household => Some(Role::Owner),
+            ProfileScope::Guest => None,
         }
     }
 
@@ -182,6 +230,7 @@ impl ToolDispatcher for McpToolDispatcher {
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
     ) -> Result<ToolCallResult> {
         let (server_prefix, bare_name) = parse_tool_name(tool_name)?;
 
@@ -209,7 +258,13 @@ impl ToolDispatcher for McpToolDispatcher {
             CallToolRequestParams::new(bare_name.to_string())
         };
 
-        let ctx = self.make_context();
+        let mut ctx = self.make_context();
+        // Carried via the type-keyed extensions bag so a server's `#[tool]` methods can read the
+        // caller's scope without widening rmcp's own `RequestContext` or every tool's signature.
+        ctx.extensions.insert(scope.clone());
+        if let Some(role) = self.resolve_role(scope).await {
+            ctx.extensions.insert(role);
+        }
         match server.server.call_tool_bridged(params, ctx).await {
             Ok(rmcp_result) => Ok(convert_rmcp_result(rmcp_result)),
             Err(e) => Ok(ToolCallResult {
@@ -324,11 +379,11 @@ fn _tool_param_schema_removed(tool_name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Human-readable name for the task." },
-                "cron": { "type": "string", "description": "6-field cron: sec min hr dom mon dow. E.g. '0 0 8 * * *' for daily 8 AM." },
-                "prompt": { "type": "string", "description": "The prompt to run on each fire." },
-                "timezone": { "type": "string", "description": "IANA timezone (e.g. 'Africa/Nairobi')." }
+                "when": { "type": "string", "description": "How often and at what time, as a person says it: 'every weekday at 7am', 'every 2 hours'." },
+                "prompt": { "type": "string", "description": "What Goose should do each time." },
+                "timezone": { "type": "string", "description": "A city or zone, only for another place's time." }
             },
-            "required": ["name", "cron", "prompt"]
+            "required": ["when", "prompt"]
         }),
         "giap-schedule__list_schedules" => json!({ "type": "object", "properties": {} }),
         "giap-schedule__update_schedule" => json!({

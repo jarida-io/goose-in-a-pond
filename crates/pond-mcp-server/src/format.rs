@@ -65,9 +65,69 @@ pub fn format_no_results(what: &str, alternatives: &[&str]) -> String {
     )
 }
 
+/// A tool's words for the model, with the receipt of what it set or did not set beside them:
+/// the turn keeps the receipt, and a failed set is said to the person whatever the model writes.
+pub fn with_receipt(
+    text: impl Into<String>,
+    receipt: pond_core::user_data::domain::message_note::Receipt,
+) -> rmcp::model::CallToolResult {
+    let mut result =
+        rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text.into())]);
+    result.meta = Some(rmcp::model::MetaObject(
+        pond_core::mcp::domain::tool_outcome::with_outcome(None, &receipt),
+    ));
+    result
+}
+
+/// The screen's `[[[mcp-ui:KIND:{...}]]]` card, annotated for the user alone: goose drops it before
+/// the provider, so the model reads each fact once, in the result's words.
+pub fn card(kind: &str, data: &serde_json::Value) -> rmcp::model::ContentBlock {
+    use rmcp::model::{Annotations, Role, TextContent};
+    // `]]]` would end the marker early; a space between brackets keeps the JSON valid.
+    let json = data.to_string().replace("]]]", "] ] ]");
+    rmcp::model::ContentBlock::Text(
+        TextContent::new(format!("[[[mcp-ui:{kind}:{json}]]]"))
+            .with_annotations(Annotations::default().with_audience(vec![Role::User])),
+    )
+}
+
+/// A success whose `text` is for the model and whose card is for the screen.
+pub fn with_card(
+    text: impl Into<String>,
+    kind: &str,
+    data: &serde_json::Value,
+) -> rmcp::model::CallToolResult {
+    rmcp::model::CallToolResult::success(vec![
+        rmcp::model::ContentBlock::text(text.into()),
+        card(kind, data),
+    ])
+}
+
+/// The place an IANA zone is named for, as said aloud: "Africa/Nairobi" is "Nairobi".
+pub fn zone_place(zone: &str) -> String {
+    let zone = zone.trim();
+    zone.rsplit('/').next().unwrap_or(zone).replace('_', " ")
+}
+
+/// An offset east of UTC as written for people: "UTC+3", "UTC+5:30", "UTC-4", "UTC".
+pub fn utc_offset_label(seconds_east: i32) -> String {
+    let sign = if seconds_east < 0 { '-' } else { '+' };
+    let minutes = seconds_east.unsigned_abs() / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "UTC".to_string(),
+        (h, 0) => format!("UTC{sign}{h}"),
+        (h, m) => format!("UTC{sign}{h}:{m:02}"),
+    }
+}
+
 /// A miss where chaining would be wrong (e.g. an unstored personal fact), with the reason why.
 pub fn format_dead_end(what: &str, why: &str) -> String {
     format!("No results: {what}. {why}")
+}
+
+/// A write or action that failed, `what` being what was tried ("adding that to their to-dos").
+pub fn format_not_done(what: &str, why: &str) -> String {
+    format!("Not done: {what}. {why}")
 }
 
 /// Join tool names as "a", "a or b", "a, b, or c".
@@ -179,6 +239,70 @@ mod tests {
             cut.starts_with("\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}"),
             "cut mid-character: {cut:?}"
         );
+    }
+
+    #[test]
+    fn a_card_is_for_the_user_alone_and_keeps_its_json_whole() {
+        use rmcp::model::{ContentBlock, Role};
+        let block = card("weather", &serde_json::json!({"a": [[["x]]]"]]]}));
+        let ContentBlock::Text(t) = &block else {
+            panic!("a card is text")
+        };
+        let audience = t.annotations.as_ref().and_then(|a| a.audience.clone());
+        assert_eq!(audience, Some(vec![Role::User]));
+        let json = t
+            .text
+            .strip_prefix("[[[mcp-ui:weather:")
+            .and_then(|r| r.strip_suffix("]]]"))
+            .expect("one marker");
+        assert!(!json.contains("]]]"), "{json}");
+        serde_json::from_str::<serde_json::Value>(json).expect("still JSON");
+    }
+
+    /// A marker written anywhere but [`card`] lands in the model's text. Submodules too: a
+    /// server's tools may live in a directory beside it.
+    #[test]
+    fn only_the_card_helper_writes_a_card_marker() {
+        let src_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut dirs = vec![src_dir.to_path_buf()];
+        let mut scanned = 0;
+        let mut nested = 0;
+        let mut offenders = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") || path == src_dir.join("format.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                let code = src.split("#[cfg(test)]").next().unwrap_or_default();
+                scanned += 1;
+                if dir != src_dir {
+                    nested += 1;
+                }
+                if strip_line_comments(code).contains("\"[[[mcp-ui:") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(scanned > 20, "scanned {scanned} files; the walk is wrong");
+        assert!(nested > 0, "no submodule was scanned; the walk is wrong");
+        assert!(offenders.is_empty(), "use format::card: {offenders:?}");
+    }
+
+    #[test]
+    fn zones_and_offsets_read_as_people_say_them() {
+        assert_eq!(zone_place("Africa/Nairobi"), "Nairobi");
+        assert_eq!(zone_place("America/Argentina/Buenos_Aires"), "Buenos Aires");
+        assert_eq!(zone_place("UTC"), "UTC");
+        assert_eq!(utc_offset_label(3 * 3600), "UTC+3");
+        assert_eq!(utc_offset_label(5 * 3600 + 1800), "UTC+5:30");
+        assert_eq!(utc_offset_label(-4 * 3600), "UTC-4");
+        assert_eq!(utc_offset_label(0), "UTC");
     }
 
     #[test]
@@ -301,6 +425,10 @@ mod tests {
             ("knowledge.rs", include_str!("knowledge.rs")),
             ("wolfram.rs", include_str!("wolfram.rs")),
             ("web_search.rs", include_str!("web_search.rs")),
+            (
+                "web_search/pictures.rs",
+                include_str!("web_search/pictures.rs"),
+            ),
             ("memory.rs", include_str!("memory.rs")),
             ("sensors.rs", include_str!("sensors.rs")),
         ]
@@ -321,8 +449,8 @@ mod tests {
     }
 
     /// Every MCP server source, keyed by extension; one list shared by the tool inventory and
-    /// the supervision guard. `wolfram.rs` and `web_search.rs` are routers composed onto
-    /// `giap-knowledge`.
+    /// the supervision guard. `wolfram.rs`, `web_search.rs` and `web_search/pictures.rs` are
+    /// routers composed onto `giap-knowledge`.
     const TOOL_SOURCES: &[(&str, &str)] = &[
         ("giap-context", include_str!("context.rs")),
         ("giap-device", include_str!("device.rs")),
@@ -330,6 +458,7 @@ mod tests {
         ("giap-knowledge", include_str!("knowledge.rs")),
         ("giap-knowledge", include_str!("wolfram.rs")),
         ("giap-knowledge", include_str!("web_search.rs")),
+        ("giap-knowledge", include_str!("web_search/pictures.rs")),
         ("giap-memory", include_str!("memory.rs")),
         ("giap-orchestrator", include_str!("orchestrator.rs")),
         ("giap-schedule", include_str!("schedule.rs")),
@@ -401,9 +530,13 @@ mod tests {
             tools.contains("giap-knowledge__compute_answer"),
             "{tools:?}"
         );
+        assert!(
+            tools.contains("giap-knowledge__show_pictures"),
+            "a router in a submodule: {tools:?}"
+        );
         assert_eq!(
             tools.len(),
-            44,
+            46,
             "the tool inventory changed. Update this count in the same commit as \
              the tool — the number is the record, and a stale one is how a count \
              read 64 for months while the real number was 65. This assertion has \

@@ -8,6 +8,7 @@ use pond_core::models::ports::provider::LlmProvider;
 use pond_core::user_data::domain::interest::{
     category_of, clean_facets, clean_topic, topic_key, ObservedInterest, Signal,
 };
+use pond_core::user_data::domain::member_profile::About;
 use pond_core::user_data::ports::conversation_extractor::{
     estimated_tokens, ConversationExtractor, ExtractedMemory, ExtractedReminder, ExtractionError,
     ExtractionWindow, MemoryKind, WindowExtraction, EXTRACTION_PROMPT_BUDGET_TOKENS,
@@ -19,7 +20,8 @@ use tokio::sync::RwLock;
 const EXTRACTION_PROMPT: &str = "\
 You are reading one conversation between {subject} and {assistant}. Two
 jobs: notice what {subject} cares about, and keep the rare fact about who
-{subject} is that will still be true in six months.
+{subject} is that will still be true in six months. Keep your thinking
+concise and focused on extracting exact facts from the conversation.
 
 Reply with JSON and nothing else:
 {skeleton}
@@ -39,13 +41,17 @@ memories: NEW facts about who {subject} is that outlast this conversation.
 - One plain sentence naming {subject}, third person. Name every person and
   place; never open with \"He\", \"She\", \"It\", \"They\".
 - A habit keeps its timing (\"every Saturday\"). NO one-off dates: no year,
-  no \"on Tuesday\", no \"next week\". A date is a reminder.
-- kind, one of exactly these five:
-  relationship  a person or pet {subject} knows, and who they are to them
-  preference    how {subject} likes things: style, defaults, likes, dislikes
-  routine       something {subject} does again and again: a habit, a pattern
-  correction    {subject} fixed something that was wrong
-  context       who {subject} is: role, home, the work they are living through
+  no \"on Tuesday\", no \"next week\". A date is a reminder. Only a yearly
+  date (a birthday, an anniversary) may be a memory.
+- about, exactly one of these words:
+  name birthday work home language: who {subject} is
+  partner child pet family friend: who that one is to {subject}
+  diet allergy health: what {subject} eats, what their body needs
+  routine: something {subject} does again and again
+  likes dislikes: their tastes
+  style: how they want to be answered (length, tone, format)
+  goal place date: what they work towards, a place of theirs, a yearly date
+  instruction: what {assistant} must always or never do for them
 - Never a memory: a question {subject} asked, something they looked up or
   wanted explained (that is an interest, signal \"asked\"), anything
   {assistant} said, a guess. One question says nothing about who they are.
@@ -57,12 +63,12 @@ Most conversations hold no memory, and \"memories\" is then []. At most
 
 const SKELETON_WITH_REMINDERS: &str = "{\"interests\":[{\"topic\":\"...\",\"category\":\"...\",\
      \"facets\":[\"...\"],\"signal\":\"asked\"}],\"memories\":[{\"note\":\"...\",\
-     \"kind\":\"relationship\"}],\"reminders\":[{\"about\":\"...\",\"when\":\"...\"}]}";
+     \"about\":\"...\"}],\"reminders\":[{\"about\":\"...\",\"when\":\"...\"}]}";
 
 /// The skeleton for a window too old to propose anything from.
 const SKELETON_NO_REMINDERS: &str = "{\"interests\":[{\"topic\":\"...\",\"category\":\"...\",\
      \"facets\":[\"...\"],\"signal\":\"asked\"}],\"memories\":[{\"note\":\"...\",\
-     \"kind\":\"relationship\"}]}";
+     \"about\":\"...\"}]}";
 
 const REMINDERS_PARAGRAPH: &str = "\n\
 reminders: anything that happens on one named day or at one named time. In\n\
@@ -447,18 +453,24 @@ pub fn parse_window_response(
             else {
                 continue;
             };
-            // Unknown kinds are rejected and counted, never defaulted into a catch-all.
-            let Some(kind) = item
-                .get("kind")
-                .and_then(|k| k.as_str())
-                .and_then(MemoryKind::parse)
-            else {
+            // An unknown word is rejected and counted, never defaulted into a catch-all. A
+            // reply in the older shape names a kind and no `about`.
+            let about = item
+                .get("about")
+                .and_then(|a| a.as_str())
+                .and_then(About::parse);
+            let Some(kind) = about.map(MemoryKind::of).or_else(|| {
+                item.get("kind")
+                    .and_then(|k| k.as_str())
+                    .and_then(MemoryKind::parse)
+            }) else {
                 extraction.rejected += 1;
                 continue;
             };
             extraction.memories.push(ExtractedMemory {
                 note: note.to_string(),
                 kind,
+                about,
             });
         }
     }
@@ -901,11 +913,14 @@ mod tests {
     #[test]
     fn the_prompt_and_the_parser_agree_on_the_catalogue() {
         let prompt = rendered();
-        for kind in MemoryKind::ALL {
+        // `now` is not offered: extraction keeps what lasts.
+        for about in About::ALL.into_iter().filter(|a| *a != About::Now) {
             assert!(
-                prompt.contains(kind.as_str()),
+                prompt
+                    .split_whitespace()
+                    .any(|w| w.trim_end_matches(':') == about.as_str()),
                 "{} is accepted by the parser and never shown to the model",
-                kind.as_str()
+                about.as_str()
             );
         }
         for gone in ["identity", "project", "knowledge"] {

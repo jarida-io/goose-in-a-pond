@@ -77,6 +77,8 @@ export interface Settings {
   voice_wake_word_transcriptions?: string[];
   /** The pond listens through its own microphone and answers on its speaker (room voice). */
   voice_room_enabled?: boolean;
+  /** A page only a browser can show is read with a headless browser, when one is there. */
+  browser_rendering_enabled?: boolean;
   /** Suggestor ids never offered on Home; per kind, as a suggestion has no durable id. */
   suggestions_muted?: string[];
   voice_recording_duration_secs?: number;
@@ -89,6 +91,8 @@ export interface Settings {
   /** Kokoro quantization (`q8` | `q8f16` | `q4f16` | `fp16` | `fp32`); picks the `.onnx` file. */
   voice_tts_quality?: string;
   voice_thinking_tone_enabled?: boolean;
+  /** Long speech is made on the graphics processor where the Pond has one set up. */
+  voice_tts_gpu_enabled?: boolean;
   /** Pinned microphone, by its system name; "" picks one that works. */
   audio_input_device?: string;
   /** Pinned speaker, by its system name; "" picks one that works. */
@@ -182,6 +186,11 @@ export interface Settings {
   // Scheduling tuning
   schedule_result_notify?: boolean;
   system_notices_enabled?: boolean;
+  lone_voice_sets_reminders?: boolean;
+  unseen_phone_remove_days?: number;
+  unseen_phone_skip_days?: number;
+  speak_unfetched_reminders?: boolean;
+  notices_wait_in_quiet_hours?: boolean;
   schedule_max_concurrent?: number;
   schedule_max_runs_per_task?: number;
 
@@ -367,7 +376,8 @@ export interface Device {
   name: string;
   device_type?: string;
   hostname?: string;
-  room?: string;
+  /** The room this device is placed in; `null`/absent shows under "Unassigned". */
+  room_id?: string | null;
   is_online: boolean;
   last_seen?: string;
   /** `set_device_state` verbs it accepts (`power`, `brightness`, …); a contact sensor has none. */
@@ -375,6 +385,17 @@ export interface Device {
   /** The address the server knows, when it knows one. */
   ip_address?: string;
   metadata?: Record<string, unknown>;
+}
+
+// ── Rooms ─────────────────────────────────────────────────────
+export interface Room {
+  id: string;
+  name: string;
+  created_at: string;
+  /** Whether an unidentified guest voice may use devices in this room. */
+  guest_accessible: boolean;
+  /** Whether this caller may change `guest_accessible` (the owner); absent from a pond that does not say. */
+  guest_access_editable?: boolean;
 }
 
 // ── Mesh ──────────────────────────────────────────────────────
@@ -388,6 +409,8 @@ export interface MeshPeer {
 
 export interface MeshSelf {
   mesh_enabled: boolean;
+  /** False when this pond-server was built without mesh support; absent from older servers. */
+  mesh_compiled?: boolean;
   peer_id?: string;
   invite_url?: string;
 }
@@ -410,6 +433,26 @@ export interface MeshSettlementStatus {
   }>;
 }
 
+// ── Factory reset ─────────────────────────────────────────────
+export type FactoryResetStep =
+  | "exporting"
+  | "pausing"
+  | "notifying_household"
+  | "revoking_devices"
+  | "erasing_data"
+  | "speaking_goodbye"
+  | "reopening_onboarding"
+  | "forgetting_wifi";
+
+export type FactoryResetStatus =
+  | { active: false }
+  | {
+      active: true;
+      current_step: FactoryResetStep;
+      steps_completed: number;
+      total_steps: number;
+    };
+
 // ── Schedules ─────────────────────────────────────────────────
 export interface Schedule {
   id: string;
@@ -424,7 +467,8 @@ export interface Schedule {
   kind?:
     | { type: "agent_prompt"; prompt: string }
     | { type: "webhook"; webhook_url: string }
-    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> }
+    | { type: "member_reminder"; profile_id: string; prompt: string };
   last_run?: string;
   next_run?: string;
   created_at?: string;
@@ -506,7 +550,13 @@ export type MemorySegment =
   // Written only by batch extraction, the one path that sees more than a single turn.
   | "routine"
   | "knowledge"
-  | "context";
+  | "context"
+  // The member's profile headings: what they eat and need, their places, yearly dates, and
+  // standing instructions to Goose.
+  | "food_health"
+  | "place"
+  | "date"
+  | "instruction";
 
 /** One inference-spending background job in `GET /api/v1/lane`, as the lane sees it now. */
 export interface LaneJobStatus {
@@ -613,8 +663,18 @@ export interface MemoryFragment {
 // Mirrors `context_index_health` / `rebuild_context_index` (pond-api routes.rs). No index or
 // embedder answers 200 with `indexed: false` and the counts absent, not zero.
 
-/** The three stores the index covers, spelled as the server spells them. */
-export type ContextCorpus = "memory" | "context" | "summary";
+/** The stores the index covers, spelled as the server spells them. */
+export type ContextCorpus =
+  | "memory"
+  | "context"
+  | "summary"
+  | "personal"
+  | "message"
+  | "digest"
+  | "story"
+  | "report"
+  | "notice"
+  | "idea";
 
 /** One store's share of the index. `coverage` is null when `rows` is 0 (0/0): render it as
  *  "nothing to index", never as a percentage. */
@@ -931,7 +991,7 @@ export interface PromptTemplate {
 }
 
 /** Mirrors `FACTORY_VERSION` in pond-core `user_data/domain/prompt_template.rs`; bump both. */
-export const PROMPT_FACTORY_VERSION = 1;
+export const PROMPT_FACTORY_VERSION = 7;
 
 /** True when the user's edit predates the current built-in; notice only, never overwrite it. */
 export function promptTemplateIsOutdated(t: PromptTemplate): boolean {
@@ -1449,6 +1509,8 @@ export interface ChatEvent {
   };
   /** On "tool_result": shown for this turn only; history keeps a stub, so the card is never stored. */
   transient?: boolean;
+  /** On "tool_result": what this tool call set up, or failed to. The only live source of receipts. */
+  receipt?: NoteReceipt;
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
   /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
@@ -1589,6 +1651,87 @@ export interface SessionSummary {
   total_prompt_tokens?: number;
   total_completion_tokens?: number;
   model_name?: string;
+  /** Where the conversation started. Absent on rows older than the field. */
+  surface?: SessionSurface;
+}
+
+export type SessionSurface = "phone" | "desktop" | "cli" | "pond" | "room" | "schedule" | "goose";
+
+export type NoteFromKind = "schedule" | "reminder" | "task" | "lookup" | "watch" | "heartbeat" | "suggestion";
+
+export type ReceiptKind = "reminder" | "todo" | "timer" | "schedule" | "watch" | "task" | "standing";
+
+/** What a tool call set up. Stored with the reply, never inferred from its words. */
+export interface NoteReceipt {
+  kind: ReceiptKind;
+  outcome: "set" | "not_set";
+  what: string;
+  id?: string;
+  /** Why it was not set; present on `not_set`. */
+  reason?: string;
+}
+
+export type SuggestionState = "open" | "done" | "dismissed";
+
+export interface NoteSuggestion {
+  noticed: string;
+  action: string;
+  prompt: string;
+  state: SuggestionState;
+  suggestion_id?: string;
+}
+
+/** A quiet annotation the pond stored with a message. */
+export interface MessageNote {
+  from?: { kind: NoteFromKind; label: string; ref_id?: string };
+  receipts?: NoteReceipt[];
+  suggestion?: NoteSuggestion;
+}
+
+export interface OfferAnswer {
+  state: SuggestionState;
+  prompt?: string;
+}
+
+// ── Pairing lock ──────────────────────────────────────────────
+export interface PairingLock {
+  locked: boolean;
+  /** False when `locked` is on but nothing holds a phone: the main member has no phone and no PIN. */
+  enforced: boolean;
+  owner_profile_id: string | null;
+  has_recovery_pin: boolean;
+  owner_has_a_phone: boolean;
+  min_pin_digits: number;
+  /** True only for a caller who may change the lock and answer requests. */
+  can_change: boolean;
+}
+
+export interface PairingRequest {
+  id: string;
+  device_name: string;
+  client_type: string;
+  created_at: string;
+  expires_at: string;
+}
+
+// ── Reliability (My Pond) ─────────────────────────────────────
+export interface ReliabilityReport {
+  days: number;
+  notices: {
+    queued: number;
+    woken: number;
+    fetched: number;
+    fetched_within_a_minute: number;
+    fetched_after_an_hour: number;
+    shown: number;
+    opened: number;
+    spoken: number;
+  };
+  turns: { asked: number; answered: number };
+  phones: { paired: number; test: number; unseen: number; with_push_token: number };
+  stops: number;
+  android_push_key: boolean;
+  apple_push_key: boolean;
 }
 
 export interface UsageSummary {
@@ -1632,6 +1775,8 @@ export interface SessionMessage {
   transient?: boolean;
   /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
+  /** Where the message came from, what it set up, or an offer it makes. */
+  note?: MessageNote;
 }
 
 // ── HuggingFace / Model Download ──────────────────────────────
@@ -1917,6 +2062,50 @@ export interface WebSearchPlace {
   /** May be empty. */
   url: string;
   snippet: string;
+  /** What Brave's web search knows of the place; each present only when known. */
+  address?: string;
+  /** The day Brave reports and its hours: "Monday 07:00 to 22:00". */
+  hours?: string;
+  phone?: string;
+  /** "4.5 of 5 from 120 reviews". */
+  rating?: string;
+}
+
+/** One row of a `search` card's optional `news`, present only when Brave added news. */
+export interface WebSearchNews {
+  title: string;
+  url: string;
+  domain: string;
+  publisher: string;
+  /** `YYYY-MM-DD`, or Brave's relative age ("2 days ago"); null when undated. */
+  date: string | null;
+  /** Only ever a thumbnail on Brave's image proxy; null without one. */
+  thumbnail: string | null;
+  breaking: boolean;
+}
+
+/** One row of a `search` card's optional `videos`, present only when Brave added videos. */
+export interface WebSearchVideo {
+  title: string;
+  url: string;
+  domain: string;
+  duration: string | null;
+  creator: string | null;
+  date: string | null;
+  /** Only ever a thumbnail on Brave's image proxy; null without one. */
+  thumbnail: string | null;
+}
+
+/** One picture of a `pictures` card, from `show_pictures`. */
+export interface WebPicture {
+  title: string;
+  /** The page the picture is on. */
+  url: string;
+  domain: string;
+  /** Brave's proxied thumbnail, never the original image. */
+  thumbnail: string;
+  width: number | null;
+  height: number | null;
 }
 
 // ── API Error ─────────────────────────────────────────────────
@@ -2026,7 +2215,7 @@ export interface DetectedPlace {
 
 export type AudioDirection = "input" | "output";
 
-export type AudioDeviceKind = "sound_server" | "hardware" | "raw" | "virtual";
+export type AudioDeviceKind = "sound_server" | "hardware" | "bluetooth" | "raw" | "virtual";
 
 /** What briefly opening a device found. A microphone is measured for level, never recorded. */
 export type AudioProbeOutcome =
@@ -2199,3 +2388,52 @@ export type ConnectionErrorCode =
   | "no_address"
   | "invalid_request"
   | "unsupported_security";
+
+/** The household's own ngrok tunnel, the alternative to the built-in remote network. */
+export interface NgrokTunnelConfig {
+  enabled: boolean;
+  endpoint: "tcp" | "tls";
+  /** The reserved domain a TLS endpoint needs. */
+  domain?: string;
+  /** A reserved TCP address, `host:port`; without one ngrok picks a new one each start. */
+  remoteAddr?: string;
+}
+
+export type NgrokTunnelStatus =
+  | { state: "off" }
+  | { state: "starting" }
+  | { state: "running"; address: string }
+  | { state: "failed"; reason: string };
+
+/** `GET /api/v1/remote-access/route`: which way phones reach the Pond from outside. */
+export interface RemoteRouteState {
+  route: "built_in" | "ngrok";
+  tokenSet: boolean;
+  reserved: boolean;
+  status: NgrokTunnelStatus;
+  fallback: string | null;
+  builtInRunning: boolean;
+}
+
+export interface NgrokTunnelState {
+  config: NgrokTunnelConfig;
+  /** A new address phones have not learned; the built-in network stands in meanwhile. */
+  fallback?: string | null;
+  tokenSet: boolean;
+  status: NgrokTunnelStatus;
+}
+
+// ── Household roles & guest device access ───────────────────────
+export type HouseholdRole = "owner" | "member" | "guest" | "developer";
+
+export interface HouseholdProfile {
+  id: string;
+  display_name: string;
+  avatar_emoji: string;
+  preferences: Record<string, string>;
+  role: HouseholdRole;
+  /** Only meaningful for `role: "guest"`; `null` means access never expires on its own. */
+  guest_until: string | null;
+  created_at: string;
+  updated_at: string;
+}

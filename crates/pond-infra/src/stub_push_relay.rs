@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_core::mcp::domain::notice_delivery::{Wake, WakeGap};
 use pond_core::mcp::ports::notification::Notification;
 use pond_core::mcp::ports::notification_relay::NotificationRelay;
 use pond_core::user_data::ports::push_token::PushTokenRepository;
@@ -22,13 +23,13 @@ impl StubPushRelay {
 
 #[async_trait]
 impl NotificationRelay for StubPushRelay {
-    async fn relay(&self, notification: &Notification) -> Result<()> {
+    async fn relay(&self, notification: &Notification) -> Result<Wake> {
         let Some(token) = self.push_tokens.get(&notification.target).await? else {
             tracing::debug!(
                 device = %notification.target,
                 "push relay: no token registered; skipping background push"
             );
-            return Ok(());
+            return Ok(Wake::NotSent(WakeGap::NoToken));
         };
         let prefix = token_log_prefix(&token.token);
         tracing::info!(
@@ -38,7 +39,7 @@ impl NotificationRelay for StubPushRelay {
             category = %notification.category,
             "push relay (stub): would deliver background push"
         );
-        Ok(())
+        Ok(Wake::NotSent(WakeGap::NoKey))
     }
 }
 

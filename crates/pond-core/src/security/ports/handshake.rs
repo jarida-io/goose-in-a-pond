@@ -20,6 +20,9 @@
 //! original `HMAC-SHA256(code, challenge || client_id)` exchange ([`VerifyRequest`]). The routes
 //! refuse that exchange from any peer but loopback.
 
+use crate::security::domain::pairing_lock::{
+    PairingClaim, PairingLockState, PairingRequest, PendingPairing, PinCheck,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -64,6 +67,14 @@ pub struct HandshakeResponse {
     /// may quiet the "new device paired" notice is the caller's decision, per method.
     #[serde(skip)]
     pub returning_device: bool,
+    /// True when the accepted pairing redeemed a code minted for a test harness. Server-side
+    /// only: such a device is not announced and gets no household notices.
+    #[serde(skip)]
+    pub test_device: bool,
+    /// Set, with `accepted` false and `rejection_reason` `approval_required`, when the pairing
+    /// lock is on: the phone proved the code, and is now waiting for somebody to let it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_request: Option<PendingPairing>,
 }
 
 /// Phase 1 of loopback pairing: the dashboard asks for a challenge.
@@ -297,6 +308,67 @@ pub trait Handshake: Send + Sync {
     /// Revoke a session token (disconnect a client).
     async fn revoke_token(&self, token: &str) -> Result<()>;
 
+    /// The pairing lock as it stands. An adapter with no lock reports one that holds nothing.
+    async fn pairing_lock(&self) -> Result<PairingLockState> {
+        Ok(PairingLockState {
+            locked: false,
+            owner_profile_id: None,
+            has_recovery_pin: false,
+            owner_has_a_phone: false,
+        })
+    }
+
+    async fn set_pairing_locked(&self, _locked: bool) -> Result<()> {
+        Err(anyhow::anyhow!("this adapter has no pairing lock"))
+    }
+
+    /// Make `profile_id` the main member. With `replace` false it only fills an empty seat,
+    /// which is how the member who sets a pond up becomes its first; `Ok(false)` when taken.
+    async fn set_pairing_owner(&self, _profile_id: &str, _replace: bool) -> Result<bool> {
+        Err(anyhow::anyhow!("this adapter has no pairing lock"))
+    }
+
+    /// Set the recovery PIN, or clear it with `None`. Clears the count of wrong tries.
+    async fn set_recovery_pin(&self, _pin: Option<&str>) -> Result<()> {
+        Err(anyhow::anyhow!("this adapter has no pairing lock"))
+    }
+
+    /// Requests still waiting for an answer, oldest first.
+    async fn pairing_requests(&self) -> Result<Vec<PairingRequest>> {
+        Ok(Vec::new())
+    }
+
+    /// Accept or decline a waiting request. `profile_id` binds an accepted phone to a member
+    /// other than the one its code named. `Ok(false)` when it was no longer waiting.
+    async fn decide_pairing_request(
+        &self,
+        _request_id: &str,
+        _accept: bool,
+        _by_device: Option<&str>,
+        _profile_id: Option<&str>,
+    ) -> Result<bool> {
+        Err(anyhow::anyhow!("this adapter has no pairing lock"))
+    }
+
+    /// What the phone that asked finds when it comes back; an accepted one is paired here.
+    async fn claim_pairing_request(
+        &self,
+        _request_id: &str,
+        _claim_secret: &str,
+    ) -> Result<PairingClaim> {
+        Ok(PairingClaim::Gone)
+    }
+
+    /// Accept the asking phone's own request with the recovery PIN, as the main member.
+    async fn recover_pairing_request(
+        &self,
+        _request_id: &str,
+        _claim_secret: &str,
+        _pin: &str,
+    ) -> Result<PinCheck> {
+        Ok(PinCheck::NoPin)
+    }
+
     /// Loopback phase 1: issue a challenge bound to a `client_id`.
     async fn init_handshake(&self, _request: InitRequest) -> Result<ChallengeResponse> {
         Err(anyhow::anyhow!(
@@ -358,6 +430,22 @@ pub trait Handshake: Send + Sync {
     /// Exchange a refresh token for a fresh session+refresh pair.
     async fn refresh(&self, _request: RefreshRequest) -> Result<HandshakeResponse> {
         Err(anyhow::anyhow!("refresh not supported by this adapter"))
+    }
+
+    /// Mark an unredeemed pairing code as already accepted: its phone is let in without a
+    /// request while the pairing lock is on. Host-only, like issuing the code.
+    async fn mark_pairing_code_approved(&self, _code: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "approved pairing codes are not supported by this adapter"
+        ))
+    }
+
+    /// Mark an unredeemed pairing code as a test harness's: the device that redeems it is a
+    /// test device. Host-only, like issuing the code.
+    async fn mark_pairing_code_test(&self, _code: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "test pairing codes are not supported by this adapter"
+        ))
     }
 
     /// Issue a single-use pairing code bound to a member; returns the only plaintext copy.

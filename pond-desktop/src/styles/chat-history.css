@@ -330,3 +330,32 @@
 
 /* Reduced motion is handled by the library, which collapses the transition
    rather than removing the lift — the lift is the whole pressed affordance. */
+
+/* ── Where it started ───────────────────────────────────────────────────── */
+
+/* Chrome, so a hairline and no offset (DESIGN.md section 3). Pressed is a heavier line, not a hue. */
+.chist__filters { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.chist__filter {
+  position: relative;
+  min-height: 36px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+.chist__filter::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: var(--tap-min);
+}
+.chist__filter[aria-pressed="true"] { border: 2px solid var(--color-text); color: var(--color-text); font-weight: var(--weight-bold); }
+.chist__from { font-size: var(--text-xs); color: var(--color-text-secondary); }
+.chist__gooseIcon { margin-right: var(--space-1); vertical-align: -2px; }

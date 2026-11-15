@@ -18,7 +18,7 @@ pipe. For third-party servers see [Building Extensions](extensions.md).
 | `giap-device-control` | `device_control.rs` | `describe_device`, `get_device_state`, `set_device_state` | `ext_device_enabled` |
 | `giap-sensors` | `sensors.rs` | `get_sensor_reading`, `get_sensor_history`, `list_sensors` | `ext_sensor_enabled` |
 | `giap-travel` | `travel.rs` | `get_directions_link`, `book_ride`, `get_ride_link` | `ext_travel_enabled` (off by default) |
-| `giap-context` | `context.rs` | `search_context`, `recall`, `get_recent_context` | `ext_context_enabled` (off by default) |
+| `giap-context` | `context.rs` | `search_context`, `recall`, `get_recent_context` | `ext_context_enabled` (on by default) |
 | `giap-orchestrator` | `orchestrator.rs` | `delegate`, `check_task` | `ext_orchestrator_enabled` (off by default) |
 
 38 tools. Registration is in `register_giap_extensions`
@@ -70,10 +70,16 @@ pub struct WeatherParams {
 Resolve in this order: the named parameter, then likely keys in `extra` (`location`, `city`,
 `place`, ...), then, where it makes sense, the user's last message (`crate::last_user_message()`).
 
-`get_wikipedia_article` and `create_schedule` also ask an optional argument specialist first:
+`get_wikipedia_article` also asks an optional argument specialist first:
 `crate::generate_params(tool_name, schema)` calls the `ToolCaller` set from the `tool_model` setting
 (a small GGUF run by `ToolCallerEngine` in `pond-adapters-local-inference`). With no `tool_model`, it
 returns `None` and the chain above applies.
+
+Ask for times the way a person says them, never as a format the model must compute: `when:
+"every weekday at 7am"`, `since: "yesterday"`, `date: "Saturday"`. `pond_core::shared::domain`'s
+`when_said` (a moment, a day, an earlier moment) and `when_repeats` (a repeat, and a stored cron
+back into words) read them in the member's time zone. Words they cannot place are refused with what
+to ask the person; they are never guessed, and never dropped to a default.
 
 ## Results
 
@@ -93,17 +99,26 @@ helpers in `crates/pond-mcp-server/src/format.rs`:
 Budgets in use: Wikipedia extracts 4,000 bytes, `search_web` 1,800 (2,400 wide), `read_web_page`
 1,800 of quoted lines or one 3,200-byte part, `compute_answer` 1,800.
 
-A result that a desktop card renders starts with a `[[[mcp-ui:<kind>:<json>]]]` line (weather,
-knowledge). The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`
+A result that a desktop card renders carries the card as its own block, annotated for the user
+alone: `format::with_card(text, kind, data)` (or `format::card`). Goose drops that block before the
+provider, so the model reads each fact once, in the text. The text is short and structured, the way
+weather's is (a bracketed header, then `Label: value | Label: value`), in the household's time and
+units, with names rather than ids and no cron, JSON or ISO stamps. The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`
 (`crates/pond-mcp-server/apps/`), listed by `all_app_resources()`.
 
 ## Failures
 
 - **A miss or an upstream error**: `CallToolResult::success` with text from the helpers above, so the
   model chains to another tool or answers.
+- **A write or action that failed**: `format_not_done(what, why)`, "Not done: what. Why."
 - **A failure no other tool can fix** (weather with no location set): `CallToolResult::error` with
   the reason in plain words.
-- **`ErrorData`** only for protocol errors. The model reports it as a technical fault.
+- **`ErrorData`** only for protocol errors.
+
+The engine never shows the model `is_error`, so the provider shim
+(`pond-adapters-goose/src/readable_failures.rs`) rewords every failed result as it is sent: it opens
+with "Not done:", and rmcp's "failed to deserialize parameters" becomes the field, what it takes and
+"call it again". The prompt's tool rules name that opening.
 
 ## Egress
 

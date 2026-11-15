@@ -53,20 +53,6 @@
   }
 }
 
-/* heroui switch thumb position is driven by margin-inline-start.
-   The reset above is now inside `@layer reset`, registered before heroui's
-   @import so it sorts below heroui's own layers — it no longer beats them, and
-   the sentence that used to live here ("unlayered always beats layered") is the
-   bug, not the reason. These re-declarations are kept because they sit at class
-   specificity in the same layer heroui uses, and removing them has not been
-   verified against every switch size. */
-.switch__thumb { margin-inline-start: calc(var(--spacing, 0.25rem) * 0.5); }
-.switch[data-selected=true] .switch__thumb { margin-inline-start: calc(100% - 1.5rem); }
-.switch--sm.switch[data-selected=true] .switch__thumb,
-.switch[data-selected=true] .switch--sm .switch__thumb { margin-inline-start: calc(100% - 1.15625rem); }
-.switch--lg.switch[data-selected=true] .switch__thumb,
-.switch[data-selected=true] .switch--lg .switch__thumb { margin-inline-start: calc(100% - 1.875rem); }
-
 /* Default to light; themeStore flips to dark via data-theme */
 html {
   color-scheme: light;
@@ -489,66 +475,6 @@ input[type="range"]::-moz-range-track {
   height: 4px;
   border-radius: var(--radius-pill);
   border: none;
-}
-
-/* ── Toggle Switch (CSS-only, checkbox wrapped in label) ─────── */
-
-.toggle-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  cursor: pointer;
-  position: relative;
-}
-
-.toggle-wrap input[type="checkbox"] {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-  pointer-events: none;
-}
-
-.toggle-track {
-  width: 36px;
-  height: 20px;
-  background: var(--color-border-strong);
-  border-radius: var(--radius-pill);
-  position: relative;
-  transition: background var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.toggle-wrap input:checked + .toggle-track {
-  background: var(--color-accent);
-}
-
-.toggle-thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  background: #FFFFFF;
-  border-radius: 50%;
-  transition: transform var(--transition-fast);
-  box-shadow: 0 1px 3px rgba(23, 22, 22, 0.20);
-  pointer-events: none;
-}
-
-.toggle-wrap input:checked ~ .toggle-thumb {
-  transform: translateX(16px);
-}
-
-.toggle-label {
-  font-size: var(--text-base);
-  color: var(--color-text);
-  user-select: none;
-}
-
-.toggle-wrap:has(input:disabled) {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 /* ── Radio Option Rows (card-style) ─────────────────────────── */

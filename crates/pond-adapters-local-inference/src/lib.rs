@@ -601,7 +601,10 @@ impl LlmProvider for LocalInferenceLlmAdapter {
     }
 
     async fn complete(&self, system: &str, messages: Vec<ChatMessage>) -> Result<ChatMessage> {
-        let mut msg = self.inner.complete(system, messages).await?;
+        let mut msg = goose_providers::request_context::as_helper(true, async {
+            self.inner.complete(system, messages).await
+        })
+        .await?;
         msg.content = strip_thinking_tokens(&msg.content);
         Ok(msg)
     }
@@ -618,7 +621,10 @@ impl LocalInferenceLlmAdapter {
         system: &str,
         messages: Vec<ChatMessage>,
     ) -> Result<ChatMessage> {
-        self.raw_inner.complete(system, messages).await
+        goose_providers::request_context::as_helper(true, async {
+            self.raw_inner.complete(system, messages).await
+        })
+        .await
     }
 }
 

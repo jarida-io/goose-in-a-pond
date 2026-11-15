@@ -243,7 +243,7 @@
   background: var(--color-surface);
   border: 2px solid var(--color-text);
   border-radius: 20px;
-  box-shadow: 4px 4px 0 var(--pp);
+  box-shadow: 4px 4px 0 var(--border-ink);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -313,7 +313,7 @@
 .sq__row[data-active] {
   background: var(--color-surface);
   border: 2px solid var(--color-text);
-  box-shadow: 2px 2px 0 var(--pp);
+  box-shadow: 2px 2px 0 var(--border-ink);
 }
 
 .sq__row-head {
@@ -404,7 +404,7 @@
   background: var(--color-text);
   color: var(--color-bg);
   font: 600 14px Quicksand, sans-serif;
-  box-shadow: 4px 4px 0 var(--pp);
+  box-shadow: 4px 4px 0 var(--border-ink);
   animation: sq-toast-in var(--dur-base) var(--ink-ease);
 }
 

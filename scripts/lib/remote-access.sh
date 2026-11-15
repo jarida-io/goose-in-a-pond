@@ -29,6 +29,13 @@ remote_embedded_enabled() {
   grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$config" 2>/dev/null
 }
 
+# True when the household's own ngrok tunnel is turned on: <data dir>/remote-tunnel/ngrok.json.
+remote_ngrok_enabled() {
+  local config="$1/remote-tunnel/ngrok.json"
+  [ -f "$config" ] || return 1
+  grep -Eq '"enabled"[[:space:]]*:[[:space:]]*true' "$config" 2>/dev/null
+}
+
 # The tailnet address the running Pond reports, or nothing (no port, no answer, or null).
 remote_pond_address() {
   local port="$1" body
@@ -40,9 +47,16 @@ remote_pond_address() {
 # Doctor lines. remote_doctor <data dir> <port> <health>, where health is "200" when the Pond
 # answered its health check. Sets REMOTE_DOCTOR_WARN and REMOTE_DOCTOR_UNK for the caller's tally.
 remote_doctor() {
-  local data="$1" port="$2" health="$3" addr how ts_ip
+  local data="$1" port="$2" health="$3" addr how ts_ip ngrok=false
   REMOTE_DOCTOR_WARN=0; REMOTE_DOCTOR_UNK=0
   addr="$(remote_pond_address "$port")"
+
+  # Its address is only given to paired phones, so the doctor can say it is on, not that it is up.
+  if remote_ngrok_enabled "$data"; then
+    ngrok=true
+    note "the household's ngrok tunnel is turned on; Pairing, Remote access shows the address phones use"
+    note "if phones cannot reach it: grep remote_tunnel_failed in today's pond.log"
+  fi
 
   if remote_embedded_enabled "$data"; then
     how="the Pond's built-in network"
@@ -87,6 +101,7 @@ remote_doctor() {
     return 0
   fi
 
+  [ "$ngrok" = true ] && return 0
   note "remote access is not set up — this Pond is reachable on the LAN only"
   note "see docs/remote-access.md to give a paired phone access from outside the house"
 }

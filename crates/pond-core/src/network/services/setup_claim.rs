@@ -118,6 +118,12 @@ impl SetupClaimService {
             .filter(|record| record.claim_state().is_claimed())
             .and_then(|record| record.claimed_by))
     }
+
+    /// Clears the claim latch so the same printed card is accepted again — a factory reset's door
+    /// back to pairing (see the struct doc).
+    pub async fn rearm(&self) -> anyhow::Result<SetupRecord> {
+        self.store.rearm().await
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +235,18 @@ mod tests {
 
         store.rearm().await.unwrap();
         assert_eq!(service.admit_setup_attempt(now).await.unwrap(), code);
+        assert_eq!(service.claimed_by().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn rearm_clears_the_claim_through_the_service() {
+        let store = Arc::new(MockSetupCodeStore::unclaimed());
+        let service = service(&store);
+        service.record_claim(at(10), "card-phone").await.unwrap();
+        assert_ne!(service.claim_state().await.unwrap(), ClaimState::Unclaimed);
+
+        service.rearm().await.unwrap();
+        assert_eq!(service.claim_state().await.unwrap(), ClaimState::Unclaimed);
         assert_eq!(service.claimed_by().await.unwrap(), None);
     }
 

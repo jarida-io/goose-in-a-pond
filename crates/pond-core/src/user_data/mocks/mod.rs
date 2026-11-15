@@ -2,6 +2,8 @@ pub mod mock_agent_suggestion;
 pub mod mock_device_control;
 pub mod mock_device_controller;
 pub mod mock_device_registry;
+pub mod mock_guest_device_access;
+pub mod mock_guest_room_access;
 pub mod mock_interests;
 pub mod mock_last_action;
 pub mod mock_matter_runtime;

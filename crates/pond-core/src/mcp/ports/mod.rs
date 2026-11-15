@@ -7,4 +7,5 @@ pub mod notification_history;
 pub mod notification_queue;
 pub mod notification_recipients;
 pub mod notification_relay;
+pub mod room_speaker;
 pub mod tools;

@@ -227,7 +227,9 @@ adapter.
   `giap-context` MCP extension. **PARTIAL (2026-10-23 code check): the extension LANDED 2026-08-11;
   the `<system-context>` corpus did not.** Context items reach the model only through the read-only
   `giap-context` tools (`search_context`, `recall`, `get_recent_context` in
-  `crates/pond-mcp-server/src/context.rs`), registered behind `ext_context_enabled`, which ships off.
+  `crates/pond-mcp-server/src/context.rs`), registered behind `ext_context_enabled`, which ships off
+  (on since 2026-11-14, with a passive `<personal-context>` block; see
+  [personal-context-index.md](../personal-context-index.md)).
   No prompt path reads `context_items`; whether one earns its tokens is the measured passive tier in
   [personal-context-index.md](../personal-context-index.md), phase G. There is no
   `ingest_context` tool and there will not be one: the corpus is written by the pipeline from

@@ -1,7 +1,7 @@
 {
   "id": "personal_context",
   "name": "Your accounts in chat",
-  "summary": "When you ask, Goose searches what your connected mail, calendar and cameras have recorded.",
+  "summary": "When you ask, Goose searches past conversations, its digests, reports and notifications, your personal details, and what your connected mail, calendar and cameras have recorded.",
   "icon": "folder-search",
   "category": "custom",
   "kind": "built_in",

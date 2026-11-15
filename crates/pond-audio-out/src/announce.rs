@@ -17,14 +17,14 @@ type Player = Arc<dyn Fn(&Floor, Vec<u8>) -> Result<()> + Send + Sync>;
 
 enum Heard {
     All,
-    /// The bus was wanted back during this unit, counted from the first one played.
+    /// The bus was wanted back before this unit had been heard to its end.
     CutIn(usize),
     /// The voice plays (or prints) its words itself, so they never reach the bus.
     Unsynthesisable,
 }
 
 /// Says text on the voice once it holds the audio bus: behind any turn in the queue, never over
-/// one, and from the cut sentence again after a turn or a ping took the bus from it.
+/// one, and from the cut unit again after a turn or a ping took the bus from it.
 #[derive(Clone)]
 pub struct Announcer {
     voice: Arc<dyn VoiceOutput>,
@@ -43,6 +43,8 @@ impl Announcer {
 
     async fn say(&self, text: &str, play: Player) -> Result<()> {
         let units = split_text(text);
+        // Kept across a cut-in, so the unit said again is not synthesised again.
+        let mut wavs: Vec<Option<Vec<u8>>> = vec![None; units.len()];
         let mut from = 0;
         while from < units.len() {
             let floor = tokio::task::spawn_blocking(|| {
@@ -51,10 +53,13 @@ impl Announcer {
             .await
             .context("the announcement's claim panicked")?
             .ok_or_else(|| anyhow!("the speaker stayed busy"))?;
-            match self.play_units(&units[from..], floor, &play).await? {
+            match self
+                .play_units(&units, &mut wavs, from, floor, &play)
+                .await?
+            {
                 Heard::All => break,
                 Heard::CutIn(unit) => {
-                    from += unit;
+                    from = unit;
                     tracing::info!(
                         kind = "announcement_resumes",
                         from,
@@ -67,34 +72,43 @@ impl Announcer {
         Ok(())
     }
 
-    /// Plays each unit on `floor` while the next is synthesised.
-    async fn play_units(&self, units: &[SpeechUnit], floor: Floor, play: &Player) -> Result<Heard> {
+    /// Synthesises what is left, then plays it on `floor` in one stretch: nobody is waiting on an
+    /// announcement's first word, and an engine slower than its speech would stop between units.
+    async fn play_units(
+        &self,
+        units: &[SpeechUnit],
+        wavs: &mut [Option<Vec<u8>>],
+        from: usize,
+        floor: Floor,
+        play: &Player,
+    ) -> Result<Heard> {
         let floor = Arc::new(floor);
-        let mut playing: Option<tokio::task::JoinHandle<Result<()>>> = None;
-        for (k, unit) in units.iter().enumerate() {
-            let Some(wav) = self.voice.synthesize_unit(unit).await? else {
+        for k in from..units.len() {
+            if wavs[k].is_some() {
+                continue;
+            }
+            let Some(wav) = self.voice.synthesize_unit(&units[k]).await? else {
                 if k == 0 {
                     return Ok(Heard::Unsynthesisable);
                 }
                 bail!("the voice stopped synthesising mid-announcement");
             };
-            if let Some(previous) = playing.take() {
-                previous
-                    .await
-                    .context("an announcement's playback panicked")??;
-                if !floor.keep() {
-                    return Ok(Heard::CutIn(k - 1));
-                }
-            }
-            crate::tap::report_spoken(&unit.text);
-            let (floor, play) = (floor.clone(), play.clone());
-            playing = Some(tokio::task::spawn_blocking(move || play(&floor, wav)));
+            wavs[k] = Some(wav);
         }
-        if let Some(last) = playing {
-            last.await
+        for k in from..units.len() {
+            let Some(wav) = wavs[k].clone() else {
+                continue;
+            };
+            if !floor.keep() {
+                return Ok(Heard::CutIn(k));
+            }
+            crate::tap::report_spoken(&units[k].text);
+            let (held, play) = (floor.clone(), play.clone());
+            tokio::task::spawn_blocking(move || play(&held, wav))
+                .await
                 .context("an announcement's playback panicked")??;
             if !floor.keep() {
-                return Ok(Heard::CutIn(units.len() - 1));
+                return Ok(Heard::CutIn(k));
             }
         }
         Ok(Heard::All)
@@ -138,6 +152,11 @@ mod tests {
         }
     }
 
+    /// A sentence long enough that two of them do not fit one unit.
+    fn long_sentence(start: &str) -> String {
+        format!("{start} is ready {}now. ", "and waiting ".repeat(9))
+    }
+
     fn rate(wav: &[u8]) -> u32 {
         u32::from_le_bytes(wav[24..28].try_into().unwrap())
     }
@@ -155,10 +174,9 @@ mod tests {
         let _one = ONE_AT_A_TIME.lock().await;
         let voice = Arc::new(Synth::default());
         let played = Arc::new(Mutex::new(Vec::new()));
-        let text =
-            "First clause of speech, followed by the second clause here. And a third sentence.";
+        let text = long_sentence("First").repeat(3);
         Announcer::new(voice.clone())
-            .say(text, recording(played.clone()))
+            .say(&text, recording(played.clone()))
             .await
             .unwrap();
         assert!(voice.0.load(Ordering::SeqCst) >= 2);
@@ -188,10 +206,10 @@ mod tests {
         assert_eq!(played.lock().unwrap().len(), 1);
     }
 
-    /// A turn arrives during the second sentence: the announcement yields, waits for the turn,
-    /// and says the second sentence again before the third.
+    /// A turn arrives during the second unit: the announcement yields, waits for the turn, and
+    /// says the second unit again before the third.
     #[tokio::test]
-    async fn a_cut_announcement_picks_up_at_the_sentence_it_was_cut_in() {
+    async fn a_cut_announcement_picks_up_at_the_unit_it_was_cut_in() {
         let _one = ONE_AT_A_TIME.lock().await;
         let played = Arc::new(Mutex::new(Vec::new()));
         let plays = Arc::new(AtomicUsize::new(0));
@@ -212,14 +230,21 @@ mod tests {
                 Ok(())
             }
         });
-        Announcer::new(Arc::new(Synth::default()))
-            .say("The tea is ready. Pour it now. Then sit down.", player)
+        let voice = Arc::new(Synth::default());
+        let text = ["The tea", "A second thing", "Something else again"].map(long_sentence);
+        Announcer::new(voice.clone())
+            .say(&text.concat(), player)
             .await
             .unwrap();
         let played = played.lock().unwrap().clone();
         assert_eq!(played.len(), 4, "{played:?}");
-        assert_eq!(played[1], played[2], "the cut sentence is said again");
+        assert_eq!(played[1], played[2], "the cut unit is said again");
         assert_ne!(played[2], played[3]);
+        assert_eq!(
+            voice.0.load(Ordering::SeqCst),
+            3,
+            "and is not synthesised again"
+        );
     }
 
     #[tokio::test]

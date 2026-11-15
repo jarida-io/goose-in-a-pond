@@ -79,6 +79,8 @@ pub fn watch_view(watch: &WebWatch) -> Value {
         "looking_for": watch.looking_for,
         "filters": watch.filters,
         "filters_words": watch.filters.words_for_people(),
+        // For a rule read off the whole page: how the page stood at the last check.
+        "standing": watch.filters.tell_when.standing(items),
         "interval_hours": watch.interval_hours,
         "paused": watch.paused,
         "items_count": items.len(),
@@ -169,7 +171,8 @@ pub async fn get(
 #[derive(Debug, Default, Deserialize)]
 pub struct WatchEditBody {
     pub looking_for: Option<String>,
-    pub filters: Option<WatchFilters>,
+    /// As sent, so a screen that does not know rules is told apart from one clearing a rule.
+    pub filters: Option<Value>,
     pub interval_hours: Option<u32>,
     pub paused: Option<bool>,
 }
@@ -194,15 +197,42 @@ pub async fn edit(
     else {
         return unknown_caller();
     };
+    let repo = repo(&state);
+    let filters = match body.filters {
+        None => None,
+        Some(sent) => {
+            let names_rule = sent.get("tell_when").is_some();
+            let mut filters: WatchFilters = match serde_json::from_value(sent) {
+                Ok(filters) => filters,
+                Err(e) => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({"error": format!("filters: {e}")})),
+                    )
+                        .into_response()
+                }
+            };
+            // An edit from a screen that sends no rule keeps the one the watch has.
+            if !names_rule {
+                match repo.get(&id).await {
+                    Ok(Some(watch)) if watch.owner == member => {
+                        filters.tell_when = watch.filters.tell_when;
+                    }
+                    Ok(_) => return not_found(),
+                    Err(e) => return failed(e),
+                }
+            }
+            Some(filters)
+        }
+    };
     let edit = WatchEdit {
         looking_for: body.looking_for.map(|t| t.trim().to_string()),
-        filters: body.filters,
+        filters,
         interval_hours: body
             .interval_hours
             .map(|h| h.clamp(MIN_INTERVAL_HOURS, MAX_INTERVAL_HOURS)),
         paused: body.paused,
     };
-    let repo = repo(&state);
     match repo.edit(&member, &id, &edit).await {
         Ok(true) => match repo.get(&id).await {
             Ok(Some(watch)) => Json(watch_view(&watch)).into_response(),

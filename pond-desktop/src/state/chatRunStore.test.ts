@@ -1446,3 +1446,44 @@ describe("text the model wrote while it worked", () => {
     expect(agent.steps).toEqual(["the weather."]);
   });
 });
+
+describe("receipts on a reply", () => {
+  const SET = { kind: "reminder", outcome: "set", what: "call Sam at 5", id: "r1" } as const;
+  const NOT_SET = { kind: "timer", outcome: "not_set", what: "10 minutes", reason: "No time was given" } as const;
+
+  it("collects the receipts a turn streams, in order, once each", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: "giap-schedule__set_reminder", id: "t1" },
+        { type: "tool_result", tool: "giap-schedule__set_reminder", id: "t1", content: "ok", receipt: SET },
+        { type: "tool_result", tool: "giap-schedule__set_reminder", id: "t1", content: "ok", receipt: SET },
+        { type: "tool_call", tool: "giap-schedule__set_timer", id: "t2" },
+        { type: "tool_result", tool: "giap-schedule__set_timer", id: "t2", content: "no", receipt: NOT_SET },
+        { type: "text", content: "Done." },
+      ]) as never,
+    );
+    sendTurn({ text: "remind me" });
+    await flush();
+    expect(getChatRun().messages[1].note?.receipts).toEqual([SET, NOT_SET]);
+  });
+
+  it("makes none from a reply's words", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream([{ type: "text", content: "I set a reminder for you." }]) as never);
+    sendTurn({ text: "remind me" });
+    await flush();
+    expect(getChatRun().messages[1].note).toBeUndefined();
+  });
+
+  it("reads the stored note of a replayed conversation", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      { id: "u1", session_id: "s", role: "user", content: "hi", created_at: "" },
+      {
+        id: "a1", session_id: "s", role: "assistant", content: "Set.", created_at: "",
+        note: { from: { kind: "schedule", label: "Daily Briefing" }, receipts: [SET] },
+      },
+    ]);
+    await openSession("s");
+    expect(getChatRun().messages[1].note?.from?.label).toBe("Daily Briefing");
+    expect(getChatRun().messages[1].note?.receipts).toEqual([SET]);
+  });
+});

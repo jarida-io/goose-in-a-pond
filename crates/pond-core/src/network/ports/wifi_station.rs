@@ -35,4 +35,11 @@ pub trait WifiStation: Send + Sync {
     /// Deletes every saved network named `ssid`, which drops the link if the pond is on it. The
     /// caller decides whether that is allowed; the station only does it.
     async fn forget(&self, ssid: &str) -> Result<(), WifiForgetError>;
+
+    /// Deletes every saved network (factory reset). Default refuses as `Unsupported`: no adapter
+    /// enumerates its saved networks today, so this needs a per-OS implementation before it can
+    /// do more than refuse.
+    async fn forget_all(&self) -> Result<(), WifiForgetError> {
+        Err(WifiForgetError::Unsupported)
+    }
 }

@@ -113,6 +113,10 @@ impl SettingsRepository for SqliteSettingsRepository {
             settings.voice_room_enabled.to_string()
         );
         upsert!(
+            "browser_rendering_enabled",
+            settings.browser_rendering_enabled.to_string()
+        );
+        upsert!(
             "voice_recording_duration_secs",
             settings.voice_recording_duration_secs.to_string()
         );
@@ -511,6 +515,38 @@ impl SettingsRepository for SqliteSettingsRepository {
             "memory_extraction_first_pass_at",
             &settings.memory_extraction_first_pass_at
         );
+        upsert!(
+            "notices_wait_in_quiet_hours",
+            if settings.notices_wait_in_quiet_hours {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "speak_unfetched_reminders",
+            if settings.speak_unfetched_reminders {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "unseen_phone_skip_days",
+            settings.unseen_phone_skip_days.to_string()
+        );
+        upsert!(
+            "unseen_phone_remove_days",
+            settings.unseen_phone_remove_days.to_string()
+        );
+        upsert!(
+            "lone_voice_sets_reminders",
+            if settings.lone_voice_sets_reminders {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Scheduling
         upsert!(
             "schedule_result_notify",
@@ -671,6 +707,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         upsert!(
             "voice_thinking_tone_enabled",
             if settings.voice_thinking_tone_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "voice_tts_gpu_enabled",
+            if settings.voice_tts_gpu_enabled {
                 "true"
             } else {
                 "false"
@@ -911,6 +955,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "voice_room_enabled" => {
             if let Ok(v) = value.parse() {
                 s.voice_room_enabled = v;
+            }
+        }
+        "browser_rendering_enabled" => {
+            if let Ok(v) = value.parse() {
+                s.browser_rendering_enabled = v;
             }
         }
         "voice_recording_duration_secs" => {
@@ -1190,6 +1239,19 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         // Scheduling
         "schedule_result_notify" => s.schedule_result_notify = value == "true",
         "system_notices_enabled" => s.system_notices_enabled = value == "true",
+        "lone_voice_sets_reminders" => s.lone_voice_sets_reminders = value == "true",
+        "unseen_phone_remove_days" => {
+            if let Ok(v) = value.parse() {
+                s.unseen_phone_remove_days = v;
+            }
+        }
+        "unseen_phone_skip_days" => {
+            if let Ok(v) = value.parse() {
+                s.unseen_phone_skip_days = v;
+            }
+        }
+        "speak_unfetched_reminders" => s.speak_unfetched_reminders = value == "true",
+        "notices_wait_in_quiet_hours" => s.notices_wait_in_quiet_hours = value == "true",
         "schedule_max_concurrent" => {
             if let Ok(v) = value.parse() {
                 s.schedule_max_concurrent = v;
@@ -1241,6 +1303,8 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "ext_travel_enabled" => s.ext_travel_enabled = value == "true",
         // Defaults ON, but a corrupt row still reads false: silence is the safe failure for audio.
         "voice_thinking_tone_enabled" => s.voice_thinking_tone_enabled = value == "true",
+        // A corrupt row reads false: the CPU is the path that always speaks.
+        "voice_tts_gpu_enabled" => s.voice_tts_gpu_enabled = value == "true",
         "audio_input_device" => s.audio_input_device = value.to_string(),
         "audio_output_device" => s.audio_output_device = value.to_string(),
         "audio_sound_test" => s.audio_sound_test = value == "true",

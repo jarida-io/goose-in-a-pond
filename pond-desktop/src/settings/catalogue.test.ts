@@ -142,6 +142,18 @@ describe("settings catalogue", () => {
     expect(homeOf("spoken_pairing_codes")).toBe("connections");
   });
 
+  it("files the reliability settings with the surface they act on", () => {
+    const homeOf = (key: string) => {
+      for (const c of CATALOGUE) for (const g of c.groups) if (g.entries.some((e) => e.key === key)) return `${c.id}/${g.name}`;
+      return undefined;
+    };
+    expect(homeOf("notices_wait_in_quiet_hours")).toBe("automation/Notices");
+    expect(homeOf("speak_unfetched_reminders")).toBe("automation/Notices");
+    expect(homeOf("unseen_phone_skip_days")).toBe("connections/Pairing");
+    expect(homeOf("unseen_phone_remove_days")).toBe("connections/Pairing");
+    expect(homeOf("lone_voice_sets_reminders")).toBe("voice/Listening");
+  });
+
   it("counts the inert settings the audit found", () => {
     // If this moves, something got wired up (mark it "live") or a new inert control shipped.
     const inert = entries.filter((e) => e.consumer === "none");

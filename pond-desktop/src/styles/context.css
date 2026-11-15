@@ -77,15 +77,19 @@
   background: var(--color-surface);
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
-.ctx__view:hover { border-color: var(--color-accent); color: var(--color-text); }
+.ctx__view:hover { border-color: var(--border-ink); color: var(--color-text); }
+/* Selected is height, not a second edge: the compact offset, on the one border. */
 .ctx__view[aria-pressed="true"] {
   border-color: var(--border-ink);
   background: var(--color-accent-subtle);
+  box-shadow: 2px 2px 0 var(--border-ink);
   color: var(--color-text);
 }
-.ctx__view:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+/* The ring is drawn over the border, not around it, so a focused tile has one edge, not two.
+   !important and class specificity beat base.css's global offset. */
+.ctx__view:focus-visible { outline-offset: -1px !important; }
 
 .ctx__viewLabel { font-weight: var(--weight-bold); font-size: 14px; }
 .ctx__viewBlurb { font-size: 12px; color: var(--color-text-secondary); }
@@ -116,13 +120,11 @@
   width: 100%;
 }
 
-/* The focus ring belongs on the WRAPPER, which is what looks like the control.
-   Putting it on the inner input drew a second rounded rectangle inside the
-   border that was already there. */
+/* The focus ring belongs on the WRAPPER, which is what looks like the control, and sits over
+   its border: one edge, not a ring outside an already recoloured border. */
 .ctx__search:focus-within {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-  border-color: var(--color-accent);
+  outline-offset: -1px;
 }
 
 .ctx__add { display: flex; gap: var(--space-3); flex-wrap: wrap; }

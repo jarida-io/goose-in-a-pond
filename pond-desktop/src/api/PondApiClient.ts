@@ -1,5 +1,8 @@
 import {
   RecoveryRequest,
+  type NgrokTunnelConfig,
+  type NgrokTunnelState,
+  type RemoteRouteState,
   ApiError,
   type AddExtensionRequest,
   type AgentRecipe,
@@ -28,8 +31,11 @@ import {
   type DownloadStarted,
   type Extension,
   type FaceModelsResponse,
+  type FactoryResetStatus,
   type HandshakeResponse,
   type HealthResponse,
+  type HouseholdProfile,
+  type HouseholdRole,
   type HfModel,
   type HfModelFile,
   type ImageAttachment,
@@ -64,10 +70,15 @@ import {
   type ModelMemoryStatus,
   type OllamaModel,
   type PairingCodeBinding,
+  type OfferAnswer,
+  type PairingLock,
+  type PairingRequest,
+  type ReliabilityReport,
   type PairingCodeResponse,
   type PrefillReport,
   type PromptTemplate,
   type RecipeValidation,
+  type Room,
   type RetitleOneResult,
   type RetitleResult,
   type Schedule,
@@ -563,6 +574,13 @@ export class PondApiClient {
   /** Whether this Pond was provisioned with a device certificate, which admits it without an invite. */
   remoteDevice(): Promise<{ provisioned: boolean; serial?: string; registered: boolean }> { return this.hostRequest('GET', '/api/v1/remote-access/device'); }
   disableRemoteAccess(): Promise<unknown> { return this.hostRequest('DELETE', '/api/v1/remote-access'); }
+  ngrokTunnel(): Promise<NgrokTunnelState> { return this.hostRequest('GET', '/api/v1/remote-access/ngrok'); }
+  configureNgrokTunnel(config: NgrokTunnelConfig): Promise<NgrokTunnelState> { return this.hostRequest('PUT', '/api/v1/remote-access/ngrok', config); }
+  setNgrokAuthtoken(authtoken: string): Promise<NgrokTunnelState> { return this.hostRequest('PUT', '/api/v1/remote-access/ngrok/token', { authtoken }); }
+  forgetNgrokAuthtoken(): Promise<NgrokTunnelState> { return this.hostRequest('DELETE', '/api/v1/remote-access/ngrok/token'); }
+  remoteRoute(): Promise<RemoteRouteState> { return this.hostRequest('GET', '/api/v1/remote-access/route'); }
+  /** Switch the way in and keep one on: the Pond starts the new route before stopping the old. */
+  chooseRemoteRoute(route: 'built_in' | 'ngrok'): Promise<RemoteRouteState> { return this.hostRequest('PUT', '/api/v1/remote-access/route', { route }); }
 
   // ── Health ────────────────────────────────────────────────
 
@@ -624,6 +642,20 @@ export class PondApiClient {
     return this.hostRequest("POST", "/api/v1/onboard/reset");
   }
 
+  /**
+   * Wipes this Pond's household data and reopens onboarding. `pondName` must match the Pond's
+   * real name exactly, or the server refuses with `ApiError.message === "pond_name_mismatch"`;
+   * a held mesh-credit balance refuses with `"payments_held"`.
+   */
+  factoryReset(pondName: string): Promise<{ routines: Schedule[] }> {
+    return this.hostRequest("POST", "/api/v1/admin/factory-reset", { pond_name: pondName });
+  }
+
+  /** Which step a reset in progress has reached; poll this while {@link factoryReset} is in flight. */
+  factoryResetStatus(): Promise<FactoryResetStatus> {
+    return this.hostRequest("GET", "/api/v1/admin/factory-reset/status");
+  }
+
   /** WAV bytes for `text`; throws {@link ApiError} (e.g. 503) when no TTS backend runs. */
   async synthesizeSpeech(text: string): Promise<ArrayBuffer> {
     await this.ensureTokenFresh();
@@ -631,7 +663,7 @@ export class PondApiClient {
     const res = await fetch(`${this.base}/api/v1/tts`, {
       method: "POST",
       headers: this.headers("POST", await this.hostHeaders()),
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, last: true }),
     });
     if (!res.ok) {
       let msg = res.statusText;
@@ -702,7 +734,7 @@ export class PondApiClient {
     device_type: string;
     hostname?: string;
     capabilities: string[];
-    room?: string;
+    room_id?: string;
   }): Promise<Device> {
     return this.post<Device>("/api/v1/devices", req);
   }
@@ -750,12 +782,36 @@ export class PondApiClient {
   /**
    * Save edits from the Devices "Configure" panel (name, hostname, room). With the host
    * credential, because another phone's row is only the host's or that phone's to change.
+   * `room_id: null` clears it (shows under "Unassigned"); omit the key to leave it as is.
    */
   updateDevice(
     id: string,
-    req: { name: string; hostname?: string; room?: string },
+    req: { name: string; hostname?: string; room_id?: string | null },
   ): Promise<Device> {
     return this.hostRequest<Device>("PUT", `/api/v1/devices/${encodeURIComponent(id)}`, req);
+  }
+
+  // ── Rooms ─────────────────────────────────────────────────
+
+  listRooms(): Promise<Room[]> {
+    return this.get<{ rooms: Room[] }>("/api/v1/rooms").then((r) => r.rooms ?? []);
+  }
+
+  createRoom(name: string): Promise<Room> {
+    return this.post<Room>("/api/v1/rooms", { name });
+  }
+
+  renameRoom(id: string, name: string): Promise<Room> {
+    return this.put<Room>(`/api/v1/rooms/${encodeURIComponent(id)}`, { name });
+  }
+
+  deleteRoom(id: string): Promise<void> {
+    return this.del(`/api/v1/rooms/${encodeURIComponent(id)}`);
+  }
+
+  /** Whether an unidentified guest voice may use devices in this room. */
+  setRoomGuestAccess(id: string, accessible: boolean): Promise<Room> {
+    return this.put<Room>(`/api/v1/rooms/${encodeURIComponent(id)}/guest-access`, { accessible });
   }
 
   // ── Connections ───────────────────────────────────────────
@@ -1630,9 +1686,11 @@ export class PondApiClient {
 
   // ── Sessions ──────────────────────────────────────────────
 
-  listSessions(): Promise<SessionSummary[]> {
+  /** `surfaces` narrows to where conversations started; `unknown` matches rows with none. */
+  listSessions(surfaces?: readonly string[]): Promise<SessionSummary[]> {
+    const qs = surfaces && surfaces.length > 0 ? `?surface=${encodeURIComponent(surfaces.join(","))}` : "";
     return this.get<{ sessions: SessionSummary[] } | SessionSummary[]>(
-      "/api/v1/sessions",
+      `/api/v1/sessions${qs}`,
     ).then((r) =>
       Array.isArray(r)
         ? r
@@ -1671,10 +1729,35 @@ export class PondApiClient {
               thinking: m.thinking as SessionMessage["thinking"],
               transient: m.transient === true ? true : undefined,
               liked: m.liked as boolean | null | undefined,
+              note: m.note as SessionMessage["note"],
             }) satisfies Record<keyof SessionMessage, unknown>,
         );
       },
     );
+  }
+
+  /** 409 means the offer was already answered: reload the conversation. */
+  answerOffer(sessionId: string, messageId: string, take: boolean): Promise<OfferAnswer> {
+    return this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/offer`,
+      { take },
+    );
+  }
+
+  // ── Pairing lock ──────────────────────────────────────────
+
+  /** The writes and the request list answer 403 to a caller that is not a member's paired device. */
+  getPairingLock(): Promise<PairingLock> { return this.get("/api/v1/pairing/lock"); }
+  setPairingLock(locked: boolean): Promise<PairingLock> { return this.put("/api/v1/pairing/lock", { locked }); }
+  setRecoveryPin(pin: string): Promise<void> { return this.put("/api/v1/pairing/recovery-pin", { pin }); }
+  clearRecoveryPin(): Promise<void> { return this.del("/api/v1/pairing/recovery-pin"); }
+  listPairingRequests(): Promise<{ requests: PairingRequest[] }> { return this.get("/api/v1/pairing/requests"); }
+  approvePairingRequest(id: string): Promise<void> { return this.post(`/api/v1/pairing/requests/${encodeURIComponent(id)}/approve`); }
+  declinePairingRequest(id: string): Promise<void> { return this.post(`/api/v1/pairing/requests/${encodeURIComponent(id)}/decline`); }
+
+  /** Needs My Pond unlocked on a member's device: a locked or non-member caller gets 403. */
+  getReliability(days: number): Promise<ReliabilityReport> {
+    return this.get(`/api/v1/admin/reliability?days=${encodeURIComponent(String(days))}`);
   }
 
   renameSession(sessionId: string, title: string): Promise<void> {
@@ -2308,10 +2391,39 @@ export class PondApiClient {
   // ── Face enrollment / identification (Faces section) ──────
   // Face calls are multipart (postMultipart); without `face-onnx` the server answers 503.
 
-  listProfiles(): Promise<{
-    profiles: Array<{ id: string; display_name: string; avatar_emoji: string }>;
-  }> {
+  listProfiles(): Promise<{ profiles: HouseholdProfile[] }> {
     return this.get("/api/v1/profiles");
+  }
+
+  /** Owner-only; 409 if it would leave the household with no owner. */
+  setProfileRole(
+    profileId: string,
+    role: HouseholdRole,
+    guestUntil?: string | null,
+  ): Promise<HouseholdProfile> {
+    return this.put(`/api/v1/profiles/${encodeURIComponent(profileId)}/role`, {
+      role,
+      guest_until: guestUntil ?? null,
+    });
+  }
+
+  /** Owner-only. The devices a guest profile may currently control. */
+  listGuestDeviceAccess(profileId: string): Promise<{ device_ids: string[] }> {
+    return this.get(`/api/v1/profiles/${encodeURIComponent(profileId)}/devices`);
+  }
+
+  /** Owner-only; 404 if the device doesn't exist. Returns the guest's updated allow-list. */
+  allowGuestDevice(profileId: string, deviceId: string): Promise<{ device_ids: string[] }> {
+    return this.put(
+      `/api/v1/profiles/${encodeURIComponent(profileId)}/devices/${encodeURIComponent(deviceId)}`,
+    );
+  }
+
+  /** Owner-only. Returns the guest's updated allow-list. */
+  revokeGuestDevice(profileId: string, deviceId: string): Promise<{ device_ids: string[] }> {
+    return this.del(
+      `/api/v1/profiles/${encodeURIComponent(profileId)}/devices/${encodeURIComponent(deviceId)}`,
+    );
   }
 
   /** A member's stored preferences, in the server's own snake_case spelling. */

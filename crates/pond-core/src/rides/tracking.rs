@@ -41,6 +41,7 @@ pub async fn track_once(booking: &RideBooking, notifier: &dyn MemberNotifier) ->
                 message.clone(),
                 serde_json::json!({
                     "action": "ride_update",
+                    "quiet_pass": true,
                     "ride_id": pending.id,
                     "status": status,
                 }),
@@ -49,6 +50,7 @@ pub async fn track_once(booking: &RideBooking, notifier: &dyn MemberNotifier) ->
                 message.clone(),
                 serde_json::json!({
                     "action": "ride_update",
+                    "quiet_pass": true,
                     "ride_id": pending.id,
                     "followed": false,
                 }),

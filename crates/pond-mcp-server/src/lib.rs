@@ -11,6 +11,7 @@ pub mod memory;
 pub mod news_web;
 pub mod orchestrator;
 pub mod page_data;
+pub mod page_render;
 pub mod product_page;
 pub mod report_images;
 pub mod saved_items;
@@ -32,6 +33,7 @@ pub mod web_watch_runner;
 pub mod wolfram;
 
 // ── Shared utilities for Knowledge-family servers ───────────────────────────
+pub mod feed;
 pub mod format;
 pub mod http;
 /// The tool block as the model sees it, pinned so a moved KV prefix is a diff.
@@ -49,6 +51,28 @@ static LAST_USER_MESSAGE: RwLock<String> = RwLock::new(String::new());
 pub use pond_core::shared::services::egress::{
     current_session_id, current_tool, set_current_session_id, set_current_tool, set_egress_sink,
 };
+
+/// Drops the `"default": null` a `#[serde(default)]` params struct gives each field: it says
+/// nothing and costs bytes in every turn's tool block.
+pub(crate) fn without_null_defaults(schema: &mut schemars::Schema) {
+    let Some(properties) = schema
+        .as_object_mut()
+        .and_then(|s| s.get_mut("properties"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for property in properties.values_mut() {
+        if let Some(property) = property.as_object_mut() {
+            if property
+                .get("default")
+                .is_some_and(serde_json::Value::is_null)
+            {
+                property.remove("default");
+            }
+        }
+    }
+}
 
 pub fn set_last_user_message(msg: &str) {
     // An address the person wrote is one `read_web_page` may fetch.
@@ -109,6 +133,32 @@ pub fn init_speaker_authority(
 pub fn speaker_authority(
 ) -> Option<Arc<dyn pond_core::security::ports::draft_authority::DraftAuthority>> {
     SPEAKER_AUTHORITY.get().cloned()
+}
+
+/// A dependency of the server: given at construction, or read from its process-wide slot each
+/// time a tool runs. Goose keeps the first server it spawns for the life of the process, and that
+/// can be before startup has installed the slots.
+pub(crate) enum Dep<T: ?Sized> {
+    Fixed(Option<Arc<T>>),
+    Installed(fn() -> Option<Arc<T>>),
+}
+
+impl<T: ?Sized> Dep<T> {
+    pub(crate) fn get(&self) -> Option<Arc<T>> {
+        match self {
+            Self::Fixed(dep) => dep.clone(),
+            Self::Installed(read) => read(),
+        }
+    }
+}
+
+impl<T: ?Sized> Clone for Dep<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Fixed(dep) => Self::Fixed(dep.clone()),
+            Self::Installed(read) => Self::Installed(*read),
+        }
+    }
 }
 
 // -- Member delivery: puts a tool's link on one member's own phones; unset → reply only --
@@ -175,7 +225,7 @@ pub async fn generate_params(
 pub use device::DeviceMcpServer;
 pub use device_control::DeviceControlMcpServer;
 pub use knowledge::{clean_query_for_search, KnowledgeMcpServer};
-pub use memory::{auto_classify_segment, parse_memory_segment, parse_memory_tier, MemoryMcpServer};
+pub use memory::MemoryMcpServer;
 pub use orchestrator::OrchestratorMcpServer;
 pub use schedule::{
     init_schedule_deps, spawn_schedule_server, try_upcoming_schedules_context,

@@ -146,7 +146,16 @@ async fn a_reminder_on_a_repeat_says_reminder_and_moves_to_the_next_day() {
     assert_eq!(notice.category, "info");
     assert_eq!(notice.title, "Reminder: take the bins out");
     assert_eq!(notice.body, "Every weekday at 18:00");
-    assert_eq!(notice.data, Some(json!({"open": "todos", "todo_id": t.id})));
+    assert_eq!(
+        notice.data,
+        Some(json!({
+            "open": "todos",
+            "todo_id": t.id,
+            "quiet_pass": true,
+            "speak_if_unfetched": true,
+        })),
+        "a reminder passes quiet hours and is said aloud if no phone fetches it"
+    );
     let after = stored(&rig, &t.id).await;
     assert_eq!(after.asked, 0, "a reminder asks nothing");
     assert_eq!(

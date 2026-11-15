@@ -121,7 +121,8 @@ system, device and sensors are on by default; travel, context and orchestrator a
 
 Phones (the Goose On The Go app) pair with CPace (`/handshake/pake/*`) using a pairing code, a
 spoken code or the printed setup card, then talk HTTPS on `:4443` against a pinned self-signed
-certificate. `auth_middleware` (`crates/pond-api/src/middleware/mod.rs`) guards every non-public
+certificate. While the pairing lock holds (`crates/pond-api/src/pairing_lock.rs`), a phone with a
+code only asks: the main member accepts it, or it lets itself in with the recovery PIN. `auth_middleware` (`crates/pond-api/src/middleware/mod.rs`) guards every non-public
 route. `POND_DEV_ALLOW_LOOPBACK=1` lets loopback callers through for development;
 `live-test.sh` re-runs its auth checks with it off. `pond-net` owns every outbound HTTP client,
 `pond-connect` the BLE setup channel, Wi-Fi and mDNS, `native/pondnet` (Go) the embedded tailnet
@@ -177,9 +178,10 @@ A turn, where Silero is available (`crates/pond-server/src/voice_rig.rs` picks):
 (`pond-adapters-ear` running `pond-ear` on its own thread, fed the mic and, through
 `pond_audio_out::tap`, everything played) hears the wake word, either its "hey goose" CNN or
 Whisper on each speech segment, and endpoints the request with Silero on echo-cancelled audio →
-Whisper transcribes it → think → tokens split into sentences (a short first clause, and clauses
-when synthesis falls behind) and spoken by Kokoro while the reply
-streams (`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
+Whisper transcribes it → think → the reply is handed to Kokoro whole once the model stops
+writing (only a reply longer than one Kokoro pass is cut, at a sentence end) and spoken
+(`pond-adapters-kokoro`, `pond-audio-out`; on a Jetson with the GPU runtime a long speech is made
+by a `kokoro-gpu-helper` child that exits when the speech ends) → the wake word, or an enrolled household voice,
 interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word, only when the
 reply ended with a question (`asks_for_an_answer`). With
 `vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,

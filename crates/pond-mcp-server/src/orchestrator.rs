@@ -12,7 +12,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -505,7 +505,7 @@ and is refused when the model runs on this device (one agent at a time).")]
     /// The whole decision, with the two I/O steps in the middle.
     async fn run_delegation(
         &self,
-        meta: &rmcp::model::Meta,
+        meta: &rmcp::model::RequestMetaObject,
         params: DelegateParams,
     ) -> Result<String, Refusal> {
         let Some(deps) = &self.deps else {
@@ -587,7 +587,7 @@ if finished. Without a `task_id`, lists the person's long tasks still running.")
     /// All of `check_task`: authorise the CALLER exactly as `delegate` does, then the TASK.
     async fn run_check(
         &self,
-        meta: &rmcp::model::Meta,
+        meta: &rmcp::model::RequestMetaObject,
         params: CheckTaskParams,
     ) -> Result<String, Refusal> {
         let Some(deps) = &self.deps else {
@@ -629,7 +629,7 @@ if finished. Without a `task_id`, lists the person's long tasks still running.")
 
 #[tool_handler]
 impl ServerHandler for OrchestratorMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1295,8 +1295,8 @@ mod tests {
         }
     }
 
-    fn meta_for(engine_session: &str) -> rmcp::model::Meta {
-        let mut m = rmcp::model::Meta::new();
+    fn meta_for(engine_session: &str) -> rmcp::model::RequestMetaObject {
+        let mut m = rmcp::model::RequestMetaObject::new();
         m.0.insert(
             crate::SESSION_ID_META_KEY.to_string(),
             serde_json::Value::String(engine_session.to_string()),
@@ -1429,7 +1429,7 @@ mod tests {
         // ... and so is a call carrying no engine session at all.
         let (server, _lease) = server_with(Some(run_of("my-session", "task-1")));
         let refusal = server
-            .run_check(&rmcp::model::Meta::new(), check_for("task-1"))
+            .run_check(&rmcp::model::RequestMetaObject::new(), check_for("task-1"))
             .await
             .expect_err("a call with no `_meta` has no caller to authorise");
         assert!(

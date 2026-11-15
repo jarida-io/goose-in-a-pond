@@ -26,6 +26,10 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
          the id is a fresh UUID -- a person",
     ),
     (
+        "crates/pond-api/src/ideas.rs",
+        "a member tapped 'Goose, do it' on an idea card (`POST /ideas/{id}/act`); the id is a fresh UUID -- a person",
+    ),
+    (
         "crates/pond-server/src/main.rs",
         "the terminal voice/chat CLI's own session -- a person, in another process",
     ),
@@ -33,6 +37,11 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
         "crates/pond-core/src/shared/services/chat.rs",
         "a voice loop's first turn (`with_session_on_first_turn`): someone in the room spoke to \
          the pond, and room voice minted the id as a fresh UUID -- a person",
+    ),
+    (
+        "crates/pond-core/src/shared/services/goose_thread.rs",
+        "MACHINE: `goose-{member}`, the thread the pond posts its own results into. Covered by \
+         POND_AUTHORED_SESSION_PREFIXES, so a post is not a person arriving.",
     ),
     (
         "crates/pond-server/src/schedule_executors.rs",

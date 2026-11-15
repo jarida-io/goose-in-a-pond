@@ -139,6 +139,14 @@ impl VoicePrintRepository for SqliteVoiceRecognition {
                 .rows_affected(),
         )
     }
+
+    async fn delete_wake_take(&self, id: &str) -> Result<u64> {
+        Ok(sqlx::query("DELETE FROM voice_wake_takes WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
 }
 
 #[cfg(test)]

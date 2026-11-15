@@ -7,7 +7,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -39,7 +39,7 @@ pub struct ForecastParams {
     pub days: Option<u8>,
     /// Days from today.
     pub day: Option<u8>,
-    /// YYYY-MM-DD.
+    /// The day as they said it: "Saturday", "tomorrow", or a date.
     pub date: Option<String>,
     /// Catch-all for unexpected fields the model might send.
     #[serde(flatten)]
@@ -126,11 +126,11 @@ location for home rather than asking which city. Never guess weather.")]
                             "sunrise": data.sunrise,
                             "sunset": data.sunset,
                         });
-                        let hint = format!("[[[mcp-ui:weather:{}]]]\n", ui_data);
-                        let full_result = format!("{}{}", hint, data.as_context_block());
-                        Ok(CallToolResult::success(vec![ContentBlock::text(
-                            full_result,
-                        )]))
+                        Ok(crate::format::with_card(
+                            data.as_context_block(),
+                            "weather",
+                            &ui_data,
+                        ))
                     }
                     // Switched off or no place set: the same answer as no provider at all.
                     Err(e) if e.downcast_ref::<WeatherOff>().is_some() => {
@@ -151,8 +151,9 @@ location for home rather than asking which city. Never guess weather.")]
     }
 
     #[tool(description = "\
-Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date. Else days 1-7 from \
-today, each labelled with its weekday (a week or a weekday name: 7). Highs/lows, rain chance, \
+Forecast. One day: day (0 today/leo, 1 tomorrow/kesho, 2 the day after/kesho kutwa) or date \
+(a weekday name or a date). Else days 1-7 from today, each labelled with its weekday (a week: \
+7). Highs/lows, rain chance, \
 UV, sun times. One call per place; for a trip, here and the destination. Omit location \
 for home. Never guess data.")]
     async fn get_weather_forecast(
@@ -174,23 +175,24 @@ impl WeatherMcpServer {
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty());
+        let today = self.household_today(now).await;
         let named = match named {
             None => None,
-            Some(d) => match NaiveDate::parse_from_str(d, "%Y-%m-%d") {
-                Ok(day) => Some(day),
-                Err(_) => {
+            Some(d) => match pond_core::shared::domain::when_said::day_from_words(d, today) {
+                Some(day) => Some(day),
+                None => {
                     tracing::warn!(
                         kind = "forecast_date_invalid",
                         date = d,
-                        "forecast date is not YYYY-MM-DD"
+                        "forecast date names no day"
                     );
                     return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "The date {d} is not YYYY-MM-DD. Pass the day asked for, e.g. 2026-11-05."
+                        "\"{d}\" names no day. Pass the day asked for: \"Saturday\", \
+                         \"tomorrow\", or a date like 2026-11-05."
                     ))]);
                 }
             },
         };
-        let today = self.household_today(now).await;
         // `day` wins: it is a count the tool turns into a date, so it cannot carry the model's
         // arithmetic slip that a disagreeing `date` would.
         let asked = match params.day {
@@ -278,7 +280,7 @@ impl WeatherMcpServer {
             location = %data.location_name,
             "weather: forecast fetched"
         );
-        // `[[[mcp-ui:…]]]` marker, or the desktop has no data to render a card.
+        // The screen's card, or the desktop has no data to render one.
         let ui_data = serde_json::json!({
             "location": data.location_name,
             "forecast": data.days.iter().map(|d| serde_json::json!({
@@ -294,11 +296,11 @@ impl WeatherMcpServer {
                 "sunset": d.sunset,
             })).collect::<Vec<_>>(),
         });
-        let hint = format!("[[[mcp-ui:weather:{}]]]\n", ui_data);
-        CallToolResult::success(vec![ContentBlock::text(format!(
-            "{hint}{header}{}",
-            data.as_context_block_from(today)
-        ))])
+        crate::format::with_card(
+            format!("{header}{}", data.as_context_block_from(today)),
+            "weather",
+            &ui_data,
+        )
     }
 
     /// The household's calendar date at `now`, on the timezone in settings.
@@ -319,7 +321,7 @@ impl WeatherMcpServer {
 
 #[tool_handler]
 impl ServerHandler for WeatherMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(

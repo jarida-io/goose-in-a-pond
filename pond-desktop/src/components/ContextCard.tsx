@@ -86,7 +86,7 @@ function SchedulesContent({ data }: { data: Record<string, unknown> }) {
         return (
           <li key={i} style={styles.listItem}>
             <span style={styles.value}>{String(sched.name ?? "Schedule")}</span>
-            <span style={styles.hint}>{String(sched.cron ?? "")}</span>
+            <span style={styles.hint}>{String(sched.when ?? sched.cron ?? "")}</span>
           </li>
         );
       })}

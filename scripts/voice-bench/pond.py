@@ -25,7 +25,10 @@ def main():
     if cmd == "pair":
         host = {"X-Pond-Host-Credential": (D / ".runtime_host_credential").read_text().strip()}
         client = "voice-frontend-bench"
-        _, code = call("POST", "/handshake/pairing-code", None, extra=host)
+        # A test device: not announced, no household notices, left out of the reliability report.
+        status, code = call("POST", "/handshake/pairing-code", {"test": True}, extra=host)
+        if status in (400, 422):  # a pond from before test devices refuses the field
+            _, code = call("POST", "/handshake/pairing-code", None, extra=host)
         _, ch = call("POST", "/handshake/init", {"client_id": client, "client_type": "desktop", "client_version": "bench"})
         mac = hmac.new(code["code"].encode(), base64.b64decode(ch["challenge"]) + client.encode(), hashlib.sha256).hexdigest()
         _, res = call("POST", "/handshake/verify", {"challenge_id": ch["challenge_id"], "mac": mac, "device_name": client})

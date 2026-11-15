@@ -1,4 +1,5 @@
 import React from "react";
+import { Switch } from "../../Switch";
 
 interface ToggleRowProps {
   icon?: React.ReactNode;
@@ -20,15 +21,7 @@ export function ToggleRow({ icon, title, desc, checked, onChange, badge }: Toggl
         </div>
         <p className="ob-toggle-row__desc">{desc}</p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`ob-switch ${checked ? "ob-switch--on" : ""}`}
-      >
-        <span className="ob-switch__thumb" />
-      </button>
+      <Switch checked={checked} label={title} onChange={onChange} />
     </div>
   );
 }

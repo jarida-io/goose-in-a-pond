@@ -26,7 +26,7 @@
   background: var(--color-surface);
   border: 2px solid var(--color-text);
   border-radius: 20px;
-  box-shadow: 4px 4px 0 var(--pp);
+  box-shadow: 4px 4px 0 var(--border-ink);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -268,13 +268,13 @@
   justify-content: center;
   gap: 4px;
   cursor: pointer;
-  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--pp);
+  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--border-ink);
   transform: translate(calc(var(--ink-rest) - var(--ink-lift)), calc(var(--ink-rest) - var(--ink-lift)));
   transition: transform var(--dur-lift) var(--ink-ease), box-shadow var(--dur-lift) var(--ink-ease);
 }
 
-/* Compact lift ladder (small control): a full 4px throw on a 44px button reads as falling over. */
-.shellbar__btn:hover { --ink-lift: var(--ink-raised); background: var(--color-hover); }
+/* Compact lift ladder (small control): hover stays at rest, as ink's compact rule has it. */
+.shellbar__btn:hover { background: var(--color-hover); }
 .shellbar__btn:active { --ink-lift: var(--ink-press-compact); }
 
 .shellbar__bar {
@@ -308,7 +308,7 @@
 .hdrawer__routine:focus-visible,
 .hdrawer__close:focus-visible,
 .shellbar__btn:focus-visible {
-  outline: 2px solid var(--pp);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 

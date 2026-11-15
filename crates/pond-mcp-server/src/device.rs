@@ -3,14 +3,20 @@
 use pond_core::models::domain::audio_device::{
     AudioDevice, AudioDeviceStatus, AudioDirection, ChoiceBasis,
 };
-use pond_core::user_data::ports::device_registry::DeviceRegistry;
+use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::device_registry::{device_type_label, DeviceRegistry};
+use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::ports::room_registry::RoomRegistry;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::ports::skill::UserSkillRepository;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        ProtocolVersion, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -46,8 +52,15 @@ pub struct LoadSkillParams {
 #[derive(Clone)]
 pub struct DeviceMcpServer {
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
+    /// Counts the household, for a caller no live turn resolves.
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
+    /// Live turns by engine session; `None` reads the registry installed with the orchestrator.
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+    children: Arc<ChildSessionRegistry>,
     #[allow(dead_code)] // accessed by rmcp's generated tool_handler code
     tool_router: ToolRouter<Self>,
 }
@@ -61,15 +74,36 @@ impl DeviceMcpServer {
 
     pub fn new(
         device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+        room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+        guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
         settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
         skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
+        profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
     ) -> Self {
         Self {
             device_registry,
+            room_registry,
+            guest_room_access,
             settings_repo,
             skill_repo,
+            profile_repo,
+            turns: None,
+            children: process_child_sessions(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Resolves callers from these registries instead of the process's own -- for tests, which
+    /// must not share live-turn state with the rest of the test binary.
+    #[cfg(test)]
+    fn with_registries(
+        mut self,
+        turns: Arc<TurnAuthorityRegistry>,
+        children: Arc<ChildSessionRegistry>,
+    ) -> Self {
+        self.turns = Some(turns);
+        self.children = children;
+        self
     }
 
     #[tool(
@@ -79,12 +113,58 @@ impl DeviceMcpServer {
     )]
     async fn list_registered_devices(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         match self.device_registry.list_devices().await {
             Ok(devices) => {
+                // A guest only ever sees what it may also control; a device with no room is
+                // off-limits by default since there's nothing to check it against.
+                let scope = crate::session_meta::caller_scope(
+                    &ctx,
+                    self.turns.clone(),
+                    &self.children,
+                    self.profile_repo.as_ref(),
+                )
+                .await;
+                let devices = if matches!(scope, ProfileScope::Guest) {
+                    let accessible = self
+                        .guest_room_access
+                        .accessible_room_ids()
+                        .await
+                        .unwrap_or_default();
+                    devices
+                        .into_iter()
+                        .filter(|d| {
+                            d.room_id
+                                .as_deref()
+                                .is_some_and(|id| accessible.contains(id))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    devices
+                };
+
+                // The model answers in room names, so it is never handed an id to read out.
+                let rooms: std::collections::HashMap<String, String> = match self
+                    .room_registry
+                    .list_rooms()
+                    .await
+                {
+                    Ok(list) => list.into_iter().map(|r| (r.id, r.name)).collect(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "list_registered_devices: could not read the rooms");
+                        Default::default()
+                    }
+                };
+                let room_of = |d: &pond_core::user_data::ports::device_registry::Device| {
+                    room_name(d.room_id.as_deref(), &rooms)
+                };
                 let text = if devices.is_empty() {
-                    "No devices registered.".to_string()
+                    if matches!(scope, ProfileScope::Guest) {
+                        "No devices are available to a guest here.".to_string()
+                    } else {
+                        "No devices registered.".to_string()
+                    }
                 } else {
                     devices
                         .iter()
@@ -96,9 +176,10 @@ impl DeviceMcpServer {
                                 format!(" — {}", d.capabilities.join(", "))
                             };
                             format!(
-                                "- {} ({}): {}{can}",
+                                "- {} ({}) in {}: {}{can}",
                                 d.name,
-                                d.device_type,
+                                device_type_label(&d.device_type),
+                                room_of(d),
                                 if d.is_online { "online" } else { "offline" }
                             )
                         })
@@ -114,16 +195,13 @@ impl DeviceMcpServer {
                                 "name": d.name,
                                 "is_online": d.is_online,
                                 "device_type": d.device_type,
-                                "room_id": d.room_id.clone().unwrap_or_default(),
+                                "room": room_of(d),
+                                "kind_label": device_type_label(&d.device_type),
                             })
                         })
                         .collect();
                     let ui_data = serde_json::json!({ "devices": ui_devices });
-                    let hint = format!("[[[mcp-ui:devices:{}]]]\n", ui_data);
-                    let full_result = format!("{}{}", hint, text);
-                    return Ok(CallToolResult::success(vec![ContentBlock::text(
-                        full_result,
-                    )]));
+                    return Ok(crate::format::with_card(text, "devices", &ui_data));
                 }
 
                 Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
@@ -305,7 +383,7 @@ impl DeviceMcpServer {
 
 #[tool_handler]
 impl ServerHandler for DeviceMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -332,22 +410,44 @@ use tokio::io::DuplexStream;
 
 struct DeviceDeps {
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
 }
 
 static DEVICE_DEPS: OnceLock<DeviceDeps> = OnceLock::new();
 
+/// What a device in no room is placed in, as the app and the dashboard name it.
+const UNASSIGNED: &str = "Unassigned";
+
+/// The name of the room `room_id` names, or "Unassigned" for none or one not found: never the id.
+fn room_name(room_id: Option<&str>, rooms: &std::collections::HashMap<String, String>) -> String {
+    room_id
+        .and_then(|id| rooms.get(id).cloned())
+        .unwrap_or_else(|| UNASSIGNED.to_string())
+}
+
+/// Room names by id. Empty without the registry or when it fails, which names every room
+/// "Unassigned" rather than showing an id; the failure is logged.
+
 /// Initialize device server dependencies. Call once at startup.
 pub fn init_device_deps(
     device_registry: Arc<dyn DeviceRegistry + Send + Sync>,
+    room_registry: Arc<dyn RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<dyn GuestRoomAccess + Send + Sync>,
     settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
     skill_repo: Arc<dyn UserSkillRepository + Send + Sync>,
+    profile_repo: Arc<dyn ProfileRepository + Send + Sync>,
 ) {
     let _ = DEVICE_DEPS.set(DeviceDeps {
         device_registry,
+        room_registry,
+        guest_room_access,
         settings_repo,
         skill_repo,
+        profile_repo,
     });
 }
 
@@ -362,8 +462,11 @@ pub fn spawn_device_server(reader: DuplexStream, writer: DuplexStream) {
     };
     let server = DeviceMcpServer::new(
         deps.device_registry.clone(),
+        deps.room_registry.clone(),
+        deps.guest_room_access.clone(),
         deps.settings_repo.clone(),
         deps.skill_repo.clone(),
+        deps.profile_repo.clone(),
     );
     crate::serve_builtin("giap-device", server, reader, writer);
 }
@@ -373,6 +476,20 @@ pub fn spawn_device_server(reader: DuplexStream, writer: DuplexStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_is_placed_by_its_rooms_name_never_its_id() {
+        let rooms: std::collections::HashMap<String, String> =
+            [("469a80eb-1e60".to_string(), "Living Room".to_string())].into();
+        assert_eq!(room_name(Some("469a80eb-1e60"), &rooms), "Living Room");
+        assert_eq!(room_name(None, &rooms), "Unassigned");
+        // A room deleted, or rooms that could not be read: still not the id.
+        assert_eq!(room_name(Some("gone"), &rooms), "Unassigned");
+        assert_eq!(
+            room_name(Some("469a80eb-1e60"), &Default::default()),
+            "Unassigned"
+        );
+    }
     use async_trait::async_trait;
     use pond_core::user_data::domain::settings::Settings;
     use pond_core::user_data::domain::skill::UserSkill;
@@ -397,6 +514,8 @@ mod tests {
             Ok(())
         }
     }
+
+    use pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry;
 
     struct StubSettings;
     #[async_trait]
@@ -444,8 +563,11 @@ mod tests {
     fn test_server() -> DeviceMcpServer {
         DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             Arc::new(StubSettings),
             Arc::new(StubSkills),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
         )
     }
 
@@ -495,8 +617,11 @@ mod tests {
     fn test_server_with_skill() -> DeviceMcpServer {
         DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             Arc::new(StubSettings),
             Arc::new(StubSkillsWithData),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
         )
     }
 
@@ -610,8 +735,11 @@ mod tests {
         }));
         let server = DeviceMcpServer::new(
             Arc::new(StubDeviceRegistry),
+            Arc::new(MockRoomRegistry),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
             settings.clone(),
             Arc::new(StubSkills),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
         );
         let ask = |which: &str, device: Option<&str>| {
             let server = server.clone();
@@ -699,5 +827,170 @@ mod tests {
         let result = server.list_skills(ctx).await.unwrap();
         let text = tool_text(&result);
         assert!(text.contains("morning-briefing: Summarizes the day each morning."));
+    }
+
+    struct OneDeviceInKitchen;
+    #[async_trait]
+    impl DeviceRegistry for OneDeviceInKitchen {
+        async fn register(&self, _: RegisterDeviceRequest) -> anyhow::Result<Device> {
+            unimplemented!()
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![Device {
+                id: "d1".into(),
+                name: "Lamp".into(),
+                device_type: "light".into(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec![],
+                registered_at: String::new(),
+                last_seen: None,
+                is_online: true,
+                room_id: Some("room-1".into()),
+            }])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(None)
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct OneRoomNamedKitchen;
+    #[async_trait]
+    impl RoomRegistry for OneRoomNamedKitchen {
+        async fn create(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<pond_core::user_data::ports::room_registry::Room> {
+            unimplemented!()
+        }
+        async fn list_rooms(
+            &self,
+        ) -> anyhow::Result<Vec<pond_core::user_data::ports::room_registry::Room>> {
+            Ok(vec![pond_core::user_data::ports::room_registry::Room {
+                id: "room-1".into(),
+                name: "Kitchen".into(),
+                created_at: String::new(),
+            }])
+        }
+        async fn get_room(
+            &self,
+            _: &str,
+        ) -> anyhow::Result<Option<pond_core::user_data::ports::room_registry::Room>> {
+            Ok(None)
+        }
+        async fn rename(&self, _: &str, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn list_registered_devices_resolves_room_id_to_name() {
+        let server = DeviceMcpServer::new(
+            Arc::new(OneDeviceInKitchen),
+            Arc::new(OneRoomNamedKitchen),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+            Arc::new(StubSettings),
+            Arc::new(StubSkills),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
+        );
+        let ctx = make_ctx(server.clone()).await;
+        let result = server.list_registered_devices(ctx).await.unwrap();
+        let text = tool_text(&result);
+        assert!(
+            text.contains("\"room\":\"Kitchen\""),
+            "expected a resolved room name in the hint JSON, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_turn_lists_only_the_devices_in_guest_rooms() {
+        use pond_core::shared::domain::orchestration::DelegationAuthority;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = DeviceMcpServer::new(
+            Arc::new(OneDeviceInKitchen),
+            Arc::new(OneRoomNamedKitchen),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+            Arc::new(StubSettings),
+            Arc::new(StubSkills),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
+        )
+        .with_registries(turns.clone(), Arc::new(ChildSessionRegistry::new()));
+        let _lease = turns.publish(
+            "engine-guest",
+            DelegationAuthority::for_turn(
+                "engine-guest".to_string(),
+                ProfileScope::Guest,
+                ["giap-device__list_registered_devices"],
+            ),
+            Default::default(),
+        );
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.meta.0.insert(
+            crate::session_meta::SESSION_ID_META_KEY.to_string(),
+            serde_json::json!("engine-guest"),
+        );
+
+        let text = tool_text(&server.list_registered_devices(ctx).await.unwrap());
+
+        assert_eq!(text, "No devices are available to a guest here.");
+    }
+
+    struct PairedPhoneRegistry;
+    #[async_trait]
+    impl DeviceRegistry for PairedPhoneRegistry {
+        async fn register(&self, _: RegisterDeviceRequest) -> anyhow::Result<Device> {
+            unimplemented!()
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            Ok(vec![Device {
+                id: "phone-1".into(),
+                name: "Emmanuel's A57".into(),
+                device_type: "gotg".into(),
+                hostname: None,
+                ip_address: None,
+                capabilities: vec!["speak".into()],
+                registered_at: "2026-01-01T00:00:00Z".into(),
+                last_seen: None,
+                is_online: true,
+                room_id: Some("living-room".into()),
+            }])
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            Ok(None)
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_phone_is_listed_as_the_companion_phone_not_its_type_code() {
+        let server = DeviceMcpServer::new(
+            Arc::new(PairedPhoneRegistry),
+            Arc::new(OneRoomNamedKitchen),
+            Arc::new(pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess),
+            Arc::new(StubSettings),
+            Arc::new(StubSkills),
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
+        );
+        let ctx = make_ctx(server.clone()).await;
+        let text = tool_text(&server.list_registered_devices(ctx).await.unwrap());
+        assert!(
+            text.contains("Emmanuel's A57 (phone running the Goose On The Go companion app)"),
+            "{text}"
+        );
+        assert!(!text.contains("(gotg)"), "{text}");
     }
 }

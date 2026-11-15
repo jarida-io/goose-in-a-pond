@@ -14,17 +14,34 @@ pub fn line(segment: Option<&str>, content: &str) -> String {
     }
 }
 
-/// Whether `rendered` (a [`line`]) is a whole line of some `<memories>` block in `earlier`, the
-/// text of an earlier user message. Lines inside a block always have a newline on each side.
+/// The fact a block line states: without its bullet, an older `[segment]` tag, or the claim a
+/// correction says it replaces. `None` for a heading, which is no fact.
+fn stated_fact(s: &str) -> Option<&str> {
+    let rest = s.trim().strip_prefix("- ")?;
+    let rest = match rest.strip_prefix('[').and_then(|r| r.split_once("] ")) {
+        Some((_, after)) => after,
+        None => rest,
+    };
+    let rest = match rest.rfind(" (replaces: ") {
+        Some(at) if rest.ends_with(')') => &rest[..at],
+        _ => rest,
+    };
+    Some(rest.trim())
+}
+
+/// Whether the fact `rendered` (a [`line`]) states is a line of some `<memories>` block in
+/// `earlier`, the text of an earlier user message, under whatever heading it stood there.
 pub fn shown_in(rendered: &str, earlier: &str) -> bool {
+    let Some(fact) = stated_fact(rendered).filter(|f| !f.is_empty()) else {
+        return false;
+    };
     let mut rest = earlier;
     while let Some(start) = rest.find("<memories>\n") {
         let body = &rest[start + "<memories>".len()..];
         let Some(end) = body.find("\n</memories>") else {
             return false;
         };
-        let block = &body[..=end];
-        if block.contains(&format!("\n{rendered}\n")) {
+        if body[..=end].lines().any(|l| stated_fact(l) == Some(fact)) {
             return true;
         }
         rest = &body[end..];
@@ -109,5 +126,19 @@ mod tests {
             4,
             "a first turn shows everything"
         );
+    }
+
+    #[test]
+    fn a_fact_shown_under_a_heading_or_as_a_correction_counts_as_shown() {
+        let earlier = "<system-context>\n<memories>\nPreferences\n- Jerry likes dark mode. \
+                       (replaces: Jerry likes light mode.)\nWho they are\n- Jerry lives in \
+                       Kisumu.\n</memories>\n</system-context>";
+        assert!(shown_in(
+            &line(Some("preference"), "Jerry likes dark mode."),
+            earlier
+        ));
+        assert!(shown_in(&line(None, "Jerry lives in Kisumu."), earlier));
+        assert!(!shown_in(&line(None, "Jerry likes light mode."), earlier));
+        assert!(!shown_in("Preferences", earlier), "a heading is not a fact");
     }
 }

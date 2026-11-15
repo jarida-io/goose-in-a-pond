@@ -1,7 +1,10 @@
 use crate::models::domain::message::ImageAttachment;
+use crate::user_data::domain::message_note::MessageNote;
 use crate::user_data::domain::session::{
-    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
+    CutTurn, ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
+    SessionSurface,
 };
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -24,6 +27,17 @@ pub enum SessionStorageError {
 pub trait SessionStorage: Send + Sync {
     async fn create_session(&self, session_id: String) -> Result<Session, SessionStorageError>;
 
+    /// Records where a conversation was started, once: a later turn from another screen does
+    /// not move it. `device_id` is the paired device that began it, when there was one.
+    async fn mark_surface(
+        &self,
+        _session_id: &str,
+        _surface: SessionSurface,
+        _device_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
+
     async fn get_session(&self, session_id: &str) -> Result<Session, SessionStorageError>;
 
     async fn add_message(
@@ -36,6 +50,22 @@ pub trait SessionStorage: Send + Sync {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, SessionStorageError>;
+
+    /// Conversations whose newest message is a person's, sent since `since`, with nothing
+    /// attached: the turns a stop cut off that can be answered again from their words alone.
+    async fn cut_turns(&self, _since: DateTime<Utc>) -> Result<Vec<CutTurn>, SessionStorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Replaces the note under one stored message; an empty note clears it.
+    async fn set_message_note(
+        &self,
+        _session_id: &str,
+        _message_id: &str,
+        _note: &MessageNote,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
 
     async fn update_title(
         &self,

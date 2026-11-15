@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { Card, CardContent, Button, Input, Switch } from "@heroui/react";
+import { Card, CardContent, Button, Input } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import { Plus, Trash2, BookOpen, Bot, Check, Pencil, Play, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { PageHeader, useConfirm } from "../components/shared";
@@ -509,12 +511,10 @@ export function Recipes() {
                   </span>
                   <Switch
                     size="sm"
-                    isSelected={r.active !== false}
+                    checked={r.active !== false}
                     onChange={() => toggleActive(r)}
-                    aria-label={`Enable ${r.title || r.name}`}
-                  >
-                    <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                  </Switch>
+                    label={`Enable ${r.title || r.name}`}
+                  />
                 </div>
                 <h3 className="skill-card__title">{r.title || r.name}</h3>
                 <p className="skill-card__desc">

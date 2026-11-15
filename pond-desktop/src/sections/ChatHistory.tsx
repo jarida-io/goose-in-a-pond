@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
-import { PenSquare, Search, Trash2 } from "lucide-react";
+import { Bird, PenSquare, Search, Trash2 } from "lucide-react";
 import type { SessionSummary } from "../api/types";
-import { cardWeight, relativeWhen, messageCountLabel, matchesQuery } from "./chatHistoryView";
+import {
+  cardWeight, relativeWhen, messageCountLabel, matchesQuery, matchesSurface, surfaceLabel, isGooseThread,
+  SURFACE_FILTERS, type SurfaceFilter,
+} from "./chatHistoryView";
 import "../styles/chat-history.css";
 
 // A wall of conversation cards, as tall as each conversation was long. Newest-first reading order rules
@@ -26,9 +29,11 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
   const [query, setQuery] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
+  const [surface, setSurface] = useState<SurfaceFilter>("all");
+
   const visible = useMemo(
-    () => sessions.filter((s) => matchesQuery(s, query)),
-    [sessions, query],
+    () => sessions.filter((s) => matchesSurface(s, surface) && matchesQuery(s, query)),
+    [sessions, query, surface],
   );
 
   function open(session: SessionSummary, event: React.MouseEvent<HTMLElement>) {
@@ -71,6 +76,20 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
         </div>
       </header>
 
+      <div className="chist__filters" role="group" aria-label="Where the conversation started">
+        {SURFACE_FILTERS.map((f) => (
+          <button
+            key={f.id}
+            type="button"
+            className="chist__filter"
+            aria-pressed={surface === f.id}
+            onClick={() => setSurface(f.id)}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
       {loading && (
         <div className="chist__grid" aria-busy="true" aria-label="Loading conversations">
           {(["card", "tile", "column", "tile", "card", "tile"] as const).map((w, i) => (
@@ -91,7 +110,7 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
 
       {!loading && sessions.length > 0 && visible.length === 0 && (
         <p className="chist__empty chist__emptyLine">
-          Nothing matches “{query.trim()}”.
+          {query.trim() ? `Nothing matches “${query.trim()}”.` : "No conversations started there yet."}
         </p>
       )}
 
@@ -100,6 +119,8 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
           {visible.map((session) => {
             const title = session.title?.trim() || "Untitled";
             const count = messageCountLabel(session.message_count);
+            const from = surfaceLabel(session);
+            const goose = isGooseThread(session);
             return (
               <article
                 key={session.id}
@@ -116,7 +137,13 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
                 tabIndex={0}
                 aria-label={`Open conversation: ${title}`}
               >
-                <span className="chist__when">{relativeWhen(session.updated_at)}</span>
+                <span className="chist__when">
+                  {goose && <Bird size={13} className="chist__gooseIcon" aria-label="The Goose thread" role="img" />}
+                  {relativeWhen(session.updated_at)}
+                </span>
+                {goose
+                  ? <span className="chist__from">What Goose did by itself</span>
+                  : from && <span className="chist__from">Started on: {from}</span>}
                 <h2 className="chist__cardTitle">{title}</h2>
                 {session.preview && <p className="chist__preview">{session.preview}</p>}
                 {count && <span className="chist__count">{count}</span>}

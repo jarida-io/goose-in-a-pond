@@ -76,6 +76,9 @@ pub trait IdeaRepository: Send + Sync {
     /// Topics the member's ideas built on since `since`.
     async fn topics_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>>;
 
+    /// Topics of the ideas the member turned down since `since`.
+    async fn declined_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>>;
+
     async fn run(&self, profile_id: &str) -> Result<IdeaRun>;
 
     async fn mark_requested(&self, profile_id: &str, at: DateTime<Utc>) -> Result<()>;

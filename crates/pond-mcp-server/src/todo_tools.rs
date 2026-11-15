@@ -1,4 +1,4 @@
-//! `add_todo`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
+//! `add_reminder`, `list_todos` and `complete_todo` for `giap-schedule`: the speaker's own to-dos and
 //! reminders in My Goose, which the Pond pushes to their phone at a time, a repeat or a place.
 
 use std::sync::{Arc, OnceLock};
@@ -8,12 +8,15 @@ use pond_core::shared::domain::todo::{
     local_instant, new_todo, parse_clock, rfc3339, zone, Answer, HookCatalog, HookError,
     HookSource, Place, StateFilter, Todo, TodoSource, TodoState, Transition, Tz, PRESENCE_HOME,
 };
+use pond_core::shared::domain::when_repeats::{repeat_from_words, RepeatUnclear};
 use pond_core::shared::domain::when_said::due_from_words;
 use pond_core::shared::ports::todo::TodoRepository;
+use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -21,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::format::format_dead_end;
+use crate::format::format_not_done;
 use crate::schedule::ScheduleMcpServer;
 
 /// A `when` this far in the past is a slip of the clock, not a time that has gone.
@@ -36,16 +39,11 @@ pub fn init_todo_deps(repo: Arc<dyn TodoRepository>) {
     let _ = TODO_DEPS.set(repo);
 }
 
-/// A repeat, as `add_todo`'s `repeat` takes it.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct RepeatParam {
-    /// "day", "weekday" (Monday to Friday), "week" or "month".
-    pub every: String,
-    /// The time of day, 24-hour "HH:MM", e.g. "18:00".
-    pub at: String,
-    /// For "week": the weekdays as numbers, 1 Monday to 7 Sunday, e.g. [2, 4]. For "month": the
-    /// days of the month, 1 to 31. Null for "day" and "weekday".
-    pub days: Option<Vec<u32>>,
+static HEARTBEAT_DOCS: OnceLock<Arc<dyn PromptTemplateRepository>> = OnceLock::new();
+
+/// Where the heartbeat's checklist is kept, for `add_to_heartbeat`.
+pub fn init_heartbeat_docs(documents: Arc<dyn PromptTemplateRepository>) {
+    let _ = HEARTBEAT_DOCS.set(documents);
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -56,13 +54,10 @@ pub struct AddTodoParams {
     /// "reminder" when they said "remind me"; "todo" when they asked to add a task to their
     /// to-dos. Null: "todo".
     pub kind: Option<String>,
-    /// One moment, as an RFC 3339 time with the person's UTC offset, worked out from the turn's
-    /// stated current date and time: "2026-11-10T18:00:00+03:00". A day said without a time is
-    /// that day at 09:00. Null when they gave no time, or when it repeats.
+    /// When, as they said it: "tomorrow at 6pm", "Friday 9am", "in 2 hours", "19 November at
+    /// 10:00"; or a repeat: "every weekday at 18:00". Null when they gave no time.
     pub when: Option<String>,
-    /// Only when they said "every ...": {"every": "weekday", "at": "18:00", "days": null}.
-    /// Null otherwise.
-    #[schemars(with = "Option<RepeatParam>")]
+    #[schemars(skip)]
     pub repeat: Option<Value>,
     /// A place they named for it, as they named it: "home", "work", "the gym". Null when they
     /// named no place.
@@ -100,18 +95,31 @@ pub struct CompleteTodoParams {
 #[tool_router(router = todo_tool_router, vis = "pub")]
 impl ScheduleMcpServer {
     #[tool(description = "\
-Put a to-do or reminder on the person's own list in My Goose; the Pond pushes it to their phone \
+Remind the person of something, or put it on their to-do list in My Goose: their phone gets it \
 at a time, on a repeat, or at a place. For \"remind me to call Emmanuel when I get home\", \
-\"add renew the logbook to my to-dos\", \"remind me on Friday at 9 to call the garage\", \
-\"every weekday at 18:00 remind me to stretch\". Not for a countdown (\"set a timer for 10 \
-minutes\"): that is set_timer.")]
-    async fn add_todo(
+\"remind me on Friday at 9 to call the garage\", \"every weekday at 18:00 remind me to \
+stretch\", \"add renew the logbook to my to-dos\". Any reminder goes here, not to set_timer \
+(a countdown) or create_schedule (work Goose does by itself).")]
+    async fn add_reminder(
         &self,
         ctx: RequestContext<RoleServer>,
         params: Parameters<AddTodoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        crate::set_current_tool("add_todo");
-        Ok(said(add(&ctx.meta, params.0).await))
+        crate::set_current_tool("add_reminder");
+        Ok(add(&ctx.meta, params.0).await.into_result())
+    }
+
+    #[tool(description = "\
+Add something for Goose to check by itself each time it looks in on the house: \"keep \
+checking whether the dollar is under 130\", \"add this to your heartbeat\". `check` is the \
+question to ask each time. For one page use web_watch; for a time or place, add_reminder.")]
+    async fn add_to_heartbeat(
+        &self,
+        _ctx: RequestContext<RoleServer>,
+        params: Parameters<AddToHeartbeatParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::set_current_tool("add_to_heartbeat");
+        Ok(add_to_heartbeat(params.0).await)
     }
 
     #[tool(description = "\
@@ -142,9 +150,102 @@ fn said(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AddToHeartbeatParams {
+    /// What to check each time, as one question.
+    #[serde(default)]
+    pub check: String,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, Value>,
+}
+
+async fn add_to_heartbeat(p: AddToHeartbeatParams) -> CallToolResult {
+    use pond_core::prompts::{
+        add_heartbeat_item, HeartbeatItemRefused, HEARTBEAT, PROMPT_HEARTBEAT,
+    };
+    let what = "adding that to the heartbeat";
+    let asked = match p.check.trim() {
+        "" => ["item", "text", "question", "task"]
+            .iter()
+            .find_map(|k| p.extra.get(*k).and_then(Value::as_str))
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        check => check.to_string(),
+    };
+    let refuse = |said: &str, why: &str| {
+        crate::format::with_receipt(
+            format_not_done(what, why),
+            Receipt::not_set("standing", asked.clone(), said),
+        )
+    };
+    let Some(documents) = HEARTBEAT_DOCS.get().cloned() else {
+        return refuse(
+            "The heartbeat is not set up on this Pond yet.",
+            "The heartbeat's checklist is not available on this Pond.",
+        );
+    };
+    let existing = documents.get(HEARTBEAT).await.ok().flatten();
+    let checklist = existing
+        .as_ref()
+        .map(|t| t.content.clone())
+        .unwrap_or_else(|| PROMPT_HEARTBEAT.to_string());
+    let added = match add_heartbeat_item(&checklist, &asked) {
+        Ok(added) => added,
+        Err(HeartbeatItemRefused::Empty) => {
+            return refuse(
+                "I could not tell what to keep an eye on.",
+                "Send `check`: what Goose should ask itself each time, in one line.",
+            )
+        }
+        Err(HeartbeatItemRefused::AlreadyThere) => {
+            return crate::format::with_receipt(
+                "That is already on the heartbeat's checklist. Tell them it already is.",
+                Receipt::set("standing", asked, None),
+            )
+        }
+        Err(HeartbeatItemRefused::Full) => {
+            return refuse(
+                "The heartbeat's list is full. Remove something from it in My Goose first.",
+                "The checklist is at its longest. Tell them to remove an item in My Goose, \
+                 under Heartbeat, and ask again.",
+            )
+        }
+    };
+    let document = pond_core::user_data::domain::prompt_template::PromptTemplate {
+        name: HEARTBEAT.to_string(),
+        content: added,
+        description: existing
+            .as_ref()
+            .map(|t| t.description.clone())
+            .unwrap_or_default(),
+        is_system: existing.as_ref().is_some_and(|t| t.is_system),
+        is_customized: true,
+        factory_version: existing.as_ref().map(|t| t.factory_version).unwrap_or(0),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = documents.upsert(&document).await {
+        tracing::warn!(target: "giap::trace", kind = "heartbeat_item_failed", error = %e);
+        return refuse(
+            "The Pond could not save it. Ask again in a moment.",
+            "The Pond could not save it just now; try again shortly.",
+        );
+    }
+    tracing::info!(target: "giap::trace", kind = "heartbeat_item_added");
+    crate::format::with_receipt(
+        format!(
+            "Added to the heartbeat's checklist: \"{asked}\". Goose looks at it each time it \
+             checks in on the house by itself, about once an hour, and tells them when it \
+             needs them. Tell them in one short sentence."
+        ),
+        Receipt::set("standing", asked, None),
+    )
+}
+
 /// The household member speaking in this call: the turn's owner, else a one-member household's
 /// only member. A guest keeps no list.
-async fn speaker(meta: &Meta) -> Option<String> {
+async fn speaker(meta: &RequestMetaObject) -> Option<String> {
     let session = crate::session_from_meta(meta)?;
     let owner = crate::installed_orchestrator_deps()
         .and_then(|deps| deps.authorities().authority_for_engine_session(&session))
@@ -160,7 +261,7 @@ async fn speaker(meta: &Meta) -> Option<String> {
     }
 }
 
-async fn household_zone() -> Tz {
+pub(crate) async fn household_zone() -> Tz {
     match crate::schedule::scheduler_and_settings() {
         Some((_, settings)) => settings
             .get()
@@ -318,20 +419,36 @@ fn place_hook(said: &str, transition: Transition, places: &[Place]) -> Result<Va
     })
 }
 
-async fn add(meta: &Meta, p: AddTodoParams) -> String {
+pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
     let what = "adding that to their to-dos";
+    let asked = p.text.trim().to_string();
+    let listed_as = match p.kind.as_deref() {
+        Some(kind) if kind.eq_ignore_ascii_case("reminder") => "reminder",
+        _ => "todo",
+    };
+    // `why` is advice for the model; `said` is the short reason the person is given.
+    let refuse = |said: &str, why: &str| Added {
+        text: format_not_done(what, why),
+        receipt: Receipt::not_set(listed_as, asked.clone(), said),
+    };
     let Some(repo) = TODO_DEPS.get().cloned() else {
-        return format_dead_end(what, "To-dos are not set up on this Pond yet.");
+        return refuse(
+            "Reminders are not set up on this Pond yet.",
+            "To-dos are not set up on this Pond yet.",
+        );
     };
     let Some(owner) = speaker(meta).await else {
-        return format_dead_end(
-            what,
+        return refuse(
+            "I do not know who is speaking, so there is no list to put it on.",
             "Only a household member the Pond knows keeps a to-do list. Ask them who they are.",
         );
     };
     let text = p.text.trim();
     if text.is_empty() {
-        return format_dead_end(what, "Give `text`: what to do, in their words.");
+        return refuse(
+            "I could not tell what it is for.",
+            "Give `text`: what to do, in their words.",
+        );
     }
     let (now, tz) = (Utc::now(), household_zone().await);
     let mut hooks: Vec<Value> = Vec::new();
@@ -339,42 +456,70 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
     let repeat = p.repeat.as_ref().filter(|r| !r.is_null());
     let when = p.when.as_deref().filter(|w| !w.trim().is_empty());
 
-    // With a repeat, `when` is only the repeat's time of day.
+    // With a repeat sent on its own, `when` is only the repeat's time of day.
     if let Some(raw) = when.filter(|_| repeat.is_none()) {
-        let Some(at) = moment(raw, now, tz) else {
-            return format_dead_end(
-                what,
-                &format!(
-                    "`when` \"{raw}\" is not a time. Send RFC 3339 with the offset, worked out \
-                     from the turn's current date and time, e.g. \"2026-11-10T18:00:00+03:00\"."
-                ),
-            );
-        };
-        if at < now - Duration::minutes(PAST_SLACK_MINUTES) {
-            let local = now.with_timezone(&tz).format("%A %-d %B %Y %H:%M");
-            return format_dead_end(
-                what,
-                &format!(
-                    "`when` {} has already passed: it is now {local} there. Work the time out \
-                     again from the current date.",
-                    rfc3339(at)
-                ),
-            );
+        let today = now.with_timezone(&tz).date_naive();
+        match repeat_from_words(raw, today) {
+            Ok(found) => {
+                match found.as_todo_repeat() {
+                    Some((every, at, days)) => hooks.push(json!({"kind": "repeat", "spec": {
+                        "every": every.as_str(),
+                        "at": at.format("%H:%M").to_string(),
+                        "days": if days.is_empty() { Value::Null } else { json!(days) },
+                    }})),
+                    None => return refuse(
+                        "A reminder repeats by the day, the week or the month, not within a day.",
+                        "A to-do repeats by the day, the week or the month, not within a day. \
+                         For something every few minutes or hours use create_schedule.",
+                    ),
+                }
+            }
+            Err(RepeatUnclear::NoCadence) => {
+                let Some(at) = moment(raw, now, tz) else {
+                    return refuse(
+                        "I could not place that time.",
+                        &format!(
+                            "`when` \"{raw}\" is not a time the Pond can place. Say it plainly: \
+                             \"tomorrow at 6pm\", \"Friday 9am\", \"in 2 hours\", \"19 November \
+                             at 10:00\". Ask them when if they did not say."
+                        ),
+                    );
+                };
+                if at < now - Duration::minutes(PAST_SLACK_MINUTES) {
+                    let local = now.with_timezone(&tz).format("%A %-d %B %Y %H:%M");
+                    return refuse(
+                        "That time has already passed.",
+                        &format!(
+                            "`when` \"{raw}\" has already passed: it is now {local} there. Ask \
+                             them which day they mean."
+                        ),
+                    );
+                }
+                due_at = Some(at);
+                hooks.push(json!({"kind": "time", "spec": {"at": rfc3339(at)}}));
+            }
+            Err(unclear) => {
+                return refuse(
+                    "I could not tell how often it should repeat.",
+                    unclear.advice(),
+                )
+            }
         }
-        due_at = Some(at);
-        hooks.push(json!({"kind": "time", "spec": {"at": rfc3339(at)}}));
     }
     if let Some(repeat) = repeat {
         match repeat_spec(repeat, when) {
             Ok(spec) => hooks.push(json!({"kind": "repeat", "spec": spec})),
-            Err(why) => return format_dead_end(what, &why),
+            Err(why) => return refuse("I could not tell how often it should repeat.", &why),
         }
     }
     let places = match repo.places(&owner).await {
         Ok(places) => places,
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            return format_dead_end(what, "The Pond could not read their places just now.");
+            return refuse(
+                "The Pond could not read your places just now.",
+                "The Pond could not read their places just now.",
+            );
         }
     };
     if let Some(said) = p.place.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -385,7 +530,7 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
             .unwrap_or(Transition::Arrive);
         match place_hook(said, transition, &places) {
             Ok(hook) => hooks.push(hook),
-            Err(why) => return format_dead_end(what, &why),
+            Err(why) => return refuse("I do not know that place.", &why),
         }
     }
     let kind = p
@@ -394,9 +539,9 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
         .filter(|k| !k.trim().is_empty())
         .unwrap_or("todo");
     if kind.eq_ignore_ascii_case("reminder") && hooks.is_empty() {
-        return format_dead_end(
-            what,
-            "A reminder needs a moment to remind them: `when`, `repeat` or `place`. Ask them when.",
+        return refuse(
+            "A reminder needs a time or a place.",
+            "A reminder needs a moment to remind them: `when` or `place`. Ask them when.",
         );
     }
     let body = json!({
@@ -412,31 +557,66 @@ async fn add(meta: &Meta, p: AddTodoParams) -> String {
     };
     let todo = match new_todo(&owner, &body, &catalog, TodoSource::Chat, None, now, tz) {
         Ok(todo) => todo,
-        Err(HookError(why)) => return format_dead_end(what, &why),
+        Err(HookError(why)) => return refuse("I could not make a reminder out of that.", &why),
     };
-    if let Err(e) = repo.create(&todo).await {
-        tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-        return format_dead_end(
-            what,
-            "The Pond could not save it just now; try again shortly.",
-        );
-    }
-    tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
+    // A turn re-run after a stop, or a second call, must not leave two of the same.
+    let already = repo
+        .list(&owner, StateFilter::Open)
+        .await
+        .ok()
+        .and_then(|open| open.into_iter().find(|kept| kept.is_repeated_by(&todo)));
+    let todo = match already {
+        Some(kept) => {
+            tracing::info!(target: "giap::trace", kind = "todo_already_added");
+            kept
+        }
+        None => {
+            if let Err(e) = repo.create(&todo).await {
+                tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
+                return refuse(
+                    "The Pond could not save it. Ask again in a moment.",
+                    "The Pond could not save it just now; try again shortly.",
+                );
+            }
+            tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
+            todo
+        }
+    };
     let fires: Vec<&str> = todo.hooks.iter().map(|h| h.label.as_str()).collect();
     let when = if fires.is_empty() {
         "It has no time or place, so it waits on their list.".to_string()
     } else {
         format!("Their phone gets it: {}.", fires.join("; "))
     };
-    format!(
-        "Added to their {}: \"{}\". {when} Tell them in one short sentence.",
-        if todo.kind.as_str() == "reminder" {
-            "reminders"
-        } else {
-            "to-dos"
-        },
-        todo.text
-    )
+    let kept = if fires.is_empty() {
+        todo.text.clone()
+    } else {
+        format!("{}: {}", todo.text, fires.join("; "))
+    };
+    Added {
+        text: format!(
+            "Added to their {}: \"{}\". {when} Tell them in one short sentence.",
+            if todo.kind.as_str() == "reminder" {
+                "reminders"
+            } else {
+                "to-dos"
+            },
+            todo.text
+        ),
+        receipt: Receipt::set(todo.kind.as_str(), kept, Some(todo.id.clone())),
+    }
+}
+
+/// What `add` did: its words for the model and the receipt for the person.
+pub(crate) struct Added {
+    pub text: String,
+    pub receipt: Receipt,
+}
+
+impl Added {
+    pub(crate) fn into_result(self) -> CallToolResult {
+        crate::format::with_receipt(self.text, self.receipt)
+    }
 }
 
 fn line(todo: &Todo) -> String {
@@ -453,13 +633,13 @@ fn line(todo: &Todo) -> String {
     out
 }
 
-async fn list(meta: &Meta, p: ListTodosParams) -> String {
+async fn list(meta: &RequestMetaObject, p: ListTodosParams) -> String {
     let what = "reading their to-dos";
     let Some(repo) = TODO_DEPS.get().cloned() else {
-        return format_dead_end(what, "To-dos are not set up on this Pond yet.");
+        return format_not_done(what, "To-dos are not set up on this Pond yet.");
     };
     let Some(owner) = speaker(meta).await else {
-        return format_dead_end(
+        return format_not_done(
             what,
             "Only a household member the Pond knows keeps a to-do list.",
         );
@@ -473,18 +653,18 @@ async fn list(meta: &Meta, p: ListTodosParams) -> String {
         }
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            format_dead_end(what, "The Pond could not read their list just now.")
+            format_not_done(what, "The Pond could not read their list just now.")
         }
     }
 }
 
-async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
+async fn complete(meta: &RequestMetaObject, p: CompleteTodoParams) -> String {
     let what = "ticking that off";
     let Some(repo) = TODO_DEPS.get().cloned() else {
-        return format_dead_end(what, "To-dos are not set up on this Pond yet.");
+        return format_not_done(what, "To-dos are not set up on this Pond yet.");
     };
     let Some(owner) = speaker(meta).await else {
-        return format_dead_end(
+        return format_not_done(
             what,
             "Only a household member the Pond knows keeps a to-do list.",
         );
@@ -493,7 +673,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
         Ok(open) => open,
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            return format_dead_end(what, "The Pond could not read their list just now.");
+            return format_not_done(what, "The Pond could not read their list just now.");
         }
     };
     let by_id =
@@ -513,14 +693,14 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
     let todo = match found.as_slice() {
         [one] => (*one).clone(),
         [] => {
-            return format_dead_end(
+            return format_not_done(
                 what,
                 "No open to-do of theirs matches. Call list_todos and pass the `id`.",
             )
         }
         many => {
             let lines: Vec<String> = many.iter().map(|t| line(t)).collect();
-            return format_dead_end(
+            return format_not_done(
                 what,
                 &format!(
                     "Several open to-dos match; pass the `id` of the one they mean:\n{}",
@@ -532,7 +712,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
     let mut done = todo;
     let tz = household_zone().await;
     if done.answer(Answer::Done, None, Utc::now(), tz).is_err() {
-        return format_dead_end(what, "That to-do is already closed.");
+        return format_not_done(what, "That to-do is already closed.");
     }
     match repo.update(&done, false).await {
         Ok(()) => format!(
@@ -541,7 +721,7 @@ async fn complete(meta: &Meta, p: CompleteTodoParams) -> String {
         ),
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-            format_dead_end(what, "The Pond could not save that just now.")
+            format_not_done(what, "The Pond could not save that just now.")
         }
     }
 }
@@ -630,7 +810,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name.to_string())
             .collect();
-        for tool in ["add_todo", "list_todos", "complete_todo", "set_timer"] {
+        for tool in ["add_reminder", "list_todos", "complete_todo", "set_timer"] {
             assert!(
                 names.iter().any(|n| n == tool),
                 "{tool} missing from {names:?}"

@@ -166,36 +166,44 @@ impl Engine {
                 style.len()
             ));
         }
-        let ids = chunk.padded();
-        if ids.len() > crate::tokenizer::MAX_CONTEXT {
-            return Err(anyhow!(
-                "Kokoro chunk is {} tokens, over the {} limit — chunking failed upstream",
-                ids.len(),
-                crate::tokenizer::MAX_CONTEXT
-            ));
-        }
-
-        // (shape, Vec), not `Array2`: `ort` uses ndarray 0.17, the workspace 0.16.
-        let n = ids.len() as i64;
-        let outputs = self
-            .session
-            .run(ort::inputs![
-                "input_ids" => Tensor::from_array((vec![1_i64, n], ids))?,
-                "style" => Tensor::from_array((vec![1_i64, STYLE_DIM as i64], style.to_vec()))?,
-                "speed" => Tensor::from_array((vec![1_i64], vec![speed]))?,
-            ])
-            .context("Kokoro inference failed")?;
-
-        let (_name, value) = outputs
-            .iter()
-            .next()
-            .ok_or_else(|| anyhow!("Kokoro produced no output tensor"))?;
-        let (_shape, data) = value
-            .try_extract_tensor::<f32>()
-            .context("failed to extract Kokoro waveform")?;
-
-        Ok(data.to_vec())
+        run(&mut self.session, chunk.padded(), style, speed)
     }
+}
+
+/// One forward pass: `ids` is the padded token sequence, `style` its [`STYLE_DIM`] voice row.
+pub(crate) fn run(
+    session: &mut Session,
+    ids: Vec<i64>,
+    style: &[f32],
+    speed: f32,
+) -> Result<Vec<f32>> {
+    if ids.len() > crate::tokenizer::MAX_CONTEXT {
+        return Err(anyhow!(
+            "Kokoro chunk is {} tokens, over the {} limit — chunking failed upstream",
+            ids.len(),
+            crate::tokenizer::MAX_CONTEXT
+        ));
+    }
+
+    // (shape, Vec), not `Array2`: `ort` uses ndarray 0.17, the workspace 0.16.
+    let n = ids.len() as i64;
+    let outputs = session
+        .run(ort::inputs![
+            "input_ids" => Tensor::from_array((vec![1_i64, n], ids))?,
+            "style" => Tensor::from_array((vec![1_i64, STYLE_DIM as i64], style.to_vec()))?,
+            "speed" => Tensor::from_array((vec![1_i64], vec![speed]))?,
+        ])
+        .context("Kokoro inference failed")?;
+
+    let (_name, value) = outputs
+        .iter()
+        .next()
+        .ok_or_else(|| anyhow!("Kokoro produced no output tensor"))?;
+    let (_shape, data) = value
+        .try_extract_tensor::<f32>()
+        .context("failed to extract Kokoro waveform")?;
+
+    Ok(data.to_vec())
 }
 
 /// Duration in seconds of a mono f32 buffer at [`SAMPLE_RATE`].

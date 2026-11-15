@@ -44,6 +44,8 @@ const EGRESS_TRACKED: &[&str] = &[
     "crates/pond-adapters-uber/src/accounts.rs",
     "crates/pond-adapters-weather/src/lib.rs",
     "crates/pond-hf-cache/src/lib.rs",
+    // Wakes an iPhone with an alert that carries none of the notice's words.
+    "crates/pond-infra/src/apns_push_relay.rs",
     "crates/pond-infra/src/fcm_push_relay.rs",
     "crates/pond-mcp-server/src/http.rs",
     "crates/pond-server/src/main.rs",

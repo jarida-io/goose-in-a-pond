@@ -692,15 +692,6 @@
 .srow__sub { font-size: 12.5px; font-weight: 600; color: var(--mut); }
 .srow__control { display: flex; align-items: center; justify-content: flex-end; flex-shrink: 0; }
 
-/* ─── Toggle ─── */
-/* Off is slate, not #D8D5E0 (1.45:1): 6.22:1 light and 4.80:1 dark on the card, the white knob 6.22:1 and 3.53:1. */
-/* justify-content: base.css centres every button's content, which put the knob mid-track when off. */
-.htoggle { width: 46px; height: 27px; border-radius: 999px; border: none; background: var(--color-text-tertiary); cursor: pointer; padding: 3px; transition: background .2s; display: flex; justify-content: flex-start; flex-shrink: 0; }
-.htoggle[data-on="true"] { background: var(--pp); }
-/* Purple on the dark panel is 2.97:1; 15% toward white makes it 3.90:1, the white knob 4.34:1. */
-:root[data-theme="dark"] .htoggle[data-on="true"] { background: color-mix(in srgb, var(--pp) 85%, white); }
-.htoggle__knob { width: 21px; height: 21px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: transform .2s; }
-.htoggle[data-on="true"] .htoggle__knob { transform: translateX(19px); }
 
 /* ─── Segmented ─── */
 .hseg { display: inline-flex; background: var(--hub-bg); border: 1px solid var(--line); border-radius: 11px; padding: 3px; gap: 2px; }

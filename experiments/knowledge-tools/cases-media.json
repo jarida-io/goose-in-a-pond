@@ -1,0 +1,31 @@
+{
+  "_doc": "E9 cases, labelled BEFORE any run. expect 'pictures': the user wants to SEE something, which only show_pictures puts on the screen. 'web' video asks: videos reach the card through search_web (small-model-tools.md 8.11), so search_web is right and show_pictures is not. Cases with 'picture' attach that photo (fixtures/pictures, freely licensed Commons files; never a search engine's results) after the user's text, as the pond does; their 'arg' patterns check the call says what is IN the picture, not 'this'. accept: families that also count as right.",
+  "cases": [
+    {"id": "m01", "q": "Show me pictures of the Maasai Mara.", "expect": "pictures", "arg": ["mara"]},
+    {"id": "m02", "q": "What does a pangolin look like?", "expect": "pictures", "accept": ["read"], "arg": ["pangolin"]},
+    {"id": "m03", "q": "Can I see some photos of Lamu Old Town?", "expect": "pictures", "arg": ["lamu"]},
+    {"id": "m04", "q": "I want to see pictures of jacaranda trees in bloom.", "expect": "pictures", "arg": ["jacaranda"]},
+    {"id": "m05", "q": "Show me a picture of a Grevy's zebra.", "expect": "pictures", "arg": ["grevy|zebra"]},
+    {"id": "m06", "q": "What does ugali with sukuma wiki look like?", "expect": "pictures", "accept": ["read"], "arg": ["ugali"]},
+    {"id": "m07", "q": "Show me photos of the Kenyatta International Convention Centre.", "expect": "pictures", "arg": ["kenyatta|kicc|convention"]},
+    {"id": "m08", "q": "Find me some pictures of Swahili doors.", "expect": "pictures", "arg": ["swahili|door"]},
+    {"id": "m09", "q": "Let me see what a matatu looks like.", "expect": "pictures", "arg": ["matatu"]},
+    {"id": "m10", "q": "Show me what the Nairobi Expressway looks like at night.", "expect": "pictures", "arg": ["expressway"]},
+    {"id": "v01", "q": "Show me a video of how to tie a tie.", "expect": "web", "arg": ["tie"]},
+    {"id": "v02", "q": "Is there a video of this year's Mashujaa Day celebrations?", "expect": "web", "arg": ["mashujaa"]},
+    {"id": "v03", "q": "Find a video on how to fix a dripping tap.", "expect": "web", "arg": ["tap|faucet"]},
+    {"id": "v04", "q": "Show me the highlights from the last Harambee Stars match.", "expect": "web", "accept": ["pictures"], "arg": ["harambee"]},
+    {"id": "a01", "q": "Where is this building, and when is it open to visitors?", "expect": "web", "arg": ["kenyatta|kicc|convention|tower|cylind|building"],
+     "picture": {"path": "kicc.jpg", "commons": "File:Kenyatta International Convention Centre at August.jpg"}},
+    {"id": "a02", "q": "Show me more pictures of this tree.", "expect": "pictures", "arg": ["jacaranda|purple|violet|lilac|blossom|flower"],
+     "picture": {"path": "jacaranda.jpg", "commons": "File:Starr 010419-0080 Jacaranda mimosifolia.jpg"}},
+    {"id": "a03", "q": "Find me a recipe for this dish.", "expect": "web", "arg": ["ugali|sukuma|maize|cornmeal|greens|kale|collard"],
+     "picture": {"path": "ugali.jpg", "commons": "File:Ugali & Sukuma Wiki.jpg"}},
+    {"id": "a04", "q": "How much does it cost to climb this mountain?", "expect": "web", "arg": ["kilimanjaro|kili"],
+     "picture": {"path": "kilimanjaro.jpg", "commons": "File:Kilimanjaro from Amboseli National Park.jpg"}},
+    {"id": "a05", "q": "Show me more photos of this animal.", "expect": "pictures", "arg": ["giraffe"],
+     "picture": {"path": "giraffe.jpg", "commons": "File:Reticulated giraffe kenya.jpg"}},
+    {"id": "a06", "q": "How much is the fare on one of these in Nairobi?", "expect": "web", "arg": ["matatu|minibus|bus"],
+     "picture": {"path": "matatu.jpg", "commons": "File:A colorful matatu in Nairobi, Kenya, during rush hour.jpg"}}
+  ]
+}

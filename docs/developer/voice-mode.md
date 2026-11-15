@@ -93,7 +93,7 @@ Under `--json-events` the refusal is an `error` line and `exit: already_running`
 |---|---|
 | Wake word heard | a two-note ping (C6 then E6, about 220 ms) |
 | Working | a soft chime (G5 + E6) every 2.6 s, mostly silence; off with `voice_thinking_tone_enabled = false`. An octave lower, the wake word model took it for "hey goose" |
-| Answer ready | the tone stops and the reply is spoken as it streams: a short first clause, then whole sentences |
+| Answer ready | the reply is handed to Kokoro whole once the model stops writing, and the tone stops when its sound starts |
 | Tool calls | shown in the UI (`tool_call`/`tool_result`), never spoken; the tone keeps playing |
 
 There is no spoken filler and no tool narration: both would have to finish playing before the

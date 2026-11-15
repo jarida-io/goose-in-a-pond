@@ -77,7 +77,20 @@ const MORNING_COPY: AgentRecipe = {
 function stubPond(recipes: AgentRecipe[], suggestions: AgentSuggestion[] = []) {
   vi.spyOn(api, "listRecipes").mockResolvedValue(recipes);
   vi.spyOn(api, "listExtensions").mockResolvedValue({ extensions: [] });
-  vi.spyOn(api, "listProfiles").mockResolvedValue({ profiles: [{ id: "amina", display_name: "Amina", avatar_emoji: "" }] });
+  vi.spyOn(api, "listProfiles").mockResolvedValue({
+    profiles: [
+      {
+        id: "amina",
+        display_name: "Amina",
+        avatar_emoji: "",
+        preferences: {},
+        role: "member",
+        guest_until: null,
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-01T00:00:00Z",
+      },
+    ],
+  });
   vi.spyOn(api, "listDevices").mockResolvedValue([]);
   vi.spyOn(api, "getSettings").mockResolvedValue({
     user_name: "Ada",

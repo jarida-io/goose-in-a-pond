@@ -55,6 +55,18 @@ pub(crate) async fn forget_member(state: &AppState, profile_id: &str) -> anyhow:
 /// The generic secrets API's answer for a key holding a member's Uber tokens. A bearer alone, which
 /// a paired phone has, must never read, replace or forget another member's sign-in.
 pub(crate) fn refuse_reserved_secret(key: &str) -> Option<Response> {
+    if key.eq_ignore_ascii_case(crate::network::NGROK_AUTHTOKEN) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "The tunnel token is managed only on the pond itself, under Remote access",
+                    "code": SECRET_RESERVED,
+                })),
+            )
+                .into_response(),
+        );
+    }
     is_member_token_key(key).then(|| {
         (
             StatusCode::FORBIDDEN,
@@ -71,7 +83,9 @@ pub(crate) fn refuse_reserved_secret(key: &str) -> Option<Response> {
 /// A listing of the secret store without the keys members' Uber tokens are kept under.
 pub(crate) fn without_reserved_secrets(keys: Vec<String>) -> Vec<String> {
     keys.into_iter()
-        .filter(|key| !is_member_token_key(key))
+        .filter(|key| {
+            !is_member_token_key(key) && !key.eq_ignore_ascii_case(crate::network::NGROK_AUTHTOKEN)
+        })
         .collect()
 }
 
@@ -176,11 +190,19 @@ pub async fn connect(
         crate::routes::sign_in_origin(request.origin.as_deref(), &headers),
         state.api_port,
     );
-    let auth_url = authorize_url(&client_id, &redirect_uri, &nonce);
+    let sign_in = match pond_adapters_uber::UberConfig::from_env() {
+        Ok(config) => config.authorize_url(),
+        Err(e) => {
+            tracing::warn!(error = %e, "uber connect: Uber settings unreadable, signing in on production");
+            pond_adapters_uber::PRODUCTION_AUTHORIZE_URL
+        }
+    };
+    let auth_url = authorize_url(sign_in, &client_id, &redirect_uri, &nonce);
     tracing::info!(
         kind = "oauth_start",
         provider = PROVIDER_ID,
         redirect_uri = %redirect_uri,
+        sign_in = %sign_in,
         "OAuth sign-in started"
     );
     oauth_callback::begin_session(

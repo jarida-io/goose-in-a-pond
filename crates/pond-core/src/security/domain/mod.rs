@@ -2,6 +2,7 @@ pub mod admin_card;
 pub mod developer_mode;
 pub mod event;
 pub mod oauth_provider;
+pub mod pairing_lock;
 pub mod proven_device;
 pub mod redaction;
 pub mod secret;

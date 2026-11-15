@@ -68,6 +68,8 @@ enum ResultSilence {
     /// A rule with a `Notify` action ran: that action already told the household, in the words
     /// they gave it, so "Schedule: ... notified: ..." would say it twice. A failure still speaks.
     RuleSpokeForItself,
+    /// A member's reminder: it went to their own phones, and is nobody else's business.
+    MembersOwn,
 }
 
 /// Whether `kind` is a rule or routine that tells the household itself.
@@ -87,6 +89,9 @@ async fn result_silence(
     settings: &dyn SettingsRepository,
     scheduler: Option<&dyn SchedulerPort>,
 ) -> Option<ResultSilence> {
+    if ev.for_member.is_some() {
+        return Some(ResultSilence::MembersOwn);
+    }
     match settings.get().await {
         Ok(s) if !s.schedule_result_notify => return Some(ResultSilence::SwitchedOff),
         Ok(_) => {}
@@ -103,6 +108,30 @@ async fn result_silence(
     let tasks = scheduler?.list_tasks().await.ok()?;
     let task = tasks.iter().find(|t| t.id == ev.schedule_id)?;
     notifies_itself(&task.kind).then_some(ResultSilence::RuleSpokeForItself)
+}
+
+/// Keeps a finished run's answer, or why it did not finish, in the Goose thread.
+async fn post_schedule_result(
+    ev: &ScheduleResultEvent,
+) -> Option<pond_core::shared::services::goose_thread::Posted> {
+    use pond_core::user_data::domain::message_note::{MessageNote, SourceKind};
+    let text = match ev.status {
+        RunStatus::Completed => ev.result.clone().unwrap_or_default(),
+        RunStatus::Failed => format!(
+            "This did not finish: {}",
+            ev.error.as_deref().unwrap_or("the run failed")
+        ),
+        RunStatus::Running | RunStatus::Skipped => return None,
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    let note = MessageNote::from_source(
+        SourceKind::Schedule,
+        ev.schedule_label.clone(),
+        Some(ev.schedule_id.clone()),
+    );
+    pond_core::shared::services::goose_thread::post(None, &text, note).await
 }
 
 /// Announce each finished schedule or rule run to the household's phones, unless the household
@@ -129,12 +158,17 @@ pub fn spawn_schedule_result_notices(
                 Err(RecvError::Closed) => break,
             };
             // A running schedule is not news.
-            let Some(notification) = schedule_result_notification(&ev) else {
+            let Some(mut notification) = schedule_result_notification(&ev) else {
                 continue;
             };
-            if let Some(silence) =
-                result_silence(&ev, settings.as_ref(), scheduler.as_deref()).await
-            {
+            let silence = result_silence(&ev, settings.as_ref(), scheduler.as_deref()).await;
+            // The answer is kept in the thread whether or not a phone is told.
+            if !matches!(silence, Some(ResultSilence::RuleSpokeForItself)) {
+                if let Some(posted) = post_schedule_result(&ev).await {
+                    notification.data = Some(OpenScreen::chat(Some(&posted.session_id)).data());
+                }
+            }
+            if let Some(silence) = silence {
                 tracing::debug!(
                     kind = "schedule_notice_skipped",
                     schedule = %ev.schedule_id,
@@ -256,6 +290,24 @@ pub fn proposal_notification(proposal: &Proposal) -> Notification {
         timestamp: chrono::Utc::now().to_rfc3339(),
         data: Some(OpenScreen::chat(reminder_session_id(proposal)).merged_into(fields)),
     }
+}
+
+/// The member's notification for what Goose did by itself in one run, or `None` when none of it
+/// is worth a buzz. `update`, never `alert`: what Goose did is read, not spoken to the room.
+pub fn goose_activity_notification(
+    did: &[pond_core::shared::domain::goose_activity::GooseActivity],
+) -> Option<Notification> {
+    let (title, body) = pond_core::shared::domain::goose_activity::notice(did)?;
+    let first = did.iter().find(|entry| entry.kind.tells())?;
+    Some(Notification {
+        id: format!("goose-activity-{}", first.id),
+        target: String::new(),
+        category: "update".to_string(),
+        title,
+        body,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data: Some(OpenScreen::GooseActivity.data()),
+    })
 }
 
 /// Tell one member about one proposal on their own phones, never the household's.
@@ -530,6 +582,7 @@ mod tests {
             result: Some("done".into()),
             error: Some("the pump is off".into()),
             duration_ms: Some(10),
+            for_member: None,
         }
     }
 
@@ -824,6 +877,21 @@ mod tests {
             .await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_members_reminder_is_never_announced_to_the_household() {
+        let settings = MockSettingsRepository::new();
+        for status in [RunStatus::Completed, RunStatus::Failed] {
+            let ev = ScheduleResultEvent {
+                for_member: Some("grace".into()),
+                ..finished("s-1", status)
+            };
+            assert_eq!(
+                result_silence(&ev, &settings, None).await,
+                Some(ResultSilence::MembersOwn)
+            );
+        }
     }
 
     #[tokio::test]

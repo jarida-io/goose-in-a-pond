@@ -306,7 +306,8 @@ def pair(call, code, pin, client_id, device_name=None, client_type="gotg", crede
         "challenge_id": challenge["challenge_id"], "device_name": device_name or client_id,
         "share": base64.b64encode(phone.share).decode(), "confirm": phone.confirmation().hex(),
     })
-    if result["accepted"]:
+    # A phone held by the pairing lock still learns it spoke to the Pond it meant to.
+    if result["accepted"] or result.get("error") == "approval_required":
         assert phone.verify_server(result.get("server_proof")), "the Pond's proof did not verify"
     return result
 

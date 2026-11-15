@@ -2,6 +2,7 @@
 // The key leaves only in the save request and is never read back; the field clears once stored.
 
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { Switch } from "../components/Switch";
 import {
   CircleAlert,
   CircleCheck,
@@ -272,11 +273,8 @@ export function WebSearchPanel() {
               </p>
             )}
           </div>
-          <button
-            type="button"
-            role="switch"
-            className="websearch-switch"
-            aria-checked={nearbyOn}
+          <Switch
+            checked={nearbyOn}
             aria-labelledby="web-search-nearby-label"
             aria-describedby={
               placesError
@@ -286,11 +284,7 @@ export function WebSearchPanel() {
             aria-disabled={nearbyBlocked || undefined}
             aria-busy={placesSaving || undefined}
             onClick={() => void toggleNearby()}
-          >
-            <span className="websearch-switch__track" aria-hidden="true">
-              <span className="websearch-switch__thumb" />
-            </span>
-          </button>
+          />
         </div>
       )}
 
@@ -300,8 +294,9 @@ export function WebSearchPanel() {
           <a href={BRAVE_DASHBOARD_URL} target="_blank" rel="noopener noreferrer">
             {BRAVE_DASHBOARD_HOST}
           </a>
-          . The free monthly credit covers about 1,000 searches. Brave asks for a card to
-          confirm who you are.
+          . The free monthly credit covers about 1,000 requests: a search shown on a screen uses
+          two, to bring news, videos and places too, and a spoken search or a set of pictures uses
+          one. Brave asks for a card to confirm who you are.
         </p>
 
         <label className="connections-field">

@@ -8,7 +8,8 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
 use pond_core::user_data::domain::idea::{
-    GooseCan, GoosePlan, Grounding, Idea, IdeaProgress, IdeaSource, IdeaState,
+    card_label, GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource,
+    IdeaState,
 };
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaRun, IdeaTodo, TopicSeed};
 
@@ -22,10 +23,32 @@ impl SqliteIdeaRepository {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self { pool }
     }
+
+    async fn sync_finished(&self, profile_id: &str) {
+        let _ = sqlx::query(
+            "UPDATE ideas SET state = 'done', updated_at = datetime('now') \
+             WHERE profile_id = ? AND state = 'working' AND task_id IS NOT NULL \
+             AND task_id IN (SELECT id FROM long_tasks WHERE state IN ('completed', 'failed', 'cancelled'))",
+        )
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await;
+
+        let _ = sqlx::query(
+            "UPDATE ideas SET state = 'done', updated_at = datetime('now') \
+             WHERE profile_id = ? AND state = 'working' AND task_id IS NULL \
+             AND id IN (SELECT source_ref FROM todos WHERE source = 'idea') \
+             AND NOT EXISTS (SELECT 1 FROM todos WHERE source = 'idea' AND source_ref = ideas.id AND state = 'open')",
+        )
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await;
+    }
 }
 
-const COLUMNS: &str = "id, profile_id, topic, title, pitch, why, grounded_json, sources_json, \
-     picture, goose_can_json, goose_plan_json, you_can_json, state, task_id, created_at";
+const COLUMNS: &str = "id, profile_id, topic, kind, title, hook, pitch, why, facts_json, notes, \
+     grounded_json, sources_json, picture, goose_can_json, goose_plan_json, you_can_json, state, \
+     task_id, created_at";
 
 fn idea_of(row: &SqliteRow) -> Result<Idea> {
     let grounded: String = row.try_get("grounded_json")?;
@@ -36,14 +59,26 @@ fn idea_of(row: &SqliteRow) -> Result<Idea> {
     let state: String = row.try_get("state")?;
     let task_id: Option<String> = row.try_get("task_id")?;
     let created_at: String = row.try_get("created_at")?;
+    let kind: String = row.try_get("kind")?;
+    let kind = IdeaKind::parse(&kind).unwrap_or_default();
+    let facts: String = row.try_get("facts_json")?;
+    let pitch: String = row.try_get("pitch")?;
+    let hook: String = row.try_get("hook")?;
+    let grounded_in = serde_json::from_str::<Vec<Grounding>>(&grounded).unwrap_or_default();
     Ok(Idea {
         id: row.try_get("id")?,
         profile_id: row.try_get("profile_id")?,
         topic: row.try_get("topic")?,
+        kind,
+        kind_label: card_label(kind, &grounded_in).to_string(),
         title: row.try_get("title")?,
-        pitch: row.try_get("pitch")?,
+        // An idea written before cards had a line of their own shows its pitch.
+        hook: if hook.is_empty() { pitch.clone() } else { hook },
+        pitch,
         why: row.try_get("why")?,
-        grounded_in: serde_json::from_str::<Vec<Grounding>>(&grounded).unwrap_or_default(),
+        facts: serde_json::from_str::<Vec<IdeaFact>>(&facts).unwrap_or_default(),
+        notes: row.try_get("notes")?,
+        grounded_in,
         sources: serde_json::from_str::<Vec<IdeaSource>>(&sources).unwrap_or_default(),
         picture: row.try_get("picture")?,
         goose_can: goose_can.and_then(|g| serde_json::from_str::<GooseCan>(&g).ok()),
@@ -64,6 +99,7 @@ fn time_or_none(raw: Option<String>) -> Option<DateTime<Utc>> {
 #[async_trait]
 impl IdeaRepository for SqliteIdeaRepository {
     async fn list(&self, profile_id: &str) -> Result<Vec<Idea>> {
+        self.sync_finished(profile_id).await;
         let rows = sqlx::query(&format!(
             "SELECT {COLUMNS} FROM ideas WHERE profile_id = ? AND state != 'dismissed' \
              ORDER BY created_at DESC, rowid DESC LIMIT 50"
@@ -76,6 +112,7 @@ impl IdeaRepository for SqliteIdeaRepository {
     }
 
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Idea>> {
+        self.sync_finished(profile_id).await;
         let row = sqlx::query(&format!(
             "SELECT {COLUMNS} FROM ideas WHERE profile_id = ? AND id = ?"
         ))
@@ -90,17 +127,21 @@ impl IdeaRepository for SqliteIdeaRepository {
     async fn add(&self, idea: &Idea) -> Result<()> {
         let now = stamp(Utc::now());
         sqlx::query(
-            "INSERT INTO ideas (id, profile_id, topic, title, pitch, why, grounded_json, \
-             sources_json, picture, goose_can_json, goose_plan_json, you_can_json, state, \
-             task_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ideas (id, profile_id, topic, kind, title, hook, pitch, why, \
+             facts_json, notes, grounded_json, sources_json, picture, goose_can_json, \
+             goose_plan_json, you_can_json, state, task_id, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&idea.id)
         .bind(&idea.profile_id)
         .bind(&idea.topic)
+        .bind(idea.kind.as_str())
         .bind(&idea.title)
+        .bind(&idea.hook)
         .bind(&idea.pitch)
         .bind(&idea.why)
+        .bind(serde_json::to_string(&idea.facts)?)
+        .bind(&idea.notes)
         .bind(serde_json::to_string(&idea.grounded_in)?)
         .bind(serde_json::to_string(&idea.sources)?)
         .bind(idea.picture.as_deref())
@@ -151,6 +192,21 @@ impl IdeaRepository for SqliteIdeaRepository {
                 .fetch_all(&self.pool)
                 .await
                 .context("read the topics a member's ideas built on")?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, at)| parse_time(at).is_ok_and(|at| at >= since))
+            .map(|(topic, _)| topic)
+            .collect())
+    }
+
+    async fn declined_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT topic, created_at FROM ideas WHERE profile_id = ? AND state = 'dismissed'",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("read the topics of the ideas a member turned down")?;
         Ok(rows
             .into_iter()
             .filter(|(_, at)| parse_time(at).is_ok_and(|at| at >= since))
@@ -324,9 +380,17 @@ mod tests {
             id: id.to_string(),
             profile_id: owner.to_string(),
             topic: topic.to_string(),
+            kind: IdeaKind::Outing,
+            kind_label: IdeaKind::Outing.label().to_string(),
             title: "Catch the January dip on Fielders".to_string(),
+            hook: "Prices dip in January.".to_string(),
             pitch: "Prices soften after the import rush.".to_string(),
             why: "You are shopping for a Toyota Fielder under KSh 1.2M.".to_string(),
+            facts: vec![IdeaFact {
+                label: "Where".into(),
+                value: "Mombasa Road yards".into(),
+            }],
+            notes: "Yards open at 8.".to_string(),
             grounded_in: vec![Grounding {
                 kind: "interest".into(),
                 label: "Toyota Fielder".into(),
@@ -364,6 +428,11 @@ mod tests {
             Some("https://example.com/fielders")
         );
         assert_eq!(back.sources.len(), 1);
+        assert_eq!(back.kind, IdeaKind::Outing);
+        assert_eq!(back.kind_label, "Get outside");
+        assert_eq!(back.hook, "Prices dip in January.");
+        assert_eq!(back.facts[0].value, "Mombasa Road yards");
+        assert_eq!(back.notes, "Yards open at 8.");
         assert!(repo.get("liz", "i1").await.unwrap().is_none());
         assert!(repo.list("liz").await.unwrap().is_empty());
 
@@ -374,10 +443,18 @@ mod tests {
         let working = repo.get("jerry", "i1").await.unwrap().unwrap();
         assert_eq!(working.progress.unwrap().task_id, "task-9");
 
+        let week = Utc::now() - chrono::Duration::days(7);
+        assert!(repo.declined_since("jerry", week).await.unwrap().is_empty());
         repo.set_state("jerry", "i1", IdeaState::Dismissed, None)
             .await
             .unwrap();
         assert!(repo.list("jerry").await.unwrap().is_empty());
+        assert_eq!(
+            repo.declined_since("jerry", week).await.unwrap(),
+            vec!["Toyota Fielder"],
+            "what they turned down is remembered as a topic"
+        );
+        assert!(repo.declined_since("liz", week).await.unwrap().is_empty());
         assert_eq!(
             repo.topics_since("jerry", Utc::now() - chrono::Duration::days(7))
                 .await
@@ -471,5 +548,31 @@ mod tests {
             (source.as_str(), source_ref.as_str(), state.as_str(), ask),
             ("idea", "i1", "open", 1)
         );
+    }
+
+    #[tokio::test]
+    async fn working_idea_auto_syncs_to_done_when_task_or_todos_complete() {
+        let pool = pool().await;
+        let repo = SqliteIdeaRepository::new(pool.clone());
+        let mut i1 = idea("i-task", "jerry", "ai");
+        i1.state = IdeaState::Working;
+        repo.add(&i1).await.unwrap();
+        repo.set_state("jerry", "i-task", IdeaState::Working, Some("t-99"))
+            .await
+            .unwrap();
+
+        let got = repo.get("jerry", "i-task").await.unwrap().unwrap();
+        assert_eq!(got.state, IdeaState::Working);
+
+        sqlx::query(
+            "INSERT INTO long_tasks (id, owner_profile_id, scope, goal, state, max_steps, created_at, updated_at) \
+             VALUES ('t-99', 'jerry', 'owner', 'research', 'completed', 10, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let list = repo.list("jerry").await.unwrap();
+        assert_eq!(list[0].state, IdeaState::Done);
     }
 }

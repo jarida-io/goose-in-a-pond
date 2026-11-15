@@ -11,8 +11,8 @@ pub trait VoiceOutput: Send + Sync {
     async fn synthesize(&self, _text: &str) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    /// [`Self::synthesize`] for one unit of a longer text, which says what follows it so an
-    /// output can end the unit in the matching silence. Wrappers must forward it.
+    /// [`Self::synthesize`] for one unit of a longer text, which says whether more follows it so
+    /// an output can end the unit in a gap or at rest. Wrappers must forward it.
     async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
         self.synthesize(&unit.text).await
     }

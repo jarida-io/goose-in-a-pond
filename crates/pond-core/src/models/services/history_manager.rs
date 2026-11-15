@@ -86,6 +86,7 @@ mod tests {
             completion_tokens: None,
             reasoning_tokens: None,
             liked: None,
+            note: None,
         }
     }
 
@@ -168,6 +169,7 @@ mod tests {
             completion_tokens: None,
             reasoning_tokens: None,
             liked: None,
+            note: None,
         };
         let tool_result = SessionMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -178,6 +180,7 @@ mod tests {
             completion_tokens: None,
             reasoning_tokens: None,
             liked: None,
+            note: None,
         };
 
         let stored = vec![

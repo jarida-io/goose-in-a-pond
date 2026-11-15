@@ -1,13 +1,16 @@
 //! Scheduler REST routes under `/api/v1/schedules`, against an in-memory scheduler.
 
+#[path = "support/household.rs"]
+mod household;
+
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use pond_api::{build_router, AppState};
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::schedule::{
     MissedRun, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule, ScheduleRun, TaskKind,
-    CRON_ONCE,
+    CRON_ONCE, PRIVATE_REMINDER_LABEL,
 };
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
@@ -244,6 +247,7 @@ async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, temp
     let scheduler: Option<Arc<dyn SchedulerPort>> = Some(scheduler);
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -266,6 +270,12 @@ async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, temp
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(NoDevices),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -307,6 +317,8 @@ async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, temp
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         face_recognition: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1010,4 +1022,163 @@ async fn a_routine_with_no_actions_or_an_assistant_prompt_is_a_bad_request() {
             .unwrap();
         assert_eq!(put.status(), StatusCode::BAD_REQUEST, "{kind}");
     }
+}
+
+#[tokio::test]
+async fn a_private_reminder_cannot_be_created_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    let body = serde_json::json!({
+        "name": "Evening",
+        "cron": "0 0 20 * * *",
+        "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+    });
+    let resp = app
+        .oneshot(auth_post("/api/v1/schedules", body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A household whose scheduler holds Liz's private reminder "r".
+async fn household_with_lizs_reminder() -> (household::Household, Arc<InMemoryScheduler>) {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    let port: Arc<dyn SchedulerPort> = scheduler.clone();
+    let h = household::household_with(|state| state.scheduler = Some(port)).await;
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "r".into(),
+            label: "Take the tablets".into(),
+            cron: "0 0 20 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            ask_if_missed: false,
+            kind: TaskKind::MemberReminder {
+                profile_id: h.liz.clone(),
+                prompt: "Take the tablets".into(),
+            },
+        })
+        .await
+        .unwrap();
+    (h, scheduler)
+}
+
+#[tokio::test]
+async fn editing_a_private_reminders_prompt_keeps_it_the_members() {
+    let (h, scheduler) = household_with_lizs_reminder().await;
+
+    let (status, body) = h
+        .send(
+            Method::PUT,
+            "/api/v1/schedules/r",
+            household::LIZ,
+            Some(serde_json::json!({"prompt": "Take the blue tablets"})),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("tablets"), "{body}");
+    assert_eq!(
+        scheduler.list_tasks().await.unwrap()[0].kind,
+        TaskKind::MemberReminder {
+            profile_id: h.liz.clone(),
+            prompt: "Take the blue tablets".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn listings_show_a_private_reminder_without_what_it_says() {
+    let (h, _scheduler) = household_with_lizs_reminder().await;
+
+    for uri in ["/api/v1/schedules", "/api/v1/schedules/upcoming"] {
+        let (status, listed) = h.send(Method::GET, uri, household::JERRY, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let listed = listed.to_string();
+        assert!(listed.contains(PRIVATE_REMINDER_LABEL), "{uri}: {listed}");
+        assert!(!listed.contains("tablets"), "{uri}: {listed}");
+    }
+}
+
+#[tokio::test]
+async fn nobody_but_its_member_changes_runs_or_reads_a_private_reminder() {
+    let (h, scheduler) = household_with_lizs_reminder().await;
+    let attempts = [
+        (
+            Method::PUT,
+            "/api/v1/schedules/r",
+            Some(serde_json::json!({"prompt": "Skip the tablets"})),
+        ),
+        (Method::DELETE, "/api/v1/schedules/r", None),
+        (Method::POST, "/api/v1/schedules/r/pause", None),
+        (Method::POST, "/api/v1/schedules/r/resume", None),
+        (Method::POST, "/api/v1/schedules/r/run-now", None),
+        (Method::POST, "/api/v1/schedules/r/missed/run", None),
+        (Method::POST, "/api/v1/schedules/r/missed/skip", None),
+        (Method::GET, "/api/v1/schedules/r/runs", None),
+    ];
+
+    for token in [household::JERRY, household::ADA, household::TABLET] {
+        for (method, uri, body) in &attempts {
+            let (status, reply) = h.send(method.clone(), uri, token, body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{token} {method} {uri}: {reply}"
+            );
+        }
+    }
+    let kept = scheduler.list_tasks().await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(!kept[0].paused);
+    assert_eq!(
+        kept[0].kind,
+        TaskKind::MemberReminder {
+            profile_id: h.liz.clone(),
+            prompt: "Take the tablets".into(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn its_member_pauses_and_deletes_their_own_reminder() {
+    let (h, scheduler) = household_with_lizs_reminder().await;
+
+    let (status, body) = h
+        .send(
+            Method::POST,
+            "/api/v1/schedules/r/pause",
+            household::LIZ,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(scheduler.list_tasks().await.unwrap()[0].paused);
+    let (status, body) = h
+        .send(Method::DELETE, "/api/v1/schedules/r", household::LIZ, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(scheduler.list_tasks().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_schedule_cannot_be_turned_into_a_private_reminder_through_the_api() {
+    let (app, _tmp) = make_app().await;
+    app.clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules",
+            serde_json::json!({"id": "evening", "name": "Evening", "cron": "0 0 20 * * *", "prompt": "hi"}),
+        ))
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(auth_put(
+            "/api/v1/schedules/evening",
+            serde_json::json!({
+                "kind": {"type": "member_reminder", "profile_id": "grace", "prompt": "Take the tablets"},
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

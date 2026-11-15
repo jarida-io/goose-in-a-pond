@@ -15,6 +15,10 @@ export function segmentLabel(segment: MemorySegment): string {
     case "routine": return i18n.t("memory.segment.routine");
     case "knowledge": return i18n.t("memory.segment.knowledge");
     case "context": return i18n.t("memory.segment.context");
+    case "food_health": return i18n.t("memory.segment.food_health");
+    case "place": return i18n.t("memory.segment.place");
+    case "date": return i18n.t("memory.segment.date");
+    case "instruction": return i18n.t("memory.segment.instruction");
   }
 }
 

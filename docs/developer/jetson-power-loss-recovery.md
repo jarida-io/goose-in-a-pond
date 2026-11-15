@@ -82,8 +82,11 @@ speculative decoding on a Gemma 4 E2B or E4B model. Much worse than that, in ord
    ssh nano 'grep -E "Applied Jetson Orin Nano CUDA|CPU-ONLY" ~/.local/share/goose-in-a-pond/logs/pond.log.$(date -u +%F) | tail -1'
    ```
    `CPU-ONLY (built without the cuda feature)` means rebuild (`bash scripts/jetson.sh deploy`).
-2. **A debug binary is being served.** The unit's `ExecStart` points at `target/release/pond-server`;
-   check `ls -la ~/goose-in-a-pond/target/release/pond-server` and the build stamp beside it.
+2. **A debug binary is being served, or none at all.** The unit's `ExecStart` points at the installed
+   `~/.local/lib/goose-in-a-pond/bin/pond-server` (an older unit at `target/release/pond-server`).
+   `status=203/EXEC` in `systemctl --user status goose-in-a-pond` means that file is gone: a unit
+   still running from `target/` loses it to `cargo clean`. Rebuild with `bash scripts/giap.sh build`,
+   which installs it and repoints the unit; `giap.sh doctor` names which binary the unit runs.
 3. **Something else holds the GPU or the cores**, a second `pond-server` above all:
    `ssh nano 'ps aux --sort=-%cpu | head -6'`.
 

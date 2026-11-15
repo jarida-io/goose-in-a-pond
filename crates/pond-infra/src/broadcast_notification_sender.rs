@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_core::mcp::domain::notice_delivery::{passes_quiet_hours, Wake};
 use pond_core::mcp::domain::notification_history::HistoryAudience;
 use pond_core::mcp::ports::notification::{
     per_device_notification_id, MemberDelivery, MemberNotifier, Notification, NotificationSender,
@@ -24,9 +25,11 @@ use pond_core::mcp::ports::notification_history::NotificationHistory;
 use pond_core::mcp::ports::notification_queue::NotificationQueueRepository;
 use pond_core::mcp::ports::notification_recipients::NotificationRecipients;
 use pond_core::mcp::ports::notification_relay::NotificationRelay;
+use pond_core::shared::services::chat::household_quiet_at;
 use pond_core::user_data::ports::device_attribution::{
     DeviceAttribution, TargetedDelivery, Undeliverable, RESERVED_BROADCAST_TARGET,
 };
+use pond_core::user_data::ports::settings::SettingsRepository;
 use tokio::sync::broadcast;
 
 /// Sentinel `target` for "every connected device". Keep it the domain constant: the targeted
@@ -106,6 +109,8 @@ pub struct BroadcastNotificationSender {
     recipients: Option<Arc<dyn NotificationRecipients>>,
     /// The household's record of durable notices; `None` records nothing.
     history: Option<Arc<dyn NotificationHistory>>,
+    /// Where quiet hours are read from; `None` holds nothing back.
+    quiet: Option<Arc<dyn SettingsRepository>>,
 }
 
 impl BroadcastNotificationSender {
@@ -121,6 +126,34 @@ impl BroadcastNotificationSender {
             attribution: None,
             recipients: None,
             history: None,
+            quiet: None,
+        }
+    }
+
+    /// Hold what is neither an alert nor timed for then while the household's quiet hours last.
+    pub fn with_quiet_hours(mut self, settings: Arc<dyn SettingsRepository>) -> Self {
+        self.quiet = Some(settings);
+        self
+    }
+
+    /// Whether this copy waits for quiet hours to end. Unreadable settings or bounds hold
+    /// nothing: a notice that arrives at night beats one that never does.
+    async fn holds(&self, notification: &Notification) -> bool {
+        let Some(settings) = &self.quiet else {
+            return false;
+        };
+        if passes_quiet_hours(notification) {
+            return false;
+        }
+        match settings.get().await {
+            Ok(settings) => {
+                settings.notices_wait_in_quiet_hours
+                    && household_quiet_at(&settings, chrono::Utc::now()) == Some(true)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "quiet hours unreadable; the notice goes out now");
+                false
+            }
         }
     }
 
@@ -281,19 +314,42 @@ impl BroadcastNotificationSender {
     /// copy live. Never records history: the callers record the notice once, not per copy.
     async fn deliver(&self, notification: Notification) -> Result<()> {
         let targeted = notification.target != BROADCAST_TARGET;
+        if targeted && self.holds(&notification).await {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "notice_held_for_quiet_hours",
+                notification_id = %notification.id,
+                device = %notification.target,
+                "a notice waits for quiet hours to end"
+            );
+            return self.queue.enqueue_held(notification).await;
+        }
         if targeted {
             // Persist for offline delivery before fanning out live.
             self.queue.enqueue(notification.clone()).await?;
             // Background push is best-effort — never fail the send on it.
             if let Some(relay) = &self.relay {
-                if let Err(e) = relay.relay(&notification).await {
-                    tracing::warn!(
+                match relay.relay(&notification).await {
+                    Ok(Wake::Sent) => {
+                        if let Err(e) = self.queue.note_wake(&notification.id).await {
+                            tracing::warn!(error = %e, "could not record a notice's wake");
+                        }
+                    }
+                    Ok(Wake::NotSent(gap)) => tracing::debug!(
+                        target: "giap::trace",
+                        kind = "push_wake_not_sent",
+                        notification_id = %notification.id,
+                        device = %notification.target,
+                        why = gap.as_str(),
+                        "no push wake was sent for a queued notice"
+                    ),
+                    Err(e) => tracing::warn!(
                         kind = "push_relay_failed",
                         notification_id = %notification.id,
                         device = %notification.target,
                         error = %e,
                         "notification relay failed"
-                    );
+                    ),
                 }
             }
         }
@@ -403,11 +459,16 @@ mod tests {
     #[derive(Default)]
     struct StubQueue {
         enqueued: Mutex<Vec<Notification>>,
+        held: Mutex<Vec<Notification>>,
     }
     #[async_trait]
     impl NotificationQueueRepository for StubQueue {
         async fn enqueue(&self, n: Notification) -> Result<()> {
             self.enqueued.lock().unwrap().push(n);
+            Ok(())
+        }
+        async fn enqueue_held(&self, n: Notification) -> Result<()> {
+            self.held.lock().unwrap().push(n);
             Ok(())
         }
         async fn list_undelivered(&self, _device_id: &str) -> Result<Vec<Notification>> {
@@ -451,6 +512,61 @@ mod tests {
 
         assert_eq!(queue.enqueued.lock().unwrap().len(), 1, "targeted enqueued");
         assert_eq!(rx.recv().await.unwrap().target, "dev-1", "fanned out live");
+    }
+
+    /// A household whose quiet hours last all day, so the test does not depend on the clock.
+    struct AlwaysQuiet;
+    #[async_trait]
+    impl SettingsRepository for AlwaysQuiet {
+        async fn get(&self) -> Result<pond_core::user_data::domain::settings::Settings> {
+            let mut settings = pond_core::user_data::domain::settings::Settings::default();
+            settings.quiet_hours_start = "00:00".into();
+            settings.quiet_hours_end = "00:00".into();
+            Ok(settings)
+        }
+        async fn update(&self, _: &pond_core::user_data::domain::settings::Settings) -> Result<()> {
+            Ok(())
+        }
+        async fn get_key(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn set_key(&self, _: &str, _: String) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn in_quiet_hours_a_plain_notice_is_held_and_an_alert_goes_out() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let queue = Arc::new(StubQueue::default());
+        let relay = Arc::new(CountingRelay::default());
+        let sender = BroadcastNotificationSender::new(tx, queue.clone(), Some(relay.clone()))
+            .with_quiet_hours(Arc::new(AlwaysQuiet));
+
+        sender.send(notif("dev-1")).await.unwrap();
+        assert_eq!(queue.held.lock().unwrap().len(), 1);
+        assert!(queue.enqueued.lock().unwrap().is_empty());
+        assert!(
+            relay.relayed.lock().unwrap().is_empty(),
+            "no wake in quiet hours"
+        );
+        assert!(drain(&mut rx).is_empty(), "and nothing on an open stream");
+
+        let mut alert = notif("dev-1");
+        alert.id = "n2".into();
+        alert.category = "alert".into();
+        sender.send(alert).await.unwrap();
+        let mut timed = notif("dev-1");
+        timed.id = "n3".into();
+        timed.data = pond_core::mcp::domain::notice_delivery::marked(
+            None,
+            pond_core::mcp::domain::notice_delivery::QUIET_PASS_KEY,
+        );
+        sender.send(timed).await.unwrap();
+        assert_eq!(queue.enqueued.lock().unwrap().len(), 2);
+        assert_eq!(relay.relayed.lock().unwrap().len(), 2);
+        assert_eq!(drain(&mut rx).len(), 2);
+        assert_eq!(queue.held.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -517,12 +633,12 @@ mod tests {
     }
     #[async_trait]
     impl NotificationRelay for CountingRelay {
-        async fn relay(&self, notification: &Notification) -> Result<()> {
+        async fn relay(&self, notification: &Notification) -> Result<Wake> {
             self.relayed
                 .lock()
                 .unwrap()
                 .push(notification.target.clone());
-            Ok(())
+            Ok(Wake::Sent)
         }
     }
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, RefreshCw, Loader2, Download, Check, X, AlertCircle } from "lucide-react";
+import { Switch } from "../../../components/Switch";
 import { HubIco } from "../../primitives/HubIco";
 import { DetailShell } from "./DetailShell";
 import { Card, Segment } from "./controls";
@@ -119,21 +120,13 @@ function McpRow({ ext, toggling, onToggle, onRemoveRedundant }: McpRowProps) {
         >
           <HubIco d={CHEVD_PATH} size={16} color="var(--color-text-tertiary)" />
         </button>
-        {/* Controlled toggle — reads ext.enabled directly */}
-        <button
-          className="htoggle"
-          data-on={ext.enabled}
-          onClick={() => onToggle(ext.name, !ext.enabled)}
-          aria-pressed={ext.enabled}
-          type="button"
+        <Switch
+          checked={ext.enabled}
+          onChange={(on) => onToggle(ext.name, on)}
           disabled={toggling}
-          aria-label={`${ext.enabled ? "Disable" : "Enable"} ${ext.name}`}
-        >
-          {toggling
-            ? <Loader2 size={10} style={{ animation: "spin 1s linear infinite", margin: "auto" }} />
-            : <span className="htoggle__knob" />
-          }
-        </button>
+          aria-busy={toggling || undefined}
+          label={`${ext.enabled ? "Disable" : "Enable"} ${ext.name}`}
+        />
       </div>
       {open && ext.tools.length > 0 && (
         <div className="ext2__tools">

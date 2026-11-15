@@ -6,6 +6,8 @@ use goose::config::GooseMode;
 use goose::conversation::message::Message;
 use goose::providers::base::Provider;
 use goose::session::SessionManager;
+use pond_core::context::vector_index::VectorIndex;
+use pond_core::mcp::domain::tool_outcome::receipt_from_meta;
 use pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::ports::agent::{
@@ -67,6 +69,48 @@ fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
 
 /// The ranked fragments that fit `budget`, estimated at four characters a token; the first
 /// always fits.
+/// Standing facts a conversation starts with: enough for a few instructions, a name, a diet
+/// and the allergies, few enough to stay a handful of lines.
+const STANDING_FACTS_SHOWN: usize = 8;
+
+/// How long a turn waits for its query vector: the Orin's CPU takes 150-185 ms for a question of
+/// 30-60 characters. Past it the turn recalls by keyword and the embed finishes behind it.
+const QUERY_VECTOR_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The query vector for `message`, or an error once `wait` passes; the embed keeps running then.
+async fn query_vector_within(
+    provider: &Arc<dyn EmbeddingProvider>,
+    message: &str,
+    wait: std::time::Duration,
+) -> Result<Vec<f32>> {
+    let provider = provider.clone();
+    let text = message.to_string();
+    let wait_ms = wait.as_millis() as u64;
+    let embed = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let vector = provider.embed_query(&text).await;
+        let took_ms = started.elapsed().as_millis() as u64;
+        if took_ms > wait_ms {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "query_vector_late",
+                took_ms,
+                wait_ms,
+                "a turn's query vector came after the turn stopped waiting for it"
+            );
+        }
+        vector
+    });
+    match tokio::time::timeout(wait, embed).await {
+        Ok(Ok(vector)) => vector,
+        Ok(Err(stopped)) => Err(anyhow!("the query embed stopped: {stopped}")),
+        Err(_) => Err(anyhow!(
+            "the query vector took longer than {} ms",
+            wait.as_millis()
+        )),
+    }
+}
+
 fn fragments_within<'a>(
     ranked: impl IntoIterator<Item = &'a MemoryFragment>,
     budget: usize,
@@ -95,10 +139,14 @@ struct TurnEnvelope<'a> {
     interview: Option<&'a str>,
     member_notes: &'a str,
     memories: &'a str,
+    /// The `<personal-context>` block, whole, or empty.
+    personal_context: &'a str,
     /// The user's words are in the attached audio, which the model hears.
     heard: bool,
     /// Where the person's phone is now (`device_place_note`), when their app shares it.
     device_place: Option<String>,
+    /// The asking phone is locked: [`LOCKED_DEVICE_NOTE`](pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE).
+    device_locked: bool,
 }
 
 /// A heard turn's <user-message>. No "recording": the model says it back. Never empty, or the
@@ -120,6 +168,8 @@ impl TurnEnvelope<'_> {
             self.suggestion.as_deref(),
             self.research.as_deref(),
             self.device_place.as_deref(),
+            self.device_locked
+                .then_some(pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE),
         ]
         .into_iter()
         .flatten()
@@ -143,6 +193,10 @@ impl TurnEnvelope<'_> {
             msg.push_str("<memories>\n");
             msg.push_str(self.memories);
             msg.push_str("\n</memories>\n");
+        }
+        if !self.personal_context.is_empty() {
+            msg.push_str(self.personal_context);
+            msg.push('\n');
         }
         msg.push_str(&pond_core::models::services::answer_contract::answer_contract());
         msg.push('\n');
@@ -577,6 +631,8 @@ pub struct GooseAdapter {
     memory_repo: Arc<dyn MemoryRepository>,
     /// Memory-search embedder; `None` (fastembed failed or disabled) falls back to keyword LIKE.
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// The shared index a turn draws its strong matches from; `None` means none ride a turn.
+    turn_index: Option<Arc<dyn VectorIndex>>,
     /// Only source of `ModelRecord.context_length` (governor rung 3); `None` only on CLI paths.
     model_repo: Option<Arc<dyn ModelRepository>>,
     llamafile_url: String,
@@ -735,6 +791,7 @@ impl GooseAdapter {
             skill_repo,
             memory_repo,
             embedding_provider: None,
+            turn_index: None,
             model_repo: None,
             llamafile_url,
             data_dir,
@@ -1179,10 +1236,11 @@ impl GooseAdapter {
                     _ => *n,
                 })
                 .collect();
-            // Same cap as the live trimmer, so a restart neither gains nor loses images.
+            // The live trimmer's plan: a restart keeps at most what a live session could hold.
             replay_images =
                 pond_core::models::services::context::image_history::plan_history_images(
                     &plannable,
+                    profile.context_window_tokens,
                 );
         }
 
@@ -2143,6 +2201,24 @@ impl GooseAdapter {
             .clone()
     }
 
+    /// A style template speaking as the soul and keeping memory by the scratchpad's rules: the
+    /// two documents a person edits. A document that is missing or unreadable leaves the
+    /// style's own block standing.
+    async fn as_goose(&self, template: &str) -> String {
+        let (soul, rules) = tokio::join!(
+            self.template_repo.get(pond_core::prompts::SOUL),
+            self.template_repo.get(pond_core::prompts::SCRATCHPAD),
+        );
+        let text = |row: anyhow::Result<
+            Option<pond_core::user_data::domain::prompt_template::PromptTemplate>,
+        >| row.ok().flatten().map(|t| t.content);
+        pond_core::prompts::with_agent_documents(
+            template,
+            text(soul).as_deref(),
+            text(rules).as_deref(),
+        )
+    }
+
     /// Memories relevant to `message`, with cosine similarity when known, and the embedder's
     /// `closest_memory` floor for those cosines. Never fails the turn.
     async fn topical_memories(
@@ -2150,14 +2226,19 @@ impl GooseAdapter {
         message: &str,
         scope: &ProfileScope,
         limit: usize,
-    ) -> (Vec<(MemoryFragment, Option<f32>)>, Option<f32>) {
+    ) -> (
+        Vec<(MemoryFragment, Option<f32>)>,
+        Option<f32>,
+        Option<(Vec<f32>, u64)>,
+    ) {
         // Before embedding: a Guest turn matches nothing and shouldn't reach the embedder.
         if scope.excludes_everything() {
-            return (Vec::new(), None);
+            return (Vec::new(), None, None);
         }
         if let Some(provider) = self.embedding_provider.as_ref().filter(|p| p.available()) {
             // Query prefix, not document: asymmetric retrievers (nomic) embed them differently.
-            match provider.embed_query(message).await {
+            let started = std::time::Instant::now();
+            match query_vector_within(provider, message, QUERY_VECTOR_WAIT).await {
                 Ok(query_vector) => {
                     let closest_floor = provider.similarity_floors().map(|f| f.closest_memory);
                     match self
@@ -2179,7 +2260,8 @@ impl GooseAdapter {
                                     (fragment, similarity)
                                 })
                                 .collect();
-                            return (hits, closest_floor);
+                            let query_ms = started.elapsed().as_millis() as u64;
+                            return (hits, closest_floor, Some((query_vector, query_ms)));
                         }
                         Err(e) => tracing::warn!("memory: semantic search failed: {e}"),
                     }
@@ -2190,17 +2272,17 @@ impl GooseAdapter {
 
         let keywords = pond_core::user_data::services::memory_relevance::keyword_terms(message);
         if keywords.is_empty() {
-            return (vec![], None);
+            return (vec![], None, None);
         }
         match self
             .memory_repo
             .search_by_content(&keywords, scope, limit)
             .await
         {
-            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None),
+            Ok(hits) => (hits.into_iter().map(|m| (m, None)).collect(), None, None),
             Err(e) => {
                 tracing::warn!("memory: keyword search failed: {e}");
-                (vec![], None)
+                (vec![], None, None)
             }
         }
     }
@@ -2552,15 +2634,14 @@ impl GooseAdapter {
 
     /// Before the turn's first reply: reduces any transient tool result an earlier turn left
     /// (a crash, a cancel the sweep missed) to its stub, and caps history images that keep
-    /// pixels; the pending turn's image isn't in history yet. One write for both, and none when
+    /// pixels once they pass what the window keeps; the pending turn's image isn't in history
+    /// yet. One write for both, and none when
     /// nothing changes: `replace_conversation` rewrites every row to eMMC.
     async fn rewrite_history_at_turn_start(
         &self,
         goose_sid: &str,
         sweep: &crate::transient_history::TurnSweep,
     ) {
-        use pond_core::models::services::context::image_history::history_image_placeholder;
-
         let _held = sweep.lock().await;
         let Ok(session) = self.session_manager.get_session(goose_sid, true).await else {
             return;
@@ -2577,23 +2658,14 @@ impl GooseAdapter {
         }
         let (source, unheard) = strip_history_audio(source);
 
+        let (_, window) = self.window_and_provider().await;
         // Tool-part messages are never rewritten: providers reject re-keyed tool responses.
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, window.tokens);
         if dropped == 0 && redacted == 0 && unheard == 0 {
             return;
         }
 
-        let rebuilt: Vec<Message> = source
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                if had[i] > keep[i] {
-                    cap_message_images(m, keep[i], &history_image_placeholder(keep[i]))
-                } else {
-                    m.clone()
-                }
-            })
-            .collect();
+        let rebuilt = capped_history(&source, &had, &keep);
 
         let capped = goose::conversation::Conversation::new_unvalidated(rebuilt);
         if let Err(e) = self
@@ -2651,6 +2723,48 @@ impl GooseAdapter {
     pub fn with_embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedding_provider = Some(provider);
         self
+    }
+
+    /// The index a turn's `<personal-context>` comes from, searched with the memory query's vector.
+    pub fn with_turn_index(mut self, index: Arc<dyn VectorIndex>) -> Self {
+        self.turn_index = Some(index);
+        self
+    }
+
+    /// The strong matches for a turn from every corpus but memories, which the turn shows
+    /// already, and its own conversation, whose words the model has.
+    async fn turn_recollections(
+        &self,
+        query_vector: Option<&[f32]>,
+        floor: Option<f32>,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
+        session_id: &str,
+        is_voice: bool,
+    ) -> Vec<pond_core::context::retrieval_service::Recollection> {
+        use pond_core::context::retrieval_service::{
+            for_turn, PersonalContextRetrieval, TURN_HITS,
+        };
+        use pond_core::context::vector_index::{Corpus, Exclusions};
+        let (Some(index), Some(embedder), Some(vector), Some(floor)) = (
+            self.turn_index.as_ref(),
+            self.embedding_provider.as_ref(),
+            query_vector,
+            floor,
+        ) else {
+            return Vec::new();
+        };
+        if !scope.allows_personal_data() {
+            return Vec::new();
+        }
+        let exclusions = Exclusions {
+            corpora: vec![Corpus::Memory],
+            session_id: Some(session_id.to_string()),
+        };
+        let hits = PersonalContextRetrieval::new(index.clone(), embedder.clone())
+            .recall_near(vector, scope, TURN_HITS * 4, &exclusions)
+            .await;
+        // A spoken answer has room for one.
+        for_turn(hits, floor, if is_voice { 1 } else { TURN_HITS })
     }
 
     /// Model catalog, so the governor can use `ModelRecord.context_length` over the name heuristic.
@@ -2923,11 +3037,15 @@ impl GooseAdapter {
                         self.topical_memories(request.message_or_heard(), &turn_scope, limit)
                             .await
                     }
-                    None => (vec![], None),
+                    None => (vec![], None, None),
                 }
             },
         );
-        let (relevant_memories, closest_floor) = relevant_memories;
+        let (relevant_memories, closest_floor, query) = relevant_memories;
+        let (query_vector, query_ms) = match query {
+            Some((vector, ms)) => (Some(vector), Some(ms)),
+            None => (None, None),
+        };
 
         // Merge, keeping semantic hits' similarity; `None` marks a recency-only hit.
         let mut memory_candidates: Vec<(MemoryFragment, Option<f32>)> = recent_memories
@@ -2950,6 +3068,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Voice = the instance flag (CLI --voice) or the request's (desktop voice pipeline).
         let voice_instance = self.voice_mode.load(std::sync::atomic::Ordering::Relaxed);
@@ -3139,6 +3258,38 @@ impl GooseAdapter {
             _ => String::new(),
         };
 
+        // Goose's own lessons for this member ride the same slot, once per conversation: what
+        // it learnt about how to work, which a new conversation would otherwise start without.
+        let lessons_for_user_msg = match pond_mcp_server::memory::agent_notes() {
+            Some(notes) if !turn_scope.excludes_everything() => {
+                let lessons = notes
+                    .list(
+                        &turn_scope,
+                        pond_core::shared::domain::agent_note::NoteKind::Lesson,
+                    )
+                    .await
+                    .unwrap_or_default();
+                let block = pond_core::shared::domain::agent_note::lessons_block(&lessons);
+                if block.is_empty()
+                    || self
+                        .earlier_user_texts(&goose_sid)
+                        .await
+                        .iter()
+                        .any(|text| text.contains(&block))
+                {
+                    String::new()
+                } else {
+                    block
+                }
+            }
+            _ => String::new(),
+        };
+        let member_notes_for_user_msg = [member_notes_for_user_msg, lessons_for_user_msg]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Only name + description per turn; `giap-device__load_skill` fetches the rest on demand.
         // The same text feeds tool selection (6c), so a skill can pull in the groups it needs.
         let mut skill_selection_signal = String::new();
@@ -3169,7 +3320,35 @@ impl GooseAdapter {
         // A preamble budget (clamped window): injected memories are re-prefilled every turn.
         let compaction_profile = &turn_profile;
 
-        if !memory_candidates.is_empty() {
+        // Strong matches from the rest of the index take a share of the memory budget, not more.
+        let recall_started = std::time::Instant::now();
+        let recollections = self
+            .turn_recollections(
+                query_vector.as_deref(),
+                closest_floor,
+                &turn_scope,
+                &request.session_id,
+                is_voice,
+            )
+            .await;
+        let recall_ms = recall_started.elapsed().as_millis() as u64;
+        let budget_split = pond_core::context::retrieval::split_preamble_budget(
+            memory_token_budget(compaction_profile.memory_token_budget, is_voice),
+            !recollections.is_empty(),
+        );
+
+        // What every conversation of this member's starts with, whatever the message is about:
+        // their standing instructions, name, diet, allergies and how they like to be answered.
+        let standing: Vec<MemoryFragment> = if turn_scope.excludes_everything() {
+            Vec::new()
+        } else {
+            self.memory_repo
+                .always_shown(&turn_scope, STANDING_FACTS_SHOWN)
+                .await
+                .unwrap_or_default()
+        };
+
+        if !memory_candidates.is_empty() || !standing.is_empty() {
             // Blended ranking, so a topical memory can displace the high-importance identity block,
             // and the memory closest to the message keeps a seat however old it is.
             memory_candidates = pond_core::user_data::services::memory_relevance::select_for_turn(
@@ -3178,32 +3357,45 @@ impl GooseAdapter {
                 closest_floor,
                 chrono::Utc::now(),
             );
+            // Only a seated memory clears the floor at the front, so this names it or nothing.
+            let seat_id = memory_candidates
+                .first()
+                .filter(|(_, s)| matches!((s, closest_floor), (Some(s), Some(f)) if *s >= f))
+                .map(|(m, _)| m.id.clone());
 
-            let token_budget =
-                memory_token_budget(compaction_profile.memory_token_budget, is_voice);
+            let token_budget = budget_split.memory_tokens;
             let (budgeted, tokens_used) =
                 fragments_within(memory_candidates.iter().map(|(m, _)| m), token_budget);
 
-            if !budgeted.is_empty() {
-                use pond_core::models::services::context::memory_block;
-                let rendered: Vec<String> = budgeted
+            let mut offered: Vec<&MemoryFragment> = standing.iter().collect();
+            offered.extend(
+                budgeted
                     .iter()
-                    .map(|m| {
-                        let seg = m
-                            .segment
-                            .as_ref()
-                            .map(|s| format!("{:?}", s).to_lowercase());
-                        memory_block::line(seg.as_deref(), &m.content)
-                    })
-                    .collect();
+                    .copied()
+                    .filter(|m| !standing.iter().any(|s| s.id == m.id)),
+            );
+            if !offered.is_empty() {
+                use pond_core::models::services::context::memory_block;
+                use pond_core::user_data::domain::member_profile::{
+                    profile_order, render_profile_led_by,
+                };
                 // An earlier turn's envelope stays in the history, so what it showed is still in
                 // front of the model; only the rest is news.
                 let earlier = self.earlier_user_texts(&goose_sid).await;
-                let fresh = memory_block::not_yet_shown(&rendered, &earlier);
+                let mut fresh: Vec<MemoryFragment> = offered
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        let l = memory_block::line(None, &m.content);
+                        !earlier.iter().any(|text| memory_block::shown_in(&l, text))
+                    })
+                    .cloned()
+                    .collect();
 
                 tracing::debug!(
                     fragments_injected = fresh.len(),
-                    fragments_already_shown = rendered.len() - fresh.len(),
+                    fragments_already_shown = offered.len() - fresh.len(),
+                    fragments_standing = standing.len(),
                     fragments_available = memory_candidates.len(),
                     closest_floor = ?closest_floor,
                     lead_similarity = ?memory_candidates.first().and_then(|(_, s)| *s),
@@ -3217,11 +3409,8 @@ impl GooseAdapter {
                     effective_ctx,
                 );
 
-                memory_block_for_user_msg = fresh
-                    .iter()
-                    .map(|line| line.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                profile_order(&mut fresh);
+                memory_block_for_user_msg = render_profile_led_by(&fresh, seat_id.as_deref());
 
                 // Feeds decay tracking; spawned to keep sequential DB writes off the hot path.
                 let ids: Vec<String> = budgeted.iter().map(|m| m.id.clone()).collect();
@@ -3232,6 +3421,40 @@ impl GooseAdapter {
                     }
                 });
             }
+        }
+
+        let mut personal_context_for_user_msg = String::new();
+        let matched = recollections.len();
+        let mut fresh = Vec::new();
+        let mut shown = 0;
+        if !recollections.is_empty() {
+            use pond_core::context::retrieval_service::{render_turn_block, turn_line};
+            // Its start is enough to know a line from an earlier envelope, however it was cut.
+            let earlier = self.earlier_user_texts(&goose_sid).await;
+            fresh = recollections
+                .into_iter()
+                .filter(|hit| {
+                    let line = turn_line(hit, 60);
+                    let start = line.trim_end_matches('…');
+                    !earlier.iter().any(|text| text.contains(start))
+                })
+                .collect();
+            (personal_context_for_user_msg, shown) =
+                render_turn_block(&fresh, budget_split.context_tokens);
+            fresh.truncate(shown);
+        }
+        if self.turn_index.is_some() && query_vector.is_some() {
+            tracing::info!(
+                kind = "personal_context",
+                matched,
+                shown,
+                corpora = ?fresh.iter().map(|h| h.corpus.as_str()).collect::<Vec<_>>(),
+                top_score = ?fresh.iter().map(|h| h.score).reduce(f32::max),
+                token_budget = budget_split.context_tokens,
+                query_ms,
+                recall_ms,
+                "turn recall"
+            );
         }
 
         // ── 4b. Upcoming schedules & vision runtime context ─────────────────
@@ -3379,9 +3602,17 @@ impl GooseAdapter {
             }
         };
 
-        // The keyed tools whose secret is not stored now, read once for the turn: the group lines
-        // must not promise them (6c), and the allow-set drops them (6e).
-        let keyless_tools = read_keyless_tools().await;
+        // The keyed tools whose secret is not stored now, read once for the turn, and in a voice
+        // turn the tools whose result is only for a screen: the group lines must not promise them
+        // (6c), and the allow-set drops them (6e).
+        let mut keyless_tools = read_keyless_tools().await;
+        if is_voice {
+            keyless_tools.extend(
+                pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                    .iter()
+                    .map(|tool| tool.to_string()),
+            );
+        }
 
         // ── 6c. Per-session tool relevance ───────────────────────────────────
         // Goose always sends the full union, so narrowing is enforced by the shim per call.
@@ -3488,22 +3719,28 @@ impl GooseAdapter {
                reports them as recognized. Use `configure_vision_bus` to adjust FPS (1-30) or \
                sensitivity, and `create_vision_automation` / `list_vision_automations` / \
                `delete_vision_automation` for motion, person, or `face:<profile_id>` triggers.\n\
-             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_todo` when the \
+             - To-dos, reminders, timers & schedules (`giap-schedule`): Use `add_reminder` when the \
                person asks to be reminded of something or to put something on their to-dos, at a \
                time, on a repeat or at a place ('remind me to call Emmanuel when I get home', \
                'add renew the logbook to my to-dos'); `list_todos` and `complete_todo` read and \
                tick off that list. Use `set_timer` only for a countdown ('set a timer for 10 \
-               minutes'), `create_schedule` for recurring 6-field cron jobs you run yourself \
-               (`sec min hr dom mon dow`), and `list_schedules` / `update_schedule` / \
-               `schedule_action` (`delete` | `pause` | `resume` | `run_now`) to inspect or \
-               control them. If a group is listed under ADDITIONAL CAPABILITIES, \
-               enable it first with `giap-device__enable_capability_group`."
+               minutes'), `create_schedule` for something you do yourself again and again \
+               (`when` in plain words: 'every weekday at 7am'; pass a schedule's name as `id` \
+               to change it), and `list_schedules` / `schedule_action` (`delete` | `pause` | \
+               `resume` | `run_now`) to inspect or control them by name."
                     .to_string(),
             );
         }
         // Appendix, not envelope: it only changes with the tools block, so it's prefilled once.
         if !dormant_groups_note.is_empty() {
             shim_appendix.push(dormant_groups_note.clone());
+        }
+        // An unidentified speaker's personal tools are withheld below; told so, the model says
+        // it rather than reaching for a tool that is not there.
+        if turn_scope.excludes_everything() {
+            shim_appendix.push(
+                pond_core::models::services::prompt_builder::UNKNOWN_SPEAKER_RULE.to_string(),
+            );
         }
         self.shim_controls
             .session(&goose_sid)
@@ -3646,7 +3883,9 @@ impl GooseAdapter {
                 kind = "tools_withheld_for_missing_secret",
                 session_id = %session_id,
                 tools = ?withheld,
-                "tools whose key is not stored were withheld from the turn"
+                voice = is_voice,
+                "tools whose key is not stored, or that need a screen in a voice turn, were \
+                 withheld from the turn"
             );
             (
                 without(allowed_tools, &withheld),
@@ -3660,6 +3899,7 @@ impl GooseAdapter {
         // this handle live, so a group enabled mid-turn is admitted at once.
         let session_controls = self.shim_controls.session(&goose_sid);
         session_controls.set_allowed_tools(allowed_tools.clone());
+        pond_core::mcp::services::screenless_sessions::global().set(&goose_sid, is_voice);
         // A failure recorded in an earlier turn is not this one's; this turn's calls record anew.
         session_controls.note_provider_outcome(None);
 
@@ -3681,6 +3921,12 @@ impl GooseAdapter {
         } else {
             None
         };
+        // Earlier recordings go to the model as sound; with memory short, only those its cache
+        // still holds, since the encoder could not load to hear the others again.
+        session_controls.set_hearing_short(matches!(
+            self.hearing_room(&settings.chat_provider, &settings.chat_model),
+            pond_core::models::domain::audio_input::HearingRoom::Short { .. }
+        ));
         let image_failures_at_start = session_controls.image_failures();
         let gpu_memory_failures_at_start = session_controls.gpu_memory_failures();
         let pictures = self.pictures.clone();
@@ -3708,11 +3954,13 @@ impl GooseAdapter {
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
             memories: &memory_block_for_user_msg,
+            personal_context: &personal_context_for_user_msg,
             heard: request.audio.iter().any(|clip| clip.heard_as.is_some()),
             device_place: request
                 .device_place
                 .as_deref()
                 .and_then(pond_core::user_data::services::location::device_place_note),
+            device_locked: request.device_locked,
         }
         .render();
         // Kept in pieces: empty-turn recovery re-engages with a steered variant of the text.
@@ -3737,8 +3985,8 @@ impl GooseAdapter {
         let guard_controls = session_controls.clone();
 
         // ── History rewrite ──────────────────────────────────────────────
-        // Goose owns compaction; the image cap stays because each replayed image re-runs the
-        // mmproj encoder (0.7-2.7 s), a cost goose can't see. The sweep travels with the stream
+        // Goose owns compaction; the image cap stays because a cold rebuild runs the mmproj
+        // encoder on every image kept (0.7-2.7 s each), a cost goose can't see. The sweep travels with the stream
         // and clears this turn's transient results however the turn ends.
         let turn_sweep = self
             .transient_sweeps
@@ -3851,6 +4099,8 @@ impl GooseAdapter {
             let mut held_turn_limit_notice: Option<String> = None;
             // Tool results streamed this turn: what a stopped turn's final reply answers from.
             let mut tool_results_gathered: usize = 0;
+            // Said at the end of the reply whatever the model wrote: what was asked for and not set.
+            let mut not_set_lines: Vec<String> = Vec::new();
             // Output written up to the latest tool call: text before a call is working notes,
             // which the answer leaves out, so it never counts as having replied.
             let mut chars_at_last_call: usize = 0;
@@ -4190,6 +4440,20 @@ impl GooseAdapter {
                                                 }
                                                 Err(e) => (format!("Error: {e}"), None, true, None),
                                             };
+                                            // What a set-for-later tool really did, apart from its words.
+                                            let outcome = tr
+                                                .tool_result
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(|result| result.meta.as_ref())
+                                                .and_then(|meta| receipt_from_meta(&meta.0));
+                                            if let Some(line) =
+                                                outcome.as_ref().and_then(|receipt| receipt.not_set_line())
+                                            {
+                                                if !not_set_lines.contains(&line) {
+                                                    not_set_lines.push(line);
+                                                }
+                                            }
 
                                             let tool_name = tool_id_to_name
                                                 .get(&tr.id)
@@ -4226,6 +4490,7 @@ impl GooseAdapter {
                                                 content: content_text,
                                                 card,
                                                 keep,
+                                                outcome,
                                             });
                                         }
                                         _ => {}
@@ -4318,6 +4583,14 @@ impl GooseAdapter {
                                     .map(|t| now.duration_since(t).as_millis() as u64);
                                 let engine_ttft = pu.stats.as_ref().and_then(|s| s.time_to_first_token_ms);
                                 let engine_prefill = pu.stats.as_ref().and_then(|s| s.prefill_ms);
+                                let prompt_tokens =
+                                    pu.usage.input_tokens.unwrap_or(0).max(0) as u32;
+                                // What the cache served; the rest of the prompt was decoded.
+                                let reused_tokens = pu
+                                    .stats
+                                    .as_ref()
+                                    .and_then(|s| s.reused_prefix_tokens)
+                                    .map_or(0, |n| n as u32);
                                 tracing::info!(
                                     target: "giap::trace",
                                     kind = "inference",
@@ -4327,7 +4600,9 @@ impl GooseAdapter {
                                     since_turn_ms = now.duration_since(turn_start).as_millis() as u64,
                                     engine_ttft_ms = engine_ttft.unwrap_or(0),
                                     engine_prefill_ms = engine_prefill.unwrap_or(0),
-                                    prompt_tokens = pu.usage.input_tokens.unwrap_or(0).max(0) as u32,
+                                    prompt_tokens,
+                                    reused_tokens,
+                                    decoded_tokens = prompt_tokens.saturating_sub(reused_tokens),
                                     output_tokens = pu.usage.output_tokens.unwrap_or(0).max(0) as u32,
                                     tools_before = tools_since_inference,
                                     reengagement = attempt as u32,
@@ -4648,6 +4923,13 @@ impl GooseAdapter {
                 yield Ok(AgentStreamEvent::Text { content: notice });
                 yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
             }
+            // From the tools' own outcomes, never from the reply's words: a set that failed is
+            // said here even when the model wrote that it worked.
+            for line in not_set_lines.drain(..) {
+                let said = format!("\n\n{line}");
+                total_output_chars += said.len();
+                yield Ok(AgentStreamEvent::Text { content: said });
+            }
             // `attempt` already counts attempts beyond the first (0 on an ordinary turn).
             turn_stats.reengagements = attempt as u32;
 
@@ -4776,6 +5058,7 @@ impl AgentPort for GooseAdapter {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         let shape = if voice_mode {
@@ -5213,6 +5496,7 @@ impl GooseAdapter {
             .flatten()
             .map(|t| t.content)
             .unwrap_or_else(|| fallback_prompt().to_string());
+        let template_content = self.as_goose(&template_content).await;
 
         // Lean on purpose: compact (a child gets a window fraction), no prose tool list (the
         // envelope names them), no thinking (the drain's `as_concat_text()` drops it).
@@ -5557,34 +5841,38 @@ fn attach_images(
         .fold(msg, |m, img| m.with_image(&img.data, &img.mime_type))
 }
 
-/// After the text, like images, so the system prefix stays byte-identical.
+/// After the text, like images, so the system prefix stays byte-identical. The message carries
+/// a reference: the recording itself stays in memory (`held_recordings`), off Goose's disk.
 fn attach_audio(
     msg: Message,
     audio: &[pond_core::models::domain::message::AudioAttachment],
 ) -> Message {
-    audio
-        .iter()
-        .fold(msg, |m, clip| m.with_audio(&clip.data, &clip.mime_type))
+    use crate::held_recordings::{hold, HELD_RECORDING_MIME};
+    audio.iter().fold(msg, |m, clip| {
+        m.with_audio(hold(&clip.data, &clip.mime_type), HELD_RECORDING_MIME)
+    })
 }
 
-/// Every recording in `source` becomes a note: heard on its own turn, never replayed, since each
-/// replay would load the encoder and re-run the audio tower for 25 tokens a second.
+/// A recording stored whole in `source`, as builds before `held_recordings` stored them, becomes
+/// a note: nothing holds it in memory, and it should not stay on disk.
 fn strip_history_audio(source: Vec<Message>) -> (Vec<Message>, usize) {
+    use crate::held_recordings::HELD_RECORDING_MIME;
     use goose::conversation::message::MessageContent as C;
     use pond_core::models::domain::audio_input::HISTORY_VOICE_NOTE_PLACEHOLDER;
 
+    let stored_whole = |c: &C| matches!(c, C::Audio(a) if a.mime_type != HELD_RECORDING_MIME);
     let mut stripped = 0usize;
     let messages = source
         .into_iter()
         .map(|mut m| {
-            if !m.content.iter().any(|c| matches!(c, C::Audio(_))) {
+            if !m.content.iter().any(stored_whole) {
                 return m;
             }
             m.content = m
                 .content
                 .into_iter()
                 .map(|c| match c {
-                    C::Audio(_) => {
+                    c if stored_whole(&c) => {
                         stripped += 1;
                         C::text(HISTORY_VOICE_NOTE_PLACEHOLDER)
                     }
@@ -5675,9 +5963,25 @@ pub(crate) fn cap_message_images(original: &Message, keep: usize, text: &str) ->
     capped
 }
 
+/// `source` with each message cut to the images its plan keeps. A message keeps its own words:
+/// they hold what was asked about the picture, and the turn's context block.
+fn capped_history(source: &[Message], had: &[usize], keep: &[usize]) -> Vec<Message> {
+    source
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if had[i] > keep[i] {
+                cap_message_images(m, keep[i], &m.as_concat_text())
+            } else {
+                m.clone()
+            }
+        })
+        .collect()
+}
+
 /// Returns `(had, keep, dropped_total)`, aligned with `source`; tool messages count as zero.
 /// `dropped_total == 0` means the conversation already fits and must stay byte-identical.
-fn plan_image_cap(source: &[Message]) -> (Vec<usize>, Vec<usize>, usize) {
+fn plan_image_cap(source: &[Message], window_tokens: usize) -> (Vec<usize>, Vec<usize>, usize) {
     use pond_core::models::services::context::image_history::{
         dropped_image_count, plan_history_images,
     };
@@ -5692,7 +5996,7 @@ fn plan_image_cap(source: &[Message]) -> (Vec<usize>, Vec<usize>, usize) {
             }
         })
         .collect();
-    let keep = plan_history_images(&had);
+    let keep = plan_history_images(&had, window_tokens);
     let dropped = dropped_image_count(&had, &keep);
     (had, keep, dropped)
 }
@@ -5911,11 +6215,19 @@ impl pond_core::mcp::ports::tools::tool_selection_control::ToolSelectionControl 
                 );
                 return Err(ToolSelectionError::NotReady(group.to_string()));
             }
-            // Widening a group must not hand back a tool the turn withheld for its missing key.
-            let withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
+            // Widening a group must not hand back a tool the turn withheld for its missing key, or
+            // for wanting a screen the turn has not got.
+            let mut withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
                 newly_allowed.iter().map(String::as_str),
             )
             .await;
+            if pond_core::mcp::services::screenless_sessions::global().is_screenless(&goose_sid) {
+                withheld.extend(
+                    pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                        .iter()
+                        .map(|tool| tool.to_string()),
+                );
+            }
             self.shim_controls
                 .session(&goose_sid)
                 .extend_allowed_tools(newly_allowed.into_iter().filter(|t| !withheld.contains(t)));
@@ -5970,6 +6282,42 @@ fn without(tools: HashSet<String>, withheld: &HashSet<String>) -> HashSet<String
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_slow_query_vector_gives_way_to_keywords_and_still_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Slow(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Slow {
+            async fn embed(&self, _: &str) -> Result<Vec<f32>> {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                self.0.store(true, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0])
+            }
+            fn dimensions(&self) -> usize {
+                2
+            }
+            fn model_id(&self) -> String {
+                "slow".into()
+            }
+        }
+        let finished = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn EmbeddingProvider> = Arc::new(Slow(finished.clone()));
+
+        let started = std::time::Instant::now();
+        let waited =
+            query_vector_within(&provider, "q", std::time::Duration::from_millis(20)).await;
+        assert!(waited.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(150));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the embed was dropped, so nothing warmed"
+        );
+
+        let quick = query_vector_within(&provider, "q", std::time::Duration::from_secs(2)).await;
+        assert_eq!(quick.unwrap(), vec![1.0, 0.0]);
+    }
+
     use super::*;
 
     #[test]
@@ -6763,6 +7111,42 @@ mod tests {
         let args = lines[call..call + 6].join("\n");
         assert!(args.contains("is_voice,"), "{args}");
         assert!(!args.contains("voice_instance"), "{args}");
+    }
+
+    /// A voice turn has no screen, so its screen-only tools join the withheld set, and only then;
+    /// a widen later in the turn must not hand them back.
+    #[test]
+    fn a_voice_turn_withholds_the_screen_only_tools_before_the_gate() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let keyless = at("let mut keyless_tools = read_keyless_tools().await;");
+        let screen_only = at("SCREEN_ONLY_TOOLS");
+        let gate = at("without(allowed_tools, &withheld)");
+        assert!(keyless < screen_only, "the keyless set is read first");
+        assert!(screen_only < gate, "the gate must see the voice turn's set");
+        assert!(
+            lines[screen_only.saturating_sub(3)..screen_only]
+                .iter()
+                .any(|l| l.contains("if is_voice")),
+            "only a voice turn loses them"
+        );
+        let screenless = at("screenless_sessions::global().set(&goose_sid, is_voice)");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        assert!(
+            allow_set < screenless && screenless - allow_set <= 3,
+            "the tools read the turn's screen as the allow-set is published"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("screenless_sessions::global().is_screenless(&goose_sid)")),
+            "enable_group must read the turn's screen"
+        );
     }
 
     /// Production source lines with `//` comments cut, so prose can't satisfy a guard.
@@ -8187,6 +8571,28 @@ mod tests {
         assert_eq!(image_parts(&msg).len(), 1);
     }
 
+    #[test]
+    fn strong_matches_follow_the_memories_inside_the_context() {
+        let envelope = TurnEnvelope {
+            message: "when is the train?",
+            memories: "Preferences\n- Jerry likes trains.",
+            personal_context: "<personal-context>\n- (from a notification I sent) The train \
+                               leaves at 8.\n</personal-context>",
+            ..Default::default()
+        }
+        .render();
+        let memories = envelope.find("</memories>").unwrap();
+        let context = envelope.find("<personal-context>").unwrap();
+        let end = envelope.find("</system-context>").unwrap();
+        assert!(memories < context && context < end, "{envelope}");
+        let bare = TurnEnvelope {
+            message: "hi",
+            ..Default::default()
+        }
+        .render();
+        assert!(!bare.contains("personal-context"));
+    }
+
     /// A heard room turn carries no text of its own words; only it gets the note, which never
     /// calls the audio a recording.
     #[test]
@@ -8232,6 +8638,28 @@ mod tests {
         }
         .render();
         assert!(!unshared.contains("phone is in"));
+    }
+
+    /// A locked phone's turn says why it has no personal tools, in its context and only then.
+    #[test]
+    fn a_locked_phone_turn_says_so_in_the_system_context_only() {
+        use pond_core::shared::domain::agent::LOCKED_DEVICE_NOTE;
+        let locked = TurnEnvelope {
+            message: "what is on my calendar",
+            device_locked: true,
+            ..Default::default()
+        }
+        .render();
+        let context = &locked[locked.find("<system-context>").unwrap()..];
+        assert_eq!(context.matches(LOCKED_DEVICE_NOTE).count(), 1);
+        assert!(LOCKED_DEVICE_NOTE.contains("unlock"));
+
+        let unlocked = TurnEnvelope {
+            message: "what is on my calendar",
+            ..Default::default()
+        }
+        .render();
+        assert!(!unlocked.contains(LOCKED_DEVICE_NOTE));
     }
 
     // ── F3: the vision-capability prompt section ─────────────────────────
@@ -8450,6 +8878,64 @@ mod tests {
         assert_eq!(again, out);
     }
 
+    #[test]
+    fn a_message_that_loses_its_picture_keeps_what_was_asked_about_it() {
+        use pond_core::models::services::context::image_history::HISTORY_IMAGE_PLACEHOLDER;
+
+        let asked = "<system-context>\nToday is Friday.\n</system-context>\nWhat colour is this?";
+        let source = vec![
+            Message::user()
+                .with_text(asked)
+                .with_image("aGVsbG8=", "image/png"),
+            Message::assistant().with_text("Red."),
+            Message::user()
+                .with_text("And this one?")
+                .with_image("d29ybGQ=", "image/png"),
+        ];
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
+        assert_eq!((dropped, keep.clone()), (1, vec![0, 0, 1]));
+
+        let capped = capped_history(&source, &had, &keep);
+        assert_eq!(image_part_count(&capped[0]), 0);
+        assert_eq!(
+            capped[0].as_concat_text(),
+            format!("{asked}\n{HISTORY_IMAGE_PLACEHOLDER}")
+        );
+        assert_eq!(capped[1..], source[1..]);
+
+        // A wide window keeps both pictures, and so rewrites nothing.
+        assert_eq!(plan_image_cap(&source, 65_536).2, 0);
+    }
+
+    #[test]
+    fn a_turns_recording_is_stored_as_a_reference_and_left_in_history() {
+        use crate::held_recordings::HELD_RECORDING_MIME;
+        use goose::conversation::message::MessageContent as C;
+
+        let clip = pond_core::models::domain::message::AudioAttachment {
+            data: "UklGRiQAAABXQVZF".to_string(),
+            mime_type: "audio/wav".to_string(),
+            name: None,
+            heard_as: None,
+        };
+        let msg = attach_audio(Message::user().with_text("listen"), &[clip.clone()]);
+        let stored: Vec<_> = msg
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                C::Audio(a) => Some((a.data.clone(), a.mime_type.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].1, HELD_RECORDING_MIME);
+        assert_ne!(stored[0].0, clip.data, "the recording itself was stored");
+
+        let (kept, stripped) = strip_history_audio(vec![msg.clone()]);
+        assert_eq!(stripped, 0);
+        assert_eq!(kept, vec![msg]);
+    }
+
     /// The Jetson's E4B turns of 2026-10-27 read "Ran into this error: Execution error: null
     /// result from llama cpp." Once the shim has counted the turn out of GPU memory, the household
     /// reads what happened and what to do instead.
@@ -8597,7 +9083,7 @@ mod tests {
             Message::assistant().with_text("hello"),
             Message::user().with_text("bye"),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(had, vec![0, 0, 0]);
         assert_eq!(keep, vec![0, 0, 0]);
         assert_eq!(dropped, 0);
@@ -8607,7 +9093,7 @@ mod tests {
     #[test]
     fn a_single_historical_image_is_left_alone() {
         let source = vec![user_with_images("look", &["AAAA"])];
-        let (_, _, dropped) = plan_image_cap(&source);
+        let (_, _, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(dropped, 0);
     }
 
@@ -8618,7 +9104,7 @@ mod tests {
             Message::assistant().with_text("ok"),
             user_with_images("second", &["BBBB", "CCCC"]),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(had, vec![1, 0, 2]);
         assert_eq!(keep, vec![0, 0, 1], "newest-first, leading image kept");
         assert_eq!(dropped, 2);
@@ -8644,7 +9130,7 @@ mod tests {
             response,
             user_with_images("second", &["BBBB"]),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!(
             &had[1..3],
             &[0, 0],
@@ -8718,7 +9204,7 @@ mod tests {
     fn capping_is_idempotent() {
         let original = user_with_images("look", &["AAAA", "BBBB"]);
         let once = cap_message_images(&original, 0, "look");
-        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&once));
+        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&once), 8_192);
         assert_eq!(had, vec![0]);
         assert_eq!(keep, vec![0]);
         assert_eq!(dropped, 0, "nothing left to drop on a second pass");
@@ -8734,7 +9220,7 @@ mod tests {
 
         // Stage 1: newest turn, budget 1: keep the leading image, one placeholder.
         let original = user_with_images("look at these", &["AAAA", "BBBB"]);
-        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&original));
+        let (had, keep, dropped) = plan_image_cap(std::slice::from_ref(&original), 8_192);
         assert_eq!((had[0], keep[0], dropped), (2, 1, 1));
         let stage1 = cap_message_images(&original, keep[0], &original.as_concat_text());
         assert_eq!(image_parts(&stage1).len(), 1);
@@ -8753,7 +9239,7 @@ mod tests {
             trim_msg(0, &source[0].as_concat_text()),
             trim_msg(1, &source[1].as_concat_text()),
         ];
-        let (had, keep, dropped) = plan_image_cap(&source);
+        let (had, keep, dropped) = plan_image_cap(&source, 8_192);
         assert_eq!((had[0], keep[0]), (1, 0), "the older turn loses its image");
         assert_eq!((had[1], keep[1]), (1, 1), "the newest turn keeps its own");
         assert_eq!(dropped, 1);
@@ -9670,6 +10156,7 @@ mod tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

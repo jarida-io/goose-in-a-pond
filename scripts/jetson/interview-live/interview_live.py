@@ -48,7 +48,10 @@ def call(method, path, body=None, token=None, host=False, timeout=600):
 
 def pair(profile_id, client_id):
     body = {"profile_id": profile_id} if profile_id else {"unattributed": True}
-    s, code = call("POST", "/handshake/pairing-code", body, host=True)
+    # A test device: not announced, no household notices, left out of the reliability report.
+    s, code = call("POST", "/handshake/pairing-code", {**body, "test": True}, host=True)
+    if s in (400, 422):  # a pond from before test devices refuses the field
+        s, code = call("POST", "/handshake/pairing-code", body, host=True)
     assert s == 200, (s, code)
     s, init = call("POST", "/handshake/init",
                    {"client_id": client_id, "client_type": "gotg", "client_version": "test"})

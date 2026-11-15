@@ -22,6 +22,7 @@ What a tap on a notice opens. The Pond writes `data.open` only through `OpenScre
 | `chat` | `session_id` when the notice is about a conversation | that conversation; the chat screen when there is no `session_id` |
 | `devices`, `models`, `extensions`, `remote_access` | none | that screen |
 | `my_pond` (2026-11-08) | none | the phone's My Pond screen; the "My Pond unlocked" notice carries it. The dashboard has no such screen and offers no action |
+| `goose_activity` (2026-11-12) | none | My Goose's list of what Goose did by itself; the notice after a heartbeat that set a reminder, paused a watch or looked something up carries it |
 
 **The id rides beside the screen, never instead of it.** A client that does not read an id still
 opens the right screen, and a client that cannot open the id opens the screen alone. Each client
@@ -179,6 +180,63 @@ Messaging:
 
 The wake is data-only (`notification_id`, `category`, `wake: "1"`): no title or body passes through
 Google. The phone reads the content from `/pending` or the stream.
+
+To wake iPhones through the Apple Push Notification service:
+
+1. In the Apple Developer account, create a key with Apple Push Notifications service (APNs)
+   enabled (Certificates, Identifiers & Profiles, Keys). It downloads once, as a `.p8` file, and
+   the page shows its Key ID.
+2. Put a JSON file on the Pond at `<data_dir>/secrets/apns-key.json`, or point
+   `POND_APNS_KEY_PATH` at it, readable by the Pond's user only:
+
+   ```json
+   {
+     "team_id": "the 10-character Team ID",
+     "key_id": "the key's 10-character Key ID",
+     "bundle_id": "io.jarida.gooseonthego",
+     "private_key": "-----BEGIN PRIVATE KEY-----\n...the .p8 file's lines...\n-----END PRIVATE KEY-----\n",
+     "sandbox": false
+   }
+   ```
+
+   `sandbox` is `true` for an app built for development, whose tokens belong to Apple's sandbox.
+3. Restart the Pond. Startup logs `kind="push_relay_apns"` when the key is in use, and a WARN
+   `kind="push_relay_stubbed"` with `reason="no_apple_key"` or `"apple_key_unusable"` otherwise.
+
+iOS throttles silent pushes and drops them for an app the person swiped away, so the iPhone wake is
+a visible alert. It says one fixed line, "Something new from your Pond.", and carries the same
+`notification_id`, `category` and `wake: "1"`: no notice's title or body passes through Apple.
+Repeat wakes for one notice share an `apns-collapse-id`, so they replace each other on the phone.
+
+A Pond with one key wakes that kind of phone only. `pond-server reliability` says which keys are
+present, and how many notices were woken, fetched and never fetched.
+
+## What became of a notice
+
+Each queued copy records more than whether it was acknowledged (migration 0102):
+
+| Column | Stamped when |
+|---|---|
+| `wakes`, `woken_at` | a push wake really left the Pond for this copy, each time |
+| `fetched_at` | the phone asked `/pending` for it, or acknowledged it |
+| `delivered_at` | the phone acknowledged it (`POST /notifications/{id}/ack`) |
+| `shown_at` | the acknowledgement said `{"shown": true}`: the phone put it in front of the person |
+| `opened_at` | the phone said the person opened it (`POST /notifications/{id}/opened`) |
+| `spoken_at` | the Pond said it in the room because no phone fetched it |
+
+A copy no phone has fetched is woken again after 2 minutes, then at doubling gaps up to an hour,
+six wakes in all and for a day at most. A due reminder (`data.speak_if_unfetched`) nobody fetched
+within five minutes is said once in the room, outside quiet hours, when
+`speak_unfetched_reminders` is on.
+
+## Quiet hours
+
+While the household's quiet hours last and `notices_wait_in_quiet_hours` is on, a copy that is
+neither an `alert` nor marked `data.quiet_pass` is held (`held = 1`): no wake, nothing on an open
+stream, not listed by `/pending`. When quiet hours end, each phone's held copies become one notice,
+"N notices from quiet hours", naming up to six of them. A due reminder and an answer to something
+the person just asked for (a form to confirm, a ride offer, a link sent to the phone) are marked to
+pass. Unreadable quiet-hour bounds hold nothing.
 
 ## Catalogue (2026-10-27)
 

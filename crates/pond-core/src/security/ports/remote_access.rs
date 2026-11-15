@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 pub trait RemoteRevocation: Send + Sync {
     /// Record an authenticated device revocation; repeated calls are idempotent.
     async fn queue(&self, device_id: &str) -> Result<()>;
+
+    /// Every device currently enrolled for remote access, for a factory reset to revoke in bulk.
+    async fn enrolled_devices(&self) -> Result<Vec<String>>;
 }
 
 /// Days a device keeps remote access off the household LAN: covers travel, not a lost phone.
@@ -31,6 +34,12 @@ pub trait DevicePresence: Send + Sync {
 /// private tailnet listener sets it; it is never read from a client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailnetMachine(pub String);
+
+/// Marks a request that arrived through a public tunnel (ngrok), which carries no machine
+/// identity. Only the tunnel listener sets it; the auth middleware then also requires that the
+/// token's device was on the household LAN within [`LAN_PRESENCE_WINDOW_DAYS`].
+#[derive(Clone)]
+pub struct RemoteTunnel(pub std::sync::Arc<dyn DevicePresence>);
 
 /// The machine each remotely enrolled device uses, so its token is refused from any other.
 #[async_trait]

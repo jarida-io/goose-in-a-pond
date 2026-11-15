@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use pond_core::mcp::domain::notice_delivery::{DeliveryTotals, UnfetchedNotice};
 use pond_core::mcp::ports::notification::Notification;
 use pond_core::mcp::ports::notification_queue::NotificationQueueRepository;
 use sqlx::{Pool, Row, Sqlite};
@@ -14,6 +16,29 @@ impl SqliteNotificationQueue {
     pub fn new(pool: Pool<Sqlite>) -> Self {
         Self { pool }
     }
+
+    /// Stamps `column` once on a row, but only when the row is `device_id`'s.
+    async fn stamp_own(&self, column: &'static str, id: &str, device_id: &str) -> Result<bool> {
+        let sql = format!(
+            "UPDATE notifications SET {column} = COALESCE({column}, datetime('now')) \
+             WHERE id = ? AND device_id = ?"
+        );
+        let result = sqlx::query(&sql)
+            .bind(id)
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+/// SQLite's `datetime('now')` form, which the stamps in this table are written in.
+const SQLITE_STAMP: &str = "%Y-%m-%d %H:%M:%S";
+
+fn parse_stamp(stored: Option<String>) -> Option<DateTime<Utc>> {
+    chrono::NaiveDateTime::parse_from_str(&stored?, SQLITE_STAMP)
+        .ok()
+        .map(|naive| naive.and_utc())
 }
 
 fn row_to_notification(row: &sqlx::sqlite::SqliteRow) -> Notification {
@@ -50,11 +75,36 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
         Ok(())
     }
 
+    async fn enqueue_held(&self, notification: Notification) -> Result<()> {
+        let id = notification.id.clone();
+        self.enqueue(notification).await?;
+        sqlx::query("UPDATE notifications SET held = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn take_held(&self) -> Result<Vec<Notification>> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT id, device_id, category, title, body, timestamp, data \
+             FROM notifications WHERE held = 1 ORDER BY created_at ASC, rowid ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM notifications WHERE held = 1")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(row_to_notification).collect())
+    }
+
     async fn list_undelivered(&self, device_id: &str) -> Result<Vec<Notification>> {
         let rows = sqlx::query(
             "SELECT id, device_id, category, title, body, timestamp, data \
              FROM notifications \
-             WHERE device_id = ? AND delivered_at IS NULL \
+             WHERE device_id = ? AND delivered_at IS NULL AND held = 0 \
              ORDER BY created_at ASC, rowid ASC",
         )
         .bind(device_id)
@@ -70,7 +120,8 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
         // Build a parameterized `IN (?, ?, ...)` — never interpolate ids.
         let placeholders = vec!["?"; ids.len()].join(",");
         let sql = format!(
-            "UPDATE notifications SET delivered_at = datetime('now') \
+            "UPDATE notifications SET delivered_at = datetime('now'), \
+                    fetched_at = COALESCE(fetched_at, datetime('now')) \
              WHERE id IN ({placeholders}) AND delivered_at IS NULL"
         );
         let mut q = sqlx::query(&sql);
@@ -94,7 +145,8 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
     async fn acknowledge(&self, id: &str, device_id: &str) -> Result<bool> {
         // `device_id` in the WHERE is the ownership check; COALESCE keeps the first stamp.
         let result = sqlx::query(
-            "UPDATE notifications SET delivered_at = COALESCE(delivered_at, datetime('now')) \
+            "UPDATE notifications SET delivered_at = COALESCE(delivered_at, datetime('now')), \
+                    fetched_at = COALESCE(fetched_at, datetime('now')) \
              WHERE id = ? AND device_id = ?",
         )
         .bind(id)
@@ -102,6 +154,112 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn note_wake(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE notifications SET wakes = wakes + 1, woken_at = datetime('now') WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn note_fetched(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "UPDATE notifications SET fetched_at = datetime('now') \
+             WHERE id IN ({placeholders}) AND fetched_at IS NULL"
+        );
+        let mut q = sqlx::query(&sql);
+        for id in ids {
+            q = q.bind(id);
+        }
+        q.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn note_shown(&self, id: &str, device_id: &str) -> Result<bool> {
+        self.stamp_own("shown_at", id, device_id).await
+    }
+
+    async fn note_opened(&self, id: &str, device_id: &str) -> Result<bool> {
+        self.stamp_own("opened_at", id, device_id).await
+    }
+
+    async fn note_spoken(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE notifications SET spoken_at = COALESCE(spoken_at, datetime('now')) \
+             WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_unfetched(&self, since: DateTime<Utc>) -> Result<Vec<UnfetchedNotice>> {
+        let rows = sqlx::query(
+            "SELECT id, device_id, category, title, body, timestamp, data, \
+                    created_at, wakes, woken_at, spoken_at \
+             FROM notifications \
+             WHERE fetched_at IS NULL AND delivered_at IS NULL AND held = 0 \
+                   AND created_at >= ? \
+             ORDER BY created_at ASC, rowid ASC",
+        )
+        .bind(since.format(SQLITE_STAMP).to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let wakes: i64 = row.get("wakes");
+                let spoken_at: Option<String> = row.get("spoken_at");
+                Some(UnfetchedNotice {
+                    notification: row_to_notification(row),
+                    queued_at: parse_stamp(row.get::<Option<String>, _>("created_at"))?,
+                    wakes: wakes.max(0) as u32,
+                    last_wake_at: parse_stamp(row.get("woken_at")),
+                    spoken: spoken_at.is_some(),
+                })
+            })
+            .collect())
+    }
+
+    async fn delivery_totals(&self, since: DateTime<Utc>) -> Result<DeliveryTotals> {
+        // Seconds from queued to fetched; julianday keeps the one-second stamps comparable.
+        const LAG: &str = "(julianday(n.fetched_at) - julianday(n.created_at)) * 86400.0";
+        let sql = format!(
+            "SELECT COUNT(*) AS queued, \
+                    COALESCE(SUM(n.wakes > 0), 0) AS woken, \
+                    COALESCE(SUM(n.fetched_at IS NOT NULL), 0) AS fetched, \
+                    COALESCE(SUM(n.fetched_at IS NOT NULL AND {LAG} <= 60.0), 0) AS in_a_minute, \
+                    COALESCE(SUM(n.fetched_at IS NOT NULL AND {LAG} > 3600.0), 0) AS after_an_hour, \
+                    COALESCE(SUM(n.shown_at IS NOT NULL), 0) AS shown, \
+                    COALESCE(SUM(n.opened_at IS NOT NULL), 0) AS opened, \
+                    COALESCE(SUM(n.spoken_at IS NOT NULL), 0) AS spoken \
+             FROM notifications n JOIN devices d ON d.id = n.device_id \
+             WHERE n.created_at >= ? AND d.is_test = 0 AND n.held = 0"
+        );
+        let row = sqlx::query(&sql)
+            .bind(since.format(SQLITE_STAMP).to_string())
+            .fetch_one(&self.pool)
+            .await?;
+        let count = |name: &str| row.get::<i64, _>(name).max(0) as u64;
+        Ok(DeliveryTotals {
+            queued: count("queued"),
+            woken: count("woken"),
+            fetched: count("fetched"),
+            fetched_within_a_minute: count("in_a_minute"),
+            fetched_after_an_hour: count("after_an_hour"),
+            shown: count("shown"),
+            opened: count("opened"),
+            spoken: count("spoken"),
+        })
     }
 }
 
@@ -155,6 +313,92 @@ mod tests {
 
         // Idempotent / empty input is a no-op.
         q.mark_delivered(&[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_notice_is_unseen_until_it_is_taken() {
+        let q = fresh().await;
+        let long_ago = Utc::now() - chrono::Duration::days(1);
+        q.enqueue_held(notif("h1", "dev-1")).await.unwrap();
+        q.enqueue(notif("n1", "dev-1")).await.unwrap();
+
+        let seen = q.list_undelivered("dev-1").await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, "n1");
+        assert_eq!(
+            q.list_unfetched(long_ago).await.unwrap().len(),
+            1,
+            "no wake for a held one"
+        );
+        assert_eq!(q.delivery_totals(long_ago).await.unwrap().queued, 1);
+        assert!(q.is_queued_for("h1", "dev-1").await.unwrap());
+
+        let taken = q.take_held().await.unwrap();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].id, "h1");
+        assert!(q.take_held().await.unwrap().is_empty(), "taken once");
+        assert!(!q.is_queued_for("h1", "dev-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_record_says_what_became_of_each_copy() {
+        let q = fresh().await;
+        let long_ago = Utc::now() - chrono::Duration::days(1);
+        q.enqueue(notif("n1", "dev-1")).await.unwrap();
+        q.enqueue(notif("n2", "dev-1")).await.unwrap();
+        q.enqueue(notif("n3", "dev-1")).await.unwrap();
+
+        q.note_wake("n1").await.unwrap();
+        q.note_wake("n1").await.unwrap();
+        q.note_fetched(&["n2".to_string()]).await.unwrap();
+        assert!(q.note_shown("n2", "dev-1").await.unwrap());
+        assert!(q.note_opened("n2", "dev-1").await.unwrap());
+        assert!(
+            !q.note_opened("n2", "dev-2").await.unwrap(),
+            "another device cannot mark this one's copy opened"
+        );
+        q.note_spoken("n3").await.unwrap();
+
+        let unfetched = q.list_unfetched(long_ago).await.unwrap();
+        let ids: Vec<&str> = unfetched
+            .iter()
+            .map(|u| u.notification.id.as_str())
+            .collect();
+        assert_eq!(ids, ["n1", "n3"], "a fetched copy is no longer waiting");
+        assert_eq!(unfetched[0].wakes, 2);
+        assert!(unfetched[0].last_wake_at.is_some());
+        assert!(unfetched[1].spoken);
+
+        let totals = q.delivery_totals(long_ago).await.unwrap();
+        assert_eq!(
+            (
+                totals.queued,
+                totals.woken,
+                totals.fetched,
+                totals.shown,
+                totals.opened,
+                totals.spoken
+            ),
+            (3, 1, 1, 1, 1, 1)
+        );
+        assert_eq!(totals.fetched_within_a_minute, 1);
+        assert_eq!(totals.never_fetched(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_copy_counts_as_fetched_and_a_test_device_is_left_out() {
+        let q = fresh().await;
+        let long_ago = Utc::now() - chrono::Duration::days(1);
+        sqlx::query("INSERT INTO devices (id, name, is_test) VALUES ('harness', 'Harness', 1)")
+            .execute(&q.pool)
+            .await
+            .unwrap();
+        q.enqueue(notif("n1", "dev-1")).await.unwrap();
+        q.enqueue(notif("t1", "harness")).await.unwrap();
+        assert!(q.acknowledge("n1", "dev-1").await.unwrap());
+
+        let totals = q.delivery_totals(long_ago).await.unwrap();
+        assert_eq!((totals.queued, totals.fetched), (1, 1));
     }
 
     #[tokio::test]
@@ -235,7 +479,10 @@ mod tests {
         let report = sender
             .send_to_profile("liz", notif("prop-1", "unused"))
             .await;
-        assert_eq!(report.queued, vec!["phone-liz", "watch-liz"]);
+        // Newest device first, and the two may be registered in the same second.
+        let mut queued = report.queued.clone();
+        queued.sort();
+        assert_eq!(queued, vec!["phone-liz", "watch-liz"]);
 
         // Both devices were offline, so both rows are still waiting.
         assert_eq!(

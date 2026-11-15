@@ -203,6 +203,16 @@ enum Commands {
     /// Show system status
     Status,
 
+    /// How dependably notices arrived and messages were answered
+    Reliability {
+        /// Days to look back over
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run interactive onboarding wizard
     Onboard {
         /// Reset and restart onboarding from scratch
@@ -346,6 +356,14 @@ enum Commands {
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
     #[command(hide = true)]
     BleHelper,
+
+    /// Kokoro on the GPU for one long speech, which the server runs as its own child (Jetson).
+    #[command(hide = true)]
+    KokoroGpuHelper {
+        /// The full-precision Kokoro weights to load.
+        #[arg(long)]
+        model: std::path::PathBuf,
+    },
 
     /// Print a sign-in link for the web dashboard in a browser.
     ///
@@ -514,6 +532,10 @@ fn main() -> Result<()> {
     if matches!(cli.command, Some(Commands::BleHelper)) {
         run_ble_helper();
     }
+    // Before anything else can write to stdout, which carries the helper's audio.
+    if let Some(Commands::KokoroGpuHelper { model }) = &cli.command {
+        run_kokoro_gpu_helper(model);
+    }
     // Before the runtime (env mutation must be single-threaded) and any child spawn: a GUI
     // launch inherits launchd's bare PATH, which hides nvm's node, and a service can find an old
     // one first (the Jetson's apt Node 12), which the one `giap.sh node` recorded goes ahead of.
@@ -621,6 +643,62 @@ fn run_ble_helper() -> ! {
     }
 }
 
+fn run_kokoro_gpu_helper(model: &std::path::Path) -> ! {
+    // The server hands its runtime on in the environment. Run by hand, only the installed GPU
+    // runtime will do, and a helper never downloads one.
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+        if let Some(lib) =
+            onnx_gpu::installed_runtime(&default_data_dir(), ORT_VERSION, on_jetson())
+        {
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib);
+        }
+    }
+    let threads = pond_adapters_kokoro::default_intra_threads();
+    let code = match pond_adapters_kokoro::gpu::run_helper(model, threads) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("kokoro-gpu-helper: {e:#}");
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+/// Long speech on the GPU, on a Jetson with the GPU runtime installed. The switch is read as
+/// each long speech begins, so changing it in Settings needs no restart.
+fn kokoro_gpu_speech(
+    data_dir: &std::path::Path,
+    kokoro_dir: &std::path::Path,
+    settings: SqliteSettingsRepository,
+) -> Option<pond_adapters_kokoro::GpuSpeech> {
+    onnx_gpu::installed_runtime(data_dir, ORT_VERSION, on_jetson())?;
+    let program = std::env::current_exe().ok()?;
+    let model = kokoro_dir.join(pond_adapters_kokoro::model_filename("fp32"));
+    let command = pond_adapters_kokoro::HelperCommand {
+        program,
+        args: vec![
+            "kokoro-gpu-helper".into(),
+            "--model".into(),
+            model.clone().into_os_string(),
+        ],
+    };
+    let reading = tokio::runtime::Handle::current();
+    let fetching = reading.clone();
+    let data_dir = data_dir.to_path_buf();
+    Some(
+        pond_adapters_kokoro::GpuSpeech::new(command, model)
+            .with_switch(move || {
+                reading
+                    .block_on(settings.get())
+                    .is_ok_and(|s| s.voice_tts_gpu_enabled)
+            })
+            .with_room_maker(|| pond_adapters_goose::release_idle_encoder("long_speech"))
+            .with_model_fetcher(move || {
+                fetching.spawn(model_download::ensure_kokoro_gpu_weights(data_dir.clone()));
+            }),
+    )
+}
+
 async fn async_main(cli: Cli) -> Result<()> {
     let data_dir = default_data_dir();
     pin_goose_state_under(&data_dir);
@@ -681,6 +759,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             .await
         }
         Some(Commands::Status) => run_status().await,
+        Some(Commands::Reliability { days, json }) => run_reliability(days, json).await,
         Some(Commands::Onboard { reset }) => {
             if let Err(err) = run_onboard(reset).await {
                 eprintln!("Error: {:?}", err);
@@ -730,6 +809,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             onnx_gpu::run_engines(&data_dir, ORT_VERSION, on_jetson())
         }
         Some(Commands::BleHelper) => run_ble_helper(),
+        Some(Commands::KokoroGpuHelper { model }) => run_kokoro_gpu_helper(&model),
         None => {
             // No subcommand: interactive text chat, provider from Settings.
             let _log = tracing_setup::init_tracing(false, &data_dir);
@@ -1266,6 +1346,7 @@ async fn run_server(
 
     // Apply the mic privacy setting before anything can open a device.
     pond_core::models::domain::mic_gate::set_mic_enabled(settings.mic_enabled);
+    pond_core::shared::domain::page_render::set_enabled(settings.browser_rendering_enabled);
     if settings.picture_support_download_enabled {
         pond_core::models::domain::device_budget::allow_gemma_vision();
     }
@@ -1504,6 +1585,21 @@ async fn run_server(
                         }
                     }
                     out.set_speed(settings.voice_tts_speed);
+                    let out = match kokoro_gpu_speech(
+                        &data_dir,
+                        &kokoro_dir,
+                        SqliteSettingsRepository::new(db.system.clone()),
+                    ) {
+                        Some(gpu) => {
+                            if settings.voice_tts_gpu_enabled {
+                                tokio::spawn(model_download::ensure_kokoro_gpu_weights(
+                                    data_dir.clone(),
+                                ));
+                            }
+                            out.with_gpu_speech(gpu)
+                        }
+                        None => out,
+                    };
                     println!(
                         "  ✅ Kokoro TTS: {} @ {:.2}x",
                         out.voice().await,
@@ -1632,12 +1728,27 @@ async fn run_server(
     let profile_repo: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
+    // Where the pond keeps what it did by itself, one conversation per member.
+    pond_core::shared::services::goose_thread::install(Arc::new(
+        pond_core::shared::services::goose_thread::GooseThread::new(session_storage.clone())
+            .with_members(profile_repo.clone()),
+    ));
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
     let room_registry: Arc<
         dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
     > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
+    let guest_device_access: Arc<
+        dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
@@ -2731,6 +2842,11 @@ async fn run_server(
                         ])
                     }
                 };
+                // In a household of one, a mention nobody was named for is offered to that member.
+                let lone_reminder_member = settings
+                    .lone_voice_sets_reminders
+                    .then(|| roster.sole_member().map(str::to_string))
+                    .flatten();
                 let config = BatchExtractionConfig::from_settings(&settings).with_household(roster);
 
                 let db_activity = newest_session_activity(extraction_storage.as_ref()).await;
@@ -2830,11 +2946,12 @@ async fn run_server(
                 status.write().await.record(config.mode, &report);
 
                 // After the pass, not inside it, so a proposal failure never costs a stored date.
-                match todo_offers::offer_pending_reminders(
+                match todo_offers::offer_pending_reminders_for(
                     promotion_reminders.as_ref(),
                     promotion_proposals.as_ref(),
                     REMINDER_PROMOTION_LIMIT,
                     chrono::Utc::now(),
+                    lone_reminder_member.as_deref(),
                 )
                 .await
                 {
@@ -3067,9 +3184,13 @@ async fn run_server(
                     scheduler.clone(),
                     settings_repo.clone(),
                     device_registry.clone(),
+                    room_registry.clone(),
                     skill_repo.clone(),
                     embedding_provider.clone(),
                     device_control.clone(),
+                    guest_room_access.clone(),
+                    guest_device_access.clone(),
+                    profile_repo.clone(),
                 ));
 
             let provider = Arc::new(
@@ -3119,9 +3240,13 @@ async fn run_server(
                     scheduler.clone(),
                     settings_repo.clone(),
                     device_registry.clone(),
+                    room_registry.clone(),
                     skill_repo.clone(),
                     embedding_provider.clone(),
                     device_control.clone(),
+                    guest_room_access.clone(),
+                    guest_device_access.clone(),
+                    profile_repo.clone(),
                 );
                 let disp: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
                     Arc::new(dispatcher);
@@ -3164,6 +3289,10 @@ async fn run_server(
             &data_dir,
             weather.clone(),
             device_registry.clone(),
+            room_registry.clone(),
+            guest_room_access.clone(),
+            guest_device_access.clone(),
+            profile_repo.clone(),
             scheduler.clone(),
             settings_repo.clone(),
             memory_repo.clone(),
@@ -3179,6 +3308,7 @@ async fn run_server(
             false, // voice_mode — server mode, not voice
             true,  // model_provisioning — the serve process verifies add-ons on disk
             mesh_provider.clone(),
+            Some(vector_index.clone()),
         )
         .await
     };
@@ -3238,7 +3368,8 @@ async fn run_server(
                 Some(settings_repo.clone()),
             )
             .with_profiles(Arc::new(SqliteProfileRepository::new(db.system.clone())))
-            .with_device_registry(device_registry.clone()),
+            .with_device_registry(device_registry.clone())
+            .with_member_delivery(pond_mcp_server::member_notifier),
         );
         deferred_executor
             .init(
@@ -3574,6 +3705,8 @@ async fn run_server(
     let (cert, key) = tls_identity.pem();
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key).await?;
     #[cfg(unix)]
+    let tunnel_certifier = tls_identity.tunnel_certifier();
+    #[cfg(unix)]
     let (embedded, embedded_listener) =
         pond_server::embedded_network::Runtime::new(&data_dir, https_port)?;
     std::fs::write(data_dir.join(".runtime_https_port"), https_port.to_string())?;
@@ -3598,9 +3731,13 @@ async fn run_server(
         scheduler.clone(),
         settings_repo.clone(),
         device_registry.clone(),
+        room_registry.clone(),
         skill_repo.clone(),
         embedding_provider.clone(),
         device_control.clone(),
+        guest_room_access.clone(),
+        guest_device_access.clone(),
+        profile_repo.clone(),
     )));
 
     // Chokepoint 2: attributes are redacted on the way in, and a finding raises sensitivity
@@ -3645,17 +3782,21 @@ async fn run_server(
         pond_infra::broadcast_notification_sender::BroadcastNotificationSender::new(
             notification_tx.clone(),
             notification_queue.clone(),
-            Some(push_relay),
+            Some(push_relay.clone()),
         )
         .with_device_attribution(device_attribution.clone())
         .with_household_recipients(Arc::new(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
-            ),
+            )
+            .with_idle_limit(settings_repo.clone()),
         ))
-        .with_history(notification_history.clone()),
+        .with_history(notification_history.clone())
+        .with_quiet_hours(settings_repo.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
+        targeted_notification_sender.clone();
+    let member_notifier: Arc<dyn pond_core::mcp::ports::notification::MemberNotifier> =
         targeted_notification_sender.clone();
     // Every system notice goes through this one: the household's switch, the wording, the logs.
     let system_notices = Arc::new(
@@ -3671,6 +3812,8 @@ async fn run_server(
     )
     .await;
     pond_server::system_notices::spawn_disk_watch(data_dir.clone(), system_notices.clone());
+    // The pond's own headless browser, when the household downloads one, lives in its data.
+    pond_mcp_server::page_render::init_data_dir(data_dir.clone());
     // Report pictures are fetched and kept by the pond, so no screen loads them from a site.
     pond_core::shared::services::report_images::install(Arc::new(
         pond_mcp_server::report_images::DiskReportImages::new(data_dir.join("report-images")),
@@ -3690,21 +3833,45 @@ async fn run_server(
             ),
         )
     });
+    // A notice no phone came for is woken again, a due reminder said aloud, and what quiet hours
+    // held handed over when they end.
+    {
+        let mut follow_up = pond_core::mcp::services::notice_follow_up::NoticeFollowUp::new(
+            notification_queue.clone(),
+            notification_sender.clone(),
+            settings_repo.clone(),
+        )
+        .with_relay(push_relay.clone());
+        if let Some(voice) = tts.clone() {
+            follow_up = follow_up.with_speaker(Arc::new(
+                pond_server::notice_follow_up::AnnouncerSpeaker::new(
+                    pond_audio_out::Announcer::new(voice),
+                    settings_repo.clone(),
+                ),
+            ));
+        }
+        pond_server::notice_follow_up::spawn(follow_up);
+    }
     // Members' web watches: checked in code, their owners told on their own devices.
+    let watch_repo: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository> = Arc::new(
+        pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(db.system.clone()),
+    );
+    let watch_notifier: Arc<dyn pond_core::shared::ports::web_watch::WatchNotifier> = Arc::new(
+        pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
+            targeted_notification_sender.clone(),
+        )
+        .with_speech(spoken_watch_alerts.clone()),
+    );
+    // Rung by a check that holds changes for the model; the judge's lane job answers it.
+    let watch_judge_bell = Arc::new(tokio::sync::Notify::new());
     pond_mcp_server::web_watch_runner::spawn(
         Arc::new(
             pond_core::shared::services::web_watch_checker::WebWatchChecker::new(
-                Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
-                    db.system.clone(),
-                )),
+                watch_repo.clone(),
                 Arc::new(pond_mcp_server::web_watch_runner::PageReader),
-                Arc::new(
-                    pond_mcp_server::web_watch_runner::MemberWatchNotifier::new(
-                        targeted_notification_sender.clone(),
-                    )
-                    .with_speech(spoken_watch_alerts.clone()),
-                ),
-            ),
+                watch_notifier.clone(),
+            )
+            .waking(watch_judge_bell.clone()),
         ),
         settings_repo.clone(),
     );
@@ -3866,6 +4033,21 @@ async fn run_server(
             observed,
             inference_lane.clone(),
             profile_repo.clone(),
+            HeartbeatDeps {
+                documents: prompt_template_repo.clone(),
+                notes: Arc::new(pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(
+                    db.system.clone(),
+                )),
+                todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
+                    db.system.clone(),
+                )),
+                watches: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                    db.system.clone(),
+                )),
+                activity: Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+                    db.system.clone(),
+                )),
+            },
         ));
     }
 
@@ -4081,8 +4263,24 @@ async fn run_server(
         sessions: session_storage.clone(),
         provider: llm_provider.clone(),
         last_user_activity: last_user_activity.clone(),
+        settings: settings_repo.clone(),
     };
     my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_memory_resort_job(mind.clone());
+    my_goose_mind::spawn_screenshot_notes_job(mind.clone());
+    my_goose_mind::spawn_watch_judge_job(mind.clone(), watch_repo, watch_notifier);
+    {
+        use pond_core::user_data::ports::lane_control::LaneControl;
+        let lane = mind.lane.clone();
+        tokio::spawn(async move {
+            loop {
+                watch_judge_bell.notified().await;
+                let _ = lane
+                    .wake(pond_core::user_data::services::inference_lane::LaneJob::WatchJudge)
+                    .await;
+            }
+        });
+    }
     my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
@@ -4324,6 +4522,66 @@ async fn run_server(
         SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone()))
             .with_setup_claims(setup_claims.clone()),
     );
+    // A pond set up before the pairing lock gets its main member: the only member, else the
+    // one settings name. A pond with no members yet names one when it is set up.
+    match handshake.pairing_lock().await {
+        Ok(lock) => {
+            let main = match lock.owner_profile_id {
+                Some(main) => Some(main),
+                None => {
+                    let members: Vec<String> = profile_repo
+                        .list()
+                        .await
+                        .map(|members| members.into_iter().map(|m| m.id).collect())
+                        .unwrap_or_default();
+                    let named = settings_repo
+                        .get()
+                        .await
+                        .ok()
+                        .and_then(|s| s.primary_profile_id)
+                        .filter(|id| members.contains(id));
+                    let main = match members.as_slice() {
+                        [only] => Some(only.clone()),
+                        _ => named,
+                    };
+                    match main {
+                        Some(main) => match handshake.set_pairing_owner(&main, false).await {
+                            Ok(seated) => seated.then_some(main),
+                            Err(error) => {
+                                tracing::warn!(%error, "the pond's main member could not be named");
+                                None
+                            }
+                        },
+                        None => None,
+                    }
+                }
+            };
+            // The owner role follows the seat, however it was filled before this start.
+            if let Some(main) = main {
+                if let Err(error) = profile_repo.hand_ownership_to(&main).await {
+                    tracing::warn!(%error, "the household's owner could not follow its main member");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "the pairing lock could not be read"),
+    }
+    // A phone that stopped connecting is removed after the household's chosen number of days.
+    pond_server::phone_retirement::spawn(
+        pond_core::user_data::services::phone_retirement::PhoneRetirement::new(
+            Arc::new(
+                pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
+                    db.system.clone(),
+                ),
+            ),
+            handshake.clone(),
+            device_registry.clone(),
+            Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+                db.system.clone(),
+            )),
+            profile_repo.clone(),
+            settings_repo.clone(),
+        ),
+    );
     let pairing_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "pond".to_string());
@@ -4387,6 +4645,26 @@ async fn run_server(
             ),
         ))
     };
+
+    // One station for the setup channel and the connections routes, so a join over Bluetooth and
+    // one over HTTPS never run at once. Built here, ahead of its other two uses below, so a
+    // factory reset's Wi-Fi forget goes through the same shared instance rather than a second
+    // one with its own exclusion lock.
+    let wifi_station = pond_connect::wifi::platform();
+    let data_wipe: Option<
+        Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>,
+    > = Some(Arc::new(
+        pond_infra::personal_data_wipe::SystemDataWipe::new(
+            db.clone(),
+            data_dir.clone(),
+            secret_repo.clone(),
+            Some(Arc::new(
+                pond_core::network::services::wifi_connections::WifiConnections::new(
+                    wifi_station.clone(),
+                ),
+            )),
+        ),
+    ));
 
     // Shared with room voice, whose turns hold lane jobs back as a phone's do.
     let runs = Arc::new(pond_api::runs::RunSupervisor::default());
@@ -4483,6 +4761,8 @@ async fn run_server(
         matter: matter_runtime.clone(),
         device_registry,
         room_registry,
+        guest_room_access,
+        guest_device_access,
         memory_repo,
         embedder: embedder.clone(),
         // Same handle the repos write through and the slot repairs; never construct a second one.
@@ -4545,6 +4825,10 @@ async fn run_server(
         notification_queue: Some(notification_queue.clone()),
         notification_history: Some(notification_history.clone()),
         notification_sender: Some(notification_sender.clone()),
+        member_notifier: Some(member_notifier.clone()),
+        factory_reset_progress: Some(Arc::new(
+            pond_infra::factory_reset_progress::InMemoryFactoryResetProgress::new(),
+        )),
         telemetry,
         context_monitor: Arc::new(
             pond_core::models::services::context_monitor::ContextMonitor::new(),
@@ -4564,12 +4848,13 @@ async fn run_server(
         mesh_transport,
         mesh_provider: mesh_provider.clone(),
         peer_capability_query,
-        mesh_rebuild: Some(mesh_rebuild),
+        mesh_rebuild: cfg!(feature = "mesh").then_some(mesh_rebuild),
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
         device_events: Default::default(),
         pond_admin: Some(pond_admin),
+        data_wipe,
         developer: developer.clone(),
     });
     state.device_events.clone().follow(event_bus.clone());
@@ -4853,9 +5138,8 @@ async fn run_server(
         ));
     }
 
-    // One station for the setup channel and the connections routes, so a join over Bluetooth and
-    // one over HTTPS never run at once.
-    let wifi_station = pond_connect::wifi::platform();
+    // `wifi_station` was built earlier, alongside `data_wipe`, so this and the BLE setup
+    // channel below share the same instance a factory reset's Wi-Fi forget also uses.
     let connections = Arc::new(pond_api::connections::Connections::new(
         pond_core::network::services::wifi_connections::WifiConnections::new(wifi_station.clone()),
         pond_connect::wired::platform(),
@@ -4887,6 +5171,12 @@ async fn run_server(
         }
     };
 
+    #[cfg(unix)]
+    let tunnel = Arc::new(pond_server::remote_tunnel::Tunnel::new(
+        &data_dir,
+        state.secret_repo.clone(),
+        tunnel_certifier,
+    ));
     let mut listeners = pond_server::listeners::compose(
         state.clone(),
         static_dir,
@@ -4895,6 +5185,8 @@ async fn run_server(
         insecure_dev.marker(),
         #[cfg(unix)]
         embedded.clone(),
+        #[cfg(unix)]
+        tunnel.clone(),
     );
     if let Some(radios) = ble_radios {
         // `GET /network/status` and `GET /connections` on every listener a household's devices use.
@@ -4902,6 +5194,7 @@ async fn run_server(
         #[cfg(unix)]
         {
             listeners.embedded = listeners.embedded.layer(axum::Extension(radios.clone()));
+            listeners.tunnel = listeners.tunnel.layer(axum::Extension(radios.clone()));
         }
         listeners.companion = listeners.companion.layer(axum::Extension(radios));
     }
@@ -4913,6 +5206,12 @@ async fn run_server(
         listeners.embedded = listeners
             .embedded
             .layer(axum::Extension(connections.clone()));
+        listeners.tunnel = listeners.tunnel.layer(axum::Extension(connections.clone()));
+        tunnel.hand_over_to(Arc::new(pond_server::embedded_network::AsBuiltIn(
+            embedded.clone(),
+        )));
+        tunnel.serve_with(listeners.tunnel.clone());
+        tunnel.start_if_enabled().await;
     }
     listeners.companion = listeners.companion.layer(axum::Extension(connections));
     #[cfg(unix)]
@@ -5079,6 +5378,17 @@ async fn run_server(
             std::future::pending::<std::convert::Infallible>().await
         }
     };
+    pond_api::pairing_lock::spawn_request_watch(state.clone());
+    // A turn a stop cut off is answered again once the pond is up and its listeners serve.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let since = chrono::Utc::now() - chrono::Duration::minutes(60);
+            pond_api::routes::answer_cut_turns(state, since).await;
+        });
+    }
+
     let serve_result = tokio::select! {
         never = revocations => match never {},
         result = embedded_server => result,
@@ -5086,10 +5396,19 @@ async fn run_server(
         result = https_server => result.map_err(anyhow::Error::from),
         result = pond_api::insecure_dev::serve(insecure_listener, listeners.insecure) => result,
         result = renewal => result,
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received -- stopping both listeners");
-            Ok(())
-        }
+        // The listeners keep serving inside this arm, so a turn in flight can finish and be
+        // stored before they stop.
+        _ = async {
+            shutdown_signal().await;
+            let waited = wait_for_turns_in_flight(&state, TURN_GRACE).await;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "shutdown",
+                waited_ms = waited.waited.as_millis() as u64,
+                turns_left = waited.left,
+                "shutdown signal received -- stopping both listeners"
+            );
+        } => Ok(()),
     };
     tls_handle.shutdown();
     // Goodbyes now, so phones drop the pond at once rather than when its records expire.
@@ -5098,6 +5417,8 @@ async fn run_server(
     if let Err(error) = embedded.shutdown().await {
         tracing::warn!(%error, "embedded networking shutdown failed");
     }
+    #[cfg(unix)]
+    tunnel.stop().await;
 
     // kill_on_drop doesn't fire on the signal path; kill matter-server here or it orphans.
     if let Some(matter) = &matter_runtime {
@@ -5115,6 +5436,47 @@ async fn run_server(
 }
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix (what `systemctl stop` and `docker stop` send).
+/// How long a stop waits for turns in flight. Shorter than systemd's default stop timeout, so
+/// the wait ends before the service manager kills the process.
+const TURN_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
+
+struct StopWait {
+    waited: std::time::Duration,
+    /// Turns still running when the wait gave up.
+    left: usize,
+}
+
+/// Tells connected screens the pond is stopping, then waits for the turns in flight, at most
+/// `grace`. A turn that outlasts it is cut, and answered again when the pond is back.
+async fn wait_for_turns_in_flight(
+    state: &Arc<pond_api::AppState>,
+    grace: std::time::Duration,
+) -> StopWait {
+    let started = std::time::Instant::now();
+    if let Some(sender) = state.notification_sender.clone() {
+        let notice = pond_core::mcp::ports::notification::Notification {
+            id: uuid::Uuid::new_v4().to_string(),
+            target: "broadcast".to_string(),
+            category: "info".to_string(),
+            title: "The Pond is restarting".to_string(),
+            body: "It will be back in a few minutes.".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            data: Some(serde_json::json!({"kind": "pond_restarting"})),
+        };
+        let _ = sender.publish_live(notice).await;
+    }
+    loop {
+        let left = state.runs.registry.in_flight();
+        if left == 0 || started.elapsed() >= grace {
+            return StopWait {
+                waited: started.elapsed(),
+                left,
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -5249,50 +5611,89 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Background wake-ups for phones: FCM v1 when a service-account key exists (data-only pings,
-/// no content via Google), else the logging stub.
+/// Background wake-ups for phones: FCM for Android and APNs for iPhones, each when its key
+/// exists. Neither push carries a notice's words. With no usable key, the logging stub.
 fn push_relay(
     data_dir: &std::path::Path,
     push_tokens: Arc<dyn pond_core::user_data::ports::push_token::PushTokenRepository>,
 ) -> Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay> {
+    let mut senders: Vec<Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay>> =
+        Vec::new();
+
     let fcm_key_path = std::env::var("POND_FCM_KEY_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("secrets").join("fcm-service-account.json"));
-    // Only the key's path is logged, never its contents.
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::ANDROID_PUSH_KEY));
+    // Only a key's path is logged, never its contents.
     if !fcm_key_path.exists() {
         tracing::warn!(
             kind = "push_relay_stubbed",
             reason = "no_key",
             expected_path = %fcm_key_path.display(),
-            "no FCM service-account key; asleep phones are not woken for notices \
-             (docs/api.md, \"Setting up push\")"
+            "no FCM service-account key; asleep Android phones are not woken for notices \
+             (docs/architecture/notifications.md, \"Setting up push\")"
         );
-        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
-    }
-    match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
-        &fcm_key_path,
-        push_tokens.clone(),
-    ) {
-        Ok(relay) => {
-            tracing::info!(
-                kind = "push_relay_fcm",
-                path = %fcm_key_path.display(),
-                "background push active: FCM wakes paired phones"
-            );
-            Arc::new(relay)
-        }
-        Err(e) => {
+    } else {
+        match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
+            &fcm_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_fcm",
+                    path = %fcm_key_path.display(),
+                    "background push active: FCM wakes paired Android phones"
+                );
+                senders.push(Arc::new(relay));
+            }
             // The reason names a field, a scheme or a host, never key material.
-            tracing::warn!(
+            Err(e) => tracing::warn!(
                 kind = "push_relay_stubbed",
                 reason = "key_unusable",
                 error = %format!("{e:#}"),
                 expected_path = %fcm_key_path.display(),
-                "FCM key unusable; background push falls back to the logging stub"
-            );
-            Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens))
+                "FCM key unusable; Android phones are not woken"
+            ),
         }
     }
+
+    let apns_key_path = std::env::var("POND_APNS_KEY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::APPLE_PUSH_KEY));
+    if !apns_key_path.exists() {
+        tracing::warn!(
+            kind = "push_relay_stubbed",
+            reason = "no_apple_key",
+            expected_path = %apns_key_path.display(),
+            "no Apple push key; asleep iPhones are not woken for notices \
+             (docs/architecture/notifications.md, \"Setting up push\")"
+        );
+    } else {
+        match pond_infra::apns_push_relay::ApnsPushRelay::from_key_file(
+            &apns_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_apns",
+                    path = %apns_key_path.display(),
+                    "background push active: APNs wakes paired iPhones"
+                );
+                senders.push(Arc::new(relay));
+            }
+            Err(e) => tracing::warn!(
+                kind = "push_relay_stubbed",
+                reason = "apple_key_unusable",
+                error = %format!("{e:#}"),
+                expected_path = %apns_key_path.display(),
+                "Apple push key unusable; iPhones are not woken"
+            ),
+        }
+    }
+
+    if senders.is_empty() {
+        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
+    }
+    Arc::new(pond_infra::apns_push_relay::PushRelays::new(senders))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5352,6 +5753,7 @@ async fn run_chat(
         pond_infra::sqlite_last_action::SqliteLastActionRepository::new(db.system.clone()),
     );
 
+    // Without it, giap-device names every device's room "Unassigned" in voice sessions.
     // Needed on this path too, or giap-sensors fails to load in voice sessions.
     pond_mcp_server::init_sensor_deps(
         Arc::new(SqliteSensorStorage::new(db.logs.clone())),
@@ -5673,6 +6075,22 @@ async fn run_chat(
     let device_registry_arc: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let room_registry_arc: Arc<
+        dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
+    > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access_arc: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
+    let guest_device_access_arc: Arc<
+        dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
+    let profile_repo_arc: Arc<
+        dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
+    > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
 
     // Upsert so existing installs get updated built-ins; user templates are never touched.
     {
@@ -5733,6 +6151,10 @@ async fn run_chat(
             &data_dir,
             weather,
             device_registry_arc,
+            room_registry_arc,
+            guest_room_access_arc,
+            guest_device_access_arc,
+            profile_repo_arc,
             None, // scheduler not used in voice mode
             settings_repo_arc,
             memory_repo,
@@ -5748,6 +6170,7 @@ async fn run_chat(
             voice_mode,
             false,                                    // model_provisioning — serve only
             Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: no mesh stack in CLI chat
+            None,                                     // turn_index
         )
         .await;
         // Steps run in serve; this process only takes `task_start` calls, which serve picks up.
@@ -5807,6 +6230,14 @@ async fn run_chat(
             }
             other => return Err(other.into()),
         }
+    }
+    let surface = if voice_mode {
+        pond_core::user_data::domain::session::SessionSurface::Room
+    } else {
+        pond_core::user_data::domain::session::SessionSurface::Cli
+    };
+    if let Err(e) = storage.mark_surface(&session_id, surface, None).await {
+        tracing::debug!("could not record where this session began: {e}");
     }
 
     let warm_agent = agent.clone();
@@ -6910,6 +7341,286 @@ async fn run_quiet_compaction(
     }
 }
 
+/// What makes a review a heartbeat: the checklist it goes through, Goose's own notes, and the
+/// member's list its reminders go on.
+struct HeartbeatDeps {
+    documents: Arc<
+        dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
+    >,
+    notes: Arc<dyn pond_core::shared::ports::agent_notes::AgentNotesRepository>,
+    todos: Arc<dyn pond_core::shared::ports::todo::TodoRepository>,
+    watches: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository>,
+    activity: Arc<dyn pond_core::shared::ports::goose_activity::GooseActivityRepository>,
+}
+
+impl HeartbeatDeps {
+    /// The member's web watches as the brief lists them.
+    async fn watch_lines(
+        &self,
+        member: &str,
+    ) -> Vec<pond_core::user_data::services::proactive_review::WatchLine> {
+        self.watches
+            .list_for(member)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(
+                |w| pond_core::user_data::services::proactive_review::WatchLine {
+                    title: w.title,
+                    paused: w.paused,
+                    failures: w.failures,
+                },
+            )
+            .collect()
+    }
+
+    /// The checklist as the household keeps it, and the member's follow-ups still worth a look.
+    /// A follow-up nobody came back to in a month is dropped here.
+    async fn checklist_and_notes(
+        &self,
+        scope: &pond_core::user_data::domain::profile::ProfileScope,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (
+        String,
+        Vec<pond_core::shared::domain::agent_note::AgentNote>,
+    ) {
+        use pond_core::shared::domain::agent_note::{is_stale, NoteKind};
+        let checklist = self
+            .documents
+            .get(pond_core::prompts::HEARTBEAT)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.content)
+            .unwrap_or_else(|| pond_core::prompts::PROMPT_HEARTBEAT.to_string());
+        let mut notes = self
+            .notes
+            .list(scope, NoteKind::Note)
+            .await
+            .unwrap_or_default();
+        for stale in notes.iter().filter(|n| is_stale(n, now)) {
+            let _ = self.notes.remove(&stale.id, scope).await;
+        }
+        notes.retain(|n| !is_stale(n, now));
+        (checklist, notes)
+    }
+
+    /// Reminders the heartbeat has set for `member` since `since`; the day's cap on failure, so
+    /// a store that cannot be read sets none.
+    async fn reminders_set_since(
+        &self,
+        member: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> usize {
+        use pond_core::shared::domain::todo::{StateFilter, TodoSource};
+        match self.todos.list(member, StateFilter::All).await {
+            Ok(todos) => todos
+                .iter()
+                .filter(|t| t.source == TodoSource::Goose && t.created_at >= since)
+                .count(),
+            Err(_) => pond_core::user_data::services::proactive_review::MAX_REMINDERS_PER_DAY,
+        }
+    }
+
+    /// Do what the heartbeat decided, each act already checked and capped by `interpret_heartbeat`.
+    async fn carry_out(
+        &self,
+        member: &str,
+        acts: &[pond_core::user_data::services::proactive_review::HeartbeatAct],
+        open_notes: &[pond_core::shared::domain::agent_note::AgentNote],
+        now: chrono::DateTime<chrono::Utc>,
+        zone: pond_core::shared::domain::todo::Tz,
+    ) -> Vec<pond_core::shared::domain::goose_activity::GooseActivity> {
+        use pond_core::shared::domain::agent_note::{
+            dropped_for_room, same_note, AgentNote, NoteKind,
+        };
+        use pond_core::shared::domain::goose_activity::GooseActivity;
+        let mut did: Vec<GooseActivity> = Vec::new();
+        use pond_core::shared::domain::todo::{
+            new_todo, rfc3339, HookCatalog, HookSource, TodoSource,
+        };
+        use pond_core::user_data::domain::profile::ProfileScope;
+        use pond_core::user_data::services::proactive_review::HeartbeatAct;
+
+        let scope = ProfileScope::Owner(member.to_string());
+        for act in acts {
+            match act {
+                HeartbeatAct::Remind { text, due, why } => {
+                    let body = serde_json::json!({
+                        "kind": "reminder",
+                        "text": text,
+                        "notes": why,
+                        "due_at": rfc3339(*due),
+                        "ask": false,
+                        "hooks": [{"kind": "time", "spec": {"at": rfc3339(*due)}}],
+                    });
+                    let catalog = HookCatalog {
+                        places: Vec::new(),
+                        sources: vec![HookSource::presence()],
+                    };
+                    let made =
+                        match new_todo(member, &body, &catalog, TodoSource::Goose, None, now, zone)
+                        {
+                            Ok(todo) => self
+                                .todos
+                                .create(&todo)
+                                .await
+                                .map(|()| todo.id.clone())
+                                .map_err(|e| e.to_string()),
+                            Err(e) => Err(e.0),
+                        };
+                    match made {
+                        // Counts and kinds only: what it reminds of stays out of the log.
+                        Ok(todo_id) => {
+                            did.push(GooseActivity::reminder(
+                                member,
+                                text,
+                                &due.with_timezone(&zone)
+                                    .format("%a %-d %b, %H:%M")
+                                    .to_string(),
+                                &todo_id,
+                                now,
+                            ));
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "remind",
+                                member = %member,
+                                "the heartbeat set a reminder"
+                            )
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "heartbeat: a reminder it decided on could not be set"
+                        ),
+                    }
+                }
+                HeartbeatAct::Note { text } => {
+                    let existing = self
+                        .notes
+                        .owned(Some(member), NoteKind::Note)
+                        .await
+                        .unwrap_or_default();
+                    if existing.iter().any(|n| same_note(&n.text, text)) {
+                        continue;
+                    }
+                    for old in dropped_for_room(NoteKind::Note, &existing) {
+                        let _ = self.notes.remove(&old, &scope).await;
+                    }
+                    let note = AgentNote {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        profile_id: Some(member.to_string()),
+                        kind: NoteKind::Note,
+                        text: text.clone(),
+                        created_at: now,
+                    };
+                    let note_id = note.id.clone();
+                    match self.notes.add(note).await {
+                        Ok(()) => {
+                            did.push(GooseActivity::note(member, text, &note_id, now));
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "note",
+                                member = %member,
+                                "the heartbeat wrote itself a note"
+                            )
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "heartbeat: a note could not be kept")
+                        }
+                    }
+                }
+                HeartbeatAct::Done { words } => {
+                    let wanted: Vec<String> = words
+                        .to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .filter(|w| w.chars().count() >= 3)
+                        .map(str::to_string)
+                        .collect();
+                    let fits: Vec<&AgentNote> = open_notes
+                        .iter()
+                        .filter(|n| {
+                            let text = n.text.to_lowercase();
+                            !wanted.is_empty() && wanted.iter().all(|w| text.contains(w.as_str()))
+                        })
+                        .collect();
+                    // Only when the words fit one note: a guess would close the wrong one.
+                    if let [note] = fits.as_slice() {
+                        if self.notes.remove(&note.id, &scope).await.unwrap_or(false) {
+                            did.push(GooseActivity::note_closed(member, &note.text, now));
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "heartbeat_act",
+                                act = "done",
+                                member = %member,
+                                "the heartbeat closed one of its notes"
+                            );
+                        }
+                    }
+                }
+                HeartbeatAct::PauseWatch { words } => {
+                    use pond_core::shared::ports::web_watch::WatchEdit;
+                    use pond_core::user_data::services::proactive_review::watch_to_pause;
+                    let watches = self.watches.list_for(member).await.unwrap_or_default();
+                    let lines = self.watch_lines(member).await;
+                    // Checked again here: only one failing watch the words fit, never a guess.
+                    let Some(line) = watch_to_pause(&lines, words) else {
+                        continue;
+                    };
+                    let Some(watch) = watches.iter().find(|w| w.title == line.title) else {
+                        continue;
+                    };
+                    let paused = WatchEdit {
+                        paused: Some(true),
+                        ..WatchEdit::default()
+                    };
+                    if self
+                        .watches
+                        .edit(member, &watch.id, &paused)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        // Written where the member reads Goose's notes, so the pause is seen.
+                        let told = AgentNote {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            profile_id: Some(member.to_string()),
+                            kind: NoteKind::Note,
+                            text: format!(
+                                "Paused the web watch \"{}\": it could not be checked {} times \
+                                 in a row. Tell them, and offer to resume it.",
+                                watch.title, watch.failures
+                            )
+                            .chars()
+                            .take(pond_core::shared::domain::agent_note::NOTE_CHARS)
+                            .collect(),
+                            created_at: now,
+                        };
+                        let _ = self.notes.add(told).await;
+                        did.push(GooseActivity::watch_paused(
+                            member,
+                            &watch.title,
+                            watch.failures,
+                            &watch.id,
+                            now,
+                        ));
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "heartbeat_act",
+                            act = "pause_watch",
+                            member = %member,
+                            "the heartbeat paused a watch that kept failing"
+                        );
+                    }
+                }
+                // Looked into by the loop itself, which holds the model.
+                HeartbeatAct::LookInto { .. } => {}
+            }
+        }
+        did
+    }
+}
+
 /// Idle-time proactive review; every failed read fails closed (skips the tick or hits the cap).
 async fn run_proactive_reviewer(
     settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
@@ -6924,6 +7635,7 @@ async fn run_proactive_reviewer(
     >,
     lane: Arc<crate::inference_lane_runner::InferenceLane>,
     profiles: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
+    heartbeat: HeartbeatDeps,
 ) {
     use pond_core::user_data::services::consolidation_schedule as sched;
     use pond_core::user_data::services::inference_lane::LaneJob;
@@ -6946,6 +7658,13 @@ async fn run_proactive_reviewer(
         Ok(role) => role,
         Err(e) => {
             tracing::error!(error = %e, "proactive reviewer: shipped role does not parse");
+            return;
+        }
+    };
+    let errand_role = match review::errand_role() {
+        Ok(role) => role,
+        Err(e) => {
+            tracing::error!(error = %e, "proactive reviewer: the errand role does not parse");
             return;
         }
     };
@@ -7023,12 +7742,11 @@ async fn run_proactive_reviewer(
             None => 0,
         };
 
-        // Whether a review is worth running: not waivable by a hand-asked tick (the daily cap
-        // must hold), and before `acquire` so the slot isn't taken just to find no work.
-        let refusal = review::reviewer_refusal(
+        // Whether a heartbeat is worth running, before `acquire` so the slot isn't taken just to
+        // find no work. A day of suggestions spent is no reason: it may still act by itself.
+        let refusal = review::heartbeat_refusal(
             // This loop awaits its own run, so runs never overlap here.
             false,
-            proposals_today,
         );
         if let Some(reason) = refusal {
             tracing::trace!(
@@ -7039,8 +7757,9 @@ async fn run_proactive_reviewer(
 
         // One `acquire` per tick, refusals as `enabled: false`: a stale registration wins
         // every tie-break and gets woken again and again to decline.
+        // Its own cadence: it looks in on the house, where consolidation tidies a store.
         let cadence = crate::inference_lane_runner::Cadence::new(
-            sched::interval_floor_from_hours(settings.memory_consolidation_interval_hours),
+            review::HEARTBEAT_EVERY,
             idle_threshold,
             false,
         );
@@ -7098,7 +7817,27 @@ async fn run_proactive_reviewer(
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = review::review_session_id(&run_id);
-        let brief = review::review_brief(now, &events, &ledger);
+        let zone = pond_core::shared::domain::todo::zone(&settings.timezone);
+        let member_scope = pond_core::user_data::domain::profile::ProfileScope::Owner(
+            audience.profile_id().to_string(),
+        );
+        let (checklist, open_notes) = heartbeat.checklist_and_notes(&member_scope, now).await;
+        let watch_lines = match member_scope.owner_id() {
+            Some(member) => heartbeat.watch_lines(member).await,
+            None => Vec::new(),
+        };
+        let mut brief = review::heartbeat_brief(
+            now,
+            zone,
+            &events,
+            &ledger,
+            &checklist,
+            &open_notes,
+            &watch_lines,
+        );
+        if proposals_today >= review::MAX_PROPOSALS_PER_DAY {
+            brief.push_str(review::SUGGESTIONS_SPENT);
+        }
         let spec =
             match review::plan_review(&role, &audience, &session_id, &brief, serde_json::json!({}))
             {
@@ -7161,33 +7900,135 @@ async fn run_proactive_reviewer(
         };
 
         let run = orchestrator.spawn(spec).await;
-        watcher.abort();
-        drop(lease);
-        // Spends the interval (failures too, or retries churn) and frees the model early.
-        drop(slot);
 
         let run = match run {
             Ok(run) => run,
             Err(e) => {
+                watcher.abort();
                 tracing::warn!(error = %e, "proactive reviewer: the run did not start");
                 continue;
             }
         };
 
         // A cancelled or turn-exhausted run yields nothing here, never partial opinions.
-        let yielded = review::interpret_answer(
+        let acted_at = chrono::Utc::now();
+        let reminders_today = heartbeat
+            .reminders_set_since(audience.profile_id(), acted_at - chrono::Duration::days(1))
+            .await;
+        let errands_today = heartbeat
+            .activity
+            .count_since(
+                audience.profile_id(),
+                pond_core::shared::domain::goose_activity::ActivityKind::Errand,
+                acted_at - chrono::Duration::days(1),
+            )
+            .await
+            .unwrap_or(review::MAX_ERRANDS_PER_DAY);
+        let yielded = review::interpret_heartbeat(
             &run,
             &audience,
-            chrono::Utc::now(),
+            acted_at,
             &ledger,
             proposals_today,
+            review::ActAllowance::for_heartbeat(reminders_today, zone).with_errands(errands_today),
         );
         for refusal in &yielded.refusals {
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
         }
+        // Counts and the run's state only: what it said about the household stays out of the log.
+        tracing::info!(
+            target: "giap::trace",
+            kind = "heartbeat_run",
+            status = ?run.status,
+            proposals = yielded.proposals.len(),
+            acts = yielded.acts.len(),
+            refused = yielded.refusals.len(),
+            answer_chars = run.result.as_deref().map_or(0, |a| a.chars().count()),
+            error = run.error.as_deref().unwrap_or(""),
+            "a heartbeat ended"
+        );
+        let mut did = heartbeat
+            .carry_out(
+                audience.profile_id(),
+                &yielded.acts,
+                &open_notes,
+                acted_at,
+                zone,
+            )
+            .await;
 
-        // WARN: all-refused is always a defect; a run with nothing to say returns an empty array.
-        if yielded.proposals.is_empty() && !yielded.refusals.is_empty() {
+        // What it looks into runs here, while the review still holds the model and its lease.
+        for act in &yielded.acts {
+            let review::HeartbeatAct::LookInto { text, why } = act else {
+                continue;
+            };
+            if cancel.is_cancelled() {
+                break;
+            }
+            let brief = review::errand_brief(text, why, chrono::Utc::now(), zone);
+            let spec = match review::plan_errand(&errand_role, &audience, &session_id, &brief) {
+                Ok(spec) => spec,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "heartbeat: an errand was refused");
+                    continue;
+                }
+            };
+            let started = std::time::Instant::now();
+            let errand = orchestrator.spawn(spec).await;
+            let answer = errand
+                .as_ref()
+                .ok()
+                .and_then(|run| run.result_for_parent())
+                .map(str::trim)
+                .filter(|answer| !answer.is_empty());
+            // Counts and the run's state only: neither the question nor the answer is logged.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "heartbeat_errand",
+                status = ?errand.as_ref().map(|run| run.status).ok(),
+                answered = answer.is_some(),
+                ms = started.elapsed().as_millis() as u64,
+                "the heartbeat looked something into"
+            );
+            if let Some(answer) = answer {
+                pond_core::shared::services::goose_thread::post(
+                    Some(audience.profile_id()),
+                    answer,
+                    pond_core::user_data::domain::message_note::MessageNote::from_source(
+                        pond_core::user_data::domain::message_note::SourceKind::Lookup,
+                        text.to_string(),
+                        None,
+                    ),
+                )
+                .await;
+                did.push(
+                    pond_core::shared::domain::goose_activity::GooseActivity::errand(
+                        audience.profile_id(),
+                        text,
+                        answer,
+                        chrono::Utc::now(),
+                    ),
+                );
+            }
+        }
+        watcher.abort();
+        drop(lease);
+        // Spends the interval (failures too, or retries churn) and frees the model.
+        drop(slot);
+
+        // WARN: all-refused is a defect in a run that answered; one cut short for a turn is not,
+        // and a run with nothing to say returns an empty array.
+        if run.status.produced_an_answer()
+            && yielded.proposals.is_empty()
+            && yielded.acts.is_empty()
+            && !yielded.refusals.is_empty()
+        {
+            // The outline of an answer nothing came of, its words masked: which keys the model
+            // used is what a fix to the role needs.
+            tracing::info!(
+                shape = %review::answer_shape(run.result.as_deref().unwrap_or(""), 320),
+                "proactive reviewer: nothing in the answer was kept"
+            );
             tracing::warn!(
                 refused = yielded.refusals.len(),
                 first = ?yielded.refusals.first(),
@@ -7201,21 +8042,70 @@ async fn run_proactive_reviewer(
                 tracing::warn!(error = %e, "proactive reviewer: could not persist a proposal");
                 continue;
             }
-            // Only the member's paired devices, never a broadcast.
-            let report = sender
-                .send_to_profile(
-                    audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(proposal),
-                )
-                .await;
+            // Every suggestion goes to the member's thread, with what Goose noticed and the
+            // offer to do it.
+            let posted = pond_core::shared::services::goose_thread::post(
+                Some(audience.profile_id()),
+                &proposal.summary(),
+                review::thread_offer(proposal),
+            )
+            .await;
+            // Goose decides which ones are worth a notice: the sure ones. The rest wait there.
+            let tells = proposal.confidence() >= review::NOTICE_CONFIDENCE;
+            let mut queued = 0;
+            let mut failed = 0;
+            if tells {
+                let mut notice = pond_server::system_notices::proposal_notification(proposal);
+                if let (Some(posted), Some(serde_json::Value::Object(fields))) =
+                    (&posted, &mut notice.data)
+                {
+                    fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+                }
+                // Only the member's paired devices, never a broadcast.
+                let report = sender.send_to_profile(audience.profile_id(), notice).await;
+                queued = report.queued.len();
+                failed = report.failed.len();
+            }
             tracing::info!(
                 proposal = %proposal.id(),
                 member = %audience.profile_id(),
-                queued = report.queued.len(),
-                failed = report.failed.len(),
+                in_thread = posted.is_some(),
+                tells,
+                queued,
+                failed,
                 "proposal made"
             );
+            did.push(
+                pond_core::shared::domain::goose_activity::GooseActivity::suggestion(
+                    audience.profile_id(),
+                    &proposal.summary(),
+                    proposal.id(),
+                    acted_at,
+                ),
+            );
         }
+
+        // What it did is kept for the member to read and take back, and told in one notice.
+        for entry in &did {
+            if let Err(e) = heartbeat.activity.add(entry).await {
+                tracing::warn!(error = %e, "heartbeat: what it did could not be recorded");
+            }
+        }
+        if let Some(notice) = pond_server::system_notices::goose_activity_notification(&did) {
+            let report = sender.send_to_profile(audience.profile_id(), notice).await;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "heartbeat_told",
+                did = did.len(),
+                queued = report.queued.len(),
+                failed = report.failed.len(),
+                "the member was told what the heartbeat did"
+            );
+        }
+        let _ = heartbeat
+            .activity
+            .prune(acted_at - pond_core::shared::domain::goose_activity::ACTIVITY_KEPT)
+            .await;
     }
 }
 
@@ -7240,6 +8130,16 @@ fn install_long_task_deps(
     pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
         pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
     ));
+    pond_mcp_server::todo_tools::init_heartbeat_docs(Arc::new(
+        SqlitePromptTemplateRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::memory::init_memory_profiles(Arc::new(
+        pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::memory::init_agent_notes(Arc::new(
+        pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(pool.clone()),
+    ));
+    pond_core::shared::ports::browser::install(Arc::new(pond_mcp_server::page_render::PondBrowser));
     pond_mcp_server::web_watch::init_web_watch_deps(pond_mcp_server::web_watch::WebWatchDeps {
         repo: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
             pool.clone(),
@@ -7527,6 +8427,7 @@ impl LongTaskHelpers {
                 task_id: task.id().to_string(),
                 scope: task.scope().clone(),
                 work,
+                kind: task.kind(),
             },
         );
         // The planner's hand-back is its plan, so only a step's helpers are asked to report.
@@ -8045,12 +8946,23 @@ async fn notify_long_task_owner(
     let Some(owner) = task.owner_profile_id() else {
         return;
     };
-    let report = sender
-        .send_to_profile(
-            owner,
-            pond_server::system_notices::long_task_notification(task, finished, body),
-        )
-        .await;
+    let mut notice =
+        pond_server::system_notices::long_task_notification(task, finished, body.clone());
+    // The answer is kept in the owner's thread, and the notice opens it there.
+    let posted = pond_core::shared::services::goose_thread::post(
+        Some(owner),
+        &body,
+        pond_core::user_data::domain::message_note::MessageNote::from_source(
+            pond_core::user_data::domain::message_note::SourceKind::Task,
+            notice.title.clone(),
+            Some(task.id().to_string()),
+        ),
+    )
+    .await;
+    if let (Some(posted), Some(serde_json::Value::Object(fields))) = (&posted, &mut notice.data) {
+        fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+    }
+    let report = sender.send_to_profile(owner, notice).await;
     tracing::info!(
         kind = "long_task_notice_sent",
         task = %task.id(),
@@ -8281,6 +9193,36 @@ async fn tail_event_log(pool: sqlx::Pool<sqlx::Sqlite>) {
             cursor = id;
         }
     }
+}
+
+/// Prints the reliability report. Reads both databases read-only, so it is safe beside a
+/// serving pond and never migrates anything.
+async fn run_reliability(days: u32, json: bool) -> Result<()> {
+    let data_dir = default_data_dir();
+    let system = pond_infra::reliability::open_read_only(&data_dir.join("pond_system.db")).await?;
+    let logs = pond_infra::reliability::open_read_only(&data_dir.join("pond_logs.db")).await?;
+    let unseen_days = SqliteSettingsRepository::new(system.clone())
+        .get()
+        .await
+        .map(|s| s.unseen_phone_skip_days)
+        .unwrap_or(14);
+    let report = pond_infra::reliability::report(
+        &system,
+        &logs,
+        &data_dir,
+        days.max(1),
+        unseen_days,
+        chrono::Utc::now(),
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in report.lines() {
+            println!("  {line}");
+        }
+    }
+    Ok(())
 }
 
 async fn run_status() -> Result<()> {
@@ -9305,15 +10247,13 @@ async fn run_onboard(reset: bool) -> Result<()> {
                 println!("Step: Wake Word");
                 println!("Presets: 1) goose  2) hey goose  3) ok computer  4) custom");
 
-                let wake_word = loop {
-                    let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
-                    break match choice.trim() {
-                        "1" => "goose".to_string(),
-                        "2" => "hey goose".to_string(),
-                        "3" => "ok computer".to_string(),
-                        "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
-                        other => other.to_string(),
-                    };
+                let choice = prompt_nonempty("Enter number or type a custom phrase: ")?;
+                let wake_word = match choice.trim() {
+                    "1" => "goose".to_string(),
+                    "2" => "hey goose".to_string(),
+                    "3" => "ok computer".to_string(),
+                    "4" => prompt_nonempty("Enter your custom wake phrase: ")?,
+                    other => other.to_string(),
                 };
 
                 user_data.insert("voice_wake_word".to_string(), wake_word);
@@ -9737,6 +10677,14 @@ async fn build_goose_backend(
     device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     >,
+    room_registry: Arc<dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync>,
+    guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    >,
+    guest_device_access: Arc<
+        dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
+    >,
+    profile_repo: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync>,
     scheduler: Option<Arc<dyn pond_core::user_data::ports::scheduler::SchedulerPort>>,
     settings_repo: Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync>,
     memory_repo: Arc<
@@ -9767,6 +10715,8 @@ async fn build_goose_backend(
     model_provisioning: bool,
     // Locked so mesh enabled at runtime applies next turn; CLI callers pass a permanent `None`.
     mesh_provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    // Where a turn's strong matches come from; CLI paths have no embedder, so none.
+    turn_index: Option<Arc<dyn pond_core::context::vector_index::VectorIndex>>,
 ) -> (
     Arc<dyn Agent>,
     Option<Arc<dyn pond_core::mcp::ports::extension_manager::ExtensionManagerPort>>,
@@ -9812,9 +10762,13 @@ async fn build_goose_backend(
             scheduler,
             settings_repo.clone(),
             device_registry.clone(),
+            room_registry.clone(),
             skill_repo.clone(),
             embedding_provider,
             device_control.clone(),
+            guest_room_access.clone(),
+            guest_device_access.clone(),
+            profile_repo.clone(),
         );
 
         let dispatcher: Arc<dyn pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher> =
@@ -9885,6 +10839,10 @@ async fn build_goose_backend(
         weather,
         settings_repo.clone(),
         device_registry.clone(),
+        room_registry.clone(),
+        guest_room_access.clone(),
+        guest_device_access.clone(),
+        profile_repo.clone(),
         skill_repo.clone(),
         device_control,
         last_action,
@@ -9920,6 +10878,10 @@ async fn build_goose_backend(
             // Without it, per-turn memory retrieval falls back to keyword LIKE search.
             let adapter = match embedding_provider {
                 Some(provider) => adapter.with_embedding_provider(provider),
+                None => adapter,
+            };
+            let adapter = match turn_index {
+                Some(index) => adapter.with_turn_index(index),
                 None => adapter,
             };
             // Else an Ollama model's context window is guessed from its name.
@@ -10506,6 +11468,22 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
+    let room_registry: Arc<
+        dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
+    > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let guest_room_access: Arc<
+        dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
+    let guest_device_access: Arc<
+        dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
+    let profile_repo: Arc<
+        dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
+    > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
     // CLI turns must budget history with the same real context window as dashboard turns.
     let cli_model_repo: Arc<dyn ModelRepository + Send + Sync> =
         Arc::new(SqliteModelRepository::new(db.system.clone()));
@@ -10561,6 +11539,10 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
+                guest_device_access,
+                profile_repo,
                 None,
                 settings_repo,
                 memory_repo,
@@ -10576,6 +11558,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
@@ -10596,6 +11579,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10610,6 +11594,10 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
+                guest_device_access,
+                profile_repo,
                 None,
                 settings_repo,
                 memory_repo,
@@ -10625,6 +11613,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
@@ -10673,6 +11662,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     deep_research_task: None,
                     interview: None,
                     device_place: None,
+                    device_locked: false,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -10687,6 +11677,10 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 &data_dir,
                 weather,
                 device_registry,
+                room_registry,
+                guest_room_access,
+                guest_device_access,
+                profile_repo,
                 None,
                 settings_repo,
                 memory_repo,
@@ -10702,6 +11696,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 false,
                 false,                                    // model_provisioning — serve only
                 Arc::new(tokio::sync::RwLock::new(None)), // mesh_provider: none on CLI paths
+                None,                                     // turn_index
             )
             .await;
 
@@ -11071,6 +12066,8 @@ async fn run_memories_cmd(action: MemoryAction) -> Result<()> {
                 lifecycle: None,
                 superseded_by: None,
                 corrects: None,
+                about: None,
+                valid_until: None,
             };
             repo.add(fragment).await?;
             println!("✓ Memory saved (id: {id})");
@@ -11208,13 +12205,18 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 
     // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
     let resp = if let Some(member) = &member {
+        // Whoever runs this holds the pond itself, so the code needs no second yes.
         client
             .post(&base)
-            .json(&serde_json::json!({ "profile_id": member }))
+            .json(&serde_json::json!({ "profile_id": member, "approved": true }))
             .send()
             .await
     } else if refresh {
-        client.post(&base).send().await
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "approved": true }))
+            .send()
+            .await
     } else {
         client.get(&base).send().await
     }

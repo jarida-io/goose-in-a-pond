@@ -40,7 +40,7 @@ function toneSwitch(): HTMLButtonElement {
   const label = screen.getByText("Sound while it thinks");
   const row = label.closest(".srow");
   if (!row) throw new Error("tone row not found");
-  const btn = row.querySelector("button.htoggle");
+  const btn = row.querySelector('button[role="switch"]');
   if (!btn) throw new Error("tone row has no switch");
   return btn as HTMLButtonElement;
 }
@@ -74,7 +74,7 @@ describe("Hub voice settings — thinking tone", () => {
     vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
     await renderVoice();
 
-    expect(toneSwitch().getAttribute("aria-pressed")).toBe("true");
+    expect(toneSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   it("draws OFF when the stored setting is off", async () => {
@@ -85,7 +85,7 @@ describe("Hub voice settings — thinking tone", () => {
     await renderVoice();
 
     await waitFor(() => {
-      expect(toneSwitch().getAttribute("aria-pressed")).toBe("false");
+      expect(toneSwitch().getAttribute("aria-checked")).toBe("false");
     });
   });
 
@@ -98,6 +98,46 @@ describe("Hub voice settings — thinking tone", () => {
     await waitFor(() => {
       expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({
         voice_thinking_tone_enabled: false,
+      });
+    });
+  });
+});
+
+function gpuSpeechSwitch(): HTMLButtonElement {
+  const row = screen.getByText("Faster long speech").closest(".srow");
+  const btn = row?.querySelector('button[role="switch"]');
+  if (!btn) throw new Error("faster long speech row has no switch");
+  return btn as HTMLButtonElement;
+}
+
+describe("Hub voice settings \u2014 faster long speech", () => {
+  it("draws ON when the key is absent", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
+    await renderVoice();
+
+    expect(gpuSpeechSwitch().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("draws OFF when the stored setting is off", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(
+      voiceSettings({ voice_tts_gpu_enabled: false }) as never,
+    );
+    await renderVoice();
+
+    await waitFor(() => {
+      expect(gpuSpeechSwitch().getAttribute("aria-checked")).toBe("false");
+    });
+  });
+
+  it("writes voice_tts_gpu_enabled and nothing else", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
+    await renderVoice();
+
+    fireEvent.click(gpuSpeechSwitch());
+
+    await waitFor(() => {
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({
+        voice_tts_gpu_enabled: false,
       });
     });
   });

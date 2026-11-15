@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, within } from "@testing-library/react";
 import { ChatHistory } from "./ChatHistory";
-import { cardWeight, relativeWhen, messageCountLabel, matchesQuery } from "./chatHistoryView";
+import { cardWeight, relativeWhen, messageCountLabel, matchesQuery, matchesSurface, surfaceLabel, surfacesOf, isGooseThread } from "./chatHistoryView";
 import type { SessionSummary } from "../api/types";
 
 afterEach(cleanup);
@@ -167,5 +167,52 @@ describe("the wall", () => {
     expect(ghosts.length).toBeGreaterThan(0);
     // Placeholders are not conversations, so nothing here is pressable.
     expect(screen.queryByRole("button", { name: /Open conversation/ })).toBeNull();
+  });
+});
+
+describe("where a conversation started", () => {
+  it("maps each filter to the surfaces the server takes", () => {
+    expect(surfacesOf("all")).toEqual([]);
+    expect(surfacesOf("here")).toEqual(["desktop", "pond", "cli", "unknown"]);
+    expect(surfacesOf("phone")).toEqual(["phone"]);
+    expect(surfacesOf("room")).toEqual(["room"]);
+    expect(surfacesOf("goose")).toEqual(["goose"]);
+  });
+
+  it("counts a row with no surface as here, and nowhere else", () => {
+    const old = session({ surface: undefined });
+    expect(matchesSurface(old, "here")).toBe(true);
+    expect(matchesSurface(old, "phone")).toBe(false);
+    expect(matchesSurface(old, "all")).toBe(true);
+    expect(matchesSurface(session({ surface: "schedule" }), "here")).toBe(false);
+  });
+
+  it("names the surface and finds the Goose thread", () => {
+    expect(surfaceLabel(session({ surface: "cli" }))).toBe("Command line");
+    expect(surfaceLabel(session({ surface: undefined }))).toBeNull();
+    expect(isGooseThread(session({ id: "goose-abc" }))).toBe(true);
+    expect(isGooseThread(session({ id: "abc" }))).toBe(false);
+  });
+
+  it("narrows the wall with the filter and labels each card", () => {
+    render(
+      <ChatHistory
+        sessions={[
+          session({ id: "a", title: "From my phone", surface: "phone" }),
+          session({ id: "goose-1", title: "Goose", surface: "goose" }),
+        ]}
+        loading={false}
+        onOpen={() => {}}
+        onNewChat={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    expect(screen.getByText("Started on: Phone")).toBeTruthy();
+    expect(screen.getByLabelText("The Goose thread")).toBeTruthy();
+    expect(screen.getByText("What Goose did by itself")).toBeTruthy();
+    expect(screen.queryByText("Started on: Goose")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Phone" }));
+    expect(document.querySelectorAll(".chist__card").length).toBe(1);
+    expect(screen.getByText("From my phone")).toBeTruthy();
   });
 });

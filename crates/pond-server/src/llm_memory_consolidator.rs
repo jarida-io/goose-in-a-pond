@@ -23,10 +23,12 @@ Reply with JSON only: an array of action objects, most important first. Each \
 object is exactly one of these:
 {\"action\":\"merge\",\"ids\":[\"id1\",\"id2\"],\"merged\":\"...\",\"segment\":\"...\",\"importance\":0.0,\"reason\":\"...\"}
 {\"action\":\"prune\",\"id\":\"id1\",\"reason\":\"...\"}
-- action: \"merge\" folds duplicates and near-duplicates into one sentence that \
-keeps every detail; \"prune\" archives a memory that does not help.
+- action: \"merge\" folds memories that say the same thing into one; \"prune\" \
+archives a memory that does not help.
 - ids, id: memory ids copied exactly from the square brackets.
-- merged: the one sentence that replaces them, never empty.
+- merged: the one short sentence that replaces them, at most 40 words, never \
+empty. Two memories about the same person or subject that say different \
+things are not duplicates: leave them as they are.
 - segment: identity, preference, correction, relationship, routine, project, \
 knowledge or context.
 - importance: 0 to 1, how much the fact matters to serving the member.
@@ -45,7 +47,8 @@ such as Willem Dafoe\", \"<member> is working through an assignment named \
 Avengers Doomsday\" (a film they asked about). PRUNE nonsense one exchange \
 produced, such as \"<member> repeatedly offers apologies to <member>\".
 Go through every memory in turn and decide: keep, merge or prune. Keep \
-distinct facts separate. Never prune a correction.
+distinct facts separate: never join them into a summary or a paragraph. \
+Never prune a correction.
 If nothing should change, reply [].";
 
 /// Parse a model-written segment label; `None` keeps the row's current segment.

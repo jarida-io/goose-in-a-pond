@@ -1,6 +1,7 @@
 //! ConversationExtractor port: read one conversation window and say what is worth remembering.
 
 use crate::user_data::domain::interest::ObservedInterest;
+use crate::user_data::domain::member_profile::About;
 use crate::user_data::domain::memory::{MemorySegment, MemoryTier};
 use crate::user_data::domain::profile::ProfileScope;
 use async_trait::async_trait;
@@ -67,6 +68,20 @@ impl MemoryKind {
         MemoryKind::Correction,
         MemoryKind::Context,
     ];
+
+    /// The kind a fact about `about` counts as, for the gates that work by kind.
+    pub fn of(about: About) -> Self {
+        match about {
+            About::Partner | About::Child | About::Pet | About::Family | About::Friend => {
+                MemoryKind::Relationship
+            }
+            About::Likes | About::Dislikes | About::Style | About::Instruction => {
+                MemoryKind::Preference
+            }
+            About::Routine => MemoryKind::Routine,
+            _ => MemoryKind::Context,
+        }
+    }
 
     /// The store segment for a kind. `Context` goes to `Identity`: the store's own `Context`
     /// segment is transient and decays in about a week.
@@ -187,6 +202,8 @@ pub struct ExtractionWindow<'a> {
 pub struct ExtractedMemory {
     pub note: String,
     pub kind: MemoryKind,
+    /// What the fact is about, when the model named it; `None` for a reply in the older shape.
+    pub about: Option<About>,
 }
 
 /// Something with a date or a time in it, which is never a memory.

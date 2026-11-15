@@ -125,6 +125,34 @@ pub async fn ensure_kokoro_engine_reporting(
     tried
 }
 
+/// The full-precision weights long speech runs on the GPU: one fetch at a time, none once the
+/// file is there.
+pub async fn ensure_kokoro_gpu_weights(data_dir: PathBuf) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FETCHING: AtomicBool = AtomicBool::new(false);
+
+    let filename = pond_adapters_kokoro::model_filename("fp32");
+    let weights = kokoro_dir(&data_dir).join(filename);
+    if weights.exists() || FETCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mb = pond_adapters_kokoro::model_size_mb("fp32");
+    let url = format!("{KOKORO_REPO_BASE}onnx/{filename}");
+    match download_file(&url, &weights, mb).await {
+        Ok(()) => tracing::info!(
+            kind = "kokoro_gpu_weights_ready",
+            mb,
+            "Kokoro's GPU weights are installed; long speech can use the GPU"
+        ),
+        Err(e) => tracing::warn!(
+            kind = "kokoro_gpu_weights_failed",
+            error = %format!("{e:#}"),
+            "Kokoro's GPU weights could not be fetched; long speech stays on the CPU"
+        ),
+    }
+    FETCHING.store(false, Ordering::SeqCst);
+}
+
 /// Fetch one Kokoro file and add it to `tried`; whether it arrived.
 async fn fetch_kokoro_file(
     tried: &mut Vec<FileFetch>,

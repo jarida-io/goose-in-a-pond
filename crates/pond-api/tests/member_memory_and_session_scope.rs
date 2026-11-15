@@ -29,6 +29,7 @@ struct Pond {
     sessions: Arc<dyn SessionStorage>,
     amina: String,
     baraka: String,
+    phone: String,
     _dir: tempfile::TempDir,
 }
 
@@ -72,7 +73,7 @@ async fn pond(amina_phone: bool) -> Pond {
             .await
             .unwrap();
     }
-    state.handshake = Arc::new(DeviceHandshake(device_id));
+    state.handshake = Arc::new(DeviceHandshake(device_id.clone()));
     let sessions = state.session_storage.clone();
     Pond {
         router: build_router(
@@ -83,6 +84,7 @@ async fn pond(amina_phone: bool) -> Pond {
         sessions,
         amina: members[0].clone(),
         baraka: members[1].clone(),
+        phone: device_id,
         _dir: built.dir,
     }
 }
@@ -288,4 +290,159 @@ async fn another_members_conversation_cannot_be_deleted_or_continued() {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {body}");
     }
+}
+
+/// Each screen lists its own conversations. The thread the pond writes into is listed for its
+/// member, and for nobody else.
+#[tokio::test]
+async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thread() {
+    use pond_core::shared::services::goose_thread::GooseThread;
+    use pond_core::user_data::domain::message_note::{MessageNote, SourceKind};
+    use pond_core::user_data::domain::session::SessionSurface;
+
+    let pond = pond(true).await;
+    let (amina, baraka) = (pond.amina.clone(), pond.baraka.clone());
+    conversation(&pond, "s-phone", Some(&amina)).await;
+    conversation(&pond, "s-room", Some(&amina)).await;
+    conversation(&pond, "s-earlier", Some(&amina)).await;
+    conversation(&pond, "s-her-other-phone", Some(&amina)).await;
+    pond.sessions
+        .mark_surface("s-phone", SessionSurface::Phone, Some(&pond.phone))
+        .await
+        .unwrap();
+    pond.sessions
+        .mark_surface(
+            "s-her-other-phone",
+            SessionSurface::Phone,
+            Some("her-other-phone"),
+        )
+        .await
+        .unwrap();
+    pond.sessions
+        .mark_surface("s-room", SessionSurface::Room, None)
+        .await
+        .unwrap();
+    let thread = GooseThread::new(pond.sessions.clone());
+    let note = MessageNote::from_source(SourceKind::Schedule, "Daily Briefing", None);
+    let hers = thread
+        .post(Some(&amina), "Here is your brief.", note.clone())
+        .await
+        .unwrap();
+    let his = thread
+        .post(Some(&baraka), "Here is your brief.", note)
+        .await
+        .unwrap();
+
+    let (status, all) = send(&pond, call(Method::GET, "/api/v1/sessions", None)).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    assert!(ids(&all).contains(&hers.session_id), "{all}");
+    assert!(
+        !ids(&all).contains(&his.session_id),
+        "another member's thread"
+    );
+
+    let listed = |surface: &'static str| {
+        let pond = &pond;
+        async move {
+            let uri = format!("/api/v1/sessions?surface={surface}");
+            ids(&send(pond, call(Method::GET, &uri, None)).await.1)
+        }
+    };
+    assert_eq!(listed("phone").await, ["s-her-other-phone", "s-phone"]);
+    assert_eq!(
+        listed("here,goose").await,
+        [hers.session_id.as_str(), "s-phone"],
+        "this phone's own and the Goose thread"
+    );
+    assert_eq!(listed("elsewhere").await, ["s-her-other-phone"]);
+    let started_here = |id: &str| {
+        all["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["started_here"].clone())
+    };
+    assert_eq!(started_here("s-phone"), Some(serde_json::json!(true)));
+    assert_eq!(
+        started_here("s-her-other-phone"),
+        Some(serde_json::json!(false))
+    );
+    assert!(
+        !all.to_string().contains(&pond.phone),
+        "no device id is sent"
+    );
+    assert_eq!(listed("room").await, ["s-room"]);
+    assert_eq!(
+        listed("unknown").await,
+        ["s-earlier"],
+        "begun before surfaces were recorded"
+    );
+
+    let uri = format!("/api/v1/sessions/{}/messages", hers.session_id);
+    let (status, messages) = send(&pond, call(Method::GET, &uri, None)).await;
+    assert_eq!(status, StatusCode::OK, "{messages}");
+    let rows = messages
+        .as_array()
+        .or_else(|| messages["messages"].as_array())
+        .expect("a list of messages");
+    assert_eq!(rows[0]["note"]["from"]["kind"], "schedule", "{messages}");
+    assert_eq!(rows[0]["note"]["from"]["label"], "Daily Briefing");
+}
+
+/// A suggestion sits in the thread with what Goose noticed and an offer. Taking it hands back
+/// the words to send as the member's own turn, and the offer is answered once.
+#[tokio::test]
+async fn an_offer_in_the_thread_is_taken_once_and_hands_back_its_words() {
+    use pond_core::shared::services::goose_thread::GooseThread;
+    use pond_core::user_data::domain::message_note::{
+        MessageNote, OfferState, SourceKind, SuggestionOffer,
+    };
+
+    let pond = pond(true).await;
+    let amina = pond.amina.clone();
+    let mut note = MessageNote::from_source(SourceKind::Suggestion, "Suggestion", None);
+    note.suggestion = Some(SuggestionOffer {
+        noticed: "You asked about Naivasha tickets twice this week.".into(),
+        action: "Do it".into(),
+        prompt: "Check whether Safari Rally tickets are on sale.".into(),
+        state: OfferState::Open,
+        suggestion_id: None,
+    });
+    let posted = GooseThread::new(pond.sessions.clone())
+        .post(
+            Some(&amina),
+            "Shall I check whether the tickets are on sale?",
+            note,
+        )
+        .await
+        .unwrap();
+    let offer = format!(
+        "/api/v1/sessions/{}/messages/{}/offer",
+        posted.session_id, posted.message_id
+    );
+
+    let take = Some(serde_json::json!({"take": true}));
+    let (status, taken) = send(&pond, call(Method::POST, &offer, take.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{taken}");
+    assert_eq!(taken["state"], "done");
+    assert_eq!(
+        taken["prompt"],
+        "Check whether Safari Rally tickets are on sale."
+    );
+
+    let (status, again) = send(&pond, call(Method::POST, &offer, take)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{again}");
+
+    let kept = pond
+        .sessions
+        .get_messages(&posted.session_id)
+        .await
+        .unwrap();
+    let offer = kept[0].note.as_ref().unwrap().suggestion.as_ref().unwrap();
+    assert_eq!(offer.state, OfferState::Done);
+    assert_eq!(
+        offer.noticed,
+        "You asked about Naivasha tickets twice this week."
+    );
 }

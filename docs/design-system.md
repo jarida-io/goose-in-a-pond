@@ -175,6 +175,22 @@ async function handleDelete() {
 }
 ```
 
+### `<Switch checked onChange? label? size? />` (`components/Switch.tsx`, `styles/switch.css`)
+
+The one on/off control in the app: the household's accent when on, a round knob, `role="switch"`
+with `aria-checked`, and a 44px hit area at either size (`"md"`, or `"sm"` in dense rows). Pass
+`label` when no visible label names it through `aria-labelledby`. The hub's `Toggle` wraps it.
+
+Do not import HeroUI's `Switch` or hand-draw a switch: `styles/controls.test.ts` fails on a new
+HeroUI `Switch` import, on an offset shadow drawn in the accent (offsets use `--border-ink`), and
+on a focus ring drawn outside a selected tile's border (the ring sits over the border instead).
+
+```tsx
+import { Switch } from "../components/Switch";
+
+<Switch checked={enabled} onChange={setEnabled} label="Turn on mesh" />
+```
+
 ### Model marks (`components/models/ModelMarks.tsx`, `styles/model-marks.css`)
 
 The repeated words of a Models screen. The classic page, the hub, the picks and the composer chip
@@ -212,6 +228,23 @@ has one name in every surface: `Read memories again` for the action, `Reading me
 status. While search by meaning is off nothing is fetched or read, so `Use` only sets the model.
 
 ---
+
+## Home widget tiles (`hub/views/widgets/`)
+
+Each tile on Home takes its look from what it shows, so the surface itself carries meaning:
+
+| Tile | Surface | What the surface says |
+|---|---|---|
+| Weather (`hub/primitives/WeatherWidget.tsx`) | the sky for the hour and condition | the weather outside |
+| Now playing (`MediaCard.tsx`) | a glow sampled from the album art | the track |
+| Tonight (`TonightCard.tsx`) | the weather tile's night sky | after dark: the next routine, and a line from now to midnight with a mark per routine (`hub/state/evening.ts`) |
+| Remote access (`RemoteAccessCard.tsx`) | the path from home to a phone away | lit while phones can reach the Pond, dashed while the way in opens, cut when it is home only or down; it reads the ngrok tunnel and the built-in network (`hub/state/remoteReach.ts`) |
+| Devices (`HomeControlsCard.tsx`) | a faint accent glow | full while every device is connected, dim when one is not |
+
+They share one material: an 18px radius and a soft drop shadow, not InkBudget's hard offset, which
+stays with the composer and the first alert. Device kinds differ by glyph and state by words and
+line, never by a new hue. Text on the night sky is measured in `tonight-card.css` (12.3:1, and
+6.6:1 for secondary text), and the moving spark honours `prefers-reduced-motion`.
 
 ## HeroUI Components
 

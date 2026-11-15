@@ -95,10 +95,18 @@ beforeEach(() => {
   clearOpenAgent();
   vi.mocked(api.listRecipes).mockResolvedValue([GREETER, DAILY]);
   vi.mocked(api.listExtensions).mockResolvedValue({ extensions: [] });
+  const baseProfile = {
+    avatar_emoji: "",
+    preferences: {},
+    role: "member" as const,
+    guest_until: null,
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:00Z",
+  };
   vi.mocked(api.listProfiles).mockResolvedValue({
     profiles: [
-      { id: "amina", display_name: "Amina", avatar_emoji: "" },
-      { id: "kofi", display_name: "Kofi", avatar_emoji: "" },
+      { ...baseProfile, id: "amina", display_name: "Amina" },
+      { ...baseProfile, id: "kofi", display_name: "Kofi" },
     ],
   });
   vi.mocked(api.listDevices).mockResolvedValue([]);

@@ -26,6 +26,10 @@ pub enum SuggestionContext {
         source_memory_id: String,
         fact: String,
     },
+    /// A card the member sent to chat. The Pond fills it from the card's id; a client never
+    /// sends its words.
+    #[serde(skip_deserializing)]
+    Card(crate::shared::domain::context_card::ContextCard),
 }
 
 impl SuggestionContext {
@@ -77,6 +81,7 @@ impl SuggestionContext {
                      </suggestion-context>"
                 )
             }
+            Self::Card(card) => card.render_envelope(),
         }
     }
 }

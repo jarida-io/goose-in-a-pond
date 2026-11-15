@@ -19,6 +19,7 @@ import {
 import type { Message } from "../state/chatRunStore";
 import { ToolCallChip } from "../components/ToolCallChip";
 import { KeptResultNote } from "../components/KeptResultNote";
+import { NoteFromLine, ReceiptChips, SuggestionOffer } from "../components/MessageNoteView";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
@@ -752,6 +753,7 @@ export function Chat() {
           return (
             <div key={msg.id} className={`ch-row ${msg.role === "user" ? "ch-row--user" : "ch-row--goose"}`}>
               <div className="ch-bubble-wrap">
+                <NoteFromLine note={msg.note} />
                 {/* Tool call chips */}
                 {msg.role === "agent" && msg.cards && msg.cards.length > 0 && !msg.streaming && (
                   <div className="tool-call-chips" role="list" aria-label="Tools used">
@@ -846,6 +848,10 @@ export function Chat() {
                       : "")
                   )}
                 </div>
+                {msg.role === "agent" && <ReceiptChips note={msg.note} />}
+                {msg.role === "agent" && !msg.streaming && (
+                  <SuggestionOffer localId={msg.id} messageId={msg.backendId} sessionId={run.sessionId} note={msg.note} />
+                )}
                 {/* Copy / edit — user messages only */}
                 {msg.role === "user" && editingId !== msg.id && (
                   <div className="ch-bubble__actions" role="group" aria-label="Message actions">

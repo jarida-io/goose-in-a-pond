@@ -7,17 +7,109 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
+use pond_core::context::chunking;
 use pond_core::context::vector_index::{
-    Corpus, CorpusHealth, IndexHealth, ResolvedHit, VectorEntry, VectorHit, VectorIndex,
+    Corpus, CorpusHealth, Exclusions, IndexHealth, ResolvedHit, StaleRow, VectorEntry, VectorHit,
+    VectorIndex,
 };
 use pond_core::user_data::domain::profile::ProfileScope;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Executor, Pool, Sqlite};
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub struct SqliteVectorIndex {
     pool: Pool<Sqlite>,
+    /// The vectors of the model last searched, so a turn scores them in memory: reading every row
+    /// through the driver each turn took 279 ms on the Orin with 5,800 passages.
+    cache: tokio::sync::Mutex<Option<Arc<VectorCache>>>,
+}
+
+/// Candidates checked against scope and liveness at a time; a later page is read only when hidden
+/// rows took the earlier pages' places.
+const VERIFY_PAGE: usize = 64;
+
+#[derive(Clone)]
+struct CachedVector {
+    span: Option<(i64, i64)>,
+    vector: Vec<f32>,
+    norm: f32,
+}
+
+/// One model's vectors as the table held them at (`count`, `max_rowid`, `newest`); any write
+/// moves that signature, whichever connection or process made it.
+#[derive(Clone, Default)]
+struct VectorCache {
+    model_id: String,
+    count: i64,
+    max_rowid: i64,
+    newest: String,
+    entries: HashMap<(Corpus, String, i64), CachedVector>,
+}
+
+impl VectorCache {
+    fn insert(&mut self, row: CachedRow) {
+        let (corpus, row_id, chunk_ix, start, len, blob) = row;
+        let Some(corpus) = Corpus::parse(&corpus) else {
+            return;
+        };
+        let vector = blob_to_vec(&blob);
+        let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let span = match (start, len) {
+            (Some(s), Some(l)) => Some((s, l)),
+            _ => None,
+        };
+        self.entries.insert(
+            (corpus, row_id, chunk_ix),
+            CachedVector { span, vector, norm },
+        );
+    }
+}
+
+type CachedRow = (String, String, i64, Option<i64>, Option<i64>, Vec<u8>);
+
+/// A scored row before its scope is checked: score, corpus, row id, best passage's span.
+type Candidate<'a> = (f32, Corpus, &'a str, Option<(i64, i64)>);
+
+/// `corpus IN (...)` over the corpora this build knows, so a retired corpus's rows neither load
+/// nor count.
+fn known_corpora_sql() -> String {
+    let names: Vec<String> = Corpus::ALL
+        .iter()
+        .map(|c| format!("'{}'", c.as_str()))
+        .collect();
+    format!("corpus IN ({})", names.join(", "))
+}
+
+/// Longest lead-in for a later passage. The lead-in is the row's first line, which is the title in
+/// every chunked corpus.
+const TITLE_CHARS: usize = 120;
+
+/// A passage of `text` by the byte span its vector was made from; the whole text without one.
+/// A later passage starts on a whole word and leads with the row's first line: without the
+/// headline, a story's earlier figures read as its result.
+fn passage(text: &str, span: Option<(i64, i64)>) -> String {
+    let Some((start, len)) = span else {
+        return text.to_string();
+    };
+    let start = (start.max(0) as usize).min(text.len());
+    let end = ((start as i64 + len.max(0)) as usize).min(text.len());
+    let start = chunking::word_start(text, start, end);
+    let piece = match text.get(start..end) {
+        Some(piece) => piece.to_string(),
+        None => String::from_utf8_lossy(&text.as_bytes()[start..end]).into_owned(),
+    };
+    let line = text.lines().next().unwrap_or_default();
+    let (title, title_end) = match chunking::cut_at_word(line, TITLE_CHARS) {
+        Some(head) => (format!("{head}…"), head.len()),
+        None => (line.trim().to_string(), line.len()),
+    };
+    if start < title_end.max(1) || title.is_empty() {
+        return piece;
+    }
+    format!("{title}\n… {}", piece.trim_start())
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -44,12 +136,126 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     Some(dot / (na * nb))
 }
 
-/// A corpus's `sys.<table>` and id column, in one exhaustive match so none can be missed.
+// The corpora below read through one shape: `id`, `profile_id`, `shared` (1 when the household
+// may see it), `body` and `rev`. Text that only exists once rendered (a profile, a digest's
+// sections) is rendered here, so a vector and the words a search returns always agree.
+
+const PERSONAL_SOURCE: &str = "(\
+    SELECT 'profile:' || p.id AS id, p.id AS profile_id, 0 AS shared, \
+           p.display_name || CASE WHEN json_valid(p.preferences) THEN \
+             COALESCE(', who goes by ' || NULLIF(trim(json_extract(p.preferences, '$.preferred_name')), ''), '') \
+             || COALESCE('. Birthday: ' || NULLIF(trim(json_extract(p.preferences, '$.birthday')), ''), '') \
+             || COALESCE('. Language: ' || NULLIF(trim(json_extract(p.preferences, '$.language')), ''), '') \
+           ELSE '' END AS body, \
+           p.updated_at AS rev \
+      FROM sys.profiles p \
+    UNION ALL \
+    SELECT 'place:' || pl.id, pl.profile_id, 0, 'A saved place: ' || pl.label, pl.created_at \
+      FROM sys.member_places pl \
+    UNION ALL \
+    SELECT 'interest:' || i.id, i.profile_id, 0, \
+           CASE WHEN i.avoid = 1 THEN 'Would rather not hear about ' || i.topic \
+                ELSE 'Interested in ' || i.topic || ' (' || i.depth || ')' END \
+           || COALESCE(': ' || (SELECT group_concat(f.value, ', ') FROM json_each(\
+                CASE WHEN json_valid(i.facets) THEN i.facets ELSE '[]' END) f), ''), \
+           i.updated_at \
+      FROM sys.interests i \
+    UNION ALL \
+    SELECT 'topic:' || t.id, t.profile_id, 0, \
+           t.area || ': ' || t.subject || CASE WHEN trim(t.why) != '' THEN '. ' || t.why ELSE '' END, \
+           t.built_at \
+      FROM sys.member_topics t \
+    UNION ALL \
+    SELECT 'portrait:' || pr.profile_id, pr.profile_id, 0, pr.summary, pr.updated_at \
+      FROM sys.member_portraits pr WHERE trim(pr.summary) != '' \
+    UNION ALL \
+    SELECT 'saved:' || si.id, si.profile_id, si.shared, \
+           si.title || CASE WHEN trim(si.body) != '' THEN char(10) || si.body ELSE '' END, \
+           si.updated_at \
+      FROM sys.saved_items si \
+    UNION ALL \
+    SELECT 'screenshot:' || sn.id, sn.profile_id, 0, sn.note, sn.created_at \
+      FROM sys.screenshot_notes sn WHERE trim(sn.note) != '')";
+
+// A session with no member is a guest's, as for summaries. The speaker's name is in the text, so
+// it is the revision: a rename re-embeds rather than leaving passages cut from the old words.
+const MESSAGE_SOURCE: &str = "(\
+    SELECT m.id AS id, ss.profile_id AS profile_id, 0 AS shared, m.session_id AS session_id, \
+           'On ' || substr(m.created_at, 1, 10) || ', ' \
+           || CASE m.role WHEN 'user' THEN pm.display_name || ' said: ' ELSE 'I replied: ' END \
+           || m.content AS body, \
+           pm.display_name AS rev \
+      FROM sys.session_messages m \
+      JOIN sys.sessions ss ON ss.id = m.session_id \
+      JOIN sys.profiles pm ON pm.id = ss.profile_id \
+     WHERE m.role IN ('user', 'assistant') AND length(trim(m.content)) >= 20)";
+
+const DIGEST_SOURCE: &str = "(\
+    SELECT d.id AS id, d.profile_id AS profile_id, 0 AS shared, \
+           d.title || ' (' || d.day || ')' || char(10) || d.intro \
+           || COALESCE(char(10) || (SELECT group_concat(\
+                json_extract(j.value, '$.heading') || ': ' || json_extract(j.value, '$.body'), char(10)) \
+                FROM json_each(CASE WHEN json_valid(d.sections) THEN d.sections ELSE '[]' END) j), '') \
+           AS body, \
+           d.written_at AS rev \
+      FROM sys.news_digests d)";
+
+const STORY_SOURCE: &str = "(\
+    SELECT n.id AS id, n.profile_id AS profile_id, 0 AS shared, \
+           n.headline || ' (' || n.site || ', ' || substr(n.written_at, 1, 10) || ')' \
+           || char(10) || n.dek || char(10) || n.summary AS body, \
+           n.written_at AS rev \
+      FROM sys.news_stories n)";
+
+// Raw data artifacts are tables for the next step, not prose anyone asks about.
+const REPORT_SOURCE: &str = "(\
+    SELECT a.id AS id, t.owner_profile_id AS profile_id, \
+           CASE WHEN t.scope = 'household' THEN 1 ELSE 0 END AS shared, \
+           a.title || char(10) || a.summary \
+           || CASE WHEN trim(a.body) != '' AND a.body != a.summary THEN char(10) || a.body ELSE '' END \
+           AS body, \
+           a.created_at AS rev \
+      FROM sys.long_task_artifacts a JOIN sys.long_tasks t ON t.id = a.task_id \
+     WHERE t.scope != 'guest' AND a.kind != 'data')";
+
+// Who a notice to devices reached is a join, so its scope lives in `scope_sql`.
+const NOTICE_SOURCE: &str = "(\
+    SELECT h.id AS id, NULL AS profile_id, \
+           CASE WHEN h.audience = 'household' THEN 1 ELSE 0 END AS shared, \
+           h.title || ' (' || substr(h.timestamp, 1, 10) || ')' || char(10) || h.body AS body, \
+           NULL AS rev \
+      FROM sys.notification_history h)";
+
+const IDEA_SOURCE: &str = "(\
+    SELECT i.id AS id, i.profile_id AS profile_id, 0 AS shared, \
+           i.title || char(10) || i.pitch \
+           || CASE WHEN trim(i.why) != '' THEN char(10) || i.why ELSE '' END AS body, \
+           i.updated_at AS rev \
+      FROM sys.ideas i WHERE i.state != 'dismissed')";
+
+/// A corpus's `sys.<table>`, or the query that shapes it, and its id column, in one exhaustive
+/// match so none can be missed.
 fn source_table(corpus: Corpus) -> (&'static str, &'static str) {
     match corpus {
         Corpus::Memory => ("sys.memory_fragments", "id"),
         Corpus::Context => ("sys.context_items", "id"),
         Corpus::Summary => ("sys.sessions", "id"),
+        Corpus::Personal => (PERSONAL_SOURCE, "id"),
+        Corpus::Message => (MESSAGE_SOURCE, "id"),
+        Corpus::Digest => (DIGEST_SOURCE, "id"),
+        Corpus::Story => (STORY_SOURCE, "id"),
+        Corpus::Report => (REPORT_SOURCE, "id"),
+        Corpus::Notice => (NOTICE_SOURCE, "id"),
+        Corpus::Idea => (IDEA_SOURCE, "id"),
+    }
+}
+
+/// Leaves a turn's own conversation out: its summary, or its messages.
+fn session_sql(corpus: Corpus, exclusions: &Exclusions) -> (&'static str, Option<String>) {
+    match (corpus, exclusions.session_id.as_ref()) {
+        (Corpus::Summary, Some(id)) => ("AND s.id != ?", Some(id.clone())),
+        (Corpus::Message, Some(id)) => ("AND s.session_id != ?", Some(id.clone())),
+        _ => ("", None),
     }
 }
 
@@ -57,12 +263,23 @@ fn source_table(corpus: Corpus) -> (&'static str, &'static str) {
 /// `profile_id` means "unknown owner" (unlike memory's "shared"), so those are never live.
 fn liveness_sql(corpus: Corpus) -> &'static str {
     match corpus {
-        Corpus::Memory => "AND (s.lifecycle IS NULL OR s.lifecycle = 'active')",
+        Corpus::Memory => {
+            "AND (s.lifecycle IS NULL OR s.lifecycle = 'active') \
+             AND (s.valid_until IS NULL OR s.valid_until > datetime('now'))"
+        }
         Corpus::Context => "",
         Corpus::Summary => {
             "AND s.rolling_summary IS NOT NULL AND s.rolling_summary != '' \
              AND s.profile_id IS NOT NULL"
         }
+        // Their source queries hold their own filters.
+        Corpus::Personal
+        | Corpus::Message
+        | Corpus::Digest
+        | Corpus::Story
+        | Corpus::Report
+        | Corpus::Notice
+        | Corpus::Idea => "",
     }
 }
 
@@ -84,6 +301,25 @@ fn scope_sql(corpus: Corpus, scope: &ProfileScope) -> (String, Option<String>) {
         (Corpus::Summary, ProfileScope::Owner(id)) => {
             ("AND s.profile_id = ?".into(), Some(id.clone()))
         }
+        (Corpus::Notice, ProfileScope::Owner(id)) => (
+            "AND (s.shared = 1 OR EXISTS (SELECT 1 FROM sys.notification_history_recipients r \
+             JOIN sys.devices d ON d.id = r.device_id \
+             WHERE r.notification_id = s.id AND d.profile_id = ?))"
+                .into(),
+            Some(id.clone()),
+        ),
+        (
+            Corpus::Personal
+            | Corpus::Message
+            | Corpus::Digest
+            | Corpus::Story
+            | Corpus::Report
+            | Corpus::Idea,
+            ProfileScope::Owner(id),
+        ) => (
+            "AND (s.profile_id = ? OR s.shared = 1)".into(),
+            Some(id.clone()),
+        ),
     }
 }
 
@@ -98,6 +334,13 @@ fn text_sql(corpus: Corpus) -> &'static str {
                             ELSE s.title || char(10) || s.body END"
         }
         Corpus::Summary => "s.rolling_summary",
+        Corpus::Personal
+        | Corpus::Message
+        | Corpus::Digest
+        | Corpus::Story
+        | Corpus::Report
+        | Corpus::Notice
+        | Corpus::Idea => "COALESCE(s.body, '')",
     }
 }
 
@@ -110,12 +353,134 @@ fn source_rev_sql(corpus: Corpus) -> Option<&'static str> {
         Corpus::Memory => None,
         // A context item is re-synced by external_id, which rewrites the row.
         Corpus::Context => Some("s.ingested_at"),
+        Corpus::Personal
+        | Corpus::Message
+        | Corpus::Digest
+        | Corpus::Story
+        | Corpus::Report
+        | Corpus::Notice
+        | Corpus::Idea => Some("s.rev"),
     }
 }
 
 impl SqliteVectorIndex {
     pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            cache: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// `model_id`'s vectors, read again only where the table changed since the last search.
+    async fn vectors_for(&self, model_id: &str) -> Result<Arc<VectorCache>> {
+        let known = known_corpora_sql();
+        let mut held = self.cache.lock().await;
+        let (count, max_rowid, newest): (i64, i64, String) = sqlx::query_as(&format!(
+            "SELECT COUNT(*), COALESCE(MAX(rowid), 0), COALESCE(MAX(embedded_at), '') \
+             FROM vectors WHERE model_id = ? AND {known}"
+        ))
+        .bind(model_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let mut cache = match held.take() {
+            Some(cache) if cache.model_id == model_id => cache,
+            _ => Arc::new(VectorCache {
+                model_id: model_id.to_string(),
+                ..VectorCache::default()
+            }),
+        };
+        if (cache.count, cache.max_rowid, cache.newest.as_str())
+            != (count, max_rowid, newest.as_str())
+        {
+            let fresh = Arc::make_mut(&mut cache);
+            let changed: Vec<CachedRow> = sqlx::query_as(&format!(
+                "SELECT corpus, row_id, chunk_ix, chunk_start, chunk_len, vector FROM vectors \
+                 WHERE model_id = ? AND {known} AND (rowid > ? OR embedded_at > ?)"
+            ))
+            .bind(model_id)
+            .bind(fresh.max_rowid)
+            .bind(&fresh.newest)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in changed {
+                fresh.insert(row);
+            }
+            // More entries than rows means some were deleted, which no change column records.
+            if fresh.entries.len() as i64 != count {
+                fresh.entries.clear();
+                let all: Vec<CachedRow> = sqlx::query_as(&format!(
+                    "SELECT corpus, row_id, chunk_ix, chunk_start, chunk_len, vector FROM vectors \
+                     WHERE model_id = ? AND {known}"
+                ))
+                .bind(model_id)
+                .fetch_all(&self.pool)
+                .await?;
+                for row in all {
+                    fresh.insert(row);
+                }
+            }
+            fresh.count = count;
+            fresh.max_rowid = max_rowid;
+            fresh.newest = newest;
+        }
+        *held = Some(cache.clone());
+        Ok(cache)
+    }
+
+    /// The rows of `page` that `scope` may see and that are live, in `page`'s order, with their
+    /// passage text: the same predicates every query here uses, read for a page at a time.
+    async fn visible(
+        &self,
+        page: &[Candidate<'_>],
+        scope: &ProfileScope,
+        exclusions: &Exclusions,
+    ) -> Result<Vec<ResolvedHit>> {
+        let mut texts: HashMap<(Corpus, String), String> = HashMap::new();
+        for corpus in Corpus::ALL {
+            let ids: Vec<&str> = page
+                .iter()
+                .filter(|(_, c, _, _)| *c == corpus)
+                .map(|(_, _, id, _)| *id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let (table, id_col) = source_table(corpus);
+            let (scope_pred, bind) = scope_sql(corpus, scope);
+            let live = liveness_sql(corpus);
+            let (session_pred, session_bind) = session_sql(corpus, exclusions);
+            let text = text_sql(corpus);
+            let marks = vec!["?"; ids.len()].join(", ");
+            let sql = format!(
+                "SELECT s.{id_col}, {text} FROM {table} s \
+                 WHERE s.{id_col} IN ({marks}) {scope_pred} {live} {session_pred}"
+            );
+            let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+            for id in &ids {
+                q = q.bind(*id);
+            }
+            if let Some(b) = bind {
+                q = q.bind(b);
+            }
+            if let Some(b) = session_bind {
+                q = q.bind(b);
+            }
+            for (id, text) in q.fetch_all(&self.pool).await? {
+                texts.insert((corpus, id), text);
+            }
+        }
+        Ok(page
+            .iter()
+            .filter_map(|(score, corpus, id, span)| {
+                let text = texts.get(&(*corpus, id.to_string()))?;
+                Some(ResolvedHit {
+                    corpus: *corpus,
+                    row_id: id.to_string(),
+                    score: *score,
+                    text: passage(text, *span),
+                })
+            })
+            .collect())
     }
 
     /// Opens `pond_vectors.db`; `after_connect` ATTACHes `sys` because ATTACH is per-connection.
@@ -168,7 +533,8 @@ impl VectorIndex for SqliteVectorIndex {
         .bind(entry.vector.len() as i64)
         .bind(vec_to_blob(&entry.vector))
         .bind(&entry.source_rev)
-        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+        // To the nanosecond, so a vector rewritten in place still moves the search cache's mark.
+        .bind(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -263,73 +629,63 @@ impl VectorIndex for SqliteVectorIndex {
         Ok(scored)
     }
 
-    async fn search_resolved(
+    async fn search_resolved_excluding(
         &self,
         query: &[f32],
         model_id: &str,
         scope: &ProfileScope,
         limit: usize,
+        exclusions: &Exclusions,
     ) -> Result<Vec<ResolvedHit>> {
         if query.is_empty() || limit == 0 || scope.excludes_everything() {
             return Ok(vec![]);
         }
-        let mut scored: Vec<ResolvedHit> = Vec::new();
-        for corpus in Corpus::ALL {
-            let (table, id_col) = source_table(corpus);
-            let (scope_pred, bind) = scope_sql(corpus, scope);
-            let live = liveness_sql(corpus);
-            let text = text_sql(corpus);
-            // Spans are byte offsets, but `substr` on TEXT counts characters (and is 1-indexed),
-            // so slice the BLOB at +1 and cast back. A NULL span is a whole-text vector.
-            let sql = format!(
-                "SELECT v.row_id, v.vector, \
-                        CASE WHEN v.chunk_start IS NULL OR v.chunk_len IS NULL THEN {text} \
-                             ELSE CAST(substr(CAST({text} AS BLOB), \
-                                              v.chunk_start + 1, v.chunk_len) AS TEXT) END \
-                 FROM vectors v \
-                 JOIN {table} s ON s.{id_col} = v.row_id \
-                 WHERE v.corpus = ? AND v.model_id = ? {scope_pred} {live}"
-            );
-            let mut q = sqlx::query_as::<_, (String, Vec<u8>, String)>(&sql)
-                .bind(corpus.as_str())
-                .bind(model_id);
-            if let Some(b) = bind {
-                q = q.bind(b);
-            }
-            // Keep only each row's best chunk, so one long document can't flood the top-K.
-            let mut best: std::collections::HashMap<String, ResolvedHit> =
-                std::collections::HashMap::new();
-            for (row_id, blob, text) in q.fetch_all(&self.pool).await? {
-                let Some(score) = cosine(query, &blob_to_vec(&blob)) else {
-                    continue;
-                };
-                match best.get(&row_id) {
-                    Some(existing) if existing.score >= score => {}
-                    _ => {
-                        best.insert(
-                            row_id.clone(),
-                            ResolvedHit {
-                                corpus,
-                                row_id,
-                                score,
-                                text,
-                            },
-                        );
-                    }
-                }
-            }
-            scored.extend(best.into_values());
+        let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if query_norm == 0.0 {
+            return Ok(vec![]);
         }
+        let cache = self.vectors_for(model_id).await?;
+
+        // Each row's best passage, so one long document can't flood the top-K.
+        let mut best: HashMap<(Corpus, &str), (f32, Option<(i64, i64)>)> = HashMap::new();
+        for ((corpus, row_id, _), cached) in &cache.entries {
+            // Wrong width is not a bad match but no match: skip it.
+            if exclusions.corpora.contains(corpus)
+                || cached.vector.len() != query.len()
+                || cached.norm == 0.0
+            {
+                continue;
+            }
+            let dot: f32 = query.iter().zip(&cached.vector).map(|(a, b)| a * b).sum();
+            let score = dot / (query_norm * cached.norm);
+            let slot = best
+                .entry((*corpus, row_id.as_str()))
+                .or_insert((f32::MIN, None));
+            if score > slot.0 {
+                *slot = (score, cached.span);
+            }
+        }
+        let mut ranked: Vec<Candidate<'_>> = best
+            .into_iter()
+            .map(|((corpus, row_id), (score, span))| (score, corpus, row_id, span))
+            .collect();
         // Score, then corpus order (the "memory wins ties" policy), then id for a stable order.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+        ranked.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.corpus.cmp(&b.corpus))
-                .then_with(|| a.row_id.cmp(&b.row_id))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(b.2))
         });
-        scored.truncate(limit);
-        Ok(scored)
+
+        let mut hits = Vec::new();
+        for page in ranked.chunks(VERIFY_PAGE) {
+            hits.extend(self.visible(page, scope, exclusions).await?);
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     async fn needs_embedding(
@@ -369,7 +725,7 @@ impl VectorIndex for SqliteVectorIndex {
         corpus: Corpus,
         model_id: &str,
         limit: usize,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<StaleRow>> {
         let (table, id_col) = source_table(corpus);
         let rev = source_rev_sql(corpus);
         let staleness = match rev {
@@ -378,19 +734,23 @@ impl VectorIndex for SqliteVectorIndex {
         };
         let extra = liveness_sql(corpus);
         let text = text_sql(corpus);
+        let rev_value = rev.unwrap_or("NULL");
         let sql = format!(
-            "SELECT DISTINCT s.{id_col}, {text} FROM {table} s \
+            "SELECT DISTINCT s.{id_col}, {text}, CAST({rev_value} AS TEXT) FROM {table} s \
              LEFT JOIN vectors v ON v.row_id = s.{id_col} AND v.corpus = ? \
              WHERE (v.row_id IS NULL OR v.model_id != ? {staleness}) {extra} \
              LIMIT ?"
         );
-        let rows: Vec<(String, String)> = sqlx::query_as(&sql)
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(&sql)
             .bind(corpus.as_str())
             .bind(model_id)
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows)
+        Ok(rows
+            .into_iter()
+            .map(|(row_id, text, rev)| StaleRow { row_id, text, rev })
+            .collect())
     }
 
     async fn prune_orphans(&self) -> Result<u64> {
@@ -571,6 +931,77 @@ mod tests {
             vec!["m1".to_string()],
             "a rebuilt index must report the source row as needing embedding"
         );
+    }
+
+    #[tokio::test]
+    async fn a_search_sees_every_write_since_the_last_one() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        add_memory(&db.system, "m1", None).await;
+        add_memory(&db.system, "m2", None).await;
+        index.upsert(&entry("m1", vec![1.0, 0.0])).await.unwrap();
+        let ids = |hits: Vec<ResolvedHit>| -> Vec<String> {
+            hits.into_iter().map(|h| h.row_id).collect()
+        };
+        let search = || {
+            index.search_resolved(
+                &[0.0, 1.0],
+                "nomic-embed-text-v1.5",
+                &ProfileScope::Household,
+                5,
+            )
+        };
+        assert_eq!(ids(search().await.unwrap()), vec!["m1"]);
+
+        index.upsert(&entry("m2", vec![0.0, 1.0])).await.unwrap();
+        assert_eq!(
+            ids(search().await.unwrap()),
+            vec!["m2", "m1"],
+            "a new vector went unseen"
+        );
+
+        index.upsert(&entry("m1", vec![0.0, 2.0])).await.unwrap();
+        let hits = search().await.unwrap();
+        assert!(
+            hits.iter().all(|h| (h.score - 1.0).abs() < 1e-6),
+            "a rewritten vector kept its old score: {hits:?}"
+        );
+
+        index.remove(Corpus::Memory, "m2").await.unwrap();
+        assert_eq!(
+            ids(search().await.unwrap()),
+            vec!["m1"],
+            "a removed vector came back"
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_hidden_from_a_member_do_not_crowd_out_their_own() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        add_profile(&db.system, "jerry").await;
+        add_profile(&db.system, "mum").await;
+        for n in 0..(VERIFY_PAGE * 2) {
+            let id = format!("mum{n}");
+            add_memory(&db.system, &id, Some("mum")).await;
+            index.upsert(&entry(&id, vec![1.0, 0.0])).await.unwrap();
+        }
+        add_memory(&db.system, "mine", Some("jerry")).await;
+        index.upsert(&entry("mine", vec![0.9, 0.1])).await.unwrap();
+
+        let hits = index
+            .search_resolved(
+                &[1.0, 0.0],
+                "nomic-embed-text-v1.5",
+                &ProfileScope::Owner("jerry".into()),
+                1,
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["mine"]);
     }
 
     #[tokio::test]
@@ -1300,6 +1731,333 @@ mod write_through_tests {
     }
 
     #[tokio::test]
+    async fn a_memory_past_its_time_is_not_recalled() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::new(db.vectors.clone()));
+
+        for id in ["lasting", "passing", "passed"] {
+            add_memory_with_vector(&db.system, id, &[1.0, 0.0]).await;
+            index_whole(&index, id, &[1.0, 0.0]).await;
+        }
+        sqlx::query(
+            "UPDATE memory_fragments SET valid_until = datetime('now', '+1 day') \
+             WHERE id = 'passing'",
+        )
+        .execute(&db.system)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE memory_fragments SET valid_until = datetime('now', '-1 day') \
+             WHERE id = 'passed'",
+        )
+        .execute(&db.system)
+        .await
+        .unwrap();
+
+        let hits = index
+            .search_resolved(&[1.0, 0.0], "m", &ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let mut ids: Vec<&str> = hits.iter().map(|h| h.row_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["lasting", "passing"],
+            "an expired fact was recalled"
+        );
+    }
+
+    /// Two members, a guest-free household, and one row of every new corpus for each.
+    async fn household_with_everything(pool: &Pool<Sqlite>) {
+        for statement in [
+            "INSERT INTO profiles (id, display_name, preferences) VALUES \
+             ('jerry', 'Jerry', '{\"preferred_name\":\"Jerr\",\"birthday\":\"1990-04-02\"}'), \
+             ('mum', 'Mum', 'not json')",
+            "INSERT INTO member_places (id, profile_id, label, lat, lng, created_at) VALUES \
+             ('home', 'jerry', 'Home', 0, 0, '2026-11-01')",
+            "INSERT INTO interests (id, profile_id, topic, topic_key, facets, depth, created_at, \
+             updated_at) VALUES ('f1', 'jerry', 'Formula 1', 'formula 1', '[\"Ferrari\"]', 'keen', \
+             '2026-11-01', '2026-11-02')",
+            "INSERT INTO saved_items (id, profile_id, kind, title, fields, body, shared, \
+             created_at, updated_at) VALUES \
+             ('recipe', 'mum', 'recipe', 'Pilau for ten', '{}', 'Rice, beef, spices.', 1, \
+              '2026-11-01', '2026-11-01'), \
+             ('gift', 'mum', 'note', 'Gift for Jerry', '{}', 'A Ferrari cap.', 0, \
+              '2026-11-01', '2026-11-01')",
+            "INSERT INTO sessions (id, created_at, profile_id) VALUES \
+             ('s1', '2026-11-10 08:00:00', 'jerry'), ('s2', '2026-11-11 08:00:00', 'mum'), \
+             ('s3', '2026-11-12 08:00:00', NULL)",
+            "INSERT INTO session_messages (id, session_id, role, content, created_at) VALUES \
+             ('m1', 's1', 'user', 'Book the Mombasa train for Friday.', '2026-11-10 08:00:01'), \
+             ('m2', 's1', 'assistant', 'The Friday train leaves at 08:00.', '2026-11-10 08:00:02'), \
+             ('m3', 's1', 'user', 'ok thanks', '2026-11-10 08:00:03'), \
+             ('m4', 's2', 'user', 'Remind me about the clinic visit.', '2026-11-11 08:00:01'), \
+             ('m5', 's3', 'user', 'A guest asking about the Wi-Fi password.', '2026-11-12 08:00:01')",
+            "INSERT INTO news_digests (id, profile_id, day, title, intro, sections, written_at) \
+             VALUES ('d1', 'jerry', '2026-11-14', 'Friday digest', 'Three things today.', \
+             '[{\"heading\":\"Rail\",\"body\":\"The SGR adds a night train.\"}]', \
+             '2026-11-14T06:00:00Z')",
+            "INSERT INTO long_tasks (id, owner_profile_id, scope, goal, state, max_steps, \
+             created_at, updated_at) VALUES \
+             ('t1', 'jerry', 'owner', 'Compare fares', 'completed', 5, '2026-11-01', '2026-11-01'), \
+             ('t2', NULL, 'guest', 'A guest task', 'completed', 5, '2026-11-01', '2026-11-01')",
+            "INSERT INTO long_task_artifacts (id, task_id, kind, title, summary, body, tokens, \
+             created_at) VALUES \
+             ('a1', 't1', 'findings', 'Fares', 'The train is cheapest.', 'Train 1,500; bus 2,000.', \
+              10, '2026-11-01'), \
+             ('a2', 't1', 'data', 'Raw fares', 'rows', '1500,2000', 1, '2026-11-01'), \
+             ('a3', 't2', 'findings', 'Guest notes', 'Not for members.', '', 1, '2026-11-01')",
+            "INSERT INTO devices (id, name, profile_id) VALUES ('mums-phone', 'Phone', 'mum')",
+            "INSERT INTO notification_history (id, audience, category, title, body, timestamp) \
+             VALUES ('n1', 'household', 'info', 'Morning briefing', 'Rain after noon.', \
+             '2026-11-14T07:00:00+03:00'), \
+             ('n2', 'devices', 'info', 'Clinic', 'The clinic visit is at 10.', \
+             '2026-11-14T08:00:00+03:00')",
+            "INSERT INTO notification_history_recipients (notification_id, device_id) VALUES \
+             ('n2', 'mums-phone')",
+            "INSERT INTO ideas (id, profile_id, topic, title, pitch, why, state, created_at, \
+             updated_at) VALUES \
+             ('i1', 'jerry', 'trains', 'Ride the night train', 'Sleep to Mombasa.', \
+              'You like trains.', 'new', '2026-11-01', '2026-11-03'), \
+             ('i2', 'jerry', 'trains', 'Dismissed idea', 'No.', '', 'dismissed', '2026-11-01', \
+              '2026-11-01')",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+    }
+
+    async fn stale(index: &SqliteVectorIndex, corpus: Corpus) -> Vec<StaleRow> {
+        let mut rows = index
+            .needs_embedding_with_text(corpus, "m", 50)
+            .await
+            .unwrap();
+        rows.sort_by(|a, b| a.row_id.cmp(&b.row_id));
+        rows
+    }
+
+    #[tokio::test]
+    async fn every_new_corpus_reads_its_text_and_revision() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        household_with_everything(&db.system).await;
+
+        let personal = stale(&index, Corpus::Personal).await;
+        let text = |id: &str| {
+            personal
+                .iter()
+                .find(|r| r.row_id == id)
+                .map(|r| r.text.clone())
+                .unwrap_or_else(|| panic!("{id} missing from {personal:?}"))
+        };
+        assert_eq!(
+            text("profile:jerry"),
+            "Jerry, who goes by Jerr. Birthday: 1990-04-02"
+        );
+        assert_eq!(
+            text("profile:mum"),
+            "Mum",
+            "bad preferences must not fail the read"
+        );
+        assert_eq!(text("place:home"), "A saved place: Home");
+        assert_eq!(
+            text("interest:f1"),
+            "Interested in Formula 1 (keen): Ferrari"
+        );
+        assert_eq!(text("saved:recipe"), "Pilau for ten\nRice, beef, spices.");
+        let interest = personal.iter().find(|r| r.row_id == "interest:f1").unwrap();
+        assert_eq!(interest.rev.as_deref(), Some("2026-11-02"));
+
+        let messages = stale(&index, Corpus::Message).await;
+        let ids: Vec<&str> = messages.iter().map(|r| r.row_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["m1", "m2", "m4"],
+            "short and guest messages stay out"
+        );
+        assert_eq!(
+            messages[0].text,
+            "On 2026-11-10, Jerry said: Book the Mombasa train for Friday."
+        );
+        assert_eq!(
+            messages[1].text,
+            "On 2026-11-10, I replied: The Friday train leaves at 08:00."
+        );
+        assert_eq!(messages[0].rev.as_deref(), Some("Jerry"));
+
+        let digest = stale(&index, Corpus::Digest).await;
+        assert_eq!(
+            digest[0].text,
+            "Friday digest (2026-11-14)\nThree things today.\nRail: The SGR adds a night train."
+        );
+
+        let reports = stale(&index, Corpus::Report).await;
+        let ids: Vec<&str> = reports.iter().map(|r| r.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["a1"], "raw data and guest tasks stay out");
+        assert_eq!(
+            reports[0].text,
+            "Fares\nThe train is cheapest.\nTrain 1,500; bus 2,000."
+        );
+
+        let notices = stale(&index, Corpus::Notice).await;
+        assert_eq!(
+            notices[0].text,
+            "Morning briefing (2026-11-14)\nRain after noon."
+        );
+        assert_eq!(notices[0].rev, None);
+
+        let ideas = stale(&index, Corpus::Idea).await;
+        let ids: Vec<&str> = ideas.iter().map(|r| r.row_id.as_str()).collect();
+        assert_eq!(ids, vec!["i1"]);
+        assert_eq!(
+            ideas[0].text,
+            "Ride the night train\nSleep to Mombasa.\nYou like trains."
+        );
+    }
+
+    /// Every live row of every new corpus, indexed with the same vector so only scope decides.
+    async fn index_everything(index: &SqliteVectorIndex) {
+        for corpus in Corpus::ALL {
+            for row in index
+                .needs_embedding_with_text(corpus, "m", 50)
+                .await
+                .unwrap()
+            {
+                index
+                    .upsert(&VectorEntry::whole(
+                        corpus,
+                        row.row_id,
+                        "m".into(),
+                        vec![1.0, 0.0],
+                        row.rev,
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    async fn found(
+        index: &SqliteVectorIndex,
+        scope: &ProfileScope,
+        exclusions: &Exclusions,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = index
+            .search_resolved_excluding(&[1.0, 0.0], "m", scope, 100, exclusions)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|h| format!("{}:{}", h.corpus.as_str(), h.row_id))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn a_member_finds_their_own_and_shared_rows_and_no_one_elses() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        household_with_everything(&db.system).await;
+        index_everything(&index).await;
+
+        let jerry = found(
+            &index,
+            &ProfileScope::Owner("jerry".into()),
+            &Exclusions::default(),
+        )
+        .await;
+        for expected in [
+            "personal:profile:jerry",
+            "personal:saved:recipe",
+            "message:m1",
+            "digest:d1",
+            "report:a1",
+            "notice:n1",
+            "idea:i1",
+        ] {
+            assert!(
+                jerry.contains(&expected.to_string()),
+                "{expected} missing: {jerry:?}"
+            );
+        }
+        for hidden in [
+            "personal:profile:mum",
+            "personal:saved:gift",
+            "message:m4",
+            "notice:n2",
+        ] {
+            assert!(
+                !jerry.contains(&hidden.to_string()),
+                "{hidden} leaked: {jerry:?}"
+            );
+        }
+
+        let mum = found(
+            &index,
+            &ProfileScope::Owner("mum".into()),
+            &Exclusions::default(),
+        )
+        .await;
+        assert!(
+            mum.contains(&"notice:n2".to_string()),
+            "a notice to her phone is hers"
+        );
+        assert!(mum.contains(&"personal:saved:gift".to_string()));
+        assert!(!mum.contains(&"message:m1".to_string()));
+
+        assert!(found(&index, &ProfileScope::Guest, &Exclusions::default())
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_turn_leaves_out_its_own_conversation_and_the_corpora_it_already_shows() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        household_with_everything(&db.system).await;
+        index_everything(&index).await;
+
+        let exclusions = Exclusions {
+            corpora: vec![Corpus::Personal],
+            session_id: Some("s1".into()),
+        };
+        let left = found(&index, &ProfileScope::Owner("jerry".into()), &exclusions).await;
+        assert!(
+            !left.iter().any(|id| id.starts_with("message:")),
+            "{left:?}"
+        );
+        assert!(
+            !left.iter().any(|id| id.starts_with("personal:")),
+            "{left:?}"
+        );
+        assert!(left.contains(&"digest:d1".to_string()), "{left:?}");
+    }
+
+    #[tokio::test]
+    async fn an_edited_row_is_owed_a_new_vector() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        household_with_everything(&db.system).await;
+        index_everything(&index).await;
+        assert!(stale(&index, Corpus::Idea).await.is_empty());
+
+        sqlx::query(
+            "UPDATE ideas SET pitch = 'Sleep all the way.', updated_at = '2026-11-14' \
+                     WHERE id = 'i1'",
+        )
+        .execute(&db.system)
+        .await
+        .unwrap();
+        let owed = stale(&index, Corpus::Idea).await;
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[0].rev.as_deref(), Some("2026-11-14"));
+    }
+
+    #[tokio::test]
     async fn an_unattributed_session_summary_is_never_surfaced() {
         let tmp = TempDir::new().unwrap();
         let db = crate::db::Database::init(tmp.path()).await.unwrap();
@@ -1658,9 +2416,41 @@ mod write_through_tests {
 
         let expected = spans[last].slice(&text).expect("span is on a boundary");
         assert_eq!(
-            hits[0].text, expected,
+            hits[0].text,
+            format!("{title}\n… {}", expected.trim_start()),
             "the resolved passage is not the bytes the chunk described"
         );
+    }
+
+    #[test]
+    fn a_later_passage_leads_with_its_headline_and_a_whole_word() {
+        let text = "Ruto and Sifuna tied at 31% (The Star, 2026-11-10)\nA new poll.\n\
+                    Up from previous figures of 24% for Ruto.";
+        let at = text.find("vious").unwrap() as i64;
+        assert_eq!(
+            passage(text, Some((at, text.len() as i64 - at))),
+            "Ruto and Sifuna tied at 31% (The Star, 2026-11-10)\n… figures of 24% for Ruto."
+        );
+        assert_eq!(
+            passage(text, Some((0, 11))),
+            "Ruto and Si",
+            "the first passage is as cut"
+        );
+        assert_eq!(passage(text, None), text);
+
+        let long = format!(
+            "On 2026-10-22, I replied: {}",
+            "ample words here ".repeat(40)
+        );
+        let at = long.len() as i64 - 30;
+        let shown = passage(&long, Some((at, 30)));
+        let (lead, rest) = shown.split_once('\n').unwrap();
+        assert!(
+            lead.starts_with("On 2026-10-22, I replied:") && lead.ends_with("…"),
+            "{lead}"
+        );
+        assert!(lead.chars().count() <= TITLE_CHARS + 1, "{lead}");
+        assert!(rest.starts_with("… "), "{rest}");
     }
 
     #[tokio::test]

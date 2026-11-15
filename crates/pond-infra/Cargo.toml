@@ -22,7 +22,8 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 hostname = { workspace = true }
 tracing = { workspace = true }
-reqwest = {workspace = true}
+# APNs speaks only HTTP/2.
+reqwest = { workspace = true, features = ["http2"] }
 jsonwebtoken = { workspace = true }
 fastembed = { workspace = true }
 # Handshake / pairing (#93): HMAC pairing proof + hashed tokens.

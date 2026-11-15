@@ -6,6 +6,7 @@
 
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
+use pond_core::mcp::domain::tool_outcome::with_outcome;
 use pond_core::shared::domain::long_task::{
     match_waits_by_name, next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact,
     ArtifactKind, ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused,
@@ -22,12 +23,13 @@ use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, Meta,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, MetaObject,
+        ProtocolVersion, RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -232,6 +234,16 @@ fn quoted(items: &[String]) -> String {
         .join(", ")
 }
 
+/// The id in `run_start`'s own "Started task {id}. ..." line.
+fn started_task_id(said: &str) -> Option<String> {
+    let id = said
+        .strip_prefix("Started task ")?
+        .split('.')
+        .next()?
+        .trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Wrap an answer or a refusal as tool success, logging the refusal.
 const REFUSAL_TRACE_CHARS: usize = 400;
 
@@ -380,10 +392,18 @@ anything you can answer now.")]
         params: Parameters<TaskStartParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("task_start");
-        Ok(answer(
-            "task_start",
-            self.run_start(&ctx.meta, params.0).await,
-        ))
+        let goal = params.0.goal.clone().unwrap_or_default();
+        let outcome = self.run_start(&ctx.meta, params.0).await;
+        let receipt = match &outcome {
+            Ok(said) => Receipt::set("task", goal, started_task_id(said)),
+            Err(_) => Receipt::not_set("task", goal, "The Pond could not start that task."),
+        };
+        let mut result = answer("task_start", outcome);
+        result.meta = Some(MetaObject(with_outcome(
+            result.meta.map(|meta| meta.0),
+            &receipt,
+        )));
+        Ok(result)
     }
 
     #[tool(description = "\
@@ -430,7 +450,10 @@ impl TasksMcpServer {
     }
 
     /// The calling turn, refused unless it is a live, identified, top-level one.
-    fn caller(&self, meta: &Meta) -> Result<(LongTaskDeps, DelegationAuthority), Refusal> {
+    fn caller(
+        &self,
+        meta: &RequestMetaObject,
+    ) -> Result<(LongTaskDeps, DelegationAuthority), Refusal> {
         let Some(deps) = self.deps() else {
             return Err(Refusal::Unavailable {
                 trace: "deps_not_installed",
@@ -458,7 +481,11 @@ impl TasksMcpServer {
         Ok((deps, authority))
     }
 
-    async fn run_start(&self, meta: &Meta, mut params: TaskStartParams) -> Result<String, Refusal> {
+    async fn run_start(
+        &self,
+        meta: &RequestMetaObject,
+        mut params: TaskStartParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         let goal = non_blank(params.goal.take())
             .or_else(|| take_alias(&mut params.extra, &GOAL_ALIASES))
@@ -529,12 +556,20 @@ impl TasksMcpServer {
         ))
     }
 
-    async fn run_status(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
+    async fn run_status(
+        &self,
+        meta: &RequestMetaObject,
+        params: TaskIdParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         status_text(&deps, authority.profile_scope(), task_id_of(params)).await
     }
 
-    async fn run_cancel(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
+    async fn run_cancel(
+        &self,
+        meta: &RequestMetaObject,
+        params: TaskIdParams,
+    ) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
         let task_id = task_id_of(params).ok_or_else(|| {
             Refusal::Malformed(
@@ -583,7 +618,18 @@ async fn status_text(
         let task = reached_task(deps, scope, &task_id).await?;
         let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
         let result = result_of(deps.repo.as_ref(), &task).await?;
-        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+        let mut said = task_summary_for_notice(&task, &steps, result.as_ref());
+        // The summary names the result; the answer is its body, which the caller came for.
+        if let Some(found) = &result {
+            if let Ok(Some(artifact)) = deps.repo.get_artifact(task.id(), &found.id).await {
+                let body: String = artifact.body().chars().take(RESULT_BODY_CHARS).collect();
+                if !body.trim().is_empty() {
+                    said.push_str("\n\nThe result:\n");
+                    said.push_str(body.trim());
+                }
+            }
+        }
+        return Ok(said);
     }
     let tasks = reached_tasks(deps, scope).await?;
     if tasks.is_empty() {
@@ -596,6 +642,9 @@ async fn status_text(
     }
     Ok(lines.join("\n"))
 }
+
+/// How much of a finished task's result its status hands the model.
+const RESULT_BODY_CHARS: usize = 6000;
 
 const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
 
@@ -799,7 +848,7 @@ fn clip(text: &str, max: usize) -> String {
 
 #[tool_handler]
 impl ServerHandler for TasksMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1071,7 +1120,7 @@ impl TaskWorkMcpServer {
     }
 
     /// The calling helper's run. The task comes from here and never from the arguments.
-    fn helper(&self, meta: &Meta) -> Result<Helper, Refusal> {
+    fn helper(&self, meta: &RequestMetaObject) -> Result<Helper, Refusal> {
         let Some(deps) = self.deps() else {
             return Err(Refusal::Unavailable {
                 trace: "deps_not_installed",
@@ -1100,7 +1149,7 @@ impl TaskWorkMcpServer {
         })
     }
 
-    async fn run_list(&self, meta: &Meta) -> Result<String, Refusal> {
+    async fn run_list(&self, meta: &RequestMetaObject) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         let artifacts = helper
             .deps
@@ -1132,7 +1181,7 @@ impl TaskWorkMcpServer {
 
     async fn run_read(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         mut params: ArtifactReadParams,
     ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
@@ -1169,7 +1218,7 @@ impl TaskWorkMcpServer {
 
     async fn run_write(
         &self,
-        meta: &Meta,
+        meta: &RequestMetaObject,
         mut params: ArtifactWriteParams,
     ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
@@ -1248,7 +1297,11 @@ impl TaskWorkMcpServer {
         ))
     }
 
-    async fn run_report(&self, meta: &Meta, params: StepReportParams) -> Result<String, Refusal> {
+    async fn run_report(
+        &self,
+        meta: &RequestMetaObject,
+        params: StepReportParams,
+    ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         if helper.binding.work == StepWork::Plan {
             return Err(Refusal::PlannerDoesNotReport);
@@ -1282,7 +1335,11 @@ impl TaskWorkMcpServer {
         ))
     }
 
-    async fn run_plan(&self, meta: &Meta, mut params: PlanWriteParams) -> Result<String, Refusal> {
+    async fn run_plan(
+        &self,
+        meta: &RequestMetaObject,
+        mut params: PlanWriteParams,
+    ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
         if helper.binding.work != StepWork::Plan {
             return Err(Refusal::NotThePlanner);
@@ -1622,7 +1679,7 @@ fn read_window(artifact: &Artifact, from: u32, asked_to: Option<u32>) -> String 
 
 #[tool_handler]
 impl ServerHandler for TaskWorkMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -1652,8 +1709,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::Duration;
 
-    fn meta_for(engine_session: &str) -> Meta {
-        let mut m = Meta::new();
+    fn meta_for(engine_session: &str) -> RequestMetaObject {
+        let mut m = RequestMetaObject::new();
         m.0.insert(
             crate::SESSION_ID_META_KEY.to_string(),
             Value::String(engine_session.to_string()),
@@ -1733,6 +1790,7 @@ mod tests {
                     task_id: task_id.to_string(),
                     scope: ProfileScope::Household,
                     work,
+                    kind: pond_core::shared::domain::long_task::LongTaskKind::General,
                 },
             );
             (
@@ -1790,7 +1848,10 @@ mod tests {
         let prime = pond.prime();
         let goal = || params::<TaskStartParams>(serde_json::json!({"goal": "compare plumbers"}));
 
-        let no_meta = prime.run_start(&Meta::new(), goal()).await.unwrap_err();
+        let no_meta = prime
+            .run_start(&RequestMetaObject::new(), goal())
+            .await
+            .unwrap_err();
         let no_turn = prime
             .run_start(&meta_for("engine-1"), goal())
             .await
@@ -2204,7 +2265,10 @@ mod tests {
         let worker = pond.worker();
         let task = pond.task(ProfileScope::Household, "compare plumbers").await;
 
-        let no_meta = worker.run_list(&Meta::new()).await.unwrap_err();
+        let no_meta = worker
+            .run_list(&RequestMetaObject::new())
+            .await
+            .unwrap_err();
         let not_a_child = worker.run_list(&meta_for("engine-x")).await.unwrap_err();
         let _unbound_child = pond.children.bind(
             "engine-orphan",

@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pond_audio::{MicHandle, MicState};
 use pond_core::models::domain::audio_device::{
-    stream_route, AudioChoice, AudioDeviceStatus, AudioDirection, ChoiceBasis, ProbeOutcome,
-    ProbedDevice,
+    stream_route, AudioChoice, AudioDevice, AudioDeviceStatus, AudioDirection, ChoiceBasis,
+    DeviceKind, ProbeOutcome, ProbedDevice,
 };
 use pond_core::models::ports::audio_devices::{AudioDeviceControl, AudioDeviceProber};
 use pond_core::models::services::voice::audio_devices::{
@@ -366,14 +366,20 @@ impl Inner {
         // Serve leaves the board's defaults to a live voice session, whose microphone choice is
         // the real one; two processes setting them would take turns overriding each other.
         // Set before retargeting so streams routed through the sound server land on the new card.
-        let sound_server = (prefs.manage_system && in_charge)
+        // A Bluetooth device is reachable only as the server's default, so it is made one even
+        // where the household keeps the board's defaults otherwise.
+        let sound_server = in_charge
             .then(|| {
+                let ours =
+                    |d: &&AudioDevice| prefs.manage_system || d.kind == DeviceKind::Bluetooth;
                 let mic = (!matches!(input.basis, ChoiceBasis::MicOff | ChoiceBasis::NoDevice))
                     .then_some(input.device.as_ref())
-                    .flatten();
-                self.selector
-                    .prober()
-                    .set_system_defaults(mic, output.device.as_ref())
+                    .flatten()
+                    .filter(ours);
+                let speaker = output.device.as_ref().filter(ours);
+                (mic.is_some() || speaker.is_some())
+                    .then(|| self.selector.prober().set_system_defaults(mic, speaker))
+                    .flatten()
             })
             .flatten();
 
@@ -1211,6 +1217,44 @@ mod tests {
         sup.stop();
         assert!(m.defaults_set.lock().unwrap().is_empty());
         assert_eq!(status.sound_server, None);
+    }
+
+    #[test]
+    fn a_pinned_bluetooth_headset_becomes_the_boards_default_even_where_the_household_keeps_them() {
+        let _g = ROUTE.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let m = machine();
+        m.outputs.lock().unwrap().push(
+            AudioDevice::new("bluez_card.B0_F0_0C_5F_3E_F6", false, DeviceKind::Bluetooth)
+                .plugged_in(),
+        );
+        m.outcomes.lock().unwrap().insert(
+            "bluez_card.B0_F0_0C_5F_3E_F6".into(),
+            ProbeOutcome::Accepting,
+        );
+        let hands_off: PrefsFn = Arc::new(|| AudioPrefs {
+            output_pin: Some("bluez_card.B0_F0_0C_5F_3E_F6".into()),
+            mic_enabled: true,
+            sound_test: true,
+            manage_system: false,
+            ..Default::default()
+        });
+        let sup = start(&m, Role::Voice, dir.path(), hands_off);
+        let status = sup.wait_ready(Duration::from_secs(5)).unwrap();
+        sup.stop();
+        assert_eq!(
+            status.output.device_id(),
+            Some("bluez_card.B0_F0_0C_5F_3E_F6")
+        );
+        assert!(
+            m.sound_tests.lock().unwrap().is_empty(),
+            "no room test for a headset"
+        );
+        assert_eq!(
+            *m.defaults_set.lock().unwrap(),
+            [(None, Some("bluez_card.B0_F0_0C_5F_3E_F6".to_string()))],
+            "only the headset, not the household's microphone"
+        );
     }
 
     #[test]

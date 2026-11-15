@@ -18,7 +18,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, Implementation, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -404,6 +404,11 @@ impl VisionMcpServer {
 
 #[tool_router]
 impl VisionMcpServer {
+    /// Every tool this server exposes, without constructing it (`tool_router()` is private).
+    pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
+        Self::tool_router().list_all()
+    }
+
     pub fn new(
         camera_storage: Arc<dyn CameraStorage + Send + Sync>,
         settings_repo: Arc<dyn SettingsRepository + Send + Sync>,
@@ -1180,7 +1185,7 @@ image attached to the message.")]
 
 #[tool_handler]
 impl ServerHandler for VisionMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(

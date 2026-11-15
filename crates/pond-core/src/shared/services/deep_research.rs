@@ -56,6 +56,7 @@ pub fn opening_events(question: &str, task_id: &str) -> [AgentStreamEvent; 2] {
             ),
             card: None,
             keep: None,
+            outcome: None,
         },
     ]
 }

@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
+use crate::user_data::domain::member_profile::About;
+
 // ── Memory classification ────────────────────────────────────────────────────
 
 /// Semantic category of a memory.
@@ -22,22 +24,109 @@ pub enum MemorySegment {
     Project,
     /// A habit, a standing way the user does things; only batch extraction can see one.
     Routine,
+    /// Facts about the world, not the member. Kept for rows filed before the profile; nothing
+    /// new is filed here.
     Knowledge,
     /// Transient context (current situation, ongoing state).
     Context,
+    /// What they eat and what their body needs: diet, allergies, health.
+    FoodHealth,
+    /// A place that matters to them.
+    Place,
+    /// A birthday or anniversary that comes round each year.
+    Date,
+    /// A standing instruction to the assistant.
+    Instruction,
 }
 
 impl MemorySegment {
+    /// Canonical segment tag.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Preference => "preference",
+            Self::Correction => "correction",
+            Self::Relationship => "relationship",
+            Self::Project => "project",
+            Self::Routine => "routine",
+            Self::Knowledge => "knowledge",
+            Self::Context => "context",
+            Self::FoodHealth => "food_health",
+            Self::Place => "place",
+            Self::Date => "date",
+            Self::Instruction => "instruction",
+        }
+    }
+
+    /// One of the canonical tags.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|s| s.as_str() == raw.trim().to_ascii_lowercase())
+            .cloned()
+    }
+
+    /// Every segment, in the order a member's profile shows them.
+    pub const ALL: [MemorySegment; 12] = [
+        Self::Instruction,
+        Self::Correction,
+        Self::Identity,
+        Self::Relationship,
+        Self::FoodHealth,
+        Self::Routine,
+        Self::Preference,
+        Self::Project,
+        Self::Place,
+        Self::Date,
+        Self::Context,
+        Self::Knowledge,
+    ];
+
+    /// Where this segment comes in a member's profile.
+    pub fn profile_rank(&self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|s| s == self)
+            .unwrap_or(Self::ALL.len())
+    }
+
+    /// The heading a person, and the model, reads this segment under.
+    pub fn heading(&self) -> &'static str {
+        match self {
+            Self::Instruction => "Standing instructions",
+            Self::Correction => "Corrections",
+            Self::Identity => "Who they are",
+            Self::Relationship => "People",
+            Self::FoodHealth => "Food and health",
+            Self::Routine => "Routines",
+            Self::Preference => "Preferences",
+            Self::Project => "Goals",
+            Self::Place => "Places",
+            Self::Date => "Dates",
+            Self::Context => "Right now",
+            Self::Knowledge => "Other",
+        }
+    }
+
+    /// The heading as the member reads it on their own page.
+    pub fn heading_to_member(&self) -> &'static str {
+        match self {
+            Self::Identity => "Who you are",
+            other => other.heading(),
+        }
+    }
+
     /// Default importance for this segment (0.0–1.0).
     pub fn default_importance(&self) -> f32 {
         match self {
-            Self::Correction => 0.9,
-            Self::Identity => 0.8,
+            Self::Correction | Self::Instruction => 0.9,
+            Self::FoodHealth => 0.85,
+            Self::Identity | Self::Date => 0.8,
             Self::Preference => 0.7,
             Self::Relationship => 0.7,
             // Below a stated preference (it's inferred), above a project (it's more durable).
             Self::Routine => 0.65,
-            Self::Project => 0.6,
+            Self::Project | Self::Place => 0.6,
             Self::Knowledge => 0.5,
             Self::Context => 0.3,
         }
@@ -45,7 +134,7 @@ impl MemorySegment {
 
     pub fn default_tier(&self) -> MemoryTier {
         match self {
-            Self::Identity => MemoryTier::Permanent,
+            Self::Identity | Self::Instruction | Self::Date => MemoryTier::Permanent,
             Self::Correction => MemoryTier::Long,
             Self::Context => MemoryTier::Short,
             _ => MemoryTier::Long,
@@ -129,6 +218,12 @@ pub struct MemoryFragment {
     /// For corrections: the wrong claim this fixes, so consolidation never reverts it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corrects: Option<String>,
+    /// What it says about its member; `None` on a row filed before the profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<About>,
+    /// When a passing fact stops being shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
 }
 
 impl MemoryFragment {
@@ -156,7 +251,18 @@ impl MemoryFragment {
             lifecycle: None,
             superseded_by: None,
             corrects: None,
+            about: None,
+            valid_until: None,
         }
+    }
+
+    /// Whether a turn may be shown this row at `now`: live and not past its time.
+    pub fn is_shown(&self, now: DateTime<Utc>) -> bool {
+        !matches!(
+            self.lifecycle,
+            Some(MemoryLifecycle::Archived | MemoryLifecycle::Merged)
+        ) && self.superseded_by.is_none()
+            && self.valid_until.is_none_or(|until| until > now)
     }
 
     /// True for user corrections, which consolidation must never prune or merge away.
@@ -204,6 +310,8 @@ impl MemoryFragment {
             lifecycle: Some(MemoryLifecycle::Active),
             superseded_by: None,
             corrects,
+            about: None,
+            valid_until: None,
         }
     }
 
@@ -237,6 +345,8 @@ impl MemoryFragment {
             lifecycle: Some(MemoryLifecycle::Active),
             superseded_by: None,
             corrects: None,
+            about: None,
+            valid_until: None,
         }
     }
 }
@@ -245,12 +355,17 @@ impl MemoryFragment {
 
 /// Shortest trimmed content, in characters, that can carry a fact.
 pub const MIN_FACT_CONTENT_LEN: usize = 8;
+/// Longest content, in characters, that is still one fact: past it a note is a paragraph of
+/// several, which cannot be filed, corrected or forgotten one at a time.
+pub const MAX_FACT_CONTENT_LEN: usize = 300;
 
 /// Why a candidate memory was refused at write time: out of context it would mislead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactDefect {
     /// Nothing left after normalisation, or too short to carry a fact.
     TooShort,
+    /// Longer than [`MAX_FACT_CONTENT_LEN`]: several facts run together.
+    TooLong,
     /// A deictic or leading pronoun with no antecedent in the sentence ("the latter city").
     UnresolvedReference,
     /// First person ("my mother"): injected into context, "my" reads as the assistant's.
@@ -269,6 +384,7 @@ impl FactDefect {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TooShort => "too short",
+            Self::TooLong => "more than one fact",
             Self::UnresolvedReference => "unresolved reference",
             Self::FirstPerson => "first person",
             Self::EchoedExample => "echoed the prompt's own example",
@@ -455,6 +571,9 @@ pub fn fact_defect(content: &str) -> Option<FactDefect> {
     let trimmed = content.trim();
     if trimmed.chars().count() < MIN_FACT_CONTENT_LEN {
         return Some(FactDefect::TooShort);
+    }
+    if trimmed.chars().count() > MAX_FACT_CONTENT_LEN {
+        return Some(FactDefect::TooLong);
     }
     let tokens = split_tokens(trimmed);
     if tokens.is_empty() {
@@ -1486,7 +1605,7 @@ mod tests {
 
     #[test]
     fn is_correction_by_corrects_field() {
-        let mut frag = MemoryFragment::from_extraction(
+        let frag = MemoryFragment::from_extraction(
             "c2".to_string(),
             None,
             "Likes tea not coffee".to_string(),
@@ -1514,6 +1633,19 @@ mod tests {
 
         assert!(frag.is_kept());
         assert_eq!(frag.decay_rate, Some(0.0));
+    }
+
+    #[test]
+    fn a_paragraph_is_refused_as_more_than_one_fact() {
+        let one = "Jerry Anyumba prefers the light to be set to a warm colour in the evening.";
+        assert_eq!(fact_defect(one), None);
+        let many = format!(
+            "Jerry Anyumba is an engineer in Nairobi. {}",
+            "He likes tea. ".repeat(25)
+        );
+        assert!(many.chars().count() > MAX_FACT_CONTENT_LEN);
+        assert_eq!(fact_defect(&many), Some(FactDefect::TooLong));
+        assert_eq!(FactDefect::TooLong.as_str(), "more than one fact");
     }
 
     #[test]

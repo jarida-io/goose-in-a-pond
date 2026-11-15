@@ -30,6 +30,9 @@ pub enum DeviceKind {
     /// A physical device opened directly.
     #[default]
     Hardware,
+    /// A Bluetooth headset or speaker. The sound server carries it, so it is reached through the
+    /// server's default route, and it is worn or carried, so no room microphone can vouch for it.
+    Bluetooth,
     /// A hardware node opened directly (ALSA `hw:`, `plughw:`): it locks the card while open, so
     /// nothing else can play or record on it meanwhile.
     Raw,
@@ -42,7 +45,7 @@ impl DeviceKind {
     fn rank(self) -> u8 {
         match self {
             Self::SoundServer => 0,
-            Self::Hardware => 1,
+            Self::Hardware | Self::Bluetooth => 1,
             Self::Raw => 2,
             Self::Virtual => 3,
         }

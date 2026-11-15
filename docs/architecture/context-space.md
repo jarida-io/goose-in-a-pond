@@ -12,6 +12,12 @@ the first draft. No code has changed. This design replaces memories, summaries, 
 suggestions and proactive review; section 3 lists what goes. It cuts across PAI-1, -2, -3, -6, -7
 and -8, so [the PAI checklist](./pai/00-checklist.md) governs every phase.
 
+**Before P1 (2026-11-14):** the `Corpus` split grew to ten corpora, adding personal details,
+messages, digests, stories, reports, notifications and ideas, each read through a source query
+rather than an item header, and a turn now carries its strong matches in `<personal-context>`.
+P1 replaces those queries with item kinds; the corpora's scope and liveness rules carry over.
+[personal-context-index.md](./personal-context-index.md) has the details.
+
 ---
 
 ## 0. Rules

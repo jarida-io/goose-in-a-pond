@@ -788,9 +788,15 @@ async fn run_once(
             let inner = Arc::downgrade(inner);
             let speech = speech.clone();
             Arc::new(move || {
-                let skip = hears && inner.upgrade().is_some_and(|inner| inner.app_active());
+                if hears {
+                    speech.release_unheld("model_hears");
+                    return true;
+                }
+                let skip = inner
+                    .upgrade()
+                    .is_some_and(|inner| inner.whisper_busy_or_active());
                 if skip {
-                    speech.release_unheld("user_active");
+                    speech.release_unheld("busy");
                 }
                 skip
             })
@@ -873,6 +879,7 @@ async fn run_once(
     .with_stdout_diagnostics(false)
     .with_event_sink(sink)
     .with_session_on_first_turn()
+    .with_surface(pond_core::user_data::domain::session::SessionSurface::Room)
     .with_voice_identity(speaker_context(&inner.deps))
     .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()))
     .with_model_hearing(hearing);

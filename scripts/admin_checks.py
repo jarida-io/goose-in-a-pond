@@ -92,6 +92,15 @@ def run():
     assert not any(name.startswith(".runtime_") for name in root), root
     print("PASS  overview, health, power, caches and the file list answer, with no credential listed")
 
+    error("GET", "/admin/reliability?days=7", 403, "admin_members_only", token=nobody)
+    report = call("GET", "/admin/reliability?days=7", token=phone)
+    assert report["days"] == 7 and {"notices", "turns", "phones", "stops", "android_push_key", "apple_push_key"} <= set(report), report
+    assert {"queued", "woken", "fetched", "fetched_within_a_minute", "shown", "opened", "spoken"} <= set(report["notices"]), report
+    # The phones the earlier sections paired signed out, and a signed-out phone's copies go with it.
+    assert report["notices"]["queued"] >= report["notices"]["fetched"] >= report["notices"]["opened"] >= 0, report
+    assert report["apple_push_key"] is False, report
+    print("PASS  the reliability report answers an unlocked member with every count it keeps")
+
     (data / "logs").mkdir(exist_ok=True)
     (data / "logs" / "admin-live.log").write_bytes(b"x" * 64)
     freed = call("DELETE", "/admin/files?path=logs%2Fadmin-live.log", token=phone)["freed_bytes"]

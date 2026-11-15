@@ -384,3 +384,20 @@ describe("buildInitialState server URL precedence", () => {
     expect(buildInitialState().serverUrl).toBe("http://192.168.1.10:4000");
   });
 });
+
+describe("reducer — schedule pop-ups", () => {
+  const running = (id: string, schedule_id = "s1") =>
+    ({ id, schedule_id, schedule_label: "News", status: "running", timestamp: 1 }) as const;
+
+  it("keeps one running pop-up per schedule: a manual run and the feed's event replace each other", () => {
+    let s: AppState = reducer(buildInitialState(), { type: "SCHEDULE_RESULT", payload: running("manual-s1") });
+    s = reducer(s, { type: "SCHEDULE_RESULT", payload: running("run-9") });
+    expect(s.scheduleToasts.map((t) => t.id)).toEqual(["run-9"]);
+    // Another schedule's run is its own.
+    s = reducer(s, { type: "SCHEDULE_RESULT", payload: running("run-10", "s2") });
+    expect(s.scheduleToasts).toHaveLength(2);
+    // How it ended replaces the running one.
+    s = reducer(s, { type: "SCHEDULE_RESULT", payload: { ...running("run-9"), status: "completed" } });
+    expect(s.scheduleToasts.map((t) => `${t.id}:${t.status}`)).toEqual(["run-9:completed", "run-10:running"]);
+  });
+});

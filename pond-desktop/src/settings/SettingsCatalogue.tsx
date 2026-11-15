@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import { Switch, Button } from "@heroui/react";
+import { Button } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import {
   Search,
   Crosshair,
@@ -28,6 +30,7 @@ import { modelLabel, rolesFor } from "../sections/models/modelsView";
 import { diffSettings, foldServerState } from "./state";
 import { parseText, summariseRetitle, textValue } from "./catalogueView";
 import { ErrorBanner, SkeletonList } from "../components/shared";
+import { FactoryResetModal } from "./FactoryResetModal";
 import {
   CATALOGUE,
   TIER_NOTE,
@@ -339,19 +342,13 @@ function EntryRow({
               }
             >
               <Switch
-                aria-label={entry.label}
-                isSelected={control.values ? value !== control.values.off : Boolean(value)}
-                isDisabled={inert}
+                label={entry.label}
+                checked={control.values ? value !== control.values.off : Boolean(value)}
+                disabled={inert}
                 onChange={(v: boolean) =>
                   onChange(entry.key, control.values ? (v ? control.values.on : control.values.off) : v)
                 }
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                </Switch.Content>
-              </Switch>
+              />
             </span>
           )}
 
@@ -489,6 +486,7 @@ export function SettingsCatalogueView({
   const [armed, setArmed] = useState(false);
   const [onboarding, setOnboarding] = useState(false);
   const [onboardErr, setOnboardErr] = useState<string | null>(null);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
 
   /** Reset on the server, then reload: `App.tsx` decides onboarding from the backend's status. */
   const startOnboarding = useCallback(async () => {
@@ -1348,7 +1346,30 @@ export function SettingsCatalogueView({
               </span>
             </div>
           </div>
+
+          <div className="scat__danger">
+            <div>
+              <b>Factory reset</b>
+              <span>
+                Erases every household member, conversation, memory, device, room, saved
+                Wi-Fi network and secret, and reopens setup. Cannot be undone.
+              </span>
+            </div>
+            <button
+              type="button"
+              className="danger-modal__btn danger-modal__btn--danger scat__dangerBtn"
+              onClick={() => setResetModalOpen(true)}
+            >
+              Factory reset…
+            </button>
+          </div>
         </>
+      )}
+      {resetModalOpen && (
+        <FactoryResetModal
+          pondName={settings.home_name ?? ""}
+          onClose={() => setResetModalOpen(false)}
+        />
       )}
     </div>
   );

@@ -83,8 +83,10 @@ implements the ports and runs the transport. `pond-server` wires it.
 - **When.** While the pond is unclaimed, or while it has no usable network (no IPv4 address on any
   interface that is not loopback, link-local, a tunnel or a container bridge), checked every 10 s
   (`pond_core::network::services::advertising::should_advertise`, applied by
-  `pond_connect::advertising`), and only while `ble_setup_enabled` is on. Otherwise it does not
-  advertise. Stopping advertising never ends an open session. The setup window after a lost
+  `pond_connect::advertising`), and only while `ble_setup_enabled` is on. A claimed pond on a
+  network also advertises while its [pairing lock](../api.md#the-pairing-lock) holds, so a phone
+  nearby can find it and ask to be let in; `hello.claimed` tells that phone it is asking, not
+  setting a pond up. Otherwise it does not advertise. Stopping advertising never ends an open session. The setup window after a lost
   network is P6.
 - **A phone holding a card** scans for exactly `…4e2379dd<id>`: CoreBluetooth filters on it in the
   background too, and Android's `ScanFilter.setServiceUuid` takes it as is. **A phone browsing**
@@ -147,7 +149,7 @@ own connection started; any other `challenge_id` is `unknown_challenge` and spen
 | `hello` | none | `protocol: 1`, `pond_id` (the discriminator), `claimed`, `pin` (`sha256/...`), `capabilities` (subset of `wifi_scan`, `wifi_join`, `spoken_code`) |
 | `spoken_code` | none | as `POST /handshake/spoken-code`: `spoken`, `expires_at`; or `spoken_code_limited`, `spoken_codes_disabled`, `announcer_unavailable`. The code is never sent. |
 | `pake_init` | as `POST /handshake/pake/init`: `credential` (`setup`, `pairing`, or here only `device`), `client_id`, `client_type`, `client_version`, `channel_binding` (the `pin` from `hello`), `client_nonce` | as the HTTPS answer: `challenge_id`, `challenge`, `expires_at`, `suite`, `share`; or its refusals, plus `device_cooling` with `retry_after` |
-| `pake_verify` | as `POST /handshake/pake/verify`: `challenge_id`, `device_name`, `share`, `confirm` | `ok: true`, `accepted: true`, `server_proof` (hex) and `sealed`; or `ok: false`, `accepted: false`, `error` and `rejection_reason` (the same code; for a device run, `invalid_or_expired_refresh` too) |
+| `pake_verify` | as `POST /handshake/pake/verify`: `challenge_id`, `device_name`, `share`, `confirm` | `ok: true`, `accepted: true`, `server_proof` (hex) and `sealed`; or `ok: false`, `accepted: false`, `error` and `rejection_reason` (the same code; for a device run, `invalid_or_expired_refresh` too). A phone the [pairing lock](../api.md#the-pairing-lock) holds gets `approval_required` with `server_proof` and a `sealed` `{pairing_request}` under `k_p2c` 0, and the session stays in its clear phase: it claims over the home network |
 
 The exchange is the HTTPS one exactly: the same channel identifiers (`goose-pair-cpace-v1` or
 `goose-setup-cpace-v1`, with the pond's pin and the `client_id`), the same claim latch, guess

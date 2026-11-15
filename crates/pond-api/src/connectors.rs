@@ -236,11 +236,20 @@ fn missing(names: &[&str]) -> Failure {
 }
 
 /// Switches settings through the settings route, so its checks and side effects all run.
-async fn switch(state: &Arc<AppState>, names: &[String], on: bool) -> Result<(), Failure> {
+async fn switch(
+    state: &Arc<AppState>,
+    principal: &Caller,
+    names: &[String],
+    on: bool,
+) -> Result<(), Failure> {
     let patch: Map<String, Value> = names.iter().map(|n| (n.clone(), json!(on))).collect();
-    crate::routes::update_settings(State(state.clone()), Ok(Json(Value::Object(patch))))
-        .await
-        .map(|_| ())
+    crate::routes::update_settings(
+        State(state.clone()),
+        principal.clone(),
+        Ok(Json(Value::Object(patch))),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// `POST /me/connectors/{id}/connect` `{"fields": {...}}` → Connector. A sign-in that needs a
@@ -270,11 +279,11 @@ async fn connect(
             _,
         ) => {
             also.insert(0, setting);
-            switch(&state, &also, true).await?;
+            switch(&state, &principal, &also, true).await?;
             id.clone()
         }
         (ConnectVia::Matter { setting }, _) => {
-            switch(&state, &[setting], true).await?;
+            switch(&state, &principal, &[setting], true).await?;
             id.clone()
         }
         (ConnectVia::ContextSource { source_kind }, None) => {
@@ -417,7 +426,7 @@ async fn disconnect(
     };
     let shown_id = match (via, instance) {
         (ConnectVia::Setting { setting, .. }, _) | (ConnectVia::Matter { setting }, _) => {
-            switch(&state, &[setting], false).await?;
+            switch(&state, &principal, &[setting], false).await?;
             id.clone()
         }
         (ConnectVia::ContextSource { source_kind }, Some(source)) => {

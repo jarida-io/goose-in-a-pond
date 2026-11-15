@@ -25,6 +25,7 @@ rules when matching events cross the event bus.
                          Webhook       HTTP POST through the egress gate
                          SensorTrigger each of the rule's actions
                          Routine       each device action in order, no agent
+                         MemberReminder agent.chat() as the member, reply to their own phones
                                                  │
                        ScheduleResultEvent broadcast ──> SSE /api/v1/schedules/events
                                                     └──> push notifications
@@ -33,8 +34,10 @@ rules when matching events cross the event bus.
 ## Domain types (`pond-core/src/user_data/domain/schedule.rs`)
 
 - **`TaskKind`**: `AgentPrompt { prompt }`, `Webhook { webhook_url }`,
-  `SensorTrigger(SensorTriggerSpec)`, or `Routine { actions }`. `TaskKind::is_event_triggered()` is true for a sensor rule,
-  which gets no timer; the rules engine fires it through `run_now`.
+  `SensorTrigger(SensorTriggerSpec)`, `Routine { actions }`, or
+  `MemberReminder { profile_id, prompt }`. `TaskKind::is_event_triggered()` is true for a sensor
+  rule, which gets no timer; the rules engine fires it through `run_now`. `TaskKind::member()` names
+  a private reminder's member, and `ScheduleResultEvent::for_member` carries it on every run event.
 - **`SensorTriggerSpec`**: `source` (`TriggerSource`: kind `Sensor` / `Camera` / `Device`, optional
   `device_id` and `signal`; unset fields match anything), `condition` (`TriggerCondition`: an
   optional numeric comparison `op` + `value`, and an optional `after` / `before` local-time window
@@ -204,12 +207,7 @@ The decision reads `last_run`, so a schedule that asks writes it to disk as each
    - **Webhook**: `POST` to the URL, checked and recorded by the egress gate
      (`EgressPurpose::Schedules`); a non-2xx status fails the run.
    - **SensorTrigger**: runs every action; the run fails only when no action succeeded.
-   - **Routine**: runs every action in order through device control, never the agent, and
-     carries on past a failed one. The run fails if any action failed: its error names what did
-     not run (`did not run: water-heater-plug`) and its result still lists every action's
-     outcome (`ActionsFailed`, which `run_outcome` unpacks). The store refuses a routine with no
-     actions or with an `agent_prompt` action (`routine_rejection`), on create and on update.
-5. `JsonRunHistory::record_finish()` records the result or error and duration, and a
+b5. `JsonRunHistory::record_finish()` records the result or error and duration, and a
    `Completed` / `Failed` event is broadcast.
 6. The task is marked not running.
 
@@ -222,6 +220,26 @@ An `AgentPrompt` result is spoken aloud when the pond has voice output,
 `unprompted_speech_enabled` is on, and the current time, in the household's `timezone` setting,
 is outside `quiet_hours_start` to `quiet_hours_end` (`AgentScheduleExecutor::speakable_now`).
 There is no per-member presence check.
+
+### A member's reminder
+
+A reminder set with `private` (on `set_timer` or `create_schedule`) is a
+`MemberReminder` for the person speaking, resolved from the call's session as the travel tools
+resolve it. A speaker who can't be told apart gets nothing set and is asked whether it may be a
+household reminder. When it fires, `AgentScheduleExecutor` runs the prompt with
+`ProfileScope::Owner(member)` and without voice, sends the reply to that member's own devices
+through `MemberNotifier` (category `action_required`), and, under the same gate as above, says
+only "Grace, you have a reminder. I've sent it to your phone." Nothing that reaches the household
+carries what it says:
+
+- the run's result, which the run history, the SSE stream and the dashboard show, is "Sent to
+  Grace's phone", and an undelivered reminder is a failed run that does not quote it;
+- the household's "task finished" notice is skipped (`ResultSilence::MembersOwn`);
+- `GET /schedules`, `GET /schedules/upcoming`, the `PUT` answer, `list_schedules` and the upcoming
+  block in the system prompt show its label and time but not its prompt.
+
+Editing its prompt keeps it the member's (`TaskKind::with_prompt`). `POST /schedules` refuses a
+`member_reminder` kind, because that route can't tell who is asking.
 
 ### A turn with no reply
 
@@ -287,19 +305,31 @@ There is no MCP tool for rules.
 
 | Tool | Description |
 |------|-------------|
-| `list_schedules` | Every schedule with cron, timezone, kind and status; rules are summarised |
-| `set_timer` | One-shot after a natural-language delay; deletes itself after firing |
-| `create_schedule` | Create a recurring `AgentPrompt` schedule; with an existing `id`, update it instead (omitted fields keep their value) |
-| `schedule_action` | `delete`, `pause`, `resume` or `run_now` by id |
-| `world_clock` | Current time in one or more IANA zones; defaults to the household's |
+| `list_schedules` | Every schedule with when it runs in words, timezone, kind and status; rules are summarised, and a member's private reminder shows only as "a private reminder" |
+| `set_timer` | One-shot after a natural-language delay; deletes itself after firing. `private` makes it the speaker's own reminder |
+| `create_schedule` | Create a recurring `AgentPrompt` schedule from `when` in plain words, or with `private` the speaker's own reminder; with an existing schedule's name or id as `id`, change it instead (omitted fields keep their value; only its member may change a private reminder) |
+| `schedule_action` | `delete`, `pause`, `resume` or `run_now`, by name or id; only its member may act on a private reminder |
+| `world_clock` | Current time in one or more places (cities, countries or zone names); defaults to the household's |
 
-`create_schedule` resolves the cron in this order: parameters generated by the optional tool-model
-specialist (only when the `tool_model` setting names one, in builds with `local-inference`); the
-model's `cron` argument, if it is six fields of digits and `* / - ,`; then
-`parse_cron_from_message` over the last user message ("every morning at 9" becomes
-`0 0 9 * * *`). If none yields a cron, the tool asks the model to retry with the field order
-rather than inventing a time. On update, a `cron` argument is first read as natural language,
-then as a literal.
+The model never writes a cron. `create_schedule` takes `when` as a person says it ("every weekday
+at 7am", "every Monday and Thursday at 18:00", "every 2 hours", "on the 1st of every month at
+9am") and `pond_core::shared::domain::when_repeats` turns it into the stored six-field cron and
+back into words for every reply and listing. Words that name no repeat fall back to the last user
+message; if that names none either, or the repeat has no time of day, or an hour from 1 to 7 has
+neither am nor pm, nothing is scheduled and the reply says what to ask the person. A five- or
+six-field cron sent as `when` (or as the old `cron` argument) is still accepted.
+
+Reminders are not schedules. On the nano the model sent "remind me to call the garage tomorrow at
+6pm" to `set_timer` and "every Monday and Thursday remind me to water the plants" to
+`create_schedule`, never to the to-do tool, which was then called `add_todo`. It is now
+`add_reminder`, each of the three descriptions names the other two, and `set_timer` given a time of
+day instead of a length of time files the reminder itself rather than refusing.
+
+The same readers serve the other tools: `add_reminder` takes `when` as a moment ("tomorrow at 6pm")
+or a repeat ("every weekday at 18:00"), `get_sensor_history` takes `since` and `until` as "yesterday"
+or "6 hours ago" (`when_said::earlier_from_words`) and refuses an end it cannot place instead of
+returning all history, and `get_weather_forecast` takes `date` as a weekday name
+(`when_said::day_from_words`).
 
 Upcoming schedules are not injected into turn context; the model calls `list_schedules`.
 

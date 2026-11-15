@@ -269,6 +269,7 @@ fn as_window_extraction(raw: &str) -> WindowExtraction {
         extraction.memories.push(ExtractedMemory {
             note: content.to_string(),
             kind,
+            about: None,
         });
     }
     extraction

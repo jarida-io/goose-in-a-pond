@@ -8,6 +8,7 @@
 
 use crate::mcp::domain::tool_group::{
     group_of_tool, groups_denied_to_guests, groups_denied_to_subagents, HOUSEHOLD_READ_TOOLS,
+    SCREEN_ONLY_TOOLS,
 };
 #[cfg(test)]
 use crate::mcp::domain::tool_group::{
@@ -911,9 +912,10 @@ impl TaskSpec {
     }
 
     /// May the child call this fully-qualified tool?
-    /// Stricter than `filter_tools_by_groups`: unprefixed and user-added MCP tools are denied.
+    /// Stricter than `filter_tools_by_groups`: unprefixed and user-added MCP tools are denied, and
+    /// so is a screen-only tool, since nobody sees a child's conversation.
     pub fn grants_tool(&self, tool_name: &str) -> bool {
-        if self.withheld.contains(tool_name) {
+        if self.withheld.contains(tool_name) || SCREEN_ONLY_TOOLS.contains(&tool_name) {
             return false;
         }
         match group_of_tool(tool_name) {
@@ -1197,6 +1199,27 @@ mod depth_tests {
             .withholding(["giap-weather__get_forecast"]);
         assert!(!spec.grants_tool("giap-weather__get_forecast"));
         assert!(spec.grants_tool("giap-weather__get_current_weather"));
+    }
+
+    #[test]
+    fn a_helper_is_never_granted_a_tool_whose_result_is_for_a_screen() {
+        let knowledge: BTreeSet<String> = ["giap-knowledge".to_string()].into_iter().collect();
+        let role = AgentRole::new(
+            "researcher",
+            "Answer the question and stop.",
+            knowledge.clone(),
+            RolePersonalData::Inherit,
+            3,
+            0.4,
+        )
+        .unwrap();
+        let spec = DelegationAuthority::root("s1", ProfileScope::Household, knowledge)
+            .delegate(&role, request("researcher", "go"))
+            .unwrap();
+        assert!(spec.grants_tool("giap-knowledge__search_web"));
+        for &tool in SCREEN_ONLY_TOOLS {
+            assert!(!spec.grants_tool(tool), "{tool}");
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { useConnections } from "./useConnections";
+import { PairingLockPanel } from "./PairingLockPanel";
 import { signalBars, signalLabel, describeBluetooth, describeEthernet, describeSetup } from "./connectionsView";
 import "./network.css";
 
@@ -179,6 +180,7 @@ export function PairingStatus({ variant }: { variant: Variant }) {
           <span className="net__line">The code stays on the card and is never shown here.</span>
         </div>
       </div>
+      <PairingLockPanel variant={variant} />
     </div>
   );
 }

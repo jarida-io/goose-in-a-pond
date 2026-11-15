@@ -218,7 +218,7 @@ curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/api/v1/onboard/complete"
 say "API checks"
 RC=0
 if [ -f scripts/live_checks.py ]; then
-  POND_DATA_DIR="$DATA_DIR" python3 scripts/live_checks.py || RC=$?
+  POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/live_checks.py || RC=$?
 else
   echo "scripts/live_checks.py not present; skipping the assertion suite"
 fi
@@ -408,6 +408,11 @@ if [ "$AUTH_OK" -eq 1 ]; then
 
   # Developer mode: refused on a home Pond until `pond-server test-pond on` marks this running pond.
   if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/developer_checks.py; then
+    RC=1
+  fi
+
+  # The pairing lock: a phone waits for the main member's yes, or lets itself in with the PIN.
+  if ! POND_DATA_DIR="$AUTH_DIR" POND_SERVER_BIN="$BIN" python3 scripts/pairing_lock_checks.py; then
     RC=1
   fi
 

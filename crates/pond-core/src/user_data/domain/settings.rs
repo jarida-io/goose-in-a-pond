@@ -249,6 +249,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_voice_room_enabled")]
     pub voice_room_enabled: bool,
 
+    /// A page that only a browser can show is read with a headless browser, when the pond
+    /// finds one and has the memory free.
+    #[serde(default = "Settings::default_browser_rendering_enabled")]
+    pub browser_rendering_enabled: bool,
+
     /// Suggestor ids muted on Home; per kind, as a derived suggestion has no durable id.
     #[serde(default)]
     pub suggestions_muted: Vec<String>,
@@ -275,6 +280,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_voice_thinking_tone_enabled")]
     pub voice_thinking_tone_enabled: bool,
 
+    /// Long speech is made on the graphics processor where the host has one set up and memory
+    /// allows; short replies are made on the CPU either way.
+    #[serde(default = "Settings::default_voice_tts_gpu_enabled")]
+    pub voice_tts_gpu_enabled: bool,
+
     /// Microphone the household pinned, by the name the system gives it; empty picks one that
     /// works. A pin that is unplugged or broken gives way until it is back.
     #[serde(default)]
@@ -285,12 +295,14 @@ pub struct Settings {
     pub audio_output_device: String,
 
     /// Chooses the speaker and microphone by sound: each choice plays a short soft test sound
-    /// and keeps the first pair where the microphone hears it. Off, devices are checked silently.
+    /// and keeps the first pair where the microphone hears it. Off, devices are checked silently,
+    /// as a connected Bluetooth headset always is.
     #[serde(default = "Settings::default_audio_sound_test")]
     pub audio_sound_test: bool,
 
     /// On a Linux board, makes the chosen speaker and microphone the sound server's defaults,
     /// unmuted, and raises a level too low for the test sound to be heard. A Mac is left alone.
+    /// A chosen Bluetooth headset becomes the default either way: it is reachable no other way.
     #[serde(default = "Settings::default_audio_manage_system")]
     pub audio_manage_system: bool,
 
@@ -611,6 +623,26 @@ pub struct Settings {
     #[serde(default = "Settings::default_system_notices_enabled")]
     pub system_notices_enabled: bool,
 
+    /// In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.
+    #[serde(default = "Settings::default_lone_voice_sets_reminders")]
+    pub lone_voice_sets_reminders: bool,
+
+    /// A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.
+    #[serde(default = "Settings::default_unseen_phone_remove_days")]
+    pub unseen_phone_remove_days: u32,
+
+    /// A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.
+    #[serde(default = "Settings::default_unseen_phone_skip_days")]
+    pub unseen_phone_skip_days: u32,
+
+    /// When no phone fetches a reminder within five minutes, the Pond says it once in the room, outside quiet hours.
+    #[serde(default = "Settings::default_speak_unfetched_reminders")]
+    pub speak_unfetched_reminders: bool,
+
+    /// In quiet hours, alerts and reminders set for that time still arrive; everything else waits for one notice when quiet hours end.
+    #[serde(default = "Settings::default_notices_wait_in_quiet_hours")]
+    pub notices_wait_in_quiet_hours: bool,
+
     // ── Memory tuning ────────────────────────────────────────────────────────
     /// Base decay half-life; each memory's is `base * (1 + importance)`.
     #[serde(default = "Settings::default_memory_decay_base_half_life_days")]
@@ -857,6 +889,7 @@ impl Default for Settings {
             voice_wake_word: Self::default_wake_word(),
             voice_wake_detector: Self::default_wake_detector(),
             voice_room_enabled: Self::default_voice_room_enabled(),
+            browser_rendering_enabled: Self::default_browser_rendering_enabled(),
             voice_kws_energy_threshold: Self::default_kws_energy_threshold(),
             voice_kws_post_trigger_silence_ms: Self::default_kws_post_trigger_silence_ms(),
             voice_kws_cooldown_ms: Self::default_kws_cooldown_ms(),
@@ -867,6 +900,7 @@ impl Default for Settings {
             voice_tts_quality: Self::default_tts_quality(),
             vad_backend: Self::default_vad_backend(),
             voice_thinking_tone_enabled: Self::default_voice_thinking_tone_enabled(),
+            voice_tts_gpu_enabled: Self::default_voice_tts_gpu_enabled(),
             audio_input_device: String::new(),
             audio_output_device: String::new(),
             audio_sound_test: Self::default_audio_sound_test(),
@@ -945,6 +979,11 @@ impl Default for Settings {
             memory_graph_enabled: false,
             schedule_result_notify: Self::default_schedule_result_notify(),
             system_notices_enabled: Self::default_system_notices_enabled(),
+            lone_voice_sets_reminders: Self::default_lone_voice_sets_reminders(),
+            unseen_phone_remove_days: Self::default_unseen_phone_remove_days(),
+            unseen_phone_skip_days: Self::default_unseen_phone_skip_days(),
+            speak_unfetched_reminders: Self::default_speak_unfetched_reminders(),
+            notices_wait_in_quiet_hours: Self::default_notices_wait_in_quiet_hours(),
             memory_decay_base_half_life_days: Self::default_memory_decay_base_half_life_days(),
             memory_decay_beta: Self::default_memory_decay_beta(),
             memory_prune_threshold: Self::default_memory_prune_threshold(),
@@ -990,12 +1029,12 @@ impl Default for Settings {
             quiet_hours_start: Self::default_quiet_hours_start(),
             quiet_hours_end: Self::default_quiet_hours_end(),
             unprompted_speech_categories: Self::default_unprompted_speech_categories(),
-            proactive_review_enabled: false,
+            proactive_review_enabled: Self::default_proactive_review_enabled(),
             long_tasks_enabled: Self::default_long_tasks_enabled(),
             agent_activations_enabled: Self::default_agent_activations_enabled(),
             agent_prefill_retention_days: Self::default_agent_prefill_retention_days(),
             context_ingest_enabled: false,
-            ext_context_enabled: false,
+            ext_context_enabled: true,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
             ble_setup_enabled: Self::default_ble_setup_enabled(),
         }
@@ -1042,6 +1081,10 @@ impl Settings {
     fn default_voice_room_enabled() -> bool {
         factory_defaults::boolean("voice_room_enabled", true)
     }
+    /// On: it does nothing until a page needs it, a browser is there and memory is free.
+    fn default_browser_rendering_enabled() -> bool {
+        factory_defaults::boolean("browser_rendering_enabled", true)
+    }
     fn default_kws_energy_threshold() -> f32 {
         factory_defaults::f32("kws_energy_threshold", 0.003)
     }
@@ -1070,6 +1113,9 @@ impl Settings {
     }
     fn default_voice_thinking_tone_enabled() -> bool {
         factory_defaults::boolean("voice_thinking_tone_enabled", true)
+    }
+    fn default_voice_tts_gpu_enabled() -> bool {
+        factory_defaults::boolean("voice_tts_gpu_enabled", true)
     }
     /// On: a speaker that takes audio and makes no sound is only caught by listening for it.
     fn default_audio_sound_test() -> bool {
@@ -1317,6 +1363,21 @@ impl Settings {
     fn default_schedule_result_notify() -> bool {
         factory_defaults::boolean("schedule_result_notify", true)
     }
+    fn default_notices_wait_in_quiet_hours() -> bool {
+        factory_defaults::boolean("notices_wait_in_quiet_hours", true)
+    }
+    fn default_speak_unfetched_reminders() -> bool {
+        factory_defaults::boolean("speak_unfetched_reminders", true)
+    }
+    fn default_unseen_phone_skip_days() -> u32 {
+        factory_defaults::u32("unseen_phone_skip_days", 14)
+    }
+    fn default_unseen_phone_remove_days() -> u32 {
+        factory_defaults::u32("unseen_phone_remove_days", 30)
+    }
+    fn default_lone_voice_sets_reminders() -> bool {
+        factory_defaults::boolean("lone_voice_sets_reminders", true)
+    }
     fn default_system_notices_enabled() -> bool {
         factory_defaults::boolean("system_notices_enabled", true)
     }
@@ -1454,7 +1515,7 @@ impl Settings {
     }
 
     fn default_proactive_review_enabled() -> bool {
-        factory_defaults::boolean("proactive_review_enabled", false)
+        factory_defaults::boolean("proactive_review_enabled", true)
     }
 
     fn default_long_tasks_enabled() -> bool {
@@ -1482,7 +1543,7 @@ impl Settings {
     }
 
     fn default_ext_context_enabled() -> bool {
-        factory_defaults::boolean("ext_context_enabled", false)
+        factory_defaults::boolean("ext_context_enabled", true)
     }
 }
 
@@ -2255,6 +2316,11 @@ mod tests {
             "schedule_max_runs_per_task",
             "schedule_result_notify",
             "system_notices_enabled",
+            "lone_voice_sets_reminders",
+            "unseen_phone_remove_days",
+            "unseen_phone_skip_days",
+            "speak_unfetched_reminders",
+            "notices_wait_in_quiet_hours",
             "session_titling_enabled",
             "reasoning_effort",
             "show_thinking",
@@ -2286,6 +2352,7 @@ mod tests {
             "voice_kws_post_trigger_silence_ms",
             "voice_recording_duration_secs",
             "voice_thinking_tone_enabled",
+            "voice_tts_gpu_enabled",
             // The Voice hub view's and the catalogue's audio device panel.
             "audio_input_device",
             "audio_output_device",
@@ -2300,6 +2367,8 @@ mod tests {
             // The phone's Voice agent page and the desktop catalogue's Listening group; it also
             // answers `PUT /voice/room`.
             "voice_room_enabled",
+            // The desktop catalogue's Web group; applied at once by `PUT /settings`.
+            "browser_rendering_enabled",
             "weather_enabled",
             "weather_latitude",
             "weather_location_name",
@@ -2450,7 +2519,6 @@ mod tests {
 
     /// Only these `ext_*` toggles may ship off, each for the reason given here:
     /// - `ext_orchestrator_enabled`: consent to autonomous `GooseMode::Auto` agents.
-    /// - `ext_context_enabled`: consent, and two tool schemas in every turn's prompt.
     /// - `ext_travel_enabled`: three tool schemas per prompt, place names leave the pond, and it
     ///   lets members book rides.
     #[test]
@@ -2467,16 +2535,10 @@ mod tests {
         off.sort_unstable();
         assert_eq!(
             off,
-            vec![
-                "ext_context_enabled",
-                "ext_orchestrator_enabled",
-                "ext_travel_enabled"
-            ],
+            vec!["ext_orchestrator_enabled", "ext_travel_enabled"],
             "the set of extension toggles that ship OFF changed. Adding one is a deliberate \
              decision and belongs in this test's doc comment with its reason; losing \
-             `ext_orchestrator_enabled` means delegation is now on by default on every install, \
-             and losing `ext_context_enabled` means two personal-context tools are in every \
-             turn's prompt on every install"
+             `ext_orchestrator_enabled` means delegation is now on by default on every install"
         );
     }
 }

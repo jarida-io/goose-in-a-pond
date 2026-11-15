@@ -472,7 +472,7 @@ impl Runner {
             ),
         };
         let outcome = match self.deps.members.notify_member(member, notification).await {
-            MemberDelivery::Reached(devices) => format!("reached {}", devices.len()),
+            MemberDelivery::Reached(devices) => format!("queued for {}", devices.len()),
             MemberDelivery::NoPhone => "no_phone".to_string(),
             MemberDelivery::Failed(_) => "failed".to_string(),
         };

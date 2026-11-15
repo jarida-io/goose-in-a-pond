@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import { Switch } from "../components/Switch";
 import { Button, Separator } from "@heroui/react";
 import { Plus, Trash2, Play, Pencil, CalendarClock, ChevronDown, ChevronUp, Clock, List, Calendar, Repeat } from "lucide-react";
 import { api } from "../api/PondApiClient";
@@ -99,6 +100,9 @@ const PROMPT_EXAMPLES: Record<string, string> = {
   "Sensor check":         "Check all sensor readings and report any anomalies.",
   "Custom":               "",
 };
+
+const RUN_CHECK_EVERY_MS = 15_000;
+const RUN_CHECK_GRACE_MS = 20_000;
 
 export function Schedules() {
   const state = useAppState();
@@ -236,9 +240,20 @@ export function Schedules() {
   // Run history per schedule (expanded state + cached runs)
   const [expandedRuns, setExpandedRuns] = useState<string | null>(null);
   const [runsCache, setRunsCache]       = useState<Record<string, ScheduleRun[]>>({});
+  // Read by the run-result effect, which must not re-run when a history opens or closes.
+  const expandedRunsRef = useRef(expandedRuns);
+  expandedRunsRef.current = expandedRuns;
+  const fetchRunsRef = useRef<(id: string) => Promise<void>>(async () => {});
+  /** Per schedule: its history is being read, or why the last read failed. */
+  const [runsLoading, setRunsLoading]   = useState<Record<string, boolean>>({});
+  const [runsError, setRunsError]       = useState<Record<string, string | null>>({});
 
-  function load() {
-    setLoading(true);
+  /**
+   * Reads the schedules. Only the first read shows the placeholders: a refresh after a run keeps
+   * the cards on screen and swaps in the new list when it arrives, so they never blink out.
+   */
+  function load(quiet = false) {
+    if (!quiet) setLoading(true);
     api
       .listSchedules()
       .then(setSchedules)
@@ -252,9 +267,11 @@ export function Schedules() {
 
   // Track running schedules and refresh on completion via global SSE listener.
   const latestScheduleResult = state.latestScheduleResult;
+  const runningSince = useRef(new Map<string, number>());
   useEffect(() => {
     if (!latestScheduleResult) return;
     if (latestScheduleResult.status === "running") {
+      runningSince.current.set(latestScheduleResult.schedule_id, Date.now());
       setRunningIds((prev) => {
         const next = new Set(prev);
         next.add(latestScheduleResult.schedule_id);
@@ -266,10 +283,43 @@ export function Schedules() {
         next.delete(latestScheduleResult.schedule_id);
         return next;
       });
-      // Refresh schedule list when a run completes to update last_run
-      load();
+      // Refresh the list quietly when a run completes, to update last_run, and the open history.
+      load(true);
+      if (expandedRunsRef.current === latestScheduleResult.schedule_id) {
+        void fetchRunsRef.current(latestScheduleResult.schedule_id);
+      }
     }
   }, [latestScheduleResult]);
+
+  // The feed can miss a run's end (a reconnect, a Pond restart), so a card that stays running
+  // asks the run history too. The grace period lets a just-started run record itself first.
+  useEffect(() => {
+    if (runningIds.size === 0) return;
+    const timer = setInterval(() => {
+      runningIds.forEach((id) => {
+        if (Date.now() - (runningSince.current.get(id) ?? 0) < RUN_CHECK_GRACE_MS) return;
+        void api
+          .getScheduleRuns(id, 1)
+          .then(([latest]) => {
+            if (!latest || latest.status === "running") return;
+            const name = schedules.find((x) => x.id === id)?.name ?? id;
+            dispatch({
+              type: "SCHEDULE_RESULT",
+              payload: {
+                id: latest.id,
+                schedule_id: id,
+                schedule_label: name,
+                status: latest.status === "failed" ? "failed" : "completed",
+                error: latest.error,
+                timestamp: Date.now(),
+              },
+            });
+          })
+          .catch(() => {});
+      });
+    }, RUN_CHECK_EVERY_MS);
+    return () => clearInterval(timer);
+  }, [runningIds, schedules, dispatch]);
 
   function flashMsg(msg: string, isError = false) {
     if (isError) {
@@ -406,11 +456,9 @@ export function Schedules() {
       payload: { id: `manual-${s.id}`, schedule_id: s.id, schedule_label: s.name, status: "running", timestamp: Date.now() },
     });
     try {
+      // 202: the run has started, not finished. It stays "running" until the Pond's schedule
+      // feed reports how it ended, which replaces this card.
       await api.runScheduleNow(s.id);
-      dispatch({
-        type: "SCHEDULE_RESULT",
-        payload: { id: `manual-${s.id}`, schedule_id: s.id, schedule_label: s.name, status: "completed", result: "Schedule triggered successfully", timestamp: Date.now() },
-      });
     } catch (e) {
       dispatch({
         type: "SCHEDULE_RESULT",
@@ -419,19 +467,31 @@ export function Schedules() {
     }
   }
 
+  /** Reads a schedule's latest runs. A failure is kept and shown, never shown as "no runs". */
+  const fetchRuns = useCallback(async (id: string) => {
+    setRunsLoading((prev) => ({ ...prev, [id]: true }));
+    try {
+      const runs = await api.getScheduleRuns(id, 5);
+      setRunsCache((prev) => ({ ...prev, [id]: runs }));
+      setRunsError((prev) => ({ ...prev, [id]: null }));
+    } catch (e) {
+      console.warn("[schedules] history could not be read", { schedule: id, error: String(e) });
+      setRunsError((prev) => ({ ...prev, [id]: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setRunsLoading((prev) => ({ ...prev, [id]: false }));
+    }
+  }, []);
+
+  fetchRunsRef.current = fetchRuns;
+
   const toggleRuns = useCallback(async (id: string) => {
     if (expandedRuns === id) {
       setExpandedRuns(null);
       return;
     }
     setExpandedRuns(id);
-    try {
-      const runs = await api.getScheduleRuns(id, 5);
-      setRunsCache((prev) => ({ ...prev, [id]: runs }));
-    } catch {
-      setRunsCache((prev) => ({ ...prev, [id]: [] }));
-    }
-  }, [expandedRuns]);
+    await fetchRuns(id);
+  }, [expandedRuns, fetchRuns]);
 
   function handleExampleChange(key: string) {
     setExampleKey(key);
@@ -884,16 +944,12 @@ export function Schedules() {
                       {s.timezone && s.timezone !== "UTC" && ` · ${s.timezone}`}
                     </div>
                   </div>
-                  <label className="toggle-wrap" aria-label={s.enabled ? "Pause schedule" : "Resume schedule"}>
-                    <input
-                      type="checkbox"
-                      checked={s.enabled}
-                      disabled={!state.serverOnline}
-                      onChange={() => handleToggle(s)}
-                    />
-                    <span className="toggle-track" />
-                    <span className="toggle-thumb" />
-                  </label>
+                  <Switch
+                    checked={s.enabled}
+                    label={s.enabled ? "Pause schedule" : "Resume schedule"}
+                    disabled={!state.serverOnline}
+                    onChange={() => handleToggle(s)}
+                  />
                 </div>
 
                 {/* Chips: prompt snippet + status */}
@@ -962,8 +1018,17 @@ export function Schedules() {
                         ))}
                       </div>
                     )}
-                    {(runsCache[s.id] ?? []).length === 0 ? (
-                      <span className="sched-history__empty">No runs yet.</span>
+                    {runsError[s.id] ? (
+                      <span className="sched-history__empty sched-history__empty--error" role="alert">
+                        {i18n.t("schedules.history.failed", { reason: runsError[s.id] })}{" "}
+                        <button type="button" className="sched-history__retry" onClick={() => void fetchRuns(s.id)}>
+                          {i18n.t("schedules.history.retry")}
+                        </button>
+                      </span>
+                    ) : runsCache[s.id] === undefined || (runsLoading[s.id] && (runsCache[s.id] ?? []).length === 0) ? (
+                      <span className="sched-history__empty">{i18n.t("schedules.history.loading")}</span>
+                    ) : (runsCache[s.id] ?? []).length === 0 ? (
+                      <span className="sched-history__empty">{i18n.t("schedules.history.none")}</span>
                     ) : (
                       (runsCache[s.id] ?? []).map((r) => (
                         <div key={r.id} className="sched-run-row">

@@ -118,6 +118,19 @@ impl WifiConnections {
             }
         }
     }
+
+    /// Deletes every saved network (factory reset); unlike [`Self::forget`] this always drops the
+    /// live link too, since a reset has nothing left worth staying connected for.
+    pub async fn forget_all(&self) -> Result<(), WifiForgetError> {
+        let station = self.station.clone();
+        match tokio::spawn(async move { station.forget_all().await }).await {
+            Ok(forgotten) => forgotten,
+            Err(error) => {
+                tracing::error!(%error, "the Wi-Fi station panicked forgetting every network");
+                Err(WifiForgetError::Unsupported)
+            }
+        }
+    }
 }
 
 /// Runs `work` on its own task and waits up to `budget`; past it, the work carries on and still

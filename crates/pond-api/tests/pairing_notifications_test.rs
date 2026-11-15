@@ -57,6 +57,8 @@ impl Handshake for RejectingHandshake {
             rejection_reason: Some("invalid_mac".into()),
             server_proof: None,
             returning_device: false,
+            test_device: false,
+            pairing_request: None,
         })
     }
 }
@@ -90,6 +92,8 @@ impl Handshake for AcceptingHandshake {
             rejection_reason: None,
             server_proof: None,
             returning_device: false,
+            test_device: false,
+            pairing_request: None,
         })
     }
 }
@@ -129,6 +133,8 @@ fn make_app_over(base: TestState, handshake: Arc<dyn Handshake>) -> Harness {
         notification_queue: Some(queue),
         notification_history: None,
         notification_sender: Some(sender),
+        member_notifier: None,
+        factory_reset_progress: None,
         ..base.state
     });
 
@@ -353,4 +359,24 @@ async fn a_phone_pairing_under_a_known_id_still_notifies() {
             .unwrap_or_else(|_| panic!("pairing {attempt} must notify"));
         assert_eq!(n.title, "New device paired");
     }
+}
+
+/// A harness's pairing is not the household's news: the device it admits is marked as a test
+/// device and nobody is told.
+#[tokio::test]
+async fn a_pairing_with_a_test_code_tells_nobody_and_marks_the_device() {
+    let (mut h, adapter) = make_real_app().await;
+    let code = adapter.issue_pairing_code().await.unwrap().code;
+    adapter.mark_pairing_code_test(&code).await.unwrap();
+    let (status, body) = pair_phone(&h.router, &code, "phone-harness", TEST_SPKI_PIN).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], true, "{body}");
+    assert!(
+        h.notifications.try_recv().is_err(),
+        "a test pairing sends no notice"
+    );
+    assert!(
+        body.get("test_device").is_none(),
+        "the flag never goes on the wire"
+    );
 }

@@ -1,5 +1,5 @@
 import i18n from '../i18n';
-import { RemoteAccess } from './RemoteAccess';
+import { RemoteProvider } from './RemoteProvider';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Chip } from "@heroui/react";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
@@ -9,6 +9,7 @@ import type { PairingCodeBinding } from "../api/types";
 import { isSignInRequired } from "../api/hostCredential";
 import { signInRefusalKey } from "../api/signInRefusal";
 import { PageHeader } from "../components/shared";
+import { PairingLockPanel } from "../network/PairingLockPanel";
 
 interface PairingInfo {
   code: string;
@@ -246,7 +247,8 @@ export function Pairing() {
               <code style={{ fontSize: 11 }}>_pond._tcp.local.</code> via mDNS.
             </Step>
           </div>
-          <RemoteAccess />
+          <div style={{ marginTop: 20 }}><PairingLockPanel variant="catalogue" /></div>
+          <RemoteProvider />
         </div>
       </div>
     </div>

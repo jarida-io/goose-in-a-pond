@@ -347,6 +347,7 @@ impl CronSchedulerAdapter {
                     result: None,
                     error: None,
                     duration_ms: None,
+                    for_member: kind.member().map(str::to_string),
                 });
             }
 
@@ -375,6 +376,7 @@ impl CronSchedulerAdapter {
                     result: result_text,
                     error: error_text,
                     duration_ms: Some(duration_ms),
+                    for_member: kind.member().map(str::to_string),
                 });
             }
 
@@ -698,6 +700,9 @@ fn validate_kind(kind: &TaskKind) -> Result<()> {
             Some(why) => anyhow::bail!("{why}"),
             None => Ok(()),
         },
+        TaskKind::MemberReminder { profile_id, .. } if profile_id.trim().is_empty() => {
+            anyhow::bail!("a member's reminder must name the member it is for")
+        }
         _ => Ok(()),
     }
 }
@@ -959,12 +964,13 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn delete_task(&self, id: &str) -> Result<()> {
-        let job_id = {
+        let (job_id, live) = {
             let mut guard = self.tasks.lock().await;
             let entry = guard
                 .remove(id)
                 .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
-            entry.job_id
+            let live: std::collections::HashSet<String> = guard.keys().cloned().collect();
+            (entry.job_id, live)
         };
 
         if job_id != uuid::Uuid::nil() {
@@ -972,6 +978,8 @@ impl SchedulerPort for CronSchedulerAdapter {
         }
 
         self.save().await?;
+        // Also drops runs left by schedules deleted before their history went with them.
+        self.run_history.keep_only(&live).await?;
         Ok(())
     }
 
@@ -1331,6 +1339,32 @@ mod tests {
 
         let tasks = sched.list_tasks().await.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_schedules_runs_go_with_it_and_older_orphans_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+        for id in ["gone", "kept"] {
+            sched
+                .create_task(create_req(id, "0 0 2 * * *"))
+                .await
+                .unwrap();
+            sched.run_history.record_start(id).await;
+        }
+        sched.run_history.record_start("deleted-long-ago").await;
+
+        sched.delete_task("gone").await.unwrap();
+
+        let reopened =
+            crate::run_history::JsonRunHistory::new(tmp.path().join("schedule_runs.json"), 50)
+                .await
+                .unwrap();
+        for history in [&*sched.run_history, &reopened] {
+            assert!(history.get_runs("gone", 10).await.is_empty());
+            assert!(history.get_runs("deleted-long-ago", 10).await.is_empty());
+            assert_eq!(history.get_runs("kept", 10).await.len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -3046,6 +3080,73 @@ mod tests {
             other => panic!("expected Webhook kind, got {other:?}"),
         }
     }
+
+    fn reminder_req(id: &str, profile_id: &str) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            kind: TaskKind::MemberReminder {
+                profile_id: profile_id.to_string(),
+                prompt: "Take the evening tablets".to_string(),
+            },
+            ..create_req(id, "0 0 20 * * *")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reminder_for_nobody_is_refused_at_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+
+        sched
+            .create_task(reminder_req("mine", "grace"))
+            .await
+            .unwrap();
+        let err = sched
+            .create_task(reminder_req("nobodys", " "))
+            .await
+            .expect_err("a reminder with no member was stored");
+        assert!(err.to_string().contains("member"), "{err}");
+        assert_eq!(sched.list_tasks().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reminders_results_name_its_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let exec: Arc<dyn ScheduleExecutor> = Arc::new(CountingExecutor(Arc::default()));
+        let sched = CronSchedulerAdapter::with_options(
+            tmp.path().join("schedules.json"),
+            tmp.path().join("schedule_runs.json"),
+            exec,
+            Some(tx),
+            10,
+        )
+        .await
+        .unwrap();
+        sched.create_task(reminder_req("r", "grace")).await.unwrap();
+        sched
+            .create_task(create_req("h", "0 0 20 * * *"))
+            .await
+            .unwrap();
+
+        sched.run_now("r").await.unwrap();
+        for _ in 0..2 {
+            let ev = next_result(&mut rx).await;
+            assert_eq!(ev.for_member.as_deref(), Some("grace"), "{:?}", ev.status);
+        }
+        sched.run_now("h").await.unwrap();
+        assert_eq!(next_result(&mut rx).await.for_member, None);
+    }
+
+    async fn next_result(
+        rx: &mut tokio::sync::broadcast::Receiver<
+            pond_core::user_data::domain::schedule::ScheduleResultEvent,
+        >,
+    ) -> pond_core::user_data::domain::schedule::ScheduleResultEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("no result event")
+            .unwrap()
+    }
 }
 
 /// What one task fire needs, shared by cron jobs and one-shots.
@@ -3107,6 +3208,7 @@ impl TaskRunContext {
                 result: None,
                 error: None,
                 duration_ms: None,
+                for_member: kind.member().map(str::to_string),
             });
         }
 
@@ -3136,6 +3238,7 @@ impl TaskRunContext {
                 result: result_text,
                 error: error_text,
                 duration_ms: Some(duration_ms),
+                for_member: kind.member().map(str::to_string),
             });
         }
 

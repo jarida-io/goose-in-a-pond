@@ -116,7 +116,7 @@ def main():
                     for path in ["/", "/dev/test", "/dev/face", "/assets/index.js"]:
                         curl(https + path, certificate, pin, expect=404)
                     # A phone pairs over pinned HTTPS with CPace, under the pin it pinned.
-                    issued = curl(http + "/api/v1/handshake/pairing-code", data={},
+                    issued = curl(http + "/api/v1/handshake/pairing-code", data={"approved": True},
                                   headers=["X-Pond-Host-Credential: " + host_credential])
 
                     def over_https(method, path, body=None, expected=200):

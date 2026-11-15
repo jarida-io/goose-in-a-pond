@@ -243,7 +243,12 @@ fn every_principal_starts_with_no_device() {
 #[test]
 fn every_handshake_adapter_answers_who_a_token_belongs_to() {
     // (type name, why it legitimately cannot answer)
-    const ALLOWED_SILENT: [(&str, &str); 6] = [
+    const ALLOWED_SILENT: [(&str, &str); 7] = [
+        (
+            "LockOnlyHandshake",
+            "pond-connect's advertising test double: it answers only the pairing lock's state \
+             and validates no token, so it has no device to name",
+        ),
         (
             "FakeHandshake",
             "pond-connect's setup session test double: its tokens are fixed strings no route \
@@ -468,7 +473,11 @@ fn no_request_dto_on_a_turn_route_has_a_device_field() {
             .unwrap_or_else(|| panic!("{dto} has no closing brace at column 0"));
         // `device_place` is where the phone says it is, a place name for the turn's context
         // (capped and cleaned by `device_place_note`), never which device is asking.
-        let body = &rest[..end].replace("device_place", "phone_place");
+        // `device_locked` is the phone's own lock state, which only ever narrows the turn to
+        // `Guest`; it names no device either.
+        let body = &rest[..end]
+            .replace("device_place", "phone_place")
+            .replace("device_locked", "phone_locked");
         assert!(
             !body.contains("device"),
             "{dto} has grown a device field:\n{body}\nA device id in a request body is the \

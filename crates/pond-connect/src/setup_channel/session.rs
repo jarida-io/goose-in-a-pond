@@ -562,7 +562,28 @@ impl SetupSession {
                 Some(&reason),
             )
             .await;
-            return verify_refused(id, &reason);
+            let mut answer = verify_refused(id, &reason);
+            // A held phone's claim secret must not cross the air in the clear: it is sealed for
+            // the one phone that proved the code, and the channel stays in its clear phase.
+            if let (Some(request), Some(keys)) = (response.pairing_request.take(), keys) {
+                let sealed = serde_json::to_vec(&json!({"pairing_request": {
+                    "request_id": request.request_id,
+                    "claim_secret": request.claim_secret,
+                    "expires_at": request.expires_at,
+                }}))
+                .map(Zeroizing::new)
+                .map_err(|_| ())
+                .and_then(|plain| {
+                    ChannelCipher::pond(&keys)
+                        .seal_to_base64(&plain)
+                        .map_err(|_| ())
+                });
+                if let Ok(sealed) = sealed {
+                    answer["server_proof"] = json!(response.server_proof);
+                    answer["sealed"] = json!(sealed);
+                }
+            }
+            return answer;
         }
         let Some(keys) = keys else {
             tracing::error!("an accepted setup channel run came back without its keys");
@@ -1029,6 +1050,31 @@ mod tests {
             request: PakeVerifyRequest,
         ) -> anyhow::Result<ChannelVerify> {
             self.verified.fetch_add(1, Ordering::SeqCst);
+            if request.confirm == "held" {
+                return Ok(ChannelVerify {
+                    response: HandshakeResponse {
+                        accepted: false,
+                        session_token: None,
+                        refresh_token: None,
+                        expires_at: None,
+                        hostname: "pond".into(),
+                        server_version: "test".into(),
+                        capabilities: vec![],
+                        rejection_reason: Some("approval_required".into()),
+                        server_proof: Some("cd".repeat(64)),
+                        returning_device: false,
+                        test_device: false,
+                        pairing_request: Some(
+                            pond_core::security::domain::pairing_lock::PendingPairing {
+                                request_id: "req-1".into(),
+                                claim_secret: "secret-1".into(),
+                                expires_at: "2026-10-17T10:10:00Z".into(),
+                            },
+                        ),
+                    },
+                    keys: Some(ChannelKeys::new(&P2C, &C2P)),
+                });
+            }
             let accepted = request.confirm == "good";
             Ok(ChannelVerify {
                 response: HandshakeResponse {
@@ -1042,6 +1088,8 @@ mod tests {
                     rejection_reason: (!accepted).then(|| "invalid_confirmation".into()),
                     server_proof: accepted.then(|| "ab".repeat(64)),
                     returning_device: false,
+                    test_device: false,
+                    pairing_request: None,
                 },
                 keys: accepted.then(|| ChannelKeys::new(&P2C, &C2P)),
             })
@@ -1284,6 +1332,41 @@ mod tests {
                 serde_json::from_slice(&stream.push(last).unwrap().unwrap()).unwrap();
             assert_eq!(answer["id"], id);
         }
+    }
+
+    #[tokio::test]
+    async fn a_phone_the_lock_holds_gets_its_request_sealed_and_no_sealed_phase() {
+        let pond = pond();
+        let now = Instant::now();
+        let mut session = SetupSession::new(pond.ctx.clone(), now);
+        let mut phone = Phone::new(23);
+        let init = phone
+            .ask(&mut session, init_request(1, "pairing"), now)
+            .await;
+        let verify = phone
+            .ask(
+                &mut session,
+                json!({"id": 2, "type": "pake_verify", "challenge_id": init["challenge_id"],
+                       "share": "CCCC", "confirm": "held"}),
+                now,
+            )
+            .await;
+        assert_eq!(verify["accepted"], false, "{verify}");
+        assert_eq!(verify["error"], "approval_required", "{verify}");
+        assert_eq!(verify["server_proof"], "cd".repeat(64));
+        assert!(
+            verify.get("pairing_request").is_none() && !verify.to_string().contains("secret-1"),
+            "the claim secret travels sealed only"
+        );
+        let opened: Value = serde_json::from_slice(
+            &ChannelCipher::phone(&ChannelKeys::new(&P2C, &C2P))
+                .open_base64(verify["sealed"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened["pairing_request"]["request_id"], "req-1");
+        assert_eq!(opened["pairing_request"]["claim_secret"], "secret-1");
+        assert!(!session.is_sealed(), "a held phone is not let in");
     }
 
     #[tokio::test]

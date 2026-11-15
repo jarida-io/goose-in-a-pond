@@ -23,8 +23,9 @@ pub struct TakeRun {
     pub heard: usize,
 }
 
-/// Each taught member's latest run; a run ends at [`TAKES_PER_RUN`] takes or a [`RUN_GAP`].
-pub fn latest_runs(takes: &[WakeTake]) -> Vec<TakeRun> {
+/// Each taught member's latest run, its takes oldest first; a run ends at [`TAKES_PER_RUN`] takes
+/// or a [`RUN_GAP`].
+fn member_runs(takes: &[WakeTake]) -> Vec<(Option<&str>, Vec<&WakeTake>)> {
     let mut by_member: BTreeMap<Option<&str>, Vec<&WakeTake>> = BTreeMap::new();
     for take in takes {
         by_member
@@ -46,13 +47,36 @@ pub fn latest_runs(takes: &[WakeTake]) -> Vec<TakeRun> {
                 }
                 run.push(take);
             }
-            TakeRun {
-                profile_id: profile_id.map(str::to_string),
-                takes: run.len(),
-                heard: run.iter().filter(|t| t.cnn_heard).count(),
-            }
+            (profile_id, run)
         })
         .collect()
+}
+
+/// Each taught member's latest run; a run ends at [`TAKES_PER_RUN`] takes or a [`RUN_GAP`].
+pub fn latest_runs(takes: &[WakeTake]) -> Vec<TakeRun> {
+    member_runs(takes)
+        .into_iter()
+        .map(|(profile_id, run)| TakeRun {
+            profile_id: profile_id.map(str::to_string),
+            takes: run.len(),
+            heard: run.iter().filter(|t| t.cnn_heard).count(),
+        })
+        .collect()
+}
+
+/// Whether the take `id` is in `profile_id`'s latest run and not yet [`RUN_GAP`] old at `now`, so
+/// a retake of its sentence can replace it and the run stays one run.
+pub fn replaceable(
+    takes: &[WakeTake],
+    profile_id: Option<&str>,
+    id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    member_runs(takes)
+        .into_iter()
+        .filter(|(member, _)| *member == profile_id)
+        .flat_map(|(_, run)| run)
+        .any(|t| t.id == id && now - t.created_at <= RUN_GAP)
 }
 
 /// The household's wake calibration across every taught member's latest run.
@@ -166,6 +190,43 @@ mod tests {
         takes.extend((40..45).map(|i| take(Some("zawadi"), i, true)));
         assert!(wake_verdict(&takes).cnn_hears_household);
         assert!(!wake_verdict(&[]).cnn_hears_household, "nobody taught it");
+    }
+
+    #[test]
+    fn a_retake_replaces_a_missed_sentence_and_the_run_stays_one_run() {
+        let start = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let mut takes: Vec<WakeTake> = (0..5).map(|i| take(Some("amina"), i, i % 2 == 0)).collect();
+        let now = start + Duration::minutes(6);
+        let missed = takes[1].id.clone();
+        assert!(replaceable(&takes, Some("amina"), &missed, now));
+        assert!(
+            !replaceable(&takes, Some("zawadi"), &missed, now),
+            "not someone else's"
+        );
+        assert!(!replaceable(&takes, Some("amina"), "no-such-take", now));
+        assert!(
+            !replaceable(
+                &takes,
+                Some("amina"),
+                &missed,
+                start + Duration::minutes(30)
+            ),
+            "a retake that late would start a new run"
+        );
+        // The handler deletes the missed take, then adds the retake.
+        takes.remove(1);
+        takes.push(take(Some("amina"), 6, true));
+        let runs = latest_runs(&takes);
+        assert_eq!((runs[0].takes, runs[0].heard), (5, 4));
+        assert!(wake_verdict(&takes).cnn_hears_household);
+        // An older run's take cannot be replaced.
+        takes.extend((7..12).map(|i| take(Some("amina"), i, true)));
+        assert!(!replaceable(
+            &takes,
+            Some("amina"),
+            &takes[0].id.clone(),
+            now
+        ));
     }
 
     #[test]

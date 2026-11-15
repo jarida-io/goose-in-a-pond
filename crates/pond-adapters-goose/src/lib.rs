@@ -1,9 +1,11 @@
 pub mod compaction_prompts;
+pub mod encoder_room;
 pub mod extension_manager;
 pub mod giap_registration;
 pub mod goose_agent;
 #[cfg(test)]
 mod goose_nudges;
+mod held_recordings;
 pub mod litert_model;
 pub mod logging;
 pub mod mesh_provider;
@@ -12,12 +14,14 @@ pub mod mtp_drafter;
 pub mod orchestrator;
 pub mod provider_adapter;
 pub mod provider_shim;
+mod readable_failures;
 pub mod registry_rows;
 pub mod shutdown;
 pub mod token_counter;
 mod transient_history;
 pub mod vision_encoder;
 
+pub use encoder_room::release_idle_encoder;
 pub use extension_manager::GiapGooseExtensionManager;
 pub use giap_registration::{register_giap_extensions, registered_extensions};
 pub use goose_agent::GooseAdapter;

@@ -16,9 +16,13 @@ const PRESET_LABELS: Record<string, string> = {
   concise:   "Concise",
   warm:      "Warm",
   technical: "Technical",
+  soul:       "Soul",
+  heartbeat:  "Heartbeat",
+  scratchpad: "Scratchpad",
 };
 
-const PRESET_ORDER = ["balanced", "concise", "warm", "technical"];
+// The four styles, then Goose's own documents (soul, heartbeat, scratchpad).
+const PRESET_ORDER = ["balanced", "concise", "warm", "technical", "soul", "heartbeat", "scratchpad"];
 
 /**
  * Variables `render_jinja_template` (pond-core prompts.rs) interpolates; display only. No

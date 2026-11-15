@@ -34,19 +34,26 @@ pub trait ReminderRepository: Send + Sync {
         Ok(false)
     }
 
+    /// Bind a pending mention nobody was named for to `profile_id`. `false` when it already
+    /// has a member or is no longer pending.
+    async fn assign(&self, _id: &str, _profile_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Move a pending reminder to `Offered`, stamping when the offer went out; `Ok(false)` if it
     /// was no longer pending, so a race's loser offers nothing twice.
     async fn offer(&self, _id: &str, _at: DateTime<Utc>) -> Result<bool> {
         Ok(false)
     }
 
-    /// The member's offered reminders still waiting for an answer, newest said first.
-    async fn offered_to(&self, _profile_id: &str) -> Result<Vec<CapturedReminder>> {
+    /// The member's reminders waiting for an answer, newest said first: those offered, and those
+    /// the daily cap held back. The cap limits the pushes, not what the member can find and answer.
+    async fn open_to(&self, _profile_id: &str) -> Result<Vec<CapturedReminder>> {
         Ok(vec![])
     }
 
-    /// Settle the member's open offer as `Accepted` or `Dismissed`; `Ok(false)` when they have
-    /// none open by that id.
+    /// Settle the member's open reminder, offered or held back, as `Accepted` or `Dismissed`;
+    /// `Ok(false)` when they have none open by that id.
     async fn settle_offer(
         &self,
         _profile_id: &str,

@@ -1,3 +1,4 @@
+use crate::user_data::domain::profile::ProfileScope;
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -15,10 +16,13 @@ pub struct ToolCallResult {
 #[async_trait]
 pub trait ToolDispatcher: Send + Sync {
     /// `tool_name` is the fully qualified name, e.g. "giap-weather__get_current_weather".
+    /// `scope` is the calling turn's actor scope, carried through so a server can refuse a
+    /// `Guest` call it wouldn't trust (e.g. a device outside its granted rooms).
     async fn dispatch(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        scope: &ProfileScope,
     ) -> Result<ToolCallResult>;
 
     async fn available_tools(&self) -> Vec<String>;

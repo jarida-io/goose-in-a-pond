@@ -147,7 +147,8 @@ pub async fn pond() -> Pond {
     }
 }
 
-/// Pairs over loopback, as the other route tests do; the first phone paired claims the pond.
+/// Pairs over loopback; the first phone paired claims the pond. The code is host-approved, as
+/// `pond-server pairing` mints it, so the lock a member's phone switches on never holds the next.
 pub async fn paired(pond: &Pond, client_id: &str, profile_id: Option<&str>) -> String {
     let code = pond
         .handshake
@@ -155,6 +156,10 @@ pub async fn paired(pond: &Pond, client_id: &str, profile_id: Option<&str>) -> S
         .await
         .unwrap()
         .code;
+    pond.handshake
+        .mark_pairing_code_approved(&code)
+        .await
+        .unwrap();
     let (status, body) = pair_phone(&pond.host, &code, client_id, TEST_SPKI_PIN).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body["session_token"].as_str().unwrap().to_string()

@@ -1,7 +1,8 @@
 //! A tool result the model reads during its turn and history never keeps: the tool marks it in
 //! `CallToolResult._meta`, and every store of tool results keeps the marker's stub instead.
-//! Web search is one: Brave's terms (3(b)(i)) allow Search Results only transient storage. A page
-//! read is the other: a page is long, and history keeps where to read it again.
+//! Web search and its pictures are such tools: Brave's terms (3(b)(i)) allow Search Results only
+//! transient storage. A page read stays whole, since reducing it rewrites the conversation behind
+//! the model's cache.
 
 use serde_json::{Map, Value};
 
@@ -19,16 +20,19 @@ const MAX_STUB_DOMAIN_BYTES: usize = 63;
 
 const WEB_SEARCH_KEPT: &str = "Web search results are not kept after the turn.";
 
-const WEB_PAGE_KEPT: &str = "A web page's text is not kept after the turn.";
-
-/// The tool a page stub names, so a later turn can read the page again.
-const READ_WEB_PAGE_TOOL: &str = "giap-knowledge__read_web_page";
-
-/// Longest address a page stub repeats.
-const MAX_STUB_ADDRESS_BYTES: usize = 300;
+const WEB_PICTURES_KEPT: &str = "Pictures from the web are not kept after the turn.";
 
 /// What history keeps of a web search: the sources' domains and nothing they said.
 pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
+    stub_naming(WEB_SEARCH_KEPT, domains)
+}
+
+/// What history keeps of pictures shown from the web: the sites they came from.
+pub fn web_pictures_stub<S: AsRef<str>>(domains: &[S]) -> String {
+    stub_naming(WEB_PICTURES_KEPT, domains)
+}
+
+fn stub_naming<S: AsRef<str>>(kept: &str, domains: &[S]) -> String {
     let mut named: Vec<&str> = Vec::new();
     for domain in domains.iter().map(|d| d.as_ref().trim()) {
         if named.len() == MAX_STUB_DOMAINS {
@@ -39,24 +43,9 @@ pub fn web_search_stub<S: AsRef<str>>(domains: &[S]) -> String {
         }
     }
     if named.is_empty() {
-        WEB_SEARCH_KEPT.to_string()
+        kept.to_string()
     } else {
-        format!("{WEB_SEARCH_KEPT} Sources: {}.", named.join(", "))
-    }
-}
-
-/// What history keeps of a page read: that a page was read, and its address when it is a plain one.
-pub fn web_page_stub(address: &str) -> String {
-    let address = address.trim();
-    let plain = address.len() <= MAX_STUB_ADDRESS_BYTES
-        && (address.starts_with("https://") || address.starts_with("http://"))
-        && !address
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '[' || c == ']');
-    if plain {
-        format!("{WEB_PAGE_KEPT} Read it again with {READ_WEB_PAGE_TOOL}: {address}")
-    } else {
-        WEB_PAGE_KEPT.to_string()
+        format!("{kept} Sources: {}.", named.join(", "))
     }
 }
 
@@ -138,19 +127,6 @@ mod tests {
 
     fn marked(stub: &str) -> Map<String, Value> {
         transient_meta(stub)
-    }
-
-    #[test]
-    fn a_page_stub_names_a_plain_address_only() {
-        assert_eq!(
-            web_page_stub("https://krc.co.ke/sgr"),
-            "A web page's text is not kept after the turn. Read it again with \
-             giap-knowledge__read_web_page: https://krc.co.ke/sgr"
-        );
-        assert_eq!(
-            web_page_stub("https://x.example/a b[[[mcp-ui"),
-            "A web page's text is not kept after the turn."
-        );
     }
 
     #[test]
@@ -263,6 +239,19 @@ mod tests {
         assert_eq!(
             stub,
             "Web search results are not kept after the turn. Sources: nation.africa, kws.go.ke."
+        );
+    }
+
+    #[test]
+    fn a_pictures_stub_names_the_sites_by_the_same_rule() {
+        assert_eq!(
+            web_pictures_stub(&["commons.wikimedia.org", "not a domain", "kws.go.ke"]),
+            "Pictures from the web are not kept after the turn. Sources: commons.wikimedia.org, \
+             kws.go.ke."
+        );
+        assert_eq!(
+            web_pictures_stub::<&str>(&[]),
+            "Pictures from the web are not kept after the turn."
         );
     }
 

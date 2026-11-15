@@ -212,6 +212,8 @@ not count. Missing metadata or a failed interface read is denied. The refusal is
 | Pairing code, six digits | 10 min, single use; issuing one retires every older one | after `PAKE_FAILURE_BUDGET` (10) failed confirmations | phones (CPace), the dashboard (HMAC) |
 | Setup code, eleven digits | the card's life | never; guessing is slowed instead | the first phone, while unclaimed |
 | Spoken code | an ordinary pairing code | as a pairing code | a phone in earshot |
+| Pairing request's claim secret | 10 min; handed once to the phone the [pairing lock](api.md#the-pairing-lock) held, stored hashed | when the tokens are collected, or the request is declined or runs out | that phone, to learn whether the main member let it in |
+| Recovery PIN, 6 to 12 digits | until the main member changes or removes it; kept as a PBKDF2 verifier | never; five wrong tries are free, then one per 30 s doubling to one per hour | the main member's new phone, with a pairing code, to let itself in |
 | Refresh hash (`credential: "device"`) | the refresh token's | on rotation | the BLE setup channel only ([setup channel](architecture/pond-setup-channel.md)) |
 
 ### Phones: CPace

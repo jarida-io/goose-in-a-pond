@@ -22,6 +22,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [System and diagnostics](#system-and-diagnostics)
 - [Pairing and tokens](#pairing-and-tokens)
 - [Onboarding](#onboarding)
+- [Factory reset](#factory-reset)
 - [Connections and setup card](#connections-and-setup-card)
 - [Settings](#settings)
 - [Chat and runs](#chat-and-runs)
@@ -141,6 +142,7 @@ The route summary's "Also" column names these.
 | member | The caller's paired device is attributed to a household member | `403`; another member's record reads as `404` |
 | unlocked | A member's device that unlocked My Pond with the admin card in the last 15 minutes ([pond administrator](architecture/pond-administrator.md)) | `403 admin_members_only`, `403 admin_locked` |
 | changer | The host credential, the device that claimed the pond, or a member's device (`connection_changes`) | `403 not_allowed` |
+| main member | The host credential, the pairing lock's main member's device, or a member's device with My Pond unlocked (`factory_reset_authority`); a household role alone never counts | `403 factory_reset_main_member_only` |
 | run owner | Only the device that started the run; unknown and not-yours are the same `404` | `404 unknown run` |
 | internal | The internal extension token as the bearer | `401` |
 | scoped | Results are scoped to the member the caller resolves to (`session_id` query plus the caller's device) | narrower results, or `403` for a write |
@@ -224,6 +226,16 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /handshake/pairing-code | open | loopback, cred | The current pairing code and pairing material |
 | POST | /handshake/pairing-code | open | loopback, cred | Issue a fresh pairing code |
 | POST | /handshake/spoken-code | open | LAN | Read a fresh pairing code aloud; never returns it |
+| POST | /handshake/pairing-request/claim | open | LAN | A phone the pairing lock held asks whether it was let in |
+| POST | /handshake/pairing-request/recover | open | LAN | The main member's new phone lets itself in with the recovery PIN |
+| GET | /pairing/lock | token +onb | | Whether pairing is locked, who the main member is, and whether the caller may change it |
+| PUT | /pairing/lock | token +onb | main member | Lock or unlock pairing |
+| PUT | /pairing/recovery-pin | token +onb | main member | Set the recovery PIN |
+| DELETE | /pairing/recovery-pin | token +onb | main member | Remove it |
+| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat, and the owner role, to another member |
+| GET | /pairing/requests | token +onb | main member | The phones waiting to be let in |
+| POST | /pairing/requests/{id}/approve | token +onb | main member | Let a waiting phone in |
+| POST | /pairing/requests/{id}/decline | token +onb | main member | Turn it away |
 
 ### Onboarding
 
@@ -251,7 +263,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /settings | token | | The whole `Settings` record |
-| PUT | /settings | wizard | | Partial update; answers with the merged record |
+| PUT | /settings | wizard | owner, to change `primary_profile_id` | Partial update; answers with the merged record |
 
 ### Chat and runs
 
@@ -269,12 +281,13 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
-| GET | /sessions | token +onb | | All sessions, most recently updated first |
+| GET | /sessions | token +onb | | All sessions, most recently updated first; `?surface=` keeps those begun on the named surfaces |
 | PATCH | /sessions/{session_id} | token +onb | | Rename |
 | DELETE | /sessions/{session_id} | token +onb | | Delete with its messages |
 | GET | /sessions/{session_id}/messages | token +onb | | Messages, paged |
 | DELETE | /sessions/{session_id}/messages/{message_id} | token +onb | | Delete a message and every later one |
 | PUT | /sessions/{session_id}/messages/{message_id}/feedback | token +onb | | Like, dislike or clear |
+| POST | /sessions/{session_id}/messages/{message_id}/offer | token +onb | | Take or pass over the suggestion a message offers |
 | GET | /sessions/{session_id}/attachments/{attachment_id} | token +onb | | Raw bytes of one chat image |
 | POST | /sessions/{session_id}/compact | token +onb | | Compact this session now |
 | POST | /sessions/retitle | token +onb | | Run the titling job's next pass now |
@@ -337,7 +350,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | PATCH | /profiles/{id} | wizard | | Merge preference keys |
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
-| DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| DELETE | /profiles/{id} | token +onb | owner | Remove a member, report what went with them |
+| PUT | /profiles/{id}/role | token +onb | owner | Set a member's role; `owner` hands the main member's seat on |
 | GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
 | PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
 | DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
@@ -359,6 +373,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /notifications/stream | token | own device | Notifications for one device (SSE) |
 | GET | /notifications/pending | token | paired device | The caller's unacknowledged notifications |
 | POST | /notifications/{id}/ack | token | paired device | Mark one of the caller's notifications delivered |
+| POST | /notifications/{id}/opened | token | paired device | Record that the person opened one of the caller's notifications |
 | GET | /notifications/history | token | paired device | The household notices the caller may read, with its read state |
 | POST | /notifications/history/read | token | paired device | Mark history notices read for the caller |
 | GET | /devices | token +onb | | All registered devices |
@@ -370,6 +385,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
+| GET | /rooms | token +onb | | The household's rooms |
+| PUT | /rooms/{id}/guest-access | token +onb | owner | Open a room's devices to guests, or close them |
 
 ### Sensors, camera and rules
 
@@ -405,12 +422,12 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /schedules | token +onb | | All scheduled tasks |
 | POST | /schedules | token +onb | | Create a task |
 | GET | /schedules/upcoming | token +onb | | Active tasks by next fire |
-| PUT | /schedules/{id} | token +onb | | Update a task |
-| DELETE | /schedules/{id} | token +onb | | Delete a task |
-| POST | /schedules/{id}/pause | token +onb | | Pause |
-| POST | /schedules/{id}/resume | token +onb | | Resume |
-| POST | /schedules/{id}/run-now | token +onb | | Fire now |
-| GET | /schedules/{id}/runs | token +onb | | Run history |
+| PUT | /schedules/{id} | token +onb | its member, for a reminder | Update a task |
+| DELETE | /schedules/{id} | token +onb | its member, for a reminder | Delete a task |
+| POST | /schedules/{id}/pause | token +onb | its member, for a reminder | Pause |
+| POST | /schedules/{id}/resume | token +onb | its member, for a reminder | Resume |
+| POST | /schedules/{id}/run-now | token +onb | its member, for a reminder | Fire now |
+| GET | /schedules/{id}/runs | token +onb | its member, for a reminder | Run history |
 | GET | /schedules/events | token +onb | | Completion events (SSE) |
 
 ### Memory, reminders, suggestions and proposals
@@ -488,8 +505,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /agent/tools | token +onb | | Every MCP tool the agent has loaded |
-| POST | /tools/invoke | token +onb | | Run an MCP tool directly |
-| POST | /mcp/tools/call | token +onb | | MCP Apps `callServerTool()` |
+| POST | /tools/invoke | token +onb | as the caller | Run an MCP tool directly |
+| POST | /mcp/tools/call | token +onb | as the caller | MCP Apps `callServerTool()` |
 | GET | /mcp/resources | token +onb | | An MCP App `ui://` resource |
 | GET | /agent/extras | token +onb | | System prompt extras |
 | POST | /agent/extras | token +onb | | Create or replace an extra |
@@ -561,6 +578,7 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | POST | /admin/enroll | token +onb | unlocked | This device's own key, shown once, replacing any older one |
 | DELETE | /admin/key | token +onb | member | Revoke this device's key and lock it |
 | GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
+| GET | /admin/reliability | token +onb | unlocked | What became of notices and turns over the last days |
 | GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
 | DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
 | GET | /admin/caches | token +onb | unlocked | KV snapshots, download leftovers and accelerator caches |
@@ -572,6 +590,8 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | GET | /admin/power | token +onb | unlocked | Power mode, modes, supply and battery |
 | PUT | /admin/power/mode | token +onb | unlocked | Switch power mode |
 | POST | /admin/power/restart | token +onb | unlocked | Restart the computer; waits for `force` while a long task runs |
+| POST | /admin/factory-reset | token | main member | Erase the household and reopen onboarding ([factory reset](#factory-reset)) |
+| GET | /admin/factory-reset/status | token | | The step a running reset has reached |
 
 ### Faces
 
@@ -620,6 +640,15 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | POST | /api/v1/remote-access/enrollment | companion | token, LAN | Enroll this phone on the tailnet |
 | POST | /api/v1/remote-access/recovery | companion | token, LAN | Ask to replace this phone's enrollment |
 | GET, POST, DELETE | /api/v1/remote-access/recovery/{id} | companion | token, LAN | Poll, execute or cancel that request |
+| GET | /api/v1/remote-access/ngrok | dashboard | loopback, cred | `{config, tokenSet, status}` of the household's ngrok tunnel |
+| PUT | /api/v1/remote-access/ngrok | dashboard | loopback, cred | Save `{enabled, endpoint: "tcp"\|"tls", domain?, remoteAddr?}` and start or stop the tunnel; `409 no_authtoken` |
+| PUT | /api/v1/remote-access/ngrok/token | dashboard | loopback, cred | `{authtoken}`: opens one ngrok session to check it, then stores it encrypted; `400 authtoken_refused` |
+| DELETE | /api/v1/remote-access/ngrok/token | dashboard | loopback, cred | Stop the tunnel and forget the authtoken |
+
+`status` is `{state: "off" | "starting"}`, `{state: "running", address}` (`host:port`) or
+`{state: "failed", reason}`. While it runs, the pairing material and an authenticated
+`GET /system/info` carry `tunnel_address`; the anonymous `/system/info` never does. The generic
+secret routes refuse the `NGROK_AUTHTOKEN` key.
 
 ### Non-API paths
 
@@ -705,7 +734,8 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 `server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
 routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
 which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
-same code in both `rejection_reason` and `error`.
+same code in both `rejection_reason` and `error`. Two refusals carry more: see
+[the pairing lock](#the-pairing-lock).
 
 | Route | Status | `error` | Meaning |
 |-------|--------|---------|---------|
@@ -724,6 +754,8 @@ same code in both `rejection_reason` and `error`.
 | verify | 200 | `unknown_challenge` | No such run, or it was already used |
 | verify | 200 | `challenge_expired` | The run is older than 60 s |
 | verify | 200 | `setup_code_unavailable` | Another device claimed the pond first; nothing was minted |
+| verify | 200 | `approval_required` | The pairing lock holds: no tokens; `pairing_request` says how to come back |
+| verify | 200 | `pairing_requests_full` | Five phones are already waiting |
 
 Each pairing code allows 10 confirmation attempts in all, and issuing a new code retires every
 older one. The setup code is never retired: five attempts are free, then one per 30 s, doubling to
@@ -758,8 +790,10 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
-`{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member, and any other
+`{profile_id?, unattributed?, approved?, test?}` (unknown fields refused) binds the device that pairs
+with it to a member. `approved` lets its phone in while [the pairing lock](#the-pairing-lock) holds:
+whoever holds the host credential has already said yes. `test` marks the device a harness's: its
+pairing is not announced, it gets no household notices and the reliability report leaves it out. With no body, a household with exactly one member binds to that member, and any other
 household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
 `tailnet_address`, `https_port`, `tls_spki_sha256`.
 
@@ -769,6 +803,38 @@ to nobody is linked by pairing it again with a code issued for its member; the a
 id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
 whose the device will be and issues the code for that choice, and `pond-server pairing --member
 <PROFILE_ID>` does the same from a shell on the pond.
+
+### The pairing lock
+
+A pond's pairing is locked from the start. The lock holds once the pond has a main member (the
+member who set it up, or whoever they handed the seat to with `PUT /pairing/owner {profile_id}`)
+and that member has a paired phone or a recovery PIN; until then a code alone pairs, so a new pond
+can be set up. It holds phones pairing with a six-digit code over CPace. The setup card, the
+dashboard's loopback exchange, a code issued with `approved`, a `pond-server pairing` code and a
+paired phone resuming are not held.
+
+A held `verify` answers `200 {accepted: false, error: "approval_required", server_proof,
+pairing_request: {request_id, claim_secret, expires_at}}` with no tokens. The phone verifies
+`server_proof` as for an accepted pairing, keeps `claim_secret` in memory, and asks again:
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /handshake/pairing-request/claim` | `{request_id, claim_secret}` | `202 {status: "waiting"}`; `200 {status: "paired", accepted: true, session_token, refresh_token, expires_at}`, once; `403 {status: "declined"}`; `410 {status: "gone"}` for an unknown, expired or already collected request, or a wrong secret |
+| `POST /handshake/pairing-request/recover` | `{request_id, claim_secret, pin}` | The `paired` body; `403 {error: "wrong_pin", tries_left}`; `429 {error: "pin_cooling", retry_after_secs}` with `Retry-After`; `409 {error: "no_recovery_pin"}` |
+| `GET /pairing/lock` | | `{locked, enforced, owner_profile_id, has_recovery_pin, owner_has_a_phone, min_pin_digits, can_change}` |
+| `PUT /pairing/lock` | `{locked}` | The lock's state |
+| `PUT /pairing/recovery-pin` | `{pin}`, 6 to 12 digits | `400 pin_not_six_to_twelve_digits` otherwise |
+| `GET /pairing/requests` | | `{requests: [{id, client_id, client_type, device_name, profile_id, created_at, expires_at}]}` |
+| `POST /pairing/requests/{id}/approve` | `{profile_id?}` | The device becomes that member's, else the code's |
+| `POST /pairing/requests/{id}/decline` | | |
+
+A request lasts ten minutes and at most five wait at once. Each one raises the household alert "A
+phone asks to pair", whose `data` is `{open: "devices", action: "pairing_request", request_id}`.
+The routes that change the lock or answer a request take the main member's own device, or any
+member's device whose My Pond unlock is live; others get `403 pairing_main_member_only`. The PIN is
+kept as a PBKDF2 verifier; five wrong tries are free, then one per 30 s, doubling to one per hour.
+A set-up pond advertises its Bluetooth setup service while the lock holds, so a phone nearby can
+find it and ask.
 
 ### `POST /handshake/spoken-code`
 
@@ -803,6 +869,55 @@ there is logged (`kind="owner_attribution_failed"`) and does not change the answ
 
 A claimed pond that has lost every token is not stuck: the host can still issue a pairing code, and
 `pond-server setup-code --rearm` makes it unclaimed again.
+
+## Factory reset
+
+`POST /admin/factory-reset {pond_name}` erases the household and reopens onboarding; the journey
+is `FactoryResetService` (`crates/pond-core/src/network/services/factory_reset.rs`).
+
+**Who.** A token, and then one of: the host credential (the desktop on the pond's own host), a
+device attributed to the pairing lock's main member, or a member's device whose My Pond unlock is
+live. Anyone else gets `403 factory_reset_main_member_only`, whatever role the household gave
+them. `pond_name` must equal the pond's name exactly; it guards against a slip, not a person.
+
+**Refusals,** before anything is touched: `409 pond_has_no_name` (an unnamed pond has nothing to
+type), `409 pond_name_mismatch`, `409 payments_held` (a peer holds mesh credit, or the ledger
+cannot be read), `409 factory_reset_in_progress` (one reset at a time), `503
+factory_reset_unavailable`.
+
+**Steps,** each reported to `GET /admin/factory-reset/status` as `current_step`:
+
+| Step | What happens |
+|---|---|
+| `exporting` | Every schedule is read for the answer. Another member's private reminder (`member_reminder`) is left out; the caller's own are kept, and the host gets none |
+| `pausing` | Background model work, room voice and every schedule stop; the reset waits up to 30 s for turns and lane work already running |
+| `notifying_household` | Each member's own devices are told, in that member's language |
+| `revoking_devices` | Every device's tokens are revoked, its remote access queued for revocation, and it is unregistered |
+| `erasing_data` | Every schedule is deleted with its runs, then the household's files, the engine's session store, stored secrets, `pond_logs.db`'s household tables, `pond_vectors.db`, and last `pond_system.db`, whose pairing lock goes back to a fresh install's: no main member, no recovery PIN |
+| `speaking_goodbye` | The pond says goodbye and re-arms its setup card |
+| `reopening_onboarding` | Onboarding restarts at `Welcome` |
+| `forgetting_wifi` | The host's Wi-Fi station is asked to forget its saved networks, best effort. Today the shared station refuses (`unsupported`, logged), so saved networks stay |
+
+The household's files are, under the data directory: `attachments/`, `snapshots/`, `memory/`,
+`audio/`, `report-images/`, `news-audio/`, `engine/data/prompt-cache/`,
+`engine/data/litert-lm/kv-snapshots/`, `engine/state/logs/`, `schedules.json`,
+`schedule_runs.json` and set-aside `schedules.json.unreadable-*` files. Folders are emptied, not
+removed, and no symlink is followed out of the data directory. Models, `secrets/master.key`, the
+TLS identity, the setup and admin cards, prompt templates and the pond's own logs (`logs/`) stay.
+A table in `pond_system.db` or `pond_logs.db` with no rule in `db.rs` stops the reset before it
+erases anything.
+
+**Answers.** `200 {routines}` once every step has run. A failure in `erasing_data` or
+`reopening_onboarding` answers `500 {error: "factory_reset_failed", step, reason, routines}`: the
+reset stops there, schedules it paused and did not delete fire again, and Wi-Fi is kept. After a
+failed `erasing_data` onboarding is as it was and, since `pond_system.db` is erased last, the
+pond's name is still there for the reset to run again; after a failed `reopening_onboarding` the
+household is gone and `POST /onboard/reset` from the host reopens setup. Notifying, revoking, the
+goodbye and the Wi-Fi are best effort.
+
+The reset runs as its own task: a caller that disconnects does not stop it. While it runs, every
+`/api/` request except the reset's own two routes and `GET /health` answers
+`503 {error: "pond_resetting"}`.
 
 ## Connections and setup card
 
@@ -877,18 +992,32 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
 | 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
 | 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
+| 403 | `{"error", "who_can_grant": "owner", "owners"}` when `primary_profile_id` changes and the caller is not the owner; a pond that names nobody yet, in settings or as its main member, takes its first from anyone. Nothing in the patch is saved |
+
+Naming `primary_profile_id` names no owner: the owner is the main member (see below).
 
 ## Chat and runs
 
 ### `POST /chat`
 
-`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?}`.
+`ChatRequest {session_id?, message, images?, voice_mode?, canvas_mode?, tool_group_allowlist?, resumable?, device_place?, device_locked?}`.
 `device_place` is where the asking phone is now, as its app named it ("Westlands, Nairobi"),
 sent only while the person has turned on telling Goose where the phone is. It is a name, never
 coordinates, and rides that one turn's `<system-context>` (cleaned, at most 80 characters,
 without `<` or `>`). The conversation is saved from the message alone, and the engine's history
 drops a past turn's `<system-context>` when the next turn starts. Home, where the Pond is, stays the tools' answer
 (`get_user_profile`).
+`device_locked: true` says the asking phone is locked: the app's voice orb opened over its lock
+screen. The turn then runs as an unidentified speaker's (`ProfileScope::Guest`, `locked_turn_scope`
+in `routes.rs`), whoever the phone belongs to, since a voice over a lock screen does not prove who
+holds the phone: no memories or notes, no connected accounts, cameras, sensor history, rides or
+long tasks. Its `<system-context>` carries `LOCKED_DEVICE_NOTE`, so the model says to unlock for
+those. The server logs `kind=turn_device_locked`. A locked turn never claims the conversation
+for the phone's member, and does not continue one that is a member's own, which would replay their
+earlier answers: it runs in a new conversation instead (`kind=turn_device_locked_new_session`), whose
+id the answer carries (`session_id` here, the `done` frame on `/chat/stream`). A conversation that is
+nobody's carries on. `deep_research` is ignored, since the task would run as the member. `/chat`
+(not streamed) honours all of it too.
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
@@ -904,7 +1033,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
 | `tool_call` | `tool, id, input, working_notes?` | A tool call. `working_notes`, when present, is exactly the `text` streamed since the previous `tool_call` (or the turn's start): the model at work ("let me check the weather"), not the answer. Move it out of the answer into the turn's steps. The answer is the text after the last call, and it alone is persisted |
-| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
+| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search and its pictures): show it in the conversation in view, never store it; history keeps only a stub. The `search` card (pages, and where Brave adds them news, videos and place details) and the `pictures` card are specified in [small-model-tools.md §8.10.3 and §8.11](architecture/small-model-tools.md) |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
 | `review_revision` | `content, score, rounds` | A revised answer replaces the streamed text |
@@ -955,12 +1084,13 @@ All chat history lives in `pond_system.db`.
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /sessions` | | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, created_at, updated_at}]}` |
+| `GET /sessions` | `?surface=here,goose` (optional) | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, surface, started_here, created_at, updated_at}]}` |
 | `PATCH /sessions/{session_id}` | `{title}` | `{session_id, title}` |
 | `DELETE /sessions/{session_id}` | | `204`, also for a missing session |
 | `GET /sessions/{session_id}/messages` | `?limit=` (default 100, max 500), `?offset=` | `{messages: [...]}`. Without `offset`, the newest `limit`; with it, oldest-first from `offset` |
 | `DELETE /sessions/{session_id}/messages/{message_id}` | | `204`; the client then resubmits |
 | `PUT .../messages/{message_id}/feedback` | `{liked: true \| false \| null}` | `204` |
+| `POST .../messages/{message_id}/offer` | `{take: bool}` | `{state: "done" \| "dismissed", prompt}`; `prompt` is what to send as the member's own turn, `null` when passed over. `409` with `state` once answered, `404` for a message with no offer |
 | `GET /sessions/{session_id}/attachments/{attachment_id}` | | Raw bytes, `Content-Type`, `Cache-Control: private, max-age=31536000, immutable`; `404` if the attachment is not this session's |
 | `POST /sessions/{session_id}/compact` | | `200` with `status` and `reason`; `404` only for an unknown session |
 | `POST /sessions/retitle` | | `{started, reason}`; `503` without a language model |
@@ -971,20 +1101,40 @@ A message has `id, session_id, role, content, created_at`, and when they apply: 
 attachment route, so fetch it with the bearer token rather than a bare `<img src>`), and `thinking`
 (reasoning passages, kept while `persist_thinking` is on).
 
+`surface` is where a conversation began: `phone`, `desktop`, `cli`, `pond` (the pond's own screen),
+`room` (room voice), `schedule` or `goose`; absent for one begun before it was recorded, which
+`?surface=unknown` selects. The first writer wins and nothing changes it later. `goose` is the
+Goose thread, `goose-<profile id>` or `goose-household`: the one conversation the pond writes into
+by itself, holding schedule answers, finished tasks, due reminders, look-ups, watch hits and
+suggestions. `started_here` says whether the calling device began the conversation; the device itself
+is never sent. In `?surface=`, `here` keeps what the caller's device began and `elsewhere` what
+another phone began.
+
+A message may carry `note`, which is stored with it and never derived from its words:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `from` | `{kind, label, ref_id?}`; `kind` is `schedule`, `reminder`, `task`, `lookup`, `watch`, `heartbeat` or `suggestion` | What produced a message the pond wrote by itself |
+| `receipts` | `[{kind, outcome: "set" \| "not_set", what, id?, reason?}]`; `kind` is `reminder`, `todo`, `timer`, `schedule`, `watch`, `task` or `standing` | What the turn's tools set, and what they did not, as the tools reported it |
+| `suggestion` | `{noticed, action, prompt, state: "open" \| "done" \| "dismissed", suggestion_id?}` | An offer: what Goose noticed, the button's words, and what taking it asks |
+
+A live turn's `tool_result` frame carries the same entry as `receipt`. A reply that says something
+was set when its tool said otherwise ends with a fixed `Not set: ...` line per failure.
+
 ## Voice and audio
 
 Speech synthesis is the in-process Kokoro engine (`AppState.tts`).
 
 | Route | Request | Response |
 |---|---|---|
-| `POST /tts` | `{text}` | `audio/wav` bytes; `400` empty text, `503 {"error":"No TTS backend is running"}` |
+| `POST /tts` | `{text, last?}`; `last: true` when nothing follows this text, so its audio ends at rest instead of in the 0.5 s gap before more | `audio/wav` bytes; `400` empty text, `503 {"error":"No TTS backend is running"}` |
 | `POST /voice/tts/apply` | optional `{voice?, speed?, quality?}`; omitted fields come from settings | `{voice, speed, quality, downloaded_voice, downloaded_weights, engine_reloaded, installed_voices}` |
 | `POST /voice/sample` | exactly `{voice}` | `202 {"speaking": true}` |
 | `GET /voice/tts/status` | | `{available, loaded}` |
 | `POST /voice/tts/prewarm`, `/voice/tts/unload` | | `{status}`; `503` without an engine |
 | `POST /voice/calibrate` | multipart `audio` (WAV), optional `prompt` | `{transcript, normalized, heard, new_variant, all_variants, sample_count, target_count, complete}` |
 | `DELETE /voice/calibrate` | optional `?variant=` (one variant as heard, e.g. the one a take just added) | `{cleared, message}`; with `variant`, `{removed, all_variants}` |
-| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
+| `POST /voice/wake/check` | multipart `audio` (WAV, at most 8 s), optional `phrase_only` (`true`) | `{heard, phrase}`; `413 segment_too_long`, `400 audio_must_be_wav`, `503 speech_recognition_unavailable` |
 | `POST /transcribe` | multipart `audio` | `{text}` |
 | `GET /audio/devices` | | `AudioDeviceStatus {input, output, updated_at_ms, source, pid, raised?, sound_server?}` |
 | `POST /audio/devices/test` | empty, or `{chime: bool}` | `AudioDeviceStatus` after a re-test |
@@ -1005,6 +1155,12 @@ learned pronunciations as they are at that moment, so a change on the Pond count
 segment; `phrase` lets the phone notice a return to "hey goose". It needs the in-process
 whisper-rs model. The recording and the transcript are dropped, never logged and never returned:
 a heard wake logs `kind=wake_check heard=true` at info, a miss only at debug.
+
+A phone also asks here to confirm its own "hey goose" detector, with `phrase_only=true`. Then the
+segment must open with the whole phrase, or a mishearing of the whole phrase that calibration
+learned, with only a hesitation ("um", "uh", "er") before it (`pond_voice::text::heard_wake_phrase`).
+The room's rule is looser on purpose: it takes a plain "goose" after a run-up word, so "OK goose"
+counts there and not here. Without the field the room's rule applies.
 
 ## Models
 
@@ -1060,7 +1216,12 @@ A download or activation for a model whose engine this pond lacks is refused
 
 ## Profiles and session identity
 
-A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, created_at, updated_at}`.
+A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, role, guest_until, created_at, updated_at}`.
+`role` is `owner`, `member`, `guest` or `developer`. The owner is the pairing lock's main member,
+and there is one: handing the seat on with `PUT /pairing/owner`, or naming another member `owner`
+with `PUT /profiles/{id}/role`, makes the old owner a `member`, and the server sets the roles to
+follow the seat when it starts. Permission checks read the seat, so a stale stored `owner` grants
+nothing.
 
 | Route | Request | Response |
 |---|---|---|
@@ -1068,7 +1229,8 @@ A profile is a household member: `Profile {id, display_name, avatar_emoji, prefe
 | `PATCH /profiles/{id}` | `{preferences: {key: value}}`, merged | `{id, display_name, preferences, updated_at}` |
 | `GET /profiles` | | `{profiles: [...]}` |
 | `GET /profiles/{id}` | | the profile, or `404` |
-| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
+| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}`; `403` unless the caller is the owner; `409` for the owner, who hands the seat on first |
+| `PUT /profiles/{id}/role` | `{role, guest_until?}` | the profile; `403` unless the caller is the owner; `409` to give the owner any other role |
 
 Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
 interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
@@ -1139,6 +1301,8 @@ itself must keep calling the heartbeat.
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
 | `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+| `GET /rooms` | | `{rooms: [{id, name, created_at, guest_accessible, guest_access_editable}]}`; `guest_access_editable` says whether this caller may change `guest_accessible` |
+| `PUT /rooms/{id}/guest-access` | `{accessible}` | the room; `403` unless the caller is the owner, `404 room_not_found` |
 
 **`GET /devices/events`** follows device state as devices report it, so a phone need not read
 every device again to see a change. Each `device_state` event's data is
@@ -1188,7 +1352,12 @@ read, `503` when no queue is wired.
 `{id, acknowledged: true}`; acknowledging twice is not an error. Percent-encode `{id}`: a phone's
 copy of a household notice is `"{notification_id}:{device_id}"`. `404` when no notification by that
 id is the caller's (another device's answers the same, so the route cannot probe someone else's
-queue), `500 notification_ack_failed`, `503` when no queue is wired.
+queue), `500 notification_ack_failed`, `503` when no queue is wired. An optional body
+`{shown: true}` also records that the phone showed it to its person.
+
+**`POST /notifications/{id}/opened`** records that the person opened one of the caller's
+notifications and answers `{id, opened: true}`; `404` as for `ack`. With the wake, the fetch
+(`pending` or the stream) and `shown`, it is the record `GET /admin/reliability` counts.
 
 **`GET /notifications/history?limit=N`** (2026-10-28) is the household's record of durable notices,
 which the dashboard's notification centre reads on start and on every reconnect of its stream. It
@@ -1299,8 +1468,16 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
-`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger`,
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`), or
+`member_reminder {profile_id, prompt}`. Every listing, `GET /schedules`, `/schedules/upcoming` and
+the suggestions included, shows a `member_reminder` with an empty `prompt` and the label
+`a private reminder`, since its own label is drawn from its words; `/schedules/events` sends its
+runs with that label and no `result` or `error`. Changing, pausing, resuming, running or answering
+a missed run of a `member_reminder`, or reading its runs, is its member's alone: anyone else, and a
+caller the pond cannot tell apart, gets `403 code: "private_reminder"` (in a household of one
+member, a caller attributed to nobody is that member); see
+[A member's reminder](architecture/scheduling.md#a-members-reminder).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
@@ -1316,13 +1493,15 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
 | `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
 | `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
-| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
+| `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms, for_member?}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
 `sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
-`agent_prompt` action, is `400`, on create and on update.
+`agent_prompt` action, is `400`, on create and on update. A `member_reminder` kind is `400` on create
+and on update: a private reminder is set by its member, by voice. Changing a `member_reminder`'s
+`prompt` keeps it the member's.
 
 ## Memory, reminders, suggestions and proposals
 
@@ -1422,6 +1601,11 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
 | `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept, nor one with `success: false` (a device that refused the command), so its resend runs again. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
+
+Both run the tool as the caller its paired device proves, as a chat turn would: a member's phone
+as that member, an invited guest's phone as that guest, and a device that belongs to nobody, in a
+household of more than one, as an unidentified guest. `set_device_state` then holds a guest to the
+rooms open to guests or the devices they were given.
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
 | `POST /agent/extras` | `UpsertExtraRequest {key, instruction, active? (true), sort_order? (0)}` | `{key, status: "ok"}` |
@@ -1504,6 +1688,7 @@ Each member connects their own Uber account through the credentials service
 (`POND_CREDENTIALS_URL`, see [architecture/pondcredentials.md](architecture/pondcredentials.md));
 tokens stay in this pond's secret store. Every Uber route needs a loopback peer and the host
 credential; a refusal is `{error, code}`, with `code` `host_only` off this machine.
+To test with your own Uber app against the sandbox, see [uber-testing.md](uber-testing.md).
 
 | Route | Request | Response |
 |---|---|---|
@@ -1570,7 +1755,7 @@ has no `code`. Images are multipart `image` fields; see [face-recognition.md](fa
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /mesh/self` | | `{mesh_enabled, peer_id, invite_url}` |
+| `GET /mesh/self` | | `{mesh_enabled, mesh_compiled, peer_id, invite_url}`; with the mesh off only `{mesh_enabled: false, mesh_compiled}`. `mesh_compiled: false` means this binary was built without the `mesh` feature |
 | `GET /mesh/peers` | | `{peers: [{peer_id, trust_scope, connected, credit_balance_millisats}]}` |
 | `POST /mesh/peers` | `{peer_id, trust_scope, address?}` | `201 {peer_id, trust_scope}` |
 | `DELETE /mesh/peers/{peer_id}` | | `204` |

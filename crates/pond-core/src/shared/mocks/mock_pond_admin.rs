@@ -110,6 +110,7 @@ impl PondAdministrator for MockPondAdministrator {
                 total_bytes: 1_000_000,
                 free_bytes: 1_000_000 - total.min(1_000_000),
             },
+            volume: None,
             data_dir_bytes: total,
             area_root_bytes,
             databases: Vec::new(),
@@ -207,6 +208,7 @@ impl PondAdministrator for MockPondAdministrator {
                 total_bytes: 100,
                 free_bytes: 50,
             },
+            volume: None,
             temperatures: Vec::new(),
             process: ProcessUsage { rss_bytes: 1_000 },
         })

@@ -194,8 +194,8 @@ test.describe("Hub — Extensions sub-screen wiring", () => {
 
     await expect(page.getByText("giap-news")).toBeVisible({ timeout: 5_000 });
 
-    // giap-news starts disabled (aria-pressed=false).
-    const newsToggle = page.locator(".ext2").filter({ hasText: "giap-news" }).locator("[aria-pressed]").first();
+    // giap-news starts disabled (aria-checked=false).
+    const newsToggle = page.locator(".ext2").filter({ hasText: "giap-news" }).getByRole("switch").first();
     await expect(newsToggle).toBeVisible({ timeout: 3_000 });
     await newsToggle.click();
     await page.waitForTimeout(600);

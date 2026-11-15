@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use pond_core::network::services::advertising::{should_advertise, ADVERTISING_CHECK_INTERVAL};
 use pond_core::network::services::setup_claim::SetupClaimService;
+use pond_core::security::ports::handshake::Handshake;
 use pond_core::user_data::ports::settings::SettingsRepository;
 
 use crate::ble::{Advertisement, BlePeripheral};
@@ -30,6 +31,9 @@ pub struct AdvertisingController {
     claims: Arc<SetupClaimService>,
     settings: Arc<dyn SettingsRepository>,
     network: Arc<dyn NetworkProbe>,
+    /// The pairing lock: while it holds, finding the pond lets nobody in, so a set-up pond can
+    /// stay findable for a phone that wants to ask.
+    pairing: Option<Arc<dyn Handshake>>,
     advertisement: Advertisement,
     /// Before the first successful read the radio stays quiet: a household that switched it off
     /// must never see it advertise because the database was busy at startup.
@@ -57,11 +61,31 @@ impl AdvertisingController {
             claims,
             settings,
             network,
+            pairing: None,
             advertisement,
             enabled: false,
             applied: None,
             last_error: None,
             started: None,
+        }
+    }
+
+    /// Keep a claimed, online pond findable while its pairing lock holds.
+    pub fn with_pairing_lock(mut self, pairing: Arc<dyn Handshake>) -> Self {
+        self.pairing = Some(pairing);
+        self
+    }
+
+    /// Whether the pairing lock holds. An unreadable lock reads as not holding: the radio
+    /// stays as quiet as it was before the lock existed.
+    async fn lock_holds(&self) -> bool {
+        match &self.pairing {
+            Some(pairing) => pairing
+                .pairing_lock()
+                .await
+                .map(|lock| lock.enforced())
+                .unwrap_or(false),
+            None => false,
         }
     }
 
@@ -93,7 +117,8 @@ impl AdvertisingController {
             }
         };
         let has_usable_network = self.network.has_usable_network();
-        let advertise = self.enabled && should_advertise(claimed, has_usable_network);
+        let advertise = self.enabled
+            && (should_advertise(claimed, has_usable_network) || self.lock_holds().await);
         let decision = Decision {
             enabled: self.enabled,
             claimed,
@@ -281,6 +306,62 @@ mod tests {
                 Some("Pond 7f3a".to_string())
             ]
         );
+    }
+
+    /// A pond whose pairing lock holds or not, as the test sets it.
+    #[derive(Default)]
+    struct LockOnlyHandshake(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl Handshake for LockOnlyHandshake {
+        async fn handshake(
+            &self,
+            _: pond_core::security::ports::handshake::HandshakeRequest,
+        ) -> anyhow::Result<pond_core::security::ports::handshake::HandshakeResponse> {
+            anyhow::bail!("unused")
+        }
+        async fn validate_token(&self, _: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        async fn revoke_device(&self, _: &str) -> anyhow::Result<u64> {
+            Ok(0)
+        }
+        async fn revoke_token(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn pairing_lock(
+            &self,
+        ) -> anyhow::Result<pond_core::security::domain::pairing_lock::PairingLockState> {
+            Ok(
+                pond_core::security::domain::pairing_lock::PairingLockState {
+                    locked: self.0.load(Ordering::SeqCst),
+                    owner_profile_id: Some("jerry".into()),
+                    has_recovery_pin: false,
+                    owner_has_a_phone: true,
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn a_set_up_pond_stays_findable_while_its_pairing_lock_holds() {
+        let mut rig = rig();
+        let lock = Arc::new(LockOnlyHandshake::default());
+        rig.controller = rig.controller.with_pairing_lock(lock.clone());
+        rig.network.0.store(true, Ordering::SeqCst);
+        rig.store.set_claimed_at(Some(chrono::Utc::now()));
+        assert!(
+            !rig.controller.check().await.advertise,
+            "claimed, online and unlocked: finding it could let a phone in"
+        );
+
+        lock.0.store(true, Ordering::SeqCst);
+        assert!(
+            rig.controller.check().await.advertise,
+            "locked: a phone that finds it can only ask"
+        );
+        lock.0.store(false, Ordering::SeqCst);
+        assert!(!rig.controller.check().await.advertise);
     }
 
     #[tokio::test]

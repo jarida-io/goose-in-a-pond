@@ -85,7 +85,7 @@ gives it a control, and the server-side rule if any.
 | `prompt_addendum` | `""` |  |
 | `custom_system_prompt` | `null` |  |
 
-### Voice (`voice`, Household, 18)
+### Voice (`voice`, Household, 19)
 
 | Key | Default | Notes |
 |---|---|---|
@@ -98,6 +98,7 @@ gives it a control, and the server-side rule if any.
 | `voice_kws_energy_threshold` | `0.003` |  |
 | `voice_kws_post_trigger_silence_ms` | `400` |  |
 | `voice_kws_cooldown_ms` | `2000` |  |
+| `lone_voice_sets_reminders` | `true` | in a household of one, a voice the pond cannot identify sets reminders and to-dos as that member |
 | `voice_recording_duration_secs` | `3` | app only: the server never reads it |
 | `voice_whisper_url` | `"http://127.0.0.1:9000"` | rule: `http(s)://` URL with a host, blank allowed |
 | `active_whisper_model` | `""` | mirror of `model_role_assignments`; the catalogue links to Models |
@@ -105,6 +106,7 @@ gives it a control, and the server-side rule if any.
 | `voice_tts_speed` | `1.0` |  |
 | `voice_tts_quality` | `"q8f16"` | rule: one of `q4`, `q4f16`, `q8`, `q8f16`, `fp16`, `fp32` |
 | `voice_thinking_tone_enabled` | `true` |  |
+| `voice_tts_gpu_enabled` | `true` | read as each long speech begins; no effect without the Jetson GPU runtime |
 | `active_tts_model` | `""` | mirror of `model_role_assignments`; the catalogue links to Models |
 | `voice_max_turns` | `0` | Rust classifies it headless; read through `Settings::effective_max_turns` |
 
@@ -159,12 +161,14 @@ gives it a control, and the server-side rule if any.
 | `telemetry_enabled` | `true` |  |
 | `context_ingest_enabled` | `false` | Rust classifies it headless |
 
-### Connections (`connections`, Household, 2)
+### Connections (`connections`, Household, 4)
 
 | Key | Default | Notes |
 |---|---|---|
 | `ble_setup_enabled` | `true` |  |
 | `spoken_pairing_codes` | `true` |  |
+| `unseen_phone_skip_days` | `14` | a phone unseen this long gets no notices until it connects again; `0` never stops; rule: 0 to 365 |
+| `unseen_phone_remove_days` | `30` | a phone unseen this long is unpaired and listed in what Goose did; `0` never removes; rule: 0 to 365 |
 
 ### Extensions & Tools (`extensions`, Household, 17)
 
@@ -179,7 +183,7 @@ gives it a control, and the server-side rule if any.
 | `ext_sensor_enabled` | `true` |  |
 | `ext_travel_enabled` | `false` |  |
 | `ext_orchestrator_enabled` | `false` |  |
-| `ext_context_enabled` | `false` | Rust classifies it headless |
+| `ext_context_enabled` | `true` | Rust classifies it headless |
 | `tool_selection_mode` | `"all"` | rule: one of `all`, `relevant`, `minimal` |
 | `tool_model` | `null` |  |
 | `searxng_url` | `null` | no Rust reader found (`search_web` does not read it); the catalogue marks it live; rule: `http(s)://` URL with a host, blank allowed |
@@ -188,7 +192,7 @@ gives it a control, and the server-side rule if any.
 | `tool_request_detection` | `true` | **inert**: nothing reads it |
 | `multi_tool_enabled` | `false` | **inert**: nothing reads it |
 
-### Automations (`automation`, Household, 11)
+### Automations (`automation`, Household, 13)
 
 | Key | Default | Notes |
 |---|---|---|
@@ -196,6 +200,8 @@ gives it a control, and the server-side rule if any.
 | `schedule_max_runs_per_task` | `50` |  |
 | `schedule_result_notify` | `true` | read for each finished run; off, no run reaches the phones (2026-10-27) |
 | `system_notices_enabled` | `true` | read for each system notice; off silences all but security notices ([notifications.md](notifications.md)) |
+| `notices_wait_in_quiet_hours` | `true` | in quiet hours only alerts and notices marked `quiet_pass` go out; the rest arrive as one notice when they end ([notifications.md](notifications.md)) |
+| `speak_unfetched_reminders` | `true` | a due reminder no phone fetched in five minutes is said once in the room, outside quiet hours |
 | `unprompted_speech_enabled` | `false` |  |
 | `unprompted_speech_categories` | `"alert"` |  |
 | `quiet_hours_start` | `"22:00"` | rule: 24-hour `HH:MM`, blank allowed |

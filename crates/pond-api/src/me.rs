@@ -60,13 +60,18 @@ pub(crate) async fn caller_member(
 async fn hub() -> Json<Value> {
     Json(json!({
         "version": 1,
+        "about": crate::about_me::SERVED,
         "interests": crate::interests::SERVED,
+        "interview": true,
         "news": crate::news::SERVED,
         "todos": crate::todos::SERVED,
         "cart": crate::cart::SERVED,
         "connectors": crate::connectors::SERVED,
         "ideas": crate::ideas::SERVED,
+        "screenshots": true,
+        "activity": crate::goose_activity::SERVED,
         "catalog": crate::catalog::SERVED,
+        "cards": crate::context_cards::KINDS,
     }))
 }
 
@@ -74,11 +79,17 @@ async fn hub() -> Json<Value> {
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me/hub", get(hub))
+        .merge(crate::about_me::routes())
+        .merge(crate::agent_notes::routes())
+        .merge(crate::goose_activity::routes())
         .merge(crate::interests::routes())
+        .merge(crate::member_interview::routes())
         .merge(crate::news::routes())
         .merge(crate::todos::routes())
         .merge(crate::cart::routes())
         .merge(crate::connectors::routes())
+        .merge(crate::context_cards::routes())
         .merge(crate::ideas::routes())
+        .merge(crate::screenshots::routes())
         .merge(crate::catalog::routes())
 }

@@ -696,6 +696,26 @@ impl Todo {
         (self.asked < MAX_ASKS).then_some(PushKind::CheckIn)
     }
 
+    /// Whether `asked` is this same request made again: a turn re-run after a stop, or the tool
+    /// called twice. One that has fired is not, so "again in ten minutes" still stands.
+    pub fn is_repeated_by(&self, asked: &Todo) -> bool {
+        const MADE_WITHIN_MINUTES: i64 = 60;
+        const SAME_MOMENT_SECONDS: i64 = 120;
+        let same_moment = match (self.due_at, asked.due_at) {
+            (None, None) => true,
+            (Some(kept), Some(new)) => (kept - new).num_seconds().abs() <= SAME_MOMENT_SECONDS,
+            _ => false,
+        };
+        self.state == TodoState::Open
+            && self.owner == asked.owner
+            && self.kind == asked.kind
+            && self.text.trim().eq_ignore_ascii_case(asked.text.trim())
+            && self.hooks.len() == asked.hooks.len()
+            && self.hooks.iter().all(|hook| hook.last_fired_at.is_none())
+            && same_moment
+            && (asked.created_at - self.created_at).num_minutes().abs() <= MADE_WITHIN_MINUTES
+    }
+
     /// Whether its due time stands in for a time hook and has come without a push since.
     pub fn due_without_hooks(&self, now: DateTime<Utc>) -> bool {
         self.state == TodoState::Open

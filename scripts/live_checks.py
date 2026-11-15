@@ -27,6 +27,8 @@ OPEN_METEO_REFUSAL = re.compile(r"outbound request to (?:[a-z-]+\.)?open-meteo\.
 # Match the destination in the refusal reason, not a hostname embedded in another field.
 APPLE_PLAYER_REFUSAL = re.compile(r"refused an outbound request to js-cdn\.music\.apple\.com:")
 
+# The speaker model's pinned checksum, pond_core::models::domain::voice_match_model::SHA256.
+VOICE_MATCH_SHA256 = "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068"
 DATA_DIR = os.environ.get("POND_DATA_DIR", "/tmp/pond-live")
 DB = os.path.join(DATA_DIR, "pond_system.db")
 PORT_FILE = os.path.join(DATA_DIR, ".runtime_api_port")
@@ -741,14 +743,17 @@ def section_audio_devices():
         expect("mic switched back on", code, 200, body)
 
 
-def _post_audio(path, audio):
-    """POST one multipart `audio` field from bytes, as a phone sends a segment."""
+def _post_audio(path, audio, fields=()):
+    """POST one multipart `audio` field from bytes, as a phone sends a segment, plus any `fields`."""
     with tempfile.NamedTemporaryFile(suffix=".wav") as fh:
         fh.write(audio)
         fh.flush()
         url = "http://127.0.0.1:%s%s" % (api_port(), path)
         cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", "-F",
-               "audio=@%s;type=audio/wav" % fh.name, url]
+               "audio=@%s;type=audio/wav" % fh.name]
+        for name, value in fields:
+            cmd += ["-F", "%s=%s" % (name, value)]
+        cmd.append(url)
         out = subprocess.run(cmd, capture_output=True, text=True).stdout
     raw, _, code = out.rpartition("\n")
     try:
@@ -787,6 +792,27 @@ def section_wake_check():
 
     code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(12))
     expect("a segment longer than the ear cuts is refused", code, 413, body)
+
+    code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(1), [("phrase_only", "true")])
+    if code == 503:
+        expect("a whole-phrase wake check with no speech recognition says so", code, 503, body)
+    else:
+        expect("a whole-phrase wake check answers a verdict", code, 200, body,
+               ("only heard and phrase", isinstance(body, dict) and sorted(body) == ["heard", "phrase"]),
+               ("silence is no wake", isinstance(body, dict) and body.get("heard") is False))
+
+    # The speaker model a phone fetches: a scratch pond may still be downloading it, or lack Voice
+    # Match; either is said by name. The bytes are 26 MB, so only the status and headers are read.
+    url = "http://127.0.0.1:%s/api/v1/voice/prints/model/file" % api_port()
+    out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-D", "-", url],
+                         capture_output=True, text=True).stdout
+    status = int(out.split()[1]) if out.startswith("HTTP/") else 0
+    if status == 200:
+        expect("the ready speaker model comes with its pinned checksum", status, 200, out,
+               ("checksum", "x-model-sha256: " + VOICE_MATCH_SHA256 in out.lower()))
+    else:
+        expect("a speaker model that is not ready is refused by name", status,
+               409 if status == 409 else 503, out)
 
 
 def section_audio_devices_after_restart():
@@ -1490,6 +1516,161 @@ def section_policy_telemetry():
         after["events"]["truncated"] is False,
         str(after["events"]),
     )
+
+
+# ── Where a conversation began, what a message carries, and the pairing lock ──
+
+_SURFACE_SESSIONS = (
+    ("live-surface-phone", "phone"),
+    ("live-surface-room", "room"),
+    ("live-surface-old", None),
+)
+_OFFER_MESSAGE = "live-offer-message"
+
+
+def _listed(surface):
+    code, body = call("GET", "/api/v1/sessions?surface=" + surface)
+    if code != 200 or not isinstance(body, dict):
+        return code, {}
+    return code, {s["id"]: s.get("surface") for s in body.get("sessions", [])}
+
+
+def _check_surfaces(label):
+    ours = {sid for sid, _ in _SURFACE_SESSIONS}
+    code, phone = _listed("phone")
+    check(
+        "%s: ?surface=phone keeps only what began on a phone" % label,
+        code == 200 and ours & set(phone) == {"live-surface-phone"} and set(phone.values()) <= {"phone"},
+        "HTTP %s %s" % (code, phone),
+    )
+    code, both = _listed("room,unknown")
+    check(
+        "%s: ?surface=room,unknown keeps the room's and the unrecorded" % label,
+        code == 200 and ours & set(both) == {"live-surface-room", "live-surface-old"}
+        and both.get("live-surface-old") is None,
+        "HTTP %s %s" % (code, both),
+    )
+    code, body = call("GET", "/api/v1/sessions")
+    everything = {s["id"] for s in body.get("sessions", [])} if code == 200 else set()
+    check("%s: no filter lists all three" % label, ours <= everything, "HTTP %s" % code)
+
+
+def section_delivery_and_conversations():
+    """Migrations 0100 to 0105 on a real file, and the routes they serve, on the real binary.
+
+    The loopback bypass names no device, so what needs a member's phone (the notice record, the
+    lock's answers, the report) is asserted with the bypass off: `remote_auth_checks.py`,
+    `pairing_lock_checks.py` and `admin_checks.py`.
+    """
+    print("\n=== delivery record, conversations by surface, notes, the pairing lock ===")
+    con = db()
+    try:
+        columns = {
+            table: {r[1] for r in con.execute("PRAGMA table_info(%s)" % table)}
+            for table in ("sessions", "session_messages", "notifications", "devices", "pairing_codes")
+        }
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table, column in (
+            ("sessions", "surface"), ("sessions", "surface_device_id"),
+            ("session_messages", "note_json"),
+            ("notifications", "wakes"), ("notifications", "fetched_at"), ("notifications", "shown_at"),
+            ("notifications", "opened_at"), ("notifications", "spoken_at"), ("notifications", "held"),
+            ("devices", "is_test"), ("pairing_codes", "is_test"), ("pairing_codes", "approved"),
+        ):
+            check("%s.%s present" % (table, column), column in columns[table], str(sorted(columns[table])))
+        for table in ("pairing_lock", "pairing_requests"):
+            check("table %s present" % table, table in tables)
+        for sid, surface in _SURFACE_SESSIONS:
+            con.execute(
+                "INSERT OR REPLACE INTO sessions (id, title, surface, created_at, updated_at) "
+                "VALUES (?, 'live surface', ?, datetime('now'), datetime('now'))",
+                (sid, surface),
+            )
+        note = {
+            "from": {"kind": "suggestion", "label": "Suggestion"},
+            "receipts": [{"kind": "reminder", "outcome": "not_set", "what": "call the vet",
+                          "reason": "no time was given"}],
+            "suggestion": {"noticed": "You asked about the vet twice this week.",
+                           "action": "Set a reminder", "prompt": "Remind me to call the vet at nine.",
+                           "state": "open"},
+        }
+        con.execute(
+            "INSERT OR REPLACE INTO session_messages (id, session_id, role, content, note_json, created_at) "
+            "VALUES (?, 'live-surface-phone', 'assistant', 'Shall I set a reminder?', ?, datetime('now'))",
+            (_OFFER_MESSAGE, json.dumps(note)),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    _check_surfaces("the conversation list")
+
+    code, body = call("GET", "/api/v1/sessions/live-surface-phone/messages")
+    rows = body.get("messages", body) if isinstance(body, dict) else body
+    ours = next((m for m in rows or [] if isinstance(m, dict) and m.get("id") == _OFFER_MESSAGE), None)
+    kept = (ours or {}).get("note") or {}
+    check(
+        "a message carries its note: where it came from, its receipts and its offer",
+        code == 200 and kept.get("from", {}).get("kind") == "suggestion"
+        and kept.get("receipts", [{}])[0].get("outcome") == "not_set"
+        and kept.get("suggestion", {}).get("state") == "open",
+        "HTTP %s %s" % (code, ours),
+    )
+    offer = "/api/v1/sessions/live-surface-phone/messages/%s/offer" % _OFFER_MESSAGE
+    code, body = call("POST", offer, {"take": True})
+    expect(
+        "taking an offer", code, 200, body,
+        ("marks it done", lambda b: b.get("state") == "done"),
+        ("hands back what to ask", lambda b: b.get("prompt") == "Remind me to call the vet at nine."),
+    )
+    code, body = call("POST", offer, {"take": False})
+    expect("an offer is answered once", code, 409, body, ("says what it became", lambda b: b.get("state") == "done"))
+    code, body = call("POST", "/api/v1/sessions/live-surface-room/messages/none/offer", {"take": True})
+    expect("a message with no offer is 404", code, 404, body)
+
+    code, body = call("GET", "/api/v1/pairing/lock")
+    expect(
+        "a fresh pond's pairing lock", code, 200, body,
+        ("is on", lambda b: b.get("locked") is True),
+        ("holds nobody out before the pond has a main member", lambda b: b.get("enforced") is False),
+        ("is not the loopback caller's to change", lambda b: b.get("can_change") is False),
+    )
+    code, body = call("PUT", "/api/v1/pairing/lock", {"locked": False})
+    expect("the lock is not changed by a caller with no device", code, 403, body)
+    code, body = call("GET", "/api/v1/admin/reliability?days=7")
+    expect("the reliability report is behind My Pond", code, 403, body)
+
+    binary = os.environ.get("POND_SERVER_BIN")
+    if binary:
+        out = subprocess.run(
+            [binary, "reliability", "--days", "7", "--json"],
+            env={**os.environ, "POND_DATA_DIR": DATA_DIR}, capture_output=True, text=True,
+        )
+        try:
+            report = json.loads(out.stdout)
+        except json.JSONDecodeError:
+            report = None
+        check(
+            "pond-server reliability reads a running pond's record",
+            out.returncode == 0 and isinstance(report, dict)
+            and {"notices", "turns", "phones", "stops"} <= set(report),
+            (out.stdout + out.stderr)[:200],
+        )
+
+
+def section_delivery_after_restart():
+    print("\n=== conversations by surface and the pairing lock, after a restart ===")
+    _check_surfaces("after a restart, the conversation list")
+    code, body = call("GET", "/api/v1/sessions/live-surface-phone/messages")
+    rows = body.get("messages", body) if isinstance(body, dict) else body
+    ours = next((m for m in rows or [] if isinstance(m, dict) and m.get("id") == _OFFER_MESSAGE), None)
+    check(
+        "after a restart, the offer is still answered",
+        code == 200 and ((ours or {}).get("note") or {}).get("suggestion", {}).get("state") == "done",
+        "HTTP %s %s" % (code, ours),
+    )
+    code, body = call("GET", "/api/v1/pairing/lock")
+    expect("after a restart, the pairing lock", code, 200, body, ("is still on", lambda b: b.get("locked") is True))
 
 
 # ── The household's notification history ──────────────────────────────────────
@@ -2207,6 +2388,7 @@ def main():
         section_memory_vectors_after_restart()
         section_vision_after_restart()
         section_notification_history("the notice history after a restart", after_pairing=True)
+        section_delivery_after_restart()
     else:
         section_schema()
         jerry, liz = section_identity()
@@ -2231,6 +2413,7 @@ def main():
         section_composed_suggestions()
         section_reminders_surface()
         section_notification_history()
+        section_delivery_and_conversations()
         section_vision()
         # Last: it moves the chat model to a local one for a moment, and puts it back.
         section_picture_support()

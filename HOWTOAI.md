@@ -131,6 +131,12 @@ the model reads; edit them as prompt text.
 taken. Never assume the port: read `<data_dir>/.runtime_api_port` and `.runtime_https_port`, and pass
 `--port` explicitly when a service may already hold one.
 
+**The pairing lock.** Once a pond has a main member with a paired phone or a recovery PIN, a phone
+pairing with a six-digit code over CPace gets `approval_required` and no tokens. A harness asks for
+its code with `{"approved": true}` (or `{"test": true}`, which also keeps the device out of the
+household's notices and the reliability report); `pond-server pairing` codes are already approved.
+The loopback HMAC exchange and the setup card are never held.
+
 **Source-reading tests.** Some tests read source as text (`*_is_wired.rs`, `*_wiring.rs`,
 `egress_guard.rs`, `stream_handler_parity.rs`). After editing comments, run the touched crates' tests.
 

@@ -482,9 +482,10 @@ impl Agent for PondAgent {
                         let name = name.clone();
                         let args = args.clone();
                         let id = id.clone();
+                        let scope = request.profile_scope.clone();
                         async move {
                             let result_text = if let Some(ref d) = disp {
-                                match d.dispatch(&name, args).await {
+                                match d.dispatch(&name, args, &scope).await {
                                     Ok(result) => result.content,
                                     Err(e) => format!("Tool '{}' failed: {}", name, e),
                                 }
@@ -506,6 +507,7 @@ impl Agent for PondAgent {
                             content: result_text.clone(),
                             card: None,
                             keep: None,
+                            outcome: None,
                         }))
                         .await;
 
@@ -540,6 +542,7 @@ impl Agent for PondAgent {
                         completion_tokens: None,
                         reasoning_tokens: None,
                         liked: None,
+                        note: None,
                     };
                     if let Err(e) = storage_ref
                         .add_message(session_id_persist.clone(), sm)
@@ -723,6 +726,7 @@ mod tests {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             })
             .await
             .unwrap();
@@ -750,6 +754,7 @@ mod tests {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             })
             .await
             .unwrap();
@@ -835,6 +840,7 @@ mod tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         };
         let prompt = agent
             .build_system_prompt(&Settings::default(), &request)

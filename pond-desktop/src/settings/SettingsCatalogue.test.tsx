@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-li
 import { SettingsCatalogueView } from "./SettingsCatalogue";
 import { summariseRetitle, parseText } from "./catalogueView";
 import { api } from "../api/PondApiClient";
+import { ApiError } from "../api/types";
 import { SETUP_WAITING, makeConnections } from "../network/connectionsFixtures";
 
 // ── Mocks ─────────────────────────────────────────────────────
@@ -53,6 +54,8 @@ vi.mock("../api/PondApiClient", () => ({
     listModels: vi.fn(),
     retitleSessions: vi.fn(),
     resetOnboarding: vi.fn(),
+    factoryReset: vi.fn(),
+    factoryResetStatus: vi.fn().mockResolvedValue({ active: false }),
     listTimeZones: vi.fn(),
     detectLocation: vi.fn(),
     getAudioDevices: vi.fn().mockRejectedValue(new Error("not under test here")),
@@ -71,6 +74,7 @@ const mockApi = api as unknown as {
   listModels: ReturnType<typeof vi.fn>;
   retitleSessions: ReturnType<typeof vi.fn>;
   resetOnboarding: ReturnType<typeof vi.fn>;
+  factoryReset: ReturnType<typeof vi.fn>;
   listTimeZones: ReturnType<typeof vi.fn>;
   detectLocation: ReturnType<typeof vi.fn>;
   getConnections: ReturnType<typeof vi.fn>;
@@ -207,6 +211,76 @@ describe("SettingsCatalogue", () => {
     // Never found half-pressed.
     expect(screen.getByRole("button", { name: /Start onboarding/ })).toBeTruthy();
     expect(mockApi.resetOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("shows a warning step first, with nothing typeable until it's confirmed", async () => {
+    await renderPage({ home_name: "The Kitchen Pond" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Factory reset/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    within(dialog).getByRole("heading", { name: /Warning/ });
+    expect(within(dialog).getByText(/cannot be undone/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/Type this Pond's name/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Erase everything/ })).toBeNull();
+
+    // Cancelling from the warning step closes the modal without ever reaching the typed card.
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Cancel$/ }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("only reaches the typed confirmation after the warning is accepted, gated on the pond's real name", async () => {
+    await renderPage({ home_name: "The Kitchen Pond" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Factory reset/ }));
+    await screen.findByRole("heading", { name: /Warning/ });
+    fireEvent.click(screen.getByRole("button", { name: /Yes, I'm sure/ }));
+
+    const confirm = (await screen.findByRole("button", { name: /Erase everything/ })) as HTMLButtonElement;
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("The Kitchen Pond")).toBeTruthy();
+    const input = screen.getByLabelText(/Type this Pond's name/);
+    expect(confirm.disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: "The Wrong Pond" } });
+    expect(confirm.disabled).toBe(true);
+
+    fireEvent.change(input, { target: { value: "The Kitchen Pond" } });
+    expect(confirm.disabled).toBe(false);
+    expect(mockApi.factoryReset).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a factory reset refusal without reloading", async () => {
+    mockApi.factoryReset.mockRejectedValue(new ApiError(409, "pond_name_mismatch"));
+    await renderPage({ home_name: "The Kitchen Pond" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Factory reset/ }));
+    await screen.findByRole("heading", { name: /Warning/ });
+    fireEvent.click(screen.getByRole("button", { name: /Yes, I'm sure/ }));
+
+    const input = await screen.findByLabelText(/Type this Pond's name/);
+    fireEvent.change(input, { target: { value: "The Kitchen Pond" } });
+    fireEvent.click(screen.getByRole("button", { name: /Erase everything/ }));
+
+    await waitFor(() => expect(mockApi.factoryReset).toHaveBeenCalledWith("The Kitchen Pond"));
+    await screen.findByText(/doesn't match this Pond's name/);
+    // The reset is refused, so the modal with its typed input must still be here.
+    expect(screen.getByLabelText(/Type this Pond's name/)).toBeTruthy();
+  });
+
+  it("blocks the reset entirely when the pond has no name, instead of a blank card to type", async () => {
+    await renderPage({ home_name: "" });
+
+    fireEvent.click(screen.getByRole("button", { name: /Factory reset/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    within(dialog).getByRole("heading", { name: /Name this Pond first/ });
+    expect(screen.queryByLabelText(/Type this Pond's name/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Yes, I'm sure/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Erase everything/ })).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /Got it/ }));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("folds the banner away and keeps answering its question while folded", async () => {
@@ -347,7 +421,8 @@ describe("SettingsCatalogue", () => {
     async function openModels(over: Record<string, unknown>) {
       await renderPage(over);
       fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
-      return screen.getByLabelText("Search memories by meaning") as HTMLInputElement;
+      const toggle = screen.getByRole("switch", { name: "Search memories by meaning" });
+      return { element: toggle, checked: toggle.getAttribute("aria-checked") === "true" };
     }
 
     it("is a switch, not a choice of engines, and says nothing false about the Orin", async () => {
@@ -371,7 +446,7 @@ describe("SettingsCatalogue", () => {
 
     it("stages \"none\" when switched off, and saves it as the pond reads it", async () => {
       const toggle = await openModels({ embedding_provider: "fastembed" });
-      fireEvent.click(toggle);
+      fireEvent.click(toggle.element);
       expect(mockApi.updateSettings).not.toHaveBeenCalled();
       fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "none" }));
@@ -379,7 +454,7 @@ describe("SettingsCatalogue", () => {
 
     it("stages \"auto\" when switched on, so the Memory model decides the engine", async () => {
       const toggle = await openModels({ embedding_provider: "none" });
-      fireEvent.click(toggle);
+      fireEvent.click(toggle.element);
       fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
     });

@@ -91,7 +91,7 @@ for them.
 
 Write only from the page. Every name, number, date and claim must be on the page; leave out \
 anything that is not. Add no background from your own knowledge. Use your own words and never \
-copy a sentence from the page.
+copy a sentence from the page. Keep your thinking concise, grounded, and focused on extracting exact facts from the page.
 
 Reply with JSON and nothing else:
 {\"headline\": \"...\", \"dek\": \"...\", \"summary\": \"...\", \"why_you\": \"...\"}
@@ -268,7 +268,7 @@ they care about, from the numbered web pages the pond read for them.
 
 Write only from the pages. Every name, number, date and claim must be on one of them; cite each \
 with its page's number in square brackets right after it, like [2]. Add no background from your \
-own knowledge. Use your own words and never copy a sentence.
+own knowledge. Use your own words and never copy a sentence. Keep your thinking concise, structured, and focused on synthesizing insights across the pages.
 
 Reply with JSON and nothing else:
 {\"headline\": \"...\", \"dek\": \"...\", \"summary\": \"...\", \"why_you\": \"...\"}
@@ -318,7 +318,7 @@ and pages it read for this section.
 
 Write only from the sources. Cite with the source's number in square brackets, like [2], at the \
 end of the sentence or run of sentences it supports, not after every sentence. Add no facts from \
-your own knowledge. Use your own words, and date nothing with today's date.
+your own knowledge. Use your own words, and date nothing with today's date. Keep your thinking concise and focused on synthesizing the news for this section.
 
 Reply with JSON and nothing else:
 {\"heading\": \"...\", \"body\": \"...\"}

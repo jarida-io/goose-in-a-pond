@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use pond_core::mcp::domain::notice_delivery::{Wake, WakeGap};
 use pond_core::mcp::ports::notification::Notification;
 use pond_core::mcp::ports::notification_relay::NotificationRelay;
 use pond_core::shared::services::egress::{self, EgressPurpose};
@@ -218,13 +219,13 @@ impl FcmPushRelay {
 
 #[async_trait]
 impl NotificationRelay for FcmPushRelay {
-    async fn relay(&self, notification: &Notification) -> Result<()> {
+    async fn relay(&self, notification: &Notification) -> Result<Wake> {
         let Some(stored) = self.push_tokens.get(&notification.target).await? else {
             tracing::debug!(
                 device = %notification.target,
                 "FCM relay: no push token registered; skipping background push"
             );
-            return Ok(());
+            return Ok(Wake::NotSent(WakeGap::NoToken));
         };
         match stored.platform {
             PushPlatform::Fcm => {}
@@ -233,14 +234,14 @@ impl NotificationRelay for FcmPushRelay {
                     device = %notification.target,
                     "APNs push not yet supported (needs an Apple Developer key); skipping"
                 );
-                return Ok(());
+                return Ok(Wake::NotSent(WakeGap::NoSender));
             }
             PushPlatform::Expo => {
                 tracing::debug!(
                     device = %notification.target,
                     "expo-platform token registered but GIAP relays directly; skipping"
                 );
-                return Ok(());
+                return Ok(Wake::NotSent(WakeGap::NoSender));
             }
         }
 
@@ -268,7 +269,7 @@ impl NotificationRelay for FcmPushRelay {
                 category = %notification.category,
                 "FCM wake ping delivered"
             );
-            Ok(())
+            Ok(Wake::Sent)
         } else {
             // 404/410 = stale token (app reinstalled); others = config/quota.
             Err(anyhow!(

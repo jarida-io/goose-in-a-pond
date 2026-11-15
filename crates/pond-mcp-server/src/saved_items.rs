@@ -16,7 +16,7 @@ use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::format::format_dead_end;
+use crate::format::format_not_done;
 use crate::knowledge::KnowledgeMcpServer;
 
 const TOOL_NAME: &str = "saved_items";
@@ -49,13 +49,16 @@ pub fn init_saved_item_deps(deps: SavedItemDeps) {
 }
 
 // Few, plain fields on purpose: this tool is in every turn's tool block.
+// `default` keeps every field out of the schema's `required`; a small model asks for each one listed.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(transform = crate::without_null_defaults)]
 pub struct SavedItemsParams {
     /// save, find or list
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "save"))]
     pub action: Option<String>,
     /// recipe, listing, place or note
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "note"))]
     pub kind: Option<String>,
     #[schemars(with = "String")]
     pub title: Option<String>,
@@ -129,10 +132,10 @@ listing, or find one they kept. save takes your last answer unless you give text
     }
 }
 
-async fn run(meta: &Meta, params: SavedItemsParams) -> String {
+async fn run(meta: &RequestMetaObject, params: SavedItemsParams) -> String {
     let what = "keeping that";
     let Some(deps) = SAVED_ITEM_DEPS.get().cloned() else {
-        return format_dead_end(what, "Saving cards is not set up on this pond yet.");
+        return format_not_done(what, "Saving cards is not set up on this pond yet.");
     };
     let authority = crate::session_from_meta(meta)
         .and_then(|s| deps.authorities.authority_for_engine_session(&s));
@@ -141,7 +144,7 @@ async fn run(meta: &Meta, params: SavedItemsParams) -> String {
             .owner_id()
             .map(|o| (o.to_string(), a.session_id().to_string()))
     }) else {
-        return format_dead_end(
+        return format_not_done(
             what,
             "Only a household member the pond knows can keep cards. Ask them to say who they are.",
         );
@@ -153,7 +156,7 @@ async fn run(meta: &Meta, params: SavedItemsParams) -> String {
     };
     result.unwrap_or_else(|e| {
         tracing::warn!(target: "giap::trace", kind = "saved_items_failed", error = %e);
-        format_dead_end(
+        format_not_done(
             what,
             "The pond couldn't do that just now; try again shortly.",
         )
@@ -229,7 +232,7 @@ async fn save(
 ) -> anyhow::Result<String> {
     let what = "keeping that";
     if deps.repo.count_for(owner).await? >= MAX_SAVED_PER_MEMBER {
-        return Ok(format_dead_end(
+        return Ok(format_not_done(
             what,
             &format!("They already keep {MAX_SAVED_PER_MEMBER} cards, the most one member may."),
         ));
@@ -239,7 +242,7 @@ async fn save(
         None => match last_answer(deps, session).await {
             Some(answer) => answer,
             None => {
-                return Ok(format_dead_end(
+                return Ok(format_not_done(
                     what,
                     "There is no answer in this conversation to keep yet.",
                 ))
@@ -273,7 +276,7 @@ async fn save(
         Utc::now(),
     ) {
         Ok(item) => item,
-        Err(refused) => return Ok(format_dead_end(what, &refused.words())),
+        Err(refused) => return Ok(format_not_done(what, &refused.words())),
     };
     deps.repo.create(&item).await?;
     tracing::info!(target: "giap::trace", kind = "saved_item", card = item.fields.kind());
@@ -399,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_deps_saving_is_refused() {
-        let text = run(&Meta::new(), params(serde_json::json!({}))).await;
+        let text = run(&RequestMetaObject::new(), params(serde_json::json!({}))).await;
         assert!(text.contains("not set up"), "{text}");
     }
 }

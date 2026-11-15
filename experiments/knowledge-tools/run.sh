@@ -6,6 +6,8 @@
 #   ./run.sh e1 gemma-4-E2B-it-qat-UD-Q4_K_XL
 #   ONLY=r01,c01 ./run.sh e1     a subset of cases
 #   PAYLOADS=payloads/<commit> OUT=results-<commit> ./run.sh e1   replay another capture
+#   MMPROJ=<model's mmproj.gguf> ./run.sh e9 <one model>             E9's attached pictures need it
+#   LLAMA_SERVER=~/llama.cpp/build/bin/llama-server ./run.sh ...     a build not on PATH
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODELS_DIR="${GIAP_MODELS:-$HOME/Library/Application Support/goose-in-a-pond/models/gguf}"
@@ -23,7 +25,8 @@ MODELS=("$@")
 )
 OUT="${OUT:-$HERE/results}"
 mkdir -p "$HERE/logs" "$OUT"
-command -v llama-server >/dev/null || { echo "llama-server not found (brew install llama.cpp)"; exit 1; }
+LLAMA_SERVER="${LLAMA_SERVER:-llama-server}"
+command -v "$LLAMA_SERVER" >/dev/null || { echo "llama-server not found (brew install llama.cpp)"; exit 1; }
 
 stop() { pkill -f "llama-server.*--port $PORT" 2>/dev/null; sleep 1; }
 trap stop EXIT
@@ -32,7 +35,8 @@ for m in "${MODELS[@]}"; do
   gguf="$MODELS_DIR/$m.gguf"
   [ -e "$gguf" ] || { echo "skip $m: not at $gguf"; continue; }
   stop
-  llama-server -m "$gguf" --port "$PORT" -c 16384 -ngl 99 --jinja --reasoning-budget "$( [ "${THINK:-0}" = 1 ] && echo -1 || echo 0 )" \
+  "$LLAMA_SERVER" -m "$gguf" ${MMPROJ:+--mmproj "$MMPROJ"} --port "$PORT" -c "${CTX:-16384}" -ngl 99 --jinja \
+    --reasoning-budget "$( [ "${THINK:-0}" = 1 ] && echo -1 || echo 0 )" \
     > "$HERE/logs/$m.log" 2>&1 &
   for _ in $(seq 1 120); do curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 1; done
   curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null || { echo "$m did not start; logs/$m.log"; continue; }

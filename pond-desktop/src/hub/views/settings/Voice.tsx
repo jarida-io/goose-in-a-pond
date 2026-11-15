@@ -194,6 +194,20 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
     }
   }
 
+  // ── Long speech on the graphics processor ──────────────────
+  const gpuSpeech = settings.voice_tts_gpu_enabled !== false;
+
+  async function handleGpuSpeechChange(on: boolean) {
+    setSettings((prev) => ({ ...prev, voice_tts_gpu_enabled: on }));
+    try {
+      await api.updateSettings({ voice_tts_gpu_enabled: on });
+      showFlash(on ? "Faster long speech on." : "Faster long speech off.");
+    } catch (e) {
+      setSettings((prev) => ({ ...prev, voice_tts_gpu_enabled: !on }));
+      showFlash(`Failed to update faster long speech: ${String(e)}`, false);
+    }
+  }
+
   // ── Speaking rate slider (debounced) ───────────────────────
   // A drag emits a value per pixel; each would be a settings write and a synthesis.
   function handlePaceChange(next: number) {
@@ -514,6 +528,18 @@ export function VoiceDetail({ go }: VoiceDetailProps) {
               key={`thinking-tone-${thinkingTone}`}
               on={thinkingTone}
               onChange={handleThinkingToneChange}
+            />
+          }
+        />
+
+        <Row
+          label="Faster long speech"
+          sub="Long answers and briefings start sooner, on a Pond with a graphics processor set up"
+          control={
+            <Toggle
+              key={`gpu-speech-${gpuSpeech}`}
+              on={gpuSpeech}
+              onChange={handleGpuSpeechChange}
             />
           }
         />

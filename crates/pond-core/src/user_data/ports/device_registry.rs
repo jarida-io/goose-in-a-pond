@@ -24,6 +24,23 @@ pub struct Device {
     pub room_id: Option<String>,
 }
 
+/// The device type a paired Goose On The Go phone registers under.
+pub const PHONE_DEVICE_TYPE: &str = "gotg";
+
+/// The device type the desktop app and the browser dashboard register under.
+pub const DESKTOP_DEVICE_TYPE: &str = "desktop";
+
+/// What a device type means in words, for the model and people. Stored codes such as `gotg` mean
+/// nothing to a model, which then guesses from the capabilities (a phone that plays audio became a
+/// "smart hub/speaker"). Types without a fixed meaning are returned as stored.
+pub fn device_type_label(device_type: &str) -> &str {
+    match device_type {
+        PHONE_DEVICE_TYPE => "phone running the Goose On The Go companion app",
+        DESKTOP_DEVICE_TYPE => "Pond desktop app or browser dashboard",
+        other => other,
+    }
+}
+
 /// Editable fields from the Devices "Configure" UI (name, hostname, room).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateDeviceRequest {
@@ -88,5 +105,23 @@ pub trait DeviceRegistry: Send + Sync {
         _capabilities: &[String],
     ) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_types_are_described_and_others_kept() {
+        assert_eq!(
+            device_type_label(PHONE_DEVICE_TYPE),
+            "phone running the Goose On The Go companion app"
+        );
+        assert_eq!(
+            device_type_label(DESKTOP_DEVICE_TYPE),
+            "Pond desktop app or browser dashboard"
+        );
+        assert_eq!(device_type_label("thermostat"), "thermostat");
     }
 }

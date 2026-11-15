@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
-import { Card, CardContent, Button, Input, Switch } from "@heroui/react";
+import { Card, CardContent, Button, Input } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import {
   Plus, Trash2, Sparkles, Check, Pencil,
   Bell, Clock, Calendar, MessageCircle, Home, Shield, Lightbulb, Wrench, Music,
@@ -249,12 +251,10 @@ export function Skills() {
                 </span>
                 <Switch
                   size="sm"
-                  isSelected={s.active}
+                  checked={s.active}
                   onChange={() => toggle(s.id, s.active)}
-                  aria-label={`Enable ${s.name}`}
-                >
-                  <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                </Switch>
+                  label={`Enable ${s.name}`}
+                />
               </div>
               <h3 className="skill-card__title">{s.name}</h3>
               <p className="skill-card__desc">

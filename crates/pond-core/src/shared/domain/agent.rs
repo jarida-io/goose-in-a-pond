@@ -1,3 +1,4 @@
+use crate::user_data::domain::message_note::Receipt;
 use crate::user_data::domain::profile::ProfileScope;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -66,7 +67,18 @@ pub struct AgentRequest {
     /// coordinates; `None` from every other caller, and from the app with the switch off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_place: Option<String>,
+    /// The asking phone is locked: the turn runs with no personal data or tools (the caller sets
+    /// its scope to `Guest`), and the model is told why, so it can say to unlock the phone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_locked: bool,
 }
+
+/// What a turn from a locked phone tells the model ([`AgentRequest::device_locked`]): why it has
+/// no personal tools this turn, and what to say when asked for something that needs them.
+pub const LOCKED_DEVICE_NOTE: &str = "The person's phone is locked, so this turn has no personal \
+     data or tools: their memories and notes, messages, calendar, cameras, sensor history and \
+     anything bought or booked. Answer what needs none of that. If they ask for something that \
+     does, say to unlock the phone and ask again.";
 
 impl AgentRequest {
     /// The words the turn is about: the message, or for a room turn the model hears, the room's
@@ -127,6 +139,9 @@ pub enum AgentStreamEvent {
         /// keeps the result whole. Set from the tool's transient marker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keep: Option<String>,
+        /// What a tool asked to set something for later really did, from its outcome marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Receipt>,
     },
     Text {
         content: String,
@@ -598,6 +613,7 @@ mod agent_request_scope_tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         }
     }
 

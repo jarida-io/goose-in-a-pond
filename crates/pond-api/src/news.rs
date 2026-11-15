@@ -60,7 +60,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .route("/me/news/digests/{id}/speak", post(speak))
 }
 
-fn store(state: &AppState) -> SqliteNewsStore {
+pub(crate) fn store(state: &AppState) -> SqliteNewsStore {
     SqliteNewsStore::new(state.db.system.clone())
 }
 

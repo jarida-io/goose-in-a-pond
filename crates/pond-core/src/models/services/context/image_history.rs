@@ -1,11 +1,20 @@
-//! Caps the history images kept as pixels; older ones degrade to a text placeholder.
-//! An image anywhere makes the turn multimodal, which bypasses the engine's KV prompt cache.
+//! Caps the history images kept as pixels; older ones degrade to a text placeholder. Taking
+//! pixels away rewrites the prompt from that message on, so it is done rarely and in batches.
 
 use std::borrow::Cow;
 
-/// One serves "a photo, then questions about it"; raising it inflates every later prefill.
+/// Most history images any window keeps as pixels: a cold rebuild runs the encoder on each.
 /// The CURRENT turn's image is not history, so it is outside this budget.
-pub const MAX_HISTORY_REPLAY_IMAGES: usize = 1;
+pub const MAX_HISTORY_IMAGES: usize = 8;
+
+/// Window behind each history image kept: one costs up to about 360 tokens of it.
+const WINDOW_TOKENS_PER_HISTORY_IMAGE: usize = 8_192;
+
+/// How many history images a window of `window_tokens` keeps before any loses its pixels.
+#[must_use]
+pub fn history_image_ceiling(window_tokens: usize) -> usize {
+    (window_tokens / WINDOW_TOKENS_PER_HISTORY_IMAGE).clamp(1, MAX_HISTORY_IMAGES)
+}
 
 /// Prefix of every placeholder wording; matching on it also catches older builds' wordings.
 pub const HISTORY_IMAGE_PLACEHOLDER_MARKER: &str = "[image attachment removed";
@@ -78,10 +87,16 @@ pub fn plan_image_replay(image_counts: &[usize], budget: usize) -> Vec<usize> {
     plan
 }
 
-/// Hydration replay and the live trimmer must both use this, or a restart gains or loses images.
+/// What the live trimmer and hydration replay keep. Nothing is dropped until the count passes
+/// the window's ceiling; then the oldest go, down to half of it, so the prompt is rewritten once
+/// for several pictures and not once for each.
 #[must_use]
-pub fn plan_history_images(image_counts: &[usize]) -> Vec<usize> {
-    plan_image_replay(image_counts, MAX_HISTORY_REPLAY_IMAGES)
+pub fn plan_history_images(image_counts: &[usize], window_tokens: usize) -> Vec<usize> {
+    let ceiling = history_image_ceiling(window_tokens);
+    if image_counts.iter().sum::<usize>() <= ceiling {
+        return image_counts.to_vec();
+    }
+    plan_image_replay(image_counts, (ceiling / 2).max(1))
 }
 
 /// Images a plan drops; zero means leave the conversation byte-identical.
@@ -100,7 +115,7 @@ mod tests {
 
     #[test]
     fn empty_history_plans_nothing() {
-        assert!(plan_image_replay(&[], MAX_HISTORY_REPLAY_IMAGES).is_empty());
+        assert!(plan_image_replay(&[], 1).is_empty());
     }
 
     #[test]
@@ -136,24 +151,46 @@ mod tests {
         assert_eq!(plan, counts);
     }
 
+    /// A window too small for more than one history image.
+    const SMALL_WINDOW: usize = 8_192;
+    const WIDE_WINDOW: usize = 65_536;
+
     #[test]
-    fn default_budget_keeps_only_the_latest_image() {
-        let plan = plan_image_replay(&[1, 1], MAX_HISTORY_REPLAY_IMAGES);
-        assert_eq!(plan, vec![0, 1]);
+    fn a_small_window_keeps_only_the_latest_image() {
+        assert_eq!(history_image_ceiling(SMALL_WINDOW), 1);
+        assert_eq!(history_image_ceiling(4_096), 1);
+        assert_eq!(plan_history_images(&[1, 1], SMALL_WINDOW), vec![0, 1]);
+        assert_eq!(
+            plan_history_images(&[1, 0, 1, 0, 1], SMALL_WINDOW),
+            plan_image_replay(&[1, 0, 1, 0, 1], 1)
+        );
     }
 
     #[test]
-    fn plan_history_images_uses_the_shared_budget() {
+    fn a_wide_window_keeps_every_image_until_the_ceiling_is_passed() {
+        assert_eq!(history_image_ceiling(WIDE_WINDOW), 8);
+        assert_eq!(history_image_ceiling(1_000_000), MAX_HISTORY_IMAGES);
+        let eight = [1usize; 8];
+        assert_eq!(plan_history_images(&eight, WIDE_WINDOW), eight);
         assert_eq!(
-            plan_history_images(&[1, 0, 1, 0, 1]),
-            plan_image_replay(&[1, 0, 1, 0, 1], MAX_HISTORY_REPLAY_IMAGES)
+            plan_history_images(&[2, 0, 3, 1], WIDE_WINDOW),
+            [2, 0, 3, 1]
         );
+    }
+
+    #[test]
+    fn past_the_ceiling_the_oldest_half_goes_in_one_pass() {
+        let nine = [1usize; 9];
+        let plan = plan_history_images(&nine, WIDE_WINDOW);
+        assert_eq!(plan, [0, 0, 0, 0, 0, 1, 1, 1, 1]);
+        // What is left is under the ceiling again: the next four pictures rewrite nothing.
+        assert_eq!(plan_history_images(&plan, WIDE_WINDOW), plan);
     }
 
     #[test]
     fn nothing_is_dropped_when_history_already_fits() {
         for counts in [vec![], vec![0, 0, 0], vec![0, 1, 0]] {
-            let plan = plan_history_images(&counts);
+            let plan = plan_history_images(&counts, SMALL_WINDOW);
             assert_eq!(dropped_image_count(&counts, &plan), 0, "counts={counts:?}");
             assert_eq!(plan, counts, "counts={counts:?}");
         }
@@ -162,7 +199,7 @@ mod tests {
     #[test]
     fn dropped_count_is_every_image_beyond_the_budget() {
         let counts = vec![2, 0, 3, 1];
-        let plan = plan_history_images(&counts);
+        let plan = plan_history_images(&counts, SMALL_WINDOW);
         assert_eq!(plan, vec![0, 0, 0, 1]);
         assert_eq!(dropped_image_count(&counts, &plan), 5);
     }

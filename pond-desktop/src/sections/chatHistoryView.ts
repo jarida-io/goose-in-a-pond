@@ -45,3 +45,44 @@ export function matchesQuery(session: SessionSummary, query: string): boolean {
     (session.preview ?? "").toLowerCase().includes(q)
   );
 }
+
+const SURFACE_LABEL: Record<string, string> = {
+  phone: "Phone",
+  desktop: "Desktop",
+  cli: "Command line",
+  pond: "This Pond",
+  room: "Room voice",
+  schedule: "Schedule",
+  goose: "Goose",
+};
+
+/** Where a conversation started, in the household's words; null for a row older than the field. */
+export function surfaceLabel(session: SessionSummary): string | null {
+  return session.surface ? (SURFACE_LABEL[session.surface] ?? null) : null;
+}
+
+export type SurfaceFilter = "all" | "here" | "phone" | "room" | "goose";
+
+/** `surfaces` is what `GET /sessions?surface=` takes; `unknown` matches rows with none. */
+export const SURFACE_FILTERS: readonly { id: SurfaceFilter; label: string; surfaces: readonly string[] }[] = [
+  { id: "all", label: "All", surfaces: [] },
+  { id: "here", label: "Here", surfaces: ["desktop", "pond", "cli", "unknown"] },
+  { id: "phone", label: "Phone", surfaces: ["phone"] },
+  { id: "room", label: "Room voice", surfaces: ["room"] },
+  { id: "goose", label: "Goose", surfaces: ["goose"] },
+];
+
+export function surfacesOf(filter: SurfaceFilter): readonly string[] {
+  return SURFACE_FILTERS.find((f) => f.id === filter)?.surfaces ?? [];
+}
+
+/** The same rule the server applies, so a loaded list narrows without another request. */
+export function matchesSurface(session: SessionSummary, filter: SurfaceFilter): boolean {
+  const wanted = surfacesOf(filter);
+  return wanted.length === 0 || wanted.includes(session.surface ?? "unknown");
+}
+
+/** The thread the pond writes its own results and suggestions into. */
+export function isGooseThread(session: SessionSummary): boolean {
+  return session.id.startsWith("goose-");
+}

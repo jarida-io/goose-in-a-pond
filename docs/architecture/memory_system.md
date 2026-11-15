@@ -7,6 +7,10 @@ into context; a decay pass archives what has gone stale; an idle consolidation p
 prunes. The decay formula is the adaptive half-life from
 [boop-agent](https://github.com/raroque/boop-agent).
 
+What a memory is about, the headings a member's profile is read under, the one policy every write
+goes through and the re-sort of older rows are in [member-memory.md](member-memory.md). Where this
+document and that one differ on segments or on what `save_memory` takes, that one is current.
+
 ## Architecture
 
 ```

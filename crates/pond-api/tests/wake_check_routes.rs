@@ -156,6 +156,71 @@ async fn a_custom_phrase_is_heard_as_said_and_as_learned_and_nothing_else_is() {
     );
 }
 
+/// As [`check`], from a paired device, with `phrase_only=true`: a phone confirming its own detector.
+async fn check_phrase_only(pond: &Pond, said: &str) -> (StatusCode, Value) {
+    *pond.heard.lock().unwrap() = VecDeque::from([said.to_string()]);
+    let boundary = "wake-check-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"segment.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&wav());
+    body.extend_from_slice(
+        format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"phrase_only\"\r\n\r\ntrue\r\n--{boundary}--\r\n").as_bytes(),
+    );
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/voice/wake/check")
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("Authorization", "Bearer test-token");
+    let response = pond
+        .router
+        .clone()
+        .oneshot(request.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn phrase_only_wants_the_whole_phrase_where_the_room_takes_less() {
+    let pond = a_pond(true).await;
+    set_phrase(&pond, "hey goose", &["Hey gus, good morning."]).await;
+
+    // The room's rule, which phones without the field keep: "OK goose" counts.
+    let (status, body) = check(
+        &pond,
+        "OK goose, what time is it",
+        wav(),
+        Some("test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["heard"], true);
+
+    for (said, heard) in [
+        ("Hey goose, what time is it", true),
+        ("hey gus, the lights", true),
+        ("OK goose, what time is it", false),
+        ("Goose.", false),
+        ("hey hoose", false),
+    ] {
+        let (status, body) = check_phrase_only(&pond, said).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["heard"], heard, "{said}");
+    }
+}
+
 #[tokio::test]
 async fn a_phrase_changed_on_the_pond_counts_from_the_next_segment() {
     let pond = a_pond(true).await;

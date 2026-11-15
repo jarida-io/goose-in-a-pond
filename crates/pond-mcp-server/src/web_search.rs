@@ -1,8 +1,9 @@
-//! `search_web` for `giap-knowledge`: Brave's LLM Context with the household's key, or, where
-//! that is unavailable, one Brave search with the top pages read through a client that reaches
-//! only public addresses; either way, the passages that answer the question. Every answer is
-//! marked transient: Brave's terms (3(b)(i)) allow Search Results only transient storage, so
-//! history keeps its stub (small-model-tools.md section 8.10).
+//! `search_web` for `giap-knowledge`: Brave's LLM Context with the household's key, and beside it,
+//! where a screen can show them, one Brave web search for the news, videos and places Brave judges
+//! the question wants. Where LLM Context is unavailable, the web search's top pages are read
+//! through a client that reaches only public addresses; either way, the passages that answer the
+//! question. Every answer is marked transient: Brave's terms (3(b)(i)) allow Search Results only
+//! transient storage, so history keeps its stub (small-model-tools.md sections 8.10 and 8.11).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, OnceLock};
@@ -20,7 +21,7 @@ use pond_core::shared::services::passages;
 use regex::Regex;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{Annotations, CallToolResult, ContentBlock, ErrorData, Meta, Role, TextContent},
+    model::{CallToolResult, ContentBlock, ErrorData, MetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -32,11 +33,110 @@ use crate::format::{format_api_error, format_dead_end, format_no_results};
 use crate::knowledge::KnowledgeMcpServer;
 
 pub(crate) mod bounded_html;
+mod pictures;
+mod sections;
+
+use sections::{news_card, read_sections, videos_card, News, PlaceDetails, Sections, Video};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-/// Results asked of Brave.
+/// Results asked of Brave's web search at least; a wider reach asks for more, up to its cap.
 const RESULT_COUNT: usize = 8;
+
+/// Brave's documented maximum for web search's `count`.
+const BRAVE_WEB_MAX_COUNT: usize = 20;
+
+/// How far one search looks: the sources it asks for and quotes, the page text it asks Brave
+/// for, and the room the model's copy has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reach {
+    sources: usize,
+    context_tokens: usize,
+    copy_bytes: usize,
+}
+
+/// A chat turn: six sources the household asked for, in a copy small enough that the answer
+/// after it still starts quickly on the Orin.
+const TURN_REACH: Reach = Reach {
+    sources: 6,
+    context_tokens: LLM_CONTEXT_MAX_TOKENS,
+    copy_bytes: RESULT_BUDGET,
+};
+
+/// A deep-research step, which runs while the house is quiet: thirty sources, with the guide's
+/// token figure for broad research.
+const RESEARCH_REACH: Reach = Reach {
+    sources: 30,
+    context_tokens: 16_384,
+    copy_bytes: 9_000,
+};
+
+/// The reach for the session behind this call: wide for a deep-research step's helper.
+fn reach_for(meta: &rmcp::model::RequestMetaObject) -> Reach {
+    use pond_core::shared::domain::long_task::LongTaskKind;
+    use pond_core::shared::services::child_sessions::process_child_sessions;
+    use pond_core::shared::services::step_bindings::process_step_bindings;
+    let research = crate::session_from_meta(meta)
+        .and_then(|session| {
+            process_step_bindings().binding_for_helper(&session, &process_child_sessions())
+        })
+        .is_some_and(|binding| binding.kind == LongTaskKind::Research);
+    if research {
+        RESEARCH_REACH
+    } else {
+        TURN_REACH
+    }
+}
+
+/// Hits asked of Brave's web search for `reach`.
+fn web_count(reach: Reach) -> usize {
+    RESULT_COUNT.max(reach.sources).min(BRAVE_WEB_MAX_COUNT)
+}
+
+/// Whether the session behind this call can show a card: a spoken turn's and a helper's results
+/// reach no screen.
+fn has_screen(meta: &rmcp::model::RequestMetaObject) -> bool {
+    use pond_core::mcp::services::screenless_sessions;
+    use pond_core::shared::services::child_sessions::process_child_sessions;
+    crate::session_from_meta(meta).is_none_or(|session| {
+        !screenless_sessions::global().is_screenless(&session)
+            && process_child_sessions().parent_of(&session).is_none()
+    })
+}
+
+/// Keys whose plan refused one of two requests sent together (Brave's free plan takes one a
+/// second): asked one request at a time from then on, so a side search never costs an answer.
+/// Held as hashes, so the keys themselves stay in the secret store alone.
+#[derive(Debug, Default)]
+struct OneAtATime(std::sync::Mutex<std::collections::HashSet<u64>>);
+
+impl OneAtATime {
+    fn tag(key: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&Self::tag(key))
+    }
+
+    fn learn(&self, key: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(Self::tag(key));
+    }
+}
+
+fn one_at_a_time() -> &'static OneAtATime {
+    static KEYS: LazyLock<OneAtATime> = LazyLock::new(OneAtATime::default);
+    &KEYS
+}
 
 /// Brave's own limits on `q` for web search.
 const BRAVE_MAX_QUERY_CHARS: usize = 400;
@@ -46,12 +146,9 @@ const BRAVE_MAX_QUERY_WORDS: usize = 50;
 const LLM_CONTEXT_MAX_QUERY_CHARS: usize = 600;
 const LLM_CONTEXT_MAX_QUERY_WORDS: usize = 75;
 
-/// Results LLM Context weighs before choosing its text: the guide's 5 for a factual question,
-/// plus a few so a local question's places and pages both have room.
+/// Results LLM Context weighs before choosing its text, at least: room for a local question's
+/// places and pages both. A wider reach weighs as many as it may quote.
 const LLM_CONTEXT_COUNT: usize = 8;
-
-/// Pages it may quote; the copy names at most this many sources either way.
-const LLM_CONTEXT_MAX_URLS: usize = 5;
 
 /// Tokens of page text it returns: the guide's figure for a factual question. The binding limit,
 /// and about four times what the copy keeps, so the ranker has a choice.
@@ -80,6 +177,10 @@ const MAX_JSON_ITEMS: usize = 40;
 
 /// How many of the top results have their page read.
 const PAGES_READ: usize = 3;
+
+/// How long a grounded answer waits for the web search beside it once LLM Context has answered:
+/// news, videos and places are worth a moment, not a slow turn.
+const SIDE_SEARCH_GRACE: Duration = Duration::from_secs(1);
 
 /// One page, connect to last byte.
 pub(crate) const PAGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -120,8 +221,8 @@ const MIN_BLOCK_CHARS: usize = 40;
 /// A heading as it prefixes the blocks under it.
 const MAX_HEADING_BYTES: usize = 80;
 
-/// The model's copy, whole, in bytes: about 450 tokens.
-const RESULT_BUDGET: usize = 1_800;
+/// The model's copy in a chat turn, whole, in bytes: about 550 tokens, room for six sources.
+const RESULT_BUDGET: usize = 2_200;
 
 /// Passages quoted from one source, so one site cannot fill the answer.
 const MAX_PASSAGES_PER_SOURCE: usize = 2;
@@ -279,7 +380,7 @@ Search the web for anything current, local or specific that the encyclopedia wil
 news, opening hours, prices, products, businesses, recent results.")]
     async fn search_web(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<SearchWebParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool(TOOL_NAME);
@@ -308,6 +409,9 @@ news, opening hours, prices, products, businesses, recent results.")]
             board: web_search_status::global(),
             town: town.as_deref(),
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+            reach: reach_for(&ctx.meta),
+            side_search: has_screen(&ctx.meta),
+            paced: one_at_a_time(),
         }
         .run(&key, &question)
         .await)
@@ -321,16 +425,24 @@ pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {
     let brave =
         brave_client().ok_or_else(|| search_failed("the search client could not be built"))?;
     let town = local_town_for_search().await;
-    WebSearch {
+    let board = web_search_status::global();
+    let asked = WebSearch {
         brave_base: BRAVE_API_BASE,
         brave,
         pages: page_client(),
-        board: web_search_status::global(),
+        board,
         town: town.as_deref(),
         context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+        reach: TURN_REACH,
+        side_search: false,
+        paced: one_at_a_time(),
     }
     .search(&key, question)
-    .await
+    .await;
+    if let Some(verdict) = asked.verdict {
+        board.record(&key, verdict);
+    }
+    asked.answer.map(|answer| answer.hits)
 }
 
 /// The town this search may send: only with local places on, read at each call so the switch
@@ -446,6 +558,26 @@ pub struct WebHit {
 #[derive(Debug, Deserialize)]
 struct BraveResponse {
     web: Option<BraveWeb>,
+    /// Read item by item ([`read_sections`]): one misshapen item must not lose the answer.
+    #[serde(default)]
+    news: Option<Value>,
+    #[serde(default)]
+    videos: Option<Value>,
+    #[serde(default)]
+    locations: Option<Value>,
+}
+
+/// One web search answer: its pages, and what Brave added beside them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct WebAnswer {
+    hits: Vec<WebHit>,
+    sections: Sections,
+}
+
+/// An answer and what it said of the key, recorded once both requests are in.
+struct Asked<T> {
+    answer: T,
+    verdict: Option<WebSearchStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,6 +611,12 @@ struct WebSearch<'a> {
     town: Option<&'a str>,
     /// How long LLM Context may take before the fallback runs.
     context_timeout: Duration,
+    reach: Reach,
+    /// Whether to ask the web search beside LLM Context for the card's news, videos and places;
+    /// off where no screen shows the card.
+    side_search: bool,
+    /// The keys asked one request at a time.
+    paced: &'a OneAtATime,
 }
 
 /// What one LLM Context request came to.
@@ -493,46 +631,164 @@ enum ContextAnswer {
 impl WebSearch<'_> {
     async fn run(&self, key: &str, question: &str) -> CallToolResult {
         let local_sent = self.town_header().is_some();
-        let fallback = match self.llm_context(key, question).await {
-            ContextAnswer::Grounded(context) => match context_result(question, &context) {
-                Some(result) => {
-                    note_sources(
-                        context
-                            .sources
-                            .iter()
-                            .map(|s| (s.hit.url.as_str(), s.hit.title.as_str()))
-                            .chain(
-                                context
-                                    .places
-                                    .iter()
-                                    .map(|p| (p.url.as_str(), p.name.as_str())),
-                            ),
-                    );
-                    tracing::info!(
-                        target: "giap::trace",
-                        kind = "web_search",
-                        source = "llm_context",
-                        results = context.sources.len(),
-                        places = context.places.len(),
-                        local_sent,
-                        "web search answered"
-                    );
-                    return result;
+        let (context, searched) = self.ask_both(key, question).await;
+        // The search's verdict first, so LLM Context's, the answer the model reads, stands.
+        if let Some(verdict) = searched.as_ref().and_then(|s| s.verdict) {
+            self.board.record(key, verdict);
+        }
+        if let Some(verdict) = context.verdict {
+            self.board.record(key, verdict);
+        }
+        let side = searched.map(|s| s.answer);
+        let fallback = match context.answer {
+            ContextAnswer::Grounded(context) => {
+                let sections = match &side {
+                    Some(Ok(answer)) => self.usable(&answer.sections),
+                    _ => Sections::default(),
+                };
+                let context = context.with_sections(&sections);
+                match context_result(question, &context, self.reach) {
+                    Some(result) => {
+                        note_sources(
+                            context
+                                .sources
+                                .iter()
+                                .map(|s| (s.hit.url.as_str(), s.hit.title.as_str()))
+                                .chain(
+                                    context
+                                        .places
+                                        .iter()
+                                        .map(|p| (p.url.as_str(), p.name.as_str())),
+                                ),
+                        );
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "web_search",
+                            source = "llm_context",
+                            reach = self.reach.sources,
+                            results = context.page_count(),
+                            places = context.places.len(),
+                            news = sections.news.len(),
+                            videos = sections.videos.len(),
+                            side_search = side.is_some(),
+                            local_sent,
+                            "web search answered"
+                        );
+                        return result;
+                    }
+                    None => "nothing_quotable",
                 }
-                None => "nothing_quotable",
-            },
+            }
             ContextAnswer::Miss(miss) => return text_result(&miss),
             ContextAnswer::Fallback(reason) => reason,
         };
-        self.search_and_read(key, question, fallback).await
+        let answer = match side {
+            Some(answer) => answer,
+            // Not asked beside LLM Context, cut at its grace, or refused for asking two at once.
+            None => {
+                let asked = self.search(key, question).await;
+                if let Some(verdict) = asked.verdict {
+                    self.board.record(key, verdict);
+                }
+                asked.answer
+            }
+        };
+        match answer {
+            Ok(answer) => self.read_and_answer(question, answer, fallback).await,
+            Err(miss) => text_result(&miss),
+        }
     }
 
-    /// The web search and page reads: what answers when LLM Context cannot.
-    async fn search_and_read(&self, key: &str, question: &str, fallback: &str) -> CallToolResult {
-        let hits = match self.search(key, question).await {
-            Ok(hits) => hits,
-            Err(miss) => return text_result(&miss),
+    /// LLM Context, and beside it where [`Self::side_search`] allows, the web search, both at
+    /// once. LLM Context answers; the web search brings what Brave adds beside its pages, or
+    /// answers in LLM Context's place. A grounded answer waits for the search only
+    /// [`SIDE_SEARCH_GRACE`]. A 429 on one of the two is the key's rate, not its allowance: the
+    /// side search then brings nothing, or answers for a refused LLM Context, and the key is asked
+    /// one request at a time from then on.
+    async fn ask_both(
+        &self,
+        key: &str,
+        question: &str,
+    ) -> (
+        Asked<ContextAnswer>,
+        Option<Asked<Result<WebAnswer, String>>>,
+    ) {
+        if !self.side_search || self.paced.holds(key) {
+            return (self.llm_context(key, question).await, None);
+        }
+        let search = self.search(key, question);
+        tokio::pin!(search);
+        let context = self.llm_context(key, question);
+        tokio::pin!(context);
+        let mut searched = None;
+        let mut context = loop {
+            tokio::select! {
+                asked = &mut context => break asked,
+                asked = &mut search, if searched.is_none() => searched = Some(asked),
+            }
         };
+        if let ContextAnswer::Grounded(grounded) = &context.answer {
+            if context_copy(question, grounded, self.reach).is_none() {
+                context.answer = ContextAnswer::Fallback("nothing_quotable");
+            }
+        }
+        let context_crowded = context.verdict == Some(WebSearchStatus::Quota);
+        if searched.is_none() {
+            searched = match context.answer {
+                ContextAnswer::Grounded(_) => tokio::time::timeout(SIDE_SEARCH_GRACE, &mut search)
+                    .await
+                    .ok(),
+                ContextAnswer::Miss(_) if !context_crowded => None,
+                _ => Some(search.await),
+            };
+        }
+        let side_crowded = searched
+            .as_ref()
+            .is_some_and(|s| s.verdict == Some(WebSearchStatus::Quota));
+        if side_crowded || context_crowded {
+            self.paced.learn(key);
+        }
+        if side_crowded {
+            searched = None;
+        } else if context_crowded && searched.as_ref().is_some_and(|s| s.answer.is_ok()) {
+            context = Asked {
+                answer: ContextAnswer::Fallback("rate_limited"),
+                verdict: None,
+            };
+        }
+        (context, searched)
+    }
+
+    /// What of `sections` this search may show: places only with local places on, as LLM
+    /// Context's are.
+    fn usable(&self, sections: &Sections) -> Sections {
+        Sections {
+            news: sections.news.clone(),
+            videos: sections.videos.clone(),
+            places: if self.town_header().is_some() {
+                sections.places.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// The pages read and quoted: what answers when LLM Context cannot. The search's news are
+    /// sources too, after its pages, and count toward the reach as they do.
+    async fn read_and_answer(
+        &self,
+        question: &str,
+        answer: WebAnswer,
+        fallback: &str,
+    ) -> CallToolResult {
+        let sections = self.usable(&answer.sections);
+        let mut hits = answer.hits;
+        let web_results = hits.len();
+        for news in &sections.news {
+            if !hits.iter().any(|h| h.url == news.url) {
+                hits.push(news_hit(news));
+            }
+        }
         if hits.is_empty() {
             return text_result(&nothing_found(question));
         }
@@ -542,14 +798,17 @@ impl WebSearch<'_> {
             None => vec![None; hits.len()],
         };
         let pages = extract_off_thread(bodies).await;
-        let result = result_from(question, &hits, &pages);
+        let result = result_with(question, &hits, &pages, self.reach, web_results, &sections);
         tracing::info!(
             target: "giap::trace",
             kind = "web_search",
             source = "pages",
             fallback,
+            reach = self.reach.sources,
             results = hits.len(),
             pages_read = pages.iter().filter(|p| p.is_some()).count(),
+            news = sections.news.len(),
+            videos = sections.videos.len(),
             "web search answered"
         );
         result
@@ -561,10 +820,14 @@ impl WebSearch<'_> {
             .and_then(|town| reqwest::header::HeaderValue::from_bytes(town.as_bytes()).ok())
     }
 
-    /// One LLM Context request. Records what the answer said of the key, as a search does.
-    async fn llm_context(&self, key: &str, question: &str) -> ContextAnswer {
-        let Some(url) = llm_context_url(self.brave_base, question) else {
-            return ContextAnswer::Fallback("address");
+    /// One LLM Context request, and what its answer said of the key.
+    async fn llm_context(&self, key: &str, question: &str) -> Asked<ContextAnswer> {
+        let unjudged = |answer| Asked {
+            answer,
+            verdict: None,
+        };
+        let Some(url) = llm_context_url(self.brave_base, question, self.reach) else {
+            return unjudged(ContextAnswer::Fallback("address"));
         };
         let town = self.town_header();
         let response = crate::http::traced_get_with(self.brave, url.as_str(), |b| {
@@ -585,20 +848,24 @@ impl WebSearch<'_> {
                 if e.downcast_ref::<pond_core::shared::services::egress::EgressDenied>()
                     .is_some()
                 {
-                    return ContextAnswer::Miss(search_failed(&describe_failure(&e)));
+                    return unjudged(ContextAnswer::Miss(search_failed(&describe_failure(&e))));
                 }
-                return ContextAnswer::Fallback(failure_kind(&e));
+                return unjudged(ContextAnswer::Fallback(failure_kind(&e)));
             }
         };
         let status = response.status().as_u16();
         match LlmContextOutcome::from_http(status) {
             LlmContextOutcome::Rejected => {
-                self.board.record(key, WebSearchStatus::Rejected);
-                return ContextAnswer::Miss(key_rejected());
+                return Asked {
+                    answer: ContextAnswer::Miss(key_rejected()),
+                    verdict: Some(WebSearchStatus::Rejected),
+                };
             }
             LlmContextOutcome::Quota => {
-                self.board.record(key, WebSearchStatus::Quota);
-                return ContextAnswer::Miss(allowance_used_up());
+                return Asked {
+                    answer: ContextAnswer::Miss(allowance_used_up()),
+                    verdict: Some(WebSearchStatus::Quota),
+                };
             }
             LlmContextOutcome::Fallback => {
                 tracing::info!(
@@ -606,75 +873,113 @@ impl WebSearch<'_> {
                     kind = "web_search_llm_context_refused",
                     status,
                 );
-                return ContextAnswer::Fallback("http_status");
+                return unjudged(ContextAnswer::Fallback("http_status"));
             }
             LlmContextOutcome::Answered => {}
         }
-        self.board.record(key, WebSearchStatus::Ok);
-        let Ok(body) = response.json::<LlmContextResponse>().await else {
-            return ContextAnswer::Fallback("unreadable");
+        let answered = |answer| Asked {
+            answer,
+            verdict: Some(WebSearchStatus::Ok),
         };
-        let context = LlmContext::from_response(body);
+        let Ok(body) = response.json::<LlmContextResponse>().await else {
+            return answered(ContextAnswer::Fallback("unreadable"));
+        };
+        let context = LlmContext::from_response(body, self.reach.sources);
         if context.is_empty() {
-            return ContextAnswer::Fallback("empty");
+            return answered(ContextAnswer::Fallback("empty"));
         }
-        ContextAnswer::Grounded(context)
+        answered(ContextAnswer::Grounded(context))
     }
 
-    /// Brave's results, or the model's text for a miss. Records what the answer said of the key.
-    async fn search(&self, key: &str, question: &str) -> Result<Vec<WebHit>, String> {
-        let url = brave_url(self.brave_base, question)
-            .ok_or_else(|| search_failed("the search address could not be built"))?;
+    /// Brave's web search, or the model's text for a miss, and what its answer said of the key.
+    /// It carries the town when local places are on, as LLM Context does.
+    async fn search(&self, key: &str, question: &str) -> Asked<Result<WebAnswer, String>> {
+        let unjudged = |answer| Asked {
+            answer,
+            verdict: None,
+        };
+        let Some(url) = brave_url(self.brave_base, question, self.reach) else {
+            return unjudged(Err(search_failed("the search address could not be built")));
+        };
+        let town = self.town_header();
         let response = crate::http::traced_get_with(self.brave, url.as_str(), |b| {
-            b.header(BRAVE_TOKEN_HEADER, key)
+            let b = b
+                .header(BRAVE_TOKEN_HEADER, key)
                 .header(reqwest::header::ACCEPT, "application/json")
-                .timeout(BRAVE_TIMEOUT)
+                .timeout(BRAVE_TIMEOUT);
+            match town {
+                Some(town) => b.header(BRAVE_LOC_CITY_HEADER, town),
+                None => b,
+            }
         })
-        .await
-        .map_err(|e| search_failed(&describe_failure(&e)))?;
+        .await;
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => return unjudged(Err(search_failed(&describe_failure(&e)))),
+        };
 
         let status = response.status().as_u16();
         let verdict = WebSearchStatus::from_brave_http(status);
-        if let Some(verdict) = verdict {
-            self.board.record(key, verdict);
-        }
-        match verdict {
-            Some(WebSearchStatus::Rejected) => return Err(key_rejected()),
-            Some(WebSearchStatus::Quota) => return Err(allowance_used_up()),
-            Some(WebSearchStatus::Ok) => {}
-            _ => return Err(search_failed(&format!("it answered HTTP {status}"))),
-        }
-        let body: BraveResponse = response
-            .json()
-            .await
-            .map_err(|_| search_failed("its answer could not be read"))?;
-        Ok(body
-            .web
-            .map(|w| w.results)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| !r.url.trim().is_empty())
-            .take(RESULT_COUNT)
-            .map(|r| WebHit {
-                title: plain_text(&r.title),
-                url: r.url.trim().to_string(),
-                description: plain_text(&r.description),
-                age: r.age.map(|a| plain_text(&a)).filter(|a| !a.is_empty()),
-                extra_snippets: r
-                    .extra_snippets
-                    .iter()
-                    .map(|s| plain_text(s))
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            })
-            .collect())
+        let answer = match verdict {
+            Some(WebSearchStatus::Rejected) => Err(key_rejected()),
+            Some(WebSearchStatus::Quota) => Err(allowance_used_up()),
+            Some(WebSearchStatus::Ok) => match response.json::<BraveResponse>().await {
+                Ok(body) => Ok(web_answer(body, web_count(self.reach))),
+                Err(_) => Err(search_failed("its answer could not be read")),
+            },
+            _ => Err(search_failed(&format!("it answered HTTP {status}"))),
+        };
+        Asked { answer, verdict }
+    }
+}
+
+/// A web search answer's pages, at most `count`, and its sections, cleaned.
+fn web_answer(body: BraveResponse, count: usize) -> WebAnswer {
+    let hits = body
+        .web
+        .map(|w| w.results)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| !r.url.trim().is_empty())
+        .take(count)
+        .map(|r| WebHit {
+            title: plain_text(&r.title),
+            url: r.url.trim().to_string(),
+            description: plain_text(&r.description),
+            age: r.age.map(|a| plain_text(&a)).filter(|a| !a.is_empty()),
+            extra_snippets: r
+                .extra_snippets
+                .iter()
+                .map(|s| plain_text(s))
+                .filter(|s| !s.is_empty())
+                .collect(),
+        })
+        .collect();
+    WebAnswer {
+        hits,
+        sections: read_sections(
+            body.news.as_ref(),
+            body.videos.as_ref(),
+            body.locations.as_ref(),
+        ),
+    }
+}
+
+/// A news item as a source the copy can quote: its description, its publisher's date.
+fn news_hit(news: &News) -> WebHit {
+    WebHit {
+        title: news.title.clone(),
+        url: news.url.clone(),
+        description: news.description.clone(),
+        age: news.date.clone(),
+        extra_snippets: Vec::new(),
     }
 }
 
 /// The search request, per section 8.3 step 1. No `country`: Kenya is not a documented value.
-fn brave_url(base: &str, question: &str) -> Option<reqwest::Url> {
+fn brave_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::Url> {
     let q = brave_query(question, BRAVE_MAX_QUERY_WORDS, BRAVE_MAX_QUERY_CHARS);
-    let count = RESULT_COUNT.to_string();
+    let count = web_count(reach).to_string();
     reqwest::Url::parse_with_params(
         &format!("{}{BRAVE_WEB_SEARCH_PATH}", base.trim_end_matches('/')),
         [
@@ -690,15 +995,19 @@ fn brave_url(base: &str, question: &str) -> Option<reqwest::Url> {
 
 /// The LLM Context request, per section 8.10. No `country`, as for web search; no
 /// `enable_local`, so local recall runs exactly when a town is sent.
-fn llm_context_url(base: &str, question: &str) -> Option<reqwest::Url> {
+fn llm_context_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::Url> {
     let q = brave_query(
         question,
         LLM_CONTEXT_MAX_QUERY_WORDS,
         LLM_CONTEXT_MAX_QUERY_CHARS,
     );
-    let count = LLM_CONTEXT_COUNT.to_string();
-    let urls = LLM_CONTEXT_MAX_URLS.to_string();
-    let tokens = LLM_CONTEXT_MAX_TOKENS.to_string();
+    // Brave's documented ranges; a value outside them is refused and the turn falls back.
+    let count = LLM_CONTEXT_COUNT
+        .max(reach.sources)
+        .clamp(1, 50)
+        .to_string();
+    let urls = reach.sources.clamp(1, 50).to_string();
+    let tokens = reach.context_tokens.clamp(1024, 32_768).to_string();
     let per_url = LLM_CONTEXT_MAX_TOKENS_PER_URL.to_string();
     reqwest::Url::parse_with_params(
         &format!("{}{BRAVE_LLM_CONTEXT_PATH}", base.trim_end_matches('/')),
@@ -892,26 +1201,36 @@ struct SourceMeta {
     site_name: Option<String>,
 }
 
-/// One page LLM Context quoted, cleaned for the copy and the card.
+/// One page LLM Context quoted, or a news item the web search beside it found, cleaned for the
+/// copy and the card.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ContextSource {
     hit: WebHit,
     snippets: Vec<String>,
+    /// From the web search's news: the card shows it as news, not among the pages.
+    news: bool,
 }
 
-/// One place local recall returned.
+/// One place local recall or the web search returned.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ContextPlace {
     name: String,
     url: String,
     snippets: Vec<String>,
+    /// What the web search knows of it, for the card.
+    details: Option<PlaceDetails>,
 }
 
-/// An LLM Context answer, as the copy and the card read it.
+/// An LLM Context answer, with what the web search beside it added, as the copy and the card
+/// read it.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct LlmContext {
     sources: Vec<ContextSource>,
     places: Vec<ContextPlace>,
+    /// The web search's news as the card shows it; the copy quotes them as sources.
+    news: Vec<News>,
+    /// For the card alone: the model never reads a video.
+    videos: Vec<Video>,
 }
 
 impl LlmContext {
@@ -919,7 +1238,61 @@ impl LlmContext {
         self.sources.is_empty() && self.places.is_empty()
     }
 
-    fn from_response(body: LlmContextResponse) -> Self {
+    /// Pages LLM Context read, news left out: what the copy's budget is keyed by.
+    fn page_count(&self) -> usize {
+        self.sources.iter().filter(|s| !s.news).count()
+    }
+
+    /// The answer with the web search's sections added: news as sources the copy may quote,
+    /// ranked with the pages for the reach's sources, a known place's details merged into the
+    /// place local recall named, a new place after them.
+    fn with_sections(mut self, sections: &Sections) -> Self {
+        for news in &sections.news {
+            if self.sources.iter().any(|s| s.hit.url == news.url) {
+                continue;
+            }
+            self.sources.push(ContextSource {
+                hit: news_hit(news),
+                snippets: [news.description.clone()]
+                    .into_iter()
+                    .filter(|d| !d.is_empty())
+                    .collect(),
+                news: true,
+            });
+        }
+        for details in &sections.places {
+            let snippets = details.snippets();
+            match self
+                .places
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(&details.name))
+            {
+                Some(at) => {
+                    let place = &mut self.places[at];
+                    let mut merged = snippets;
+                    merged.retain(|s| !place.snippets.contains(s));
+                    merged.append(&mut place.snippets);
+                    place.snippets = merged;
+                    if place.url.is_empty() {
+                        place.url = details.url.clone();
+                    }
+                    place.details = Some(details.clone());
+                }
+                None if self.places.len() < MAX_PLACES => self.places.push(ContextPlace {
+                    name: details.name.clone(),
+                    url: details.url.clone(),
+                    snippets,
+                    details: Some(details.clone()),
+                }),
+                None => {}
+            }
+        }
+        self.news = sections.news.clone();
+        self.videos = sections.videos.clone();
+        self
+    }
+
+    fn from_response(body: LlmContextResponse, max_sources: usize) -> Self {
         let meta = body.sources.unwrap_or_default();
         let grounding = body.grounding.unwrap_or_default();
         let sources = grounding
@@ -927,7 +1300,7 @@ impl LlmContext {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|item| context_source(item, &meta))
-            .take(LLM_CONTEXT_MAX_URLS)
+            .take(max_sources)
             .collect();
         let mut places: Vec<ContextPlace> = Vec::new();
         for item in grounding
@@ -948,7 +1321,12 @@ impl LlmContext {
                 places.push(place);
             }
         }
-        Self { sources, places }
+        Self {
+            sources,
+            places,
+            news: Vec::new(),
+            videos: Vec::new(),
+        }
     }
 }
 
@@ -987,6 +1365,7 @@ fn context_source(
             extra_snippets: Vec::new(),
         },
         snippets,
+        news: false,
     })
 }
 
@@ -1010,6 +1389,7 @@ fn context_place(item: GroundingItem) -> Option<ContextPlace> {
         name: passages::clip(&name, MAX_TITLE_BYTES),
         url: item.url.unwrap_or_default().trim().to_string(),
         snippets: snippet_texts(item.snippets.as_deref().unwrap_or_default()),
+        details: None,
     })
 }
 
@@ -1209,9 +1589,14 @@ struct ContextCopy {
 
 /// The tool result for an LLM Context answer: the model's copy, then the card, marked transient;
 /// `None` when nothing in it is quotable.
-fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult> {
-    let copy = context_copy(question, context)?;
-    let hits: Vec<WebHit> = context.sources.iter().map(|s| s.hit.clone()).collect();
+fn context_result(question: &str, context: &LlmContext, reach: Reach) -> Option<CallToolResult> {
+    let copy = context_copy(question, context, reach)?;
+    let hits: Vec<WebHit> = context
+        .sources
+        .iter()
+        .filter(|s| !s.news)
+        .map(|s| s.hit.clone())
+        .collect();
     let places: Vec<CardPlace> = context
         .places
         .iter()
@@ -1220,12 +1605,21 @@ fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult
             name: place.name.clone(),
             url: place.url.clone(),
             snippet: snippet.clone(),
+            details: place.details.clone(),
         })
         .collect();
     Some(transient(
         vec![
             ContentBlock::text(copy.text),
-            card_block_with(question, &hits, &places),
+            card_block_with(
+                question,
+                &hits,
+                &CardExtras {
+                    places: &places,
+                    news: &context.news,
+                    videos: &context.videos,
+                },
+            ),
         ],
         &copy.domains,
     ))
@@ -1233,7 +1627,7 @@ fn context_result(question: &str, context: &LlmContext) -> Option<CallToolResult
 
 /// The plain-text answer for the model: the places part first, as local recall answers a local
 /// question, then the sources' passages within what is left of the budget.
-fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
+fn context_copy(question: &str, context: &LlmContext, reach: Reach) -> Option<ContextCopy> {
     let mut texts: Vec<String> = Vec::new();
     let mut owners: Vec<Owner> = Vec::new();
     for (i, source) in context.sources.iter().enumerate() {
@@ -1277,8 +1671,7 @@ fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
         })
         .collect();
 
-    let read = context.sources.len();
-    let (per_source_cap, budget) = selection_limits(read);
+    let limits = selection_limits(context.page_count(), reach);
     let header = format!("Web results for: {}\n{WEB_TEXT_NOTICE}", echo(question));
     let mut used = header.len();
     let mut out = header;
@@ -1319,28 +1712,18 @@ fn context_copy(question: &str, context: &LlmContext) -> Option<ContextCopy> {
     }
 
     let hits: Vec<&WebHit> = context.sources.iter().map(|s| &s.hit).collect();
-    let mut chosen: Vec<(usize, String)> = Vec::new();
-    let mut per_source: HashMap<usize, usize> = HashMap::new();
-    for index in order {
-        let Owner::Source(source) = owners[index] else {
-            continue;
-        };
-        let quoted = per_source.get(&source).copied().unwrap_or(0);
-        if quoted >= per_source_cap {
-            continue;
-        }
-        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
-        let mut cost = passage.len() + 1;
-        if quoted == 0 {
-            cost += source_line(hits[source]).len() + 1;
-        }
-        if used + cost > budget {
-            continue;
-        }
-        used += cost;
-        per_source.insert(source, quoted + 1);
-        chosen.push((index, passage));
-    }
+    let mut chosen = choose_passages(
+        &order,
+        &texts,
+        |index| match owners[index] {
+            Owner::Source(source) => Some(source),
+            Owner::Place(_) => None,
+        },
+        |source| source_line(hits[source]).len(),
+        limits,
+        used,
+        reach.sources,
+    );
     if chosen.is_empty() && place_lines.is_empty() {
         return None;
     }
@@ -1650,28 +2033,84 @@ pub fn result_from(
     hits: &[WebHit],
     pages: &[Option<Vec<String>>],
 ) -> CallToolResult {
-    let (copy, quoted) = match model_copy_quoting(question, hits, pages) {
+    result_within(question, hits, pages, TURN_REACH)
+}
+
+/// [`result_from`] with the copy sized for `reach`.
+fn result_within(
+    question: &str,
+    hits: &[WebHit],
+    pages: &[Option<Vec<String>>],
+    reach: Reach,
+) -> CallToolResult {
+    result_with(
+        question,
+        hits,
+        pages,
+        reach,
+        hits.len(),
+        &Sections::default(),
+    )
+}
+
+/// [`result_within`] where `hits` after the first `web_results` are the search's news, and
+/// `sections` adds the card's news, videos and places.
+fn result_with(
+    question: &str,
+    hits: &[WebHit],
+    pages: &[Option<Vec<String>>],
+    reach: Reach,
+    web_results: usize,
+    sections: &Sections,
+) -> CallToolResult {
+    let (copy, quoted) = match model_copy_quoting(question, hits, pages, reach) {
         Some((copy, quoted)) => (copy, quoted),
         None => (nothing_found(question), (0..hits.len()).collect()),
     };
     let domains: Vec<String> = quoted.iter().map(|&i| domain_of(&hits[i].url)).collect();
-    transient(
-        vec![ContentBlock::text(copy), card_block(question, hits)],
-        &domains,
-    )
+    let places: Vec<CardPlace> = sections
+        .places
+        .iter()
+        .map(|details| CardPlace {
+            name: details.name.clone(),
+            url: details.url.clone(),
+            snippet: best_snippet(question, &details.snippets()),
+            details: Some(details.clone()),
+        })
+        .collect();
+    let card = card_block_with(
+        question,
+        &hits[..web_results.min(hits.len())],
+        &CardExtras {
+            places: &places,
+            news: &sections.news,
+            videos: &sections.videos,
+        },
+    );
+    transient(vec![ContentBlock::text(copy), card], &domains)
+}
+
+/// The snippet that best answers `question`, or the first when none shares a word with it.
+fn best_snippet(question: &str, snippets: &[String]) -> String {
+    passages::rank(question, snippets)
+        .first()
+        .filter(|r| r.score > 0.0)
+        .map(|r| snippets[r.index].clone())
+        .or_else(|| snippets.first().cloned())
+        .unwrap_or_default()
 }
 
 /// `content` as a result history keeps only as a stub naming `domains`.
 fn transient(content: Vec<ContentBlock>, domains: &[String]) -> CallToolResult {
     let mut result = CallToolResult::success(content);
-    result.meta = Some(Meta(transient_meta(&web_search_stub(domains))));
+    result.meta = Some(MetaObject(transient_meta(&web_search_stub(domains))));
     result
 }
 
 /// The plain-text answer for the model, within [`selection_limits`]; `None` if nothing quotable.
 #[cfg(test)]
 fn model_copy(question: &str, hits: &[WebHit], pages: &[Option<Vec<String>>]) -> Option<String> {
-    model_copy_quoting(question, hits, pages).map(|(copy, _)| copy)
+    model_copy_quoting(question, hits, pages, TURN_REACH).map(|(copy, _)| copy)
 }
 
 /// The plain-text answer for the model and the hits it quoted, in the copy's order; `None` if
@@ -1680,6 +2119,7 @@ fn model_copy_quoting(
     question: &str,
     hits: &[WebHit],
     pages: &[Option<Vec<String>>],
+    reach: Reach,
 ) -> Option<(String, Vec<usize>)> {
     // A source whose page was read speaks with its page; only an unread one with Brave's text.
     let mut texts: Vec<String> = Vec::new();
@@ -1717,29 +2157,16 @@ fn model_copy_quoting(
         ranked.iter().map(|r| r.index).collect()
     };
 
-    let (per_source_cap, budget) = selection_limits(read);
     let header = format!("Web results for: {}\n{WEB_TEXT_NOTICE}", echo(question));
-    let mut used = header.len();
-    let mut chosen: Vec<(usize, String)> = Vec::new();
-    let mut per_source: HashMap<usize, usize> = HashMap::new();
-    for index in order {
-        let source = source_of[index];
-        let quoted = per_source.get(&source).copied().unwrap_or(0);
-        if quoted >= per_source_cap {
-            continue;
-        }
-        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
-        let mut cost = passage.len() + 1;
-        if quoted == 0 {
-            cost += source_line(&hits[source]).len() + 1;
-        }
-        if used + cost > budget {
-            continue;
-        }
-        used += cost;
-        per_source.insert(source, quoted + 1);
-        chosen.push((index, passage));
-    }
+    let mut chosen = choose_passages(
+        &order,
+        &texts,
+        |index| Some(source_of[index]),
+        |source| source_line(&hits[source]).len(),
+        selection_limits(read, reach),
+        header.len(),
+        reach.sources,
+    );
     if chosen.is_empty() {
         return None;
     }
@@ -1765,12 +2192,102 @@ fn model_copy_quoting(
 
 /// Passages per source and the copy's byte budget, given how many pages were read: with few
 /// read pages, a page's third and fourth passages are worth more than nothing.
-fn selection_limits(pages_read: usize) -> (usize, usize) {
+fn selection_limits(pages_read: usize, reach: Reach) -> (usize, usize) {
     if pages_read <= WIDE_WHEN_READ_AT_MOST {
-        (WIDE_PASSAGES_PER_SOURCE, WIDE_RESULT_BUDGET)
+        (
+            WIDE_PASSAGES_PER_SOURCE,
+            reach.copy_bytes.max(WIDE_RESULT_BUDGET),
+        )
     } else {
-        (MAX_PASSAGES_PER_SOURCE, RESULT_BUDGET)
+        (MAX_PASSAGES_PER_SOURCE, reach.copy_bytes)
     }
+}
+
+/// Less room than this quotes nothing from a source: half a clause misleads more than it tells.
+const MIN_PASSAGE_BYTES: usize = 80;
+
+/// The passages to quote, as (text index, clipped passage). Each of the first `sources` sources
+/// by rank gets its best passage, clipped to an even share of the room, before any source gets a
+/// second, so a wide search is heard across its sources rather than from the top two.
+fn choose_passages(
+    order: &[usize],
+    texts: &[String],
+    source_of: impl Fn(usize) -> Option<usize>,
+    source_line_len: impl Fn(usize) -> usize,
+    (per_source_cap, budget): (usize, usize),
+    mut used: usize,
+    sources: usize,
+) -> Vec<(usize, String)> {
+    let mut firsts: Vec<(usize, usize)> = Vec::new();
+    for &index in order {
+        let Some(source) = source_of(index) else {
+            continue;
+        };
+        if firsts.len() < sources && !firsts.iter().any(|&(_, s)| s == source) {
+            firsts.push((index, source));
+        }
+    }
+    // Water-filled: a source whose best passage is short leaves its unused room to the rest.
+    let wants: Vec<usize> = firsts
+        .iter()
+        .map(|&(index, source)| {
+            source_line_len(source) + 1 + texts[index].len().min(MAX_PASSAGE_BYTES) + 1
+        })
+        .collect();
+    let mut by_need: Vec<usize> = (0..firsts.len()).collect();
+    by_need.sort_by_key(|&i| wants[i]);
+    let mut left = budget.saturating_sub(used);
+    let mut given = vec![0; firsts.len()];
+    for (served, &i) in by_need.iter().enumerate() {
+        let share = left / (firsts.len() - served);
+        given[i] = wants[i].min(share);
+        left -= given[i];
+    }
+    let mut chosen: Vec<(usize, String)> = Vec::new();
+    let mut per_source: HashMap<usize, usize> = HashMap::new();
+    for (i, &(index, source)) in firsts.iter().enumerate() {
+        let line = source_line_len(source) + 1;
+        let room = given[i].saturating_sub(line + 1).min(MAX_PASSAGE_BYTES);
+        // Too little room only matters for a passage that would have to be cut.
+        if room < MIN_PASSAGE_BYTES.min(texts[index].len()) {
+            continue;
+        }
+        let passage = passages::clip(&texts[index], room);
+        // A syndicated paragraph under two sources is quoted once.
+        if chosen.iter().any(|(_, said)| said.trim() == passage.trim()) {
+            continue;
+        }
+        let cost = line + passage.len() + 1;
+        if used + cost > budget {
+            continue;
+        }
+        used += cost;
+        per_source.insert(source, 1);
+        chosen.push((index, passage));
+    }
+    for &index in order {
+        let Some(source) = source_of(index) else {
+            continue;
+        };
+        let Some(&quoted) = per_source.get(&source) else {
+            continue;
+        };
+        if quoted >= per_source_cap || chosen.iter().any(|(i, _)| *i == index) {
+            continue;
+        }
+        let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
+        if chosen.iter().any(|(_, said)| said.trim() == passage.trim()) {
+            continue;
+        }
+        let cost = passage.len() + 1;
+        if used + cost > budget {
+            continue;
+        }
+        used += cost;
+        per_source.insert(source, quoted + 1);
+        chosen.push((index, passage));
+    }
+    chosen
 }
 
 /// `Title (domain[, age])`.
@@ -1853,17 +2370,28 @@ struct CardPlace {
     name: String,
     url: String,
     snippet: String,
+    details: Option<PlaceDetails>,
+}
+
+/// What a card shows beside the pages.
+#[derive(Debug, Clone, Copy, Default)]
+struct CardExtras<'a> {
+    places: &'a [CardPlace],
+    news: &'a [News],
+    videos: &'a [Video],
 }
 
 /// The `[[[mcp-ui:search:{...}]]]` card, annotated for the user only: goose drops such blocks
 /// before the provider, so the model never reads it.
+#[cfg(test)]
 fn card_block(question: &str, hits: &[WebHit]) -> ContentBlock {
-    card_block_with(question, hits, &[])
+    card_block_with(question, hits, &CardExtras::default())
 }
 
-/// [`card_block`] with the places local recall returned; `places` is left out when there are none,
-/// so a card from before places reads the same.
-fn card_block_with(question: &str, hits: &[WebHit], places: &[CardPlace]) -> ContentBlock {
+/// The card with what Brave added beside the pages. Each of `places`, `news` and `videos` is left
+/// out when empty, so a card with none of them reads as it did before them.
+fn card_block_with(question: &str, hits: &[WebHit], extras: &CardExtras) -> ContentBlock {
+    let places = extras.places;
     let mut card = serde_json::json!({
         "query": sanitize(question),
         "results": hits.iter().map(|h| serde_json::json!({
@@ -1877,19 +2405,34 @@ fn card_block_with(question: &str, hits: &[WebHit], places: &[CardPlace]) -> Con
         card["places"] = places
             .iter()
             .map(|p| {
-                serde_json::json!({
+                let mut place = serde_json::json!({
                     "name": sanitize(&p.name),
                     "url": sanitize(&p.url),
                     "snippet": sanitize(&passages::clip(&p.snippet, MAX_SNIPPET_BYTES)),
-                })
+                });
+                if let Some(details) = &p.details {
+                    for (field, value) in [
+                        ("address", &details.address),
+                        ("hours", &details.hours),
+                        ("phone", &details.phone),
+                        ("rating", &details.rating),
+                    ] {
+                        if let Some(value) = value {
+                            place[field] = Value::String(sanitize(value));
+                        }
+                    }
+                }
+                place
             })
             .collect();
     }
-    let marker = format!("[[[mcp-ui:search:{card}]]]");
-    ContentBlock::Text(
-        TextContent::new(marker)
-            .with_annotations(Annotations::default().with_audience(vec![Role::User])),
-    )
+    if !extras.news.is_empty() {
+        card["news"] = news_card(extras.news);
+    }
+    if !extras.videos.is_empty() {
+        card["videos"] = videos_card(extras.videos);
+    }
+    crate::format::card("search", &card)
 }
 
 /// Neutralise `]]]`, which would end the card's marker early.
@@ -1905,6 +2448,7 @@ pub(crate) fn defang(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::Role;
     use std::io::{Read, Write};
 
     /// The encyclopedia tool a miss points at.
@@ -2600,42 +3144,48 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
+        // Each connection on its own thread: search_web's two requests arrive together, and a
+        // slow answer to one must not hold the other.
         std::thread::spawn(move || {
             for _ in 0..requests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = vec![0u8; 16 * 1024];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).to_string();
-                let path = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .split('?')
-                    .next()
-                    .unwrap_or("/")
-                    .to_string();
-                let _ = tx.send(head);
-                if let Some((slow_path, delay)) = slow {
-                    if slow_path == path {
-                        std::thread::sleep(delay);
+                let routes = routes.clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
+                        .to_string();
+                    let _ = tx.send(head);
+                    if let Some((slow_path, delay)) = slow {
+                        if slow_path == path {
+                            std::thread::sleep(delay);
+                        }
                     }
-                }
-                let (status, content_type, body) = routes
-                    .iter()
-                    .find(|(p, ..)| *p == path)
-                    .map(|(_, s, ct, b)| (*s, *ct, b.clone()))
-                    .unwrap_or((404, "text/plain", "not here".to_string()));
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .as_bytes(),
-                );
-                let _ = stream.write_all(body.as_bytes());
+                    let (status, content_type, body) = routes
+                        .iter()
+                        .find(|(p, ..)| *p == path)
+                        .map(|(_, s, ct, b)| (*s, *ct, b.clone()))
+                        .unwrap_or((404, "text/plain", "not here".to_string()));
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = stream.write_all(body.as_bytes());
+                });
             }
         });
         (port, rx)
@@ -2669,6 +3219,9 @@ mod tests {
             board,
             town,
             context_timeout: Duration::from_millis(1_500),
+            reach: TURN_REACH,
+            side_search: true,
+            paced: Box::leak(Box::default()),
         }
     }
 
@@ -2691,13 +3244,16 @@ mod tests {
         board: &'static WebSearchStatusBoard,
     ) -> CallToolResult {
         let base = format!("http://127.0.0.1:{brave_port}");
-        against(&base, pages, board, None)
-            .search_and_read(
-                "test-key-123",
-                "What time does Junction Mall close?",
-                "test",
-            )
-            .await
+        let search = against(&base, pages, board, None);
+        let question = "What time does Junction Mall close?";
+        let asked = search.search("test-key-123", question).await;
+        if let Some(verdict) = asked.verdict {
+            board.record("test-key-123", verdict);
+        }
+        match asked.answer {
+            Ok(answer) => search.read_and_answer(question, answer, "test").await,
+            Err(miss) => text_result(&miss),
+        }
     }
 
     /// A server answering every request with a redirect to `location`.
@@ -2819,6 +3375,9 @@ mod tests {
             board,
             town: None,
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+            reach: TURN_REACH,
+            side_search: true,
+            paced: Box::leak(Box::default()),
         }
         .run("test-key-123", "junction mall hours")
         .await;
@@ -2947,7 +3506,7 @@ mod tests {
             "the capped page: {copy}"
         );
         assert!(!copy.contains("BRAVE TEXT FOR THE BIG PAGE"), "{copy}");
-        assert!(copy.len() <= selection_limits(2).1);
+        assert!(copy.len() <= selection_limits(2, TURN_REACH).1);
         assert_eq!(result.content.len(), 2, "the card rides along");
     }
 
@@ -3005,7 +3564,7 @@ mod tests {
     }
 
     fn context_of(body: &str) -> LlmContext {
-        LlmContext::from_response(serde_json::from_str(body).unwrap())
+        LlmContext::from_response(serde_json::from_str(body).unwrap(), TURN_REACH.sources)
     }
 
     const CONTEXT_PATH: &str = "/res/v1/llm/context";
@@ -3032,20 +3591,33 @@ mod tests {
             .and_then(|m| pond_core::mcp::domain::transient_result::keep_from_meta(&m.0))
     }
 
+    /// The request `requests` saw for `path`: search_web's two arrive in either order.
+    fn request_to(requests: &std::sync::mpsc::Receiver<String>, path: &str) -> String {
+        let wanted = format!("GET {path}?");
+        loop {
+            let head = requests
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("no request to {path}"));
+            if head.starts_with(&wanted) {
+                return head;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_llm_context_request_is_the_one_section_8_10_names() {
         let (port, requests) = stub(
             vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            1,
+            2,
         );
         let _ = context_against(port, fresh_board(), None).await;
-        let head = requests.recv().unwrap();
+        let head = request_to(&requests, CONTEXT_PATH);
         let line = head.lines().next().unwrap();
         assert!(line.starts_with("GET /res/v1/llm/context?"), "{line}");
         for param in [
             "q=What+time+does+Nairobi+National+Park+close%3F",
             "count=8",
-            "maximum_number_of_urls=5",
+            "maximum_number_of_urls=6",
             "maximum_number_of_tokens=2048",
             "maximum_number_of_tokens_per_url=1024",
             "safesearch=moderate",
@@ -3074,14 +3646,146 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_short_passage_leaves_its_room_to_a_long_one() {
+        let texts = vec![
+            "The bridge opened in 2022.".to_string(),
+            "word ".repeat(120),
+        ];
+        let chosen = choose_passages(&[0, 1], &texts, Some, |_| 20, (1, 400), 0, 2);
+        assert_eq!(chosen.len(), 2, "{chosen:?}");
+        let long = &chosen.iter().find(|(i, _)| *i == 1).unwrap().1;
+        assert!(
+            long.len() > 300,
+            "the long passage kept only {} bytes",
+            long.len()
+        );
+    }
+
+    #[test]
+    fn the_same_paragraph_under_two_sources_is_quoted_once() {
+        let same = "The expressway closes at 22:00 on Saturday for repairs.".to_string();
+        let texts = vec![same.clone(), same];
+        let chosen = choose_passages(&[0, 1], &texts, Some, |_| 10, (2, 1000), 0, 2);
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+    }
+
+    #[test]
+    fn a_research_step_asks_for_thirty_sources_and_a_turn_for_six() {
+        let question = "Rainfall in Kiambu this season";
+        let research = llm_context_url("http://stub", question, RESEARCH_REACH).unwrap();
+        let query = research.query().unwrap();
+        for param in [
+            "count=30",
+            "maximum_number_of_urls=30",
+            "maximum_number_of_tokens=16384",
+        ] {
+            assert!(query.contains(param), "{param} missing: {query}");
+        }
+        let web = brave_url("http://stub", question, RESEARCH_REACH).unwrap();
+        assert!(
+            web.query().unwrap().contains("count=20"),
+            "web search asks for more than Brave's documented 20: {web}"
+        );
+        let turn = llm_context_url("http://stub", question, TURN_REACH).unwrap();
+        assert!(turn.query().unwrap().contains("maximum_number_of_urls=6"));
+    }
+
+    fn rain_sources(n: usize) -> (Vec<WebHit>, Vec<Option<Vec<String>>>) {
+        let hits = (1..=n)
+            .map(|i| {
+                hit(
+                    &format!("Rain report {i}"),
+                    &format!("https://site{i}.example/rain"),
+                    "",
+                )
+            })
+            .collect();
+        let pages = (1..=n)
+            .map(|i| {
+                Some(vec![format!(
+                    "Site {i} measured Kiambu rainfall this season at {i}0 millimetres. "
+                )
+                .repeat(10)])
+            })
+            .collect();
+        (hits, pages)
+    }
+
+    #[test]
+    fn a_turn_hears_six_sources_and_a_research_step_thirty() {
+        let question = "Kiambu rainfall this season";
+        let (hits, pages) = rain_sources(8);
+        let (copy, quoted) = model_copy_quoting(question, &hits, &pages, TURN_REACH).unwrap();
+        assert_eq!(quoted.len(), 6, "{copy}");
+        assert!(copy.len() <= TURN_REACH.copy_bytes, "{} bytes", copy.len());
+
+        let (hits, pages) = rain_sources(40);
+        let (copy, quoted) = model_copy_quoting(question, &hits, &pages, RESEARCH_REACH).unwrap();
+        assert_eq!(quoted.len(), 30, "{copy}");
+        assert!(
+            copy.len() <= RESEARCH_REACH.copy_bytes,
+            "{} bytes",
+            copy.len()
+        );
+    }
+
+    #[test]
+    fn a_deep_research_helper_searches_wide_and_every_other_caller_as_a_turn() {
+        use pond_core::shared::domain::long_task::{LongTaskKind, StepKey};
+        use pond_core::shared::services::child_sessions::process_child_sessions;
+        use pond_core::shared::services::step_bindings::{
+            process_step_bindings, StepBinding, StepWork,
+        };
+        use pond_core::user_data::domain::profile::ProfileScope;
+        let meta = |session: &str| {
+            let mut m = rmcp::model::RequestMetaObject::new();
+            m.0.insert(
+                crate::SESSION_ID_META_KEY.to_string(),
+                Value::String(session.to_string()),
+            );
+            m
+        };
+        let bind = |root: &str, kind: LongTaskKind| {
+            process_step_bindings().bind(
+                root,
+                StepBinding {
+                    task_id: format!("task-{root}"),
+                    scope: ProfileScope::Household,
+                    work: StepWork::Do(StepKey::parse("read-part-1").unwrap()),
+                    kind,
+                },
+            )
+        };
+        let _research = bind("root-reach-research", LongTaskKind::Research);
+        let _research_helper = process_child_sessions().bind(
+            "engine-reach-research",
+            "root-reach-research",
+            ProfileScope::Household,
+        );
+        let _general = bind("root-reach-general", LongTaskKind::General);
+        let _general_helper = process_child_sessions().bind(
+            "engine-reach-general",
+            "root-reach-general",
+            ProfileScope::Household,
+        );
+        assert_eq!(reach_for(&meta("engine-reach-research")), RESEARCH_REACH);
+        assert_eq!(reach_for(&meta("engine-reach-general")), TURN_REACH);
+        assert_eq!(reach_for(&meta("20261115_1")), TURN_REACH);
+        assert_eq!(
+            reach_for(&rmcp::model::RequestMetaObject::new()),
+            TURN_REACH
+        );
+    }
+
     #[tokio::test]
     async fn with_local_places_on_the_town_alone_is_sent() {
         let (port, requests) = stub(
             vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            1,
+            2,
         );
         let _ = context_against(port, fresh_board(), Some("Nairobi")).await;
-        let head = requests.recv().unwrap();
+        let head = request_to(&requests, CONTEXT_PATH);
         let lower = head.to_ascii_lowercase();
         assert!(lower.contains("x-loc-city: nairobi"), "{head}");
         assert_eq!(lower.matches("x-loc-").count(), 1, "only the town: {head}");
@@ -3216,7 +3920,12 @@ mod tests {
     #[test]
     fn the_context_copy_puts_places_first_then_ranked_passages() {
         let context = context_of(&context_body());
-        let copy = context_copy("What time does Nairobi National Park close?", &context).unwrap();
+        let copy = context_copy(
+            "What time does Nairobi National Park close?",
+            &context,
+            TURN_REACH,
+        )
+        .unwrap();
         let lines: Vec<&str> = copy.text.lines().collect();
         assert_eq!(
             lines[0],
@@ -3239,7 +3948,7 @@ mod tests {
         );
         assert!(!copy.text.contains("://"), "{}", copy.text);
         assert!(!copy.text.contains("www."), "{}", copy.text);
-        assert!(copy.text.len() <= selection_limits(2).1);
+        assert!(copy.text.len() <= selection_limits(2, TURN_REACH).1);
         assert_eq!(
             copy.domains,
             [
@@ -3254,7 +3963,8 @@ mod tests {
     #[test]
     fn a_place_line_takes_its_best_ranked_snippet() {
         let context = context_of(&context_body());
-        let copy = context_copy("Java House opening hours on Sunday", &context).unwrap();
+        let copy =
+            context_copy("Java House opening hours on Sunday", &context, TURN_REACH).unwrap();
         assert_eq!(copy.place_snippets[0], "day: Sunday; hours: 8 am - 9 pm");
         assert!(
             copy.text
@@ -3281,6 +3991,7 @@ mod tests {
                         "",
                     ),
                     snippets: (0..8).map(|j| long(i * 10 + j)).collect(),
+                    news: false,
                 })
                 .collect(),
             places: (0..5)
@@ -3288,10 +3999,12 @@ mod tests {
                     name: format!("Place {i} with a fairly long name for a place"),
                     url: format!("https://p{i}.example/"),
                     snippets: vec![long(100 + i)],
+                    details: None,
                 })
                 .collect(),
+            ..Default::default()
         };
-        let copy = context_copy("When do the park gates close?", &context).unwrap();
+        let copy = context_copy("When do the park gates close?", &context, TURN_REACH).unwrap();
         assert!(
             copy.text.len() <= RESULT_BUDGET,
             "{} bytes",
@@ -3319,8 +4032,12 @@ mod tests {
     #[test]
     fn the_context_card_carries_places_and_the_copy_does_not_carry_the_card() {
         let context = context_of(&context_body());
-        let result =
-            context_result("What time does Nairobi National Park close?", &context).unwrap();
+        let result = context_result(
+            "What time does Nairobi National Park close?",
+            &context,
+            TURN_REACH,
+        )
+        .unwrap();
         assert_eq!(result.content.len(), 2);
         let visible = agent_visible_text(&result);
         assert!(!visible.contains("mcp-ui"), "{visible}");
@@ -3370,7 +4087,7 @@ mod tests {
     #[test]
     fn both_paths_mark_the_result_transient_with_domains_only() {
         let context = context_of(&context_body());
-        let grounded = context_result("When does the park close?", &context).unwrap();
+        let grounded = context_result("When does the park close?", &context, TURN_REACH).unwrap();
         assert_eq!(
             stub_of(&grounded).as_deref(),
             Some(
@@ -3407,11 +4124,34 @@ mod tests {
         }
     }
 
+    /// The paths of the requests `requests` saw within a moment, in arrival order.
+    fn paths_seen(requests: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+        let mut paths = Vec::new();
+        while let Ok(head) = requests.recv_timeout(Duration::from_millis(300)) {
+            let path = head
+                .split_whitespace()
+                .nth(1)
+                .and_then(|p| p.split('?').next())
+                .unwrap_or("")
+                .to_string();
+            paths.push(path);
+        }
+        paths
+    }
+
+    fn sorted(mut paths: Vec<String>) -> Vec<String> {
+        paths.sort();
+        paths
+    }
+
     #[tokio::test]
-    async fn grounding_answers_without_a_search_and_records_the_key_ok() {
+    async fn a_grounded_answer_asks_the_web_search_once_beside_it_and_records_the_key_ok() {
         let (port, requests) = stub(
-            vec![(CONTEXT_PATH, 200, "application/json", context_body())],
-            2,
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", brave_body(&[])),
+            ],
+            3,
         );
         let board = fresh_board();
         board.record("test-key-123", WebSearchStatus::Unverified);
@@ -3423,10 +4163,130 @@ mod tests {
         );
         assert!(stub_of(&result).is_some());
         assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
-        requests.recv().unwrap();
-        assert!(
-            requests.recv_timeout(Duration::from_millis(200)).is_err(),
-            "a grounded answer made a second request"
+        assert_eq!(
+            sorted(paths_seen(&requests)),
+            vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()],
+            "one of each, and no page read"
+        );
+    }
+
+    #[tokio::test]
+    async fn where_no_screen_shows_a_card_llm_context_is_asked_alone() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let search = WebSearch {
+            side_search: false,
+            ..against(&base, None, fresh_board(), None)
+        };
+        let result = search
+            .run(
+                "test-key-123",
+                "What time does Nairobi National Park close?",
+            )
+            .await;
+        assert!(text_of(&result, 0).contains("open every day from 6:00 AM"));
+        assert!(card_of(&result).get("news").is_none());
+        assert_eq!(paths_seen(&requests), vec![CONTEXT_PATH.to_string()]);
+    }
+
+    #[test]
+    fn a_spoken_turn_and_a_helper_have_no_screen() {
+        use pond_core::mcp::services::screenless_sessions;
+        use pond_core::shared::services::child_sessions::process_child_sessions;
+        use pond_core::user_data::domain::profile::ProfileScope;
+        let meta = |session: &str| {
+            let mut m = rmcp::model::RequestMetaObject::new();
+            m.0.insert(
+                crate::SESSION_ID_META_KEY.to_string(),
+                Value::String(session.to_string()),
+            );
+            m
+        };
+        let _helper =
+            process_child_sessions().bind("engine-screenless", "root", ProfileScope::Household);
+        assert!(!has_screen(&meta("engine-screenless")));
+        screenless_sessions::global().set("engine-spoken", true);
+        assert!(!has_screen(&meta("engine-spoken")));
+        screenless_sessions::global().set("engine-spoken", false);
+        assert!(has_screen(&meta("engine-spoken")), "a typed turn after it");
+        assert!(has_screen(&meta("20261115_2")));
+        assert!(has_screen(&rmcp::model::RequestMetaObject::new()));
+    }
+
+    #[tokio::test]
+    async fn a_429_on_the_side_search_brings_no_extras_and_paces_the_key() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 429, "application/json", "{}".to_string()),
+            ],
+            3,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let board = fresh_board();
+        let search = against(&base, None, board, None);
+        let question = "What time does Nairobi National Park close?";
+        let result = search.run("test-key-123", question).await;
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("open every day from 6:00 AM"), "{copy}");
+        assert!(!copy.contains("allowance"), "{copy}");
+        assert!(card_of(&result).get("news").is_none());
+        assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
+        assert_eq!(paths_seen(&requests).len(), 2);
+
+        let _ = search.run("test-key-123", question).await;
+        assert_eq!(
+            paths_seen(&requests),
+            vec![CONTEXT_PATH.to_string()],
+            "a paced key is asked one request at a time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_429_on_llm_context_beside_a_search_that_answered_is_answered_by_the_search() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 429, "application/json", "{}".to_string()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let board = fresh_board();
+        let result = context_against(port, board, None).await;
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("said the web search"), "{copy}");
+        assert!(!copy.contains("allowance"), "{copy}");
+        assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn a_side_search_cut_by_a_429_is_asked_again_for_the_fallback() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 404, "text/plain", "no".to_string()),
+                (SEARCH_PATH, 429, "application/json", "{}".to_string()),
+            ],
+            3,
+        );
+        let board = fresh_board();
+        let copy = text_of(&context_against(port, board, None).await, 0);
+        assert!(copy.contains("allowance is used up"), "{copy}");
+        assert_eq!(
+            board.status_for(Some("test-key-123")),
+            WebSearchStatus::Quota,
+            "refused one at a time too, it is the allowance"
+        );
+        let paths = paths_seen(&requests);
+        assert_eq!(
+            paths.iter().filter(|p| p.as_str() == SEARCH_PATH).count(),
+            2,
+            "{paths:?}"
         );
     }
 
@@ -3474,10 +4334,11 @@ mod tests {
                 stub_of(&result).is_some(),
                 "{label}: the fallback is transient too"
             );
-            let first = requests.recv().unwrap();
-            let second = requests.recv().unwrap();
-            assert!(first.starts_with("GET /res/v1/llm/context?"), "{label}");
-            assert!(second.starts_with("GET /res/v1/web/search?"), "{label}");
+            assert_eq!(
+                sorted(paths_seen(&requests)),
+                vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()],
+                "{label}: the fallback reads the search already asked"
+            );
             assert_eq!(
                 board.status_for(Some("test-key-123")),
                 WebSearchStatus::Ok,
@@ -3488,18 +4349,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_verdict_from_llm_context_is_final() {
-        for (status, told, verdict) in [
+        let refused = |status: u16| {
+            vec![
+                (CONTEXT_PATH, status, "application/json", "{}".to_string()),
+                (SEARCH_PATH, status, "application/json", "{}".to_string()),
+            ]
+        };
+        for (routes, status, told, verdict) in [
             (
+                fallback_routes((401, "application/json", "{}".to_string())),
                 401,
                 "The web search key was rejected.",
                 WebSearchStatus::Rejected,
             ),
-            (429, "allowance is used up", WebSearchStatus::Quota),
+            (
+                refused(429),
+                429,
+                "allowance is used up",
+                WebSearchStatus::Quota,
+            ),
         ] {
-            let (port, requests) = stub(
-                fallback_routes((status, "application/json", "{}".to_string())),
-                2,
-            );
+            let (port, requests) = stub(routes, 3);
             let board = fresh_board();
             let result = context_against(port, board, None).await;
             let copy = text_of(&result, 0);
@@ -3509,11 +4379,16 @@ mod tests {
                 stub_of(&result).is_none(),
                 "{status}: a miss quotes nothing of Brave's"
             );
-            assert_eq!(board.status_for(Some("test-key-123")), verdict, "{status}");
-            requests.recv().unwrap();
+            assert_eq!(
+                board.status_for(Some("test-key-123")),
+                verdict,
+                "{status}: LLM Context's verdict stands over the search's"
+            );
+            let paths = paths_seen(&requests);
             assert!(
-                requests.recv_timeout(Duration::from_millis(200)).is_err(),
-                "{status}: fell back after a verdict on the key"
+                paths.iter().filter(|p| p.as_str() == SEARCH_PATH).count() <= 1
+                    && paths.iter().filter(|p| p.as_str() == CONTEXT_PATH).count() == 1,
+                "{status}: asked again after a verdict on the key: {paths:?}"
             );
         }
     }
@@ -3546,11 +4421,254 @@ mod tests {
         let result = context_against(port, fresh_board(), None).await;
         let copy = text_of(&result, 0);
         assert!(copy.contains("said the web search"), "{copy}");
-        requests.recv().unwrap();
-        assert!(requests
-            .recv()
+        assert_eq!(
+            sorted(paths_seen(&requests)),
+            vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()]
+        );
+    }
+
+    // ── The web search beside LLM Context (section 8.11) ──────────────────
+
+    const THUMB: &str = "https://imgs.search.brave.com/t/rs:fit:200:200:1/g:ce/aHR0cHM6";
+    const VIDEO_TITLE: &str = "A walk through the park at dusk";
+    const NEWS_URL: &str = "https://www.the-star.co.ke/news/park-gates";
+
+    /// A web search answer with every section Brave can add beside its pages.
+    fn sectioned_body() -> String {
+        serde_json::json!({
+            "type": "search",
+            "web": {"results": [{
+                "title": "Nairobi National Park", "url": PARK,
+                "description": "The park closes at 6 pm, said the web search.",
+            }]},
+            "news": {"results": [{
+                "title": "Park gates to close early for the census",
+                "url": NEWS_URL,
+                "description": "The park gates close at 4 pm on census night, the wildlife service said.",
+                "page_age": "2026-10-27T09:00:00",
+                "profile": {"name": "The Star"},
+                "thumbnail": {"src": THUMB},
+            }]},
+            "videos": {"results": [{
+                "title": VIDEO_TITLE,
+                "url": "https://www.youtube.com/watch?v=park",
+                "video": {"duration": "4:12", "creator": "KWS"},
+                "thumbnail": {"src": THUMB},
+            }]},
+            "locations": {"results": [{
+                "title": "Java House Junction",
+                "url": "https://www.javahouseafrica.com/junction",
+                "opening_hours": {"current_day": [{"full_name": "Monday", "opens": "07:00", "closes": "22:00"}]},
+                "contact": {"telephone": "+254 709 000 000"},
+            }]},
+        })
+        .to_string()
+    }
+
+    fn card_of(result: &CallToolResult) -> Value {
+        let card = text_of(result, 1);
+        serde_json::from_str(
+            card.trim_start_matches("[[[mcp-ui:search:")
+                .trim_end_matches("]]]"),
+        )
+        .expect("the card's JSON")
+    }
+
+    #[tokio::test]
+    async fn the_web_search_adds_news_to_the_copy_and_news_and_videos_to_the_card() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let result = context_against(port, fresh_board(), None).await;
+        let copy = agent_visible_text(&result);
+        assert!(copy.contains("close at 4 pm on census night"), "{copy}");
+        assert!(
+            copy.contains("Park gates to close early for the census (the-star.co.ke, 2026-10-27)"),
+            "{copy}"
+        );
+        assert!(
+            !copy.contains(VIDEO_TITLE),
+            "a video is the user's alone: {copy}"
+        );
+        assert!(!copy.contains("://"), "{copy}");
+
+        let card = card_of(&result);
+        assert_eq!(card["news"][0]["publisher"], "The Star");
+        assert_eq!(card["news"][0]["date"], "2026-10-27");
+        assert_eq!(card["news"][0]["thumbnail"], THUMB);
+        assert_eq!(card["videos"][0]["title"], VIDEO_TITLE);
+        assert_eq!(card["videos"][0]["duration"], "4:12");
+        assert!(
+            card["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| !r["url"].as_str().unwrap().contains("the-star")),
+            "news is not listed among the pages: {card}"
+        );
+        assert!(
+            card["places"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|p| p.get("phone").is_none() && p.get("hours").is_none()),
+            "the search's places are not read with local places off: {card}"
+        );
+        assert!(!copy.contains("+254"), "{copy}");
+        let stub = stub_of(&result).unwrap();
+        assert!(stub.contains("the-star.co.ke"), "{stub}");
+        assert_eq!(
+            pond_core::mcp::services::page_addresses::global()
+                .resolve(NEWS_URL)
+                .as_deref(),
+            Some(NEWS_URL),
+            "read_web_page may open a news story the copy quoted"
+        );
+    }
+
+    #[test]
+    fn news_counts_toward_the_reach_of_a_turn() {
+        let pages = (0..TURN_REACH.sources)
+            .map(|i| ContextSource {
+                hit: hit(
+                    &format!("Report {i}"),
+                    &format!("https://page{i}.example/"),
+                    "",
+                ),
+                snippets: vec![format!(
+                    "Page {i} says the Kiambu rainfall this season reached {i}0 millimetres."
+                )],
+                news: false,
+            })
+            .collect();
+        let news: Vec<News> = (0..3)
+            .map(|i| News {
+                title: format!("Rain story {i}"),
+                url: format!("https://news{i}.example/rain"),
+                description: format!(
+                    "News {i}: the Kiambu rainfall this season broke records, the met office said."
+                ),
+                publisher: "Paper".to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let context = LlmContext {
+            sources: pages,
+            ..Default::default()
+        }
+        .with_sections(&Sections {
+            news,
+            ..Default::default()
+        });
+        assert_eq!(context.page_count(), TURN_REACH.sources);
+        let copy = context_copy("Kiambu rainfall records", &context, TURN_REACH).unwrap();
+        let quoted = copy
+            .text
+            .lines()
+            .filter(|l| l.ends_with(".example)"))
+            .count();
+        assert_eq!(quoted, TURN_REACH.sources, "{}", copy.text);
+        assert!(
+            copy.text.contains("Rain story 0 (news0.example)"),
+            "news competes by rank: {}",
+            copy.text
+        );
+    }
+
+    #[tokio::test]
+    async fn with_local_places_on_both_requests_carry_the_town_and_places_gain_their_details() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let result = against(&base, None, fresh_board(), Some("Nairobi"))
+            .run(
+                "test-key-123",
+                "Which phone do I call to book a table at Java?",
+            )
+            .await;
+        for _ in 0..2 {
+            let head = requests.recv().unwrap().to_ascii_lowercase();
+            assert!(head.contains("x-loc-city: nairobi"), "{head}");
+            assert_eq!(head.matches("x-loc-").count(), 1, "only the town: {head}");
+        }
+        let copy = agent_visible_text(&result);
+        assert!(
+            copy.contains("Java House Junction: phone: +254 709 000 000"),
+            "{copy}"
+        );
+        let card = card_of(&result);
+        let java = card["places"]
+            .as_array()
             .unwrap()
-            .starts_with("GET /res/v1/web/search?"));
+            .iter()
+            .find(|p| p["name"] == "Java House Junction")
+            .expect("the place local recall named");
+        assert_eq!(java["hours"], "Monday 07:00 to 22:00");
+        assert_eq!(java["phone"], "+254 709 000 000");
+        assert_eq!(
+            card["places"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["name"]
+                    .as_str()
+                    .unwrap()
+                    .eq_ignore_ascii_case("java house junction"))
+                .count(),
+            1,
+            "merged into the place LLM Context named, not repeated: {card}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_web_search_does_not_hold_a_grounded_answer() {
+        let (port, _requests) = slow_stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+            Some((SEARCH_PATH, Duration::from_secs(4))),
+        );
+        let started = std::time::Instant::now();
+        let result = context_against(port, fresh_board(), None).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("open every day from 6:00 AM"), "{copy}");
+        assert!(card_of(&result).get("news").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_fallback_quotes_news_and_shows_the_sections_in_its_card() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 404, "text/plain", "no".to_string()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let result = context_against(port, fresh_board(), None).await;
+        let copy = agent_visible_text(&result);
+        assert!(copy.contains("said the web search"), "{copy}");
+        assert!(copy.contains("census night"), "{copy}");
+        assert!(!copy.contains(VIDEO_TITLE), "{copy}");
+        let card = card_of(&result);
+        assert_eq!(card["results"].as_array().unwrap().len(), 1, "{card}");
+        assert_eq!(card["news"].as_array().unwrap().len(), 1, "{card}");
+        assert_eq!(card["videos"].as_array().unwrap().len(), 1, "{card}");
     }
 
     // ── The MCP surface ───────────────────────────────────────────────────
@@ -3574,7 +4692,11 @@ mod tests {
         }))
         .unwrap();
         // No secret store in a test binary: the key-removed path.
-        let result = server.call_tool(params, ctx).await.unwrap();
+        let rmcp::model::CallToolResponse::Complete(result) =
+            server.call_tool(params, ctx).await.unwrap()
+        else {
+            panic!("search_web answered with an input-required or task response");
+        };
         let copy = text_of(&result, 0);
         assert!(copy.contains("Web search is not set up"), "{copy}");
     }
@@ -3616,7 +4738,7 @@ mod tests {
     /// Functional only: Brave's terms (3(b)(xiii)) forbid scoring a model on its results, and
     /// nothing here is written to disk.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network and a Brave key; set BRAVE_SEARCH_API_KEY"]
     async fn live_brave_search_answers_a_local_question() {
         let key = std::env::var(BRAVE_SEARCH_API_KEY).expect("set BRAVE_SEARCH_API_KEY");
         let brave = crate::build_http_client();
@@ -3630,26 +4752,24 @@ mod tests {
                 board,
                 town,
                 context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
+                reach: TURN_REACH,
+                side_search: true,
+                paced: Box::leak(Box::default()),
             };
-            match search.llm_context(&key, question).await {
-                ContextAnswer::Grounded(context) => {
-                    eprintln!(
-                        "town {town:?}: LLM Context grounded {} sources, {} places",
-                        context.sources.len(),
-                        context.places.len()
-                    );
-                    let copy = context_copy(question, &context).expect("a quotable copy");
-                    assert!(copy.text.len() <= RESULT_BUDGET.max(WIDE_RESULT_BUDGET));
-                    assert!(!copy.text.contains("://"), "{}", copy.text);
-                }
-                ContextAnswer::Miss(miss) => panic!("town {town:?}: {miss}"),
-                ContextAnswer::Fallback(reason) => {
-                    eprintln!("town {town:?}: LLM Context fell back ({reason}); a plan without it?")
-                }
-            }
             let result = search.run(&key, question).await;
             let copy = text_of(&result, 0);
-            eprintln!("{copy}");
+            let card = card_of(&result);
+            let count = |field: &str| card[field].as_array().map_or(0, Vec::len);
+            eprintln!(
+                "town {town:?}: copy {} bytes; card: {} pages, {} places, {} news, {} videos",
+                copy.len(),
+                count("results"),
+                count("places"),
+                count("news"),
+                count("videos"),
+            );
+            assert!(copy.len() <= RESULT_BUDGET.max(WIDE_RESULT_BUDGET));
+            assert!(!copy.contains("://"), "{copy}");
             assert!(copy.starts_with("Web results for:"), "{copy}");
             assert_eq!(board.status_for(Some(&key)), WebSearchStatus::Ok);
             assert_eq!(result.content.len(), 2);
@@ -3792,7 +4912,7 @@ mod tests {
     /// the offline port in `kt/copies.py` can be checked against this code:
     /// `FIXTURES=<dir> COPIES_TO=<file> cargo test -p pond-mcp-server fixture_copies -- --ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "needs frozen fixtures; set FIXTURES and COPIES_TO"]
     fn fixture_copies() {
         let dir = std::path::PathBuf::from(std::env::var("FIXTURES").expect("set FIXTURES"));
         let mut copies = serde_json::Map::new();
@@ -3812,7 +4932,7 @@ mod tests {
     /// Freeze each live page's extracted blocks as a JSON fixture, so selection can be compared
     /// offline: `FREEZE_TO=<dir> cargo test -p pond-mcp-server freeze_pages -- --ignored`.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network; set FREEZE_TO"]
     async fn freeze_pages_for_offline_ranking() {
         let dir = std::path::PathBuf::from(std::env::var("FREEZE_TO").expect("set FREEZE_TO"));
         let fetched = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -3856,7 +4976,7 @@ mod tests {
     /// frozen blocks the shipped selection answers; for the rest a miss is printed, and
     /// `REQUIRE_ANSWERS=1` turns it into a failure.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "needs the network"]
     async fn live_pages_are_read_extracted_and_ranked() {
         let client = page_client().expect("page client builds");
 
@@ -3893,7 +5013,11 @@ mod tests {
             let copy = model_copy(page.question, &hits, &pages).expect("something quotable");
             eprintln!("{copy}");
 
-            assert!(copy.len() <= selection_limits(1).1, "{} bytes", copy.len());
+            assert!(
+                copy.len() <= selection_limits(1, TURN_REACH).1,
+                "{} bytes",
+                copy.len()
+            );
             assert!(
                 !copy.contains("://"),
                 "the model's copy carries no URL: {copy}"

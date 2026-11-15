@@ -2,6 +2,7 @@ pub mod capability;
 pub mod claim;
 pub mod credential;
 pub mod discriminator;
+pub mod factory_reset_phrases;
 pub mod interface;
 pub mod peripheral;
 pub mod pond_advert;

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::context::vector_index::{Corpus, VectorEntry, VectorIndex};
 use pond_core::models::ports::embedding::EmbeddingProvider;
+use pond_core::user_data::domain::member_profile::About;
 use pond_core::user_data::domain::memory::{
     cosine_similarity, MemoryEvent, MemoryEventKind, MemoryFragment, MemoryLifecycle,
     MemorySegment, MemoryTier,
@@ -169,6 +170,8 @@ struct FragmentRow {
     superseded_by: Option<String>,
     /// For correction memories: what wrong claim this corrects.
     corrects: Option<String>,
+    about: Option<String>,
+    valid_until: Option<String>,
 }
 
 /// Accepts `add`'s `%Y-%m-%d %H:%M:%S` and RFC3339 (other writers); unreadable falls back to now.
@@ -188,7 +191,7 @@ fn parse_dt(s: &str) -> chrono::DateTime<Utc> {
 }
 
 fn parse_segment(s: &str) -> Option<MemorySegment> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+    MemorySegment::parse(s)
 }
 
 fn parse_tier(s: &str) -> Option<MemoryTier> {
@@ -220,6 +223,8 @@ fn row_to_fragment(row: FragmentRow) -> MemoryFragment {
         lifecycle: row.lifecycle.as_deref().and_then(parse_lifecycle),
         superseded_by: row.superseded_by,
         corrects: row.corrects,
+        about: row.about.as_deref().and_then(About::parse),
+        valid_until: row.valid_until.as_deref().map(parse_dt),
     }
 }
 
@@ -242,19 +247,14 @@ fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
 const SELECT_ALL: &str = "\
     id, profile_id, session_id, content, embedding, source, tags, created_at, \
     segment, importance, tier, decay_rate, access_count, last_accessed_at, \
-    lifecycle, superseded_by, corrects";
+    lifecycle, superseded_by, corrects, about, valid_until";
+
+/// A row a turn or a recall may see: live and not past its time.
+const LIVE: &str = "(lifecycle IS NULL OR lifecycle = 'active') \
+    AND (valid_until IS NULL OR valid_until > datetime('now'))";
 
 fn segment_to_str(s: &MemorySegment) -> &'static str {
-    match s {
-        MemorySegment::Identity => "identity",
-        MemorySegment::Preference => "preference",
-        MemorySegment::Correction => "correction",
-        MemorySegment::Relationship => "relationship",
-        MemorySegment::Project => "project",
-        MemorySegment::Routine => "routine",
-        MemorySegment::Knowledge => "knowledge",
-        MemorySegment::Context => "context",
-    }
+    s.as_str()
 }
 
 fn lifecycle_to_str(l: &MemoryLifecycle) -> &'static str {
@@ -296,8 +296,8 @@ impl MemoryRepository for SqliteMemoryRepository {
             "INSERT INTO memory_fragments \
              (id, profile_id, session_id, content, embedding, source, tags, created_at, \
               segment, importance, tier, decay_rate, access_count, last_accessed_at, \
-              lifecycle, superseded_by, corrects) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              lifecycle, superseded_by, corrects, about, valid_until) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&fragment.id)
         .bind(&fragment.profile_id)
@@ -316,6 +316,12 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(lifecycle_str)
         .bind(&fragment.superseded_by)
         .bind(&fragment.corrects)
+        .bind(fragment.about.map(About::as_str))
+        .bind(
+            fragment
+                .valid_until
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+        )
         .execute(&self.pool)
         .await?;
 
@@ -336,7 +342,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let (filter, bind) = scope_sql(scope);
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE (lifecycle IS NULL OR lifecycle = 'active') {filter} \
+             WHERE {LIVE} {filter} \
              ORDER BY created_at DESC LIMIT ?"
         );
         let mut q = sqlx::query_as::<_, FragmentRow>(&query);
@@ -364,7 +370,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
              WHERE embedding IS NOT NULL \
-             AND (lifecycle IS NULL OR lifecycle = 'active') {filter}"
+             AND {LIVE} {filter}"
         );
 
         let rows: Vec<FragmentRow> = match bind {
@@ -509,7 +515,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let sql = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE (lifecycle IS NULL OR lifecycle = 'active') \
+             WHERE {LIVE} \
              AND ({likes_sql}) \
              {profile_filter} \
              ORDER BY COALESCE(importance, 0.5) DESC, created_at DESC \
@@ -601,7 +607,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let (filter, bind) = scope_sql(scope);
         let query = format!(
             "SELECT {SELECT_ALL} FROM memory_fragments \
-             WHERE segment = ? AND (lifecycle IS NULL OR lifecycle = 'active') {filter} \
+             WHERE segment = ? AND {LIVE} {filter} \
              ORDER BY created_at DESC LIMIT ?"
         );
 
@@ -704,15 +710,118 @@ impl MemoryRepository for SqliteMemoryRepository {
         Ok(rows.into_iter().map(row_to_event).collect())
     }
 
+    async fn live_about(&self, scope: &ProfileScope, about: About) -> Result<Vec<MemoryFragment>> {
+        if scope.excludes_everything() {
+            return Ok(vec![]);
+        }
+        let (filter, bind) = scope_sql(scope);
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about = ? AND {LIVE} {filter} ORDER BY created_at DESC"
+        );
+        let mut q = sqlx::query_as::<_, FragmentRow>(&query).bind(about.as_str());
+        if let Some(pid) = bind {
+            q = q.bind(pid);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn always_shown(
+        &self,
+        scope: &ProfileScope,
+        limit: usize,
+    ) -> Result<Vec<MemoryFragment>> {
+        if scope.excludes_everything() {
+            return Ok(vec![]);
+        }
+        let listed = About::ALL
+            .iter()
+            .filter(|a| a.always_shown())
+            .map(|a| format!("'{}'", a.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (filter, bind) = scope_sql(scope);
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about IN ({listed}) AND {LIVE} {filter} \
+             ORDER BY COALESCE(importance, 0.5) DESC, created_at DESC LIMIT ?"
+        );
+        let mut q = sqlx::query_as::<_, FragmentRow>(&query);
+        if let Some(pid) = bind {
+            q = q.bind(pid);
+        }
+        let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn unfiled(&self, limit: usize) -> Result<Vec<MemoryFragment>> {
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE about IS NULL AND resort_attempts < {} AND {LIVE} \
+             ORDER BY created_at ASC, rowid ASC LIMIT ?",
+            pond_core::user_data::services::memory_resort::MAX_ATTEMPTS
+        );
+        let rows = sqlx::query_as::<_, FragmentRow>(&query)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn archived_of(&self, profile_id: &str, limit: usize) -> Result<Vec<MemoryFragment>> {
+        let query = format!(
+            "SELECT {SELECT_ALL} FROM memory_fragments \
+             WHERE profile_id = ? AND lifecycle = 'archived' \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        );
+        let rows = sqlx::query_as::<_, FragmentRow>(&query)
+            .bind(profile_id)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(row_to_fragment).collect())
+    }
+
+    async fn note_unfiled_attempt(&self, id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE memory_fragments SET resort_attempts = resort_attempts + 1 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn file_row(&self, id: &str, about: About) -> Result<()> {
+        let tier = about.tier();
+        let valid_until = about
+            .valid_until(Utc::now())
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        sqlx::query(
+            "UPDATE memory_fragments SET about = ?, segment = ?, importance = ?, tier = ?, \
+             decay_rate = ?, valid_until = ? WHERE id = ?",
+        )
+        .bind(about.as_str())
+        .bind(about.segment().as_str())
+        .bind(about.importance() as f64)
+        .bind(tier_to_str(&tier))
+        .bind(tier.default_decay_rate() as f64)
+        .bind(valid_until)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn update_segment(
         &self,
         id: &str,
         segment: pond_core::user_data::domain::memory::MemorySegment,
         importance: f32,
     ) -> anyhow::Result<()> {
-        let seg_str = format!("{:?}", segment).to_lowercase();
         sqlx::query("UPDATE memory_fragments SET segment = ?, importance = ? WHERE id = ?")
-            .bind(&seg_str)
+            .bind(segment.as_str())
             .bind(importance as f64)
             .bind(id)
             .execute(&self.pool)
@@ -1332,6 +1441,254 @@ mod tests {
             .unwrap();
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].id, "id1");
+    }
+
+    /// `profile_id` references `profiles(id)`, so a row's owner must exist first.
+    async fn seed_profiles(repo: &SqliteMemoryRepository, ids: &[&str]) {
+        for id in ids {
+            sqlx::query("INSERT INTO profiles (id, display_name, avatar_emoji) VALUES (?, ?, ?)")
+                .bind(id)
+                .bind(id)
+                .bind("duck")
+                .execute(&repo.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    fn filed(id: &str, owner: Option<&str>, about: About, content: &str) -> MemoryFragment {
+        let mut row =
+            MemoryFragment::from_chat(id.into(), owner.map(str::to_string), None, content.into());
+        row.lifecycle = Some(MemoryLifecycle::Active);
+        pond_core::user_data::domain::member_profile::file_under(&mut row, about);
+        row
+    }
+
+    #[tokio::test]
+    async fn a_filed_row_comes_back_with_what_it_is_about_and_when_it_ends() {
+        let (repo, _tmp) = make_repo().await;
+        repo.add(filed(
+            "a1",
+            None,
+            About::Allergy,
+            "Jerry is allergic to peanuts.",
+        ))
+        .await
+        .unwrap();
+        repo.add(filed(
+            "n1",
+            None,
+            About::Now,
+            "Jerry is in Kisumu this month.",
+        ))
+        .await
+        .unwrap();
+
+        let rows = repo
+            .search_recent(&ProfileScope::Household, 10)
+            .await
+            .unwrap();
+        let allergy = rows.iter().find(|r| r.id == "a1").unwrap();
+        assert_eq!(allergy.about, Some(About::Allergy));
+        assert_eq!(allergy.segment, Some(MemorySegment::FoodHealth));
+        assert_eq!(allergy.valid_until, None);
+        let passing = rows.iter().find(|r| r.id == "n1").unwrap();
+        assert_eq!(passing.about, Some(About::Now));
+        assert!(passing.valid_until.is_some_and(|t| t > Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn a_row_past_its_time_is_not_recalled_by_any_route() {
+        let (repo, _tmp) = make_repo().await;
+        let mut gone = filed("gone", None, About::Now, "Jerry is staying in Nakuru.");
+        gone.valid_until = Some(Utc::now() - chrono::Duration::days(1));
+        gone.embedding = Some(vec![1.0, 0.0]);
+        repo.add(gone).await.unwrap();
+        let household = ProfileScope::Household;
+
+        assert!(repo.search_recent(&household, 10).await.unwrap().is_empty());
+        assert!(repo
+            .search_similar(&[1.0, 0.0], &household, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .search_by_content(&["nakuru".to_string()], &household, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .live_about(&household, About::Now)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            repo.get_in_scope("gone", &household)
+                .await
+                .unwrap()
+                .is_some(),
+            "it is still there to read by id"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_rows_about_one_thing_are_listed_within_scope() {
+        let (repo, _tmp) = make_repo().await;
+        seed_profiles(&repo, &["liz", "jerry"]).await;
+        repo.add(filed(
+            "d-liz",
+            Some("liz"),
+            About::Diet,
+            "Liz is vegetarian.",
+        ))
+        .await
+        .unwrap();
+        repo.add(filed(
+            "d-jerry",
+            Some("jerry"),
+            About::Diet,
+            "Jerry eats no pork.",
+        ))
+        .await
+        .unwrap();
+        repo.add(filed("l-liz", Some("liz"), About::Likes, "Liz likes jazz."))
+            .await
+            .unwrap();
+        repo.mark_superseded("d-jerry", "d-liz").await.unwrap();
+
+        let liz = repo
+            .live_about(&ProfileScope::Owner("liz".into()), About::Diet)
+            .await
+            .unwrap();
+        assert_eq!(
+            liz.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["d-liz"]
+        );
+        assert!(repo
+            .live_about(&ProfileScope::Owner("jerry".into()), About::Diet)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .live_about(&ProfileScope::Guest, About::Diet)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_standing_facts_are_the_weightiest_first_and_no_others() {
+        let (repo, _tmp) = make_repo().await;
+        for (id, about, content) in [
+            ("likes", About::Likes, "Jerry likes hiking."),
+            ("name", About::Name, "Jerry goes by Jerr."),
+            (
+                "rule",
+                About::Instruction,
+                "Jerry wants prices in shillings.",
+            ),
+            ("allergy", About::Allergy, "Jerry is allergic to peanuts."),
+        ] {
+            repo.add(filed(id, None, about, content)).await.unwrap();
+        }
+        let household = ProfileScope::Household;
+        let ids = |rows: Vec<MemoryFragment>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        let standing = ids(repo.always_shown(&household, 8).await.unwrap());
+        assert_eq!(standing.len(), 3);
+        assert!(!standing.contains(&"likes".to_string()));
+        assert_eq!(standing[2], "name", "the name weighs least of the three");
+        assert_eq!(repo.always_shown(&household, 1).await.unwrap().len(), 1);
+        assert!(repo
+            .always_shown(&ProfileScope::Guest, 8)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_re_sort_reads_unfiled_rows_oldest_first_until_filed_or_given_up_on() {
+        let (repo, _tmp) = make_repo().await;
+        seed_profiles(&repo, &["jerry"]).await;
+        for (id, age) in [("newer", 1), ("older", 5)] {
+            let mut row = MemoryFragment::from_chat(
+                id.into(),
+                Some("jerry".into()),
+                None,
+                format!("Jerry {id}."),
+            );
+            row.created_at = Utc::now() - chrono::Duration::days(age);
+            repo.add(row).await.unwrap();
+        }
+        // The two segments that can only be about one thing are filed at migration, so an
+        // already filed row is never offered.
+        repo.add(filed(
+            "done",
+            Some("jerry"),
+            About::Routine,
+            "Jerry runs on Sundays.",
+        ))
+        .await
+        .unwrap();
+        let ids = |rows: Vec<MemoryFragment>| rows.into_iter().map(|r| r.id).collect::<Vec<_>>();
+
+        assert_eq!(ids(repo.unfiled(10).await.unwrap()), ["older", "newer"]);
+
+        repo.file_row("older", About::Diet).await.unwrap();
+        let filed_row = repo
+            .get_in_scope("older", &ProfileScope::Household)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(filed_row.about, Some(About::Diet));
+        assert_eq!(filed_row.segment, Some(MemorySegment::FoodHealth));
+        assert_eq!(ids(repo.unfiled(10).await.unwrap()), ["newer"]);
+
+        for _ in 0..pond_core::user_data::services::memory_resort::MAX_ATTEMPTS {
+            repo.note_unfiled_attempt("newer").await.unwrap();
+        }
+        assert!(
+            repo.unfiled(10).await.unwrap().is_empty(),
+            "a row the model never answered for is left as it is"
+        );
+        assert!(
+            repo.search_recent(&ProfileScope::Household, 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.id == "newer"),
+            "and is still recalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_members_archived_rows_are_listed_for_them_alone() {
+        let (repo, _tmp) = make_repo().await;
+        seed_profiles(&repo, &["liz", "jerry"]).await;
+        for (id, owner) in [
+            ("liz-old", "liz"),
+            ("jerry-old", "jerry"),
+            ("liz-live", "liz"),
+        ] {
+            repo.add(MemoryFragment::from_chat(
+                id.into(),
+                Some(owner.into()),
+                None,
+                format!("A note of {owner}'s."),
+            ))
+            .await
+            .unwrap();
+        }
+        for id in ["liz-old", "jerry-old"] {
+            repo.update_lifecycle(id, MemoryLifecycle::Archived)
+                .await
+                .unwrap();
+        }
+        let archived = repo.archived_of("liz", 10).await.unwrap();
+        assert_eq!(
+            archived.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["liz-old"]
+        );
     }
 
     #[tokio::test]

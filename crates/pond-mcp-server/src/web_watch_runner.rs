@@ -104,6 +104,16 @@ impl WatchNotifier for MemberWatchNotifier {
                 tracing::warn!(target: "giap::trace", kind = "web_watch_hook_event_failed", error = %e);
             }
         }
+        pond_core::shared::services::goose_thread::post(
+            Some(&notice.owner),
+            &format!("{}\n{}", notice.title, notice.body),
+            pond_core::user_data::domain::message_note::MessageNote::from_source(
+                pond_core::user_data::domain::message_note::SourceKind::Watch,
+                notice.title.clone(),
+                notice.watch_id.clone(),
+            ),
+        )
+        .await;
         let notification = Notification {
             id: format!(
                 "web-watch-{}-{}",
@@ -127,7 +137,7 @@ impl WatchNotifier for MemberWatchNotifier {
             .notify_member(&notice.owner, notification)
             .await;
         let outcome = match &delivery {
-            MemberDelivery::Reached(devices) => format!("reached {}", devices.len()),
+            MemberDelivery::Reached(devices) => format!("queued for {}", devices.len()),
             MemberDelivery::NoPhone => "no_phone".to_string(),
             MemberDelivery::Failed(_) => "failed".to_string(),
         };

@@ -525,7 +525,7 @@ async fn render_replies_as_spoken() {
             }
             write_wav(&format!("{out}/units/{name}_{i:02}_own_row.wav"), &own);
             manifest.push(serde_json::json!({
-                "text": name, "i": i, "unit": unit.text, "boundary": format!("{:?}", unit.boundary),
+                "text": name, "i": i, "unit": unit.text, "last": unit.last,
                 "tokens": chunks.iter().map(|c| c.tokens.len()).sum::<usize>(),
             }));
         }

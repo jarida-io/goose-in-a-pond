@@ -67,7 +67,7 @@ impl CartNotifier for MemberCartNotifier {
             .notify_member(&notice.owner, notification)
             .await
         {
-            MemberDelivery::Reached(devices) => format!("reached {}", devices.len()),
+            MemberDelivery::Reached(devices) => format!("queued for {}", devices.len()),
             MemberDelivery::NoPhone => "no_phone".to_string(),
             MemberDelivery::Failed(_) => "failed".to_string(),
         };

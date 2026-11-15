@@ -394,6 +394,17 @@ impl RunRegistry {
         self.inner.lock().expect("run registry poisoned").runs.len()
     }
 
+    /// Runs still being driven: what a stop waits for.
+    pub fn in_flight(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("run registry poisoned")
+            .runs
+            .values()
+            .filter(|run| !run.state().is_terminal())
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

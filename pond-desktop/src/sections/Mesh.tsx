@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Button, Separator, Switch } from "@heroui/react";
+import { Button, Separator } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import { Share2, Plus, X, Trash2, Copy, Wifi, WifiOff, Coins, Cpu, Zap } from "lucide-react";
 import QRCode from "qrcode";
 import { api } from "../api/PondApiClient";
@@ -240,14 +242,11 @@ export function Mesh() {
       {!loading && meshEnabledSetting !== null && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <Switch
-            aria-label="Enable mesh"
-            isSelected={meshEnabledSetting}
-            isDisabled={meshToggling}
+            label="Enable mesh"
+            checked={meshEnabledSetting}
+            disabled={meshToggling}
             onChange={toggleMesh}
-          >
-            {/* Switch.Content wires up the aria-label — without it the toggle has no accessible name. */}
-            <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-          </Switch>
+          />
           <span className="muted-12">Enable mesh</span>
           {/* Turning mesh ON hot-builds the real transport synchronously
               (#132 follow-up) — `toggleMesh` already re-fetched `self` by
@@ -259,12 +258,15 @@ export function Mesh() {
               is "until you restart"; turning ON and staying dark means the
               hot-build itself failed (no `mesh` feature in this build, or a
               real startup error) — telling the user to restart would be
-              wrong, since restarting cannot fix either of those. */}
+              wrong, since restarting cannot fix either of those.
+              `mesh_compiled` says which of the two it was. */}
           {!meshToggling && self && meshEnabledSetting !== self.mesh_enabled && (
             <span className="muted-12 text-error">
-              {meshEnabledSetting
-                ? "Mesh couldn't start — check the server logs (this build may not include mesh support)."
-                : "Still connected to peers until you restart pond-server."}
+              {!meshEnabledSetting
+                ? "Still connected to peers until you restart pond-server."
+                : self.mesh_compiled === false
+                  ? "This pond-server was built without mesh support. Install a current build to use mesh."
+                  : "Mesh couldn't start. Check the server logs."}
             </span>
           )}
         </div>
@@ -274,9 +276,11 @@ export function Mesh() {
         <div className="empty-state">
           <Share2 size={32} />
           <span>
-            {meshEnabledSetting
-              ? "Mesh is enabled but couldn't start — check the server logs."
-              : "Mesh is disabled. Flip the switch above to invite trusted peers."}
+            {!meshEnabledSetting
+              ? "Mesh is disabled. Flip the switch above to invite trusted peers."
+              : self.mesh_compiled === false
+                ? "This build has no mesh support."
+                : "Mesh is enabled but couldn't start. Check the server logs."}
           </span>
         </div>
       )}

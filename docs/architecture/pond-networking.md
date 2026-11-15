@@ -183,8 +183,9 @@ setup code. Once claimed it never accepts the setup code again until it is reset
   outlast the hardware.
 - **Lifecycle.** `claimed_at` is written before the first device's tokens are returned, and read
   live on every attempt. Clearing it re-arms the same printed code: a latch with a door, not a
-  one-way door. As built the door is `pond-server setup-code --rearm`, run on the host; there is no
-  factory reset (see Open questions).
+  one-way door. As built the door is `pond-server setup-code --rearm`, run on the host, or
+  `POST /api/v1/admin/factory-reset`, which re-arms it as the last step of wiping the household
+  and reopening onboarding (`pond-core/src/network/services/factory_reset.rs`).
 
 ### The spoken fallback
 
@@ -362,8 +363,14 @@ log or return it, and zeroizes its copy.
 
 ## Open questions
 
-- What should reset to factory state mean beyond re-arming the code: forget Wi-Fi, devices,
-  household authority? Today only `POST /onboard/reset` and `setup-code --rearm` exist.
+- Answered: `POST /api/v1/admin/factory-reset`, from the host or the main member, quiets the
+  pond, notifies each member in their own language, revokes every paired device, then deletes
+  every schedule and erases the household's files, the engine's sessions, the household tables of
+  `pond_logs.db` and `pond_system.db` (`pond-infra/src/db.rs`) and stored secrets
+  (`SystemDataWipe`). It re-arms the setup code, reopens onboarding, and asks the Wi-Fi station
+  to forget saved networks last, which the shared station still refuses. Only shipped config (the model
+  catalog, prompt templates — `SYSTEM_KEEP_TABLES`) survives it. The rules are in
+  [api.md](../api.md#factory-reset).
 - Answered by P5e: re-provisioning a claimed pond without anyone in earshot uses
   `credential: "device"` over BLE, a CPace run keyed on the stored refresh hash, so the token is
   never sent.

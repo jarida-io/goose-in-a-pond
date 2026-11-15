@@ -8,16 +8,17 @@ use chrono::{Duration, Utc};
 use pond_core::mcp::services::page_addresses;
 use pond_core::shared::domain::cart::{money_words, Notify};
 use pond_core::shared::domain::web_watch::{
-    WatchFilters, WatchItem, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
-    MIN_INTERVAL_HOURS,
+    TellWhen, WatchFilters, WatchItem, DEFAULT_INTERVAL_HOURS, MAX_INTERVAL_HOURS,
+    MAX_WATCHES_PER_MEMBER, MIN_INTERVAL_HOURS,
 };
 use pond_core::shared::ports::cart::ModelUse;
 use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
 use pond_core::shared::services::cart_watch::{self, AddRefusal, NewCartItem};
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::message_note::Receipt;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, Meta},
+    model::{CallToolResult, ContentBlock, ErrorData, RequestMetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -25,7 +26,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::format::format_dead_end;
+use crate::format::format_not_done;
 use crate::knowledge::KnowledgeMcpServer;
 use crate::page_data::Item;
 use crate::web_page::{read_watched, FetchFailure};
@@ -50,10 +51,13 @@ pub fn init_web_watch_deps(deps: WebWatchDeps) {
 }
 
 // Undocumented fields and plain types on purpose: this tool is in every turn's tool block.
+// `default` keeps every field out of the schema's `required`; a small model asks for each one listed.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(transform = crate::without_null_defaults)]
 pub struct WebWatchParams {
     /// start, list, stop, or watch_price for one product's page
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("default" = "start"))]
     pub action: Option<String>,
     #[schemars(with = "String")]
     pub url: Option<String>,
@@ -66,7 +70,16 @@ pub struct WebWatchParams {
     pub min_year: Option<Value>,
     #[schemars(with = "f64")]
     pub max_mileage: Option<Value>,
-    #[schemars(with = "u32")]
+    /// new (default), appears, disappears, below or above
+    #[schemars(with = "String")]
+    #[serde(alias = "when")]
+    pub condition: Option<String>,
+    /// The words to appear or disappear, or the label beside the number
+    #[schemars(with = "String")]
+    pub phrase: Option<String>,
+    #[schemars(with = "f64")]
+    pub value: Option<Value>,
+    #[schemars(with = "u32", extend("default" = 6))]
     pub every_hours: Option<Value>,
     #[schemars(with = "String")]
     pub watch_id: Option<String>,
@@ -130,6 +143,39 @@ impl WebWatchParams {
             max_price: number(self.max_price.as_ref()),
             min_year: number(self.min_year.as_ref()).map(|y| y as u32),
             max_mileage: number(self.max_mileage.as_ref()),
+            tell_when: TellWhen::NewOrChanged,
+        }
+    }
+
+    /// What the watch tells about, or what is missing to say so. A rule read off the whole
+    /// page takes the place of the item filters: its owner asked for one thing.
+    fn rule(&self) -> Result<TellWhen, &'static str> {
+        let when = self
+            .condition
+            .as_deref()
+            .map(|w| w.trim().to_lowercase())
+            .unwrap_or_default();
+        let phrase = text(self.phrase.as_ref());
+        let value = number(self.value.as_ref());
+        let is = |names: &[&str]| names.iter().any(|n| when == *n || when.starts_with(n));
+        if is(&["appear", "shows up", "is there"]) {
+            if phrase.is_empty() {
+                return Err("Say which words should appear, in phrase.");
+            }
+            Ok(TellWhen::Appears { phrase })
+        } else if is(&["disappear", "gone", "is gone", "goes away"]) {
+            if phrase.is_empty() {
+                return Err("Say which words should be gone, in phrase.");
+            }
+            Ok(TellWhen::Disappears { phrase })
+        } else if is(&["below", "under", "less"]) {
+            let value = value.ok_or("Say the number it should go below, in value.")?;
+            Ok(TellWhen::Below { phrase, value })
+        } else if is(&["above", "over", "more", "pass"]) {
+            let value = value.ok_or("Say the number it should go above, in value.")?;
+            Ok(TellWhen::Above { phrase, value })
+        } else {
+            Ok(TellWhen::NewOrChanged)
         }
     }
 
@@ -150,36 +196,74 @@ pub fn watch_item(item: Item) -> WatchItem {
         year: item.year,
         link: item.link,
         image: item.image,
+        snippet: item.snippet,
     }
 }
 
 #[tool_router(router = web_watch_tool_router, vis = "pub")]
 impl KnowledgeMcpServer {
     #[tool(description = "\
-Keep checking a page of listings the person or read_web_page gave, and tell the person when a \
-match appears or drops in price.")]
+Keep checking a web page and tell the person on their phone when a new listing or article \
+appears, a price drops, words appear or go away (sold out, registration open), or a number \
+goes below or above a value. Only url is needed.")]
     async fn web_watch(
         &self,
         ctx: RequestContext<RoleServer>,
         params: Parameters<WebWatchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool(TOOL_NAME);
-        let text = run(&ctx.meta, params.0).await;
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        let params = params.0;
+        let sets_a_watch = !matches!(params.action(), "list" | "stop");
+        let asked = text(params.url.as_ref());
+        let mut made = Made::default();
+        let said = run(&ctx.meta, params, &mut made).await;
+        if !sets_a_watch {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(said)]));
+        }
+        let receipt = match made.watching {
+            Some((watching, id)) => Receipt::set("watch", watching, id),
+            None => Receipt::not_set(
+                "watch",
+                asked,
+                made.why_not
+                    .unwrap_or_else(|| "The Pond could not save it. Ask again in a moment.".into()),
+            ),
+        };
+        Ok(crate::format::with_receipt(said, receipt))
     }
 }
 
-async fn run(meta: &Meta, params: WebWatchParams) -> String {
+/// Whether a call left a watch behind, for its receipt: what is watched, or why nothing is.
+#[derive(Default)]
+struct Made {
+    watching: Option<(String, Option<String>)>,
+    why_not: Option<String>,
+}
+
+impl Made {
+    /// A refusal: `why` is advice for the model, `said` the short reason the person is given.
+    fn refused(&mut self, what: &str, said: &str, why: &str) -> String {
+        self.why_not = Some(said.to_string());
+        format_not_done(what, why)
+    }
+}
+
+async fn run(meta: &RequestMetaObject, params: WebWatchParams, made: &mut Made) -> String {
     let what = "watching that page";
     let Some(deps) = WEB_WATCH_DEPS.get().cloned() else {
-        return format_dead_end(what, "Watching pages is not set up on this pond yet.");
+        return made.refused(
+            what,
+            "Watching pages is not set up on this Pond yet.",
+            "Watching pages is not set up on this pond yet.",
+        );
     };
     let owner = crate::session_from_meta(meta)
         .and_then(|s| deps.authorities.authority_for_engine_session(&s))
         .and_then(|a| a.profile_scope().owner_id().map(str::to_string));
     let Some(owner) = owner else {
-        return format_dead_end(
+        return made.refused(
             what,
+            "I do not know who is speaking, so there is nobody to keep the watch for.",
             "Only a household member the pond knows can keep watches. Ask them to say who they are.",
         );
     };
@@ -187,12 +271,12 @@ async fn run(meta: &Meta, params: WebWatchParams) -> String {
     let result = match params.action() {
         "list" => list(&deps, &owner).await,
         "stop" => stop(&deps, &owner, &params).await,
-        "watch_price" => watch_price(&owner, &params).await,
-        _ => start(&deps, &owner, &params, session).await,
+        "watch_price" => watch_price(&owner, &params, made).await,
+        _ => start(&deps, &owner, &params, session, made).await,
     };
     result.unwrap_or_else(|e| {
         tracing::warn!(target: "giap::trace", kind = "web_watch_failed", error = %e);
-        format_dead_end(
+        format_not_done(
             what,
             "The pond couldn't save that just now; try again shortly.",
         )
@@ -204,25 +288,29 @@ async fn start(
     owner: &str,
     params: &WebWatchParams,
     session: Option<String>,
+    made: &mut Made,
 ) -> anyhow::Result<String> {
     let what = "watching that page";
     let asked = text(params.url.as_ref());
     if asked.is_empty() {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
+            "I need the page's address.",
             "I need the page's address: the link the person gave, or a page read_web_page read.",
         ));
     }
     let Some(address) = page_addresses::global().resolve(&asked) else {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
+            "I can only watch a page whose address you gave me.",
             "I watch only a page whose address the person gave, or one read_web_page read.",
         ));
     };
     let mine = deps.repo.list_for(owner).await?;
     if mine.len() >= MAX_WATCHES_PER_MEMBER {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
+            "You already keep as many watches as one member may.",
             &format!(
                 "They already keep {MAX_WATCHES_PER_MEMBER} watches, the most one member may. \
                  Offer to stop one first."
@@ -230,26 +318,69 @@ async fn start(
         ));
     }
     if mine.iter().any(|w| w.address == address) {
-        return Ok(format_dead_end(what, "They already watch that page."));
+        return Ok(made.refused(
+            what,
+            "You already watch that page.",
+            "They already watch that page.",
+        ));
     }
     let page = match read_watched(&address).await {
         Ok(page) => page,
-        Err(failure) => return Ok(format_dead_end(what, &unreadable(&failure))),
+        Err(failure) => {
+            return Ok(made.refused(what, "I could not read that page.", &unreadable(&failure)))
+        }
     };
-    // One product's page lists nothing to compare, but its price can be watched.
+    // A page that only shows its posts as prose is better watched by the feed it declares:
+    // a feed lists each post once, with its own address.
+    let page = match page.feed.clone().filter(|_| !page.items_are_its_own) {
+        Some(feed) => match read_watched(&feed).await {
+            Ok(of_feed) if !of_feed.items.is_empty() => {
+                tracing::info!(target: "giap::trace", kind = "web_watch_uses_feed", items = of_feed.items.len());
+                of_feed
+            }
+            _ => page,
+        },
+        None => page,
+    };
+    // One product's page with no items or sections can be price-watched.
     if page.items.is_empty() && cart_watch::installed().is_some() {
-        return watch_price(owner, params).await;
+        return watch_price(owner, params, made).await;
     }
     if page.items.is_empty() {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
-            "That page lists nothing the pond can compare from one check to the next. Watch a \
-             page of listings or search results instead.",
+            "That page has nothing I can compare from one check to the next.",
+            "That page has no readable content to compare from one check to the next.",
         ));
     }
-    let filters = params.filters();
-    let interval = params.interval();
+    let rule = match params.rule() {
+        Ok(rule) => rule,
+        Err(missing) => {
+            return Ok(made.refused(
+                what,
+                "I could not tell what to look for on that page.",
+                missing,
+            ))
+        }
+    };
     let items: Vec<WatchItem> = page.items.into_iter().map(watch_item).collect();
+    let standing = rule.standing(&items);
+    if !rule.is_default() && standing.is_none() {
+        return Ok(made.refused(
+            what,
+            "I found no number beside those words on that page.",
+            "I found no number beside those words on that page. Read the page and use the label \
+             written just before the number.",
+        ));
+    }
+    let filters = match rule.is_default() {
+        true => params.filters(),
+        false => WatchFilters {
+            tell_when: rule.clone(),
+            ..WatchFilters::default()
+        },
+    };
+    let interval = params.interval();
     let now = Utc::now();
     let title = if page.title.is_empty() {
         crate::web_search::domain_of(&page.address)
@@ -277,24 +408,51 @@ async fn start(
         session_id: session,
     };
     deps.repo.create(&watch).await?;
+    made.watching = Some((title.clone(), Some(watch.id.clone())));
     tracing::info!(target: "giap::trace", kind = "web_watch_started", items = items.len(), interval);
-    let matching: Vec<&WatchItem> = items.iter().filter(|i| filters.matches(i)).collect();
-    let mut out = format!(
-        "Watching {title} every {interval} hours for {}. It lists {} items now; {} match. The \
-         person will be told on their phone when a new match appears or one drops in price, and \
-         gets a daily summary of other changes.",
-        filters.words_for_people(),
-        items.len(),
-        matching.len()
-    );
-    for item in matching.iter().take(SHOWN_MATCHES) {
-        out.push_str(&format!(
-            "\n- {}{}",
-            item.title,
-            item.price_words()
-                .map(|p| format!(", {p}"))
-                .unwrap_or_default()
+    if let (Some(rule_words), Some(standing)) = (rule.in_words(), standing) {
+        return Ok(format!(
+            "Watching {title} every {interval} hours. The person will be told on their phone \
+             {rule_words}. Right now {standing}."
         ));
+    }
+    // No rule and no filters: what they asked for, in their words, is all there is to go by.
+    if pond_core::shared::services::web_watch_judge::needs_judging(&watch) {
+        return Ok(format!(
+            "Watching {title} every {interval} hours. It lists {} items now. Each change the \
+             page shows is checked against what the person asked for, and they are told on \
+             their phone only when one is what they asked for.",
+            items.len()
+        ));
+    }
+    let matching: Vec<&WatchItem> = items.iter().filter(|i| filters.matches(i)).collect();
+    let has_prices = items.iter().any(|i| i.price.is_some());
+    let mut out = if has_prices {
+        format!(
+            "Watching {title} every {interval} hours for {}. It lists {} items now; {} match. The \
+             person will be told on their phone when a new match appears or one drops in price, and \
+             gets a daily summary of other changes.",
+            filters.words_for_people(),
+            items.len(),
+            matching.len()
+        )
+    } else {
+        format!(
+            "Watching {title} every {interval} hours for {}. It tracks {} sections/articles now; {} match. The \
+             person will be told on their phone when new content or an update appears, and \
+             gets a daily summary of other changes.",
+            filters.words_for_people(),
+            items.len(),
+            matching.len()
+        )
+    };
+    for item in matching.iter().take(SHOWN_MATCHES) {
+        let detail = item
+            .price_words()
+            .map(|p| format!(", {p}"))
+            .or_else(|| item.snippet.as_ref().map(|s| format!(": {s}")))
+            .unwrap_or_default();
+        out.push_str(&format!("\n- {}{}", item.title, detail));
     }
     Ok(out)
 }
@@ -329,7 +487,7 @@ async fn stop(deps: &WebWatchDeps, owner: &str, params: &WebWatchParams) -> anyh
                     || w.title.to_lowercase().contains(&asked)))
     });
     let Some(watch) = found else {
-        return Ok(format_dead_end(
+        return Ok(format_not_done(
             "stopping that watch",
             "They have no watch by that id. List them first to find its id.",
         ));
@@ -339,18 +497,24 @@ async fn stop(deps: &WebWatchDeps, owner: &str, params: &WebWatchParams) -> anyh
 }
 
 /// Watches the price of the one product a page sells, in the member's cart.
-async fn watch_price(owner: &str, params: &WebWatchParams) -> anyhow::Result<String> {
+async fn watch_price(
+    owner: &str,
+    params: &WebWatchParams,
+    made: &mut Made,
+) -> anyhow::Result<String> {
     let what = "watching that price";
     let Some(cart) = cart_watch::installed() else {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
+            "Watching prices is not set up on this Pond yet.",
             "Watching prices is not set up on this pond yet.",
         ));
     };
     let asked = text(params.url.as_ref());
     let Some(address) = page_addresses::global().resolve(&asked) else {
-        return Ok(format_dead_end(
+        return Ok(made.refused(
             what,
+            "I can only watch a page whose address you gave me.",
             "I watch only a page whose address the person gave, or one read_web_page read.",
         ));
     };
@@ -370,20 +534,26 @@ async fn watch_price(owner: &str, params: &WebWatchParams) -> anyhow::Result<Str
     let item = match cart.add(owner, new, now).await? {
         Ok(item) => item,
         Err(AddRefusal::AlreadyWatched(item)) => {
+            made.watching = Some((cart_watch::item_words(&item), None));
             return Ok(format!(
                 "They already watch this price: {}.",
                 cart_watch::item_words(&item)
-            ))
+            ));
         }
         Err(AddRefusal::TooMany) => {
-            return Ok(format_dead_end(
+            return Ok(made.refused(
                 what,
+                "You already watch as many prices as one member may.",
                 "They already watch as many prices as one member may. Offer to remove one in \
                  My Goose, under Cart.",
             ))
         }
         Err(AddRefusal::NotAnAddress) => {
-            return Ok(format_dead_end(what, "That is not a web address."))
+            return Ok(made.refused(
+                what,
+                "That is not a web address.",
+                "That is not a web address.",
+            ))
         }
     };
     // A turn holds the model, so this first read uses the page's own data; a page without any is
@@ -396,6 +566,7 @@ async fn watch_price(owner: &str, params: &WebWatchParams) -> anyhow::Result<Str
     .ok()
     .and_then(Result::ok)
     .unwrap_or(item);
+    made.watching = Some((cart_watch::item_words(&checked), None));
     tracing::info!(target: "giap::trace", kind = "cart_added_by_chat", priced = checked.price.is_some());
     let when = match checked.target {
         Some(t) => format!(
@@ -435,6 +606,78 @@ mod tests {
 
     fn params(value: serde_json::Value) -> WebWatchParams {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_model_sees_every_field_as_optional_with_its_real_default() {
+        let tools = crate::prefix_oracle::all_tools();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|(_, t)| t.name == name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_else(|| panic!("{name} is not offered"))
+        };
+        for name in ["web_watch", "saved_items"] {
+            let required = tool(name).input_schema.get("required").cloned();
+            assert!(
+                required.is_none_or(|r| r.as_array().is_some_and(Vec::is_empty)),
+                "{name} lists required fields, so a small model asks the person for each one"
+            );
+        }
+        let watch = tool("web_watch").input_schema;
+        assert_eq!(
+            watch["properties"]["every_hours"]["default"],
+            serde_json::json!(DEFAULT_INTERVAL_HOURS),
+            "the interval the model is shown is the one a watch gets"
+        );
+        assert_eq!(watch["properties"]["action"]["default"], "start");
+        assert!(watch["properties"]["url"].get("default").is_none());
+    }
+
+    #[test]
+    fn a_rule_is_read_from_how_the_model_says_it_and_asks_for_what_is_missing() {
+        let rule = |value: serde_json::Value| params(value).rule();
+        assert_eq!(
+            rule(serde_json::json!({"url": "a.example"})),
+            Ok(TellWhen::NewOrChanged)
+        );
+        assert_eq!(
+            rule(serde_json::json!({"condition": "Disappears", "phrase": " sold out "})),
+            Ok(TellWhen::Disappears {
+                phrase: "sold out".into()
+            })
+        );
+        assert_eq!(
+            rule(serde_json::json!({"condition": "appears", "phrase": "registration open"})),
+            Ok(TellWhen::Appears {
+                phrase: "registration open".into()
+            })
+        );
+        assert_eq!(
+            rule(serde_json::json!({"condition": "above", "phrase": "USD/KES", "value": "130"})),
+            Ok(TellWhen::Above {
+                phrase: "USD/KES".into(),
+                value: 130.0
+            })
+        );
+        // With no label, a number rule reads the page's first price.
+        assert_eq!(
+            rule(serde_json::json!({"condition": "under", "value": 4000})),
+            Ok(TellWhen::Below {
+                phrase: String::new(),
+                value: 4000.0
+            })
+        );
+        assert!(rule(serde_json::json!({"condition": "appears"})).is_err());
+        assert!(rule(serde_json::json!({"condition": "below", "phrase": "USD"})).is_err());
+        // The name it had before still reads, for a model or a bench that learned it.
+        assert_eq!(
+            rule(serde_json::json!({"when": "appears", "phrase": "sold out"})),
+            Ok(TellWhen::Appears {
+                phrase: "sold out".into()
+            })
+        );
     }
 
     #[test]
@@ -485,9 +728,11 @@ mod tests {
 
     #[tokio::test]
     async fn without_deps_or_a_member_a_watch_is_refused() {
+        let mut made = Made::default();
         let text = run(
-            &Meta::new(),
+            &RequestMetaObject::new(),
             params(serde_json::json!({"url": "c.example"})),
+            &mut made,
         )
         .await;
         assert!(text.contains("not set up"), "{text}");

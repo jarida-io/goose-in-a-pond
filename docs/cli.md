@@ -33,7 +33,7 @@ interactive menu.
 |---|---|
 | *(none)* | Interactive menu: diagnose, install and build, service install/start/stop/restart/remove, run in the foreground, desktop app, logs, Jetson power |
 | `status` | Print the detection banner only |
-| `doctor` | Banner plus a read-only health report; exits 1 if any check FAILs |
+| `doctor` | Banner plus a read-only health report; exits 1 if any check FAILs. Its mesh line (`scripts/lib/mesh.sh`) says whether this `pond-server` was built with mesh (it reads the binary itself), and warns when `mesh_enabled` is on in a binary built without it |
 | `install` | Guardrailed `bash scripts/install.sh`: passes `--no-service` when a service unit already exists, offers to stop a running Jetson service for the build, and offers Full or Minimal (`--minimal`) when interactive |
 | `build` | `build-ui`, then a release `pond-server` with this host's features (CUDA features on a Jetson; stops the service during the build there). Stops first, asking, when the disk has under 5 GiB free (a full disk fails the link at the end with `signal 7 [Bus error]`). Also builds the `pondnet` remote-access helper, with a Go at or above `native/pondnet/go.mod`'s pin, offering to download one first when there is none; without Go the pond builds with remote access off. Writes a build stamp |
 | `build-ui` | `npm ci` when the lockfile is newer than `node_modules`, then `npm run build` in `pond-desktop/`, then touches `dist/` so cargo re-embeds it |
@@ -52,6 +52,7 @@ interactive menu.
 | `models pairings` | Regenerate the vision pairing table from Hugging Face |
 | `wifi-grant [remove\|status]` | Linux: install, remove or report the polkit grant that lets the pond's user join Wi-Fi from the BLE setup channel (uses sudo) |
 | `test-pond [on\|off\|status]` | Mark this pond as a Jarida test Pond, whose debug switch a paired phone may turn on to show household content in the logs, or a home Pond again; run as the pond's own account. See [`pond-server test-pond`](#test-pond) |
+| `reliability [DAYS]` | How dependably the pond delivered over the last DAYS (7): notices queued, woken, fetched, shown and opened, messages left without a reply, phones gone quiet, stops, and whether the push keys are present. Reads the databases as the pond's own account; see [`pond-server reliability`](#reliability) |
 | `admin-card [show\|rotate]` | My Pond's admin card: make it as the pond's user, seal a recovery copy (the TPM on a Jetson, a root-only file without one, the Keychain on macOS) and, on a Jetson, let the pond's user switch power modes and restart (uses sudo). `show` prints the sealed card again; `rotate` replaces it and locks every phone. See [pond administrator](architecture/pond-administrator.md) |
 | `service-account [undo\|status]` | Linux: run the pond as its own locked system account, `agamemnon` (no password, shell `/usr/sbin/nologin`). Stops the pond, makes the account, moves the data directory to `/var/lib/goose-in-a-pond` (a link stays at the old path), writes a system unit with `User=agamemnon`, points the power rule and the Wi-Fi grant at it, and starts it (uses sudo). `undo` puts back the account, unit and data directory it came from; `status` is the doctor line. See [pond administrator](architecture/pond-administrator.md#the-service-account) |
 | `provision --host HOST --key FILE [...]` | Operator machine: save a pond's printed setup card and give it a device certificate over SSH. Must be the first argument; runs `scripts/provision-device.sh` |
@@ -131,6 +132,7 @@ directory plus `goose-in-a-pond` (`~/Library/Application Support/goose-in-a-pond
 | [`setup-code`](#setup-code) | Show the printed setup code and its claim state |
 | [`admin-card`](#admin-card) | Make or replace the admin card that unlocks My Pond |
 | [`test-pond`](#test-pond) | Mark this pond as a Jarida test Pond, or a home Pond again |
+| [`reliability`](#reliability) | What became of notices and messages over the last days |
 | [`dashboard`](#dashboard) | Print a sign-in link for the web dashboard |
 
 `ble-helper` is hidden: the server runs it as its own child for the BLE setup channel on macOS.
@@ -362,6 +364,9 @@ there are two members. `--member <PROFILE_ID>` (an `id` from `GET /api/v1/profil
 fresh code for that member. A phone that is already paired is linked to its member by pairing it
 again with such a code: the app keeps its install id, so the same device row takes the new owner.
 
+A code from this command is already accepted: whoever can run it holds the pond, so its phone is
+let in while [the pairing lock](api.md#the-pairing-lock) holds, without a request.
+
 ### setup-code
 
 ```bash
@@ -410,6 +415,20 @@ debug switch, which makes the logs show what the household said and the members'
 ([`/developer/debug`](api.md#activity-logs-and-telemetry)). A running server sees the change
 without a restart. Run it as the account that owns the data directory; `bash scripts/giap.sh
 test-pond` does that for you.
+
+### reliability
+
+```bash
+pond-server reliability [--days <N>] [--json]
+```
+
+Reads the pond's own record, read-only, whether or not the server is running: of the notices
+queued for phones in the last `N` days (default 7), how many were woken, fetched (and how many
+within a minute, or after an hour), shown, opened, or said in the room because no phone fetched
+them; how many messages were left without a reply; how many phones are paired, hold a push token or
+have gone quiet; how many times the pond stopped; and whether the Android and Apple push keys are
+in `<data_dir>/secrets/`. Test devices are left out. `--json` prints the same as
+`GET /api/v1/admin/reliability`.
 
 ### dashboard
 

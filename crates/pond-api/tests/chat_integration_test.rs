@@ -85,6 +85,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     mock_hs.add_valid_token("test-token".to_string()).await;
 
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -107,6 +108,12 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(MockDeviceRegistry),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -149,6 +156,8 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         runs: Arc::new(pond_api::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -493,6 +502,7 @@ impl pond_core::models::ports::agent::Agent for ToolEmittingMockAgent {
                 content: "Sunny, 28°C".to_string(),
                 card: None,
                 keep: None,
+                outcome: None,
             });
             yield Ok(AgentStreamEvent::Text { content: "Tool done".to_string() });
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
@@ -510,6 +520,7 @@ async fn make_app_with_agent(
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
     let state = Arc::new(AppState {
+        data_wipe: None,
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
@@ -532,6 +543,12 @@ async fn make_app_with_agent(
         profile_repo: Arc::new(MockProfileRepository::new()),
         device_registry: Arc::new(MockDeviceRegistry),
         room_registry: Arc::new(pond_core::user_data::mocks::mock_room_registry::MockRoomRegistry),
+        guest_room_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_room_access::MockGuestRoomAccess,
+        ),
+        guest_device_access: Arc::new(
+            pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess,
+        ),
         matter: None,
         memory_repo: Arc::new(MockMemoryRepository::new()),
         embedder: Default::default(),
@@ -594,6 +611,8 @@ async fn make_app_with_agent(
         notification_queue: None,
         notification_history: None,
         notification_sender: None,
+        member_notifier: None,
+        factory_reset_progress: None,
         api_port: 4000,
         weather_provider: None,
         peer_directory: Arc::new(
@@ -731,6 +750,7 @@ impl pond_core::models::ports::agent::Agent for TransientToolMockAgent {
                         .to_string(),
                 ),
                 keep: Some(TRANSIENT_STUB.to_string()),
+                outcome: None,
             });
             yield Ok(AgentStreamEvent::Text { content: "It closes at 6 pm.".to_string() });
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
@@ -978,5 +998,126 @@ async fn truncating_a_session_also_makes_the_engine_forget_it() {
         vec!["sess-trunc".to_string()],
         "the rows were deleted but the engine still holds them, so the model \
          keeps seeing the turns the user removed"
+    );
+}
+
+/// A model that was told its timer was not set, and says it set one anyway.
+struct ClaimsAnUnsetTimer;
+
+#[async_trait::async_trait]
+impl pond_core::models::ports::agent::Agent for ClaimsAnUnsetTimer {
+    async fn chat(
+        &self,
+        _request: pond_core::models::ports::agent::AgentRequest,
+    ) -> anyhow::Result<pond_core::models::ports::agent::AgentResponse> {
+        Ok(pond_core::models::ports::agent::AgentResponse {
+            text: "I have set a timer.".to_string(),
+            metadata: std::collections::HashMap::new(),
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        request: pond_core::models::ports::agent::AgentRequest,
+    ) -> anyhow::Result<
+        futures::stream::BoxStream<
+            'static,
+            anyhow::Result<pond_core::models::ports::agent::AgentStreamEvent>,
+        >,
+    > {
+        use futures::StreamExt;
+        use pond_core::models::ports::agent::AgentStreamEvent;
+        use pond_core::user_data::domain::message_note::Receipt;
+        let session_id = request.session_id.clone();
+        let model_role = request.model_role.clone();
+        let stream = async_stream::stream! {
+            yield Ok(AgentStreamEvent::ToolCall {
+                id: "tc-1".to_string(),
+                tool: "giap-schedule__set_timer".to_string(),
+                input: Some(serde_json::json!({"duration": "41 days"})),
+            });
+            yield Ok(AgentStreamEvent::ToolResult {
+                id: "tc-1".to_string(),
+                tool: "giap-schedule__set_timer".to_string(),
+                content: "No timer was set. A timer needs a length of time.".to_string(),
+                card: None,
+                keep: None,
+                outcome: Some(Receipt::not_set(
+                    "timer",
+                    "Doomsday",
+                    "I could not tell how long the timer should run.",
+                )),
+            });
+            yield Ok(AgentStreamEvent::Text { content: "I have set a timer.".to_string() });
+            yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: None, stats: None });
+        };
+        Ok(stream.boxed())
+    }
+}
+
+/// The receipt comes from the tool's own outcome, so a reply cannot claim a set that failed.
+#[tokio::test]
+async fn a_reply_that_claims_a_failed_set_is_stored_with_the_truth() {
+    let (app, _tmp) = make_app_with_agent(Arc::new(ClaimsAnUnsetTimer)).await;
+    let session_id = "unset-timer";
+
+    let stream_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/chat/stream")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer test-token")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "session_id": session_id,
+                        "message": "set a timer for Doomsday"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), StatusCode::OK);
+    let frames = axum::body::to_bytes(stream_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let frames = String::from_utf8_lossy(&frames);
+    assert!(
+        frames.contains("\"receipt\"") && frames.contains("\"not_set\""),
+        "the live frame carries the receipt: {frames}"
+    );
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/sessions/{}/messages", session_id))
+                .header("Authorization", "Bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let reply = json["messages"]
+        .as_array()
+        .expect("messages array")
+        .last()
+        .expect("a reply")
+        .clone();
+    assert_eq!(reply["role"], "assistant");
+    let receipt = &reply["note"]["receipts"][0];
+    assert_eq!(receipt["outcome"], "not_set", "{reply}");
+    assert_eq!(receipt["kind"], "timer");
+    assert_eq!(
+        reply["content"],
+        "I have set a timer.\n\nNot set: Doomsday. I could not tell how long the timer should run.",
+        "the fixed line is in what was stored"
     );
 }

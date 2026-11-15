@@ -25,4 +25,8 @@ pub trait CreditLedger: Send + Sync {
     async fn credit(&self, peer: PeerId, amount: Millisats) -> Result<(), CreditLedgerError>;
 
     async fn debit(&self, peer: PeerId, amount: Millisats) -> Result<(), CreditLedgerError>;
+
+    /// Whether any peer holds a nonzero balance — the Pond's only persisted notion of held
+    /// value, used to block a factory reset while money is held.
+    async fn has_any_balance(&self) -> Result<bool, CreditLedgerError>;
 }

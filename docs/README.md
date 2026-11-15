@@ -35,6 +35,8 @@ bash scripts/giap.sh doctor   # health check; exits 1 on any FAIL
 | [Database schema](architecture/database_schema.md) | The three SQLite databases |
 | [Settings catalogue](architecture/settings-catalogue.md) | Settings categories and the client contract |
 | [Memory system](architecture/memory_system.md) | Batch extraction on the inference lane, scoring, decay, consolidation |
+| [Goose's own documents](architecture/agent-documents.md) | The soul, the heartbeat and the scratchpad: what a person edits and what Goose does with each |
+| [Member memory](architecture/member-memory.md) | Each member's profile, the one write policy, the re-sort of older memories, and the research behind them |
 | [Scheduling](architecture/scheduling.md) | Routines, one-shots, event rules and the inference lane's batch jobs |
 | [Model capabilities](architecture/model_capabilities.md) | Thinking, vision and context detection |
 | [Token tracking](architecture/token_tracking.md) | Usage accounting per session |

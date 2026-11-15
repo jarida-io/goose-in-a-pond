@@ -207,6 +207,16 @@ pub const FIELD_RULES: &[FieldRule] = &[
         check: int(1.0, 1_000_000.0, "tokens"),
         blank_ok: false,
     },
+    FieldRule {
+        key: "unseen_phone_skip_days",
+        check: int(0.0, 365.0, "days"),
+        blank_ok: false,
+    },
+    FieldRule {
+        key: "unseen_phone_remove_days",
+        check: int(0.0, 365.0, "days"),
+        blank_ok: false,
+    },
 ];
 
 /// Validates one field: `Ok(None)` stores it as sent, `Ok(Some(v))` stores canonical `v` instead.
@@ -527,6 +537,17 @@ mod tests {
         assert!(check_field("agent_max_turns", &Value::from(99_999)).is_err());
         assert!(check_field("agent_max_turns", &Value::from(2.5)).is_err());
         assert!(check_field("agent_max_turns", &s("many")).is_err());
+    }
+
+    #[test]
+    fn a_phone_may_go_unseen_for_up_to_a_year_and_zero_switches_the_rule_off() {
+        for key in ["unseen_phone_skip_days", "unseen_phone_remove_days"] {
+            assert!(check_field(key, &Value::from(0)).unwrap().is_none());
+            assert!(check_field(key, &Value::from(365)).unwrap().is_none());
+            assert!(check_field(key, &Value::from(366)).is_err());
+            assert!(check_field(key, &Value::from(-1)).is_err());
+            assert!(check_field(key, &Value::from(1.5)).is_err());
+        }
     }
 
     #[test]

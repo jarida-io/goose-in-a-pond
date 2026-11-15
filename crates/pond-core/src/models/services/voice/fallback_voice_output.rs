@@ -101,7 +101,7 @@ mod tests {
     }
 
     /// Records the boundary each unit arrived with.
-    struct UnitTts(std::sync::Mutex<Vec<pond_voice::text::Boundary>>);
+    struct UnitTts(std::sync::Mutex<Vec<bool>>);
 
     #[async_trait]
     impl VoiceOutput for UnitTts {
@@ -109,19 +109,18 @@ mod tests {
             Ok(())
         }
         async fn synthesize_unit(&self, unit: &SpeechUnit) -> Result<Option<Vec<u8>>> {
-            self.0.lock().unwrap().push(unit.boundary);
+            self.0.lock().unwrap().push(unit.last);
             Ok(Some(vec![1]))
         }
     }
 
     #[tokio::test]
-    async fn the_unit_boundary_reaches_the_engine() {
-        use pond_voice::text::Boundary;
+    async fn whether_a_unit_is_the_last_reaches_the_engine() {
         let engine = Arc::new(UnitTts(Default::default()));
         let tts = FallbackVoiceOutput::new(engine.clone(), Arc::new(FailingTts));
-        let unit = SpeechUnit::new("First paragraph ends here.", Boundary::Paragraph);
+        let unit = SpeechUnit::closing("The reply ends here.");
         tts.synthesize_unit(&unit).await.unwrap();
-        assert_eq!(*engine.0.lock().unwrap(), vec![Boundary::Paragraph]);
+        assert_eq!(*engine.0.lock().unwrap(), vec![true]);
     }
 
     #[tokio::test]

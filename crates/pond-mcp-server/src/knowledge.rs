@@ -5,7 +5,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, ErrorCode, ErrorData, Implementation, InitializeResult,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        ProtocolVersion, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -19,7 +19,8 @@ use serde::Deserialize;
 pub struct WikipediaQueryParams {
     /// Name, phrase, or question to look up.
     pub topic: Option<String>,
-    /// Max results, default 5, max 10 (search_wikipedia only).
+    /// Read and ignored: one article is fetched, so the model is not offered it.
+    #[schemars(skip)]
     pub limit: Option<u32>,
     /// Catch-all for any extra fields the model sends (e.g. "query", "title", "search").
     /// Not part of the advertised schema — exists purely to absorb unexpected keys.
@@ -68,7 +69,7 @@ pub struct KnowledgeMcpServer {
 
 #[tool_router]
 impl KnowledgeMcpServer {
-    /// Every tool from all four routers, without constructing the server or its deps.
+    /// Every tool from all its routers, without constructing the server or its deps.
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::wolfram_tool_router().list_all());
@@ -76,20 +77,22 @@ impl KnowledgeMcpServer {
         tools.extend(Self::web_page_tool_router().list_all());
         tools.extend(Self::web_watch_tool_router().list_all());
         tools.extend(Self::saved_items_tool_router().list_all());
+        tools.extend(Self::pictures_tool_router().list_all());
         tools
     }
 
     pub fn new(http_client: reqwest::Client) -> Self {
         Self {
             http_client,
-            // One extension, four routers: `wolfram.rs`, `web_search.rs` and `web_page.rs` hold
-            // the others.
+            // One extension, seven routers: `wolfram.rs`, `web_search.rs` and its `pictures`
+            // module, `web_page.rs`, `web_watch.rs` and `saved_items.rs` hold the others.
             tool_router: Self::tool_router()
                 + Self::wolfram_tool_router()
                 + Self::web_search_tool_router()
                 + Self::web_page_tool_router()
                 + Self::web_watch_tool_router()
-                + Self::saved_items_tool_router(),
+                + Self::saved_items_tool_router()
+                + Self::pictures_tool_router(),
         }
     }
 
@@ -124,26 +127,15 @@ verbatim.")]
         }
 
         match self.fetch_article_summary(&topic).await {
-            Ok(text) => {
-                let full_result = prepend_knowledge_hint(&topic, &text);
-                Ok(CallToolResult::success(vec![ContentBlock::text(
-                    full_result,
-                )]))
-            }
+            Ok(text) => Ok(knowledge_result(&topic, text)),
             Err(WikiFetchError::NotFound) => {
                 eprintln!(
                     "[wikipedia] exact title not found, searching for '{}'",
                     topic
                 );
-                match self.search_and_fetch_best(&topic).await {
-                    Ok(text) => {
-                        let full_result = prepend_knowledge_hint(&topic, &text);
-                        Ok(CallToolResult::success(vec![ContentBlock::text(
-                            full_result,
-                        )]))
-                    }
-                    Err(e) => Err(e),
-                }
+                self.search_and_fetch_best(&topic)
+                    .await
+                    .map(|text| knowledge_result(&topic, text))
             }
             Err(WikiFetchError::Mcp(e)) => Err(e),
         }
@@ -154,7 +146,7 @@ verbatim.")]
 // alone, which would drop the composed Wolfram, web search and page tools from `list_tools`.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for KnowledgeMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new(
@@ -167,14 +159,16 @@ impl ServerHandler for KnowledgeMcpServer {
 
 /// Every tool these instructions name must be one this server lists.
 const KNOWLEDGE_INSTRUCTIONS: &str = "\
-GIAP Knowledge server: encyclopedia articles, computation, web search and web pages.
+GIAP Knowledge server: encyclopedia articles, computation, web search, web pages and pictures.
 
 Tools: get_wikipedia_article (encyclopedia articles), compute_answer (computation; offered \
 while a computation key is stored), search_web (the web; offered while a web search key is \
 stored), read_web_page (one web page: a link the person gave, a source search_web found, or a \
-link or search form a page it read listed), web_watch (keep checking a page of listings and \
-tell the person when something they want appears or drops in price), saved_items (keep what \
-you made as a card in their collection, or find one they kept).
+link or search form a page it read listed), web_watch (keep checking any web page—listings, blogs, \
+news feeds, release notes, or notice boards—and tell the person when content updates, new articles appear, \
+or prices drop), saved_items (keep what \
+you made as a card in their collection, or find one they kept), show_pictures (pictures from \
+the web on the person's screen; offered while a web search key is stored, never in a voice turn).
 
 If the answer has to be worked out (arithmetic, a unit or currency conversion, a date \
 difference, a statistic), use compute_answer. If it has to be read (who someone was, what \
@@ -183,17 +177,29 @@ not exact. If it is current, local or specific (news, opening hours, prices, pro
 businesses, recent results), use search_web. When the person gives a link, or a number, \
 price, time or date matters and a search source has it, read that page with read_web_page. \
 A turn reads at most three pages; pick the most relevant. When the person wants to hear when \
-listings change, such as a car under a price, start web_watch on a listings page you read, with \
-their words as filters. When they ask to keep a recipe, a listing or a plan you gave, use \
-saved_items to save it; it takes your last answer, so do not repeat it.
+web pages or listings change—such as a car under a price, a blog for new posts, a project for releases, \
+or a site for updates—start web_watch on that page, with their keywords or criteria as filters. \
+When they ask to keep a recipe, a listing or a plan you gave, use \
+saved_items to save it; it takes your last answer, so do not repeat it. If the person wants to \
+see something, use show_pictures.
 After receiving results: synthesize in your own words. Do not parrot verbatim.
 In voice mode: 1-3 sentences. Offer to elaborate if the user wants more.";
 
 // ── MCP-UI hint helpers ───────────────────────────────────────────────────
 
-/// Prepend a `[[[mcp-ui:knowledge:{...}]]]` card hint to a Wikipedia article result.
-fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
-    // Article format: "# Title\n\nExtract...\n\nSource: URL"
+/// A Wikipedia result, with the screen's card when it is an article ("# Title\n\nExtract...\n\n
+/// Source: URL"); a miss is words alone.
+fn knowledge_result(topic: &str, text: String) -> CallToolResult {
+    match knowledge_card(topic, &text) {
+        Some(card) => crate::format::with_card(text, "knowledge", &card),
+        None => CallToolResult::success(vec![ContentBlock::text(text)]),
+    }
+}
+
+fn knowledge_card(topic: &str, text: &str) -> Option<serde_json::Value> {
+    if !text.starts_with("# ") {
+        return None;
+    }
     let title = text
         .strip_prefix("# ")
         .and_then(|s| s.split('\n').next())
@@ -208,13 +214,12 @@ fn prepend_knowledge_hint(topic: &str, text: &str) -> String {
     let body_end = text.rfind("\n\nSource:").unwrap_or(text.len());
     let summary: String = text[body_start..body_end].chars().take(300).collect();
 
-    let ui_data = serde_json::json!({
+    Some(serde_json::json!({
         "title": title,
         "summary": summary,
         "source_url": source_url,
         "topic": topic,
-    });
-    format!("[[[mcp-ui:knowledge:{}]]]\n{}", ui_data, text)
+    }))
 }
 
 // ── Wikipedia helpers (outside the #[tool_router] block) ───────────────────
@@ -646,17 +651,30 @@ mod tests {
     }
 
     #[test]
-    fn prepend_knowledge_hint_extracts_source_url() {
+    fn the_article_card_carries_its_source_url() {
         let text = "# Nairobi\n\nNairobi is the capital of Kenya.\n\nSource: https://en.wikipedia.org/wiki/Nairobi";
-        let result = prepend_knowledge_hint("Nairobi", text);
-        assert!(result.contains("\"source_url\":\"https://en.wikipedia.org/wiki/Nairobi\""));
+        let card = knowledge_card("Nairobi", text).expect("an article has a card");
+        assert_eq!(card["source_url"], "https://en.wikipedia.org/wiki/Nairobi");
     }
 
     #[test]
-    fn prepend_knowledge_hint_missing_source_uses_empty_string() {
+    fn an_article_without_a_source_line_has_an_empty_url() {
         let text = "# Test\n\nSome article with no source line.";
-        let result = prepend_knowledge_hint("Test", text);
-        assert!(result.contains("\"source_url\":\"\""));
+        assert_eq!(knowledge_card("Test", text).unwrap()["source_url"], "");
+    }
+
+    #[test]
+    fn a_miss_has_no_card_and_the_model_reads_each_fact_once() {
+        assert!(knowledge_card("Zzz", "No results for Zzz.").is_none());
+        let text = "# Nairobi\n\nNairobi is the capital of Kenya.";
+        let result = knowledge_result("Nairobi", text.to_string());
+        let texts: Vec<&str> = result
+            .content
+            .iter()
+            .filter_map(|b| b.as_text().map(|t| t.text.as_str()))
+            .collect();
+        assert_eq!(texts[0], text);
+        assert!(texts[1].starts_with("[[[mcp-ui:knowledge:"), "{}", texts[1]);
     }
 
     #[test]
@@ -668,7 +686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_fetch_exact_title() {
         let server = test_server();
         let text = server.fetch_article_summary("Nairobi").await.unwrap();
@@ -682,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_vague_query_finds_article() {
         let server = test_server();
         let text = server.search_and_fetch_best("black holes").await.unwrap();
@@ -694,7 +712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_get_article_auto_resolves_vague_topic() {
         let server = test_server();
         let text = server.search_and_fetch_best("volcanoes").await.unwrap();
@@ -706,7 +724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_nonsense_query_returns_not_found() {
         let server = test_server();
         let text = server
@@ -721,7 +739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_misspelled_topic_resolved() {
         let server = test_server();
         let text = server
@@ -752,7 +770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // requires internet
+    #[ignore = "needs the network"]
     async fn live_search_books_returns_results() {
         let server = test_server();
         let url = "https://openlibrary.org/search.json?q=Dune+Frank+Herbert&limit=3";

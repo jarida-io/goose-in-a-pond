@@ -14,6 +14,7 @@ use crate::user_data::domain::interest::{
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
 use crate::user_data::ports::interests::InterestRepository;
+use crate::user_data::services::member_interview::MemberInterview;
 
 #[derive(Default)]
 pub struct InMemoryInterestRepository {
@@ -22,6 +23,7 @@ pub struct InMemoryInterestRepository {
     pictures_looked_for: Mutex<HashSet<String>>,
     portraits: Mutex<HashMap<String, MemberPortrait>>,
     interviews: Mutex<HashMap<String, InterestInterview>>,
+    member_interviews: Mutex<HashMap<String, MemberInterview>>,
 }
 
 impl InMemoryInterestRepository {
@@ -267,6 +269,28 @@ impl InterestRepository for InMemoryInterestRepository {
         let mut stamped = interview.clone();
         stamped.updated_at = Some(Utc::now());
         self.interviews
+            .lock()
+            .unwrap()
+            .insert(profile_id.to_string(), stamped);
+        Ok(())
+    }
+    async fn member_interview(&self, profile_id: &str) -> Result<Option<MemberInterview>> {
+        Ok(self
+            .member_interviews
+            .lock()
+            .unwrap()
+            .get(profile_id)
+            .cloned())
+    }
+
+    async fn save_member_interview(
+        &self,
+        profile_id: &str,
+        interview: &MemberInterview,
+    ) -> Result<()> {
+        let mut stamped = interview.clone();
+        stamped.updated_at = Some(Utc::now());
+        self.member_interviews
             .lock()
             .unwrap()
             .insert(profile_id.to_string(), stamped);

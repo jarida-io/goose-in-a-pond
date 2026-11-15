@@ -460,3 +460,80 @@ async fn a_non_phone_stream_still_marks_what_it_sends_delivered() {
     assert!(delivered_at(&h, "for-desk").await.is_some());
     assert!(pending_ids(&h, &desk).await.is_empty());
 }
+
+async fn stamp(h: &Harness, column: &str, id: &str) -> Option<String> {
+    sqlx::query_scalar(&format!("SELECT {column} FROM notifications WHERE id = ?"))
+        .bind(id)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+}
+
+async fn post_json(
+    router: &axum::Router,
+    path: &str,
+    bearer: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// Queued says a row exists. The record says whether the phone came for it, showed it, and
+/// whether the person opened it. One phone throughout: pairings here share one rate limit.
+#[tokio::test]
+async fn a_copy_records_its_fetch_its_showing_and_its_opening() {
+    let h = pond().await;
+    let a = paired(&h, "phone-a").await;
+    settle(&h, &[&a]).await;
+    h.sender.broadcast(notice("briefing")).await.unwrap();
+    let copy = per_device_notification_id("briefing", &a.device);
+    let opened = |id: &str| format!("/api/v1/notifications/{id}/opened");
+
+    assert_eq!(stamp(&h, "fetched_at", &copy).await, None);
+    assert_eq!(pending_ids(&h, &a).await, vec![copy.clone()]);
+    assert!(
+        stamp(&h, "fetched_at", &copy).await.is_some(),
+        "asking for what is pending is the fetch"
+    );
+    assert_eq!(stamp(&h, "shown_at", &copy).await, None);
+
+    let (status, body) = post_json(
+        &h.lan,
+        &ack_path(&copy),
+        &a.token,
+        serde_json::json!({"shown": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stamp(&h, "shown_at", &copy).await.is_some());
+
+    let (status, _) = send(&h.lan, Method::POST, &opened("not-mine"), Some(&a.token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(stamp(&h, "opened_at", &copy).await, None);
+    let (status, body) = send(&h.lan, Method::POST, &opened(&copy), Some(&a.token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stamp(&h, "opened_at", &copy).await.is_some());
+
+    // An app from before the record sends no body with its acknowledgement.
+    h.sender.broadcast(notice("movies")).await.unwrap();
+    let older_app = per_device_notification_id("movies", &a.device);
+    let (status, body) = send(&h.lan, Method::POST, &ack_path(&older_app), Some(&a.token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stamp(&h, "fetched_at", &older_app).await.is_some());
+    assert_eq!(stamp(&h, "shown_at", &older_app).await, None);
+}

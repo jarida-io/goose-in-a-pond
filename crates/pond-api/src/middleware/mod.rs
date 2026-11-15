@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use pond_core::security::ports::policy::Principal;
-use pond_core::security::ports::remote_access::{RemoteMachines, TailnetMachine};
+use pond_core::security::ports::remote_access::{RemoteMachines, RemoteTunnel, TailnetMachine};
 use pond_core::user_data::ports::onboarding::OnboardingRepository;
 use std::{
     collections::HashMap,
@@ -31,6 +31,10 @@ pub enum AuthError {
     WrongMachine,
     /// The Pond could not learn which machine the token's device enrolled; retrying may work.
     MachineUnverifiable,
+    /// A tunnel request whose device has not been on the household LAN within the presence window.
+    AwayTooLong,
+    /// The Pond could not read when the token's device was last home; retrying may work.
+    PresenceUnverifiable,
 }
 
 impl IntoResponse for AuthError {
@@ -52,6 +56,14 @@ impl IntoResponse for AuthError {
             AuthError::MachineUnverifiable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Could not confirm which machine this device enrolled; try again",
+            ),
+            AuthError::AwayTooLong => (
+                StatusCode::FORBIDDEN,
+                "This device has not been home recently; connect it to the household Wi-Fi once",
+            ),
+            AuthError::PresenceUnverifiable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Could not confirm when this device was last home; try again",
             ),
         };
         let body =
@@ -201,6 +213,18 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::POST, "/handshake/pairing-code", Exposure::Always),
     // A headless pond's way to pair a phone: LAN-gated in the handler, never returns the code.
     (Method::POST, "/handshake/spoken-code", Exposure::Always),
+    // A phone the pairing lock held comes back for its request: LAN-gated in the handler, and
+    // answered only to the secret that phone was handed.
+    (
+        Method::POST,
+        "/handshake/pairing-request/claim",
+        Exposure::Always,
+    ),
+    (
+        Method::POST,
+        "/handshake/pairing-request/recover",
+        Exposure::Always,
+    ),
     // Onboarding: tokenless from an unclaimed pond's host, else the claimant's token, never after.
     (Method::POST, "/onboard", Exposure::UntilOnboarded),
     (Method::POST, "/onboard/complete", Exposure::UntilOnboarded),
@@ -216,6 +240,19 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         Method::POST,
         "/onboard/reset",
         Exposure::UntilOnboardedThenHostOnly,
+    ),
+    // Factory reset undoes setup, so unlike `/onboard/reset` it has no pre-onboarding exemption:
+    // a token always, then the host credential or the main member (`factory_reset_authority`).
+    (
+        Method::POST,
+        "/admin/factory-reset",
+        Exposure::Authenticated,
+    ),
+    // Read-only progress poll; same gate as the reset it reports on.
+    (
+        Method::GET,
+        "/admin/factory-reset/status",
+        Exposure::Authenticated,
     ),
     // IANA zones: the same list on every pond, so it reveals nothing; needed before pairing too.
     (Method::GET, "/time/zones", Exposure::Always),
@@ -318,6 +355,11 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         "/notifications/{id}/ack",
         Exposure::Authenticated,
     ),
+    (
+        Method::POST,
+        "/notifications/{id}/opened",
+        Exposure::Authenticated,
+    ),
     // The household's notice history, read and marked by the caller's own device, from its token.
     (
         Method::GET,
@@ -365,6 +407,22 @@ fn path_matches(pattern: &str, path: &str) -> bool {
             _ => return false,
         }
     }
+}
+
+/// What a public tunnel (ngrok) answers without a token: liveness, the port and protocol, and a
+/// paired phone renewing its session while away. Pairing, onboarding and sign-in callbacks are
+/// for the household's own network, so over the tunnel they need a token like everything else.
+const TUNNEL_TOKENLESS: &[(Method, &str)] = &[
+    (Method::GET, "/health"),
+    (Method::GET, "/system/info"),
+    (Method::POST, "/handshake/refresh"),
+];
+
+fn tunnel_answers_without_token(method: &Method, path: &str) -> bool {
+    let path = path.strip_prefix("/api/v1").unwrap_or(path);
+    TUNNEL_TOKENLESS
+        .iter()
+        .any(|(m, p)| m == method && *p == path)
 }
 
 /// This request's exposure class, or `None` when the route is not on the allowlist.
@@ -530,6 +588,25 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     response
 }
 
+/// While a factory reset runs, only its own routes and the health probe answer: anything else
+/// could write what the reset is erasing. A second reset reaches its handler and gets `409`.
+fn held_by_factory_reset(state: &crate::AppState, method: &Method, path: &str) -> bool {
+    let resetting = state
+        .factory_reset_progress
+        .as_ref()
+        .is_some_and(|progress| progress.running());
+    let Some(route) = path.strip_prefix("/api/v1") else {
+        return false;
+    };
+    resetting
+        && !matches!(
+            (method.as_str(), route),
+            ("GET", "/health")
+                | ("GET", "/admin/factory-reset/status")
+                | ("POST", "/admin/factory-reset")
+        )
+}
+
 /// Bearer-token auth; a `PUBLIC_ROUTES` entry skips it only if its exposure admits the peer.
 pub async fn auth_middleware(
     State(state): State<Arc<crate::AppState>>,
@@ -538,6 +615,14 @@ pub async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
+    if held_by_factory_reset(&state, req.method(), path.path()) {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "pond_resetting"})),
+        )
+            .into_response());
+    }
+
     // `ConnectInfo<SocketAddr>` comes from `main.rs`'s `into_make_service_with_connect_info`;
     // a request without it counts as remote, so failure narrows access.
     // A request on the plaintext development listener is never the host's own: a browser on
@@ -553,7 +638,10 @@ pub async fn auth_middleware(
             .map(|ci| ci.0.ip().is_loopback())
             .unwrap_or(false);
 
-    if let Some(exposure) = route_exposure(req.method(), path.path()) {
+    let over_tunnel = req.extensions().get::<RemoteTunnel>().is_some();
+    let exposure = route_exposure(req.method(), path.path())
+        .filter(|_| !over_tunnel || tunnel_answers_without_token(req.method(), path.path()));
+    if let Some(exposure) = exposure {
         // Only the state-dependent classes read pond state; the rest ignore it.
         let state_dependent = matches!(
             exposure,
@@ -647,9 +735,42 @@ pub async fn auth_middleware(
         enrolled_on(machines, &principal_device, &machine).await?;
     }
 
+    // A public tunnel has no machine identity, so a token alone would work from anywhere: the
+    // device must also have been home recently, as remote access over the tailnet requires.
+    if let Some(RemoteTunnel(presence)) = req.extensions().get::<RemoteTunnel>().cloned() {
+        home_recently(presence.as_ref(), &principal_device, chrono::Utc::now()).await?;
+    }
+
     let mut req = req;
     req.extensions_mut().insert(principal);
     Ok(next.run(req).await)
+}
+
+/// Whether `device` was on the household LAN recently enough to be reached over a tunnel.
+/// Refuses a device never seen at home, and when the lookup fails.
+pub(crate) async fn home_recently(
+    presence: &dyn pond_core::security::ports::remote_access::DevicePresence,
+    device: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AuthError> {
+    if device.is_empty() {
+        return Err(AuthError::AwayTooLong);
+    }
+    match presence.lapses_at(device).await {
+        Ok(Some(lapses)) if lapses > now => Ok(()),
+        Ok(_) => {
+            tracing::warn!(
+                kind = "remote_tunnel_away_too_long",
+                device,
+                "refused a tunnel request: the device has not been home within the presence window"
+            );
+            Err(AuthError::AwayTooLong)
+        }
+        Err(error) => {
+            tracing::warn!(%error, device, "could not read when a device was last home");
+            Err(AuthError::PresenceUnverifiable)
+        }
+    }
 }
 
 /// Whether `device` enrolled `machine`. Refuses when the lookup is missing or fails.
@@ -733,6 +854,86 @@ mod tests {
             assert!(matches!(
                 enrolled_on(lookup(Err(anyhow::anyhow!("offline"))), "phone", PHONE).await,
                 Err(AuthError::MachineUnverifiable)
+            ));
+        }
+    }
+
+    mod remote_tunnel {
+        use super::super::{home_recently, tunnel_answers_without_token, AuthError};
+        use axum::http::Method;
+
+        #[test]
+        fn only_liveness_info_and_refresh_skip_the_token_over_a_tunnel() {
+            assert!(tunnel_answers_without_token(&Method::GET, "/api/v1/health"));
+            assert!(tunnel_answers_without_token(
+                &Method::GET,
+                "/api/v1/system/info"
+            ));
+            assert!(tunnel_answers_without_token(
+                &Method::POST,
+                "/api/v1/handshake/refresh"
+            ));
+            for (method, path) in [
+                (Method::POST, "/api/v1/handshake/pake/init"),
+                (Method::POST, "/api/v1/handshake/pairing-code"),
+                (Method::GET, "/api/v1/oauth/callback"),
+                (Method::GET, "/api/v1/onboard/status"),
+                (Method::GET, "/"),
+            ] {
+                assert!(
+                    !tunnel_answers_without_token(&method, path),
+                    "{method} {path}"
+                );
+            }
+        }
+        use chrono::{DateTime, Duration, Utc};
+        use pond_core::security::ports::remote_access::DevicePresence;
+
+        struct Lapses(anyhow::Result<Option<DateTime<Utc>>>);
+
+        #[async_trait::async_trait]
+        impl DevicePresence for Lapses {
+            async fn seen_on_lan(&self, _: &str) {}
+            async fn absent_since(&self, _: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+                Ok(Vec::new())
+            }
+            async fn lapses_at(&self, _: &str) -> anyhow::Result<Option<DateTime<Utc>>> {
+                match &self.0 {
+                    Ok(at) => Ok(*at),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn only_a_device_home_within_the_window_passes() {
+            let now = Utc::now();
+            let home = Lapses(Ok(Some(now + Duration::days(3))));
+            assert!(home_recently(&home, "phone", now).await.is_ok());
+            let lapsed = Lapses(Ok(Some(now - Duration::seconds(1))));
+            assert!(matches!(
+                home_recently(&lapsed, "phone", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+            let never_home = Lapses(Ok(None));
+            assert!(matches!(
+                home_recently(&never_home, "phone", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+        }
+
+        #[tokio::test]
+        async fn no_device_or_a_failed_lookup_refuses() {
+            let now = Utc::now();
+            let home = Lapses(Ok(Some(now + Duration::days(3))));
+            assert!(matches!(
+                home_recently(&home, "", now).await,
+                Err(AuthError::AwayTooLong)
+            ));
+            let broken = Lapses(Err(anyhow::anyhow!("database locked")));
+            assert!(matches!(
+                home_recently(&broken, "phone", now).await,
+                Err(AuthError::PresenceUnverifiable)
             ));
         }
     }
@@ -1279,6 +1480,7 @@ mod tests {
             // A phone's own device during owner setup; each handler admits only that device.
             "DELETE /devices/{id}/push-token = Authenticated".to_string(),
             "DELETE /voice/calibrate = UntilOnboarded".to_string(),
+            "GET /admin/factory-reset/status = Authenticated".to_string(),
             "GET /connections = Authenticated".to_string(),
             "GET /connections/wifi/networks = Authenticated".to_string(),
             "GET /devices/self = Authenticated".to_string(),
@@ -1300,6 +1502,8 @@ mod tests {
             "GET /test = HostOnly".to_string(),
             "GET /warmup = UntilOnboarded".to_string(),
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
+            // Unlike `/onboard/reset`, no pre-onboarding exemption; the handler also asks who it is.
+            "POST /admin/factory-reset = Authenticated".to_string(),
             "POST /connections/wifi/join = Authenticated".to_string(),
             "POST /devices/{id}/push-token = Authenticated".to_string(),
             // The music player bridge and extension egress: the handlers check the internal
@@ -1314,6 +1518,7 @@ mod tests {
             "POST /notifications/history/read = Authenticated".to_string(),
             // A woken phone fetches and acknowledges its own queued notices, as the stream would.
             "POST /notifications/{id}/ack = Authenticated".to_string(),
+            "POST /notifications/{id}/opened = Authenticated".to_string(),
             "POST /onboard = UntilOnboarded".to_string(),
             "POST /onboard/complete = UntilOnboarded".to_string(),
             // Once set up, the handler asks a caller with no token for the host credential.
