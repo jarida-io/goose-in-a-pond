@@ -2,8 +2,14 @@
 //! per-call channel (a `session_id` param is model-filled; `current_session_id()` races).
 
 use pond_core::security::ports::draft_authority::DraftAuthority;
+use pond_core::shared::services::child_sessions::ChildSessionRegistry;
+use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::profile::ProfileRepository;
+use pond_core::user_data::services::identity_resolution::scope_without_evidence;
 use rmcp::model::RequestMetaObject;
+use rmcp::service::RequestContext;
+use rmcp::RoleServer;
 use std::sync::Arc;
 
 /// Goose's `SESSION_ID_HEADER`, duplicated: this crate must not depend on the goose submodule.
@@ -19,6 +25,43 @@ pub fn session_from_meta(meta: &RequestMetaObject) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// The scope of the live turn behind this call's `_meta`, else of the helper it delegated to.
+/// `turns` is `None` to read the registry installed with the orchestrator.
+pub fn turn_scope(
+    meta: &RequestMetaObject,
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+    children: &ChildSessionRegistry,
+) -> Option<ProfileScope> {
+    let session = session_from_meta(meta)?;
+    turns
+        .or_else(|| crate::installed_orchestrator_deps().map(|deps| deps.authorities()))
+        .and_then(|turns| turns.authority_for_engine_session(&session))
+        .map(|authority| authority.profile_scope().clone())
+        .or_else(|| children.scope_of(&session))
+}
+
+/// Whose call this is: the scope a direct dispatch carried, else the turn's, else an unidentified
+/// speaker's, which is the whole household's only where it has one member.
+pub async fn caller_scope(
+    ctx: &RequestContext<RoleServer>,
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+    children: &ChildSessionRegistry,
+    profiles: &(dyn ProfileRepository + Send + Sync),
+) -> ProfileScope {
+    if let Some(scope) = ctx.extensions.get::<ProfileScope>() {
+        return scope.clone();
+    }
+    if let Some(scope) = turn_scope(&ctx.meta, turns, children) {
+        return scope;
+    }
+    let scope = scope_without_evidence(Some(profiles)).await;
+    tracing::debug!(
+        ?scope,
+        "no turn resolves this call's caller; reading it as an unidentified speaker"
+    );
+    scope
 }
 
 /// The household member speaking in this call, or why there is none. An unidentified

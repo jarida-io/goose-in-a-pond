@@ -13,7 +13,9 @@ use pond_core::user_data::ports::guest_device_access::GuestDeviceAccess;
 use pond_core::user_data::ports::guest_room_access::GuestRoomAccess;
 use pond_core::user_data::ports::last_action::{LastActionRepository, LastDeviceAction};
 use pond_core::user_data::ports::profile::ProfileRepository;
-use pond_core::user_data::services::household_permission::{may_control_device, PermissionDecision};
+use pond_core::user_data::services::household_permission::{
+    may_control_device, PermissionDecision,
+};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -168,21 +170,21 @@ impl DeviceControlMcpServer {
     }
 
     /// An invited, identified guest (`Role::Guest`) is restricted to its own allow-list and,
-    /// if time-limited, to before its `guest_until`. Only fires when the resolved role is
-    /// `Guest`; Owner, Member and Developer are untouched, and an anonymous unidentified voice
-    /// is handled separately by `guest_room_denial` (it has no profile to look this up from).
+    /// if time-limited, to before its `guest_until`; so is a member whose role could not be
+    /// read, since a failed lookup must never widen. Owner, Member and Developer are untouched,
+    /// and an anonymous unidentified voice is `guest_room_denial`'s (it has no profile).
     async fn guest_device_denial(
         &self,
         scope: &ProfileScope,
         role: Option<Role>,
         device_id: &str,
     ) -> Option<CallToolResult> {
-        if role != Some(Role::Guest) {
-            return None;
-        }
         let ProfileScope::Owner(profile_id) = scope else {
             return None;
         };
+        if !matches!(role, Some(Role::Guest) | None) {
+            return None;
+        }
         let guest_until = self
             .profile_repo
             .get(profile_id)
@@ -229,19 +231,38 @@ impl DeviceControlMcpServer {
     /// unidentified speaker or a household-wide context -- their commands are still carried out,
     /// just never remembered for "undo" (there is nobody specific to remember them for).
     fn owner_for(&self, meta: &RequestMetaObject) -> Option<String> {
-        let session = crate::session_from_meta(meta)?;
-        let turns = self
-            .turns
-            .clone()
-            .or_else(|| crate::installed_orchestrator_deps().map(|deps| deps.authorities()));
-        let scope = turns
-            .and_then(|turns| turns.authority_for_engine_session(&session))
-            .map(|authority| authority.profile_scope().clone())
-            .or_else(|| self.children.scope_of(&session))?;
-        match scope {
+        match crate::session_meta::turn_scope(meta, self.turns.clone(), &self.children)? {
             ProfileScope::Owner(id) => Some(id),
             ProfileScope::Household | ProfileScope::Guest => None,
         }
+    }
+
+    /// Whose call this is and their household role: carried by a direct dispatch, else read from
+    /// the turn behind the call. `Household` (one member, or a household-wide turn) is trusted
+    /// as the owner; `Guest` has no profile and so no role.
+    async fn caller(&self, ctx: &RequestContext<RoleServer>) -> (ProfileScope, Option<Role>) {
+        let scope = crate::session_meta::caller_scope(
+            ctx,
+            self.turns.clone(),
+            &self.children,
+            self.profile_repo.as_ref(),
+        )
+        .await;
+        let role = match ctx.extensions.get::<Role>() {
+            Some(role) => Some(*role),
+            None => match &scope {
+                ProfileScope::Owner(id) => self
+                    .profile_repo
+                    .get(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p.role),
+                ProfileScope::Household => Some(Role::Owner),
+                ProfileScope::Guest => None,
+            },
+        };
+        (scope, role)
     }
 
     /// The registered id for a caller's reference, or the guidance to send instead.
@@ -282,25 +303,27 @@ impl DeviceControlMcpServer {
             // Registry down: pass the reference through; a backend may still understand it.
             Err(e) => {
                 tracing::warn!(error = %e, tool, "device list unavailable");
+                if held_to_guest_devices(scope, role) {
+                    return Err(guidance(DEVICES_UNCHECKED.to_string()));
+                }
                 Ok(reference.to_string())
             }
         }
     }
 }
 
-/// The calling turn's scope, or `Household` (fully trusted) when none was carried through —
-/// the native-goose-extension path doesn't yet thread a scope into the tool-call context.
-fn scope_of(ctx: &RequestContext<RoleServer>) -> ProfileScope {
-    ctx.extensions
-        .get::<ProfileScope>()
-        .cloned()
-        .unwrap_or(ProfileScope::Household)
-}
+/// Said to a guest when the device list can't be read: their access can't be checked without it.
+const DEVICES_UNCHECKED: &str =
+    "The devices can't be checked right now, so nothing was done. Try again in a moment.";
 
-/// The calling turn's resolved household role, if the dispatcher carried one through. `None`
-/// here means "not resolved" (an anonymous voice, or no scope at all), not "no role assigned."
-fn role_of(ctx: &RequestContext<RoleServer>) -> Option<Role> {
-    ctx.extensions.get::<Role>().copied()
+/// Whether this caller may use only the devices a guest was given, which needs the device list
+/// to check: an unidentified speaker, an invited guest, or a member whose role could not be read.
+fn held_to_guest_devices(scope: &ProfileScope, role: Option<Role>) -> bool {
+    match scope {
+        ProfileScope::Guest => true,
+        ProfileScope::Owner(_) => matches!(role, Some(Role::Guest) | None),
+        ProfileScope::Household => false,
+    }
 }
 
 /// One `render_state` line; pond-desktop's `powerStateOf` (`devicePower.ts`) parses it.
@@ -531,9 +554,10 @@ impl DeviceControlMcpServer {
         crate::set_current_tool("describe_device");
         let Parameters(p) = params;
         let device_id = p.device_id.trim();
+        let (scope, role) = self.caller(&ctx).await;
 
         let device_id = match self
-            .resolve_or_explain(device_id, "describe_device", &scope_of(&ctx), role_of(&ctx))
+            .resolve_or_explain(device_id, "describe_device", &scope, role)
             .await
         {
             Ok(id) => id,
@@ -561,9 +585,10 @@ impl DeviceControlMcpServer {
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         crate::set_current_tool("get_device_state");
         let Parameters(p) = params;
+        let (scope, role) = self.caller(&ctx).await;
 
         let device_id = match self
-            .resolve_or_explain(p.device_id.trim(), "get_device_state", &scope_of(&ctx), role_of(&ctx))
+            .resolve_or_explain(p.device_id.trim(), "get_device_state", &scope, role)
             .await
         {
             Ok(id) => id,
@@ -586,8 +611,7 @@ impl DeviceControlMcpServer {
         ctx: RequestContext<RoleServer>,
         params: Parameters<SetDeviceStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let scope = scope_of(&ctx);
-        let role = role_of(&ctx);
+        let (scope, role) = self.caller(&ctx).await;
         self.run_set_device_state(&ctx.meta, &scope, role, params.0)
             .await
     }
@@ -669,6 +693,9 @@ impl DeviceControlMcpServer {
             Err(e) => {
                 // Registry down: pass the reference through; a backend may still understand it.
                 tracing::warn!(error = %e, "device resolution unavailable; using raw id");
+                if held_to_guest_devices(scope, role) {
+                    return Ok(guidance(DEVICES_UNCHECKED.to_string()));
+                }
                 device_id.to_string()
             }
         };
@@ -1961,7 +1988,10 @@ mod tests {
             Arc::new(StubControl),
             Arc::new(OneLightInKitchen),
             Arc::new(FixedGuestAccess(
-                guest_accessible_rooms.iter().map(|s| s.to_string()).collect(),
+                guest_accessible_rooms
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             )),
             Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
             Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new()),
@@ -2130,7 +2160,10 @@ mod tests {
             })
             .await
             .unwrap();
-        profiles.set_role(&guest.id, Role::Guest, None).await.unwrap();
+        profiles
+            .set_role(&guest.id, Role::Guest, None)
+            .await
+            .unwrap();
 
         let server = DeviceControlMcpServer::new(
             Arc::new(StubControl),
@@ -2178,6 +2211,174 @@ mod tests {
             .unwrap();
         let text = tool_text(&result);
         assert!(text.contains("power=on"), "expected success, got: {text}");
+    }
+
+    // ── A turn's caller, as Goose's builtin path carries it: only `_meta` ─────
+
+    /// A household of `names`, the first its owner; returns the repository and their ids.
+    async fn household_of(
+        names: &[&str],
+    ) -> (Arc<dyn ProfileRepository + Send + Sync>, Vec<String>) {
+        use pond_core::user_data::domain::profile::CreateProfileRequest;
+        let profiles: Arc<dyn ProfileRepository + Send + Sync> =
+            Arc::new(pond_core::user_data::mocks::mock_profile::MockProfileRepository::new());
+        let mut ids = Vec::new();
+        for name in names {
+            let created = profiles
+                .create(CreateProfileRequest {
+                    display_name: name.to_string(),
+                    avatar_emoji: "X".to_string(),
+                })
+                .await
+                .unwrap();
+            ids.push(created.id);
+        }
+        (profiles, ids)
+    }
+
+    fn lamp_server(
+        registry: Arc<dyn DeviceRegistry + Send + Sync>,
+        profiles: Arc<dyn ProfileRepository + Send + Sync>,
+        turns: Arc<TurnAuthorityRegistry>,
+    ) -> DeviceControlMcpServer {
+        DeviceControlMcpServer::new(
+            Arc::new(StubControl),
+            registry,
+            Arc::new(FixedGuestAccess(std::collections::HashSet::new())),
+            Arc::new(pond_core::user_data::mocks::mock_guest_device_access::MockGuestDeviceAccess),
+            profiles,
+        )
+        .with_registries(turns, Arc::new(ChildSessionRegistry::new()))
+    }
+
+    /// Turns the lamp on as the call from `session` would arrive from Goose: no extensions.
+    async fn lamp_on_from(server: &DeviceControlMcpServer, session: &str) -> String {
+        let mut ctx = make_ctx(server.clone()).await;
+        ctx.meta = meta_for(session);
+        let result = server
+            .set_device_state(
+                ctx,
+                Parameters(SetDeviceStateParams {
+                    device_id: "lamp".into(),
+                    power: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        tool_text(&result)
+    }
+
+    #[tokio::test]
+    async fn a_guest_turn_is_held_to_the_guest_rooms() {
+        let (profiles, _) = household_of(&["Jerry", "Liz"]).await;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(OneLightInKitchen), profiles, turns.clone());
+        let _lease = turn_as(&turns, "engine-guest", ProfileScope::Guest);
+
+        let text = lamp_on_from(&server, "engine-guest").await;
+
+        assert!(text.contains("isn't in a room guests can use"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_invited_guests_turn_is_held_to_their_own_devices() {
+        let (profiles, ids) = household_of(&["Jerry", "Ada"]).await;
+        profiles.set_role(&ids[1], Role::Guest, None).await.unwrap();
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(OneLightInKitchen), profiles, turns.clone());
+        let _lease = turn_as(&turns, "engine-ada", ProfileScope::Owner(ids[1].clone()));
+
+        let text = lamp_on_from(&server, "engine-ada").await;
+
+        assert!(text.contains("Ask Jerry."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_members_turn_uses_any_device() {
+        let (profiles, ids) = household_of(&["Jerry", "Liz"]).await;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(OneLightInKitchen), profiles, turns.clone());
+        let _lease = turn_as(&turns, "engine-liz", ProfileScope::Owner(ids[1].clone()));
+
+        let text = lamp_on_from(&server, "engine-liz").await;
+
+        assert!(text.contains("power=on"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_member_whose_profile_cannot_be_read_is_held_as_a_guest() {
+        let (profiles, _) = household_of(&["Jerry", "Liz"]).await;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(OneLightInKitchen), profiles, turns.clone());
+        let _lease = turn_as(&turns, "engine-gone", ProfileScope::Owner("gone".into()));
+
+        let text = lamp_on_from(&server, "engine-gone").await;
+
+        assert!(!text.contains("power=on"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_call_no_turn_resolves_is_a_guests_where_the_household_has_several() {
+        let (profiles, _) = household_of(&["Jerry", "Liz"]).await;
+        let server = lamp_server(
+            Arc::new(OneLightInKitchen),
+            profiles,
+            Arc::new(TurnAuthorityRegistry::new()),
+        );
+
+        let text = lamp_on_from(&server, "engine-nobody").await;
+
+        assert!(text.contains("isn't in a room guests can use"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_call_no_turn_resolves_is_the_households_where_it_has_one_member() {
+        let (profiles, _) = household_of(&["Jerry"]).await;
+        let server = lamp_server(
+            Arc::new(OneLightInKitchen),
+            profiles,
+            Arc::new(TurnAuthorityRegistry::new()),
+        );
+
+        let text = lamp_on_from(&server, "engine-nobody").await;
+
+        assert!(text.contains("power=on"), "{text}");
+    }
+
+    struct RegistryDown;
+    #[async_trait]
+    impl DeviceRegistry for RegistryDown {
+        async fn register(
+            &self,
+            _: pond_core::user_data::ports::device_registry::RegisterDeviceRequest,
+        ) -> anyhow::Result<Device> {
+            anyhow::bail!("down")
+        }
+        async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {
+            anyhow::bail!("down")
+        }
+        async fn get_device(&self, _: &str) -> anyhow::Result<Option<Device>> {
+            anyhow::bail!("down")
+        }
+        async fn unregister(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("down")
+        }
+        async fn heartbeat(&self, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("down")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guest_is_not_let_through_when_the_device_list_is_down() {
+        let (profiles, _) = household_of(&["Jerry", "Liz"]).await;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(RegistryDown), profiles, turns.clone());
+        let _lease = turn_as(&turns, "engine-guest", ProfileScope::Guest);
+
+        let text = lamp_on_from(&server, "engine-guest").await;
+
+        assert_eq!(text, DEVICES_UNCHECKED);
     }
 
     /// Builds a server with no guest restrictions in force, for tests that aren't about
