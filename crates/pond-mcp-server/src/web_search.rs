@@ -20,7 +20,7 @@ use pond_core::shared::services::passages;
 use regex::Regex;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, ContentBlock, ErrorData, MetaObject, RequestMetaObject},
+    model::{CallToolResult, ContentBlock, ErrorData, MetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };

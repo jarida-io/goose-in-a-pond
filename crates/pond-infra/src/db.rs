@@ -1,6 +1,6 @@
 //! Opens and migrates `pond_system.db`, `pond_logs.db` and the derived `pond_vectors.db`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;

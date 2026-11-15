@@ -11,7 +11,7 @@ use axum::http::{Method, Request, StatusCode};
 use pond_api::build_router;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
-use pond_core::user_data::domain::idea::{GooseCan, GooseKind, GoosePlan, Idea, IdeaState};
+use pond_core::user_data::domain::idea::{GooseCan, GooseKind, GoosePlan, Idea, IdeaKind, IdeaState};
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
 use pond_core::user_data::ports::ideas::IdeaRepository;
@@ -325,9 +325,14 @@ async fn taking_an_idea_on_yourself_leaves_goose_out_of_it() {
             id: "idea-1".into(),
             profile_id: pond.member.clone(),
             topic: "Toyota Fielder".into(),
+            kind: IdeaKind::Activity,
+            kind_label: IdeaKind::Activity.label().into(),
             title: "Catch the January dip on Fielders".into(),
+            hook: "Fielders cost less in January.".into(),
             pitch: "Prices soften after the import rush.".into(),
             why: "You are shopping for a Fielder.".into(),
+            facts: vec![],
+            notes: String::new(),
             grounded_in: vec![],
             sources: vec![],
             picture: None,

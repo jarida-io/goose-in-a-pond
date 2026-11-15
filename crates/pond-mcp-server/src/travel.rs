@@ -1205,42 +1205,7 @@ mod delivery_tests {
     use super::*;
     use crate::session_meta::fakes::{meta, FixedSpeaker};
     use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
-    use pond_core::security::ports::policy::{PolicyDecision, PolicyMode};
-    use pond_core::user_data::domain::session::IdentificationSource;
-
-    /// Resolves every session to `scope`; `sole` is the household's only member, if it has one.
-    struct FixedSpeaker {
-        scope: Option<ProfileScope>,
-        sole: Option<&'static str>,
-    }
-
-    #[async_trait]
-    impl DraftAuthority for FixedSpeaker {
-        async fn policy_mode(&self) -> PolicyMode {
-            PolicyMode::Audit
-        }
-        async fn actor_for_engine_session(
-            &self,
-            _engine_session_id: &str,
-        ) -> Option<(ProfileScope, IdentificationSource)> {
-            self.scope
-                .clone()
-                .map(|scope| (scope, IdentificationSource::Explicit))
-        }
-        async fn sole_member(&self) -> Option<String> {
-            self.sole.map(str::to_string)
-        }
-        async fn audit(&self, _s: &str, _a: &str, _d: &PolicyDecision) {}
-    }
-
-    fn meta() -> RequestMetaObject {
-        let mut m = RequestMetaObject::new();
-        m.0.insert(
-            crate::session_meta::SESSION_ID_META_KEY.to_string(),
-            serde_json::json!("engine-1"),
-        );
-        m
-    }
+    use pond_core::user_data::domain::profile::ProfileScope;
 
     fn server(speaker: Option<ProfileScope>, notifier: Arc<MockMemberNotifier>) -> TravelMcpServer {
         in_household(speaker, None, notifier)

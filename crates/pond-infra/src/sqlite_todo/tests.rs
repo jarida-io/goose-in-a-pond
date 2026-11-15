@@ -452,5 +452,5 @@ async fn a_mention_nobody_was_named_for_goes_to_the_only_member() {
         .unwrap();
     assert_eq!((lone.offered.len(), lone.unaddressable), (1, 0));
     assert_eq!(lone.offered[0].profile_id.as_deref(), Some("jerry"));
-    assert_eq!(reminders.offered_to("jerry").await.unwrap().len(), 1);
+    assert_eq!(reminders.open_to("jerry").await.unwrap().len(), 1);
 }
