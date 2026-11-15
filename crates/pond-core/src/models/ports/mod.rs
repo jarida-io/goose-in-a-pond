@@ -7,6 +7,7 @@ pub mod embedding;
 pub mod inference;
 pub mod inference_pool;
 pub mod interrupt;
+pub mod media_room;
 pub mod model_catalog_provider;
 pub mod model_downloader;
 pub mod model_repository;

@@ -118,6 +118,12 @@ pub enum AgentStreamEvent {
     Status {
         content: String,
     },
+    /// The turn waits before its reply can start; `content` tells the household why. It ends at
+    /// the turn's next event.
+    Waiting {
+        reason: TurnWait,
+        content: String,
+    },
     /// Model reasoning (chain-of-thought); only emitted when `show_thinking` is enabled.
     Thinking {
         content: String,
@@ -184,6 +190,30 @@ pub enum AgentStreamEvent {
     Error {
         content: String,
     },
+}
+
+/// Why a turn waits before its reply can start, as clients receive it (`waiting` on a status
+/// frame, `reason` on a voice `waiting` event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnWait {
+    /// The model is answering another conversation.
+    AnotherConversation,
+    /// The pond's own work holds the model and stops at its next token.
+    BackgroundWork,
+    /// Memory is being freed to take in this turn's recording or picture.
+    MakingRoom,
+}
+
+impl TurnWait {
+    /// The serde wire spelling, for a frame built by hand.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TurnWait::AnotherConversation => "another_conversation",
+            TurnWait::BackgroundWork => "background_work",
+            TurnWait::MakingRoom => "making_room",
+        }
+    }
 }
 
 /// Where a delegation has got to, as a client sees it.
@@ -313,6 +343,7 @@ pub enum InterruptReason {
 /// {"event":"audio_level","rms":0.42}          // wait/recording mic level, throttled
 /// {"event":"wake","who":null}                 // or {"profile_id":"..","name":".."}
 /// {"event":"interrupt","why":"wake_word"}     // voice | wake_word | button
+/// {"event":"waiting","reason":"making_room","message":"..."}  // until the turn's next event
 /// ```
 ///
 /// `wake` and `interrupt` come only from a loop with an interrupt watch (the ear); without one
@@ -357,6 +388,8 @@ pub enum WorkflowEvent {
     Wake { who: Option<VoiceSpeaker> },
     /// The turn in flight was ended early, persisting nothing.
     Interrupt { why: InterruptReason },
+    /// The turn waits before its reply can start; `message` is for the household.
+    Waiting { reason: TurnWait, message: String },
     /// Internal-only user input text; `to_ndjson` skips it.
     UserInput(String),
     /// Internal-only full agent output text; `to_ndjson` skips it.
@@ -567,6 +600,26 @@ mod ndjson_golden_tests {
             assert_eq!(
                 WorkflowEvent::Interrupt { why }.to_ndjson().unwrap(),
                 format!(r#"{{"event":"interrupt","why":"{name}"}}"#)
+            );
+        }
+    }
+
+    #[test]
+    fn waiting_line_matches_contract() {
+        for reason in [
+            TurnWait::AnotherConversation,
+            TurnWait::BackgroundWork,
+            TurnWait::MakingRoom,
+        ] {
+            let name = reason.as_str();
+            assert_eq!(
+                WorkflowEvent::Waiting {
+                    reason,
+                    message: "One moment.".into()
+                }
+                .to_ndjson()
+                .unwrap(),
+                format!(r#"{{"event":"waiting","reason":"{name}","message":"One moment."}}"#)
             );
         }
     }

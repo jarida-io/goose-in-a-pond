@@ -4858,6 +4858,9 @@ async fn run_server(
         developer: developer.clone(),
     });
     state.device_events.clone().follow(event_bus.clone());
+    pond_adapters_goose::media_room::set_media_room(Arc::new(pond_api::routes::StateMediaRoom(
+        state.clone(),
+    )));
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
     {
@@ -11341,7 +11344,7 @@ async fn stream_agent_response(
 
     while let Some(event) = stream.next().await {
         match event? {
-            AgentStreamEvent::Status { content } => {
+            AgentStreamEvent::Status { content } | AgentStreamEvent::Waiting { content, .. } => {
                 eprint!("\r\x1b[K  {content}");
                 let _ = io::stderr().flush();
             }

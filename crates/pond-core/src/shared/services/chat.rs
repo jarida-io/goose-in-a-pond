@@ -1593,6 +1593,12 @@ impl ChatService {
                     let content = truncate_tool_result(content);
                     self.emit_event(WorkflowEvent::ToolResult { tool, id, content });
                 }
+                AgentStreamEvent::Waiting { reason, content } => {
+                    self.emit_event(WorkflowEvent::Waiting {
+                        reason,
+                        message: content,
+                    });
+                }
                 AgentStreamEvent::Status { .. }
                 | AgentStreamEvent::Thinking { .. }
                 | AgentStreamEvent::ReviewStatus { .. }
@@ -2433,6 +2439,9 @@ impl ChatService {
             }
             WorkflowEvent::Error { message } => {
                 tracing::debug!("Workflow error: {}", message);
+            }
+            WorkflowEvent::Waiting { reason, .. } => {
+                tracing::debug!(reason = reason.as_str(), "Turn waiting");
             }
             WorkflowEvent::AudioLevel { .. } => {
                 // High-frequency — do not trace per-level (same as Token).

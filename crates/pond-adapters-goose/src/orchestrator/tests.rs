@@ -2440,9 +2440,10 @@ async fn an_engine_item_survives_a_progress_frame() {
     let mut seen: Vec<String> = Vec::new();
     loop {
         match next_parent_step(&mut engine, &mut progress).await {
-            ParentStep::Progress(frame) => {
+            ParentStep::Progress(ParentFrame::Child(frame)) => {
                 seen.push(frame.detail.expect("a tool frame names its tool"))
             }
+            ParentStep::Progress(wait) => panic!("no engine call waited: {wait:?}"),
             ParentStep::Engine(item) => seen.push(format!("item-{item}")),
             ParentStep::EngineEnded => break,
         }
@@ -2482,9 +2483,10 @@ async fn a_frame_does_not_wait_for_the_engine_to_go_idle() {
     let mut seen: Vec<String> = Vec::new();
     loop {
         match next_parent_step(&mut engine, &mut progress).await {
-            ParentStep::Progress(frame) => {
+            ParentStep::Progress(ParentFrame::Child(frame)) => {
                 seen.push(frame.detail.expect("a tool frame names its tool"))
             }
+            ParentStep::Progress(wait) => panic!("no engine call waited: {wait:?}"),
             ParentStep::Engine(item) => seen.push(format!("item-{item}")),
             ParentStep::EngineEnded => break,
         }
@@ -2496,6 +2498,46 @@ async fn a_frame_does_not_wait_for_the_engine_to_go_idle() {
         "a frame published while the engine still had events queued was not \
          delivered within one event of being published"
     );
+}
+
+/// A wait an engine call reports reaches the live turn through the same select as a child's frame.
+#[tokio::test]
+async fn an_engine_calls_wait_reaches_the_turn_while_the_engine_is_quiet() {
+    let mut progress = process_progress_bus().subscribe("waiting-turn-session");
+    let waits = progress.waits();
+    let engine = async_stream::stream! {
+        waits
+            .send((TurnWait::MakingRoom, "Making room".to_string()))
+            .unwrap();
+        tokio::task::yield_now().await;
+        yield 1u32;
+    };
+    let mut engine = Box::pin(engine);
+    let mut seen = Vec::new();
+    loop {
+        match next_parent_step(&mut engine, &mut progress).await {
+            ParentStep::Progress(ParentFrame::Waiting { reason, content }) => {
+                assert_eq!(reason, TurnWait::MakingRoom);
+                seen.push(content);
+            }
+            ParentStep::Progress(other) => panic!("no child ran: {other:?}"),
+            ParentStep::Engine(item) => seen.push(format!("item-{item}")),
+            ParentStep::EngineEnded => break,
+        }
+    }
+    assert_eq!(seen, vec!["Making room", "item-1"]);
+}
+
+#[test]
+fn a_queued_turn_says_what_it_waits_behind() {
+    assert_eq!(
+        wait_behind(Some(InferenceClaim::Turn)).0,
+        TurnWait::AnotherConversation
+    );
+    for background in [InferenceClaim::Task, InferenceClaim::Chore] {
+        assert_eq!(wait_behind(Some(background)).0, TurnWait::BackgroundWork);
+    }
+    assert_eq!(wait_behind(None).0, TurnWait::AnotherConversation);
 }
 
 #[test]
