@@ -2,6 +2,7 @@
 // place each have their own face; the owner renames, moves, shares and deletes. Both shells draw this.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Switch } from "../components/Switch";
 import {
   ArrowLeft,
   Bookmark,
@@ -627,18 +628,13 @@ function OwnerControls({
       </div>
 
       <div className="sowner__share">
-        <button
-          type="button"
-          role="switch"
-          className="ink-switch"
-          aria-checked={item.shared}
+        <Switch
+          checked={item.shared}
           aria-labelledby={`${ids}-share`}
           aria-describedby={`${ids}-share-hint`}
           disabled={busy}
-          onClick={() => void onEdit({ shared: !item.shared })}
-        >
-          <span className="ink-switch__knob" />
-        </button>
+          onChange={(shared) => void onEdit({ shared })}
+        />
         <span className="sowner__share-text">
           <span id={`${ids}-share`} className="wform__label">
             {SHARE_LABEL}

@@ -78,22 +78,22 @@ describe("Hub Connections screen", () => {
 
 // The Hub's Toggle keeps its own state, so assert what is drawn after the async settings load.
 function spokenCodesSwitch(): HTMLButtonElement {
-  return screen.getByRole("button", { name: "Say pairing codes aloud" }) as HTMLButtonElement;
+  return screen.getByRole("switch", { name: "Say pairing codes aloud" }) as HTMLButtonElement;
 }
 function bleSetupSwitch(): HTMLButtonElement {
-  return screen.getByRole("button", { name: "Set up over Bluetooth" }) as HTMLButtonElement;
+  return screen.getByRole("switch", { name: "Set up over Bluetooth" }) as HTMLButtonElement;
 }
 
 describe("Hub Connections: spoken pairing codes", () => {
   it("draws ON when the key is absent, as the server ships it", async () => {
     await renderScreen();
-    expect(spokenCodesSwitch().getAttribute("aria-pressed")).toBe("true");
+    expect(spokenCodesSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   it("draws OFF when the household turned it off", async () => {
     vi.mocked(api.getSettings).mockResolvedValue({ spoken_pairing_codes: false } as never);
     await renderScreen();
-    await waitFor(() => expect(spokenCodesSwitch().getAttribute("aria-pressed")).toBe("false"));
+    await waitFor(() => expect(spokenCodesSwitch().getAttribute("aria-checked")).toBe("false"));
   });
 
   it("saves the switch as spoken_pairing_codes", async () => {
@@ -107,13 +107,13 @@ describe("Hub Connections: spoken pairing codes", () => {
 describe("Hub Connections: setup over Bluetooth", () => {
   it("draws ON when the key is absent, as the server ships it", async () => {
     await renderScreen();
-    expect(bleSetupSwitch().getAttribute("aria-pressed")).toBe("true");
+    expect(bleSetupSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   it("draws OFF when the household turned it off", async () => {
     vi.mocked(api.getSettings).mockResolvedValue({ ble_setup_enabled: false } as never);
     await renderScreen();
-    await waitFor(() => expect(bleSetupSwitch().getAttribute("aria-pressed")).toBe("false"));
+    await waitFor(() => expect(bleSetupSwitch().getAttribute("aria-checked")).toBe("false"));
   });
 
   it("saves the switch as ble_setup_enabled", async () => {
@@ -148,13 +148,13 @@ describe("Hub Connections: setup over Bluetooth", () => {
     await renderScreen();
     fireEvent.click(bleSetupSwitch());
     await screen.findByText("That switch was not saved. Try again.");
-    await waitFor(() => expect(bleSetupSwitch().getAttribute("aria-pressed")).toBe("true"));
+    await waitFor(() => expect(bleSetupSwitch().getAttribute("aria-checked")).toBe("true"));
   });
 
   it("keeps the switch inside the Bluetooth card, under its status", async () => {
     await renderScreen();
     const card = screen.getByText("Bluetooth", { selector: ".setcard__title" }).closest(".setcard") as HTMLElement;
     expect(within(card).getByText("Visible to phones")).toBeTruthy();
-    expect(within(card).getByRole("button", { name: "Set up over Bluetooth" })).toBeTruthy();
+    expect(within(card).getByRole("switch", { name: "Set up over Bluetooth" })).toBeTruthy();
   });
 });

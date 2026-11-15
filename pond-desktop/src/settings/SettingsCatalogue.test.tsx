@@ -347,7 +347,8 @@ describe("SettingsCatalogue", () => {
     async function openModels(over: Record<string, unknown>) {
       await renderPage(over);
       fireEvent.click(screen.getByRole("button", { name: /^Models/ }));
-      return screen.getByLabelText("Search memories by meaning") as HTMLInputElement;
+      const toggle = screen.getByRole("switch", { name: "Search memories by meaning" });
+      return { element: toggle, checked: toggle.getAttribute("aria-checked") === "true" };
     }
 
     it("is a switch, not a choice of engines, and says nothing false about the Orin", async () => {
@@ -371,7 +372,7 @@ describe("SettingsCatalogue", () => {
 
     it("stages \"none\" when switched off, and saves it as the pond reads it", async () => {
       const toggle = await openModels({ embedding_provider: "fastembed" });
-      fireEvent.click(toggle);
+      fireEvent.click(toggle.element);
       expect(mockApi.updateSettings).not.toHaveBeenCalled();
       fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "none" }));
@@ -379,7 +380,7 @@ describe("SettingsCatalogue", () => {
 
     it("stages \"auto\" when switched on, so the Memory model decides the engine", async () => {
       const toggle = await openModels({ embedding_provider: "none" });
-      fireEvent.click(toggle);
+      fireEvent.click(toggle.element);
       fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ embedding_provider: "auto" }));
     });

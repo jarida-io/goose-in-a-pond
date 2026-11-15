@@ -4,8 +4,8 @@ import {
   Button,
   Card,
   CardContent,
-  Switch,
 } from "@heroui/react";
+import { Switch } from "../components/Switch";
 import {
   Puzzle,
   Trash2,
@@ -777,14 +777,12 @@ export function ExtensionCard({
             </button>
           )}
           <Switch
-            isSelected={ext.enabled}
+            checked={ext.enabled}
             onChange={(val) => onToggle(ext.name, val)}
-            isDisabled={disabled}
+            disabled={disabled}
             size="sm"
-            aria-label={`${ext.enabled ? "Disable" : "Enable"} ${ext.name}`}
-          >
-            <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-          </Switch>
+            label={`${ext.enabled ? "Disable" : "Enable"} ${ext.name}`}
+          />
           <button
             className="ext-card__delete-btn"
             onClick={() => onDelete(ext.name)}

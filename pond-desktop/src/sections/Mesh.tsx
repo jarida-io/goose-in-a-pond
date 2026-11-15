@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Button, Separator, Switch } from "@heroui/react";
+import { Button, Separator } from "@heroui/react";
+import { Switch } from "../components/Switch";
+
 import { Share2, Plus, X, Trash2, Copy, Wifi, WifiOff, Coins, Cpu, Zap } from "lucide-react";
 import QRCode from "qrcode";
 import { api } from "../api/PondApiClient";
@@ -240,14 +242,11 @@ export function Mesh() {
       {!loading && meshEnabledSetting !== null && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
           <Switch
-            aria-label="Enable mesh"
-            isSelected={meshEnabledSetting}
-            isDisabled={meshToggling}
+            label="Enable mesh"
+            checked={meshEnabledSetting}
+            disabled={meshToggling}
             onChange={toggleMesh}
-          >
-            {/* Switch.Content wires up the aria-label — without it the toggle has no accessible name. */}
-            <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-          </Switch>
+          />
           <span className="muted-12">Enable mesh</span>
           {/* Turning mesh ON hot-builds the real transport synchronously
               (#132 follow-up) — `toggleMesh` already re-fetched `self` by

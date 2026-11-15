@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { Switch } from "../components/Switch";
 import { AlertTriangle, Check, ChevronLeft, Info, Trash2 } from "lucide-react";
 import "./agents.css";
 import { api } from "../api/PondApiClient";
@@ -447,17 +448,12 @@ export function AgentBuilder({ variant, recipe, recipes, env, onBack, onSaved, o
                       of the pond only records the choice: nothing is offered yet.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    className="ink-switch"
-                    aria-checked={draft.expose}
+                  <Switch
+                    checked={draft.expose}
                     aria-labelledby="ag-expose-label"
                     aria-describedby="ag-expose-hint"
-                    onClick={() => void toggleExpose()}
-                  >
-                    <span className="ink-switch__knob" />
-                  </button>
+                    onChange={() => void toggleExpose()}
+                  />
                 </div>
                 <Messages messages={[...errors.at(paths.a2a), ...errors.at(paths.expose)]} />
               </FormSection>
