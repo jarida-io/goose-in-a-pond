@@ -59,13 +59,15 @@ func TestANodeThatCannotReachItsCoordinatorSaysWhy(t *testing.T) {
 	}
 	defer node.Close()
 
+	// The first warning can be the transient "Tailscale is starting", before the node has tried
+	// the coordinator; wait for the one about the refusal.
 	deadline := time.Now().Add(30 * time.Second)
 	var status Status
 	for time.Now().Before(deadline) {
 		if status, err = node.Snapshot(); err != nil {
 			t.Fatal(err)
 		}
-		if len(status.Health) > 0 {
+		if strings.Contains(strings.Join(status.Health, " | "), listener.Addr().String()) {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
