@@ -930,9 +930,8 @@ mod tests {
         );
     }
 
-    /// Needs `WHISPER_TEST_MODEL` pointing at a ggml model; run with `--ignored`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn loads_real_model_and_transcribes_silence() {
         let Some(model_env) = std::env::var_os("WHISPER_TEST_MODEL") else {
             eprintln!("set WHISPER_TEST_MODEL to run this test");
@@ -952,9 +951,9 @@ mod tests {
         );
     }
 
-    /// Measures real inference time against `DEFAULT_SILENCE_MS`; needs `WHISPER_TEST_MODEL`.
+    /// Measures real inference time against `DEFAULT_SILENCE_MS`.
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn speculative_overlap_hides_inference_time_within_default_silence_window() {
         let Some(model_env) = std::env::var_os("WHISPER_TEST_MODEL") else {
             eprintln!("set WHISPER_TEST_MODEL to run this test");
@@ -1046,9 +1045,9 @@ mod tests {
         );
     }
 
-    /// Measures what the KWS `audio_ctx` cap costs in accuracy; needs `WHISPER_TEST_MODEL`.
+    /// Measures what the KWS `audio_ctx` cap costs in accuracy.
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn audio_ctx_sweep() {
         let Some(model_env) = std::env::var_os("WHISPER_TEST_MODEL") else {
             eprintln!("set WHISPER_TEST_MODEL");
@@ -1130,7 +1129,7 @@ mod decode_profiles {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn the_accurate_profile_transcribes_real_speech_correctly() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1170,7 +1169,7 @@ mod decode_profiles {
     /// A transcription allocates nothing: loading makes the accurate state, every later call
     /// reuses it, and the wake-word state is made once, on its first use.
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn each_profile_keeps_one_state_across_transcriptions() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1197,7 +1196,7 @@ mod decode_profiles {
     /// An abandoned speculative job shares the full transcription's state; it must give it up
     /// at its next decode step rather than make that transcription wait out its decode.
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn an_abandoned_transcription_does_not_hold_up_the_next() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1249,7 +1248,7 @@ mod decode_profiles {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "needs a Whisper model; set WHISPER_TEST_MODEL"]
     fn the_accurate_profile_emits_no_bracketed_annotations() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1269,11 +1268,11 @@ mod decode_profiles {
     /// in production, and require that the failure is an error. Before the GGML change in
     /// `vendor/whisper-rs-sys/POND-PATCH.md` it was a `SIGSEGV`, so a crash here is that bug.
     ///
-    /// It exhausts device memory on purpose: stop the Pond first. CUDA builds only, because
-    /// on unified memory without a device limit it would fill RAM before anything failed.
+    /// CUDA builds only, because on unified memory without a device limit it would fill RAM
+    /// before anything failed.
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore]
+    #[ignore = "fills the GPU; stop the Pond and set WHISPER_TEST_MODEL"]
     fn running_out_of_gpu_memory_is_an_error_not_a_crash() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1303,11 +1302,11 @@ mod decode_profiles {
     }
 
     /// The point of keeping a state: with the GPU full, a transcription still works, because it
-    /// allocates nothing. Before states were kept, this call created one and failed. Stop the
-    /// Pond first, as for the tests around it. CUDA builds only.
+    /// allocates nothing. Before states were kept, this call created one and failed. CUDA
+    /// builds only.
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore]
+    #[ignore = "fills the GPU; stop the Pond and set WHISPER_TEST_MODEL"]
     fn a_kept_state_transcribes_on_a_full_gpu() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
@@ -1338,8 +1337,7 @@ mod decode_profiles {
     ///
     /// One beam decode runs first, as the Pond's earlier transcriptions have by the time this
     /// happens in production. Then the GPU is filled with states, and each decodes with beam
-    /// search until one cannot grow its cache. Stop the Pond first, as for the test above.
-    /// CUDA builds only.
+    /// search until one cannot grow its cache. CUDA builds only.
     ///
     /// Where a run fails depends on how much memory the fill leaves, so run it until it prints
     /// `beam decodes fit before`. A run that aborts with `cuMemAddressReserve` in its log has
@@ -1350,7 +1348,7 @@ mod decode_profiles {
     /// that reached the cache passed.
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore]
+    #[ignore = "fills the GPU; stop the Pond and set WHISPER_TEST_MODEL"]
     fn running_out_of_gpu_memory_while_decoding_is_an_error_not_a_crash() {
         let Some(ctx) = model() else {
             eprintln!("set WHISPER_TEST_MODEL to run this");
