@@ -292,7 +292,7 @@ function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)", overflowY: "auto" }}>
             {devices.map((d) => (
-              <Row key={d.id} label={d.name} hint={d.room ?? d.device_type}>
+              <Row key={d.id} label={d.name} hint={d.device_type}>
                 <Switch
                   aria-label={`Allow ${profile.display_name} to use ${d.name}`}
                   isSelected={allowed.has(d.id)}
