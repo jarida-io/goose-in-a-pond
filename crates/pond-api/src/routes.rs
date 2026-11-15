@@ -39,7 +39,7 @@ use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::{CreateProfileRequest, Role};
 use pond_core::user_data::domain::schedule::{
     routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
-    SensorTriggerSpec, TaskKind,
+    SensorTriggerSpec, TaskKind, PRIVATE_REMINDER_LABEL,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{
@@ -49,7 +49,9 @@ use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_attribution::DeviceAttribution;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
 use pond_core::user_data::ports::face_recognition::FaceRecognition;
-use pond_core::user_data::ports::scheduler::{CreateScheduleRequest, UpdateScheduleRequest};
+use pond_core::user_data::ports::scheduler::{
+    CreateScheduleRequest, SchedulerPort, UpdateScheduleRequest,
+};
 use pond_core::user_data::ports::session_storage::SessionStorageError;
 use pond_core::user_data::services::face_recognition_slot::{
     FaceModelsProgress, FaceRecognitionNotReady,
@@ -12670,6 +12672,7 @@ async fn create_schedule(
 /// `DELETE /api/v1/schedules/:id` — remove a scheduled task.
 async fn delete_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12678,26 +12681,77 @@ async fn delete_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.delete_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"deleted": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
 
-/// Schedules as anyone in the household may see them: a member's reminder keeps its label and
-/// time but not what it says, since these routes can't tell who is asking.
+/// Schedules as anyone in the household may see them: a member's reminder keeps its time but
+/// neither what it says nor its label, which is drawn from what it says.
 fn household_view(mut tasks: Vec<Schedule>) -> Vec<Schedule> {
     for task in &mut tasks {
         if let TaskKind::MemberReminder { prompt, .. } = &mut task.kind {
             prompt.clear();
+            task.label = PRIVATE_REMINDER_LABEL.to_string();
         }
     }
     tasks
 }
 
+/// A member's private reminder runs as them, so only they may change, run or read it. `Err` is
+/// the refusal when `id` is one and the caller is anyone else, or cannot be told apart; a
+/// one-member household's unidentified caller can only be that member.
+async fn refuse_another_members_reminder(
+    state: &Arc<AppState>,
+    scheduler: &Arc<dyn SchedulerPort>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let tasks = scheduler.list_tasks().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("could not read the schedules: {e}")})),
+        )
+    })?;
+    let Some(owner) = tasks
+        .iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.kind.member())
+    else {
+        return Ok(());
+    };
+    let caller = match scope_from_principal(state, principal).await {
+        ProfileScope::Owner(member) => Some(member),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await,
+        ProfileScope::Guest => None,
+    };
+    if caller.as_deref() == Some(owner) {
+        return Ok(());
+    }
+    tracing::info!(
+        kind = "private_reminder_refused",
+        schedule_id = id,
+        "refused another member's private reminder"
+    );
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "that is someone's private reminder, and only they can change it",
+            "code": "private_reminder",
+        })),
+    ))
+}
+
 /// `PUT /api/v1/schedules/:id` — update an existing scheduled task.
 async fn update_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     result: Result<Json<ApiUpdateScheduleRequest>, JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
@@ -12707,6 +12761,11 @@ async fn update_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     let Json(api_req) = match result {
         Ok(r) => r,
         Err(e) => {
@@ -12795,6 +12854,7 @@ struct ApiUpdateScheduleRequest {
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
 async fn pause_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12803,6 +12863,11 @@ async fn pause_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.pause_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"paused": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
@@ -12812,6 +12877,7 @@ async fn pause_schedule(
 /// `POST /api/v1/schedules/:id/resume` — resume a paused task.
 async fn resume_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12820,6 +12886,11 @@ async fn resume_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.resume_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"resumed": id}))),
         // The schedule exists and stays paused: a conflict with its state, not a missing id.
@@ -12834,6 +12905,7 @@ async fn resume_schedule(
 /// `POST /api/v1/schedules/:id/run-now` — fire a task immediately.
 async fn run_schedule_now(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12842,6 +12914,11 @@ async fn run_schedule_now(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
@@ -12851,22 +12928,25 @@ async fn run_schedule_now(
 /// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
 async fn run_missed_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+    answer_missed_schedule(&state, principal.as_ref(), &id, MissedRunAnswer::Run).await
 }
 
 /// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
 async fn skip_missed_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+    answer_missed_schedule(&state, principal.as_ref(), &id, MissedRunAnswer::Skip).await
 }
 
 /// The first answer settles a missed run; a later one is `409`, as is answering none.
 async fn answer_missed_schedule(
-    state: &AppState,
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     id: &str,
     answer: MissedRunAnswer,
 ) -> (StatusCode, Json<Value>) {
@@ -12876,6 +12956,9 @@ async fn answer_missed_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) = refuse_another_members_reminder(state, scheduler, principal, id).await {
+        return refusal;
+    }
     match scheduler.answer_missed_run(id, answer).await {
         Ok(()) => match answer {
             MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
@@ -12892,6 +12975,7 @@ async fn answer_missed_schedule(
 /// `GET /api/v1/schedules/:id/runs` — execution history for a schedule.
 async fn list_schedule_runs(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
@@ -12901,6 +12985,11 @@ async fn list_schedule_runs(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     let limit: u32 = params
         .get("limit")
         .and_then(|v: &String| v.parse().ok())
@@ -12938,6 +13027,18 @@ async fn list_upcoming_schedules(
     }
 }
 
+/// A run as anyone listening may see it: a member's reminder says that it ran, not what it said.
+fn household_event(
+    mut event: pond_core::user_data::domain::schedule::ScheduleResultEvent,
+) -> pond_core::user_data::domain::schedule::ScheduleResultEvent {
+    if event.for_member.is_some() {
+        event.schedule_label = PRIVATE_REMINDER_LABEL.to_string();
+        event.result = None;
+        event.error = None;
+    }
+    event
+}
+
 /// `GET /api/v1/schedules/events` — SSE stream of schedule completion events.
 async fn schedule_events_sse(
     State(state): State<Arc<AppState>>,
@@ -12948,7 +13049,7 @@ async fn schedule_events_sse(
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    let data = serde_json::to_string(&household_event(event)).unwrap_or_default();
                     yield Ok(Event::default().data(data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -17331,7 +17432,7 @@ async fn suggestion_groups(state: &Arc<AppState>) -> GroupsKnown {
     }
 }
 
-/// Unpaused schedules due before `until`, and the soonest one's own label.
+/// Unpaused schedules due before `until`, and the soonest one's label as the household sees it.
 async fn suggestion_schedules_before(
     state: &Arc<AppState>,
     now: chrono::DateTime<chrono::Utc>,
@@ -17344,7 +17445,7 @@ async fn suggestion_schedules_before(
     let Ok(all) = scheduler.list_upcoming(50).await else {
         return (0, None);
     };
-    let mut due: Vec<_> = all
+    let mut due: Vec<_> = household_view(all)
         .into_iter()
         .filter(|s| !s.paused)
         .filter_map(|s| s.next_run.map(|at| (at, s.label)))
@@ -22724,6 +22825,30 @@ mod tests {
         assert_eq!(failed.category, "alert");
         assert_eq!(failed.title, "Failed pairing attempt");
         assert_eq!(failed.data, Some(json!({"open": "devices"})));
+    }
+
+    #[test]
+    fn a_reminders_run_is_heard_by_the_household_without_its_words() {
+        use pond_core::user_data::domain::schedule::{RunStatus, ScheduleResultEvent};
+        let run = |for_member: Option<&str>| ScheduleResultEvent {
+            schedule_id: "r".into(),
+            schedule_label: "Take the tablets".into(),
+            run_id: "1".into(),
+            status: RunStatus::Completed,
+            result: Some("Time to take the tablets".into()),
+            error: Some("tablets".into()),
+            duration_ms: Some(5),
+            for_member: for_member.map(str::to_string),
+        };
+
+        let heard = super::household_event(run(Some("liz")));
+        assert_eq!(heard.schedule_label, super::PRIVATE_REMINDER_LABEL);
+        assert_eq!((heard.result, heard.error), (None, None));
+        assert_eq!(heard.schedule_id, "r");
+
+        let household = super::household_event(run(None));
+        assert_eq!(household.schedule_label, "Take the tablets");
+        assert!(household.result.is_some());
     }
 
     /// Only the dashboard's re-pair of its own known row is spared; a phone's id is a claim.

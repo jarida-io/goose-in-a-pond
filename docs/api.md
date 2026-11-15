@@ -420,12 +420,12 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /schedules | token +onb | | All scheduled tasks |
 | POST | /schedules | token +onb | | Create a task |
 | GET | /schedules/upcoming | token +onb | | Active tasks by next fire |
-| PUT | /schedules/{id} | token +onb | | Update a task |
-| DELETE | /schedules/{id} | token +onb | | Delete a task |
-| POST | /schedules/{id}/pause | token +onb | | Pause |
-| POST | /schedules/{id}/resume | token +onb | | Resume |
-| POST | /schedules/{id}/run-now | token +onb | | Fire now |
-| GET | /schedules/{id}/runs | token +onb | | Run history |
+| PUT | /schedules/{id} | token +onb | its member, for a reminder | Update a task |
+| DELETE | /schedules/{id} | token +onb | its member, for a reminder | Delete a task |
+| POST | /schedules/{id}/pause | token +onb | its member, for a reminder | Pause |
+| POST | /schedules/{id}/resume | token +onb | its member, for a reminder | Resume |
+| POST | /schedules/{id}/run-now | token +onb | its member, for a reminder | Fire now |
+| GET | /schedules/{id}/runs | token +onb | its member, for a reminder | Run history |
 | GET | /schedules/events | token +onb | | Completion events (SSE) |
 
 ### Memory, reminders, suggestions and proposals
@@ -1417,8 +1417,13 @@ Every schedule route answers `503 {"error":"scheduler not configured"}` when the
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
 `kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger`,
 `routine {actions}`, where each action is a rule action (`device_power`, `notify`), or
-`member_reminder {profile_id, prompt}`. A `member_reminder` is listed with an empty `prompt`, since
-these routes can't tell who is asking; see
+`member_reminder {profile_id, prompt}`. Every listing, `GET /schedules`, `/schedules/upcoming` and
+the suggestions included, shows a `member_reminder` with an empty `prompt` and the label
+`a private reminder`, since its own label is drawn from its words; `/schedules/events` sends its
+runs with that label and no `result` or `error`. Changing, pausing, resuming, running or answering
+a missed run of a `member_reminder`, or reading its runs, is its member's alone: anyone else, and a
+caller the pond cannot tell apart, gets `403 code: "private_reminder"` (in a household of one
+member, a caller attributed to nobody is that member); see
 [A member's reminder](architecture/scheduling.md#a-members-reminder).
 `cron` is six fields with a leading seconds field.
 
