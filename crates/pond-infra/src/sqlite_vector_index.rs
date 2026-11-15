@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
+use pond_core::context::chunking;
 use pond_core::context::vector_index::{
     Corpus, CorpusHealth, Exclusions, IndexHealth, ResolvedHit, StaleRow, VectorEntry, VectorHit,
     VectorIndex,
@@ -82,17 +83,33 @@ fn known_corpora_sql() -> String {
     format!("corpus IN ({})", names.join(", "))
 }
 
+/// Longest lead-in for a later passage. The lead-in is the row's first line, which is the title in
+/// every chunked corpus.
+const TITLE_CHARS: usize = 120;
+
 /// A passage of `text` by the byte span its vector was made from; the whole text without one.
+/// A later passage starts on a whole word and leads with the row's first line: without the
+/// headline, a story's earlier figures read as its result.
 fn passage(text: &str, span: Option<(i64, i64)>) -> String {
     let Some((start, len)) = span else {
         return text.to_string();
     };
     let start = (start.max(0) as usize).min(text.len());
     let end = ((start as i64 + len.max(0)) as usize).min(text.len());
-    match text.get(start..end) {
+    let start = chunking::word_start(text, start, end);
+    let piece = match text.get(start..end) {
         Some(piece) => piece.to_string(),
         None => String::from_utf8_lossy(&text.as_bytes()[start..end]).into_owned(),
+    };
+    let line = text.lines().next().unwrap_or_default();
+    let (title, title_end) = match chunking::cut_at_word(line, TITLE_CHARS) {
+        Some(head) => (format!("{head}…"), head.len()),
+        None => (line.trim().to_string(), line.len()),
+    };
+    if start < title_end.max(1) || title.is_empty() {
+        return piece;
     }
+    format!("{title}\n… {}", piece.trim_start())
 }
 
 fn vec_to_blob(v: &[f32]) -> Vec<u8> {
@@ -2399,9 +2416,41 @@ mod write_through_tests {
 
         let expected = spans[last].slice(&text).expect("span is on a boundary");
         assert_eq!(
-            hits[0].text, expected,
+            hits[0].text,
+            format!("{title}\n… {}", expected.trim_start()),
             "the resolved passage is not the bytes the chunk described"
         );
+    }
+
+    #[test]
+    fn a_later_passage_leads_with_its_headline_and_a_whole_word() {
+        let text = "Ruto and Sifuna tied at 31% (The Star, 2026-11-10)\nA new poll.\n\
+                    Up from previous figures of 24% for Ruto.";
+        let at = text.find("vious").unwrap() as i64;
+        assert_eq!(
+            passage(text, Some((at, text.len() as i64 - at))),
+            "Ruto and Sifuna tied at 31% (The Star, 2026-11-10)\n… figures of 24% for Ruto."
+        );
+        assert_eq!(
+            passage(text, Some((0, 11))),
+            "Ruto and Si",
+            "the first passage is as cut"
+        );
+        assert_eq!(passage(text, None), text);
+
+        let long = format!(
+            "On 2026-10-22, I replied: {}",
+            "ample words here ".repeat(40)
+        );
+        let at = long.len() as i64 - 30;
+        let shown = passage(&long, Some((at, 30)));
+        let (lead, rest) = shown.split_once('\n').unwrap();
+        assert!(
+            lead.starts_with("On 2026-10-22, I replied:") && lead.ends_with("…"),
+            "{lead}"
+        );
+        assert!(lead.chars().count() <= TITLE_CHARS + 1, "{lead}");
+        assert!(rest.starts_with("… "), "{rest}");
     }
 
     #[tokio::test]

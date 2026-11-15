@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::context::chunking;
 use crate::context::retrieval::CONTEXT_BLOCK_TAG;
 use crate::context::vector_index::{Corpus, Exclusions, ResolvedHit, VectorIndex};
 use crate::models::ports::embedding::EmbeddingProvider;
@@ -66,11 +67,12 @@ pub fn for_turn(mut hits: Vec<Recollection>, floor: f32, limit: usize) -> Vec<Re
     hits
 }
 
-/// One hit as a block line: its provenance, then its text on one line, cut to `max_chars`.
+/// One hit as a block line: its provenance, then its text on one line, cut to `max_chars` at a
+/// word break.
 pub fn turn_line(hit: &Recollection, max_chars: usize) -> String {
     let text = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = match text.char_indices().nth(max_chars) {
-        Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+    let text = match chunking::cut_at_word(&text, max_chars) {
+        Some(head) => format!("{head}…"),
         None => text,
     };
     format!("- ({}) {text}", label(hit.corpus, &hit.row_id))
@@ -316,6 +318,15 @@ mod tests {
             100,
         );
         assert_eq!(line, "- (from a notification I sent) Rain at noon");
+
+        let cut = turn_line(
+            &recollection(Corpus::Story, "s", 0.9, "Ruto and Sifuna tied at 31%"),
+            21,
+        );
+        assert_eq!(
+            cut,
+            "- (from a news story I picked for you) Ruto and Sifuna tied…"
+        );
     }
 
     struct StubIndex(Vec<ResolvedHit>);
