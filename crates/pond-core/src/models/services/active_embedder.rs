@@ -211,6 +211,21 @@ impl ActiveEmbedder {
             .build(model)
             .await
             .and_then(|provider| matches_row(model, provider));
+        // One embed before any turn can use it: a fresh model's first took over 150 ms on the
+        // Orin, past what a turn waits for its query vector.
+        let warm_ms = match &built {
+            Ok(provider) => {
+                let started = std::time::Instant::now();
+                if let Err(e) = provider.embed_query("warm up").await {
+                    tracing::warn!(
+                        model_id = model.model_id,
+                        "warming the embedder failed: {e:#}"
+                    );
+                }
+                Some(started.elapsed().as_millis() as u64)
+            }
+            Err(_) => None,
+        };
 
         let mut inner = self.inner.write().await;
         let mut status = self.status();
@@ -226,7 +241,12 @@ impl ActiveEmbedder {
             Ok(provider) => {
                 let dims = provider.dimensions();
                 *inner = Some(provider);
-                tracing::info!(model_id = model.model_id, dims, "embedding model ready");
+                tracing::info!(
+                    model_id = model.model_id,
+                    dims,
+                    warm_ms,
+                    "embedding model ready"
+                );
                 EmbedderState::Ready {
                     model_id: model.model_id.to_string(),
                     dims,
