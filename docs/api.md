@@ -22,6 +22,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [System and diagnostics](#system-and-diagnostics)
 - [Pairing and tokens](#pairing-and-tokens)
 - [Onboarding](#onboarding)
+- [Factory reset](#factory-reset)
 - [Connections and setup card](#connections-and-setup-card)
 - [Settings](#settings)
 - [Chat and runs](#chat-and-runs)
@@ -141,6 +142,7 @@ The route summary's "Also" column names these.
 | member | The caller's paired device is attributed to a household member | `403`; another member's record reads as `404` |
 | unlocked | A member's device that unlocked My Pond with the admin card in the last 15 minutes ([pond administrator](architecture/pond-administrator.md)) | `403 admin_members_only`, `403 admin_locked` |
 | changer | The host credential, the device that claimed the pond, or a member's device (`connection_changes`) | `403 not_allowed` |
+| main member | The host credential, the pairing lock's main member's device, or a member's device with My Pond unlocked (`factory_reset_authority`); a household role alone never counts | `403 factory_reset_main_member_only` |
 | run owner | Only the device that started the run; unknown and not-yours are the same `404` | `404 unknown run` |
 | internal | The internal extension token as the bearer | `401` |
 | scoped | Results are scoped to the member the caller resolves to (`session_id` query plus the caller's device) | narrower results, or `403` for a write |
@@ -585,6 +587,8 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | GET | /admin/power | token +onb | unlocked | Power mode, modes, supply and battery |
 | PUT | /admin/power/mode | token +onb | unlocked | Switch power mode |
 | POST | /admin/power/restart | token +onb | unlocked | Restart the computer; waits for `force` while a long task runs |
+| POST | /admin/factory-reset | token | main member | Erase the household and reopen onboarding ([factory reset](#factory-reset)) |
+| GET | /admin/factory-reset/status | token | | The step a running reset has reached |
 
 ### Faces
 
@@ -862,6 +866,55 @@ there is logged (`kind="owner_attribution_failed"`) and does not change the answ
 
 A claimed pond that has lost every token is not stuck: the host can still issue a pairing code, and
 `pond-server setup-code --rearm` makes it unclaimed again.
+
+## Factory reset
+
+`POST /admin/factory-reset {pond_name}` erases the household and reopens onboarding; the journey
+is `FactoryResetService` (`crates/pond-core/src/network/services/factory_reset.rs`).
+
+**Who.** A token, and then one of: the host credential (the desktop on the pond's own host), a
+device attributed to the pairing lock's main member, or a member's device whose My Pond unlock is
+live. Anyone else gets `403 factory_reset_main_member_only`, whatever role the household gave
+them. `pond_name` must equal the pond's name exactly; it guards against a slip, not a person.
+
+**Refusals,** before anything is touched: `409 pond_has_no_name` (an unnamed pond has nothing to
+type), `409 pond_name_mismatch`, `409 payments_held` (a peer holds mesh credit, or the ledger
+cannot be read), `409 factory_reset_in_progress` (one reset at a time), `503
+factory_reset_unavailable`.
+
+**Steps,** each reported to `GET /admin/factory-reset/status` as `current_step`:
+
+| Step | What happens |
+|---|---|
+| `exporting` | Every schedule is read for the answer. Another member's private reminder (`member_reminder`) is left out; the caller's own are kept, and the host gets none |
+| `pausing` | Background model work, room voice and every schedule stop; the reset waits up to 30 s for turns and lane work already running |
+| `notifying_household` | Each member's own devices are told, in that member's language |
+| `revoking_devices` | Every device's tokens are revoked, its remote access queued for revocation, and it is unregistered |
+| `erasing_data` | Every schedule is deleted with its runs, then the household's files, the engine's session store, stored secrets, `pond_logs.db`'s household tables, `pond_vectors.db`, and last `pond_system.db`, whose pairing lock goes back to a fresh install's: no main member, no recovery PIN |
+| `speaking_goodbye` | The pond says goodbye and re-arms its setup card |
+| `reopening_onboarding` | Onboarding restarts at `Welcome` |
+| `forgetting_wifi` | The host's Wi-Fi station is asked to forget its saved networks, best effort. Today the shared station refuses (`unsupported`, logged), so saved networks stay |
+
+The household's files are, under the data directory: `attachments/`, `snapshots/`, `memory/`,
+`audio/`, `report-images/`, `news-audio/`, `engine/data/prompt-cache/`,
+`engine/data/litert-lm/kv-snapshots/`, `engine/state/logs/`, `schedules.json`,
+`schedule_runs.json` and set-aside `schedules.json.unreadable-*` files. Folders are emptied, not
+removed, and no symlink is followed out of the data directory. Models, `secrets/master.key`, the
+TLS identity, the setup and admin cards, prompt templates and the pond's own logs (`logs/`) stay.
+A table in `pond_system.db` or `pond_logs.db` with no rule in `db.rs` stops the reset before it
+erases anything.
+
+**Answers.** `200 {routines}` once every step has run. A failure in `erasing_data` or
+`reopening_onboarding` answers `500 {error: "factory_reset_failed", step, reason, routines}`: the
+reset stops there, schedules it paused and did not delete fire again, and Wi-Fi is kept. After a
+failed `erasing_data` onboarding is as it was and, since `pond_system.db` is erased last, the
+pond's name is still there for the reset to run again; after a failed `reopening_onboarding` the
+household is gone and `POST /onboard/reset` from the host reopens setup. Notifying, revoking, the
+goodbye and the Wi-Fi are best effort.
+
+The reset runs as its own task: a caller that disconnects does not stop it. While it runs, every
+`/api/` request except the reset's own two routes and `GET /health` answers
+`503 {error: "pond_resetting"}`.
 
 ## Connections and setup card
 
