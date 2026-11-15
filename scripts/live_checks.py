@@ -27,6 +27,8 @@ OPEN_METEO_REFUSAL = re.compile(r"outbound request to (?:[a-z-]+\.)?open-meteo\.
 # Match the destination in the refusal reason, not a hostname embedded in another field.
 APPLE_PLAYER_REFUSAL = re.compile(r"refused an outbound request to js-cdn\.music\.apple\.com:")
 
+# The speaker model's pinned checksum, pond_core::models::domain::voice_match_model::SHA256.
+VOICE_MATCH_SHA256 = "7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068"
 DATA_DIR = os.environ.get("POND_DATA_DIR", "/tmp/pond-live")
 DB = os.path.join(DATA_DIR, "pond_system.db")
 PORT_FILE = os.path.join(DATA_DIR, ".runtime_api_port")
@@ -741,14 +743,17 @@ def section_audio_devices():
         expect("mic switched back on", code, 200, body)
 
 
-def _post_audio(path, audio):
-    """POST one multipart `audio` field from bytes, as a phone sends a segment."""
+def _post_audio(path, audio, fields=()):
+    """POST one multipart `audio` field from bytes, as a phone sends a segment, plus any `fields`."""
     with tempfile.NamedTemporaryFile(suffix=".wav") as fh:
         fh.write(audio)
         fh.flush()
         url = "http://127.0.0.1:%s%s" % (api_port(), path)
         cmd = ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", "-F",
-               "audio=@%s;type=audio/wav" % fh.name, url]
+               "audio=@%s;type=audio/wav" % fh.name]
+        for name, value in fields:
+            cmd += ["-F", "%s=%s" % (name, value)]
+        cmd.append(url)
         out = subprocess.run(cmd, capture_output=True, text=True).stdout
     raw, _, code = out.rpartition("\n")
     try:
@@ -787,6 +792,27 @@ def section_wake_check():
 
     code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(12))
     expect("a segment longer than the ear cuts is refused", code, 413, body)
+
+    code, body = _post_audio("/api/v1/voice/wake/check", _silent_wav(1), [("phrase_only", "true")])
+    if code == 503:
+        expect("a whole-phrase wake check with no speech recognition says so", code, 503, body)
+    else:
+        expect("a whole-phrase wake check answers a verdict", code, 200, body,
+               ("only heard and phrase", isinstance(body, dict) and sorted(body) == ["heard", "phrase"]),
+               ("silence is no wake", isinstance(body, dict) and body.get("heard") is False))
+
+    # The speaker model a phone fetches: a scratch pond may still be downloading it, or lack Voice
+    # Match; either is said by name. The bytes are 26 MB, so only the status and headers are read.
+    url = "http://127.0.0.1:%s/api/v1/voice/prints/model/file" % api_port()
+    out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-D", "-", url],
+                         capture_output=True, text=True).stdout
+    status = int(out.split()[1]) if out.startswith("HTTP/") else 0
+    if status == 200:
+        expect("the ready speaker model comes with its pinned checksum", status, 200, out,
+               ("checksum", "x-model-sha256: " + VOICE_MATCH_SHA256 in out.lower()))
+    else:
+        expect("a speaker model that is not ready is refused by name", status,
+               409 if status == 409 else 503, out)
 
 
 def section_audio_devices_after_restart():
