@@ -69,6 +69,12 @@ sees it as `<extension>__<tool>`.
 | `giap-context` | `context.rs` | off | `search_context`, `recall`, `get_recent_context` |
 | `giap-orchestrator` | `orchestrator.rs` | off | `delegate`, `check_task` |
 
+The device tools name a device's kind in words, never by its stored type code:
+`device_type_label` in pond-core turns `gotg` into "phone running the Goose On The Go companion
+app" and `desktop` into "Pond desktop app or browser dashboard". A bare code let the model guess,
+and a paired phone was called a smart hub. The devices card data carries both: `device_type` as
+stored and `kind_label` for display.
+
 Modules without tools: `audio.rs` (device-name resolution behind `set_audio_device`), `secrets.rs`
 (key lookup and per-turn withholding), `session_meta.rs` (the GIAP session id from a request's
 `_meta`), `dispatcher.rs`, `format.rs`, `http.rs`, `prefix_oracle.rs`. `format.rs` holds a test that
