@@ -1,5 +1,6 @@
 import { useCallback, useState, useEffect } from "react";
-import { Button, Separator, Switch } from "@heroui/react";
+import { Button, Separator } from "@heroui/react";
+import { Switch } from "../components/Switch";
 import {
   Monitor, Cpu, Activity, Power, Settings, Plus, X, Radio, Smartphone,
   Lightbulb, Lock, Thermometer, Fan, Blinds, RefreshCw, Pencil, Trash2,
@@ -550,13 +551,12 @@ export function Devices() {
                   <>
                     <span className="room-section__guest">
                       <Switch
-                        aria-label={`Let a guest use devices in ${room.name}`}
-                        isSelected={room.guest_accessible}
-                        isDisabled={guestAccessBusy === room.id}
-                        onChange={() => handleToggleGuestAccess(room, !room.guest_accessible)}
-                      >
-                        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                      </Switch>
+                        size="sm"
+                        label={`Let a guest use devices in ${room.name}`}
+                        checked={room.guest_accessible}
+                        disabled={guestAccessBusy === room.id}
+                        onChange={(next) => handleToggleGuestAccess(room, next)}
+                      />
                       Guest access
                     </span>
                     <div className="room-section__actions">

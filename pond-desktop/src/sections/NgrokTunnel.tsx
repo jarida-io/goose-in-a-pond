@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Switch } from '@heroui/react';
+import { Button } from '@heroui/react';
+import { Switch } from '../components/Switch';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/PondApiClient';
 import { ApiError, type NgrokTunnelConfig, type NgrokTunnelState } from '../api/types';
@@ -137,13 +138,11 @@ export function NgrokTunnel({ onStarted, onStopped }: { onStarted?: () => void; 
         <span role="status" style={hint}>{tunnel?.tokenSet || on ? statusText : t('tunnel.needsToken')}</span>
       </div>
       <Switch
-        aria-label={t('remote.toggleLabel')}
-        isSelected={on}
-        isDisabled={busy || (!on && !tunnel?.tokenSet)}
-        onChange={(next: boolean) => void setEnabled(next)}
-      >
-        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-      </Switch>
+        label={t('remote.toggleLabel')}
+        checked={on}
+        disabled={busy || (!on && !tunnel?.tokenSet)}
+        onChange={(next) => void setEnabled(next)}
+      />
     </div>
     {!on && <p style={{ ...hint, margin: 0 }}>{t('tunnel.replacesTailnet')}</p>}
     {error && <p role="alert" style={{ margin: 0 }}>{error}</p>}

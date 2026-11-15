@@ -105,7 +105,7 @@ describe("Hub voice settings — thinking tone", () => {
 
 function gpuSpeechSwitch(): HTMLButtonElement {
   const row = screen.getByText("Faster long speech").closest(".srow");
-  const btn = row?.querySelector("button.htoggle");
+  const btn = row?.querySelector('button[role="switch"]');
   if (!btn) throw new Error("faster long speech row has no switch");
   return btn as HTMLButtonElement;
 }
@@ -115,7 +115,7 @@ describe("Hub voice settings \u2014 faster long speech", () => {
     vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
     await renderVoice();
 
-    expect(gpuSpeechSwitch().getAttribute("aria-pressed")).toBe("true");
+    expect(gpuSpeechSwitch().getAttribute("aria-checked")).toBe("true");
   });
 
   it("draws OFF when the stored setting is off", async () => {
@@ -125,7 +125,7 @@ describe("Hub voice settings \u2014 faster long speech", () => {
     await renderVoice();
 
     await waitFor(() => {
-      expect(gpuSpeechSwitch().getAttribute("aria-pressed")).toBe("false");
+      expect(gpuSpeechSwitch().getAttribute("aria-checked")).toBe("false");
     });
   });
 

@@ -70,7 +70,7 @@ describe("NgrokTunnel", () => {
     await waitFor(() => expect(api.configureNgrokTunnel).toHaveBeenCalledWith({ enabled: true, endpoint: "tcp" }));
     expect(await screen.findByText("Phones can reach this Pond at 4.tcp.eu.ngrok.io:12345.")).toBeTruthy();
     expect(started).toHaveBeenCalled();
-    expect((screen.getByRole("switch", { name: "Reach this Pond from outside your home" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("switch", { name: "Reach this Pond from outside your home" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("asks for the reserved domain when the endpoint is TLS", async () => {

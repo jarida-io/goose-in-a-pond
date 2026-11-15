@@ -409,14 +409,14 @@ describe("Devices section — rooms", () => {
 
     const toggle = screen.getByRole("switch", {
       name: /let a guest use devices in living room/i,
-    }) as HTMLInputElement;
+    });
     fireEvent.click(toggle);
 
     await waitFor(() =>
       expect(api.setRoomGuestAccess).toHaveBeenCalledWith(livingRoom.id, true),
     );
     // Reverted: the call failed, so the switch should read as it did before the click.
-    await waitFor(() => expect(toggle.checked).toBe(false));
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
   });
 
   it("deleting a room asks for confirmation, then calls deleteRoom", async () => {
