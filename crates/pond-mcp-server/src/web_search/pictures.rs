@@ -22,8 +22,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    brave_client, brave_key, brave_query, defang, describe_failure, domain_of, echo, plain_text,
-    sanitize, text_result, without_urls, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS,
+    brave_client, brave_key, brave_query, defang, describe_failure, domain_of, echo, has_screen,
+    plain_text, sanitize, text_result, without_urls, BRAVE_MAX_QUERY_CHARS, BRAVE_MAX_QUERY_WORDS,
     MAX_TITLE_BYTES,
 };
 use crate::format::{format_api_error, format_dead_end};
@@ -77,10 +77,15 @@ Show the user pictures from the web of what they want to see: a place, an animal
 dish, a product. The pictures appear on their screen; you will not see them.")]
     async fn show_pictures(
         &self,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
         params: Parameters<ShowPicturesParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool(TOOL_NAME);
+        // A spoken turn or a helper is never offered this tool; a search would spend the key on
+        // no one.
+        if !has_screen(&ctx.meta) {
+            return Ok(text_result(&no_screen()));
+        }
         let request = resolve_request(&params.0);
         if request.is_empty() {
             return Ok(text_result(
@@ -108,6 +113,13 @@ fn not_set_up() -> String {
     format_dead_end(
         "pictures for this request",
         "Web search is not set up on this pond.",
+    )
+}
+
+fn no_screen() -> String {
+    format_dead_end(
+        "pictures for this request",
+        "Nobody is looking at a screen in this conversation.",
     )
 }
 

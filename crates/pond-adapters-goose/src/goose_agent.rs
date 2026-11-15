@@ -3899,6 +3899,7 @@ impl GooseAdapter {
         // this handle live, so a group enabled mid-turn is admitted at once.
         let session_controls = self.shim_controls.session(&goose_sid);
         session_controls.set_allowed_tools(allowed_tools.clone());
+        pond_core::mcp::services::screenless_sessions::global().set(&goose_sid, is_voice);
         // A failure recorded in an earlier turn is not this one's; this turn's calls record anew.
         session_controls.note_provider_outcome(None);
 
@@ -6214,11 +6215,19 @@ impl pond_core::mcp::ports::tools::tool_selection_control::ToolSelectionControl 
                 );
                 return Err(ToolSelectionError::NotReady(group.to_string()));
             }
-            // Widening a group must not hand back a tool the turn withheld for its missing key.
-            let withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
+            // Widening a group must not hand back a tool the turn withheld for its missing key, or
+            // for wanting a screen the turn has not got.
+            let mut withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
                 newly_allowed.iter().map(String::as_str),
             )
             .await;
+            if pond_core::mcp::services::screenless_sessions::global().is_screenless(&goose_sid) {
+                withheld.extend(
+                    pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                        .iter()
+                        .map(|tool| tool.to_string()),
+                );
+            }
             self.shim_controls
                 .session(&goose_sid)
                 .extend_allowed_tools(newly_allowed.into_iter().filter(|t| !withheld.contains(t)));
@@ -7104,7 +7113,8 @@ mod tests {
         assert!(!args.contains("voice_instance"), "{args}");
     }
 
-    /// A voice turn has no screen, so its screen-only tools join the withheld set, and only then.
+    /// A voice turn has no screen, so its screen-only tools join the withheld set, and only then;
+    /// a widen later in the turn must not hand them back.
     #[test]
     fn a_voice_turn_withholds_the_screen_only_tools_before_the_gate() {
         let lines = stream_body_code();
@@ -7124,6 +7134,18 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("if is_voice")),
             "only a voice turn loses them"
+        );
+        let screenless = at("screenless_sessions::global().set(&goose_sid, is_voice)");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        assert!(
+            allow_set < screenless && screenless - allow_set <= 3,
+            "the tools read the turn's screen as the allow-set is published"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("screenless_sessions::global().is_screenless(&goose_sid)")),
+            "enable_group must read the turn's screen"
         );
     }
 

@@ -93,6 +93,17 @@ fn web_count(reach: Reach) -> usize {
     RESULT_COUNT.max(reach.sources).min(BRAVE_WEB_MAX_COUNT)
 }
 
+/// Whether the session behind this call can show a card: a spoken turn's and a helper's results
+/// reach no screen.
+fn has_screen(meta: &rmcp::model::RequestMetaObject) -> bool {
+    use pond_core::mcp::services::screenless_sessions;
+    use pond_core::shared::services::child_sessions::process_child_sessions;
+    crate::session_from_meta(meta).is_none_or(|session| {
+        !screenless_sessions::global().is_screenless(&session)
+            && process_child_sessions().parent_of(&session).is_none()
+    })
+}
+
 /// Brave's own limits on `q` for web search.
 const BRAVE_MAX_QUERY_CHARS: usize = 400;
 const BRAVE_MAX_QUERY_WORDS: usize = 50;
@@ -4038,6 +4049,30 @@ mod tests {
             vec![CONTEXT_PATH.to_string(), SEARCH_PATH.to_string()],
             "one of each, and no page read"
         );
+    }
+
+    #[test]
+    fn a_spoken_turn_and_a_helper_have_no_screen() {
+        use pond_core::mcp::services::screenless_sessions;
+        use pond_core::shared::services::child_sessions::process_child_sessions;
+        use pond_core::user_data::domain::profile::ProfileScope;
+        let meta = |session: &str| {
+            let mut m = rmcp::model::RequestMetaObject::new();
+            m.0.insert(
+                crate::SESSION_ID_META_KEY.to_string(),
+                Value::String(session.to_string()),
+            );
+            m
+        };
+        let _helper =
+            process_child_sessions().bind("engine-screenless", "root", ProfileScope::Household);
+        assert!(!has_screen(&meta("engine-screenless")));
+        screenless_sessions::global().set("engine-spoken", true);
+        assert!(!has_screen(&meta("engine-spoken")));
+        screenless_sessions::global().set("engine-spoken", false);
+        assert!(has_screen(&meta("engine-spoken")), "a typed turn after it");
+        assert!(has_screen(&meta("20261115_2")));
+        assert!(has_screen(&rmcp::model::RequestMetaObject::new()));
     }
 
     /// The fallback's search answers from Brave's snippets alone (no page client).

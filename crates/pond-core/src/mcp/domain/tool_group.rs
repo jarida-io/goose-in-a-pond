@@ -217,8 +217,8 @@ pub const SEARCH_WEB_TOOL: &str = "giap-knowledge__search_web";
 /// Prefixed name of the tool that puts pictures from the web on the user's screen.
 pub const SHOW_PICTURES_TOOL: &str = "giap-knowledge__show_pictures";
 
-/// Tools whose whole result is for the user's screen. A voice turn has no screen to show it on,
-/// so it is not offered them.
+/// Tools whose whole result is for the user's screen. A voice turn and a helper have no screen to
+/// show it on, so neither is offered them.
 pub const SCREEN_ONLY_TOOLS: &[&str] = &[SHOW_PICTURES_TOOL];
 
 /// Secret-store key holding the household's Brave Search API key.
