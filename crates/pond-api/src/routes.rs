@@ -10149,10 +10149,14 @@ async fn update_profile_prefs(
     })))
 }
 
+/// `DELETE /api/v1/profiles/{id}` — owner-only, since it erases the member's data; the owner
+/// themselves is refused until they hand the main member's seat on.
 async fn delete_profile(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
     let profile = state
         .profile_repo
         .get(&id)
@@ -10170,25 +10174,14 @@ async fn delete_profile(
             )
         })?;
 
-    // The last-owner guard also applies to deletion, not just demotion: either one would leave
-    // the household with no owner.
-    if profile.role == pond_core::user_data::domain::profile::Role::Owner {
-        let profiles = state.profile_repo.list().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-        let owners = profiles
-            .iter()
-            .filter(|p| p.role == pond_core::user_data::domain::profile::Role::Owner)
-            .count();
-        if owners <= 1 {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "this household would be left with no owner"})),
-            ));
-        }
+    if crate::pairing_lock::seated_role(&state, &id, profile.role).await == Role::Owner {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this household would be left with no owner; make another member \
+                          the owner first",
+            })),
+        ));
     }
 
     // Count before deleting: most `profile_id` foreign keys cascade.

@@ -1,5 +1,8 @@
 //! Agent-data `/api/v1` routes over a tempdir SQLite database.
 
+#[path = "support/household.rs"]
+mod household;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -1880,17 +1883,14 @@ async fn an_empty_profile_id_is_rejected() {
 
 #[tokio::test]
 async fn deleting_a_member_reports_what_went_and_what_stayed() {
-    let (app, storage, _tmp) = make_app_with_sessions().await;
+    let h = household::household().await;
+    let storage = h.state.session_storage.clone();
     storage.create_session("sess-1".to_string()).await.unwrap();
-    // The first profile in an empty household becomes its owner, and the last owner can't be
-    // deleted -- seed one ahead of Jerry so deleting him isn't refused on that ground.
-    seed_profile(&app, "Liz").await;
-    let jerry = seed_profile(&app, "Jerry").await;
     storage
         .set_session_identity(
             "sess-1",
             &SessionIdentity {
-                profile_id: Some(jerry.clone()),
+                profile_id: Some(h.liz.clone()),
                 source: IdentificationSource::Explicit,
                 confidence: None,
             },
@@ -1898,16 +1898,18 @@ async fn deleting_a_member_reports_what_went_and_what_stayed() {
         .await
         .unwrap();
 
-    let body = body_json(
-        app.clone()
-            .oneshot(delete(&format!("/api/v1/profiles/{jerry}")))
-            .await
-            .unwrap(),
-    )
-    .await;
+    let (status, body) = h
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/profiles/{}", h.liz),
+            household::JERRY,
+            None,
+        )
+        .await;
 
-    assert_eq!(body["profile_id"], jerry);
-    assert_eq!(body["display_name"], "Jerry");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["profile_id"], h.liz.as_str());
+    assert_eq!(body["display_name"], "Liz");
     // Sessions are released, never deleted: a conversation is not solely the speaker's.
     assert_eq!(body["released"]["sessions"], 1);
     // Type only: the mock memory repo always counts 0; pond-infra covers the real count.
@@ -1931,32 +1933,31 @@ async fn deleting_a_member_who_does_not_exist_is_404() {
 /// `settings.primary_profile_id` is a key-value row, not a foreign key, so no cascade reaches it.
 #[tokio::test]
 async fn deleting_the_primary_member_clears_the_setting_that_named_them() {
-    let (app, _storage, _tmp) = make_app_with_sessions().await;
-    // The first profile in an empty household becomes its owner, and the last owner can't be
-    // deleted -- seed one ahead of Jerry so deleting him isn't refused on that ground.
-    seed_profile(&app, "Liz").await;
-    let jerry = seed_profile(&app, "Jerry").await;
-
-    let resp = app
-        .clone()
-        .oneshot(put(
+    let h = household::household().await;
+    let (status, body) = h
+        .send(
+            Method::PUT,
             "/api/v1/settings",
-            serde_json::json!({ "primary_profile_id": jerry }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "settings write failed");
+            household::JERRY,
+            Some(serde_json::json!({ "primary_profile_id": h.liz })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "settings write failed: {body}");
 
-    let body = body_json(
-        app.clone()
-            .oneshot(delete(&format!("/api/v1/profiles/{jerry}")))
-            .await
-            .unwrap(),
-    )
-    .await;
+    let (status, body) = h
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/profiles/{}", h.liz),
+            household::JERRY,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["cleared_primary_profile"], true);
 
-    let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
+    let (_, settings) = h
+        .send(Method::GET, "/api/v1/settings", household::JERRY, None)
+        .await;
     let dangling = settings["primary_profile_id"].as_str().unwrap_or("");
     assert!(
         dangling.is_empty(),
@@ -1966,29 +1967,23 @@ async fn deleting_the_primary_member_clears_the_setting_that_named_them() {
 
 #[tokio::test]
 async fn deleting_someone_else_does_not_touch_the_primary_setting() {
-    let (app, _storage, _tmp) = make_app_with_sessions().await;
-    let jerry = seed_profile(&app, "Jerry").await;
-    let liz = seed_profile(&app, "Liz").await;
+    let h = household::household().await;
 
-    app.clone()
-        .oneshot(put(
-            "/api/v1/settings",
-            serde_json::json!({ "primary_profile_id": jerry }),
-        ))
-        .await
-        .unwrap();
-
-    let body = body_json(
-        app.clone()
-            .oneshot(delete(&format!("/api/v1/profiles/{liz}")))
-            .await
-            .unwrap(),
-    )
-    .await;
+    let (status, body) = h
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/profiles/{}", h.liz),
+            household::JERRY,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["cleared_primary_profile"], false);
 
-    let settings = body_json(app.oneshot(get("/api/v1/settings")).await.unwrap()).await;
-    assert_eq!(settings["primary_profile_id"], jerry);
+    let (_, settings) = h
+        .send(Method::GET, "/api/v1/settings", household::JERRY, None)
+        .await;
+    assert_eq!(settings["primary_profile_id"], h.jerry.as_str());
 }
 
 /// A household on 2026-10-27 typed its owner's display name into a free-text "Household profile"

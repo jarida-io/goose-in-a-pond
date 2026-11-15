@@ -85,7 +85,11 @@ async fn handing_the_main_members_seat_on_hands_the_owner_role_with_it() {
             Some(json!({"role": "member"})),
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "the old owner manages no roles");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the old owner manages no roles"
+    );
     let (status, body) = h
         .send(
             Method::PUT,
@@ -113,7 +117,11 @@ async fn naming_another_owner_hands_the_main_members_seat_on() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["role"], "owner", "{body}");
     assert_eq!(h.main_member().await.as_deref(), Some(h.liz.as_str()));
-    assert_eq!(h.role_of(&h.jerry).await, Role::Member, "one owner, never two");
+    assert_eq!(
+        h.role_of(&h.jerry).await,
+        Role::Member,
+        "one owner, never two"
+    );
 }
 
 #[tokio::test]
@@ -152,4 +160,37 @@ async fn a_stale_owner_role_grants_nothing_once_the_seat_has_moved() {
         .await;
 
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+#[tokio::test]
+async fn only_the_owner_removes_a_member() {
+    let h = household().await;
+    let delete = |id: &str| format!("/api/v1/profiles/{id}");
+
+    let (status, body) = h.send(Method::DELETE, &delete(&h.liz), ADA, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a guest: {body}");
+    let (status, body) = h.send(Method::DELETE, &delete(&h.ada), LIZ, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a member: {body}");
+    assert_eq!(h.role_of(&h.liz).await, Role::Member, "Liz is still here");
+    assert_eq!(h.role_of(&h.ada).await, Role::Guest, "Ada is still here");
+
+    let (status, body) = h.send(Method::DELETE, &delete(&h.ada), JERRY, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn the_owner_is_not_removed_until_the_seat_is_handed_on() {
+    let h = household().await;
+
+    let (status, body) = h
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/profiles/{}", h.jerry),
+            JERRY,
+            None,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(h.role_of(&h.jerry).await, Role::Owner);
 }

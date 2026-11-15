@@ -69,12 +69,10 @@ async fn pond() -> Pond {
         .unwrap()
         .id;
     let api_port = state.api_port;
-    let handshake = Arc::new(pond_infra::mock_handshake::MockHandshake::new());
-    handshake.add_valid_token("desktop-token".to_string()).await;
     let state = Arc::new(pond_api::AppState {
         secret_repo: Some(secrets.clone()),
-        // The desktop's own paired token; the real handshake's pairing is not what is under test.
-        handshake,
+        // The real handshake's pairing is not what is under test.
+        handshake: Arc::new(Tokens),
         ..state
     });
     let dist = std::path::PathBuf::from("pond-desktop/dist");
@@ -97,8 +95,93 @@ async fn pond() -> Pond {
     }
 }
 
+/// The desktop's own paired token, which names no device, and the owner's phone's.
+struct Tokens;
+
+const OWNER_TOKEN: &str = "owner-token";
+const OWNER_PHONE: &str = "owner-phone";
+
+#[async_trait::async_trait]
+impl pond_core::security::ports::handshake::Handshake for Tokens {
+    async fn handshake(
+        &self,
+        _: pond_core::security::ports::handshake::HandshakeRequest,
+    ) -> anyhow::Result<pond_core::security::ports::handshake::HandshakeResponse> {
+        anyhow::bail!("pairing is not used here")
+    }
+    async fn validate_token(&self, token: &str) -> anyhow::Result<bool> {
+        Ok(token == "desktop-token" || token == OWNER_TOKEN)
+    }
+    async fn caller_for_token(
+        &self,
+        token: &str,
+    ) -> anyhow::Result<Option<pond_core::security::ports::handshake::TokenCaller>> {
+        Ok(
+            (token == OWNER_TOKEN).then(|| pond_core::security::ports::handshake::TokenCaller {
+                client_id: OWNER_PHONE.into(),
+                device_id: OWNER_PHONE.into(),
+            }),
+        )
+    }
+    async fn revoke_device(&self, _: &str) -> anyhow::Result<u64> {
+        Ok(0)
+    }
+    async fn revoke_token(&self, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Jerry joins as the household's owner, with the phone `OWNER_TOKEN` names, so the member can be
+/// deleted by someone allowed to.
+async fn seat_an_owner(p: &Pond) {
+    use pond_core::user_data::ports::device_attribution::DeviceAttribution;
+    use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
+    let jerry = p
+        .state
+        .profile_repo
+        .create(CreateProfileRequest {
+            display_name: "Jerry".to_string(),
+            avatar_emoji: "Y".to_string(),
+        })
+        .await
+        .unwrap()
+        .id;
+    p.state
+        .profile_repo
+        .hand_ownership_to(&jerry)
+        .await
+        .unwrap();
+    p.state
+        .device_registry
+        .register(RegisterDeviceRequest {
+            id: Some(OWNER_PHONE.into()),
+            name: "Jerry's phone".into(),
+            device_type: "gotg".into(),
+            hostname: None,
+            capabilities: vec![],
+            room_id: None,
+        })
+        .await
+        .unwrap();
+    pond_infra::sqlite_device_attribution::SqliteDeviceAttribution::new(p.state.db.system.clone())
+        .set_device_profile(OWNER_PHONE, Some(&jerry))
+        .await
+        .unwrap();
+}
+
 async fn call(
     router: &axum::Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    with_credential: bool,
+) -> (StatusCode, String) {
+    call_as(router, "desktop-token", method, uri, body, with_credential).await
+}
+
+async fn call_as(
+    router: &axum::Router,
+    token: &str,
     method: Method,
     uri: &str,
     body: Option<Value>,
@@ -107,7 +190,7 @@ async fn call(
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
-        .header("Authorization", "Bearer desktop-token");
+        .header("Authorization", format!("Bearer {token}"));
     if with_credential {
         req = req.header(pond_api::host_guard::CREDENTIAL_HEADER, CREDENTIAL.as_str());
     }
@@ -481,8 +564,9 @@ async fn start_sign_in(p: &Pond) -> String {
 }
 
 async fn delete_member(p: &Pond) -> Value {
-    let (status, body) = call(
+    let (status, body) = call_as(
         &p.loopback,
+        OWNER_TOKEN,
         Method::DELETE,
         &format!("/api/v1/profiles/{}", p.member),
         None,
@@ -499,25 +583,7 @@ async fn deleting_a_member_forgets_their_uber_sign_in() {
     let service = credentials_service().await;
     let _at = CredentialsAt::set(&service.uri());
     let p = pond().await;
-    // The only profile in an empty household is its owner, and the last owner can't be deleted
-    // -- seed a second owner so deleting the member isn't refused on that ground.
-    {
-        use pond_core::user_data::domain::profile::Role;
-        let jerry = p
-            .state
-            .profile_repo
-            .create(CreateProfileRequest {
-                display_name: "Jerry".to_string(),
-                avatar_emoji: "Y".to_string(),
-            })
-            .await
-            .unwrap();
-        p.state
-            .profile_repo
-            .set_role(&jerry.id, Role::Owner, None)
-            .await
-            .unwrap();
-    }
+    seat_an_owner(&p).await;
 
     let nonce = start_sign_in(&p).await;
     let (_, page) = call(
@@ -559,25 +625,7 @@ async fn a_sign_in_that_outlives_its_member_keeps_nothing() {
         .await;
     let _at = CredentialsAt::set(&service.uri());
     let p = pond().await;
-    // The only profile in an empty household is its owner, and the last owner can't be deleted
-    // -- seed a second owner so deleting the member isn't refused on that ground.
-    {
-        use pond_core::user_data::domain::profile::Role;
-        let jerry = p
-            .state
-            .profile_repo
-            .create(CreateProfileRequest {
-                display_name: "Jerry".to_string(),
-                avatar_emoji: "Y".to_string(),
-            })
-            .await
-            .unwrap();
-        p.state
-            .profile_repo
-            .set_role(&jerry.id, Role::Owner, None)
-            .await
-            .unwrap();
-    }
+    seat_an_owner(&p).await;
 
     let nonce = start_sign_in(&p).await;
     let returning = tokio::spawn({

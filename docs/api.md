@@ -348,7 +348,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | PATCH | /profiles/{id} | wizard | | Merge preference keys |
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
-| DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| DELETE | /profiles/{id} | token +onb | owner | Remove a member, report what went with them |
+| PUT | /profiles/{id}/role | token +onb | owner | Set a member's role; `owner` hands the main member's seat on |
 | GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
 | PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
 | DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
@@ -1168,7 +1169,8 @@ nothing.
 | `PATCH /profiles/{id}` | `{preferences: {key: value}}`, merged | `{id, display_name, preferences, updated_at}` |
 | `GET /profiles` | | `{profiles: [...]}` |
 | `GET /profiles/{id}` | | the profile, or `404` |
-| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
+| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}`; `403` unless the caller is the owner; `409` for the owner, who hands the seat on first |
+| `PUT /profiles/{id}/role` | `{role, guest_until?}` | the profile; `403` unless the caller is the owner; `409` to give the owner any other role |
 
 Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
 interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
