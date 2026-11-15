@@ -750,9 +750,10 @@ fn llm_context_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::
         LLM_CONTEXT_MAX_QUERY_WORDS,
         LLM_CONTEXT_MAX_QUERY_CHARS,
     );
-    let count = LLM_CONTEXT_COUNT.max(reach.sources).to_string();
-    let urls = reach.sources.to_string();
-    let tokens = reach.context_tokens.to_string();
+    // Brave's documented ranges; a value outside them is refused and the turn falls back.
+    let count = LLM_CONTEXT_COUNT.max(reach.sources).clamp(1, 50).to_string();
+    let urls = reach.sources.clamp(1, 50).to_string();
+    let tokens = reach.context_tokens.clamp(1024, 32_768).to_string();
     let per_url = LLM_CONTEXT_MAX_TOKENS_PER_URL.to_string();
     reqwest::Url::parse_with_params(
         &format!("{}{BRAVE_LLM_CONTEXT_PATH}", base.trim_end_matches('/')),
@@ -1842,16 +1843,36 @@ fn choose_passages(
             firsts.push((index, source));
         }
     }
-    let share = budget.saturating_sub(used) / firsts.len().max(1);
+    // Water-filled: a source whose best passage is short leaves its unused room to the rest.
+    let wants: Vec<usize> = firsts
+        .iter()
+        .map(|&(index, source)| {
+            source_line_len(source) + 1 + texts[index].len().min(MAX_PASSAGE_BYTES) + 1
+        })
+        .collect();
+    let mut by_need: Vec<usize> = (0..firsts.len()).collect();
+    by_need.sort_by_key(|&i| wants[i]);
+    let mut left = budget.saturating_sub(used);
+    let mut given = vec![0; firsts.len()];
+    for (served, &i) in by_need.iter().enumerate() {
+        let share = left / (firsts.len() - served);
+        given[i] = wants[i].min(share);
+        left -= given[i];
+    }
     let mut chosen: Vec<(usize, String)> = Vec::new();
     let mut per_source: HashMap<usize, usize> = HashMap::new();
-    for (index, source) in firsts {
+    for (i, &(index, source)) in firsts.iter().enumerate() {
         let line = source_line_len(source) + 1;
-        let room = share.saturating_sub(line + 1).min(MAX_PASSAGE_BYTES);
-        if room < MIN_PASSAGE_BYTES {
+        let room = given[i].saturating_sub(line + 1).min(MAX_PASSAGE_BYTES);
+        // Too little room only matters for a passage that would have to be cut.
+        if room < MIN_PASSAGE_BYTES.min(texts[index].len()) {
             continue;
         }
         let passage = passages::clip(&texts[index], room);
+        // A syndicated paragraph under two sources is quoted once.
+        if chosen.iter().any(|(_, said)| said.trim() == passage.trim()) {
+            continue;
+        }
         let cost = line + passage.len() + 1;
         if used + cost > budget {
             continue;
@@ -1871,6 +1892,9 @@ fn choose_passages(
             continue;
         }
         let passage = passages::clip(&texts[index], MAX_PASSAGE_BYTES);
+        if chosen.iter().any(|(_, said)| said.trim() == passage.trim()) {
+            continue;
+        }
         let cost = passage.len() + 1;
         if used + cost > budget {
             continue;
@@ -3180,6 +3204,23 @@ mod tests {
             !lower.contains("x-loc-"),
             "a location went with local places off: {head}"
         );
+    }
+
+    #[test]
+    fn a_short_passage_leaves_its_room_to_a_long_one() {
+        let texts = vec!["The bridge opened in 2022.".to_string(), "word ".repeat(120)];
+        let chosen = choose_passages(&[0, 1], &texts, Some, |_| 20, (1, 400), 0, 2);
+        assert_eq!(chosen.len(), 2, "{chosen:?}");
+        let long = &chosen.iter().find(|(i, _)| *i == 1).unwrap().1;
+        assert!(long.len() > 300, "the long passage kept only {} bytes", long.len());
+    }
+
+    #[test]
+    fn the_same_paragraph_under_two_sources_is_quoted_once() {
+        let same = "The expressway closes at 22:00 on Saturday for repairs.".to_string();
+        let texts = vec![same.clone(), same];
+        let chosen = choose_passages(&[0, 1], &texts, Some, |_| 10, (2, 1000), 0, 2);
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
     }
 
     #[test]

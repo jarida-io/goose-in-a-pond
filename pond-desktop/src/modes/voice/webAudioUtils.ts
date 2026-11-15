@@ -439,11 +439,13 @@ const SCAFFOLD_TAGS = [
   "tool-usage",
   "tool-failure",
   "memory-rules",
+  "filling-gaps",
   "output-quality",
   "voice-mode",
   "vision",
   "conversation-summary",
   "home-devices",
+  "personal-context",
 ];
 
 /** Port of `strip_markup_for_speech` in `crates/pond-voice/src/text.rs`. */

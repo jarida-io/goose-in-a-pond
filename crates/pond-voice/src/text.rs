@@ -191,6 +191,7 @@ pub const SCAFFOLD_TAGS: &[&str] = &[
     "vision",
     "conversation-summary",
     "home-devices",
+    "personal-context",
 ];
 
 /// Drop markup a model wrote as text, so it is never spoken: a closed scaffold block with its body,
