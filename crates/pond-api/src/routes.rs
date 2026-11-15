@@ -24799,17 +24799,7 @@ mod locked_turn_tests {
     use pond_core::user_data::domain::profile::ProfileScope;
 
     #[test]
-    fn a_locked_phone_asks_as_an_unidentified_speaker_whoever_owns_it() {
-        for scope in ProfileScope::every_shape() {
-            assert_eq!(
-                locked_turn_scope(scope.clone(), true, "s"),
-                ProfileScope::Guest
-            );
-            assert_eq!(
-                locked_turn_scope(scope.clone(), false, "s"),
-                scope,
-                "unlocked keeps its scope"
-            );
-        }
+    fn a_locked_phone_asks_as_an_unidentified_speaker() {
+        assert_eq!(locked_turn_scope("s"), ProfileScope::Guest);
     }
 }
