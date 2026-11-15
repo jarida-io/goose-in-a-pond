@@ -32,6 +32,12 @@ pub trait DevicePresence: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailnetMachine(pub String);
 
+/// Marks a request that arrived through a public tunnel (ngrok), which carries no machine
+/// identity. Only the tunnel listener sets it; the auth middleware then also requires that the
+/// token's device was on the household LAN within [`LAN_PRESENCE_WINDOW_DAYS`].
+#[derive(Clone)]
+pub struct RemoteTunnel(pub std::sync::Arc<dyn DevicePresence>);
+
 /// The machine each remotely enrolled device uses, so its token is refused from any other.
 #[async_trait]
 pub trait RemoteMachines: Send + Sync {

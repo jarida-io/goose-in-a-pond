@@ -55,6 +55,18 @@ pub(crate) async fn forget_member(state: &AppState, profile_id: &str) -> anyhow:
 /// The generic secrets API's answer for a key holding a member's Uber tokens. A bearer alone, which
 /// a paired phone has, must never read, replace or forget another member's sign-in.
 pub(crate) fn refuse_reserved_secret(key: &str) -> Option<Response> {
+    if key.eq_ignore_ascii_case(crate::network::NGROK_AUTHTOKEN) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "The tunnel token is managed only on the pond itself, under Remote access",
+                    "code": SECRET_RESERVED,
+                })),
+            )
+                .into_response(),
+        );
+    }
     is_member_token_key(key).then(|| {
         (
             StatusCode::FORBIDDEN,
@@ -71,7 +83,9 @@ pub(crate) fn refuse_reserved_secret(key: &str) -> Option<Response> {
 /// A listing of the secret store without the keys members' Uber tokens are kept under.
 pub(crate) fn without_reserved_secrets(keys: Vec<String>) -> Vec<String> {
     keys.into_iter()
-        .filter(|key| !is_member_token_key(key))
+        .filter(|key| {
+            !is_member_token_key(key) && !key.eq_ignore_ascii_case(crate::network::NGROK_AUTHTOKEN)
+        })
         .collect()
 }
 

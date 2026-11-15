@@ -1,5 +1,5 @@
 import i18n from '../i18n';
-import { RemoteAccess } from './RemoteAccess';
+import { RemoteProvider } from './RemoteProvider';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Chip } from "@heroui/react";
 import { RefreshCw, Smartphone, Wifi } from "lucide-react";
@@ -248,7 +248,7 @@ export function Pairing() {
             </Step>
           </div>
           <div style={{ marginTop: 20 }}><PairingLockPanel variant="catalogue" /></div>
-          <RemoteAccess />
+          <RemoteProvider />
         </div>
       </div>
     </div>

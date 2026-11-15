@@ -13,6 +13,7 @@ vi.mock("../api/PondApiClient", () => ({
     listProfiles: vi.fn(async () => ({ profiles: [] })),
     // Remote access sits on this page and asks for these as soon as it mounts.
     remoteStatus: vi.fn(async () => ({ state: "Stopped" })),
+    ngrokTunnel: vi.fn(async () => ({ config: { enabled: false, endpoint: "tcp" }, tokenSet: false, status: { state: "off" } })),
     remoteRecoveryRequests: vi.fn(async () => []),
     remoteDevice: vi.fn(async () => ({ provisioned: false, registered: true })),
   },
