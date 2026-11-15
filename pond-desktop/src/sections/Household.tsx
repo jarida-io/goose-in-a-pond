@@ -216,6 +216,7 @@ interface DeviceAccessModalProps {
 
 function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps) {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [roomNames, setRoomNames] = useState<Map<string, string>>(new Map());
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const titleId = useId();
@@ -225,12 +226,14 @@ function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps
     let cancelled = false;
     (async () => {
       try {
-        const [deviceList, access] = await Promise.all([
+        const [deviceList, access, rooms] = await Promise.all([
           api.listDevices(),
           api.listGuestDeviceAccess(profile.id),
+          api.listRooms().catch(() => []),
         ]);
         if (cancelled) return;
         setDevices(deviceList);
+        setRoomNames(new Map(rooms.map((r) => [r.id, r.name] as const)));
         setAllowed(new Set(access.device_ids));
       } catch (e) {
         if (!cancelled) onFlash(friendlyError(e), false);
@@ -292,7 +295,7 @@ function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)", overflowY: "auto" }}>
             {devices.map((d) => (
-              <Row key={d.id} label={d.name} hint={d.room ?? d.device_type}>
+              <Row key={d.id} label={d.name} hint={(d.room_id && roomNames.get(d.room_id)) || d.device_type}>
                 <Switch
                   aria-label={`Allow ${profile.display_name} to use ${d.name}`}
                   isSelected={allowed.has(d.id)}

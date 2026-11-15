@@ -6,7 +6,7 @@ import { HP_PATHS } from "../../primitives/icons";
 import { DetailShell } from "./DetailShell";
 import { Card, Row } from "./controls";
 import { api } from "../../../api/PondApiClient";
-import type { Device } from "../../../api/types";
+import type { Device, Room } from "../../../api/types";
 import { openStateLabel } from "../../../sections/clientPresence";
 
 // ─── Room → icon key mapping ───────────────────────────────────
@@ -24,25 +24,40 @@ function roomIconKey(name: string): keyof typeof HP_PATHS | null {
 }
 
 // ─── Offline mock fallback ─────────────────────────────────────
+const MOCK_ROOMS: Room[] = [
+  { id: "mock-office",  name: "Office",      created_at: "", guest_accessible: false },
+  { id: "mock-outdoor", name: "Outdoor",     created_at: "", guest_accessible: false },
+  { id: "mock-living",  name: "Living Room", created_at: "", guest_accessible: false },
+];
+
 const MOCK_DEVICES: Device[] = [
-  { id: "mock-1", name: "Jetson Orin Nano",   device_type: "host",   room_id: "Office",  is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-2", name: "Motion Sensor A",    device_type: "sensor", room_id: "Office",  is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-3", name: "Front Door Camera",  device_type: "sensor", room_id: "Outdoor", is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
-  { id: "mock-4", name: "Backyard Sensor",    device_type: "sensor", room_id: "Outdoor", is_online: true,  last_seen: new Date().toISOString() },
-  { id: "mock-5", name: "Hub Controller",     device_type: "host",   room_id: "Living Room", is_online: true, last_seen: new Date().toISOString() },
-  { id: "mock-6", name: "Climate Sensor",     device_type: "sensor", room_id: "Living Room", is_online: false, last_seen: new Date(Date.now() - 7_200_000).toISOString() },
+  { id: "mock-1", name: "Jetson Orin Nano",   device_type: "host",   room_id: "mock-office",  is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-2", name: "Motion Sensor A",    device_type: "sensor", room_id: "mock-office",  is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-3", name: "Front Door Camera",  device_type: "sensor", room_id: "mock-outdoor", is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
+  { id: "mock-4", name: "Backyard Sensor",    device_type: "sensor", room_id: "mock-outdoor", is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-5", name: "Hub Controller",     device_type: "host",   room_id: "mock-living",  is_online: true,  last_seen: new Date().toISOString() },
+  { id: "mock-6", name: "Climate Sensor",     device_type: "sensor", room_id: "mock-living",  is_online: false, last_seen: new Date(Date.now() - 7_200_000).toISOString() },
 ];
 
 // ─── Group devices by room ─────────────────────────────────────
-function groupByRoom(devices: Device[]): Map<string, Device[]> {
-  const map = new Map<string, Device[]>();
+interface RoomGroup {
+  key: string;
+  name: string;
+  devices: Device[];
+}
+
+// A device carries only its room's id, which is never shown: the card is labelled by name.
+function groupByRoom(devices: Device[], rooms: Room[]): RoomGroup[] {
+  const nameById = new Map(rooms.map((r) => [r.id, r.name] as const));
+  const groups = new Map<string, RoomGroup>();
   for (const d of devices) {
-    const room = d.room_id ?? "Unassigned";
-    const list = map.get(room) ?? [];
-    list.push(d);
-    map.set(room, list);
+    const name = d.room_id ? nameById.get(d.room_id) : undefined;
+    const key = d.room_id && name ? d.room_id : "unassigned";
+    const group = groups.get(key) ?? { key, name: name ?? "Unassigned", devices: [] };
+    group.devices.push(d);
+    groups.set(key, group);
   }
-  return map;
+  return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ─── Device sub-label ─────────────────────────────────────────
@@ -134,6 +149,7 @@ interface RoomsDetailProps {
 
 export function RoomsDetail({ go }: RoomsDetailProps) {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
@@ -149,11 +165,16 @@ export function RoomsDetail({ go }: RoomsDetailProps) {
     setLoading(true);
     setError(null);
     try {
-      const fetched = await api.listDevices();
+      const [fetched, named] = await Promise.all([
+        api.listDevices(),
+        api.listRooms().catch(() => [] as Room[]),
+      ]);
       setDevices(fetched);
+      setRooms(named);
     } catch (e) {
       console.warn("[RoomsDetail] API offline — using mock fallback:", e);
       setDevices(MOCK_DEVICES);
+      setRooms(MOCK_ROOMS);
       setError("Could not reach the server. Showing offline view.");
     } finally {
       setLoading(false);
@@ -168,10 +189,9 @@ export function RoomsDetail({ go }: RoomsDetailProps) {
   }, [loadData]);
 
   // ── Derived ──────────────────────────────────────────────────
-  const byRoom = groupByRoom(devices);
-  const roomNames = Array.from(byRoom.keys()).sort();
+  const groups = groupByRoom(devices, rooms);
   const totalCount = devices.length;
-  const roomCount = byRoom.size;
+  const roomCount = groups.length;
 
   return (
     <DetailShell
@@ -257,14 +277,13 @@ export function RoomsDetail({ go }: RoomsDetailProps) {
 
       {/* Room cards */}
       {!loading &&
-        roomNames.map((roomName) => {
-          const devs = byRoom.get(roomName) ?? [];
+        groups.map(({ key, name: roomName, devices: devs }) => {
           const iconKey = roomIconKey(roomName);
           const iconPath = iconKey ? HP_PATHS[iconKey] : null;
 
           return (
             <Card
-              key={roomName}
+              key={key}
               title={
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                   {iconPath && (

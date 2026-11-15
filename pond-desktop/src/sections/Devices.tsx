@@ -548,17 +548,19 @@ export function Devices() {
                 <span className="room-section__spacer" />
                 {room && (
                   <>
-                    <span className="room-section__guest">
-                      <Switch
-                        aria-label={`Let a guest use devices in ${room.name}`}
-                        isSelected={room.guest_accessible}
-                        isDisabled={guestAccessBusy === room.id}
-                        onChange={() => handleToggleGuestAccess(room, !room.guest_accessible)}
-                      >
-                        <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                      </Switch>
-                      Guest access
-                    </span>
+                    {room.guest_access_editable !== false && (
+                      <span className="room-section__guest">
+                        <Switch
+                          aria-label={`Let a guest use devices in ${room.name}`}
+                          isSelected={room.guest_accessible}
+                          isDisabled={guestAccessBusy === room.id}
+                          onChange={() => handleToggleGuestAccess(room, !room.guest_accessible)}
+                        >
+                          <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
+                        </Switch>
+                        Guest access
+                      </span>
+                    )}
                     <div className="room-section__actions">
                       <button
                         className="device-card__action-btn"
