@@ -363,7 +363,7 @@ impl BeforeHookSources {
         if hooks.contains(&BeforeHook::Today) {
             context.date = Some(activations::local_date_label(now, &timezone));
             if !private {
-                context.schedule = self.today(&timezone, now).await;
+                context.schedule = self.today(scope, &timezone, now).await;
             }
         }
         if hooks.contains(&BeforeHook::Weather) {
@@ -375,7 +375,7 @@ impl BeforeHookSources {
         context
     }
 
-    async fn today(&self, timezone: &str, now: DateTime<Utc>) -> Vec<String> {
+    async fn today(&self, scope: &ProfileScope, timezone: &str, now: DateTime<Utc>) -> Vec<String> {
         let Some(scheduler) = &self.scheduler else {
             return Vec::new();
         };
@@ -395,7 +395,7 @@ impl BeforeHookSources {
                     format!(
                         "{} {}",
                         activations::local_clock_label(at, now, timezone),
-                        s.label
+                        s.label_for(scope)
                     )
                 })
             })

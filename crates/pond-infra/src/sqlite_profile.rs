@@ -163,14 +163,15 @@ impl ProfileRepository for SqliteProfileRepository {
             .flatten();
         let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let result =
-            sqlx::query("UPDATE profiles SET role = ?, guest_until = ?, updated_at = ? WHERE id = ?")
-                .bind(role.as_str())
-                .bind(&guest_until_str)
-                .bind(&now_str)
-                .bind(profile_id)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "UPDATE profiles SET role = ?, guest_until = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(role.as_str())
+        .bind(&guest_until_str)
+        .bind(&now_str)
+        .bind(profile_id)
+        .execute(&self.pool)
+        .await?;
 
         if result.rows_affected() == 0 {
             return Err(anyhow!("profile not found: {}", profile_id));
@@ -179,6 +180,30 @@ impl ProfileRepository for SqliteProfileRepository {
         self.get(profile_id)
             .await?
             .ok_or_else(|| anyhow!("profile not found after update: {}", profile_id))
+    }
+
+    async fn hand_ownership_to(&self, profile_id: &str) -> Result<()> {
+        let now_str = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let mut tx = self.pool.begin().await?;
+        let promoted = sqlx::query(
+            "UPDATE profiles SET role = 'owner', guest_until = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(&now_str)
+        .bind(profile_id)
+        .execute(&mut *tx)
+        .await?;
+        if promoted.rows_affected() == 0 {
+            return Err(anyhow!("profile not found: {}", profile_id));
+        }
+        sqlx::query(
+            "UPDATE profiles SET role = 'member', updated_at = ? WHERE role = 'owner' AND id != ?",
+        )
+        .bind(&now_str)
+        .bind(profile_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn delete(&self, profile_id: &str) -> Result<()> {
@@ -349,42 +374,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_primary_profile_is_backfilled_as_owner() {
-        let tmp = tempdir().unwrap();
-        let db = Database::init(tmp.path()).await.unwrap();
-        let repo = SqliteProfileRepository::new(db.system.clone());
-
-        let owner = repo
+    async fn handing_ownership_on_leaves_one_owner() {
+        let (repo, _tmp) = make_repo().await;
+        let first = repo
             .create(CreateProfileRequest {
-                display_name: "Liz".to_string(),
+                display_name: "Jerry".to_string(),
                 avatar_emoji: "X".to_string(),
             })
             .await
             .unwrap();
-        let other = repo
+        let next = repo
             .create(CreateProfileRequest {
-                display_name: "Jerry".to_string(),
+                display_name: "Liz".to_string(),
                 avatar_emoji: "Y".to_string(),
             })
             .await
             .unwrap();
-        sqlx::query("INSERT INTO settings (key, value) VALUES ('primary_profile_id', ?)")
-            .bind(&owner.id)
-            .execute(&db.system)
+        repo.set_role(&next.id, Role::Guest, Some(Utc::now()))
             .await
             .unwrap();
 
-        // Re-run just this migration's backfill statements against the now-populated tables,
-        // since `Database::init` already ran every migration before `settings` had a row.
-        sqlx::query(
-            "UPDATE profiles SET role = 'owner' \
-             WHERE id = (SELECT value FROM settings WHERE key = 'primary_profile_id')",
-        )
-        .execute(&db.system)
-        .await
-        .unwrap();
+        repo.hand_ownership_to(&next.id).await.unwrap();
+        let next = repo.get(&next.id).await.unwrap().unwrap();
+        assert_eq!(next.role, Role::Owner);
+        assert_eq!(next.guest_until, None);
+        assert_eq!(
+            repo.get(&first.id).await.unwrap().unwrap().role,
+            Role::Member
+        );
 
-        assert_eq!(repo.get(&owner.id).await.unwrap().unwrap().role, Role::Owner);
-        assert_eq!(repo.get(&other.id).await.unwrap().unwrap().role, Role::Member);
+        assert!(repo.hand_ownership_to("nobody").await.is_err());
+        assert_eq!(repo.get(&next.id).await.unwrap().unwrap().role, Role::Owner);
+    }
+
+    /// A pond as it stood before the roles migration: these profiles, this stored primary and
+    /// this main member, then every migration from the roles one on.
+    async fn roles_backfilled(
+        profiles: &[&str],
+        primary: Option<&str>,
+        main_member: Option<&str>,
+    ) -> (SqliteProfileRepository, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let pool = Database::connect(&tmp.path().join("pond_system.db"))
+            .await
+            .unwrap();
+        let mut before = sqlx::migrate!("migrations/system");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|m| m.version < 106)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        before.run(&pool).await.unwrap();
+        for id in profiles {
+            sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
+                .bind(id)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if let Some(primary) = primary {
+            sqlx::query("INSERT INTO settings (key, value) VALUES ('primary_profile_id', ?)")
+                .bind(primary)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if let Some(main) = main_member {
+            sqlx::query("UPDATE pairing_lock SET owner_profile_id = ? WHERE id = 1")
+                .bind(main)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::migrate!("migrations/system")
+            .run(&pool)
+            .await
+            .unwrap();
+        (SqliteProfileRepository::new(pool), tmp)
+    }
+
+    async fn role_of(repo: &SqliteProfileRepository, id: &str) -> Role {
+        repo.get(id).await.unwrap().unwrap().role
+    }
+
+    #[tokio::test]
+    async fn the_primary_profile_is_backfilled_as_owner() {
+        let (repo, _tmp) = roles_backfilled(&["liz", "jerry"], Some("liz"), None).await;
+        assert_eq!(role_of(&repo, "liz").await, Role::Owner);
+        assert_eq!(role_of(&repo, "jerry").await, Role::Member);
+    }
+
+    #[tokio::test]
+    async fn a_cleared_primary_still_backfills_the_only_profile_as_owner() {
+        let (repo, _tmp) = roles_backfilled(&["liz"], Some(""), None).await;
+        assert_eq!(role_of(&repo, "liz").await, Role::Owner);
+    }
+
+    #[tokio::test]
+    async fn the_main_member_is_backfilled_as_owner_over_the_primary() {
+        let (repo, _tmp) = roles_backfilled(&["liz", "jerry"], Some("liz"), Some("jerry")).await;
+        assert_eq!(role_of(&repo, "jerry").await, Role::Owner);
+        assert_eq!(role_of(&repo, "liz").await, Role::Member);
     }
 }

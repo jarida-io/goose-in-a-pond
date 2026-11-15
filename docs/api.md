@@ -230,7 +230,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | PUT | /pairing/lock | token +onb | main member | Lock or unlock pairing |
 | PUT | /pairing/recovery-pin | token +onb | main member | Set the recovery PIN |
 | DELETE | /pairing/recovery-pin | token +onb | main member | Remove it |
-| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat to another member |
+| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat, and the owner role, to another member |
 | GET | /pairing/requests | token +onb | main member | The phones waiting to be let in |
 | POST | /pairing/requests/{id}/approve | token +onb | main member | Let a waiting phone in |
 | POST | /pairing/requests/{id}/decline | token +onb | main member | Turn it away |
@@ -261,7 +261,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /settings | token | | The whole `Settings` record |
-| PUT | /settings | wizard | | Partial update; answers with the merged record |
+| PUT | /settings | wizard | owner, to change `primary_profile_id` | Partial update; answers with the merged record |
 
 ### Chat and runs
 
@@ -348,7 +348,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | PATCH | /profiles/{id} | wizard | | Merge preference keys |
 | GET | /profiles | token +onb | | All members |
 | GET | /profiles/{id} | token +onb | | One member |
-| DELETE | /profiles/{id} | token +onb | | Remove a member, report what went with them |
+| DELETE | /profiles/{id} | token +onb | owner | Remove a member, report what went with them |
+| PUT | /profiles/{id}/role | token +onb | owner | Set a member's role; `owner` hands the main member's seat on |
 | GET | /profiles/{id}/notes | token +onb | member | The member's own notes |
 | PUT | /profiles/{id}/notes/{key} | token +onb | member | Create or replace one of the member's notes |
 | DELETE | /profiles/{id}/notes/{key} | token +onb | member | Delete one of the member's notes |
@@ -382,6 +383,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /devices/events | token | | Device state changes (SSE) |
 | POST | /devices/commission | token +onb | | Commission a Matter device |
 | GET | /matter/status | token +onb | | The Matter controller's state |
+| GET | /rooms | token +onb | | The household's rooms |
+| PUT | /rooms/{id}/guest-access | token +onb | owner | Open a room's devices to guests, or close them |
 
 ### Sensors, camera and rules
 
@@ -417,12 +420,12 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /schedules | token +onb | | All scheduled tasks |
 | POST | /schedules | token +onb | | Create a task |
 | GET | /schedules/upcoming | token +onb | | Active tasks by next fire |
-| PUT | /schedules/{id} | token +onb | | Update a task |
-| DELETE | /schedules/{id} | token +onb | | Delete a task |
-| POST | /schedules/{id}/pause | token +onb | | Pause |
-| POST | /schedules/{id}/resume | token +onb | | Resume |
-| POST | /schedules/{id}/run-now | token +onb | | Fire now |
-| GET | /schedules/{id}/runs | token +onb | | Run history |
+| PUT | /schedules/{id} | token +onb | its member, for a reminder | Update a task |
+| DELETE | /schedules/{id} | token +onb | its member, for a reminder | Delete a task |
+| POST | /schedules/{id}/pause | token +onb | its member, for a reminder | Pause |
+| POST | /schedules/{id}/resume | token +onb | its member, for a reminder | Resume |
+| POST | /schedules/{id}/run-now | token +onb | its member, for a reminder | Fire now |
+| GET | /schedules/{id}/runs | token +onb | its member, for a reminder | Run history |
 | GET | /schedules/events | token +onb | | Completion events (SSE) |
 
 ### Memory, reminders, suggestions and proposals
@@ -500,8 +503,8 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /agent/tools | token +onb | | Every MCP tool the agent has loaded |
-| POST | /tools/invoke | token +onb | | Run an MCP tool directly |
-| POST | /mcp/tools/call | token +onb | | MCP Apps `callServerTool()` |
+| POST | /tools/invoke | token +onb | as the caller | Run an MCP tool directly |
+| POST | /mcp/tools/call | token +onb | as the caller | MCP Apps `callServerTool()` |
 | GET | /mcp/resources | token +onb | | An MCP App `ui://` resource |
 | GET | /agent/extras | token +onb | | System prompt extras |
 | POST | /agent/extras | token +onb | | Create or replace an extra |
@@ -936,6 +939,9 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
 | 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
 | 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
+| 403 | `{"error", "who_can_grant": "owner", "owners"}` when `primary_profile_id` changes and the caller is not the owner; a pond that names nobody yet, in settings or as its main member, takes its first from anyone. Nothing in the patch is saved |
+
+Naming `primary_profile_id` names no owner: the owner is the main member (see below).
 
 ## Chat and runs
 
@@ -953,7 +959,12 @@ screen. The turn then runs as an unidentified speaker's (`ProfileScope::Guest`, 
 in `routes.rs`), whoever the phone belongs to, since a voice over a lock screen does not prove who
 holds the phone: no memories or notes, no connected accounts, cameras, sensor history, rides or
 long tasks. Its `<system-context>` carries `LOCKED_DEVICE_NOTE`, so the model says to unlock for
-those. The server logs `kind=turn_device_locked`. `/chat` (not streamed) honours it too.
+those. The server logs `kind=turn_device_locked`. A locked turn never claims the conversation
+for the phone's member, and does not continue one that is a member's own, which would replay their
+earlier answers: it runs in a new conversation instead (`kind=turn_device_locked_new_session`), whose
+id the answer carries (`session_id` here, the `done` frame on `/chat/stream`). A conversation that is
+nobody's carries on. `deep_research` is ignored, since the task would run as the member. `/chat`
+(not streamed) honours all of it too.
 Creates the session when `session_id` is absent. Answers
 `{session_id, response, model_role}`. Turn persistence goes through `ChatService`.
 
@@ -1152,7 +1163,12 @@ A download or activation for a model whose engine this pond lacks is refused
 
 ## Profiles and session identity
 
-A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, created_at, updated_at}`.
+A profile is a household member: `Profile {id, display_name, avatar_emoji, preferences, role, guest_until, created_at, updated_at}`.
+`role` is `owner`, `member`, `guest` or `developer`. The owner is the pairing lock's main member,
+and there is one: handing the seat on with `PUT /pairing/owner`, or naming another member `owner`
+with `PUT /profiles/{id}/role`, makes the old owner a `member`, and the server sets the roles to
+follow the seat when it starts. Permission checks read the seat, so a stale stored `owner` grants
+nothing.
 
 | Route | Request | Response |
 |---|---|---|
@@ -1160,7 +1176,8 @@ A profile is a household member: `Profile {id, display_name, avatar_emoji, prefe
 | `PATCH /profiles/{id}` | `{preferences: {key: value}}`, merged | `{id, display_name, preferences, updated_at}` |
 | `GET /profiles` | | `{profiles: [...]}` |
 | `GET /profiles/{id}` | | the profile, or `404` |
-| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}` |
+| `DELETE /profiles/{id}` | | `{profile_id, display_name, deleted: {memories, face_embeddings, uber_accounts}, released: {sessions}, cleared_primary_profile}`; `403` unless the caller is the owner; `409` for the owner, who hands the seat on first |
+| `PUT /profiles/{id}/role` | `{role, guest_until?}` | the profile; `403` unless the caller is the owner; `409` to give the owner any other role |
 
 Deleting a member removes their memories, face embeddings, Uber sign-in, notes and setup
 interview, and releases their sessions (the conversation stays, unattributed). Household-scoped
@@ -1231,6 +1248,8 @@ itself must keep calling the heartbeat.
 | `POST /devices/commission` | `{code, name?}` | `201 {id, name, node_id}` |
 | `GET /devices/events` | `?after_seq=N` | SSE, below |
 | `GET /matter/status` | | `MatterStatus {enabled, url, state}` |
+| `GET /rooms` | | `{rooms: [{id, name, created_at, guest_accessible, guest_access_editable}]}`; `guest_access_editable` says whether this caller may change `guest_accessible` |
+| `PUT /rooms/{id}/guest-access` | `{accessible}` | the room; `403` unless the caller is the owner, `404 room_not_found` |
 
 **`GET /devices/events`** follows device state as devices report it, so a phone need not read
 every device again to see a change. Each `device_state` event's data is
@@ -1398,8 +1417,13 @@ Every schedule route answers `503 {"error":"scheduler not configured"}` when the
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
 `kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger`,
 `routine {actions}`, where each action is a rule action (`device_power`, `notify`), or
-`member_reminder {profile_id, prompt}`. A `member_reminder` is listed with an empty `prompt`, since
-these routes can't tell who is asking; see
+`member_reminder {profile_id, prompt}`. Every listing, `GET /schedules`, `/schedules/upcoming` and
+the suggestions included, shows a `member_reminder` with an empty `prompt` and the label
+`a private reminder`, since its own label is drawn from its words; `/schedules/events` sends its
+runs with that label and no `result` or `error`. Changing, pausing, resuming, running or answering
+a missed run of a `member_reminder`, or reading its runs, is its member's alone: anyone else, and a
+caller the pond cannot tell apart, gets `403 code: "private_reminder"` (in a household of one
+member, a caller attributed to nobody is that member); see
 [A member's reminder](architecture/scheduling.md#a-members-reminder).
 `cron` is six fields with a leading seconds field.
 
@@ -1524,6 +1548,11 @@ Secret keys starting with `UBER_` are reserved for the Uber routes: the generic 
 | `GET /agent/tools` | | `[{extension, name, description, ui?, _meta?}]`; `[]` without an agent |
 | `POST /tools/invoke` | `InvokeToolRequest {server?, tool, args?}`; optional `Idempotency-Key` header (1 to 255 visible ASCII characters) | the tool's result. With a key, the result also carries `idempotency_key`, and a resend under the same key from the same device within 30 minutes gets the first result without running the tool again; a resend during the first run waits for it. A failed run is not kept, nor one with `success: false` (a device that refused the command), so its resend runs again. `400 invalid_idempotency_key`; `422 idempotency_key_reused` for the same key with another tool or arguments. Kept in memory, so a restart forgets them |
 | `POST /mcp/tools/call` | `McpToolCallRequest {name, arguments?}` | the tool's result |
+
+Both run the tool as the caller its paired device proves, as a chat turn would: a member's phone
+as that member, an invited guest's phone as that guest, and a device that belongs to nobody, in a
+household of more than one, as an unidentified guest. `set_device_state` then holds a guest to the
+rooms open to guests or the devices they were given.
 | `GET /mcp/resources` | `?uri=` | `{contents: [{uri, text, ...}]}` |
 | `GET /agent/extras` | | `[PromptExtra {key, instruction, active, sort_order}]` |
 | `POST /agent/extras` | `UpsertExtraRequest {key, instruction, active? (true), sort_order? (0)}` | `{key, status: "ok"}` |

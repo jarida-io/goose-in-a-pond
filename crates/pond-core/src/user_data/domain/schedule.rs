@@ -1,5 +1,6 @@
 //! Scheduled automations (cron, one-shot or event-triggered) and sensor rule types.
 
+use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,10 @@ impl TaskKind {
         }
     }
 }
+
+/// What a member's reminder is called wherever the household can see it, since its own label is
+/// drawn from its words.
+pub const PRIVATE_REMINDER_LABEL: &str = "a private reminder";
 
 /// A routine's actions in one line: "kitchen-lights on, water-heater-plug on".
 pub fn routine_summary(actions: &[TriggerAction]) -> String {
@@ -477,6 +482,15 @@ impl Schedule {
     pub fn is_one_shot(&self) -> bool {
         self.fire_at.is_some()
     }
+
+    /// Its label as a reader at `scope` may see it: a member's reminder is named only to that
+    /// member, since its label is drawn from its words.
+    pub fn label_for(&self, scope: &ProfileScope) -> &str {
+        match self.kind.member() {
+            Some(member) if scope.owner_id() != Some(member) => PRIVATE_REMINDER_LABEL,
+            _ => &self.label,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,6 +538,33 @@ pub struct ScheduleResultEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_members_reminder_is_named_only_to_that_member() {
+        let stored = serde_json::json!({
+            "id": "r", "label": "Take the tablets", "cron": "0 0 20 * * *", "timezone": "UTC",
+            "kind": {"type": "member_reminder", "profile_id": "liz", "prompt": "Take the tablets"},
+            "paused": false, "currently_running": false, "last_run": null, "next_run": null,
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let reminder: Schedule = serde_json::from_value(stored).unwrap();
+
+        assert_eq!(
+            reminder.label_for(&ProfileScope::Owner("liz".into())),
+            "Take the tablets"
+        );
+        for other in [
+            ProfileScope::Owner("jerry".into()),
+            ProfileScope::Household,
+            ProfileScope::Guest,
+        ] {
+            assert_eq!(
+                reminder.label_for(&other),
+                PRIVATE_REMINDER_LABEL,
+                "{other:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_schedule_from_before_missed_runs_reads_as_never_asking() {

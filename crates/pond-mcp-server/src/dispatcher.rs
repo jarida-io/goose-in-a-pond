@@ -145,6 +145,7 @@ impl McpToolDispatcher {
             guest_room_access.clone(),
             settings_repo.clone(),
             skill_repo,
+            profile_repo.clone(),
         );
         let device_control_server = DeviceControlMcpServer::new(
             device_control,
@@ -205,7 +206,13 @@ impl McpToolDispatcher {
     /// `Household` (a sole-member pond) is trusted as the owner.
     async fn resolve_role(&self, scope: &ProfileScope) -> Option<Role> {
         match scope {
-            ProfileScope::Owner(id) => self.profile_repo.get(id).await.ok().flatten().map(|p| p.role),
+            ProfileScope::Owner(id) => self
+                .profile_repo
+                .get(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|p| p.role),
             ProfileScope::Household => Some(Role::Owner),
             ProfileScope::Guest => None,
         }

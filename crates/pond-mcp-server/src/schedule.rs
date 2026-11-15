@@ -219,7 +219,7 @@ fn kind_words(kind: &TaskKind) -> &'static str {
 
 /// How every listing names a member's reminder: listings reach the whole household, and its own
 /// label is drawn from its words.
-const PRIVATE_REMINDER: &str = "a private reminder";
+const PRIVATE_REMINDER: &str = pond_core::user_data::domain::schedule::PRIVATE_REMINDER_LABEL;
 
 fn shown_label(schedule: &Schedule) -> &str {
     match schedule.kind {
@@ -555,7 +555,6 @@ a time of day, a date, or to remind the person of a task, use add_reminder.")]
         meta: &RequestMetaObject,
         p: SetTimerParams,
     ) -> Result<CallToolResult, ErrorData> {
-
         let raw = if p.duration.trim().is_empty() {
             ["in", "delay", "after", "for", "time"]
                 .iter()
@@ -579,9 +578,7 @@ a time of day, a date, or to remind the person of a task, use add_reminder.")]
                     when: Some(raw.trim().to_string()),
                     ..Default::default()
                 };
-                return Ok(crate::todo_tools::add(meta, reminder)
-                    .await
-                    .into_result());
+                return Ok(crate::todo_tools::add(meta, reminder).await.into_result());
             }
             return Ok(with_receipt(
                 "No timer was set. A timer needs a length of time as `duration`: \"10 \
@@ -1469,11 +1466,7 @@ mod private_reminder_tests {
             .await
             .unwrap();
         let id = stored.0.lock().unwrap()[0].id.clone();
-        assert!(
-            text(&created).contains("Scheduled"),
-            "{}",
-            text(&created)
-        );
+        assert!(text(&created).contains("Scheduled"), "{}", text(&created));
 
         let updated = server
             .upsert_result(

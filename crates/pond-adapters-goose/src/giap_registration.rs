@@ -115,6 +115,7 @@ pub fn register_giap_extensions(
             guest_room_access.clone(),
             settings_repo.clone(),
             skill_repo,
+            profile_repo.clone(),
         );
         register_builtin_extension("giap-device", pond_mcp_server::spawn_device_server);
         registered.push("giap-device".into());

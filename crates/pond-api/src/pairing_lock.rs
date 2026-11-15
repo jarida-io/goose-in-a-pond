@@ -31,6 +31,51 @@ fn failed(what: &'static str, error: anyhow::Error) -> Response {
     )
 }
 
+/// Seats `profile_id` as the main member, which makes them the household's one owner. With
+/// `replace` false it only fills an empty seat; `Ok(false)` when somebody already holds it.
+pub(crate) async fn seat_main_member(
+    state: &AppState,
+    profile_id: &str,
+    replace: bool,
+) -> anyhow::Result<bool> {
+    if !state
+        .handshake
+        .set_pairing_owner(profile_id, replace)
+        .await?
+    {
+        return Ok(false);
+    }
+    state.profile_repo.hand_ownership_to(profile_id).await?;
+    tracing::info!(
+        kind = "household_owner_seated",
+        profile_id,
+        "the main member is the household's owner"
+    );
+    Ok(true)
+}
+
+/// `stored` as permission checks read it: the main member is the owner, and an `Owner` role
+/// anyone else still carries counts as `Member`. An empty or unreadable seat leaves it as stored.
+pub(crate) async fn seated_role(
+    state: &AppState,
+    profile_id: &str,
+    stored: pond_core::user_data::domain::profile::Role,
+) -> pond_core::user_data::domain::profile::Role {
+    use pond_core::user_data::domain::profile::Role;
+    let seat = match state.handshake.pairing_lock().await {
+        Ok(lock) => lock.owner_profile_id,
+        Err(error) => {
+            tracing::warn!(%error, "could not read the main member; reading the stored role");
+            None
+        }
+    };
+    match seat {
+        Some(main) if main == profile_id => Role::Owner,
+        Some(_) if stored == Role::Owner => Role::Member,
+        _ => stored,
+    }
+}
+
 /// Tells the household of each phone that starts waiting, however it asked: over the home
 /// network or over Bluetooth, which has no route to announce from.
 pub fn spawn_request_watch(state: Arc<AppState>) {
@@ -311,7 +356,8 @@ pub struct OwnerBody {
     profile_id: String,
 }
 
-/// `PUT /pairing/owner` `{"profile_id": ...}`: hand the main member's role to another member.
+/// `PUT /pairing/owner` `{"profile_id": ...}`: hand the main member's role, and with it the
+/// household's owner role, to another member.
 pub async fn set_owner(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -329,11 +375,7 @@ pub async fn set_owner(
     if !is_member {
         return refuse(StatusCode::BAD_REQUEST, "not_a_member");
     }
-    match state
-        .handshake
-        .set_pairing_owner(&body.profile_id, true)
-        .await
-    {
+    match seat_main_member(&state, &body.profile_id, true).await {
         Ok(_) => Json(json!({"owner_profile_id": body.profile_id})).into_response(),
         Err(error) => failed("owner", error),
     }

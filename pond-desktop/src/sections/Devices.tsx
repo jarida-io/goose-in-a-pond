@@ -549,16 +549,18 @@ export function Devices() {
                 <span className="room-section__spacer" />
                 {room && (
                   <>
-                    <span className="room-section__guest">
-                      <Switch
-                        size="sm"
-                        label={`Let a guest use devices in ${room.name}`}
-                        checked={room.guest_accessible}
-                        disabled={guestAccessBusy === room.id}
-                        onChange={(next) => handleToggleGuestAccess(room, next)}
-                      />
-                      Guest access
-                    </span>
+                    {room.guest_access_editable !== false && (
+                      <span className="room-section__guest">
+                        <Switch
+                          size="sm"
+                          label={`Let a guest use devices in ${room.name}`}
+                          checked={room.guest_accessible}
+                          disabled={guestAccessBusy === room.id}
+                          onChange={(next) => handleToggleGuestAccess(room, next)}
+                        />
+                        Guest access
+                      </span>
+                    )}
                     <div className="room-section__actions">
                       <button
                         className="device-card__action-btn"

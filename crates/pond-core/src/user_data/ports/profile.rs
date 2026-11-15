@@ -23,5 +23,8 @@ pub trait ProfileRepository: Send + Sync {
         role: Role,
         guest_until: Option<DateTime<Utc>>,
     ) -> Result<Profile>;
+    /// Makes `profile_id` the only owner, every other owner a member, in one step: the owner is
+    /// whoever holds the pairing lock's main member seat. Errs, changing nothing, for no such profile.
+    async fn hand_ownership_to(&self, profile_id: &str) -> Result<()>;
     async fn delete(&self, profile_id: &str) -> Result<()>;
 }

@@ -419,6 +419,17 @@ describe("Devices section — rooms", () => {
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
   });
 
+  it("offers the guest access switch only to whoever the pond says may change it", async () => {
+    mocked(api.listRooms).mockResolvedValue([{ ...livingRoom, guest_access_editable: false }]);
+    mocked(api.listDevices).mockResolvedValue([]);
+
+    renderDevices();
+    await screen.findByText("Living Room");
+
+    expect(screen.queryByRole("switch", { name: /let a guest use devices/i })).toBeNull();
+    expect(screen.queryByText("Guest access")).toBeNull();
+  });
+
   it("deleting a room asks for confirmation, then calls deleteRoom", async () => {
     mocked(api.listRooms).mockResolvedValue([livingRoom]);
     mocked(api.listDevices).mockResolvedValue([]);

@@ -39,7 +39,7 @@ use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::{CreateProfileRequest, Role};
 use pond_core::user_data::domain::schedule::{
     routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
-    SensorTriggerSpec, TaskKind,
+    SensorTriggerSpec, TaskKind, PRIVATE_REMINDER_LABEL,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{
@@ -49,7 +49,9 @@ use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_attribution::DeviceAttribution;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
 use pond_core::user_data::ports::face_recognition::FaceRecognition;
-use pond_core::user_data::ports::scheduler::{CreateScheduleRequest, UpdateScheduleRequest};
+use pond_core::user_data::ports::scheduler::{
+    CreateScheduleRequest, SchedulerPort, UpdateScheduleRequest,
+};
 use pond_core::user_data::ports::session_storage::SessionStorageError;
 use pond_core::user_data::services::face_recognition_slot::{
     FaceModelsProgress, FaceRecognitionNotReady,
@@ -1870,7 +1872,7 @@ async fn name_main_member_from_phone(state: &Arc<AppState>, session_token: &str)
 
 /// Fills the main member's seat if it is empty; never takes it from somebody.
 async fn name_main_member(state: &Arc<AppState>, profile_id: &str) {
-    match state.handshake.set_pairing_owner(profile_id, false).await {
+    match crate::pairing_lock::seat_main_member(state, profile_id, false).await {
         Ok(true) => tracing::info!(
             kind = "pairing_owner_named",
             profile_id,
@@ -2258,6 +2260,10 @@ async fn chat(
     }
     let session_id = req.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    let session_id = match req.device_locked {
+        true => locked_turn_session(&state, session_id).await,
+        false => session_id,
+    };
     refuse_without_a_model(&state).await?;
     let storage = &state.session_storage;
 
@@ -2277,13 +2283,13 @@ async fn chat(
     let model_role = "chat";
 
     // Scope resolved exactly as /chat/stream does, so both endpoints agree on the speaker.
-    let scope = locked_turn_scope(
-        resolve_turn_scope(&state, &session_id, &device).await,
-        req.device_locked,
-        &session_id,
-    );
+    let scope = match req.device_locked {
+        true => locked_turn_scope(&session_id),
+        false => resolve_turn_scope(&state, &session_id, &device).await,
+    };
     let service = ChatService::new(state.agent.clone(), session_id.clone(), storage.clone())
-        .with_profile_scope(scope);
+        .with_profile_scope(scope)
+        .with_device_locked(req.device_locked);
 
     // As every turn path does before the model: wait out a quiet compaction in the way.
     if let Some(wait) = state.runs.quiet_passes().turn_arrives(&session_id) {
@@ -2673,6 +2679,13 @@ async fn chat_stream(
 
     if let Some(session_id) = req.session_id.as_deref() {
         refuse_another_members_session(&state, principal.as_ref(), session_id).await?;
+    }
+    if req.device_locked {
+        if let Some(session_id) = req.session_id.take() {
+            req.session_id = Some(locked_turn_session(&state, session_id).await);
+        }
+        // A research task would run as the phone's member, which a locked phone does not prove.
+        req.deep_research = false;
     }
 
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
@@ -3815,11 +3828,10 @@ async fn drive_turn(
     let model_role = "chat";
 
     // Shared with the AgentRequest so memory is written under the identity it was read under.
-    let turn_scope = locked_turn_scope(
-        resolve_turn_scope(state, &session_id, &device).await,
-        req.device_locked,
-        &session_id,
-    );
+    let turn_scope = match req.device_locked {
+        true => locked_turn_scope(&session_id),
+        false => resolve_turn_scope(state, &session_id, &device).await,
+    };
 
     let mut chat_service = pond_core::shared::services::chat::ChatService::new(
         state.agent.clone(),
@@ -6491,10 +6503,13 @@ struct SetGuestAccessBody {
     accessible: bool,
 }
 
-/// `GET /api/v1/rooms` — every room the household has named.
+/// `GET /api/v1/rooms` — every room the household has named, each saying whether this caller
+/// may change its guest access, so a client offers the switch only to the owner.
 async fn list_rooms(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::may_manage_household_roles;
     let rooms = state.room_registry.list_rooms().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6506,9 +6521,16 @@ async fn list_rooms(
         .accessible_room_ids()
         .await
         .unwrap_or_default();
+    let editable =
+        may_manage_household_roles(resolve_role_from_principal(&state, principal.as_ref()).await)
+            .is_allowed();
     let list: Vec<Value> = rooms
         .iter()
-        .map(|r| room_json(r, accessible.contains(&r.id)))
+        .map(|r| {
+            let mut room = room_json(r, accessible.contains(&r.id));
+            room["guest_access_editable"] = json!(editable);
+            room
+        })
         .collect();
     Ok(Json(json!({ "rooms": list })))
 }
@@ -6671,11 +6693,14 @@ async fn rename_room(
 }
 
 /// `PUT /api/v1/rooms/{id}/guest-access` — grant or revoke guest access to a room's devices.
+/// Owner-only: it decides what anyone the pond cannot identify may switch.
 async fn set_room_guest_access(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     body: Result<Json<SetGuestAccessBody>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
     let Json(req) = body.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -7250,6 +7275,48 @@ async fn refuse_primary_profile_that_is_not_a_member(
     }
 }
 
+/// Only the owner changes the household's primary member. A pond that names nobody yet, in
+/// settings or in the main member's seat, takes its first from whoever sets it up.
+async fn refuse_primary_profile_change_by_a_non_owner(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    patch: &Value,
+    current: &Settings,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use pond_core::user_data::services::household_permission::{
+        may_manage_household_roles, PermissionDecision,
+    };
+    let Some(asked) = patch.get("primary_profile_id") else {
+        return Ok(());
+    };
+    let asked = asked.as_str().unwrap_or_default();
+    let named = current.primary_profile_id.as_deref().unwrap_or_default();
+    if asked == named {
+        return Ok(());
+    }
+    let seat_empty = matches!(
+        state.handshake.pairing_lock().await,
+        Ok(lock) if lock.owner_profile_id.is_none()
+    );
+    if named.is_empty() && seat_empty {
+        return Ok(());
+    }
+    let role = resolve_role_from_principal(state, principal).await;
+    if let PermissionDecision::Denied {
+        reason,
+        grantable_by,
+    } = may_manage_household_roles(role)
+    {
+        tracing::warn!(
+            kind = "primary_profile_refused",
+            reason,
+            "refused a change of the household's primary member from a non-owner"
+        );
+        return Err(permission_denied(state, reason, grantable_by).await);
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_settings(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -7312,6 +7379,8 @@ pub(crate) async fn update_settings(
     }
 
     refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
+    refuse_primary_profile_change_by_a_non_owner(&state, principal.as_ref(), &patch, &current)
+        .await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -7454,32 +7523,6 @@ pub(crate) async fn update_settings(
     // Must follow the write (marks existing rows); exempts these keys from DEFAULT_ADOPTIONS.
     if let Err(e) = state.settings_repo.mark_user_set(&user_keys).await {
         tracing::warn!(error = %e, "failed to record user intent for settings patch");
-    }
-
-    // The only place a profile becomes Owner going forward (the migration backfill only covers
-    // profiles that existed when it ran): naming the primary profile is naming the owner.
-    if user_keys.contains("primary_profile_id") {
-        if let Some(primary) = merged
-            .primary_profile_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-        {
-            match state.profile_repo.get(primary).await {
-                Ok(Some(profile)) if profile.role != Role::Owner => {
-                    if let Err(e) = state
-                        .profile_repo
-                        .set_role(primary, Role::Owner, None)
-                        .await
-                    {
-                        tracing::warn!(error = %e, profile_id = %primary, "failed to promote the primary profile to owner");
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, profile_id = %primary, "could not read the primary profile to promote it")
-                }
-            }
-        }
     }
 
     if phrase_changed {
@@ -10131,10 +10174,14 @@ async fn update_profile_prefs(
     })))
 }
 
+/// `DELETE /api/v1/profiles/{id}` — owner-only, since it erases the member's data; the owner
+/// themselves is refused until they hand the main member's seat on.
 async fn delete_profile(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    require_household_role_manager(&state, principal.as_ref()).await?;
     let profile = state
         .profile_repo
         .get(&id)
@@ -10152,25 +10199,14 @@ async fn delete_profile(
             )
         })?;
 
-    // The last-owner guard also applies to deletion, not just demotion: either one would leave
-    // the household with no owner.
-    if profile.role == pond_core::user_data::domain::profile::Role::Owner {
-        let profiles = state.profile_repo.list().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-        let owners = profiles
-            .iter()
-            .filter(|p| p.role == pond_core::user_data::domain::profile::Role::Owner)
-            .count();
-        if owners <= 1 {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "this household would be left with no owner"})),
-            ));
-        }
+    if crate::pairing_lock::seated_role(&state, &id, profile.role).await == Role::Owner {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this household would be left with no owner; make another member \
+                          the owner first",
+            })),
+        ));
     }
 
     // Count before deleting: most `profile_id` foreign keys cascade.
@@ -10297,8 +10333,8 @@ struct SetProfileRoleBody {
     guest_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// `PUT /api/v1/profiles/{id}/role` — owner-only; refused if it would leave the household
-/// without an owner.
+/// `PUT /api/v1/profiles/{id}/role` — owner-only. `owner` hands the main member's seat on; the
+/// owner's own role is refused any other value, which would leave the household without one.
 async fn set_profile_role(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -10343,20 +10379,43 @@ async fn set_profile_role(
             )
         })?;
 
-    if target.role == Role::Owner && req.role != Role::Owner {
-        let profiles = state.profile_repo.list().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-        })?;
-        let owners = profiles.iter().filter(|p| p.role == Role::Owner).count();
-        if owners <= 1 {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "this household would be left with no owner"})),
-            ));
+    let target_is_owner =
+        crate::pairing_lock::seated_role(&state, &id, target.role).await == Role::Owner;
+    // One owner, the main member: naming another hands the seat on, and the owner's own role
+    // changes only that way.
+    if req.role == Role::Owner {
+        if !target_is_owner {
+            crate::pairing_lock::seat_main_member(&state, &id, true)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                })?;
         }
+        let seated = state
+            .profile_repo
+            .get(&id)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "the new owner could not be read back"})),
+                )
+            })?;
+        return Ok(Json(profile_json(&seated)));
+    }
+    if target_is_owner {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this household would be left with no owner; make another member \
+                          the owner first",
+            })),
+        ));
     }
 
     let updated = state
@@ -12613,6 +12672,7 @@ async fn create_schedule(
 /// `DELETE /api/v1/schedules/:id` — remove a scheduled task.
 async fn delete_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12621,26 +12681,77 @@ async fn delete_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.delete_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"deleted": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
 
-/// Schedules as anyone in the household may see them: a member's reminder keeps its label and
-/// time but not what it says, since these routes can't tell who is asking.
+/// Schedules as anyone in the household may see them: a member's reminder keeps its time but
+/// neither what it says nor its label, which is drawn from what it says.
 fn household_view(mut tasks: Vec<Schedule>) -> Vec<Schedule> {
     for task in &mut tasks {
         if let TaskKind::MemberReminder { prompt, .. } = &mut task.kind {
             prompt.clear();
+            task.label = PRIVATE_REMINDER_LABEL.to_string();
         }
     }
     tasks
 }
 
+/// A member's private reminder runs as them, so only they may change, run or read it. `Err` is
+/// the refusal when `id` is one and the caller is anyone else, or cannot be told apart; a
+/// one-member household's unidentified caller can only be that member.
+async fn refuse_another_members_reminder(
+    state: &Arc<AppState>,
+    scheduler: &Arc<dyn SchedulerPort>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let tasks = scheduler.list_tasks().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("could not read the schedules: {e}")})),
+        )
+    })?;
+    let Some(owner) = tasks
+        .iter()
+        .find(|t| t.id == id)
+        .and_then(|t| t.kind.member())
+    else {
+        return Ok(());
+    };
+    let caller = match scope_from_principal(state, principal).await {
+        ProfileScope::Owner(member) => Some(member),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await,
+        ProfileScope::Guest => None,
+    };
+    if caller.as_deref() == Some(owner) {
+        return Ok(());
+    }
+    tracing::info!(
+        kind = "private_reminder_refused",
+        schedule_id = id,
+        "refused another member's private reminder"
+    );
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": "that is someone's private reminder, and only they can change it",
+            "code": "private_reminder",
+        })),
+    ))
+}
+
 /// `PUT /api/v1/schedules/:id` — update an existing scheduled task.
 async fn update_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     result: Result<Json<ApiUpdateScheduleRequest>, JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
@@ -12650,6 +12761,11 @@ async fn update_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     let Json(api_req) = match result {
         Ok(r) => r,
         Err(e) => {
@@ -12738,6 +12854,7 @@ struct ApiUpdateScheduleRequest {
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
 async fn pause_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12746,6 +12863,11 @@ async fn pause_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.pause_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"paused": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
@@ -12755,6 +12877,7 @@ async fn pause_schedule(
 /// `POST /api/v1/schedules/:id/resume` — resume a paused task.
 async fn resume_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12763,6 +12886,11 @@ async fn resume_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.resume_task(&id).await {
         Ok(()) => (StatusCode::OK, Json(json!({"resumed": id}))),
         // The schedule exists and stays paused: a conflict with its state, not a missing id.
@@ -12777,6 +12905,7 @@ async fn resume_schedule(
 /// `POST /api/v1/schedules/:id/run-now` — fire a task immediately.
 async fn run_schedule_now(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let Some(scheduler) = &state.scheduler else {
@@ -12785,6 +12914,11 @@ async fn run_schedule_now(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
@@ -12794,22 +12928,25 @@ async fn run_schedule_now(
 /// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
 async fn run_missed_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+    answer_missed_schedule(&state, principal.as_ref(), &id, MissedRunAnswer::Run).await
 }
 
 /// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
 async fn skip_missed_schedule(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+    answer_missed_schedule(&state, principal.as_ref(), &id, MissedRunAnswer::Skip).await
 }
 
 /// The first answer settles a missed run; a later one is `409`, as is answering none.
 async fn answer_missed_schedule(
-    state: &AppState,
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     id: &str,
     answer: MissedRunAnswer,
 ) -> (StatusCode, Json<Value>) {
@@ -12819,6 +12956,9 @@ async fn answer_missed_schedule(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) = refuse_another_members_reminder(state, scheduler, principal, id).await {
+        return refusal;
+    }
     match scheduler.answer_missed_run(id, answer).await {
         Ok(()) => match answer {
             MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
@@ -12835,6 +12975,7 @@ async fn answer_missed_schedule(
 /// `GET /api/v1/schedules/:id/runs` — execution history for a schedule.
 async fn list_schedule_runs(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
@@ -12844,6 +12985,11 @@ async fn list_schedule_runs(
             Json(json!({"error": "scheduler not configured"})),
         );
     };
+    if let Err(refusal) =
+        refuse_another_members_reminder(&state, scheduler, principal.as_ref(), &id).await
+    {
+        return refusal;
+    }
     let limit: u32 = params
         .get("limit")
         .and_then(|v: &String| v.parse().ok())
@@ -12881,6 +13027,18 @@ async fn list_upcoming_schedules(
     }
 }
 
+/// A run as anyone listening may see it: a member's reminder says that it ran, not what it said.
+fn household_event(
+    mut event: pond_core::user_data::domain::schedule::ScheduleResultEvent,
+) -> pond_core::user_data::domain::schedule::ScheduleResultEvent {
+    if event.for_member.is_some() {
+        event.schedule_label = PRIVATE_REMINDER_LABEL.to_string();
+        event.result = None;
+        event.error = None;
+    }
+    event
+}
+
 /// `GET /api/v1/schedules/events` — SSE stream of schedule completion events.
 async fn schedule_events_sse(
     State(state): State<Arc<AppState>>,
@@ -12891,7 +13049,7 @@ async fn schedule_events_sse(
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    let data = serde_json::to_string(&household_event(event)).unwrap_or_default();
                     yield Ok(Event::default().data(data));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -13870,8 +14028,8 @@ fn qualify_tool_name(server: &str, tool: &str) -> String {
     }
 }
 
-/// Tools callable without an LLM turn; deny-by-default. No session reaches them, so identity
-/// guards pass in audit mode. Open to any paired client or MCP App: read-only/narrow only.
+/// Tools callable without an LLM turn; deny-by-default. No session reaches them, so the caller is
+/// who its paired device says. Open to any paired client or MCP App: read-only/narrow only.
 const DIRECT_DISPATCH_ALLOWLIST: &[&str] = &[
     "giap-device-control__set_device_state",
     // Read-only; the Devices card's power label (`powerStateOf`) needs it.
@@ -13880,9 +14038,11 @@ const DIRECT_DISPATCH_ALLOWLIST: &[&str] = &[
     "giap-weather__get_weather_forecast",
 ];
 
-/// Runs an allowlisted tool straight through the MCP registry, with no LLM turn.
+/// Runs an allowlisted tool straight through the MCP registry, with no LLM turn, as the caller
+/// `principal` proves: a guest's phone, or a device that belongs to nobody, is held as a guest.
 async fn dispatch_tool_direct(
     state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     qualified: &str,
     args: Value,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -13910,9 +14070,7 @@ async fn dispatch_tool_direct(
         )
     })?;
     let args = if args.is_null() { json!({}) } else { args };
-    // This path carries no caller identity (see the allowlist refusal above); it is reached only
-    // through authenticated HTTP routes a guest's chat turn never calls directly.
-    let scope = pond_core::user_data::domain::profile::ProfileScope::Household;
+    let scope = scope_from_principal(state, principal).await;
     match dispatcher.dispatch(qualified, args, &scope).await {
         Ok(result) => Ok(Json(json!({
             "tool": qualified,
@@ -13948,7 +14106,7 @@ async fn invoke_tool(
     }
     let qualified = qualify_tool_name(&req.server, &req.tool);
     let Some(key) = headers.get(crate::idempotency::HEADER) else {
-        return dispatch_tool_direct(&state, &qualified, req.args).await;
+        return dispatch_tool_direct(&state, principal.as_ref(), &qualified, req.args).await;
     };
     let key = key
         .to_str()
@@ -13976,7 +14134,8 @@ async fn invoke_tool(
         return Ok(Json(reply.clone()));
     }
     outcome.request = Some(request);
-    let Json(mut reply) = dispatch_tool_direct(&state, &qualified, req.args).await?;
+    let Json(mut reply) =
+        dispatch_tool_direct(&state, principal.as_ref(), &qualified, req.args).await?;
     reply["idempotency_key"] = json!(key);
     // A failure is not kept: nothing ran, or the device refused and a resend may try it again.
     if reply["success"] == json!(true) {
@@ -13988,6 +14147,7 @@ async fn invoke_tool(
 /// `POST /api/v1/mcp/tools/call` — MCP Apps' `callServerTool()`, by qualified name.
 async fn mcp_call_tool(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<McpToolCallRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Json(req) = body.map_err(|e| {
@@ -13998,6 +14158,7 @@ async fn mcp_call_tool(
     })?;
     dispatch_tool_direct(
         &state,
+        principal.as_ref(),
         &req.name,
         req.arguments.unwrap_or_else(|| json!({})),
     )
@@ -17271,7 +17432,7 @@ async fn suggestion_groups(state: &Arc<AppState>) -> GroupsKnown {
     }
 }
 
-/// Unpaused schedules due before `until`, and the soonest one's own label.
+/// Unpaused schedules due before `until`, and the soonest one's label as the household sees it.
 async fn suggestion_schedules_before(
     state: &Arc<AppState>,
     now: chrono::DateTime<chrono::Utc>,
@@ -17284,7 +17445,7 @@ async fn suggestion_schedules_before(
     let Ok(all) = scheduler.list_upcoming(50).await else {
         return (0, None);
     };
-    let mut due: Vec<_> = all
+    let mut due: Vec<_> = household_view(all)
         .into_iter()
         .filter(|s| !s.paused)
         .filter_map(|s| s.next_run.map(|at| (at, s.label)))
@@ -21486,13 +21647,19 @@ async fn decide_proposal(
 
 /// Resolves whose turn this is, once, at the edge; every failure narrows rather than widens.
 /// `device` is a [`ProvenDevice`] because a paired device outranks every other identity proof.
+async fn resolve_turn_scope(
+    state: &Arc<AppState>,
+    session_id: &str,
+    device: &ProvenDevice,
+) -> ProfileScope {
+    resolve_turn_identity(state, session_id, device).await.scope
+}
+
 /// A turn from a locked phone is an unidentified speaker's, whoever the phone belongs to: the
-/// voice that woke it over the lock screen does not prove who is holding it. The member's own
-/// scope comes back with the next turn sent after the phone is unlocked.
-fn locked_turn_scope(scope: ProfileScope, locked: bool, session_id: &str) -> ProfileScope {
-    if !locked {
-        return scope;
-    }
+/// voice that woke it over the lock screen does not prove who is holding it. Taken in place of
+/// [`resolve_turn_scope`], so the conversation is not claimed for the phone's member either; the
+/// member's own scope comes back with the next turn sent after the phone is unlocked.
+fn locked_turn_scope(session_id: &str) -> ProfileScope {
     tracing::info!(
         kind = "turn_device_locked",
         session_id,
@@ -21501,12 +21668,33 @@ fn locked_turn_scope(scope: ProfileScope, locked: bool, session_id: &str) -> Pro
     ProfileScope::Guest
 }
 
-async fn resolve_turn_scope(
-    state: &Arc<AppState>,
-    session_id: &str,
-    device: &ProvenDevice,
-) -> ProfileScope {
-    resolve_turn_identity(state, session_id, device).await.scope
+/// The conversation a locked phone's turn runs in. A member's own conversation would replay
+/// their earlier answers to whoever holds the phone, so such a turn starts a new one instead.
+async fn locked_turn_session(state: &AppState, session_id: String) -> String {
+    match state
+        .session_storage
+        .get_session_identity(&session_id)
+        .await
+    {
+        Ok(identity) if identity.readable_by(&ProfileScope::Guest) => session_id,
+        read => {
+            if let Err(e) = read {
+                tracing::warn!(
+                    error = %e,
+                    session_id,
+                    "could not read whose conversation a locked phone asked in"
+                );
+            }
+            let fresh = Uuid::new_v4().to_string();
+            tracing::info!(
+                kind = "turn_device_locked_new_session",
+                asked = %session_id,
+                session_id = %fresh,
+                "a locked phone asked in a member's conversation; the turn starts a new one"
+            );
+            fresh
+        }
+    }
 }
 
 /// [`resolve_turn_scope`] with the evidence it rested on, for decisions a voice match may not make.
@@ -21612,13 +21800,10 @@ fn proven_device(
 /// else to defer to" trust `ProfileScope::Household` already carries elsewhere.
 async fn resolve_role(state: &Arc<AppState>, scope: &ProfileScope) -> Option<Role> {
     match scope {
-        ProfileScope::Owner(id) => state
-            .profile_repo
-            .get(id)
-            .await
-            .ok()
-            .flatten()
-            .map(|p| p.role),
+        ProfileScope::Owner(id) => {
+            let stored = state.profile_repo.get(id).await.ok().flatten()?.role;
+            Some(crate::pairing_lock::seated_role(state, id, stored).await)
+        }
         ProfileScope::Household => Some(Role::Owner),
         ProfileScope::Guest => None,
     }
@@ -21631,6 +21816,14 @@ async fn resolve_role_from_principal(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Option<Role> {
+    resolve_role(state, &scope_from_principal(state, principal).await).await
+}
+
+/// The caller's scope from its paired device alone, for a handler with no chat session.
+async fn scope_from_principal(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> ProfileScope {
     let device = proven_device(principal);
     let device_rung = match device.id() {
         None => DeviceRung::NoDevice,
@@ -21640,12 +21833,12 @@ async fn resolve_role_from_principal(
         Ok(profiles) => profiles.len() > 1,
         Err(_) => true,
     };
-    let resolved = identity_resolution::resolve(&identity_resolution::ResolutionInputs {
+    identity_resolution::resolve(&identity_resolution::ResolutionInputs {
         paired_device_profile: device_rung.profile_id(),
         session: &SessionIdentity::unknown(),
         household_has_multiple_members,
-    });
-    resolve_role(state, &resolved.scope).await
+    })
+    .scope
 }
 
 /// Real owner names, for refusals that should say who to ask, not just which role.
@@ -22632,6 +22825,30 @@ mod tests {
         assert_eq!(failed.category, "alert");
         assert_eq!(failed.title, "Failed pairing attempt");
         assert_eq!(failed.data, Some(json!({"open": "devices"})));
+    }
+
+    #[test]
+    fn a_reminders_run_is_heard_by_the_household_without_its_words() {
+        use pond_core::user_data::domain::schedule::{RunStatus, ScheduleResultEvent};
+        let run = |for_member: Option<&str>| ScheduleResultEvent {
+            schedule_id: "r".into(),
+            schedule_label: "Take the tablets".into(),
+            run_id: "1".into(),
+            status: RunStatus::Completed,
+            result: Some("Time to take the tablets".into()),
+            error: Some("tablets".into()),
+            duration_ms: Some(5),
+            for_member: for_member.map(str::to_string),
+        };
+
+        let heard = super::household_event(run(Some("liz")));
+        assert_eq!(heard.schedule_label, super::PRIVATE_REMINDER_LABEL);
+        assert_eq!((heard.result, heard.error), (None, None));
+        assert_eq!(heard.schedule_id, "r");
+
+        let household = super::household_event(run(None));
+        assert_eq!(household.schedule_label, "Take the tablets");
+        assert!(household.result.is_some());
     }
 
     /// Only the dashboard's re-pair of its own known row is spared; a phone's id is a claim.

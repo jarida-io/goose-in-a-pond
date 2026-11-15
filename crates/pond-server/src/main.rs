@@ -1741,14 +1741,14 @@ async fn run_server(
     > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
     let guest_room_access: Arc<
         dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
     let guest_device_access: Arc<
         dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
@@ -4525,29 +4525,44 @@ async fn run_server(
     // A pond set up before the pairing lock gets its main member: the only member, else the
     // one settings name. A pond with no members yet names one when it is set up.
     match handshake.pairing_lock().await {
-        Ok(lock) if lock.owner_profile_id.is_none() => {
-            let members: Vec<String> = profile_repo
-                .list()
-                .await
-                .map(|members| members.into_iter().map(|m| m.id).collect())
-                .unwrap_or_default();
-            let named = settings_repo
-                .get()
-                .await
-                .ok()
-                .and_then(|s| s.primary_profile_id)
-                .filter(|id| members.contains(id));
-            let main = match members.as_slice() {
-                [only] => Some(only.clone()),
-                _ => named,
+        Ok(lock) => {
+            let main = match lock.owner_profile_id {
+                Some(main) => Some(main),
+                None => {
+                    let members: Vec<String> = profile_repo
+                        .list()
+                        .await
+                        .map(|members| members.into_iter().map(|m| m.id).collect())
+                        .unwrap_or_default();
+                    let named = settings_repo
+                        .get()
+                        .await
+                        .ok()
+                        .and_then(|s| s.primary_profile_id)
+                        .filter(|id| members.contains(id));
+                    let main = match members.as_slice() {
+                        [only] => Some(only.clone()),
+                        _ => named,
+                    };
+                    match main {
+                        Some(main) => match handshake.set_pairing_owner(&main, false).await {
+                            Ok(seated) => seated.then_some(main),
+                            Err(error) => {
+                                tracing::warn!(%error, "the pond's main member could not be named");
+                                None
+                            }
+                        },
+                        None => None,
+                    }
+                }
             };
+            // The owner role follows the seat, however it was filled before this start.
             if let Some(main) = main {
-                if let Err(error) = handshake.set_pairing_owner(&main, false).await {
-                    tracing::warn!(%error, "the pond's main member could not be named");
+                if let Err(error) = profile_repo.hand_ownership_to(&main).await {
+                    tracing::warn!(%error, "the household's owner could not follow its main member");
                 }
             }
         }
-        Ok(_) => {}
         Err(error) => tracing::warn!(%error, "the pairing lock could not be read"),
     }
     // A phone that stopped connecting is removed after the household's chosen number of days.
@@ -4636,8 +4651,10 @@ async fn run_server(
     // factory reset's Wi-Fi forget goes through the same shared instance rather than a second
     // one with its own exclusion lock.
     let wifi_station = pond_connect::wifi::platform();
-    let data_wipe: Option<Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>> =
-        Some(Arc::new(pond_infra::personal_data_wipe::SystemDataWipe::new(
+    let data_wipe: Option<
+        Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>,
+    > = Some(Arc::new(
+        pond_infra::personal_data_wipe::SystemDataWipe::new(
             db.clone(),
             secret_repo.clone(),
             Some(Arc::new(
@@ -4645,7 +4662,8 @@ async fn run_server(
                     wifi_station.clone(),
                 ),
             )),
-        )));
+        ),
+    ));
 
     // Shared with room voice, whose turns hold lane jobs back as a phone's do.
     let runs = Arc::new(pond_api::runs::RunSupervisor::default());
@@ -6061,14 +6079,14 @@ async fn run_chat(
     > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
     let guest_room_access_arc: Arc<
         dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
     let guest_device_access_arc: Arc<
         dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
     let profile_repo_arc: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
@@ -11449,18 +11467,19 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    let room_registry: Arc<dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync> =
-        Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let room_registry: Arc<
+        dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
+    > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
     let guest_room_access: Arc<
         dyn pond_core::user_data::ports::guest_room_access::GuestRoomAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_room_access::SqliteGuestRoomAccess::new(db.system.clone()),
+    );
     let guest_device_access: Arc<
         dyn pond_core::user_data::ports::guest_device_access::GuestDeviceAccess + Send + Sync,
-    > = Arc::new(pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(
-        db.system.clone(),
-    ));
+    > = Arc::new(
+        pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
+    );
     let profile_repo: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));

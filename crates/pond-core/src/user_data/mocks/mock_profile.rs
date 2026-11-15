@@ -89,9 +89,34 @@ impl ProfileRepository for MockProfileRepository {
             .get_mut(profile_id)
             .ok_or_else(|| anyhow!("profile not found: {}", profile_id))?;
         profile.role = role;
-        profile.guest_until = if role == Role::Guest { guest_until } else { None };
+        profile.guest_until = if role == Role::Guest {
+            guest_until
+        } else {
+            None
+        };
         profile.updated_at = Utc::now();
         Ok(profile.clone())
+    }
+
+    async fn hand_ownership_to(&self, profile_id: &str) -> Result<()> {
+        let mut store = self.store.write().await;
+        if !store.contains_key(profile_id) {
+            return Err(anyhow!("profile not found: {}", profile_id));
+        }
+        let now = Utc::now();
+        for profile in store.values_mut() {
+            let role = if profile.id == profile_id {
+                Role::Owner
+            } else if profile.role == Role::Owner {
+                Role::Member
+            } else {
+                continue;
+            };
+            profile.role = role;
+            profile.guest_until = None;
+            profile.updated_at = now;
+        }
+        Ok(())
     }
 
     async fn delete(&self, profile_id: &str) -> Result<()> {
@@ -154,6 +179,33 @@ mod tests {
             updated.preferences.get("language").map(|s| s.as_str()),
             Some("en")
         );
+    }
+
+    #[tokio::test]
+    async fn handing_ownership_on_leaves_one_owner() {
+        let repo = MockProfileRepository::new();
+        let first = repo
+            .create(CreateProfileRequest {
+                display_name: "Ada".to_string(),
+                avatar_emoji: "A".to_string(),
+            })
+            .await
+            .unwrap();
+        let next = repo
+            .create(CreateProfileRequest {
+                display_name: "Bo".to_string(),
+                avatar_emoji: "B".to_string(),
+            })
+            .await
+            .unwrap();
+        repo.hand_ownership_to(&next.id).await.unwrap();
+        assert_eq!(repo.get(&next.id).await.unwrap().unwrap().role, Role::Owner);
+        assert_eq!(
+            repo.get(&first.id).await.unwrap().unwrap().role,
+            Role::Member
+        );
+        assert!(repo.hand_ownership_to("nobody").await.is_err());
+        assert_eq!(repo.get(&next.id).await.unwrap().unwrap().role, Role::Owner);
     }
 
     #[tokio::test]

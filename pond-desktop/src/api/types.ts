@@ -394,6 +394,8 @@ export interface Room {
   created_at: string;
   /** Whether an unidentified guest voice may use devices in this room. */
   guest_accessible: boolean;
+  /** Whether this caller may change `guest_accessible` (the owner); absent from a pond that does not say. */
+  guest_access_editable?: boolean;
 }
 
 // ── Mesh ──────────────────────────────────────────────────────
