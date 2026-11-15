@@ -259,25 +259,38 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(json).expect("still JSON");
     }
 
-    /// A marker written anywhere but [`card`] lands in the model's text.
+    /// A marker written anywhere but [`card`] lands in the model's text. Submodules too: a
+    /// server's tools may live in a directory beside it.
     #[test]
     fn only_the_card_helper_writes_a_card_marker() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let src_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut dirs = vec![src_dir.to_path_buf()];
         let mut scanned = 0;
+        let mut nested = 0;
         let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|e| e != "rs") || path.ends_with("format.rs") {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).unwrap();
-            let code = src.split("#[cfg(test)]").next().unwrap_or_default();
-            scanned += 1;
-            if strip_line_comments(code).contains("\"[[[mcp-ui:") {
-                offenders.push(path.display().to_string());
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") || path == src_dir.join("format.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                let code = src.split("#[cfg(test)]").next().unwrap_or_default();
+                scanned += 1;
+                if dir != src_dir {
+                    nested += 1;
+                }
+                if strip_line_comments(code).contains("\"[[[mcp-ui:") {
+                    offenders.push(path.display().to_string());
+                }
             }
         }
         assert!(scanned > 20, "scanned {scanned} files; the walk is wrong");
+        assert!(nested > 0, "no submodule was scanned; the walk is wrong");
         assert!(offenders.is_empty(), "use format::card: {offenders:?}");
     }
 
@@ -412,6 +425,10 @@ mod tests {
             ("knowledge.rs", include_str!("knowledge.rs")),
             ("wolfram.rs", include_str!("wolfram.rs")),
             ("web_search.rs", include_str!("web_search.rs")),
+            (
+                "web_search/pictures.rs",
+                include_str!("web_search/pictures.rs"),
+            ),
             ("memory.rs", include_str!("memory.rs")),
             ("sensors.rs", include_str!("sensors.rs")),
         ]
@@ -432,8 +449,8 @@ mod tests {
     }
 
     /// Every MCP server source, keyed by extension; one list shared by the tool inventory and
-    /// the supervision guard. `wolfram.rs` and `web_search.rs` are routers composed onto
-    /// `giap-knowledge`.
+    /// the supervision guard. `wolfram.rs`, `web_search.rs` and `web_search/pictures.rs` are
+    /// routers composed onto `giap-knowledge`.
     const TOOL_SOURCES: &[(&str, &str)] = &[
         ("giap-context", include_str!("context.rs")),
         ("giap-device", include_str!("device.rs")),
@@ -441,6 +458,7 @@ mod tests {
         ("giap-knowledge", include_str!("knowledge.rs")),
         ("giap-knowledge", include_str!("wolfram.rs")),
         ("giap-knowledge", include_str!("web_search.rs")),
+        ("giap-knowledge", include_str!("web_search/pictures.rs")),
         ("giap-memory", include_str!("memory.rs")),
         ("giap-orchestrator", include_str!("orchestrator.rs")),
         ("giap-schedule", include_str!("schedule.rs")),
@@ -512,9 +530,13 @@ mod tests {
             tools.contains("giap-knowledge__compute_answer"),
             "{tools:?}"
         );
+        assert!(
+            tools.contains("giap-knowledge__show_pictures"),
+            "a router in a submodule: {tools:?}"
+        );
         assert_eq!(
             tools.len(),
-            45,
+            46,
             "the tool inventory changed. Update this count in the same commit as \
              the tool — the number is the record, and a stale one is how a count \
              read 64 for months while the real number was 65. This assertion has \

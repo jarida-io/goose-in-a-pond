@@ -3602,9 +3602,17 @@ impl GooseAdapter {
             }
         };
 
-        // The keyed tools whose secret is not stored now, read once for the turn: the group lines
-        // must not promise them (6c), and the allow-set drops them (6e).
-        let keyless_tools = read_keyless_tools().await;
+        // The keyed tools whose secret is not stored now, read once for the turn, and in a voice
+        // turn the tools whose result is only for a screen: the group lines must not promise them
+        // (6c), and the allow-set drops them (6e).
+        let mut keyless_tools = read_keyless_tools().await;
+        if is_voice {
+            keyless_tools.extend(
+                pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                    .iter()
+                    .map(|tool| tool.to_string()),
+            );
+        }
 
         // ── 6c. Per-session tool relevance ───────────────────────────────────
         // Goose always sends the full union, so narrowing is enforced by the shim per call.
@@ -3875,7 +3883,9 @@ impl GooseAdapter {
                 kind = "tools_withheld_for_missing_secret",
                 session_id = %session_id,
                 tools = ?withheld,
-                "tools whose key is not stored were withheld from the turn"
+                voice = is_voice,
+                "tools whose key is not stored, or that need a screen in a voice turn, were \
+                 withheld from the turn"
             );
             (
                 without(allowed_tools, &withheld),
@@ -3889,6 +3899,7 @@ impl GooseAdapter {
         // this handle live, so a group enabled mid-turn is admitted at once.
         let session_controls = self.shim_controls.session(&goose_sid);
         session_controls.set_allowed_tools(allowed_tools.clone());
+        pond_core::mcp::services::screenless_sessions::global().set(&goose_sid, is_voice);
         // A failure recorded in an earlier turn is not this one's; this turn's calls record anew.
         session_controls.note_provider_outcome(None);
 
@@ -6204,11 +6215,19 @@ impl pond_core::mcp::ports::tools::tool_selection_control::ToolSelectionControl 
                 );
                 return Err(ToolSelectionError::NotReady(group.to_string()));
             }
-            // Widening a group must not hand back a tool the turn withheld for its missing key.
-            let withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
+            // Widening a group must not hand back a tool the turn withheld for its missing key, or
+            // for wanting a screen the turn has not got.
+            let mut withheld = pond_mcp_server::tools_withheld_for_missing_secrets(
                 newly_allowed.iter().map(String::as_str),
             )
             .await;
+            if pond_core::mcp::services::screenless_sessions::global().is_screenless(&goose_sid) {
+                withheld.extend(
+                    pond_core::mcp::domain::tool_group::SCREEN_ONLY_TOOLS
+                        .iter()
+                        .map(|tool| tool.to_string()),
+                );
+            }
             self.shim_controls
                 .session(&goose_sid)
                 .extend_allowed_tools(newly_allowed.into_iter().filter(|t| !withheld.contains(t)));
@@ -7092,6 +7111,42 @@ mod tests {
         let args = lines[call..call + 6].join("\n");
         assert!(args.contains("is_voice,"), "{args}");
         assert!(!args.contains("voice_instance"), "{args}");
+    }
+
+    /// A voice turn has no screen, so its screen-only tools join the withheld set, and only then;
+    /// a widen later in the turn must not hand them back.
+    #[test]
+    fn a_voice_turn_withholds_the_screen_only_tools_before_the_gate() {
+        let lines = stream_body_code();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
+        };
+        let keyless = at("let mut keyless_tools = read_keyless_tools().await;");
+        let screen_only = at("SCREEN_ONLY_TOOLS");
+        let gate = at("without(allowed_tools, &withheld)");
+        assert!(keyless < screen_only, "the keyless set is read first");
+        assert!(screen_only < gate, "the gate must see the voice turn's set");
+        assert!(
+            lines[screen_only.saturating_sub(3)..screen_only]
+                .iter()
+                .any(|l| l.contains("if is_voice")),
+            "only a voice turn loses them"
+        );
+        let screenless = at("screenless_sessions::global().set(&goose_sid, is_voice)");
+        let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
+        assert!(
+            allow_set < screenless && screenless - allow_set <= 3,
+            "the tools read the turn's screen as the allow-set is published"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("screenless_sessions::global().is_screenless(&goose_sid)")),
+            "enable_group must read the turn's screen"
+        );
     }
 
     /// Production source lines with `//` comments cut, so prose can't satisfy a guard.

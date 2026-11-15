@@ -2,6 +2,7 @@ pub mod extension_env;
 pub mod marketplace;
 pub mod notice_follow_up;
 pub mod page_addresses;
+pub mod screenless_sessions;
 pub mod source_ledger;
 pub mod system_notices;
 pub mod tool_registry;

@@ -13,6 +13,9 @@ import { TypingIndicator } from "./chat/TypingIndicator";
 import { StepsDisclosure } from "./chat/StepsDisclosure";
 import { ResultCard } from "./chat/ResultCard";
 import type { CardKind } from "./chat/ResultCard";
+import { WebResultCard } from "./chat/WebResultCard";
+import { webCardOf } from "./chat/webCard";
+import type { ContextCard } from "../../state/reducer";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
 import { ContextPressureNote } from "../../components/ContextPressureNote";
 import { SubagentTree } from "../../components/SubagentTree";
@@ -51,6 +54,8 @@ interface Row {
   who: "user" | "goose";
   text: string;
   card?: CardKind;
+  /** The web's results for the person, when the turn's last tool brought them. */
+  webCard?: ContextCard;
   streaming?: boolean;
   turnStats?: TurnStats;
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
@@ -95,12 +100,14 @@ function makeSeed(userName: string): Row[] {
 /** Project a stored message into what this surface renders. */
 function toRow(m: Message): Row {
   // One inline card: the last tool a turn called is the one its answer is about.
-  const lastTool = m.cards?.[m.cards.length - 1]?.tool;
+  const last = m.cards?.[m.cards.length - 1];
+  const lastTool = last?.tool;
   return {
     id: String(m.id),
     who: m.role === "user" ? "user" : "goose",
     text: m.text,
     card: lastTool ? toolToCard(lastTool) : undefined,
+    webCard: webCardOf(last) ?? undefined,
     streaming: m.streaming,
     turnStats: m.turnStats,
     turnLimit: m.turnLimit,
@@ -434,6 +441,11 @@ export function ChatHubView() {
               {m.card && !m.streaming && (
                 <div className="ch-card">
                   <ResultCard kind={m.card} />
+                </div>
+              )}
+              {m.who === "goose" && m.webCard && !m.streaming && (
+                <div className="ch-card">
+                  <WebResultCard card={m.webCard} />
                 </div>
               )}
               {m.who === "goose" && !m.streaming && m.turnLimit !== undefined && (

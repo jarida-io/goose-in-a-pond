@@ -305,3 +305,108 @@ describe("SearchCard, nearby places", () => {
     expect(count("large")).toBe(5);
   });
 });
+
+const THUMB = "https://imgs.search.brave.com/t/rs:fit:200:200:1/g:ce/aHR0cHM6";
+
+const NEWS = [
+  {
+    title: "The library opens a new reading room",
+    url: "https://news.example.org/reading-room",
+    domain: "news.example.org",
+    publisher: "Example News",
+    date: "2026-10-26",
+    thumbnail: THUMB,
+    breaking: true,
+  },
+];
+
+const VIDEOS = [
+  {
+    title: "A tour of the library",
+    url: "https://video.example.org/watch?v=tour",
+    domain: "video.example.org",
+    duration: "4:12",
+    creator: "Example Channel",
+    date: null,
+    thumbnail: THUMB,
+  },
+];
+
+describe("SearchCard, what Brave adds beside the pages", () => {
+  const withEverything = { ...DATA, news: NEWS, videos: VIDEOS };
+
+  it("shows news and videos under their own labels, after the pages", () => {
+    render(<SearchCard data={withEverything} toolName="t" />);
+    expect(screen.getByText("Pages")).toBeTruthy();
+    const news = screen.getByRole("list", { name: "News" });
+    expect(news.textContent).toContain("The library opens a new reading room");
+    expect(news.textContent).toContain("Example News · 2026-10-26");
+    expect(news.textContent).toContain("Breaking");
+    const videos = screen.getByRole("list", { name: "Videos" });
+    expect(videos.textContent).toContain("A tour of the library");
+    expect(videos.textContent).toContain("Example Channel · video.example.org");
+
+    const everything = document.querySelector(".ui-search")!.textContent!;
+    expect(everything.indexOf("Opening hours - Example Town Library")).toBeLessThan(
+      everything.indexOf("The library opens a new reading room"),
+    );
+  });
+
+  it("names a video's length on its picture, and in words for a screen reader", () => {
+    render(<SearchCard data={withEverything} toolName="t" />);
+    const badge = document.querySelector(".ui-search__duration")!;
+    expect(badge.textContent).toBe("4:12");
+    expect(badge.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByText(", 4:12 long")).toBeTruthy();
+  });
+
+  it("loads a thumbnail only from Brave's image proxy, with no referrer and no words of its own", () => {
+    const elsewhere = [{ ...NEWS[0], thumbnail: "https://news.example.org/photo.jpg" }];
+    render(<SearchCard data={{ ...DATA, news: elsewhere, videos: VIDEOS }} toolName="t" />);
+    const images = Array.from(document.querySelectorAll("img"));
+    expect(images.map((i) => i.getAttribute("src"))).toEqual([THUMB]);
+    expect(images[0]!.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(images[0]!.getAttribute("alt")).toBe("");
+  });
+
+  it("opens news and videos outside the app, and only web addresses", () => {
+    const script = [{ ...NEWS[0], url: "javascript:alert(1)" }];
+    render(<SearchCard data={{ ...DATA, news: script, videos: VIDEOS }} toolName="t" />);
+    expect(screen.queryByRole("list", { name: "News" })).toBeNull();
+    const video = screen.getByRole("link", { name: /A tour of the library/ });
+    expect(video.getAttribute("href")).toBe("https://video.example.org/watch?v=tour");
+    expect(video.getAttribute("target")).toBe("_blank");
+  });
+
+  it("is a card when only news came back, and labels nothing when one group is all there is", () => {
+    render(<SearchCard data={{ query: "q", news: NEWS }} toolName="t" />);
+    expect(screen.getByRole("list", { name: "News" })).toBeTruthy();
+    expect(screen.queryByText("News")).toBeNull();
+    expect(screen.queryByText("No pages came back for this search.")).toBeNull();
+  });
+
+  it("ignores news and videos fields that are not lists", () => {
+    render(<SearchCard data={{ ...DATA, news: "x", videos: { a: 1 } }} toolName="t" />);
+    expect(screen.queryByRole("list", { name: "News" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Videos" })).toBeNull();
+    expect(screen.queryByText("Pages")).toBeNull();
+  });
+
+  it("shows a place's details in place of its snippet when the search knew them", () => {
+    const place = {
+      name: "Example Town Library",
+      url: "https://library.example.org/",
+      snippet: "phone: +254 700 000 000",
+      hours: "Saturday 09:00 to 13:00",
+      address: "1 Library Road",
+      phone: "+254 700 000 000",
+      rating: "4.5 of 5 from 12 reviews",
+    };
+    render(<SearchCard data={{ query: "q", places: [place] }} toolName="t" />);
+    expect(screen.getByText("Open Saturday 09:00 to 13:00")).toBeTruthy();
+    expect(screen.getByText("1 Library Road")).toBeTruthy();
+    expect(screen.getByText("+254 700 000 000")).toBeTruthy();
+    expect(screen.getByText("4.5 of 5 from 12 reviews")).toBeTruthy();
+    expect(screen.queryByText("phone: +254 700 000 000")).toBeNull();
+  });
+});

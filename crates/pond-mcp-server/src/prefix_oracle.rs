@@ -175,8 +175,8 @@ mod tests {
         let total = total_bytes(&entries);
         assert_eq!(
             total,
-            30_179,
-            "the default tool block is now {total} raw bytes, was 30,179. That is \
+            30_237,
+            "the default tool block is now {total} raw bytes, was 30,237. That is \
              the PRE-minification form (see the module docs); the provider shim minifies it further. If the change is deliberate, update this number and \
              say why in the commit.\nfull order:\n{}",
             rendered.join("\n")
@@ -185,18 +185,29 @@ mod tests {
         assert_eq!(entries.len(), 48, "tool count moved");
     }
 
-    /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there
-    /// on, once, and the core block and everything sorting before it stay byte-identical.
+    /// Storing one key adds its schemas inside `giap-knowledge`: the prefix moves from the first
+    /// of them on, once, and the core block and everything sorting before it stay byte-identical.
     #[test]
-    fn storing_a_key_moves_the_prefix_only_from_its_tool_on() {
+    fn storing_a_key_moves_the_prefix_only_from_its_tools_on() {
+        use pond_core::mcp::domain::tool_group::TOOL_REQUIREMENTS;
         let keyless = ordered_keyless_tools(DEFAULT_GROUPS);
-        for requirement in pond_core::mcp::domain::tool_group::TOOL_REQUIREMENTS {
+        for requirement in TOOL_REQUIREMENTS {
             let keyed = ordered_tools_with(DEFAULT_GROUPS, |s| s == requirement.secret);
-            assert_eq!(keyed.len(), keyless.len() + 1, "{}", requirement.secret);
+            let its_tools: Vec<&str> = TOOL_REQUIREMENTS
+                .iter()
+                .filter(|r| r.secret == requirement.secret)
+                .map(|r| r.tool)
+                .collect();
+            assert_eq!(
+                keyed.len(),
+                keyless.len() + its_tools.len(),
+                "{}",
+                requirement.secret
+            );
             let at = keyed
                 .iter()
-                .position(|e| e.name == requirement.tool)
-                .expect("the keyed tool is in the keyed block");
+                .position(|e| its_tools.contains(&e.name.as_str()))
+                .expect("the keyed tools are in the keyed block");
             let shared = keyed
                 .iter()
                 .zip(&keyless)
@@ -219,8 +230,8 @@ mod tests {
         }
         let total = total_bytes(&ordered_tools(DEFAULT_GROUPS));
         assert_eq!(
-            total, 30_981,
-            "the block with every key stored is now {total} raw bytes, was 30,981"
+            total, 31_519,
+            "the block with every key stored is now {total} raw bytes, was 31,519"
         );
     }
 
