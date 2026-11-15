@@ -21,7 +21,7 @@ agents here.
 |---|---|---|
 | Rust | `rust-version = "1.91.1"` (root `Cargo.toml`); CI uses current stable | the workspace |
 | Node | `.nvmrc` = 22; `pond-desktop/package.json` `engines`: `^22.13.0 \|\| ^24.0.0 \|\| >=26.0.0` | desktop app, web UI, tests. `bash scripts/giap.sh node` finds or downloads one in range |
-| Go | `go 1.27.3` (`native/pondnet/go.mod`) | the `pondnet` remote-access helper (`scripts/build-network-helper.sh`) |
+| Go | `go 1.27.4` (`native/pondnet/go.mod`) | the `pondnet` remote-access helper (`scripts/build-network-helper.sh`) |
 | C toolchain, cmake, pkg-config | any recent | whisper-rs and llama.cpp build from source |
 | Linux only | `libasound2-dev libdbus-1-dev libssl-dev` | ALSA (cpal) and BlueZ (`pond-connect`) |
 | `protoc` | any | only for `pond-adapters-lightning` (its Breez SDK compiles `.proto` files) |
