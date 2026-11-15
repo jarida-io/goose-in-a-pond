@@ -98,7 +98,9 @@ describe("WebSearchPanel: what it always says", () => {
     expect(link.target).toBe("_blank");
     expect(link.rel).toContain("noopener");
     expect(
-      screen.getByText(/The free monthly credit covers about 500 web searches, since each one asks Brave twice/),
+      screen.getByText(
+        /The free monthly credit covers about 1,000 requests: a search shown on a screen uses two, to bring news, videos and places too, and a spoken search or a set of pictures uses one\./,
+      ),
     ).toBeTruthy();
     expect(screen.getByText(/Brave asks for a card to confirm who you are\./)).toBeTruthy();
   });

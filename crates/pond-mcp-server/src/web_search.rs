@@ -104,6 +104,40 @@ fn has_screen(meta: &rmcp::model::RequestMetaObject) -> bool {
     })
 }
 
+/// Keys whose plan refused one of two requests sent together (Brave's free plan takes one a
+/// second): asked one request at a time from then on, so a side search never costs an answer.
+/// Held as hashes, so the keys themselves stay in the secret store alone.
+#[derive(Debug, Default)]
+struct OneAtATime(std::sync::Mutex<std::collections::HashSet<u64>>);
+
+impl OneAtATime {
+    fn tag(key: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&Self::tag(key))
+    }
+
+    fn learn(&self, key: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(Self::tag(key));
+    }
+}
+
+fn one_at_a_time() -> &'static OneAtATime {
+    static KEYS: LazyLock<OneAtATime> = LazyLock::new(OneAtATime::default);
+    &KEYS
+}
+
 /// Brave's own limits on `q` for web search.
 const BRAVE_MAX_QUERY_CHARS: usize = 400;
 const BRAVE_MAX_QUERY_WORDS: usize = 50;
@@ -376,6 +410,8 @@ news, opening hours, prices, products, businesses, recent results.")]
             town: town.as_deref(),
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
             reach: reach_for(&ctx.meta),
+            side_search: has_screen(&ctx.meta),
+            paced: one_at_a_time(),
         }
         .run(&key, &question)
         .await)
@@ -398,6 +434,8 @@ pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {
         town: town.as_deref(),
         context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
         reach: TURN_REACH,
+        side_search: false,
+        paced: one_at_a_time(),
     }
     .search(&key, question)
     .await;
@@ -574,6 +612,11 @@ struct WebSearch<'a> {
     /// How long LLM Context may take before the fallback runs.
     context_timeout: Duration,
     reach: Reach,
+    /// Whether to ask the web search beside LLM Context for the card's news, videos and places;
+    /// off where no screen shows the card.
+    side_search: bool,
+    /// The keys asked one request at a time.
+    paced: &'a OneAtATime,
 }
 
 /// What one LLM Context request came to.
@@ -641,7 +684,7 @@ impl WebSearch<'_> {
         };
         let answer = match side {
             Some(answer) => answer,
-            // Grounded but nothing quotable, and the search was cut at its grace: ask again.
+            // Not asked beside LLM Context, cut at its grace, or refused for asking two at once.
             None => {
                 let asked = self.search(key, question).await;
                 if let Some(verdict) = asked.verdict {
@@ -656,9 +699,12 @@ impl WebSearch<'_> {
         }
     }
 
-    /// Both requests at once. LLM Context answers; the web search brings what Brave adds beside
-    /// its pages, or answers in LLM Context's place. A grounded answer waits for the search only
-    /// [`SIDE_SEARCH_GRACE`]; a verdict on the key needs nothing more.
+    /// LLM Context, and beside it where [`Self::side_search`] allows, the web search, both at
+    /// once. LLM Context answers; the web search brings what Brave adds beside its pages, or
+    /// answers in LLM Context's place. A grounded answer waits for the search only
+    /// [`SIDE_SEARCH_GRACE`]. A 429 on one of the two is the key's rate, not its allowance: the
+    /// side search then brings nothing, or answers for a refused LLM Context, and the key is asked
+    /// one request at a time from then on.
     async fn ask_both(
         &self,
         key: &str,
@@ -667,6 +713,9 @@ impl WebSearch<'_> {
         Asked<ContextAnswer>,
         Option<Asked<Result<WebAnswer, String>>>,
     ) {
+        if !self.side_search || self.paced.holds(key) {
+            return (self.llm_context(key, question).await, None);
+        }
         let search = self.search(key, question);
         tokio::pin!(search);
         let context = self.llm_context(key, question);
@@ -683,13 +732,28 @@ impl WebSearch<'_> {
                 context.answer = ContextAnswer::Fallback("nothing_quotable");
             }
         }
+        let context_crowded = context.verdict == Some(WebSearchStatus::Quota);
         if searched.is_none() {
             searched = match context.answer {
                 ContextAnswer::Grounded(_) => tokio::time::timeout(SIDE_SEARCH_GRACE, &mut search)
                     .await
                     .ok(),
-                ContextAnswer::Miss(_) => None,
-                ContextAnswer::Fallback(_) => Some(search.await),
+                ContextAnswer::Miss(_) if !context_crowded => None,
+                _ => Some(search.await),
+            };
+        }
+        let side_crowded = searched
+            .as_ref()
+            .is_some_and(|s| s.verdict == Some(WebSearchStatus::Quota));
+        if side_crowded || context_crowded {
+            self.paced.learn(key);
+        }
+        if side_crowded {
+            searched = None;
+        } else if context_crowded && searched.as_ref().is_some_and(|s| s.answer.is_ok()) {
+            context = Asked {
+                answer: ContextAnswer::Fallback("rate_limited"),
+                verdict: None,
             };
         }
         (context, searched)
@@ -3129,6 +3193,8 @@ mod tests {
             town,
             context_timeout: Duration::from_millis(1_500),
             reach: TURN_REACH,
+            side_search: true,
+            paced: Box::leak(Box::default()),
         }
     }
 
@@ -3283,6 +3349,8 @@ mod tests {
             town: None,
             context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
             reach: TURN_REACH,
+            side_search: true,
+            paced: Box::leak(Box::default()),
         }
         .run("test-key-123", "junction mall hours")
         .await;
@@ -4051,6 +4119,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn where_no_screen_shows_a_card_llm_context_is_asked_alone() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let search = WebSearch {
+            side_search: false,
+            ..against(&base, None, fresh_board(), None)
+        };
+        let result = search
+            .run(
+                "test-key-123",
+                "What time does Nairobi National Park close?",
+            )
+            .await;
+        assert!(text_of(&result, 0).contains("open every day from 6:00 AM"));
+        assert!(card_of(&result).get("news").is_none());
+        assert_eq!(paths_seen(&requests), vec![CONTEXT_PATH.to_string()]);
+    }
+
     #[test]
     fn a_spoken_turn_and_a_helper_have_no_screen() {
         use pond_core::mcp::services::screenless_sessions;
@@ -4073,6 +4166,77 @@ mod tests {
         assert!(has_screen(&meta("engine-spoken")), "a typed turn after it");
         assert!(has_screen(&meta("20261115_2")));
         assert!(has_screen(&rmcp::model::RequestMetaObject::new()));
+    }
+
+    #[tokio::test]
+    async fn a_429_on_the_side_search_brings_no_extras_and_paces_the_key() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 200, "application/json", context_body()),
+                (SEARCH_PATH, 429, "application/json", "{}".to_string()),
+            ],
+            3,
+        );
+        let base = format!("http://127.0.0.1:{port}");
+        let board = fresh_board();
+        let search = against(&base, None, board, None);
+        let question = "What time does Nairobi National Park close?";
+        let result = search.run("test-key-123", question).await;
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("open every day from 6:00 AM"), "{copy}");
+        assert!(!copy.contains("allowance"), "{copy}");
+        assert!(card_of(&result).get("news").is_none());
+        assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
+        assert_eq!(paths_seen(&requests).len(), 2);
+
+        let _ = search.run("test-key-123", question).await;
+        assert_eq!(
+            paths_seen(&requests),
+            vec![CONTEXT_PATH.to_string()],
+            "a paced key is asked one request at a time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_429_on_llm_context_beside_a_search_that_answered_is_answered_by_the_search() {
+        let (port, _requests) = stub(
+            vec![
+                (CONTEXT_PATH, 429, "application/json", "{}".to_string()),
+                (SEARCH_PATH, 200, "application/json", sectioned_body()),
+            ],
+            2,
+        );
+        let board = fresh_board();
+        let result = context_against(port, board, None).await;
+        let copy = text_of(&result, 0);
+        assert!(copy.contains("said the web search"), "{copy}");
+        assert!(!copy.contains("allowance"), "{copy}");
+        assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn a_side_search_cut_by_a_429_is_asked_again_for_the_fallback() {
+        let (port, requests) = stub(
+            vec![
+                (CONTEXT_PATH, 404, "text/plain", "no".to_string()),
+                (SEARCH_PATH, 429, "application/json", "{}".to_string()),
+            ],
+            3,
+        );
+        let board = fresh_board();
+        let copy = text_of(&context_against(port, board, None).await, 0);
+        assert!(copy.contains("allowance is used up"), "{copy}");
+        assert_eq!(
+            board.status_for(Some("test-key-123")),
+            WebSearchStatus::Quota,
+            "refused one at a time too, it is the allowance"
+        );
+        let paths = paths_seen(&requests);
+        assert_eq!(
+            paths.iter().filter(|p| p.as_str() == SEARCH_PATH).count(),
+            2,
+            "{paths:?}"
+        );
     }
 
     /// The fallback's search answers from Brave's snippets alone (no page client).
@@ -4134,18 +4298,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_verdict_from_llm_context_is_final() {
-        for (status, told, verdict) in [
+        let refused = |status: u16| {
+            vec![
+                (CONTEXT_PATH, status, "application/json", "{}".to_string()),
+                (SEARCH_PATH, status, "application/json", "{}".to_string()),
+            ]
+        };
+        for (routes, status, told, verdict) in [
             (
+                fallback_routes((401, "application/json", "{}".to_string())),
                 401,
                 "The web search key was rejected.",
                 WebSearchStatus::Rejected,
             ),
-            (429, "allowance is used up", WebSearchStatus::Quota),
+            (
+                refused(429),
+                429,
+                "allowance is used up",
+                WebSearchStatus::Quota,
+            ),
         ] {
-            let (port, requests) = stub(
-                fallback_routes((status, "application/json", "{}".to_string())),
-                2,
-            );
+            let (port, requests) = stub(routes, 3);
             let board = fresh_board();
             let result = context_against(port, board, None).await;
             let copy = text_of(&result, 0);
@@ -4529,6 +4702,8 @@ mod tests {
                 town,
                 context_timeout: BRAVE_LLM_CONTEXT_TIMEOUT,
                 reach: TURN_REACH,
+                side_search: true,
+                paced: Box::leak(Box::default()),
             };
             let result = search.run(&key, question).await;
             let copy = text_of(&result, 0);
