@@ -41,12 +41,11 @@ impl Database {
         })
     }
 
-    /// Every household-personal table in `pond_system.db`, erased by a factory reset. Kept
-    /// explicit (not "everything except the keep-list") so a new migration's table must be
-    /// placed deliberately — see `every_system_table_is_classified` below, which fails the build
-    /// the moment a table is in neither list.
+    /// Every household-personal table in `pond_system.db`, erased by a factory reset. A table in
+    /// neither this nor the keep-list fails `every_system_table_is_classified` and the wipe.
     const SYSTEM_ERASE_TABLES: &[&str] = &[
         "admin_device_keys",
+        "agent_notes",
         "agent_recipes",
         "agent_suggestion_dismissals",
         "cart_items",
@@ -60,6 +59,7 @@ impl Database {
         "engine_session_map",
         "face_embeddings",
         "face_profile_thresholds",
+        "goose_activity",
         "guest_accessible_rooms",
         "guest_device_access",
         "handshake_challenges",
@@ -75,6 +75,7 @@ impl Database {
         "long_task_steps",
         "long_tasks",
         "mcp_servers",
+        "member_interviews",
         "member_places",
         "member_portraits",
         "member_topics",
@@ -97,6 +98,9 @@ impl Database {
         "notification_history_recipients",
         "notifications",
         "pairing_codes",
+        // Its one row is seeded again below, so the old main member and recovery PIN go.
+        "pairing_lock",
+        "pairing_requests",
         "profile_interviews",
         "profiles",
         // `0074_member_prompt_extras` let a row be one member's own (`profile_id` set), not just
@@ -108,6 +112,7 @@ impl Database {
         "rides",
         "rooms",
         "saved_items",
+        "screenshot_notes",
         "session_messages",
         "session_thinking",
         "session_tokens",
@@ -144,6 +149,16 @@ impl Database {
     /// setup, not installation. `vectors` has no personal/infra split: it is wholly derived from
     /// `system`'s `context_items`/`context_sources`, so it is always erased in full.
     pub async fn wipe_personal_data(&self) -> Result<()> {
+        // Refused before anything is erased: a reset that skipped a table would look complete.
+        let tables = table_names(&self.system).await?;
+        let unknown = unclassified(&tables, Self::SYSTEM_ERASE_TABLES, Self::SYSTEM_KEEP_TABLES);
+        if !unknown.is_empty() {
+            anyhow::bail!(
+                "pond_system.db has tables a factory reset has no rule for: {}",
+                unknown.join(", ")
+            );
+        }
+
         let mut tx = self.system.begin().await?;
         // Lets the deletes below run in any order: FK checks still run, just once at COMMIT, by
         // which point every table either side of a reference is already empty.
@@ -155,6 +170,9 @@ impl Database {
                 .execute(&mut *tx)
                 .await?;
         }
+        sqlx::query("INSERT OR IGNORE INTO pairing_lock (id) VALUES (1)")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
 
         // `vectors/0002_chunks.sql` folded the old `vectors_chunked` table back into `vectors`
@@ -182,6 +200,26 @@ impl Database {
             .connect_with(opts)
             .await?)
     }
+}
+
+/// The tables of `pool`'s main schema, leaving out SQLite's own and sqlx's migration record.
+async fn table_names(pool: &Pool<Sqlite>) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' \
+         ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// The tables in neither list.
+fn unclassified<'a>(tables: &'a [String], erase: &[&str], keep: &[&str]) -> Vec<&'a str> {
+    tables
+        .iter()
+        .map(String::as_str)
+        .filter(|table| !erase.contains(table) && !keep.contains(table))
+        .collect()
 }
 
 #[cfg(test)]
@@ -243,30 +281,82 @@ mod tests {
         Database::init(tmp.path()).await.unwrap(); // second run must not fail
     }
 
-    /// Guards against a new migration's table landing in neither `SYSTEM_ERASE_TABLES` nor
-    /// `SYSTEM_KEEP_TABLES`: silence here would mean a factory reset quietly stops being
-    /// complete, not that the table needs no decision.
+    /// A new migration's table must land in `SYSTEM_ERASE_TABLES` or `SYSTEM_KEEP_TABLES`, or
+    /// every factory reset refuses to run.
     #[tokio::test]
     async fn every_system_table_is_classified() {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
 
-        let tables: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations'",
+        let tables = table_names(&db.system).await.unwrap();
+        let unknown = unclassified(
+            &tables,
+            Database::SYSTEM_ERASE_TABLES,
+            Database::SYSTEM_KEEP_TABLES,
+        );
+        assert!(
+            unknown.is_empty(),
+            "{unknown:?} in neither the erase-list nor the keep-list -- \
+             a factory reset needs an explicit decision for every table"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_table_with_no_rule_stops_the_wipe_before_it_erases_anything() {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        sqlx::query("INSERT INTO profiles (id, display_name) VALUES ('p1', 'Owner')")
+            .execute(&db.system)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE household_diary (entry TEXT)")
+            .execute(&db.system)
+            .await
+            .unwrap();
+
+        let error = db.wipe_personal_data().await.unwrap_err();
+
+        assert!(error.to_string().contains("household_diary"), "{error}");
+        let profiles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM profiles")
+            .fetch_one(&db.system)
+            .await
+            .unwrap();
+        assert_eq!(profiles, 1, "nothing is erased when a table has no rule");
+    }
+
+    #[tokio::test]
+    async fn the_wipe_forgets_the_main_member_and_the_recovery_pin() {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        sqlx::query("INSERT INTO profiles (id, display_name) VALUES ('p1', 'Owner')")
+            .execute(&db.system)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE pairing_lock SET owner_profile_id = 'p1', locked = 0, \
+             pin_verifier = 'scrypt$old', pin_failures = 3 WHERE id = 1",
         )
-        .fetch_all(&db.system)
+        .execute(&db.system)
         .await
         .unwrap();
 
-        for (table,) in tables {
-            assert!(
-                Database::SYSTEM_ERASE_TABLES.contains(&table.as_str())
-                    || Database::SYSTEM_KEEP_TABLES.contains(&table.as_str()),
-                "table '{table}' is in neither the erase-list nor the keep-list -- \
-                 a factory reset needs an explicit decision for every table"
-            );
-        }
+        db.wipe_personal_data().await.unwrap();
+
+        let (owner, locked, pin, failures): (Option<String>, i64, Option<String>, i64) =
+            sqlx::query_as(
+                "SELECT owner_profile_id, locked, pin_verifier, pin_failures \
+                 FROM pairing_lock WHERE id = 1",
+            )
+            .fetch_one(&db.system)
+            .await
+            .unwrap();
+        assert_eq!(owner, None);
+        assert_eq!(locked, 1, "a fresh install's lock is on");
+        assert_eq!(
+            pin, None,
+            "the previous household's recovery PIN must not survive"
+        );
+        assert_eq!(failures, 0);
     }
 
     #[tokio::test]
@@ -320,7 +410,10 @@ mod tests {
             .fetch_one(&db.system)
             .await
             .unwrap();
-        assert_eq!(templates.0, 1, "kept tables must survive the reset untouched");
+        assert_eq!(
+            templates.0, 1,
+            "kept tables must survive the reset untouched"
+        );
     }
 
     #[tokio::test]
