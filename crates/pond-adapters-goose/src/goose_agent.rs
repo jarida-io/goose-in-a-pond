@@ -73,9 +73,9 @@ fn memory_token_budget(window_budget: usize, is_voice: bool) -> usize {
 /// and the allergies, few enough to stay a handful of lines.
 const STANDING_FACTS_SHOWN: usize = 8;
 
-/// How long a turn waits for its query vector, about 3.5 times P0's 41 ms on the Orin's CPU. Past
-/// it the turn recalls by keyword and the embed finishes behind it, warming the next turn.
-const QUERY_VECTOR_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+/// How long a turn waits for its query vector: the Orin's CPU takes 150-185 ms for a question of
+/// 30-60 characters. Past it the turn recalls by keyword and the embed finishes behind it.
+const QUERY_VECTOR_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The query vector for `message`, or an error once `wait` passes; the embed keeps running then.
 async fn query_vector_within(
