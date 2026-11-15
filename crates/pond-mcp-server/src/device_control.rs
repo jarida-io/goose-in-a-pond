@@ -248,6 +248,14 @@ impl DeviceControlMcpServer {
             self.profile_repo.as_ref(),
         )
         .await;
+        // A schedule runs with nobody present, so its turn reads as a guest's; the household set
+        // it up, and a schedule that switches a light must still switch it.
+        if matches!(scope, ProfileScope::Guest)
+            && crate::session_meta::turn_session(&ctx.meta, self.turns.clone())
+                .is_some_and(|session| session.starts_with(SCHEDULE_SESSION_PREFIX))
+        {
+            return (ProfileScope::Household, Some(Role::Owner));
+        }
         let role = match ctx.extensions.get::<Role>() {
             Some(role) => Some(*role),
             None => match &scope {
@@ -311,6 +319,9 @@ impl DeviceControlMcpServer {
         }
     }
 }
+
+/// The pond session prefix of a schedule's run (`schedule_executors.rs`).
+const SCHEDULE_SESSION_PREFIX: &str = "sched-";
 
 /// Said to a guest when the device list can't be read: their access can't be checked without it.
 const DEVICES_UNCHECKED: &str =
@@ -2292,6 +2303,18 @@ mod tests {
         let text = lamp_on_from(&server, "engine-ada").await;
 
         assert!(text.contains("Ask Jerry."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_run_switches_a_device_though_nobody_is_present() {
+        let (profiles, _) = household_of(&["Jerry", "Liz"]).await;
+        let turns = Arc::new(TurnAuthorityRegistry::new());
+        let server = lamp_server(Arc::new(OneLightInKitchen), profiles, turns.clone());
+        let _lease = turn_as(&turns, "sched-lights-1794700000", ProfileScope::Guest);
+
+        let text = lamp_on_from(&server, "sched-lights-1794700000").await;
+
+        assert!(text.contains("power=on"), "{text}");
     }
 
     #[tokio::test]

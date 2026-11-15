@@ -42,6 +42,18 @@ pub fn turn_scope(
         .or_else(|| children.scope_of(&session))
 }
 
+/// The pond session of the live turn behind this call, e.g. `sched-...` for a scheduled run.
+pub fn turn_session(
+    meta: &RequestMetaObject,
+    turns: Option<Arc<TurnAuthorityRegistry>>,
+) -> Option<String> {
+    let session = session_from_meta(meta)?;
+    turns
+        .or_else(|| crate::installed_orchestrator_deps().map(|deps| deps.authorities()))
+        .and_then(|turns| turns.authority_for_engine_session(&session))
+        .map(|authority| authority.session_id().to_string())
+}
+
 /// Whose call this is: the scope a direct dispatch carried, else the turn's, else an unidentified
 /// speaker's, which is the whole household's only where it has one member.
 pub async fn caller_scope(
