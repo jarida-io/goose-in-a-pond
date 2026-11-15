@@ -85,7 +85,22 @@ async fn query_vector_within(
 ) -> Result<Vec<f32>> {
     let provider = provider.clone();
     let text = message.to_string();
-    let embed = tokio::spawn(async move { provider.embed_query(&text).await });
+    let wait_ms = wait.as_millis() as u64;
+    let embed = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let vector = provider.embed_query(&text).await;
+        let took_ms = started.elapsed().as_millis() as u64;
+        if took_ms > wait_ms {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "query_vector_late",
+                took_ms,
+                wait_ms,
+                "a turn's query vector came after the turn stopped waiting for it"
+            );
+        }
+        vector
+    });
     match tokio::time::timeout(wait, embed).await {
         Ok(Ok(vector)) => vector,
         Ok(Err(stopped)) => Err(anyhow!("the query embed stopped: {stopped}")),
