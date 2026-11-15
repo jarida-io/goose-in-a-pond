@@ -144,9 +144,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Reset onboarding back to the first step ("Start over" in Settings).
         .route("/onboard/reset", post(reset_onboarding))
         // Wipe the Pond's household data and reopen onboarding ("Factory reset" in Settings).
-        // Under `/admin` to match the other My-Pond routes the mobile client groups it with,
-        // though unlike those it needs no admin-card unlock -- owner role + typed name already
-        // gate it (see `factory_reset` below).
+        // The host, the main member or a member with My Pond unlocked (`factory_reset_authority`).
         .route("/admin/factory-reset", post(factory_reset))
         .route("/admin/factory-reset/status", get(factory_reset_status))
         // The write is the wizard's; the read needs a token in every state, so the wizard can
@@ -2053,12 +2051,43 @@ struct FactoryResetRequest {
     pond_name: String,
 }
 
+/// Who may wipe the pond: the host, by the credential only its own account can read, or the
+/// main member or a member with My Pond unlocked. `Some(member)` when a member asked.
+async fn factory_reset_authority(
+    state: &AppState,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    credential: Option<&crate::host_guard::HostCredential>,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    if crate::host_guard::presents_credential(credential, headers) {
+        return Ok(None);
+    }
+    let lock = state.handshake.pairing_lock().await.map_err(|e| {
+        tracing::warn!(error = %e, "factory reset: could not read the pairing lock");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "pairing_lock_unavailable"})),
+        )
+    })?;
+    match crate::pond_admin::may_reset_pond(state, principal, lock.owner_profile_id.as_deref())
+        .await
+    {
+        Some(member) => Ok(Some(member)),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "factory_reset_main_member_only"})),
+        )),
+    }
+}
+
 /// Wipes the Pond's household data and reopens onboarding — the whole journey is
 /// `pond_core::network::services::factory_reset::FactoryResetService::execute`; this assembles
 /// its ports from `state` and turns a refusal into the matching HTTP status.
 async fn factory_reset(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    credential: Option<axum::Extension<crate::host_guard::HostCredential>>,
+    headers: axum::http::HeaderMap,
     remote: Option<
         axum::Extension<Arc<dyn pond_core::security::ports::remote_access::RemoteRevocation>>,
     >,
@@ -2067,18 +2096,14 @@ async fn factory_reset(
     use pond_core::network::services::factory_reset::{
         FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
     };
-    use pond_core::user_data::services::household_permission::{
-        may_reset_pond, PermissionDecision,
-    };
 
-    let role = resolve_role_from_principal(&state, principal.as_ref()).await;
-    if let PermissionDecision::Denied {
-        reason,
-        grantable_by,
-    } = may_reset_pond(role)
-    {
-        return Err(permission_denied(&state, reason, grantable_by).await);
-    }
+    factory_reset_authority(
+        &state,
+        principal.as_ref(),
+        credential.as_ref().map(|axum::Extension(c)| c),
+        &headers,
+    )
+    .await?;
 
     let Json(request) = body.map_err(|_| bad_body())?;
 

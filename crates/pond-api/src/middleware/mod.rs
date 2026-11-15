@@ -242,7 +242,7 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         Exposure::UntilOnboardedThenHostOnly,
     ),
     // Factory reset undoes setup, so unlike `/onboard/reset` it has no pre-onboarding exemption:
-    // only an owner's token may ever reach it.
+    // a token always, then the host credential or the main member (`factory_reset_authority`).
     (
         Method::POST,
         "/admin/factory-reset",
@@ -1475,7 +1475,7 @@ mod tests {
             "GET /test = HostOnly".to_string(),
             "GET /warmup = UntilOnboarded".to_string(),
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
-            // Unlike `/onboard/reset`, no pre-onboarding exemption: only an owner's token reaches it.
+            // Unlike `/onboard/reset`, no pre-onboarding exemption; the handler also asks who it is.
             "POST /admin/factory-reset = Authenticated".to_string(),
             "POST /connections/wifi/join = Authenticated".to_string(),
             "POST /devices/{id}/push-token = Authenticated".to_string(),

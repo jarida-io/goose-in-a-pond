@@ -101,20 +101,33 @@ pub(crate) async fn may_answer_pairing(
     owner: Option<&str>,
 ) -> Result<String, Response> {
     let caller = member_device(state, principal).await?;
-    if owner == Some(caller.member.as_str()) {
+    if owner == Some(caller.member.as_str()) || unlocked_now(state, &caller.device).await {
         return Ok(caller.device);
     }
-    if let Some(admin) = &state.pond_admin {
-        let unlocked = admin
-            .elevation
-            .status(&caller.device, Instant::now())
-            .await
-            .is_ok_and(|status| status.unlocked_for.is_some());
-        if unlocked {
-            return Ok(caller.device);
-        }
-    }
     Err(refuse(StatusCode::FORBIDDEN, "pairing_main_member_only"))
+}
+
+/// Who may wipe the pond from a device: the same two as [`may_answer_pairing`]. The member who
+/// asked, or `None` for anyone else, whatever role the household gave them.
+pub(crate) async fn may_reset_pond(
+    state: &AppState,
+    principal: Option<&Extension<Principal>>,
+    owner: Option<&str>,
+) -> Option<String> {
+    let caller = member_device(state, principal).await.ok()?;
+    (owner == Some(caller.member.as_str()) || unlocked_now(state, &caller.device).await)
+        .then_some(caller.member)
+}
+
+async fn unlocked_now(state: &AppState, device: &str) -> bool {
+    let Some(admin) = &state.pond_admin else {
+        return false;
+    };
+    admin
+        .elevation
+        .status(device, Instant::now())
+        .await
+        .is_ok_and(|status| status.unlocked_for.is_some())
 }
 
 /// A member's device whose unlock is live; each admitted request renews it.
