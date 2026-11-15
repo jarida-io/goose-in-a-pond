@@ -13,7 +13,7 @@ use pond_core::mcp::services::web_search_status::{self, WebSearchStatusBoard};
 use pond_core::shared::services::passages;
 use rmcp::{
     handler::server::wrapper::Parameters,
-    model::{Annotations, CallToolResult, ContentBlock, ErrorData, MetaObject, Role, TextContent},
+    model::{CallToolResult, ContentBlock, ErrorData, MetaObject},
     service::RequestContext,
     tool, tool_router, RoleServer,
 };
@@ -371,8 +371,7 @@ fn model_line(request: &str, shown: usize, sites: &[String]) -> String {
     )
 }
 
-/// The `[[[mcp-ui:pictures:{...}]]]` card, for the user only: goose drops such blocks before the
-/// provider.
+/// The `pictures` card, for the user only: goose drops such blocks before the provider.
 fn card_block(request: &str, pictures: &[Picture]) -> ContentBlock {
     let card = serde_json::json!({
         "query": sanitize(request),
@@ -385,15 +384,13 @@ fn card_block(request: &str, pictures: &[Picture]) -> ContentBlock {
             "height": p.height,
         })).collect::<Vec<_>>(),
     });
-    ContentBlock::Text(
-        TextContent::new(format!("[[[mcp-ui:pictures:{card}]]]"))
-            .with_annotations(Annotations::default().with_audience(vec![Role::User])),
-    )
+    crate::format::card("pictures", &card)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::Role;
     use std::io::{Read, Write};
     use std::time::Duration;
 
