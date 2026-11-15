@@ -1,0 +1,22 @@
+.waiting-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--purple-200);
+  background: var(--bg-brand-soft);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.waiting-line__icon {
+  flex: none;
+  color: var(--color-text-secondary);
+  animation: waitingBreathe 2.4s ease-in-out infinite;
+}
+@keyframes waitingBreathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .waiting-line__icon { animation: none; }
+}

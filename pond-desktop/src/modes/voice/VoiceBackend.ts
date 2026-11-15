@@ -53,6 +53,8 @@ export interface VoiceBackend {
   onAgentToken: ((token: string, done: boolean) => void) | null;
   onToolCall: ((data: ToolCallData) => void) | null;
   onError: ((msg: string) => void) | null;
+  /** The pond's line while a turn waits before its reply can start; null when the wait ends. */
+  onWaiting: ((message: string | null) => void) | null;
   onSessionId: ((id: string) => void) | null;
   onResponseMeta: ((meta: ResponseMeta) => void) | null;
   onWakeDetected: ((wav: Blob) => void) | null;

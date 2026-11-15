@@ -30,7 +30,7 @@ use pond_core::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
 use pond_core::models::domain::inference_bus::{
     inference_bus, running_under, take_early_turn, InferenceClaim, InferenceFloor, InferenceHold,
 };
-use pond_core::shared::domain::agent::{AgentStreamEvent, SubagentStatus};
+use pond_core::shared::domain::agent::{AgentStreamEvent, SubagentStatus, TurnWait};
 use pond_core::shared::domain::orchestration::{
     max_concurrent_subagents, BackgroundAvailability, ChildModel, ReportNudge, TaskRun, TaskSpec,
     TaskStatus, REMOTE_SUBAGENT_CONCURRENCY,
@@ -272,6 +272,29 @@ impl TurnDeviceClaim {
     }
 }
 
+/// How long a turn queues for the model before the household is told why; shorter waits are the
+/// usual hand-over and say nothing.
+pub const TURN_WAIT_SAID_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Why a turn still queueing for the model waits, from what holds it, and the line that says so.
+pub fn why_the_turn_waits() -> (TurnWait, &'static str) {
+    let state = inference_bus().state();
+    wait_behind(state.holder.or(state.next))
+}
+
+fn wait_behind(ahead: Option<InferenceClaim>) -> (TurnWait, &'static str) {
+    match ahead {
+        Some(InferenceClaim::Turn) | None => (
+            TurnWait::AnotherConversation,
+            "Your pond is busy with another conversation. Yours is next.",
+        ),
+        Some(InferenceClaim::Task | InferenceClaim::Chore) => (
+            TurnWait::BackgroundWork,
+            "Your pond is finishing something. Yours is next.",
+        ),
+    }
+}
+
 /// Take the device for a parent turn. `None` (off-device provider, or cancelled while queueing)
 /// is safe to proceed on: a cancelled turn's reply exits on the same token.
 pub async fn claim_device_for_turn(
@@ -341,6 +364,28 @@ pub struct ProgressBus {
     next_id: std::sync::atomic::AtomicU64,
 }
 
+/// What a live turn hears besides its engine: a delegation's progress, or why the engine call it
+/// is waiting on has not started its reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentFrame {
+    Child(ChildProgress),
+    Waiting { reason: TurnWait, content: String },
+}
+
+impl From<ParentFrame> for AgentStreamEvent {
+    fn from(frame: ParentFrame) -> Self {
+        match frame {
+            ParentFrame::Child(progress) => progress.into(),
+            ParentFrame::Waiting { reason, content } => {
+                AgentStreamEvent::Waiting { reason, content }
+            }
+        }
+    }
+}
+
+/// Where a turn's engine calls say they wait; held by the session's controls for the turn.
+pub type WaitSender = tokio::sync::mpsc::UnboundedSender<(TurnWait, String)>;
+
 /// One live parent turn's end of the channel.
 struct Subscriber {
     /// Lets a stale stream's `Drop` remove only its own entry, not a newer turn's.
@@ -365,6 +410,7 @@ impl ProgressBus {
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (waits_tx, waits) = tokio::sync::mpsc::unbounded_channel();
         self.lock().insert(
             giap_session_id.to_string(),
             Subscriber { id, tx: tx.clone() },
@@ -372,6 +418,8 @@ impl ProgressBus {
         ProgressStream {
             rx,
             _keepalive: tx,
+            waits,
+            waits_tx,
             bus: Arc::downgrade(self),
             session_id: giap_session_id.to_string(),
             id,
@@ -396,6 +444,8 @@ impl ProgressBus {
 pub struct ProgressStream {
     rx: tokio::sync::mpsc::UnboundedReceiver<ChildProgress>,
     _keepalive: tokio::sync::mpsc::UnboundedSender<ChildProgress>,
+    waits: tokio::sync::mpsc::UnboundedReceiver<(TurnWait, String)>,
+    waits_tx: WaitSender,
     bus: std::sync::Weak<ProgressBus>,
     session_id: String,
     id: u64,
@@ -403,12 +453,19 @@ pub struct ProgressStream {
 
 impl ProgressStream {
     /// The next frame, pending forever if none comes; cancel-safe, for use inside `select!`.
-    pub async fn next(&mut self) -> ChildProgress {
-        match self.rx.recv().await {
-            Some(frame) => frame,
-            // Unreachable while `_keepalive` lives; pend, or the biased select starves the engine.
-            None => std::future::pending().await,
+    pub async fn next(&mut self) -> ParentFrame {
+        // Neither channel closes while this stream holds a sender to each.
+        tokio::select! {
+            biased;
+            Some(frame) = self.rx.recv() => ParentFrame::Child(frame),
+            Some((reason, content)) = self.waits.recv() => ParentFrame::Waiting { reason, content },
+            else => std::future::pending().await,
         }
+    }
+
+    /// What this turn's engine calls tell it they are waiting through.
+    pub fn waits(&self) -> WaitSender {
+        self.waits_tx.clone()
     }
 }
 
@@ -429,8 +486,8 @@ impl Drop for ProgressStream {
 /// What a parent's drain loop got when it asked for the next thing to happen.
 #[derive(Debug)]
 pub enum ParentStep<T> {
-    /// A child's frame: yield it, but never fold it into the turn's own output.
-    Progress(ChildProgress),
+    /// A child's frame or a wait: yield it, but never fold it into the turn's own output.
+    Progress(ParentFrame),
     Engine(T),
     EngineEnded,
 }
