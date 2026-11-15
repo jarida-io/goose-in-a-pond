@@ -11,7 +11,11 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait PersonalDataWipe: Send + Sync {
     /// Erase every household-personal store: profiles, sessions, memories, devices, rooms,
-    /// secrets, saved Wi-Fi networks, mesh credit/trust state. Leaves infrastructure (models,
-    /// the setup card, TLS identity) untouched — a factory reset undoes setup, not installation.
+    /// secrets, mesh credit/trust state. Leaves infrastructure (models, the setup card, TLS
+    /// identity) untouched — a factory reset undoes setup, not installation.
     async fn wipe(&self) -> Result<()>;
+
+    /// Forget the saved Wi-Fi networks, where the host's Wi-Fi is the pond's to forget. Called
+    /// last, once onboarding has reopened, so a failed reset never leaves the pond off its network.
+    async fn forget_networks(&self) -> Result<()>;
 }

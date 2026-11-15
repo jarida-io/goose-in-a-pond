@@ -17,6 +17,7 @@ pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
+pub mod factory_reset;
 mod home_location;
 pub mod host_guard;
 mod ideas;

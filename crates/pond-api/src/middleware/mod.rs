@@ -588,6 +588,25 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     response
 }
 
+/// While a factory reset runs, only its own routes and the health probe answer: anything else
+/// could write what the reset is erasing. A second reset reaches its handler and gets `409`.
+fn held_by_factory_reset(state: &crate::AppState, method: &Method, path: &str) -> bool {
+    let resetting = state
+        .factory_reset_progress
+        .as_ref()
+        .is_some_and(|progress| progress.running());
+    let Some(route) = path.strip_prefix("/api/v1") else {
+        return false;
+    };
+    resetting
+        && !matches!(
+            (method.as_str(), route),
+            ("GET", "/health")
+                | ("GET", "/admin/factory-reset/status")
+                | ("POST", "/admin/factory-reset")
+        )
+}
+
 /// Bearer-token auth; a `PUBLIC_ROUTES` entry skips it only if its exposure admits the peer.
 pub async fn auth_middleware(
     State(state): State<Arc<crate::AppState>>,
@@ -596,6 +615,14 @@ pub async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
+    if held_by_factory_reset(&state, req.method(), path.path()) {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "pond_resetting"})),
+        )
+            .into_response());
+    }
+
     // `ConnectInfo<SocketAddr>` comes from `main.rs`'s `into_make_service_with_connect_info`;
     // a request without it counts as remote, so failure narrows access.
     // A request on the plaintext development listener is never the host's own: a browser on

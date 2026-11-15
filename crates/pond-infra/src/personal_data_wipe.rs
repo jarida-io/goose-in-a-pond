@@ -1,7 +1,7 @@
 //! Adapter for `PersonalDataWipe`: erases every household-personal store a factory reset must
 //! clear: the household's files, the engine's copy of its conversations, stored secrets, and the
 //! databases last, so any failure before them leaves the pond's name for the reset to run again.
-//! Saved Wi-Fi networks are forgotten after that, best effort.
+//! Saved Wi-Fi networks are forgotten on their own, once the reset has reopened onboarding.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,14 +51,13 @@ impl PersonalDataWipe for SystemDataWipe {
                 .await
                 .map_err(|error| error.context("clearing stored secrets"))?;
         }
-        self.db.wipe_personal_data().await?;
+        self.db.wipe_personal_data().await
+    }
 
+    async fn forget_networks(&self) -> Result<()> {
         if let Some(wifi) = &self.wifi {
-            if let Err(error) = wifi.forget_all().await {
-                tracing::warn!(%error, "factory reset: could not forget every saved Wi-Fi network");
-            }
+            wifi.forget_all().await?;
         }
-
         Ok(())
     }
 }
@@ -219,6 +218,12 @@ mod tests {
             .unwrap();
         assert_eq!(profiles.0, 0);
         assert!(cleared.load(Ordering::SeqCst));
+        assert!(
+            !forgotten.load(Ordering::SeqCst),
+            "Wi-Fi waits until onboarding has reopened"
+        );
+
+        wipe.forget_networks().await.unwrap();
         assert!(forgotten.load(Ordering::SeqCst));
     }
 
@@ -254,7 +259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_wifi_forget_never_fails_the_wipe() {
+    async fn a_failed_wifi_forget_is_reported_and_never_fails_the_wipe() {
         let tmp = tempdir().unwrap();
         let db = Arc::new(Database::init(tmp.path()).await.unwrap());
         let wipe = SystemDataWipe::new(
@@ -268,6 +273,7 @@ mod tests {
         );
 
         assert!(wipe.wipe().await.is_ok());
+        assert!(wipe.forget_networks().await.is_err());
     }
 
     #[tokio::test]

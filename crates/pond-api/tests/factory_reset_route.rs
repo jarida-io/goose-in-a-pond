@@ -18,6 +18,7 @@ use pond_core::mesh::domain::peer_id::PeerId;
 use pond_core::mesh::mocks::mock_credit_ledger::MockCreditLedger;
 use pond_core::mesh::ports::credit_ledger::CreditLedger as _;
 use pond_core::network::ports::personal_data_wipe::PersonalDataWipe;
+use pond_core::network::services::factory_reset::FactoryResetStep;
 use pond_core::security::ports::handshake::Handshake;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
@@ -183,6 +184,119 @@ impl PersonalDataWipe for BrokenWipe {
     async fn wipe(&self) -> anyhow::Result<()> {
         anyhow::bail!("disk I/O error")
     }
+    async fn forget_networks(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// An erase that waits until the test lets it finish.
+#[derive(Default)]
+struct HeldWipe {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl PersonalDataWipe for HeldWipe {
+    async fn wipe(&self) -> anyhow::Result<()> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+    async fn forget_networks(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+async fn get(pond: &Pond, path: &str) -> (StatusCode, Value) {
+    let response = pond
+        .router
+        .clone()
+        .oneshot(
+            Request::get(path)
+                .header(header::AUTHORIZATION, format!("Bearer {}", pond.main))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn one_reset_at_a_time_and_nothing_else_while_it_runs() {
+    let pond = Arc::new(pond().await);
+    let progress = pond.state.factory_reset_progress.clone().unwrap();
+    // A turn being answered holds the reset at its pause, before any token is revoked.
+    let turn = pond.state.runs.turn_started();
+    let first = tokio::spawn({
+        let pond = pond.clone();
+        async move { reset(&pond, &pond.main, false, POND_NAME).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while progress.current() != Some(FactoryResetStep::Pausing) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reset reaches its pause");
+
+    let (status, body) = reset(&pond, &pond.main, false, POND_NAME).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "factory_reset_in_progress", "{body}");
+    let (status, body) = get(&pond, "/api/v1/settings").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "pond_resetting", "{body}");
+    let (status, body) = get(&pond, "/api/v1/admin/factory-reset/status").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["current_step"], "pausing", "{body}");
+    assert_eq!(
+        members(&pond).await,
+        1,
+        "nothing is erased while a turn is answered"
+    );
+
+    drop(turn);
+    let (status, body) = first.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!progress.running(), "the slot frees when the reset ends");
+    assert_eq!(members(&pond).await, 0);
+}
+
+#[tokio::test]
+async fn a_caller_that_hangs_up_does_not_stop_the_reset_halfway() {
+    let wipe = Arc::new(HeldWipe::default());
+    let pond = Arc::new(pond_wiping(Some(wipe.clone())).await);
+    let request = tokio::spawn({
+        let pond = pond.clone();
+        async move { reset(&pond, &pond.main, false, POND_NAME).await }
+    });
+    wipe.started.notified().await;
+
+    request.abort();
+    let _ = request.await;
+    wipe.release.notify_one();
+
+    let progress = pond.state.factory_reset_progress.clone().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while progress.running() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reset finishes on its own");
+    assert_eq!(
+        pond.state.onboarding_repo.get_current_step().await,
+        Some(OnboardingStep::Welcome),
+        "the reset went on to reopen setup"
+    );
 }
 
 #[tokio::test]

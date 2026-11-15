@@ -114,7 +114,9 @@ pub async fn app_state() -> TestState {
         notification_history: None,
         notification_sender: None,
         member_notifier: None,
-        factory_reset_progress: None,
+        factory_reset_progress: Some(Arc::new(
+            pond_infra::factory_reset_progress::InMemoryFactoryResetProgress::new(),
+        )),
         runs: Arc::new(crate::runs::RunSupervisor::default()),
         sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
         notification_sse_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

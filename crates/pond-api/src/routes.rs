@@ -2107,7 +2107,10 @@ async fn factory_reset(
 
     let Json(request) = body.map_err(|_| bad_body())?;
 
-    let Some(data_wipe) = state.data_wipe.clone() else {
+    let (Some(data_wipe), Some(progress)) = (
+        state.data_wipe.clone(),
+        state.factory_reset_progress.clone(),
+    ) else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "factory_reset_unavailable"})),
@@ -2121,9 +2124,12 @@ async fn factory_reset(
         )
     })?;
 
-    if let Some(progress) = &state.factory_reset_progress {
-        progress.clear();
-    }
+    let Some(run) = progress.begin() else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "factory_reset_in_progress"})),
+        ));
+    };
 
     let ports = FactoryResetPorts {
         onboarding: state.onboarding_repo.clone(),
@@ -2137,16 +2143,26 @@ async fn factory_reset(
         tts: state.tts.clone(),
         credit_ledger: state.credit_ledger.clone(),
         data_wipe,
-        progress: state.factory_reset_progress.clone().map(|p| {
-            p as Arc<dyn pond_core::network::services::factory_reset::FactoryResetProgress>
-        }),
+        progress: Some(progress),
+        quiet: Some(Arc::new(crate::factory_reset::QuietPond::new(
+            state.clone(),
+        ))),
     };
 
-    let result =
-        FactoryResetService::execute(&ports, &request.pond_name, &settings.home_name).await;
-    if let Some(progress) = &state.factory_reset_progress {
-        progress.clear();
-    }
+    let typed = request.pond_name;
+    let actual = settings.home_name;
+    // Its own task: a caller that hangs up must not stop the erase halfway.
+    let reset = tokio::spawn(async move {
+        let _run = run;
+        FactoryResetService::execute(&ports, &typed, &actual).await
+    });
+    let result = reset.await.map_err(|error| {
+        tracing::error!(%error, "factory reset: the reset task ended without an answer");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "factory_reset_failed"})),
+        )
+    })?;
 
     match result {
         Ok(export) => Ok(Json(json!({ "routines": export.routines }))),

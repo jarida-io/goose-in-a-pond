@@ -434,11 +434,13 @@ export interface MeshSettlementStatus {
 // ── Factory reset ─────────────────────────────────────────────
 export type FactoryResetStep =
   | "exporting"
+  | "pausing"
   | "notifying_household"
   | "revoking_devices"
   | "erasing_data"
   | "speaking_goodbye"
-  | "reopening_onboarding";
+  | "reopening_onboarding"
+  | "forgetting_wifi";
 
 export type FactoryResetStatus =
   | { active: false }
