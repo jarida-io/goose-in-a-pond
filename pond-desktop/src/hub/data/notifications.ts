@@ -39,6 +39,10 @@ export interface Notification {
   timestamp: string;
   read: boolean;
   action?: NotificationAction;
+  /** What the notice is about (`data.kind` from the Pond), for its icon. */
+  kind?: string;
+  /** The screen the notice points at (`data.open`), for its icon when it names no kind. */
+  open?: string;
 }
 
 export interface NotificationGroup {
@@ -47,13 +51,103 @@ export interface NotificationGroup {
 }
 
 // ─── Severity colour map ──────────────────────────────────────────────────────
-export const CATEGORY_COLOR: Record<NotificationCategory, { fg: string; bg: string }> = {
-  schedule:        { fg: "#7C3AED", bg: "#EDE9FE" },
-  routine:         { fg: "#0D9488", bg: "#CCFBF1" },
-  info:            { fg: "#0EA5E9", bg: "#E0F2FE" },
-  alert:           { fg: "#DC2626", bg: "#FEE2E2" },
-  action_required: { fg: "#D97706", bg: "#FEF3C7" },
+/** Each category's hue. The icon's tint is mixed from it in CSS, so it suits a light or dark page. */
+export const CATEGORY_COLOR: Record<NotificationCategory, string> = {
+  schedule:        "#7C3AED",
+  routine:         "#0D9488",
+  info:            "#0EA5E9",
+  alert:           "#DC2626",
+  action_required: "#D97706",
 };
+
+/** The pictures a notification can carry; the view maps each to its icon. */
+export type NoticeIcon =
+  | "unlocked" | "schedule" | "routine" | "download" | "downloadFailed" | "disk" | "diskLow"
+  | "extensions" | "offline" | "online" | "signIn" | "deviceRemoved" | "devices" | "chat"
+  | "watch" | "models" | "remote" | "todos" | "news" | "cart"
+  | "info" | "alert" | "request";
+
+/** By what the notice is about: the most specific picture there is. */
+const ICON_FOR_KIND: Record<string, NoticeIcon> = {
+  model_downloaded: "download",
+  model_download_failed: "downloadFailed",
+  startup_problems: "extensions",
+  disk_low: "diskLow",
+  disk_recovered: "disk",
+  remote_access_down: "offline",
+  remote_access_sign_in: "signIn",
+  remote_access_restored: "online",
+  device_removed: "deviceRemoved",
+  sign_in_expired: "signIn",
+};
+
+/** By the screen it opens, for a notice that names no kind ("My Pond unlocked" opens My Pond). */
+const ICON_FOR_OPEN: Record<string, NoticeIcon> = {
+  my_pond: "unlocked",
+  schedule: "schedule",
+  devices: "devices",
+  chat: "chat",
+  watch: "watch",
+  models: "models",
+  extensions: "extensions",
+  remote_access: "remote",
+  todos: "todos",
+  news: "news",
+  cart: "cart",
+};
+
+const ICON_FOR_CATEGORY: Record<NotificationCategory, NoticeIcon> = {
+  schedule: "schedule",
+  routine: "routine",
+  info: "info",
+  alert: "alert",
+  action_required: "request",
+};
+
+/**
+ * The picture a notification carries: what it is about when the Pond says (its kind), else the
+ * screen it opens, else its category's. So "My Pond unlocked" shows an open padlock and a model
+ * download an arrow into a tray, where both used to show their category's warning or info sign.
+ */
+export function noticeIcon(n: Pick<Notification, "kind" | "open" | "category">): NoticeIcon {
+  return (
+    (n.kind && ICON_FOR_KIND[n.kind]) ||
+    (n.open && ICON_FOR_OPEN[n.open]) ||
+    ICON_FOR_CATEGORY[n.category]
+  );
+}
+
+/** One row of the list: the newest of a run of identical notices, with the older ones it stands for. */
+export interface NotificationRow {
+  notification: Notification;
+  /** Every notification the row stands for, newest first: just the one, or the whole repeat. */
+  members: Notification[];
+}
+
+/**
+ * Folds notices that say the same thing one after another ("My Pond unlocked", five times) into one
+ * row, so a repeated alert reads as one thing that happened several times. Schedule runs never fold:
+ * each run is its own result. The list is newest first, and so is each row's `members`.
+ */
+export function foldRepeats(items: Notification[]): NotificationRow[] {
+  const rows: NotificationRow[] = [];
+  for (const n of items) {
+    const last = rows[rows.length - 1];
+    const same =
+      last &&
+      n.source === "notice" &&
+      last.notification.source === "notice" &&
+      n.category === last.notification.category &&
+      n.title === last.notification.title &&
+      n.body === last.notification.body &&
+      n.action?.route === last.notification.action?.route &&
+      n.action?.sessionId === last.notification.action?.sessionId &&
+      n.action?.watchId === last.notification.action?.watchId;
+    if (same) last.members.push(n);
+    else rows.push({ notification: n, members: [n] });
+  }
+  return rows;
+}
 
 // ─── Grouping helper ──────────────────────────────────────────────────────────
 export function groupNotifications(
