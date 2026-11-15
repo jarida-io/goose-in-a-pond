@@ -4639,6 +4639,7 @@ async fn run_server(
     let data_wipe: Option<Arc<dyn pond_core::network::ports::personal_data_wipe::PersonalDataWipe>> =
         Some(Arc::new(pond_infra::personal_data_wipe::SystemDataWipe::new(
             db.clone(),
+            data_dir.clone(),
             secret_repo.clone(),
             Some(Arc::new(
                 pond_core::network::services::wifi_connections::WifiConnections::new(

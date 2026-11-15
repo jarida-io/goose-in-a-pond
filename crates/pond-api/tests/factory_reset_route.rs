@@ -57,7 +57,12 @@ async fn pond() -> Pond {
     named.home_name = POND_NAME.to_string();
     settings.update(&named).await.unwrap();
     state.settings_repo = settings;
-    state.data_wipe = Some(Arc::new(SystemDataWipe::new(state.db.clone(), None, None)));
+    state.data_wipe = Some(Arc::new(SystemDataWipe::new(
+        state.db.clone(),
+        dir.path(),
+        None,
+        None,
+    )));
     let ledger = Arc::new(MockCreditLedger::new());
     state.credit_ledger = ledger.clone();
     let jerry = state

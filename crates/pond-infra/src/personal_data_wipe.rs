@@ -1,9 +1,8 @@
 //! Adapter for `PersonalDataWipe`: erases every household-personal store a factory reset must
-//! clear, by calling the three things that each own a slice of it. `db` is the one erase that
-//! must land (it holds everything else the port's doc comment promises — profiles, sessions,
-//! memories, devices, rooms, mesh credit/trust state); secrets and Wi-Fi are best-effort, same as
-//! every other step `FactoryResetService::execute` takes past its refusal checks.
+//! clear: the household's files and the engine's copy of its conversations, then the databases,
+//! then stored secrets and saved Wi-Fi networks.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -14,9 +13,11 @@ use pond_core::network::services::wifi_connections::WifiConnections;
 use pond_core::security::ports::secret::SecretRepository;
 
 use crate::db::Database;
+use crate::household_files;
 
 pub struct SystemDataWipe {
     db: Arc<Database>,
+    data_dir: PathBuf,
     secrets: Option<Arc<dyn SecretRepository + Send + Sync>>,
     wifi: Option<Arc<WifiConnections>>,
 }
@@ -24,16 +25,25 @@ pub struct SystemDataWipe {
 impl SystemDataWipe {
     pub fn new(
         db: Arc<Database>,
+        data_dir: impl Into<PathBuf>,
         secrets: Option<Arc<dyn SecretRepository + Send + Sync>>,
         wifi: Option<Arc<WifiConnections>>,
     ) -> Self {
-        Self { db, secrets, wifi }
+        Self {
+            db,
+            data_dir: data_dir.into(),
+            secrets,
+            wifi,
+        }
     }
 }
 
 #[async_trait]
 impl PersonalDataWipe for SystemDataWipe {
     async fn wipe(&self) -> Result<()> {
+        let data_dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || household_files::erase(&data_dir)).await??;
+        erase_engine_sessions(&self.data_dir).await?;
         self.db.wipe_personal_data().await?;
 
         if let Some(secrets) = &self.secrets {
@@ -50,6 +60,43 @@ impl PersonalDataWipe for SystemDataWipe {
 
         Ok(())
     }
+}
+
+/// Empties the engine's own session store in place: the engine holds it open, so its file stays.
+async fn erase_engine_sessions(data_dir: &std::path::Path) -> Result<()> {
+    let Some(path) = household_files::beneath(data_dir, household_files::ENGINE_SESSIONS) else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        return Ok(());
+    }
+    let pool = Database::connect(&path).await?;
+    let erased = async {
+        // `shadow` tables belong to a virtual table, which is emptied through itself.
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_list \
+             WHERE schema = 'main' AND type IN ('table', 'virtual') \
+             AND name NOT LIKE 'sqlite_%' AND name != 'schema_version'",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("PRAGMA defer_foreign_keys = ON")
+            .execute(&mut *tx)
+            .await?;
+        for table in &tables {
+            sqlx::query(&format!("DELETE FROM \"{}\"", table.replace('"', "\"\"")))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        anyhow::Ok(tables.len())
+    }
+    .await;
+    pool.close().await;
+    let tables = erased?;
+    tracing::info!(tables, "factory reset: the engine's sessions erased");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -73,8 +120,10 @@ mod tests {
         }
         async fn scan(
             &self,
-        ) -> Result<Vec<pond_core::network::domain::wifi::WifiNetwork>, pond_core::network::domain::wifi::WifiScanError>
-        {
+        ) -> Result<
+            Vec<pond_core::network::domain::wifi::WifiNetwork>,
+            pond_core::network::domain::wifi::WifiScanError,
+        > {
             unreachable!()
         }
         async fn join(
@@ -82,8 +131,10 @@ mod tests {
             _: &str,
             _: Option<&pond_core::network::domain::wifi::WifiPassphrase>,
             _: bool,
-        ) -> Result<pond_core::network::domain::wifi::JoinedNetwork, pond_core::network::domain::wifi::WifiJoinError>
-        {
+        ) -> Result<
+            pond_core::network::domain::wifi::JoinedNetwork,
+            pond_core::network::domain::wifi::WifiJoinError,
+        > {
             unreachable!()
         }
         async fn status(&self) -> pond_core::network::domain::wifi::NetworkStatus {
@@ -144,6 +195,7 @@ mod tests {
         let forgotten = Arc::new(AtomicBool::new(false));
         let wipe = SystemDataWipe::new(
             db.clone(),
+            tmp.path(),
             Some(Arc::new(FakeSecrets {
                 cleared: cleared.clone(),
             })),
@@ -170,6 +222,7 @@ mod tests {
         let db = Arc::new(Database::init(tmp.path()).await.unwrap());
         let wipe = SystemDataWipe::new(
             db,
+            tmp.path(),
             None,
             Some(Arc::new(WifiConnections::new(Arc::new(FakeStation {
                 forgot_all: Arc::new(AtomicBool::new(false)),
@@ -189,7 +242,7 @@ mod tests {
             .await
             .unwrap();
 
-        let wipe = SystemDataWipe::new(db.clone(), None, None);
+        let wipe = SystemDataWipe::new(db.clone(), tmp.path(), None, None);
         wipe.wipe().await.unwrap();
 
         let profiles: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM profiles")
@@ -197,5 +250,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(profiles.0, 0);
+    }
+
+    #[tokio::test]
+    async fn the_engines_conversations_and_the_households_files_go() {
+        let tmp = tempdir().unwrap();
+        let db = Arc::new(Database::init(tmp.path()).await.unwrap());
+        let sessions_dir = tmp.path().join("engine/data/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let engine = Database::connect(&sessions_dir.join("sessions.db"))
+            .await
+            .unwrap();
+        for statement in [
+            "CREATE TABLE schema_version (version INTEGER)",
+            "INSERT INTO schema_version VALUES (9)",
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE messages (session_id TEXT REFERENCES sessions(id), content TEXT)",
+            "INSERT INTO sessions VALUES ('s1', 'Dinner plans')",
+            "INSERT INTO messages VALUES ('s1', 'my blood test results')",
+        ] {
+            sqlx::query(statement).execute(&engine).await.unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("attachments/s1")).unwrap();
+        std::fs::write(tmp.path().join("attachments/s1/scan.pdf"), b"x").unwrap();
+
+        SystemDataWipe::new(db, tmp.path(), None, None)
+            .wipe()
+            .await
+            .unwrap();
+
+        for (table, left) in [("sessions", 0), ("messages", 0), ("schema_version", 1)] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&engine)
+                .await
+                .unwrap();
+            assert_eq!(count, left, "{table}");
+        }
+        assert!(!tmp.path().join("attachments/s1").exists());
+        assert!(tmp.path().join("pond_system.db").exists());
     }
 }

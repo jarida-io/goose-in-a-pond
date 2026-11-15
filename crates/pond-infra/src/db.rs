@@ -144,20 +144,64 @@ impl Database {
         "prompt_templates", // shipped + user-customized prompt text, treated as config
     ];
 
-    /// Erases every household-personal row across `system` and the derived `vectors` index.
-    /// Leaves `logs` (telemetry) and the keep-list above untouched — a factory reset undoes
-    /// setup, not installation. `vectors` has no personal/infra split: it is wholly derived from
-    /// `system`'s `context_items`/`context_sources`, so it is always erased in full.
+    /// What the household did, in `pond_logs.db`: its audit trail, the operational log the Logs
+    /// screen shows, its sensors and cameras, and the turns it took.
+    const LOGS_ERASE_TABLES: &[&str] = &[
+        "camera_events",
+        "event_log",
+        "events",
+        "sensor_readings",
+        "turn_metrics",
+    ];
+
+    /// What `pond_logs.db` records about the host itself.
+    const LOGS_KEEP_TABLES: &[&str] = &["system_info"];
+
+    /// Erases every household-personal row across `system`, `logs` and the derived `vectors`
+    /// index, leaving the keep-lists: a factory reset undoes setup, not installation. `system`
+    /// goes last, so a failure before it leaves the pond's name for the reset to run again.
     pub async fn wipe_personal_data(&self) -> Result<()> {
         // Refused before anything is erased: a reset that skipped a table would look complete.
-        let tables = table_names(&self.system).await?;
-        let unknown = unclassified(&tables, Self::SYSTEM_ERASE_TABLES, Self::SYSTEM_KEEP_TABLES);
-        if !unknown.is_empty() {
-            anyhow::bail!(
-                "pond_system.db has tables a factory reset has no rule for: {}",
-                unknown.join(", ")
-            );
+        for (name, pool, erase, keep) in [
+            (
+                "pond_system.db",
+                &self.system,
+                Self::SYSTEM_ERASE_TABLES,
+                Self::SYSTEM_KEEP_TABLES,
+            ),
+            (
+                "pond_logs.db",
+                &self.logs,
+                Self::LOGS_ERASE_TABLES,
+                Self::LOGS_KEEP_TABLES,
+            ),
+        ] {
+            let tables = table_names(pool).await?;
+            let unknown = unclassified(&tables, erase, keep);
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "{name} has tables a factory reset has no rule for: {}",
+                    unknown.join(", ")
+                );
+            }
         }
+
+        let mut tx = self.logs.begin().await?;
+        for table in Self::LOGS_ERASE_TABLES {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        // Wholly derived from `system`, so every table goes, whatever a later migration adds.
+        let mut tx = self.vectors.begin().await?;
+        for table in table_names(&self.vectors).await? {
+            sqlx::query(&format!("DELETE FROM \"{}\"", table.replace('"', "\"\"")))
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
 
         let mut tx = self.system.begin().await?;
         // Lets the deletes below run in any order: FK checks still run, just once at COMMIT, by
@@ -174,12 +218,6 @@ impl Database {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-
-        // `vectors/0002_chunks.sql` folded the old `vectors_chunked` table back into `vectors`
-        // (one `DROP` + `RENAME`, not two live tables) — one DELETE is the whole index now.
-        sqlx::query("DELETE FROM vectors")
-            .execute(&self.vectors)
-            .await?;
 
         tracing::info!("factory reset: household data erased");
         Ok(())
@@ -299,6 +337,55 @@ mod tests {
             "{unknown:?} in neither the erase-list nor the keep-list -- \
              a factory reset needs an explicit decision for every table"
         );
+    }
+
+    #[tokio::test]
+    async fn every_logs_table_is_classified() {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+
+        let tables = table_names(&db.logs).await.unwrap();
+        let unknown = unclassified(
+            &tables,
+            Database::LOGS_ERASE_TABLES,
+            Database::LOGS_KEEP_TABLES,
+        );
+        assert!(unknown.is_empty(), "{unknown:?} in neither logs list");
+    }
+
+    #[tokio::test]
+    async fn the_wipe_empties_the_households_logs_and_keeps_the_hosts() {
+        let tmp = tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        for statement in [
+            "INSERT INTO events (timestamp, category, action, privacy_sensitivity) \
+             VALUES ('2026-11-01T08:00:00Z', 'auth', 'admin.unlocked', 'sensitive')",
+            "INSERT INTO camera_events (camera_id, event_type) VALUES ('front', 'person')",
+            "INSERT INTO sensor_readings (device_id, sensor_type, value, unit) \
+             VALUES ('bedroom', 'temperature', 21.5, 'C')",
+            "INSERT INTO event_log (source, message) VALUES ('giap::trace', 'Amina asked')",
+            "INSERT INTO turn_metrics (session_id, turn_number, prompt_tokens, \
+             completion_tokens, ttft_ms, total_latency_ms, context_utilization_pct, \
+             model_name, timestamp) VALUES ('s1', 1, 10, 10, 5, 5, 1.0, 'm', 'now')",
+            "INSERT INTO system_info (key, value) VALUES ('board', 'orin-nano')",
+        ] {
+            sqlx::query(statement).execute(&db.logs).await.unwrap();
+        }
+
+        db.wipe_personal_data().await.unwrap();
+
+        for table in Database::LOGS_ERASE_TABLES {
+            let rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&db.logs)
+                .await
+                .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM system_info")
+            .fetch_one(&db.logs)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1);
     }
 
     #[tokio::test]
