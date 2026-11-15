@@ -1507,6 +1507,9 @@ mod tests {
         // A custom phrase, and run-up words before it.
         assert!(heard_wake_phrase("Hey Jarvis, lights", "hey jarvis", &none));
         assert!(!heard_wake_phrase("okay hey jarvis", "hey jarvis", &none));
+        // A stutter of the phrase is still the phrase.
+        assert!(heard_wake_phrase("Hey, hey goose", "hey goose", &none));
+        assert!(!heard_wake_phrase("hey you, hey goose", "hey goose", &none));
     }
 
     #[test]
@@ -2160,8 +2163,14 @@ pub fn heard_wake_phrase(transcript: &str, wake_word: &str, calibrated: &[String
     let heard = normalize_transcript(transcript);
     let words: Vec<&str> = heard.split_whitespace().collect();
     triggers.iter().any(|t| {
+        // A stutter of the phrase's own words ("hey, hey goose") is a hesitation too.
+        let stutter = |w: &&str| t.split_whitespace().any(|own| own == *w);
         find_trigger_words(&heard, t)
-            .map(|(start, _)| words[..start].iter().all(|w| HESITATION_WORDS.contains(w)))
+            .map(|(start, _)| {
+                words[..start]
+                    .iter()
+                    .all(|w| HESITATION_WORDS.contains(w) || stutter(w))
+            })
             .unwrap_or(false)
     })
 }

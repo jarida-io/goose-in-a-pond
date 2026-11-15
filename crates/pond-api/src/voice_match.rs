@@ -272,7 +272,18 @@ pub(crate) async fn post_take(
     let store = voice_prints(&state);
     let now = chrono::Utc::now();
     if let Some(replaces) = &take.replaces {
-        store.delete_wake_take(replaces).await.map_err(failed)?;
+        // Zero rows means another request already replaced it: adding too would split the run.
+        if store.delete_wake_take(replaces).await.map_err(failed)? == 0 {
+            tracing::warn!(
+                kind = "voice_take_refused",
+                reason = "retake_not_found",
+                "voice: a retake's take was already replaced by another request"
+            );
+            return Err(refuse(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({"error": "retake_not_found"}),
+            ));
+        }
     }
     let take_id = uuid::Uuid::new_v4().to_string();
     store
