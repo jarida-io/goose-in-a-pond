@@ -27,6 +27,10 @@ export function readReach(ngrok: NgrokTunnelState | null, builtIn: { state: stri
     // The coordinator's own vocabulary: 'Running', 'Stopped', or a step on the way to running.
     if (builtIn.state === "Running") return { reach: "on", route: "built-in", address: null };
     if (builtIn.state === "Stopped") return { reach: "off", route: null, address: null };
+    // A dead helper or a login nobody is completing will not turn into "on" by waiting.
+    if (builtIn.state === "Unavailable" || builtIn.state === "NeedsLogin") {
+      return { reach: "problem", route: "built-in", address: null };
+    }
     return { reach: "connecting", route: "built-in", address: null };
   }
   if (ngrok) return { reach: "off", route: null, address: null };
