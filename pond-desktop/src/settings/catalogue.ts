@@ -164,8 +164,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         entries: [
           { key: "audio_input_device", label: "Microphone", description: "The microphone to listen through. Automatic uses one that works, and moves when it stops working.", control: { kind: "lookup", source: "audio-inputs", placeholder: "Automatic" }, consumer: "live" },
           { key: "audio_output_device", label: "Speaker", description: "The speaker to answer on. Automatic uses one that works, and follows headphones when they connect.", control: { kind: "lookup", source: "audio-outputs", placeholder: "Automatic" }, consumer: "live" },
-          { key: "audio_sound_test", label: "Find them by sound", description: "Play a short, soft sound to check that a speaker and a microphone hear each other. Off, the pond checks them silently.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "audio_manage_system", label: "Set up the board's sound", description: "On a Linux board like the nano, the pair the pond picks becomes every program's default, unmuted, and a level too low to be heard is turned up. A Mac's own settings are never changed.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "audio_sound_test", label: "Find them by sound", description: "Play a short, soft sound to check that a speaker and a microphone hear each other. Off, the pond checks them silently, as it always does a Bluetooth headset: the room cannot hear it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "audio_manage_system", label: "Set up the board's sound", description: "On a Linux board like the nano, the pair the pond picks becomes every program's default, unmuted, and a level too low to be heard is turned up. A Bluetooth headset the pond uses becomes the default either way, as that is the only way to reach it. A Mac's own settings are never changed.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
