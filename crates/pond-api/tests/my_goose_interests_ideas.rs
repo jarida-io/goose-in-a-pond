@@ -11,7 +11,9 @@ use axum::http::{Method, Request, StatusCode};
 use pond_api::build_router;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
-use pond_core::user_data::domain::idea::{GooseCan, GooseKind, GoosePlan, Idea, IdeaKind, IdeaState};
+use pond_core::user_data::domain::idea::{
+    GooseCan, GooseKind, GoosePlan, Idea, IdeaKind, IdeaState,
+};
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
 use pond_core::user_data::ports::ideas::IdeaRepository;

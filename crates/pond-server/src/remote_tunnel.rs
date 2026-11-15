@@ -462,7 +462,9 @@ impl Tunnel {
             while connections.try_join_next().is_some() {}
             let peer = public_peer(conn.remote_addr(), &lan_interfaces());
             let Some(peer_slot) = per_peer.take(peer.ip()) else {
-                tracing::debug!("tunnel connection dropped: its peer already holds {MAX_CONNECTIONS_PER_PEER}");
+                tracing::debug!(
+                    "tunnel connection dropped: its peer already holds {MAX_CONNECTIONS_PER_PEER}"
+                );
                 continue;
             };
             let Ok(slot) = slots.clone().try_acquire_owned() else {
@@ -1398,7 +1400,10 @@ mod tests {
         assert!(slots.take(busy).is_none());
         assert!(slots.take("198.51.100.4".parse().unwrap()).is_some());
         drop(held);
-        assert!(slots.take(busy).is_some(), "a closed connection gives its place back");
+        assert!(
+            slots.take(busy).is_some(),
+            "a closed connection gives its place back"
+        );
     }
 
     struct BrokenBuiltIn;

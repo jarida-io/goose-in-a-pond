@@ -1002,7 +1002,10 @@ fn llm_context_url(base: &str, question: &str, reach: Reach) -> Option<reqwest::
         LLM_CONTEXT_MAX_QUERY_CHARS,
     );
     // Brave's documented ranges; a value outside them is refused and the turn falls back.
-    let count = LLM_CONTEXT_COUNT.max(reach.sources).clamp(1, 50).to_string();
+    let count = LLM_CONTEXT_COUNT
+        .max(reach.sources)
+        .clamp(1, 50)
+        .to_string();
     let urls = reach.sources.clamp(1, 50).to_string();
     let tokens = reach.context_tokens.clamp(1024, 32_768).to_string();
     let per_url = LLM_CONTEXT_MAX_TOKENS_PER_URL.to_string();
@@ -3645,11 +3648,18 @@ mod tests {
 
     #[test]
     fn a_short_passage_leaves_its_room_to_a_long_one() {
-        let texts = vec!["The bridge opened in 2022.".to_string(), "word ".repeat(120)];
+        let texts = vec![
+            "The bridge opened in 2022.".to_string(),
+            "word ".repeat(120),
+        ];
         let chosen = choose_passages(&[0, 1], &texts, Some, |_| 20, (1, 400), 0, 2);
         assert_eq!(chosen.len(), 2, "{chosen:?}");
         let long = &chosen.iter().find(|(i, _)| *i == 1).unwrap().1;
-        assert!(long.len() > 300, "the long passage kept only {} bytes", long.len());
+        assert!(
+            long.len() > 300,
+            "the long passage kept only {} bytes",
+            long.len()
+        );
     }
 
     #[test]

@@ -1740,7 +1740,8 @@ async fn resolve_role_for_device(
     profile_repo: &dyn ProfileRepository,
     device_attribution: &dyn DeviceAttribution,
 ) -> Option<Role> {
-    let device_rung = DeviceRung::from_attribution(device_attribution.device_profile(device_id).await);
+    let device_rung =
+        DeviceRung::from_attribution(device_attribution.device_profile(device_id).await);
     let household_has_multiple_members = match profile_repo.list().await {
         Ok(profiles) => profiles.len() > 1,
         Err(_) => true,
@@ -1779,8 +1780,8 @@ async fn register_phone(
         .map_err(IntoResponse::into_response)?
         .device;
 
-    let role = resolve_role_for_device(&device, profile_repo.as_ref(), device_attribution.as_ref())
-        .await;
+    let role =
+        resolve_role_for_device(&device, profile_repo.as_ref(), device_attribution.as_ref()).await;
     if let pond_core::user_data::services::household_permission::PermissionDecision::Denied {
         reason,
         grantable_by,
@@ -2110,7 +2111,9 @@ pub fn companion_management(runtime: Arc<Runtime>, state: Arc<pond_api::AppState
                 state.db.system.clone(),
             ),
         )
-            as Arc<dyn pond_core::user_data::ports::device_attribution::DeviceAttribution>))
+            as Arc<
+                dyn pond_core::user_data::ports::device_attribution::DeviceAttribution,
+            >))
         .route_layer(middleware::from_fn_with_state(
             state,
             pond_api::middleware::auth_middleware,

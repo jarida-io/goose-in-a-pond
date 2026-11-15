@@ -28,8 +28,8 @@ use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, MetaObject, ProtocolVersion,
-        RequestMetaObject, ServerCapabilities, ServerConfig,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, MetaObject,
+        ProtocolVersion, RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router, RoleServer, ServerHandler,
@@ -399,7 +399,10 @@ anything you can answer now.")]
             Err(_) => Receipt::not_set("task", goal, "The Pond could not start that task."),
         };
         let mut result = answer("task_start", outcome);
-        result.meta = Some(MetaObject(with_outcome(result.meta.map(|meta| meta.0), &receipt)));
+        result.meta = Some(MetaObject(with_outcome(
+            result.meta.map(|meta| meta.0),
+            &receipt,
+        )));
         Ok(result)
     }
 

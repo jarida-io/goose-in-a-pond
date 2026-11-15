@@ -57,7 +57,11 @@ mod tests {
     use pond_core::user_data::ports::profile::ProfileRepository;
     use tempfile::tempdir;
 
-    async fn make() -> (SqliteGuestDeviceAccess, SqliteProfileRepository, tempfile::TempDir) {
+    async fn make() -> (
+        SqliteGuestDeviceAccess,
+        SqliteProfileRepository,
+        tempfile::TempDir,
+    ) {
         let tmp = tempdir().unwrap();
         let db = Database::init(tmp.path()).await.unwrap();
         (

@@ -34,10 +34,9 @@ impl GuestRoomAccess for SqliteGuestRoomAccess {
     }
 
     async fn accessible_room_ids(&self) -> Result<HashSet<String>> {
-        let rows: Vec<(String,)> =
-            sqlx::query_as("SELECT room_id FROM guest_accessible_rooms")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT room_id FROM guest_accessible_rooms")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 

@@ -120,7 +120,12 @@ mod tests {
     #[test]
     fn only_the_owner_may_remove_a_device() {
         allowed(may_remove_device(Some(Role::Owner)));
-        for role in [Some(Role::Member), Some(Role::Guest), Some(Role::Developer), None] {
+        for role in [
+            Some(Role::Member),
+            Some(Role::Guest),
+            Some(Role::Developer),
+            None,
+        ] {
             denied_with(may_remove_device(role), REASON_OWNER_ONLY_REMOVE);
         }
     }
@@ -128,7 +133,10 @@ mod tests {
     #[test]
     fn only_the_owner_may_change_the_model() {
         allowed(may_change_model(Some(Role::Owner)));
-        denied_with(may_change_model(Some(Role::Member)), REASON_OWNER_ONLY_MODEL);
+        denied_with(
+            may_change_model(Some(Role::Member)),
+            REASON_OWNER_ONLY_MODEL,
+        );
     }
 
     #[test]
@@ -149,7 +157,12 @@ mod tests {
     #[test]
     fn only_the_owner_may_manage_household_roles() {
         allowed(may_manage_household_roles(Some(Role::Owner)));
-        for role in [Some(Role::Member), Some(Role::Guest), Some(Role::Developer), None] {
+        for role in [
+            Some(Role::Member),
+            Some(Role::Guest),
+            Some(Role::Developer),
+            None,
+        ] {
             denied_with(may_manage_household_roles(role), REASON_OWNER_ONLY_ROLES);
         }
     }
