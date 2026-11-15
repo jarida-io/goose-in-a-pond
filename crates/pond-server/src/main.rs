@@ -11436,6 +11436,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 deep_research_task: None,
                 interview: None,
                 device_place: None,
+                device_locked: false,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -11514,6 +11515,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     deep_research_task: None,
                     interview: None,
                     device_place: None,
+                    device_locked: false,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");

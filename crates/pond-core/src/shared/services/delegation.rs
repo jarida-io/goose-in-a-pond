@@ -137,6 +137,7 @@ mod tests {
             deep_research_task: None,
             interview: None,
             device_place: None,
+            device_locked: false,
         }
     }
 

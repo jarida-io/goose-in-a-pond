@@ -282,6 +282,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         deep_research_task: None,
         interview: None,
         device_place: None,
+        device_locked: false,
     };
 
     let started = Instant::now();
