@@ -25,7 +25,8 @@
 #      does not have) and rsync pond-desktop/dist to the Jetson — pond-server
 #      embeds it at compile time (crates/pond-api/build.rs).
 #   4. Jetson: release build with CUDA (sm_87), with the flags giap.sh builds with there
-#      (scripts/lib/release-build.sh). It runs detached there, so a lost
+#      (scripts/lib/release-build.sh), then the remote-access helper, both installed where the
+#      service runs them (scripts/install-pond-binaries.sh). It runs detached there, so a lost
 #      connection cannot kill it; this side follows its log and reconnects. Run the deploy again
 #      after a drop and it follows the build still running, skipping steps 1-3 so nothing changes
 #      under it. Below 3 GB free the pond is stopped for the build; a deploy that ends before
@@ -127,7 +128,16 @@ cmd=\"\$(release_build_cmd \"\$features\")\"
 printf '\$ %s\\n' \"\$cmd\"
 bash -c \"\$cmd\" || exit
 release_build_stamp \"\$features\" \"\$(git rev-parse --short HEAD)\" \"\$(git -C goose rev-parse --short=9 HEAD)\" built \\
-  > target/release/.giap-build-stamp"
+  > target/release/.giap-build-stamp
+# The remote-access helper sits beside the server, so it is built with it; without Go the pond
+# still runs, with remote access off.
+if command -v go >/dev/null 2>&1; then
+  bash scripts/build-network-helper.sh target/release || echo 'pondnet was not built: remote access stays off' >&2
+else
+  echo 'no Go on this device: pondnet was not built, so remote access stays off (bash scripts/giap.sh go)' >&2
+fi
+# The service runs installed copies, so cleaning target/ never leaves it nothing to start.
+bash scripts/install-pond-binaries.sh || exit"
 fi
 
 if [ "${RESTART}" -eq 0 ]; then

@@ -38,8 +38,8 @@ says how); it lists the commands a deploy needs rather than granting `ALL`.
 
 | | |
 |---|---|
-| Unit | `goose-in-a-pond.service`. The `giap.sh` menu's "Install the service" writes a **user** unit, `~/.config/systemd/user/goose-in-a-pond.service`, running `target/release/pond-server serve --port 8080`; `loginctl enable-linger <user>` makes it start at boot. `scripts/install.sh` writes a **system** unit of the same name (`/etc/systemd/system/`) instead. `giap.sh status` shows which scope a board has, and the menu refuses to add a second unit |
-| Binary | `~/goose-in-a-pond/target/release/pond-server`, with `target/release/.giap-build-stamp` naming its features and commits |
+| Unit | `goose-in-a-pond.service`. The `giap.sh` menu's "Install the service" writes a **user** unit, `~/.config/systemd/user/goose-in-a-pond.service`, running the installed `~/.local/lib/goose-in-a-pond/bin/pond-server serve --port 8080`; `loginctl enable-linger <user>` makes it start at boot. `scripts/install.sh` writes a **system** unit of the same name (`/etc/systemd/system/`) instead. `giap.sh status` shows which scope a board has, and the menu refuses to add a second unit |
+| Binary | Built at `~/goose-in-a-pond/target/release/pond-server` (with `.giap-build-stamp` naming its features and commits), then installed with `pondnet` to `~/.local/lib/goose-in-a-pond/bin/` by `giap.sh build` and the deploy. The service runs the installed copy, so `cargo clean` or a deleted `target/` cannot stop the pond from starting; the copy it replaced is kept as `pond-server.previous`. A unit that still runs from `target/` is repointed once by `bash scripts/giap.sh install-binaries`, and `giap.sh doctor` warns until it is |
 | HTTP | `127.0.0.1:8080`, loopback only. Tunnel to it: `ssh -N -L 8080:127.0.0.1:8080 nano`, then `http://localhost:8080`. Keep the same port both ends or OAuth redirects miss |
 | HTTPS | all interfaces, normally 4443 (`<data_dir>/.runtime_https_port`), with the pinned certificate the phone app trusts; see [remote-access.md](../remote-access.md) |
 | Data | `~/.local/share/goose-in-a-pond/` |
