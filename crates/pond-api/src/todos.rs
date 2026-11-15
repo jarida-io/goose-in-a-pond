@@ -350,7 +350,7 @@ async fn offers(
     let member = caller_member(&state, principal.as_ref()).await?;
     let (now, tz) = (Utc::now(), timezone(&state).await);
     let offered = reminders(&state)
-        .offered_to(&member)
+        .open_to(&member)
         .await
         .map_err(server_error)?;
     Ok(Json(json!({
@@ -371,7 +371,7 @@ async fn accept_offer(
     let body = body_of(&body)?;
     let (now, tz) = (Utc::now(), timezone(&state).await);
     let reminders = reminders(&state);
-    let offered = reminders.offered_to(&member).await.map_err(server_error)?;
+    let offered = reminders.open_to(&member).await.map_err(server_error)?;
     let Some(reminder) = offered.iter().find(|r| r.id == reminder_id) else {
         return Err(not_found("offer"));
     };
