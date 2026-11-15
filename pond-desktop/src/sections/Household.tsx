@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Button, Switch } from "@heroui/react";
+import { Button } from "@heroui/react";
+import { Switch } from "../components/Switch";
 import { Users, RefreshCw, Plus } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { ApiError } from "../api/types";
@@ -216,6 +217,7 @@ interface DeviceAccessModalProps {
 
 function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps) {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [roomNames, setRoomNames] = useState<Map<string, string>>(new Map());
   const [allowed, setAllowed] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const titleId = useId();
@@ -225,12 +227,15 @@ function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps
     let cancelled = false;
     (async () => {
       try {
-        const [deviceList, access] = await Promise.all([
+        const [deviceList, access, rooms] = await Promise.all([
           api.listDevices(),
           api.listGuestDeviceAccess(profile.id),
+          // A device's room only helps the hint; the list still works without it.
+          api.listRooms().catch(() => []),
         ]);
         if (cancelled) return;
         setDevices(deviceList);
+        setRoomNames(new Map(rooms.map((r) => [r.id, r.name])));
         setAllowed(new Set(access.device_ids));
       } catch (e) {
         if (!cancelled) onFlash(friendlyError(e), false);
@@ -292,14 +297,13 @@ function DeviceAccessModal({ profile, onClose, onFlash }: DeviceAccessModalProps
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)", overflowY: "auto" }}>
             {devices.map((d) => (
-              <Row key={d.id} label={d.name} hint={d.room ?? d.device_type}>
+              <Row key={d.id} label={d.name} hint={(d.room_id && roomNames.get(d.room_id)) || d.device_type}>
                 <Switch
-                  aria-label={`Allow ${profile.display_name} to use ${d.name}`}
-                  isSelected={allowed.has(d.id)}
-                  onChange={() => toggle(d, !allowed.has(d.id))}
-                >
-                  <Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control></Switch.Content>
-                </Switch>
+                  size="sm"
+                  label={`Allow ${profile.display_name} to use ${d.name}`}
+                  checked={allowed.has(d.id)}
+                  onChange={(next) => toggle(d, next)}
+                />
               </Row>
             ))}
           </div>
