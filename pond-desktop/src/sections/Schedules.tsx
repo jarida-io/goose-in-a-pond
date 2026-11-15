@@ -101,6 +101,9 @@ const PROMPT_EXAMPLES: Record<string, string> = {
   "Custom":               "",
 };
 
+const RUN_CHECK_EVERY_MS = 15_000;
+const RUN_CHECK_GRACE_MS = 20_000;
+
 export function Schedules() {
   const state = useAppState();
   const dispatch = useAppDispatch();
@@ -264,9 +267,11 @@ export function Schedules() {
 
   // Track running schedules and refresh on completion via global SSE listener.
   const latestScheduleResult = state.latestScheduleResult;
+  const runningSince = useRef(new Map<string, number>());
   useEffect(() => {
     if (!latestScheduleResult) return;
     if (latestScheduleResult.status === "running") {
+      runningSince.current.set(latestScheduleResult.schedule_id, Date.now());
       setRunningIds((prev) => {
         const next = new Set(prev);
         next.add(latestScheduleResult.schedule_id);
@@ -285,6 +290,36 @@ export function Schedules() {
       }
     }
   }, [latestScheduleResult]);
+
+  // The feed can miss a run's end (a reconnect, a Pond restart), so a card that stays running
+  // asks the run history too. The grace period lets a just-started run record itself first.
+  useEffect(() => {
+    if (runningIds.size === 0) return;
+    const timer = setInterval(() => {
+      runningIds.forEach((id) => {
+        if (Date.now() - (runningSince.current.get(id) ?? 0) < RUN_CHECK_GRACE_MS) return;
+        void api
+          .getScheduleRuns(id, 1)
+          .then(([latest]) => {
+            if (!latest || latest.status === "running") return;
+            const name = schedules.find((x) => x.id === id)?.name ?? id;
+            dispatch({
+              type: "SCHEDULE_RESULT",
+              payload: {
+                id: latest.id,
+                schedule_id: id,
+                schedule_label: name,
+                status: latest.status === "failed" ? "failed" : "completed",
+                error: latest.error,
+                timestamp: Date.now(),
+              },
+            });
+          })
+          .catch(() => {});
+      });
+    }, RUN_CHECK_EVERY_MS);
+    return () => clearInterval(timer);
+  }, [runningIds, schedules, dispatch]);
 
   function flashMsg(msg: string, isError = false) {
     if (isError) {
