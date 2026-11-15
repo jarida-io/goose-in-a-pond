@@ -107,6 +107,10 @@ void i18n.use(initReactI18next).init({
     onceAt: 'Runs once on {{date}} at {{time}}',
     oncePast: 'That date and time has already passed. Pick a moment in the future.',
     unchanged: 'Nothing changed, so the schedule was left as it was.',
+    history: {
+      loading: 'Loading runs…', none: 'No runs yet.', retry: 'Try again',
+      failed: 'The runs could not be loaded: {{reason}}.',
+    },
   }, toast: {
     schedule: 'Schedule', routine: 'Routine', schedules: 'Schedules',
     runningCount_one: '{{count}} running', runningCount_other: '{{count}} running',
