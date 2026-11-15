@@ -2094,7 +2094,7 @@ async fn factory_reset(
     body: Result<Json<FactoryResetRequest>, JsonRejection>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::network::services::factory_reset::{
-        FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
+        FactoryResetError, FactoryResetPorts, FactoryResetRefusal, FactoryResetService,
     };
 
     factory_reset_authority(
@@ -2150,17 +2150,26 @@ async fn factory_reset(
 
     match result {
         Ok(export) => Ok(Json(json!({ "routines": export.routines }))),
-        Err(FactoryResetRefusal::NoPondName) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "pond_has_no_name"})),
-        )),
-        Err(FactoryResetRefusal::NameMismatch) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "pond_name_mismatch"})),
-        )),
-        Err(FactoryResetRefusal::PaymentsHeld) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "payments_held"})),
+        Err(FactoryResetError::Refused(refusal)) => {
+            let code = match refusal {
+                FactoryResetRefusal::NoPondName => "pond_has_no_name",
+                FactoryResetRefusal::NameMismatch => "pond_name_mismatch",
+                FactoryResetRefusal::PaymentsHeld => "payments_held",
+            };
+            Err((StatusCode::CONFLICT, Json(json!({ "error": code }))))
+        }
+        Err(FactoryResetError::Failed {
+            step,
+            reason,
+            export,
+        }) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "factory_reset_failed",
+                "step": step,
+                "reason": reason,
+                "routines": export.routines,
+            })),
         )),
     }
 }

@@ -1,6 +1,7 @@
 //! Adapter for `PersonalDataWipe`: erases every household-personal store a factory reset must
-//! clear: the household's files and the engine's copy of its conversations, then the databases,
-//! then stored secrets and saved Wi-Fi networks.
+//! clear: the household's files, the engine's copy of its conversations, stored secrets, and the
+//! databases last, so any failure before them leaves the pond's name for the reset to run again.
+//! Saved Wi-Fi networks are forgotten after that, best effort.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,13 +45,13 @@ impl PersonalDataWipe for SystemDataWipe {
         let data_dir = self.data_dir.clone();
         tokio::task::spawn_blocking(move || household_files::erase(&data_dir)).await??;
         erase_engine_sessions(&self.data_dir).await?;
-        self.db.wipe_personal_data().await?;
-
         if let Some(secrets) = &self.secrets {
-            if let Err(error) = secrets.clear_all().await {
-                tracing::warn!(%error, "factory reset: could not clear stored secrets");
-            }
+            secrets
+                .clear_all()
+                .await
+                .map_err(|error| error.context("clearing stored secrets"))?;
         }
+        self.db.wipe_personal_data().await?;
 
         if let Some(wifi) = &self.wifi {
             if let Err(error) = wifi.forget_all().await {
@@ -157,6 +158,7 @@ mod tests {
 
     struct FakeSecrets {
         cleared: Arc<AtomicBool>,
+        fail: bool,
     }
 
     #[at]
@@ -177,6 +179,9 @@ mod tests {
             Ok(false)
         }
         async fn clear_all(&self) -> Result<()> {
+            if self.fail {
+                anyhow::bail!("secrets.json is read-only");
+            }
             self.cleared.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -198,6 +203,7 @@ mod tests {
             tmp.path(),
             Some(Arc::new(FakeSecrets {
                 cleared: cleared.clone(),
+                fail: false,
             })),
             Some(Arc::new(WifiConnections::new(Arc::new(FakeStation {
                 forgot_all: forgotten.clone(),
@@ -214,6 +220,37 @@ mod tests {
         assert_eq!(profiles.0, 0);
         assert!(cleared.load(Ordering::SeqCst));
         assert!(forgotten.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn secrets_that_will_not_clear_fail_the_wipe_before_the_databases() {
+        let tmp = tempdir().unwrap();
+        let db = Arc::new(Database::init(tmp.path()).await.unwrap());
+        sqlx::query("INSERT INTO profiles (id, display_name) VALUES ('p1', 'Owner')")
+            .execute(&db.system)
+            .await
+            .unwrap();
+        let wipe = SystemDataWipe::new(
+            db.clone(),
+            tmp.path(),
+            Some(Arc::new(FakeSecrets {
+                cleared: Arc::new(AtomicBool::new(false)),
+                fail: true,
+            })),
+            None,
+        );
+
+        let error = wipe.wipe().await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("read-only"), "{error:#}");
+        let profiles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM profiles")
+            .fetch_one(&db.system)
+            .await
+            .unwrap();
+        assert_eq!(
+            profiles, 1,
+            "the reset can run again: the household is still there"
+        );
     }
 
     #[tokio::test]

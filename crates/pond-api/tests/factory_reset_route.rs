@@ -17,7 +17,9 @@ use pond_core::mesh::domain::millisats::Millisats;
 use pond_core::mesh::domain::peer_id::PeerId;
 use pond_core::mesh::mocks::mock_credit_ledger::MockCreditLedger;
 use pond_core::mesh::ports::credit_ledger::CreditLedger as _;
+use pond_core::network::ports::personal_data_wipe::PersonalDataWipe;
 use pond_core::security::ports::handshake::Handshake;
+use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_infra::personal_data_wipe::SystemDataWipe;
@@ -47,6 +49,11 @@ fn host_peer() -> SocketAddr {
 
 /// A named pond whose main member, Jerry, paired the first phone.
 async fn pond() -> Pond {
+    pond_wiping(None).await
+}
+
+/// As [`pond`], erasing through `wipe` instead of the real one.
+async fn pond_wiping(wipe: Option<Arc<dyn PersonalDataWipe>>) -> Pond {
     let pond_api::test_support::TestState {
         mut state,
         handshake,
@@ -57,12 +64,19 @@ async fn pond() -> Pond {
     named.home_name = POND_NAME.to_string();
     settings.update(&named).await.unwrap();
     state.settings_repo = settings;
-    state.data_wipe = Some(Arc::new(SystemDataWipe::new(
-        state.db.clone(),
-        dir.path(),
-        None,
-        None,
-    )));
+    state.data_wipe = Some(wipe.unwrap_or_else(|| {
+        Arc::new(SystemDataWipe::new(
+            state.db.clone(),
+            dir.path(),
+            None,
+            None,
+        ))
+    }));
+    state
+        .onboarding_repo
+        .save_step(OnboardingStep::Completed)
+        .await
+        .unwrap();
     let ledger = Arc::new(MockCreditLedger::new());
     state.credit_ledger = ledger.clone();
     let jerry = state
@@ -161,6 +175,30 @@ async fn the_main_member_typing_the_real_name_wipes_the_household() {
         0,
         "the household's profiles must be gone"
     );
+}
+
+struct BrokenWipe;
+#[async_trait::async_trait]
+impl PersonalDataWipe for BrokenWipe {
+    async fn wipe(&self) -> anyhow::Result<()> {
+        anyhow::bail!("disk I/O error")
+    }
+}
+
+#[tokio::test]
+async fn a_failed_erase_answers_500_and_leaves_onboarding_as_it_was() {
+    let pond = pond_wiping(Some(Arc::new(BrokenWipe))).await;
+
+    let (status, body) = reset(&pond, &pond.main, false, POND_NAME).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"], "factory_reset_failed", "{body}");
+    assert_eq!(body["step"], "erasing_data", "{body}");
+    assert!(
+        pond.state.onboarding_repo.is_complete().await.unwrap(),
+        "a reset that erased nothing must not reopen setup over the household"
+    );
+    assert_eq!(members(&pond).await, 1);
 }
 
 #[tokio::test]

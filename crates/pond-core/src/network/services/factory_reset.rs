@@ -1,11 +1,6 @@
-//! Journey 7: wipe a Pond before handing it on. Orchestrates the full reset over ports only —
-//! the raw DB/file erase lives behind [`crate::network::ports::personal_data_wipe::PersonalDataWipe`]
-//! in pond-api/pond-infra, since pond-core has no business opening a SQLite pool directly.
-//!
-//! Permission (`may_reset_pond`) is checked by the caller, not here — same split as
-//! `reset_onboarding` in pond-api's `routes.rs`, which keeps the HTTP-shaped refusal response in
-//! the HTTP layer. By the time [`FactoryResetService::execute`] runs, the caller is already known
-//! to be the owner.
+//! Journey 7: wipe a Pond before handing it on, over ports only; the erase itself is
+//! [`crate::network::ports::personal_data_wipe::PersonalDataWipe`]. Who may reset is the caller's
+//! to check: by the time [`FactoryResetService::execute`] runs, the host or the main member asked.
 
 use std::sync::Arc;
 
@@ -84,6 +79,26 @@ pub enum FactoryResetRefusal {
     PaymentsHeld,
 }
 
+/// Why a reset did not finish.
+#[derive(Debug)]
+pub enum FactoryResetError {
+    /// Refused before anything was touched.
+    Refused(FactoryResetRefusal),
+    /// A step the reset cannot go on without failed, and nothing after it ran: onboarding was not
+    /// reopened. `export` holds the routines read before it, which may be gone from the scheduler.
+    Failed {
+        step: FactoryResetStep,
+        reason: String,
+        export: FactoryResetExport,
+    },
+}
+
+impl From<FactoryResetRefusal> for FactoryResetError {
+    fn from(refusal: FactoryResetRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
 /// Every port the reset touches. Most are `Option` because the step they back is best-effort —
 /// nothing here aborts the reset over a missing TTS engine or an unconfigured scheduler.
 pub struct FactoryResetPorts {
@@ -107,25 +122,24 @@ pub struct FactoryResetService;
 
 impl FactoryResetService {
     /// Runs the whole journey: refuse (name/payments) → export → notify → revoke → erase →
-    /// speak → rearm → reset onboarding. Notification happens before the erase step reaches
-    /// `profiles`/push tokens, even though the ticket's prose describes it last — see the module
-    /// doc on sequencing. Every step past the refusal checks is best-effort: a failed notify or
-    /// a silent TTS never leaves the Pond half-reset.
+    /// speak → rearm → reset onboarding. Members are notified while their devices still resolve.
+    /// Notifying, revoking, the goodbye and the rearm are best effort; a failed erase or
+    /// onboarding reset stops the reset there and is returned, never reported as done.
     pub async fn execute(
         ports: &FactoryResetPorts,
         typed_pond_name: &str,
         actual_pond_name: &str,
-    ) -> Result<FactoryResetExport, FactoryResetRefusal> {
+    ) -> Result<FactoryResetExport, FactoryResetError> {
         if actual_pond_name.trim().is_empty() {
-            return Err(FactoryResetRefusal::NoPondName);
+            return Err(FactoryResetRefusal::NoPondName.into());
         }
         if typed_pond_name != actual_pond_name {
-            return Err(FactoryResetRefusal::NameMismatch);
+            return Err(FactoryResetRefusal::NameMismatch.into());
         }
 
         // Fail safe: an unreadable ledger is treated as "money might be held", never as clear.
         if ports.credit_ledger.has_any_balance().await.unwrap_or(true) {
-            return Err(FactoryResetRefusal::PaymentsHeld);
+            return Err(FactoryResetRefusal::PaymentsHeld.into());
         }
 
         Self::report(ports, FactoryResetStep::Exporting);
@@ -163,11 +177,12 @@ impl FactoryResetService {
         Self::revoke_every_device(ports).await;
 
         Self::report(ports, FactoryResetStep::ErasingData);
-        if let Err(error) = Self::delete_every_schedule(ports).await {
-            tracing::error!(%error, "factory reset: deleting the household's schedules failed");
-        }
-        if let Err(error) = ports.data_wipe.wipe().await {
-            tracing::error!(%error, "factory reset: erasing household data failed");
+        let erased = match Self::delete_every_schedule(ports).await {
+            Ok(()) => ports.data_wipe.wipe().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = erased {
+            return Err(Self::failed(FactoryResetStep::ErasingData, error, routines));
         }
 
         Self::report(ports, FactoryResetStep::SpeakingGoodbye);
@@ -185,14 +200,32 @@ impl FactoryResetService {
 
         Self::report(ports, FactoryResetStep::ReopeningOnboarding);
         let onboarding = OnboardingService::new(ports.onboarding.clone());
-        if let Err(error) = onboarding.reset().await {
-            tracing::warn!(%error, "factory reset: could not reset onboarding state");
-        }
-        if let Err(error) = onboarding.start().await {
-            tracing::warn!(%error, "factory reset: could not restart onboarding");
+        let reopened = match onboarding.reset().await {
+            Ok(()) => onboarding.start().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = reopened {
+            return Err(Self::failed(
+                FactoryResetStep::ReopeningOnboarding,
+                error,
+                routines,
+            ));
         }
 
         Ok(FactoryResetExport { routines })
+    }
+
+    fn failed(
+        step: FactoryResetStep,
+        error: anyhow::Error,
+        routines: Vec<Schedule>,
+    ) -> FactoryResetError {
+        tracing::error!(?step, error = %format!("{error:#}"), "factory reset: stopped before it finished");
+        FactoryResetError::Failed {
+            step,
+            reason: format!("{error:#}"),
+            export: FactoryResetExport { routines },
+        }
     }
 
     /// Through the scheduler, so its routines stop firing now, not at the next start.
@@ -539,6 +572,61 @@ mod tests {
         }
     }
 
+    fn refusal(result: Result<FactoryResetExport, FactoryResetError>) -> FactoryResetRefusal {
+        match result {
+            Err(FactoryResetError::Refused(refusal)) => refusal,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    struct BrokenWipe;
+    #[async_trait::async_trait]
+    impl PersonalDataWipe for BrokenWipe {
+        async fn wipe(&self) -> Result<()> {
+            anyhow::bail!("disk I/O error")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_erase_stops_the_reset_before_onboarding_reopens() {
+        let log = Arc::new(CallLog::default());
+        let mut ports = happy_ports(log.clone(), vec![device("phone-1")], None).await;
+        ports.data_wipe = Arc::new(BrokenWipe);
+        ports.scheduler = Some(Arc::new(FakeScheduler::new(
+            log.clone(),
+            vec![routine("routine-1")],
+        )));
+
+        let result =
+            FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
+
+        match result {
+            Err(FactoryResetError::Failed {
+                step,
+                reason,
+                export,
+            }) => {
+                assert_eq!(step, FactoryResetStep::ErasingData);
+                assert!(reason.contains("disk I/O error"), "{reason}");
+                assert_eq!(
+                    export.routines.len(),
+                    1,
+                    "the routines still reach the caller"
+                );
+            }
+            other => panic!("a failed erase must not read as done: {other:?}"),
+        }
+        let calls = log.calls();
+        assert!(
+            !calls.contains(&"onboarding.reset"),
+            "onboarding stays as it was"
+        );
+        assert!(
+            !calls.contains(&"tts.speak"),
+            "nothing after the erase runs"
+        );
+    }
+
     #[tokio::test]
     async fn name_mismatch_refuses_before_any_mutation() {
         let log = Arc::new(CallLog::default());
@@ -546,7 +634,7 @@ mod tests {
 
         let result = FactoryResetService::execute(&ports, "Wrong Name", "The Kitchen Pond").await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::NameMismatch);
+        assert_eq!(refusal(result), FactoryResetRefusal::NameMismatch);
         assert!(
             log.calls().is_empty(),
             "nothing should run before the name check"
@@ -560,7 +648,7 @@ mod tests {
 
         let result = FactoryResetService::execute(&ports, "", "").await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::NoPondName);
+        assert_eq!(refusal(result), FactoryResetRefusal::NoPondName);
         assert!(
             log.calls().is_empty(),
             "nothing should run before the name check"
@@ -581,7 +669,7 @@ mod tests {
         let result =
             FactoryResetService::execute(&ports, "The Kitchen Pond", "The Kitchen Pond").await;
 
-        assert_eq!(result.unwrap_err(), FactoryResetRefusal::PaymentsHeld);
+        assert_eq!(refusal(result), FactoryResetRefusal::PaymentsHeld);
         assert!(
             log.calls().is_empty(),
             "nothing should run before the payment check"
