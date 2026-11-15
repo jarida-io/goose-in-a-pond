@@ -12,7 +12,6 @@ import "./styles/base.css";
 import "./styles/sections.css";
 import "./hub/hub.css";
 // Last: the touch layer settles equal-specificity conflicts by cascade order.
-import "./styles/goose.css";
 import "./styles/touch.css";
 
 import { Root } from "./Root";
