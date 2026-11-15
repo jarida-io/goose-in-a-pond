@@ -15,12 +15,35 @@ pub enum TaskKind {
     SensorTrigger(SensorTriggerSpec),
     /// A fixed list of device actions, run in order without the LLM.
     Routine { actions: Vec<TriggerAction> },
+    /// One member's reminder: runs as them, sends the details to their own phones, and says
+    /// aloud only that they have a reminder.
+    MemberReminder { profile_id: String, prompt: String },
 }
 
 impl TaskKind {
     /// Event-fired kinds, which the scheduler never registers with cron.
     pub fn is_event_triggered(&self) -> bool {
         matches!(self, TaskKind::SensorTrigger(_))
+    }
+
+    /// The member a private reminder belongs to; `None` for household tasks.
+    pub fn member(&self) -> Option<&str> {
+        match self {
+            TaskKind::MemberReminder { profile_id, .. } => Some(profile_id),
+            _ => None,
+        }
+    }
+
+    /// This task with a new prompt. A member's reminder stays theirs; anything else becomes a
+    /// household prompt.
+    pub fn with_prompt(&self, prompt: String) -> TaskKind {
+        match self {
+            TaskKind::MemberReminder { profile_id, .. } => TaskKind::MemberReminder {
+                profile_id: profile_id.clone(),
+                prompt,
+            },
+            _ => TaskKind::AgentPrompt { prompt },
+        }
     }
 }
 
@@ -493,6 +516,9 @@ pub struct ScheduleResultEvent {
     pub result: Option<String>,
     pub error: Option<String>,
     pub duration_ms: Option<u64>,
+    /// Set for a member's reminder, whose result must not be broadcast to the household.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_member: Option<String>,
 }
 
 #[cfg(test)]
@@ -517,6 +543,43 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&RunStatus::Skipped).unwrap(),
             "\"skipped\""
+        );
+    }
+
+    #[test]
+    fn a_member_reminder_round_trips_and_names_its_member() {
+        let kind = TaskKind::MemberReminder {
+            profile_id: "grace".into(),
+            prompt: "Take the evening tablets".into(),
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("\"type\":\"member_reminder\""));
+        assert_eq!(serde_json::from_str::<TaskKind>(&json).unwrap(), kind);
+        assert_eq!(kind.member(), Some("grace"));
+        assert_eq!(TaskKind::AgentPrompt { prompt: "x".into() }.member(), None);
+    }
+
+    #[test]
+    fn a_new_prompt_keeps_a_reminder_with_its_member() {
+        let reminder = TaskKind::MemberReminder {
+            profile_id: "grace".into(),
+            prompt: "old".into(),
+        };
+        assert_eq!(
+            reminder.with_prompt("new".into()),
+            TaskKind::MemberReminder {
+                profile_id: "grace".into(),
+                prompt: "new".into()
+            }
+        );
+        let household = TaskKind::AgentPrompt {
+            prompt: "old".into(),
+        };
+        assert_eq!(
+            household.with_prompt("new".into()),
+            TaskKind::AgentPrompt {
+                prompt: "new".into()
+            }
         );
     }
 

@@ -28,7 +28,7 @@ use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, ProtocolVersion,
+        CallToolResult, ContentBlock, ErrorData, Implementation, InitializeResult, MetaObject, ProtocolVersion,
         RequestMetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
