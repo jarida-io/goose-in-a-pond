@@ -8200,10 +8200,28 @@ async fn run_long_task_runner(
         }
     };
 
-    // A step a crash left running reruns from the ledger without spending an attempt.
+    // A step a crash left running reruns from the ledger without spending an attempt, and the
+    // time the pond was off is given back to the task's deadline.
     if let Ok(open) = tasks.list_tasks(LongTaskOwnerFilter::Everyone, false).await {
+        let back = chrono::Utc::now();
         for task in &open {
-            for mut step in tasks.list_steps(task.id()).await.unwrap_or_default() {
+            let steps = tasks.list_steps(task.id()).await.unwrap_or_default();
+            if let Some(deadline) =
+                pond_core::shared::services::long_task_runner::deadline_after_downtime(
+                    task, &steps, back,
+                )
+            {
+                if tasks.set_deadline(task.id(), Some(deadline)).await.is_ok() {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "long_task_deadline_extended",
+                        task_id = %task.id(),
+                        %deadline,
+                        "a task's deadline moved by the time the pond was off"
+                    );
+                }
+            }
+            for mut step in steps {
                 if step.state() == StepState::Running && step.preempt().is_ok() {
                     let _ = tasks.update_step(&step).await;
                 }

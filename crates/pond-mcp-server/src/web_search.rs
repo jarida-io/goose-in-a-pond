@@ -68,20 +68,12 @@ const TURN_REACH: Reach = Reach {
 const RESEARCH_REACH: Reach = Reach {
     sources: 30,
     context_tokens: 16_384,
-    copy_bytes: 9_000,
+    copy_bytes: 20_000,
 };
 
 /// The reach for the session behind this call: wide for a deep-research step's helper.
 fn reach_for(meta: &rmcp::model::RequestMetaObject) -> Reach {
-    use pond_core::shared::domain::long_task::LongTaskKind;
-    use pond_core::shared::services::child_sessions::process_child_sessions;
-    use pond_core::shared::services::step_bindings::process_step_bindings;
-    let research = crate::session_from_meta(meta)
-        .and_then(|session| {
-            process_step_bindings().binding_for_helper(&session, &process_child_sessions())
-        })
-        .is_some_and(|binding| binding.kind == LongTaskKind::Research);
-    if research {
+    if crate::reading_room::research_session(meta).is_some() {
         RESEARCH_REACH
     } else {
         TURN_REACH
@@ -401,8 +393,11 @@ news, opening hours, prices, products, businesses, recent results.")]
                 "the search client could not be built",
             )));
         };
+        if crate::reading_room::left(&ctx.meta) == Some(0) {
+            return Ok(text_result(crate::reading_room::ROOM_FULL));
+        }
         let town = local_town_for_search().await;
-        Ok(WebSearch {
+        let result = WebSearch {
             brave_base: BRAVE_API_BASE,
             brave,
             pages: page_client(),
@@ -414,10 +409,20 @@ news, opening hours, prices, products, businesses, recent results.")]
             paced: one_at_a_time(),
         }
         .run(&key, &question)
-        .await)
+        .await;
+        crate::reading_room::spend(&ctx.meta, result_bytes(&result));
+        Ok(result)
     }
 }
 
+/// The text a result hands the model, which is what fills its window.
+fn result_bytes(result: &CallToolResult) -> usize {
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.len()))
+        .sum()
+}
 /// Brave's results for background work that writes from them in its own words and keeps none
 /// of them: the same key, client, town and key-status record as `search_web`.
 pub async fn search_hits(question: &str) -> Result<Vec<WebHit>, String> {

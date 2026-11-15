@@ -75,7 +75,7 @@ giap_role:
     - giap-schedule
     - giap-device
   personal_data: inherit
-  max_turns: 8
+  max_turns: 12
   instructions: |
     You are Forager Gosling, executing one step of a longer task on Goose In A Pond.
     You run locally on this household's physical hardware. "Goose" is this pond's agent —

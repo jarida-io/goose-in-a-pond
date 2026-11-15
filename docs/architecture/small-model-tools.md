@@ -750,7 +750,7 @@ real test.
   fewer pages were read, it quotes up to four passages a page within 2,400 bytes; otherwise
   two a page within 2,200. Each source's best passage comes first, clipped to an even share of
   the room, so a turn hears up to six sources; a deep-research step hears up to thirty within
-  9,000 bytes.
+  20,000 bytes. Shares are water-filled: room a short passage leaves goes to the longer ones.
 - **Extraction.** It ports Mozilla Readability's unlikely-candidate rule, with its retry
   without the class test when a page yields under 500 characters, and adds:
   - a "most popular / trending" rail pattern;
@@ -927,7 +927,7 @@ turn cannot wait that long, and a timeout falls back (§8.10.4).
     copy's budget.
   - Sources: §8.8's budgets, keyed by the number of sources. Two or fewer give four passages a
     source within 2,400 bytes; more give two within 2,200, each source's best passage first, so
-    up to six sources are quoted (thirty within 9,000 bytes in a deep-research step).
+    up to six sources are quoted (thirty within 20,000 bytes in a deep-research step).
   - No URLs and no Markdown (R4), and `[[[` is defanged. Every line is quoted text, a source
     line or the `Places:` label, so nothing is copyable as an answer the tool did not find (R6).
 
@@ -1545,11 +1545,17 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
 
 ### 9.4 Who uses it
 
-- **Forager Gosling.** Its recipe names the tool beside `search_web`. A research step reads the
-  page before it writes a number, price, time or date from the web, and cites the address the
-  tool gave. It reads one page a step, two at most, and one more part at most: each read is a
-  model turn, and on the Orin a weekend plan whose helpers read two or three pages a step took
-  twice as long.
+- **Forager Gosling.** Its recipe names the tool beside `search_web`, and it has 12 turns. A
+  research step reads every page it can use, until its reading room is full: the sources it
+  has been handed (search copies and page reads) may fill 45% of the model's window, about
+  53 KB in the Orin's 32,768 tokens (`reading_room.rs`, which reads the window the engine last
+  reported). Then `search_web` and `read_web_page` answer that the room is full and the step
+  saves what it found. A research read quotes up to 6,000 bytes of answering lines rather than
+  1,800. A read the site refuses (401, 403, 429) costs nothing, and the step reads the next
+  source. A number, price, time or date a search passage quotes may be written and cited to
+  that source; the step reads the page for what the passages leave out. Each read is still a
+  model turn, so a deep step takes minutes on the Orin; a report's length comes from its
+  sections, each written from a full read.
 - **Nestmaker Goose** holds `giap-knowledge`, so it can read a page too.
 - **The chat turn.** The knowledge instructions name the tool for a link the person gives.
 - **Not the planner or Sentinel Goose,** which hold no knowledge tools.

@@ -942,3 +942,68 @@ fn a_step_answering_after_the_time_is_up_is_told_so_and_given_everything() {
     assert!(late.contains("The task's time is up"), "{late}");
     assert!(late.contains("art-a"), "everything saved is given: {late}");
 }
+
+fn ran_between(key: &str, started: DateTime<Utc>, finished: DateTime<Utc>) -> PlanStep {
+    PlanStep::from_parts(PlanStepParts {
+        task_id: "task-1".to_string(),
+        key: key.to_string(),
+        ordinal: 0,
+        role: "long-task-worker".to_string(),
+        instructions: format!("do {key}"),
+        inputs: Vec::new(),
+        depends_on: Vec::new(),
+        acceptance: None,
+        state: StepState::Completed,
+        attempts: 1,
+        summary: Some(format!("{key} done")),
+        failure: None,
+        started_at: Some(started),
+        finished_at: Some(finished),
+        agent: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn time_the_pond_was_off_does_not_count_against_a_tasks_deadline() {
+    let task = task_in(LongTaskState::Running, Some(t(1_800)));
+    let steps = vec![
+        ran_between("find", t(300), t(600)),
+        step("write", 1, &["find"], StepState::Pending, 0),
+    ];
+
+    // Last seen at 600 s, back at 2 400 s: 1 800 s off, so the 1 800 s deadline moves to 3 600 s.
+    assert_eq!(
+        deadline_after_downtime(&task, &steps, t(2_400)),
+        Some(t(3_600))
+    );
+    let after = task_in(LongTaskState::Running, Some(t(1_800)));
+    assert_eq!(
+        deadline_after_downtime(&after, &steps, t(500)),
+        None,
+        "a restart before the last thing it did changes nothing"
+    );
+}
+
+#[test]
+fn a_task_already_out_of_time_or_finished_keeps_its_deadline() {
+    let late = task_in(LongTaskState::Running, Some(t(100)));
+    let ran = ran_between("find", t(200), t(300));
+    assert_eq!(deadline_after_downtime(&late, &[ran], t(5_000)), None);
+
+    let done = task_in(LongTaskState::Completed, Some(t(1_800)));
+    assert_eq!(deadline_after_downtime(&done, &[], t(5_000)), None);
+    let open_ended = task_in(LongTaskState::Running, None);
+    assert_eq!(deadline_after_downtime(&open_ended, &[], t(5_000)), None);
+}
+
+#[test]
+fn a_research_step_reads_deep_and_a_refused_read_costs_it_nothing() {
+    let research = task_in(LongTaskState::Running, None).with_kind(LongTaskKind::Research);
+    let step_b = step("b", 0, &[], StepState::Pending, 0);
+    let brief = worker_brief(&research, &step_b, &[], &HashMap::new(), t(10));
+    assert!(brief.contains("Go deep"), "{brief}");
+    assert!(brief.contains("costs nothing"), "{brief}");
+    assert!(brief.contains("search_web passage quotes"), "{brief}");
+    assert!(!brief.contains("two at most"), "{brief}");
+}

@@ -4664,6 +4664,9 @@ impl GooseAdapter {
                                     }
                                     if let Some(n_ctx) = stats.effective_context_tokens {
                                         turn_stats.context_limit_tokens = Some(n_ctx as u32);
+                                        pond_core::shared::services::context_window::record(
+                                            n_ctx as usize,
+                                        );
                                     }
                                     if let Some(draft) = &stats.draft {
                                         turn_stats.draft_accept_rate = Some(draft.accept_rate as f32);
