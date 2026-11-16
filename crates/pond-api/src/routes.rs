@@ -7760,6 +7760,12 @@ async fn get_warmup(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(v)
 }
 
+/// Upcoming days the weather widget's `forecast` carries, after today.
+///
+/// A week: the dashboard shows as many as the card has room for, so a taller card shows more days
+/// instead of leaving the space empty. Open-Meteo serves up to 16 days in the same one request.
+const WEATHER_UPCOMING_DAYS: u8 = 7;
+
 /// Weather widget data; `{"enabled": false}` (not an error) when no location is set.
 async fn get_weather(
     State(state): State<Arc<AppState>>,
@@ -7784,12 +7790,16 @@ async fn get_weather(
             Json(json!({"error": format!("Failed to fetch weather: {e:#}")})),
         )
     })?;
-    let forecast = provider.forecast(4).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("Failed to fetch forecast: {e:#}")})),
-        )
-    })?;
+    // Today plus the upcoming days: today supplies the high and low, the rest the day tiles.
+    let forecast = provider
+        .forecast(WEATHER_UPCOMING_DAYS + 1)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("Failed to fetch forecast: {e:#}")})),
+            )
+        })?;
 
     let (hi, lo) = forecast
         .days
@@ -7799,20 +7809,6 @@ async fn get_weather(
             current.temperature_c.round() as i64,
             current.temperature_c.round() as i64,
         ));
-
-    let upcoming: Vec<Value> = forecast
-        .days
-        .iter()
-        .skip(1)
-        .take(3)
-        .map(|d| {
-            json!({
-                "d": weather_short_weekday(&d.date),
-                "i": weather_icon_key(&d.description),
-                "t": d.temp_max_c.round() as i64,
-            })
-        })
-        .collect();
 
     Ok(Json(json!({
         "enabled": true,
@@ -7829,8 +7825,24 @@ async fn get_weather(
         // Whether it is day where the Pond is, from the weather service, so a client draws a
         // clear night as the moon without working out the sun's times in the Pond's time zone.
         "is_day": current.is_day,
-        "forecast": upcoming,
+        "forecast": weather_upcoming(&forecast.days),
     })))
+}
+
+/// The widget's day tiles: every day after today, up to [`WEATHER_UPCOMING_DAYS`], as
+/// `{d: short weekday, i: icon key, t: rounded high}`.
+fn weather_upcoming(days: &[pond_adapters_weather::ForecastDay]) -> Vec<Value> {
+    days.iter()
+        .skip(1)
+        .take(WEATHER_UPCOMING_DAYS.into())
+        .map(|d| {
+            json!({
+                "d": weather_short_weekday(&d.date),
+                "i": weather_icon_key(&d.description),
+                "t": d.temp_max_c.round() as i64,
+            })
+        })
+        .collect()
 }
 
 /// Maps a WMO description (`pond-adapters-weather`'s `wmo.rs`) to one of the dashboard widget's
@@ -24804,8 +24816,48 @@ mod session_preview_tests {
 }
 
 #[cfg(test)]
-mod weather_icon_tests {
-    use super::weather_icon_key;
+mod weather_tests {
+    use super::{weather_icon_key, weather_upcoming};
+    use pond_adapters_weather::ForecastDay;
+
+    fn day(date: &str, high: f64) -> ForecastDay {
+        ForecastDay {
+            date: date.into(),
+            description: "Clear sky".into(),
+            temp_max_c: high,
+            temp_min_c: 10.0,
+            precipitation_sum_mm: 0.0,
+            precipitation_probability_pct: 0,
+            wind_speed_max_kmh: 0.0,
+            uv_index_max: 0.0,
+            sunrise: String::new(),
+            sunset: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_widget_forecast_is_the_week_after_today() {
+        // 2026-11-16 is a Monday; the provider is asked for today plus seven.
+        let days: Vec<ForecastDay> = (16..=23)
+            .map(|d| day(&format!("2026-11-{d}"), f64::from(d)))
+            .collect();
+
+        let upcoming = weather_upcoming(&days);
+
+        assert_eq!(upcoming.len(), 7);
+        assert_eq!(upcoming[0]["d"], "Tue", "today is not a tile");
+        assert_eq!(upcoming[0]["t"], 17);
+        assert_eq!(upcoming[6]["d"], "Mon");
+        assert_eq!(upcoming[0]["i"], "sun");
+    }
+
+    #[test]
+    fn a_short_forecast_gives_the_days_it_has() {
+        let days = [day("2026-11-16", 20.0), day("2026-11-17", 21.0)];
+
+        assert_eq!(weather_upcoming(&days).len(), 1);
+        assert!(weather_upcoming(&days[..1]).is_empty());
+    }
 
     #[test]
     fn every_wmo_description_gets_the_icon_of_its_own_condition() {

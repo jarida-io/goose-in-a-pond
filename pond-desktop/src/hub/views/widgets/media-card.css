@@ -58,6 +58,10 @@
 /* ── Glass: the frosted pane everything sits on ──────────────*/
 
 .mcard__glass {
+  /* Artwork and play button sizes; the player state below scales both. */
+  --mcard-art: 72px;
+  --mcard-play: 52px;
+
   position: relative;
   z-index: 1;
   box-sizing: border-box;
@@ -66,6 +70,29 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* ── The player scales to its card ─────────────────────────────
+   At M and L the card is as tall as the row it sits on, and the Devices card
+   beside it grows a row of tiles at a time. A fixed-size player sat at the top
+   of that and left a dead band under its transport. The card is a size
+   container instead: the artwork takes the height left after the padding, the
+   two gaps, the scrubber and the play button (capped by the card's width), the
+   play button and titles grow a little with it, and whatever the width cap
+   leaves over goes between the rows rather than under them.
+
+   `size`, not `inline-size`, so the card's own content does not size it: its
+   height comes from the frame's min-height and the row, which is the point.
+   Only the player states: the disconnected and refused messages wrap and have
+   to keep sizing their card from their text. */
+.mcard:not(.mcard--tile):is([data-state="playing"], [data-state="paused"], [data-state="idle"]) {
+  container-type: size;
+}
+
+.mcard:not(.mcard--tile):is([data-state="playing"], [data-state="paused"], [data-state="idle"]) .mcard__glass {
+  --mcard-play: clamp(52px, 16cqh, 72px);
+  --mcard-art: clamp(72px, calc(100cqh - 32px - 28px - 10px - var(--mcard-play)), 42cqw);
+  justify-content: space-between;
 }
 
 /* Playing/paused/idle states get the frosted glass + light text so the glow
@@ -98,8 +125,8 @@
 
 .mcard__art {
   flex: none;
-  width: 72px;
-  height: 72px;
+  width: var(--mcard-art);
+  height: var(--mcard-art);
   border-radius: 12px;
   overflow: hidden;
   background: linear-gradient(140deg, var(--color-accent), var(--color-accent-active));
@@ -131,7 +158,7 @@
 
 .mcard__track {
   display: block;
-  font: 700 16px Quicksand, sans-serif;
+  font: 700 clamp(16px, calc(var(--mcard-art) / 8), 24px) Quicksand, sans-serif;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -139,7 +166,7 @@
 
 .mcard__artist {
   display: block;
-  font-size: 13px;
+  font-size: clamp(13px, calc(var(--mcard-art) / 11), 17px);
   color: inherit;
   opacity: 0.75;
   white-space: nowrap;
@@ -217,8 +244,8 @@
 }
 
 .mcard__btn {
-  width: 38px;
-  height: 38px;
+  width: calc(var(--mcard-play) * 0.73);
+  height: calc(var(--mcard-play) * 0.73);
   border: 2px solid currentColor;
   border-radius: 999px;
   background: transparent;
@@ -244,8 +271,8 @@
 }
 
 .mcard__play {
-  width: 52px;
-  height: 52px;
+  width: var(--mcard-play);
+  height: var(--mcard-play);
   border-radius: 999px;
   border: 0;
   background: #fff;
@@ -259,6 +286,29 @@
 
 .mcard__play:active {
   transform: scale(0.96);
+}
+
+/* A card about as tall as it is wide -- a medium card stretched by its row --
+   stands the artwork above the titles instead of beside them, so it can take
+   the card's width rather than under half of it. The titles and the like
+   button share the line under it; 68px is that line at its largest type plus
+   the gap above it.
+   After the base rules on purpose: same specificity, so order decides. */
+@container (max-aspect-ratio: 4 / 3) {
+  .mcard:not(.mcard--tile):is([data-state="playing"], [data-state="paused"], [data-state="idle"]) .mcard__glass {
+    --mcard-art: max(72px, min(100cqw - 32px, 100cqh - 32px - 28px - 10px - var(--mcard-play) - 68px));
+  }
+
+  .mcard__top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .mcard__art {
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
 }
 
 /* ── Small: a square album-art tile, not a shrunk player. nowPlaying's
