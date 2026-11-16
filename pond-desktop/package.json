@@ -35,7 +35,7 @@
     "@heroui/react": "^3.2.7",
     "@jarida/ink": "^1.1.0",
     "framer-motion": "^14.9.1",
-    "i18next": "^26.7.2",
+    "i18next": "^27.1.1",
     "lucide-react": "^1.69.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.1",
