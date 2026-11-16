@@ -108,6 +108,18 @@ impl CaptureRepository for SqliteCaptureRepository {
         row.as_ref().map(capture_of).transpose()
     }
 
+    async fn by_hash(&self, profile_id: &str, content_hash: &str) -> Result<Option<Capture>> {
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM captures WHERE profile_id = ? AND content_hash = ?"
+        ))
+        .bind(profile_id)
+        .bind(content_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .context("find a capture by its picture")?;
+        row.as_ref().map(capture_of).transpose()
+    }
+
     async fn list(&self, profile_id: &str) -> Result<Vec<Capture>> {
         let rows = sqlx::query(&format!(
             "SELECT {COLUMNS} FROM captures WHERE profile_id = ? AND hot = 0 \
@@ -269,6 +281,11 @@ mod tests {
             "the same picture"
         );
         assert!(repo.add(&capture("liz", "aaa", 1)).await.unwrap());
+        assert_eq!(
+            repo.by_hash("jerry", "aaa").await.unwrap(),
+            Some(shot.clone())
+        );
+        assert_eq!(repo.by_hash("jerry", "zzz").await.unwrap(), None);
         let mut unhashed = capture("jerry", "x", 1);
         unhashed.content_hash = None;
         let mut another = capture("jerry", "y", 1);
@@ -350,6 +367,12 @@ mod tests {
             assert!(repo.add(one).await.unwrap());
         }
         assert_eq!(repo.get("liz", &mine.id).await.unwrap(), None);
+        assert_eq!(repo.by_hash("liz", "aaa").await.unwrap(), None);
+        assert_eq!(
+            repo.by_hash("jerry", "bbb").await.unwrap(),
+            Some(held.clone()),
+            "a held picture is still the same picture"
+        );
         assert_eq!(repo.delete("liz", &mine.id).await.unwrap(), None);
         let mut forged = mine.clone();
         forged.profile_id = "liz".into();

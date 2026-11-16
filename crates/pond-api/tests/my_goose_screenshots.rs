@@ -1,254 +1,268 @@
-//! `/me/screenshots` over HTTP, as a paired phone of a household of one calls it: off until
-//! the member turns it on, a bounded queue of pictures held in memory, and notes they can
-//! read and delete.
+//! `/me/screenshots` over HTTP, as a phone build without captures calls it: the routes answer
+//! in the shapes that build reads, over the member's captures of kind `screenshot`.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Method, StatusCode};
 use chrono::Utc;
-use pond_api::build_router;
-use pond_core::models::domain::message::ChatMessage;
-use pond_core::models::domain::model_capabilities::ModelCapabilities;
-use pond_core::models::ports::provider::LlmProvider;
-use pond_core::user_data::domain::profile::CreateProfileRequest;
-use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
-use pond_core::user_data::ports::screenshot_notes::ScreenshotNoteRepository;
-use pond_core::user_data::services::screenshot_notes::{
-    pending, ScreenshotNote, MAX_IMAGE_CHARS, MAX_PENDING,
-};
-use pond_infra::sqlite_screenshot_notes::SqliteScreenshotNoteRepository;
+use pond_core::user_data::domain::capture::{Capture, CaptureDetails, CaptureKind, CaptureState};
 use serde_json::{json, Value};
-use tower::ServiceExt;
 
-#[path = "support/device_handshake.rs"]
-mod device_handshake;
-use device_handshake::DeviceHandshake;
+#[path = "support/two_members.rs"]
+mod two_members;
+use two_members::{base64_of, call, get, png, pond, Pond, EMMANUEL, JERRY};
 
-/// A model that says whether it reads pictures and is never asked anything here.
-struct Model {
-    vision: bool,
+fn screenshot(seed: u8) -> Value {
+    json!({"image": base64_of(&png(seed)), "mime_type": "image/png"})
 }
 
-#[async_trait]
-impl LlmProvider for Model {
-    async fn complete(
-        &self,
-        _system: &str,
-        _messages: Vec<ChatMessage>,
-    ) -> anyhow::Result<ChatMessage> {
-        Ok(ChatMessage::assistant("{}"))
-    }
-
-    fn model_name(&self) -> String {
-        "test".to_string()
-    }
-
-    fn capabilities(&self) -> ModelCapabilities {
-        ModelCapabilities {
-            vision: self.vision,
-            ..ModelCapabilities::default()
-        }
-    }
-}
-
-struct Pond {
-    router: axum::Router,
-    notes: SqliteScreenshotNoteRepository,
-    member: String,
-    _dir: tempfile::TempDir,
-}
-
-async fn a_pond(vision: bool) -> Pond {
-    let built = pond_api::test_support::app_state().await;
-    let mut state = built.state;
-    let member = state
-        .profile_repo
-        .create(CreateProfileRequest {
-            display_name: "Jerry".into(),
-            avatar_emoji: "x".into(),
-        })
-        .await
+fn keys(view: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = view
+        .as_object()
         .unwrap()
-        .id;
-    let device_id = state
-        .device_registry
-        .register(RegisterDeviceRequest {
-            id: None,
-            name: "Phone".into(),
-            device_type: "gotg".into(),
-            hostname: None,
-            capabilities: vec![],
-            room_id: None,
-        })
-        .await
-        .unwrap()
-        .id;
-    state.handshake = Arc::new(DeviceHandshake(device_id));
-    *state.llm_provider.write().await = Some(Arc::new(Model { vision }));
-    let notes = SqliteScreenshotNoteRepository::new(state.db.system.clone());
-    Pond {
-        router: build_router(
-            Arc::new(state),
-            std::path::PathBuf::from("pond-desktop/dist"),
-        ),
-        notes,
-        member,
-        _dir: built.dir,
-    }
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
 }
 
-async fn call(pond: &Pond, method: Method, uri: &str, body: Value) -> (StatusCode, Value) {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(format!("/api/v1{uri}"))
-        .header("Authorization", "Bearer test-token")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-        .unwrap();
-    let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
-    request.extensions_mut().insert(ConnectInfo(peer));
-    let response = pond.router.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
-        .await
-        .unwrap();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+/// A capture of Jerry's as the engine leaves one it has read.
+async fn read_capture(pond: &Pond, kind: CaptureKind, description: &str) -> Capture {
+    let now = Utc::now();
+    let mut capture = Capture::new(&pond.jerry, kind, now);
+    capture.read(description, None, CaptureDetails::default(), now);
+    assert!(pond.stores.captures.add(&capture).await.unwrap());
+    capture
 }
 
-fn picture() -> Value {
-    json!({"image": "AAAA", "mime_type": "image/jpeg"})
+async fn enable(pond: &Pond, token: &str, enabled: bool) -> Value {
+    let body = json!({"enabled": enabled});
+    let (status, view) = call(pond, token, Method::PUT, "/me/screenshots", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    view
 }
 
 #[tokio::test]
-async fn screenshots_are_off_until_the_member_turns_them_on() {
-    let pond = a_pond(true).await;
-    let (status, hub) = call(&pond, Method::GET, "/me/hub", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(hub["screenshots"], true);
-
-    let (status, at_first) = call(&pond, Method::GET, "/me/screenshots", json!({})).await;
-    assert_eq!(status, StatusCode::OK, "{at_first}");
-    assert_eq!(at_first["enabled"], false);
+async fn the_screenshot_routes_answer_in_the_shapes_the_older_phone_build_reads() {
+    let pond = pond(true).await;
+    let at_first = get(&pond, JERRY, "/me/screenshots").await;
+    assert_eq!(
+        keys(&at_first),
+        ["available", "enabled", "max_pending", "notes", "pending"]
+    );
+    assert_eq!(at_first["enabled"], true);
     assert_eq!(at_first["available"], true);
+    assert_eq!(at_first["pending"], 0);
+    assert_eq!(at_first["max_pending"], 30);
     assert_eq!(at_first["notes"], json!([]));
 
-    let (status, refused) = call(&pond, Method::POST, "/me/screenshots", picture()).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-    assert_eq!(
-        pending().count_for(&pond.member),
-        0,
-        "nothing is held while off"
-    );
-
-    let (status, on) = call(
+    let off = enable(&pond, JERRY, false).await;
+    assert_eq!(off["enabled"], false);
+    let (status, refused) = call(
         &pond,
-        Method::PUT,
+        JERRY,
+        Method::POST,
         "/me/screenshots",
-        json!({"enabled": true}),
+        Some(screenshot(1)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{on}");
-    assert_eq!(on["enabled"], true);
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(pond.picture_files().is_empty(), "nothing is held while off");
 
-    let (status, taken) = call(&pond, Method::POST, "/me/screenshots", picture()).await;
+    let on = enable(&pond, JERRY, true).await;
+    assert_eq!(on["enabled"], true);
+    assert_eq!(
+        get(&pond, JERRY, "/me/captures").await["settings"]["screenshots"],
+        true
+    );
+
+    let (status, taken) = call(
+        &pond,
+        JERRY,
+        Method::POST,
+        "/me/screenshots",
+        Some(screenshot(1)),
+    )
+    .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{taken}");
-    assert_eq!(taken["pending"], 1);
+    assert_eq!(taken, json!({"pending": 1}));
+    let (status, again) = call(
+        &pond,
+        JERRY,
+        Method::POST,
+        "/me/screenshots",
+        Some(screenshot(1)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{again}");
+    assert_eq!(
+        again,
+        json!({"pending": 1}),
+        "the same screenshot is kept once"
+    );
+    let kept = pond.stores.captures.list(&pond.jerry).await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].kind, CaptureKind::Screenshot);
+    assert_eq!(kept[0].state, CaptureState::Pending);
+    assert_eq!(pond.picture_files().len(), 1);
 
     let (status, wrong) = call(
         &pond,
+        JERRY,
         Method::POST,
         "/me/screenshots",
-        json!({"image": "AAAA", "mime_type": "image/gif"}),
+        Some(json!({"image": base64_of(&png(2)), "mime_type": "image/gif"})),
     )
     .await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{wrong}");
     let (status, huge) = call(
         &pond,
+        JERRY,
         Method::POST,
         "/me/screenshots",
-        json!({"image": "A".repeat(MAX_IMAGE_CHARS + 1), "mime_type": "image/png"}),
+        Some(json!({"image": "A".repeat(2_000_001), "mime_type": "image/png"})),
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{huge}");
 
-    for _ in 1..MAX_PENDING {
-        let (status, _) = call(&pond, Method::POST, "/me/screenshots", picture()).await;
+    for seed in 2..=30 {
+        let (status, _) = call(
+            &pond,
+            JERRY,
+            Method::POST,
+            "/me/screenshots",
+            Some(screenshot(seed)),
+        )
+        .await;
         assert_eq!(status, StatusCode::ACCEPTED);
     }
-    let (status, full) = call(&pond, Method::POST, "/me/screenshots", picture()).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{full}");
-
-    // Turning it off forgets what was still waiting to be read.
-    let (status, off) = call(
+    let (status, full) = call(
         &pond,
-        Method::PUT,
+        JERRY,
+        Method::POST,
         "/me/screenshots",
-        json!({"enabled": false}),
+        Some(screenshot(31)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{off}");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{full}");
+    assert_eq!(get(&pond, JERRY, "/me/screenshots").await["pending"], 30);
+
+    // Turning it off forgets what was still waiting to be read.
+    let off = enable(&pond, JERRY, false).await;
     assert_eq!(off["enabled"], false);
     assert_eq!(off["pending"], 0);
-    assert_eq!(pending().count_for(&pond.member), 0);
+    assert!(pond
+        .stores
+        .captures
+        .list(&pond.jerry)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(pond.picture_files().is_empty());
 }
 
 #[tokio::test]
 async fn a_pond_whose_model_cannot_read_pictures_takes_none() {
-    let pond = a_pond(false).await;
-    call(
-        &pond,
-        Method::PUT,
-        "/me/screenshots",
-        json!({"enabled": true}),
-    )
-    .await;
-    let (_, view) = call(&pond, Method::GET, "/me/screenshots", json!({})).await;
+    let pond = pond(false).await;
+    let view = enable(&pond, JERRY, true).await;
     assert_eq!(view["enabled"], true);
     assert_eq!(view["available"], false);
-    let (status, refused) = call(&pond, Method::POST, "/me/screenshots", picture()).await;
+    let (status, refused) = call(
+        &pond,
+        JERRY,
+        Method::POST,
+        "/me/screenshots",
+        Some(screenshot(1)),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
-    assert_eq!(pending().count_for(&pond.member), 0);
+    assert!(pond.picture_files().is_empty());
 }
 
 #[tokio::test]
-async fn the_member_reads_their_notes_and_deletes_one_or_all() {
-    let pond = a_pond(true).await;
-    for (id, text) in [
-        ("n1", "Looking at the Ngong Hills hiking trail"),
-        ("n2", "Saved a recipe for chicken biryani"),
-    ] {
-        pond.notes
-            .add(&ScreenshotNote {
-                id: id.into(),
-                profile_id: pond.member.clone(),
-                note: text.into(),
-                taken_at: None,
-                created_at: Utc::now(),
-                used_at: None,
-            })
-            .await
-            .unwrap();
-    }
-    let (_, view) = call(&pond, Method::GET, "/me/screenshots", json!({})).await;
+async fn a_note_is_what_a_read_screenshot_showed_and_the_member_deletes_one_or_all() {
+    let pond = pond(true).await;
+    let trail = read_capture(
+        &pond,
+        CaptureKind::Screenshot,
+        "The Ngong Hills hiking trail",
+    )
+    .await;
+    let recipe = read_capture(
+        &pond,
+        CaptureKind::Screenshot,
+        "A recipe for chicken biryani",
+    )
+    .await;
+    let photo = read_capture(&pond, CaptureKind::Photo, "A poster for the AI Summit").await;
+    let mut receipt = Capture::new(&pond.jerry, CaptureKind::Screenshot, Utc::now());
+    receipt.hold_for_budget(Utc::now());
+    assert!(pond.stores.captures.add(&receipt).await.unwrap());
+    call(
+        &pond,
+        JERRY,
+        Method::POST,
+        "/me/screenshots",
+        Some(screenshot(1)),
+    )
+    .await;
+
+    let view = get(&pond, JERRY, "/me/screenshots").await;
+    assert_eq!(view["pending"], 1);
     let notes = view["notes"].as_array().unwrap();
     assert_eq!(notes.len(), 2, "{view}");
-    assert!(notes[0].get("profile_id").is_none());
+    assert_eq!(
+        keys(&notes[0]),
+        ["created_at", "id", "note", "taken_at", "used_at"]
+    );
+    let said: Vec<&str> = notes
+        .iter()
+        .map(|note| note["note"].as_str().unwrap())
+        .collect();
+    assert!(said.contains(&"The Ngong Hills hiking trail"), "{said:?}");
+    assert!(said.contains(&"A recipe for chicken biryani"), "{said:?}");
+    assert_eq!(notes[0]["used_at"], Value::Null);
+    assert_eq!(
+        get(&pond, EMMANUEL, "/me/screenshots").await["notes"],
+        json!([])
+    );
 
-    let (status, _) = call(&pond, Method::DELETE, "/me/screenshots/n1", json!({})).await;
+    let uri = format!("/me/screenshots/{}", trail.id);
+    let (status, _) = call(&pond, EMMANUEL, Method::DELETE, &uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "another member's note");
+    let (status, _) = call(&pond, JERRY, Method::DELETE, &uri, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(&pond, Method::DELETE, "/me/screenshots/n1", json!({})).await;
+    let (status, _) = call(&pond, JERRY, Method::DELETE, &uri, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let uri = format!("/me/screenshots/{}", photo.id);
+    let (status, _) = call(&pond, JERRY, Method::DELETE, &uri, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a photo is not a screenshot's note"
+    );
+    let left = get(&pond, JERRY, "/me/screenshots").await;
+    assert_eq!(left["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(left["notes"][0]["id"], json!(recipe.id));
 
-    let (status, gone) = call(&pond, Method::DELETE, "/me/screenshots", json!({})).await;
+    let (status, gone) = call(&pond, JERRY, Method::DELETE, "/me/screenshots", None).await;
     assert_eq!(status, StatusCode::OK, "{gone}");
-    assert_eq!(gone["deleted"], 1);
-    let (_, view) = call(&pond, Method::GET, "/me/screenshots", json!({})).await;
+    assert_eq!(gone, json!({"deleted": 2, "dropped": 1}));
+    let view = get(&pond, JERRY, "/me/screenshots").await;
     assert_eq!(view["notes"], json!([]));
+    assert_eq!(view["pending"], 0);
+    assert!(pond.picture_files().is_empty());
+    let left = pond.stores.captures.list(&pond.jerry).await.unwrap();
+    assert_eq!(
+        left.len(),
+        1,
+        "the photo is not the older routes' to delete"
+    );
+    assert_eq!(left[0].id, photo.id);
+    assert!(pond
+        .stores
+        .captures
+        .hot(&pond.jerry)
+        .await
+        .unwrap()
+        .is_empty());
 }

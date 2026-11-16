@@ -13,6 +13,8 @@ const FOLDERS: &[&[&str]] = &[
     &["attachments"],
     // Camera event pictures.
     &["snapshots"],
+    // The screenshots and photos members' phones sent.
+    &["captures"],
     // The MCP memory server's store.
     &["memory"],
     // The chosen microphone and speaker, which carry the household's device names.
@@ -126,6 +128,7 @@ mod tests {
         let household = [
             "attachments/session-1/photo.jpg",
             "snapshots/front-door.jpg",
+            "captures/3f2c-9a.jpg",
             "memory/facts.json",
             "audio/devices-input.json",
             "report-images/chart.png",

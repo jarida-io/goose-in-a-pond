@@ -2,6 +2,7 @@ pub mod account_credentials;
 pub mod agent_suggestion;
 pub mod anchors;
 pub mod camera_storage;
+pub mod capture_pictures;
 pub mod captures;
 pub mod conversation_extractor;
 pub mod device_attribution;

@@ -26,9 +26,12 @@ else Goose can do. This document is the contract between the Pond and the phone.
 ## 0. What this Pond serves
 
 `GET /me/hub` → `{"version":1,"about":bool,"interests":bool,"interview":bool,"news":bool,
-"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"activity":bool,
-"catalog":bool,"cards":[kind]}`. A Pond without the route answers 404 and the phone
-keeps its older My Goose.
+"todos":bool,"cart":bool,"connectors":bool,"ideas":bool,"screenshots":bool,"anchors":bool,
+"facts":bool,"questions":bool,"captures":bool,"agents":bool,"ledger":bool,"intentions":bool,
+"engine_log":bool,"activity":bool,"catalog":bool,"cards":[kind]}`. A Pond without the route
+answers 404 and the phone keeps its older My Goose. A key a Pond does not send is a part it
+does not serve: `anchors` covers `/me/anchors*` and `/me/deliverables*`, `facts` covers
+`/me/facts*` and `/me/dont*`, `agents` is `/me/agents*`, and `engine_log` is `/me/engine/jobs`.
 
 ## 0a. About you: the member's profile
 
@@ -218,6 +221,130 @@ Rule = { "id", "rule": "recipes built on a colour preference", "strength": "neve
   rule said twice is one rule, and a `never` is not weakened by a later `avoid`
 - `DELETE /me/dont/{id}` → the same list
 
+## 1a. Anchors, what Goose makes for them, and its questions
+
+An anchor is a real thing in the member's life: an event, a trip, a purchase, a project, an
+interest. Goose makes deliverables for it and asks questions when details are missing. Tables:
+`anchors`, `anchor_shares`, `deliverables` (migration 0111), `engine_jobs` (0112), `questions`
+(0113). The design is in [idea-engine.md](idea-engine.md).
+
+```
+Anchor = { "id", "kind": "event|trip|purchase|project|interest|standing", "title",
+  "state": "candidate|active|ended|stopped|faded",   // candidate: waiting for the member's yes
+  "starts_at"|null, "ends_at"|null, "place"|null,
+  "facts": [{"label","value","source"}],            // source "you": the member wrote it
+  "agent": "trip|work|hunt|budget"|null,             // the specialist that owns it
+  "origin": "chat|capture|interest|you|goose", "why": "why Goose offered it",
+  "confirmed_at"|null, "ended_at"|null, "created_at", "updated_at",
+  "mine": bool, "shared_by": "Jerry"|null,           // the owner's name, on one shared with you
+  "shares": [profile_id], "deliverables": [DeliverableSummary], "open_questions": n,
+  "job": Job|null }                                  // the job running for it, else the next queued
+DeliverableSummary = { "id", "kind": "dossier|plan|shortlist|digest|checklist", "slot", "title",
+  "state": "queued|making|ready|unsure|rejected|archived", "hook": "one line", "version": n,
+  "changed": "what the last refresh changed", "unseen": bool }
+Deliverable = DeliverableSummary + { "anchor_id", "anchor_title", "body": "markdown",
+  "facts": [{"label","value","source"}], "sources": [{"title","url"}],
+  "objections": [{"kind": "grounding|relevance|duplicate|dont_list|vague|stale", "about", "fix"}],
+  "task_id"|null, "refresh_at"|null, "mine": bool, "created_at", "updated_at", "job": Job|null }
+Job = { "kind": "deliverable|fact_sheet|memory|consolidation|heartbeat|capture|ledger|rule|
+                 questions", "subject": "in words, never an id", "state": "queued|running",
+  "rounds": n, "steps"?: [{"key","role","label": "Researching","state","summary"|null}] }
+Question = { "id", "text", "options": ["..."], "multi": bool }   // the screen adds "Other"
+```
+
+- `GET /me/anchors` → `{"anchors":[Anchor]}`: the candidates and the active ones the member owns
+  or is shared with
+- `POST /me/anchors` `{kind, title, starts_at?, ends_at?, place?, notes?}` → 201 Anchor, active.
+  `kind` is not `standing`. A title the member already has answers 200 with that anchor; one
+  Goose offered is confirmed by it; one that faded or was stopped comes back (201); one that
+  ended is 409
+- `GET /me/anchors/{id}` → Anchor with `"questions":[Question]` and the job's `steps`
+- `PATCH /me/anchors/{id}` `{title?, starts_at?, ends_at?, place?, facts?}` → Anchor. A date or
+  place sent as `null` is cleared; `facts` replaces the whole list. 409 for a title the member
+  has or had, 422 when it would end before it starts
+- `POST /me/anchors/{id}/confirm` → Anchor; `POST /me/anchors/{id}/dismiss` → 204 (a
+  candidate fades; 409 for an active one)
+- `POST /me/anchors/{id}/stop` `{reasons?: [reason], text?, never?: bool}` → 204. An active
+  anchor stops, its open jobs are called off, and a reason, words or `never` leave a rule on
+  the don't-list. `reason` is one of `too_generic|not_relevant|wrong_facts|already_know|bad_timing`
+- `PUT /me/anchors/{id}/shares` `{profile_ids: []}` → Anchor. A member it is shared with reads
+  it and answers its questions; every change to it answers them 403
+- `GET /me/deliverables/{id}` → Deliverable
+- `POST /me/deliverables/{id}/refresh` → 202 `{"state":"queued|running"}`: a job of class
+  `asked`, or the open one moved ahead. 409 once it was rejected or its anchor is over
+- `POST /me/deliverables/{id}/reject` `{verb: "not_this"|"never", reasons?: [reason], text?}` →
+  204. `not_this` leaves an `avoid` rule on its title; `never` with the member's words leaves a
+  `never` rule that an engine job then rewrites as one general rule
+- `POST /me/deliverables/{id}/seen` → 204; `GET /me/deliverables/{id}/file` → the body as a
+  Markdown attachment (404 before anything is written)
+- `GET /me/questions` → `{"batches":[{"id","purpose":"anchor|interest|profile|ledger",
+  "anchor_id"|null,"title","questions":[Question]}]}`: the open ones, at most four a batch
+- `POST /me/questions/{id}/answer` `{choices: [], text?}` → 204. A choice must be one of the
+  options and `text` is the member's "Other"; 422 for neither, or two choices where `multi` is
+  false; 409 once it is no longer open. An answer for an anchor queues a refresh of what was
+  made for it, and one of purpose `profile` a rebuild of the fact sheet
+- `POST /me/questions/{id}/skip` → 204
+
+### The engine log
+
+`GET /me/engine/jobs?limit=` (30 when left out, 100 at most) → `{"jobs":[{"id","kind","subject",
+"state":"queued|running|passed|unsure|dropped|failed|cancelled","rounds": n,
+"objections":[{"kind","about","fix"}],"outcome": "one line"|null,"anchor_id"|null,
+"deliverable_id"|null,"created_at","started_at"|null,"finished_at"|null}]}`, newest first: every
+maker-and-critic run made for the member, so they can see what Goose worked on and what its
+critic held against it.
+
+### Intentions
+
+What the heartbeat means to do for the member: one thing, once a condition holds, until a
+deadline (table `intentions`, migration 0114; [idea-engine.md](idea-engine.md) section 8).
+
+```
+Intention = { "id", "act": "push|refresh|look_into|ask|propose_todo", "text": "what to do or say",
+  "why": "one sentence", "when": "tomorrow at 7am",   // the condition, as the member reads it
+  "until", "state": "waiting|done|expired|dropped", "outcome": "what came of it"|null,
+  "anchor_id"|null, "created_at", "settled_at"|null }
+```
+
+- `GET /me/intentions?state=waiting|settled` → `{"intentions":[Intention]}`, newest first.
+  `waiting` when left out; `settled` is the done, expired and dropped ones, 100 at most
+- `DELETE /me/intentions/{id}` → 204: a waiting one is withdrawn (`dropped`). 409 for one that
+  was carried out or expired
+
+## 1b. Specialists and the Budget ledger
+
+A specialist is shipped with the Pond: it owns some kinds of anchor and adds its playbook to
+their briefs. Trips and events, Projects and Purchases are on as shipped; Budget is off, and
+Goose offers it once the member has sent three pictures that show money. Tables:
+`member_agents`, `ledger_entries` (migration 0116).
+
+```
+Agent = { "id": "trip|work|hunt|budget", "title": "Budget", "about": "one sentence",
+  "state": "on|off|offered|declined",
+  "why": "You have sent three pictures of receipts or payments" }   // offered only, else ""
+Entry = { "id", "occurred_on": "2026-11-03", "payee", "amount": "4200.50", "currency": "KES",
+  "category": "groceries|eating_out|transport|bills|rent|health|shopping|travel|entertainment|
+               transfers|other", "anchor_id"|null, "note"|null }
+```
+
+- `GET /me/agents` → `{"agents":[Agent]}`
+- `PUT /me/agents/{id}` `{"on": bool}` → the same list. Off answers an offer with `declined`,
+  which is never offered again, and otherwise leaves `off`. Turning Budget off, or declining
+  it, deletes the money pictures held for it; the ledger is kept
+- `GET /me/ledger?month=YYYY-MM` → `{"month","entries":[Entry],"totals":[{"currency","total",
+  "by_category":[{"category","total"}]}]}`: the month's entries, newest day first, and one total
+  for each currency with its categories largest first. The month it is now where the Pond is
+  when left out
+- `PATCH /me/ledger/{id}` `{payee?, amount?, category?, occurred_on?, note?, anchor_id?}` →
+  Entry. `note` and `anchor_id` sent as `null` are cleared; 422 for an amount that is not a
+  plain number, a category outside the list, a date after today or an anchor that is not theirs
+- `DELETE /me/ledger/{id}` → 204
+
+An amount is a decimal string in the currency's major unit, with as many places as the
+currency has (`"4200.50"` KES, `"50000"` UGX); a refund is negative, and amounts in different
+currencies are never added together. `PATCH` takes the same string, or a number. Every ledger
+route answers 409 while Budget is not `on`.
+
 ## 2. News
 
 ```
@@ -265,12 +392,15 @@ quiet hours and unprompted-speech setting.
 
 ## 3. To-dos and reminders, with hooks
 
-Tables: `todos`, `todo_hooks`, `member_places` (migration 0087).
+Tables: `todos`, `todo_hooks`, `member_places` (migrations 0087 and 0115).
 
 ```
-Todo = { "id", "kind": "todo|reminder", "text", "notes"|null, "state": "open|done|dropped",
-  "due_at"|null, "hooks": [Hook], "ask": bool, "source": "you|chat|goose|idea",
-  "last_asked_at"|null, "asked": n, "snoozed_until"|null, "created_at", "done_at"|null }
+Todo = { "id", "kind": "todo|reminder", "text", "notes"|null, "list"|null,
+  "priority": "low|normal|high", "steps": [{"text", "done": bool}],
+  "goose_can": {"label", "kind": "research|chat|watch", "prompt"}|null, "anchor_id"|null,
+  "state": "open|done|dropped", "due_at"|null, "hooks": [Hook], "ask": bool,
+  "source": "you|chat|goose|idea", "last_asked_at"|null, "asked": n, "snoozed_until"|null,
+  "created_at", "done_at"|null }
 Hook = { "id", "kind": "time|repeat|place|event|connector", "label": "plain sentence",
   "spec": {...}, "next_fire_at"|null, "last_fired_at"|null }
   time:      {"at": time}
@@ -282,8 +412,11 @@ Place = { "id", "label", "lat", "lng", "radius_m" }
 ```
 
 - `GET /me/todos?state=open|done|all` → `{"todos":[Todo]}`
-- `POST /me/todos` `{kind, text, notes?, due_at?, ask?, hooks?: [{kind, spec}]}` → Todo
-- `PATCH /me/todos/{id}` (text, notes, due_at, ask, state; `hooks` replaces all) → Todo
+- `POST /me/todos` `{kind, text, notes?, due_at?, ask?, hooks?: [{kind, spec}], list?,
+  priority?, steps?: [{text, done?}], goose_can?: {label, kind, prompt}, anchor_id?}` → 201 Todo,
+  or 200 with the Todo already open on the list under the same words, plus `"duplicate_of"`: its id
+- `PATCH /me/todos/{id}` (text, notes, due_at, ask, state, list, priority, anchor_id; `hooks` and
+  `steps` each replace all; `goose_can: null` clears it) → Todo
 - `DELETE /me/todos/{id}` → 204
 - `POST /me/todos/{id}/answer` `{"answer":"done|not_yet|drop", "snooze_minutes"?}` → Todo
 - `GET /me/hooks/sources` → `{"places":[Place], "sources":[{"id", "kind":
@@ -293,12 +426,23 @@ Place = { "id", "label", "lat", "lng", "radius_m" }
 - `POST /hooks/in/{token}` (public; the token is the credential) → 202: a webhook connector's
   event, any JSON body
 
+A list name is at most 40 characters and an empty one is none. A to-do has at most 12 steps of
+at most 120 characters each; a step is ticked by sending the whole list again, and ticking the
+last one leaves the to-do open for the member to close. `goose_can` is something Goose offers
+to do for the to-do: `label` is the button's words, at most 30 characters.
+
+A member keeps one open to-do under a key, its words in lower case without punctuation, so a
+reminder and a to-do in the same words are one, and a done or dropped to-do does not count.
+Every path that adds one (`POST /me/todos`, `add_reminder`, an accepted offer, an idea's steps)
+answers with the one already there instead of a second. When that one has nothing left to fire
+(no hook, or only times that have passed) and the new ask names a time or place, it takes them.
+
 When a hook fires, a reminder is pushed to the member's devices. An `ask` to-do is pushed as a
 question, `category: "action_required"`, `data: {"action":"todo_checkin","todo_id","text"}`,
 which the phone shows with Done and Not yet buttons and answers through `/answer`. Goose asks
 again after `not_yet` (at the snooze, else the next morning), at most three times, then leaves
 the to-do open and stops asking. The chat model gets `add_reminder`, `list_todos` and `complete_todo` so "remind me
-to ... when I get home" makes a row.
+to ... when I get home" makes a row; `add_reminder` also takes a `list`, a `priority` and `steps`.
 
 A dated mention the Pond lifts from a chat ("call the garage on Friday", the `reminders` table) is
 offered as a to-do instead of a bare suggestion: a push, `category: "action_required"`,
@@ -308,8 +452,9 @@ offered as a to-do instead of a bare suggestion: a push, `category: "action_requ
   — every reminder open to the member: those offered, and those the shared daily cap held back.
   The cap limits the pushes, not what the member can find and answer: Home counts every pending
   reminder, and the Reminders screen lists the same ones.
-- `POST /me/todos/offers/{reminder_id}/accept` `{"due_at"?}` → Todo (a time hook at the due time
-  the Pond worked out from `when_said`, or the one the phone sends)
+- `POST /me/todos/offers/{reminder_id}/accept` `{"due_at"?}` → 201 Todo (a time hook at the due
+  time the Pond worked out from `when_said`, or the one the phone sends), or 200 with the Todo
+  already on the list and `"duplicate_of"`; the offer is settled either way
 - `POST /me/todos/offers/{reminder_id}/decline` → 204 (the reminder is dismissed)
 
 Accept and decline settle a held-back reminder as well, and the offer job then never pushes it.
@@ -424,37 +569,70 @@ digest's are its sources, why it was shown and when it was written; a to-do's an
 link's are their state. Chat suggestions carry their grounding the same way
 (`suggestion_context`).
 
-## 6b. Ideas from screenshots (opt-in)
+## 6b. Captures: screenshots and photos
 
-Off until the member turns it on. With it on, the phone sends the member's recent screenshots
-and one idea a run may build on what one of them showed.
+The phone sends the member's screenshots, and photos from the albums they chose or shared by
+hand. The Pond reads each one once for what it shows and what the member seems to want with
+it. Table `captures` (migration 0116); the design is in [idea-engine.md](idea-engine.md),
+section 6.5.
 
-- The Pond looks at a screenshot once and keeps one line about what the member seems
-  interested in ("Looking at the Ngong Hills hiking trail"). **The picture is never stored**:
-  it waits in memory, at most six a member, until the lane reads it, and is dropped whether or
-  not a line came of it. A restart forgets any still waiting.
-- A screen showing banking or payments, passwords or codes, a private conversation or email,
-  an identity document, medical or legal records, or someone's personal details is skipped
-  whole: the model is told to skip it, and a line that still carries an email address, a long
-  number or the vocabulary of such a screen is refused in code. The line is never logged.
-- The member sees every note, deletes any one or all of them, and turning it off forgets every
-  screenshot still waiting. At most forty notes are kept; a note seeds an idea for fourteen
-  days, once.
+- Screenshots are on until the member turns them off; photos are sent only from the albums
+  they name, or one at a time by hand. Turning screenshots off deletes the ones still waiting.
+- A picture is kept as a file under `<data_dir>/captures/`, in a directory and a file only the
+  Pond's own user can open, named by the capture's id and the type its own bytes show. The
+  same picture sent twice is kept once. The file is deleted 30 days after it is read; what it
+  showed stays.
+- A picture that is private (a login, a private conversation, a document) is deleted with
+  nothing kept of it: no row, no file. One that shows money is never listed, described or served;
+  the Budget agent reads it into the ledger and it is deleted, or it is deleted when the member
+  says no to Budget.
 - It needs a model that reads pictures; `available` says whether this Pond's does.
 
 ```
-Screenshots = { "enabled": bool, "available": bool, "pending": n, "max_pending": 6,
-                "notes": [{"id","note","taken_at"|null,"created_at","used_at"|null}] }
+Capture = { "id", "kind": "screenshot|photo", "album"|null, "taken_at"|null,
+  "description": "what it shows"|null, "intent": "what the member seems to want"|null,
+  "details": {"names":[],"dates":[],"places":[],"prices":[],"links":[]},
+  "has_picture": bool, "created_at" }
+Settings = { "screenshots": bool, "albums": ["Receipts"] }
+```
+
+- `GET /me/captures` → `{"settings": Settings, "available": bool, "pending": n,
+  "captures":[Capture]}`: the ones read, newest first, 200 at most; `pending` counts the ones
+  waiting to be read
+- `PUT /me/captures/settings` `{screenshots?, albums?}` → Settings. At most 20 albums, each
+  name at most 60 characters (422 past either)
+- `POST /me/captures` `{"image": base64, "mime_type": "image/jpeg|image/png|image/webp",
+  "kind": "screenshot|photo", "album"?, "taken_at"?}` → `202 {"pending": n}`, or `200
+  {"pending": n, "capture": Capture|null}` when the member already sent that picture (`null`
+  for one that shows money). `409` for a screenshot while screenshots are off, a photo from
+  an album the member did not choose, or a model that reads no pictures; `413` over about
+  1.5 MB; `415` when the type, or the bytes, are not one of the three; `422` when the picture
+  is not base64; `429` when 30 are waiting
+- `GET /me/captures/{id}/picture` → the picture, to its member only; 404 once it is gone
+- `DELETE /me/captures/{id}` → 204; `DELETE /me/captures` → 204, every capture the member has.
+  The picture is deleted first, then the row, and a job reading it is called off
+
+The settings are the member preferences `captures_screenshots` and `captures_albums`. A member
+who chose under the older `ideas_from_screenshots` preference keeps that choice until they
+choose again.
+
+### The older screenshot routes
+
+A phone build without captures calls `/me/screenshots`. The routes keep their shapes and are
+served from the member's captures of kind `screenshot`: a note is a read screenshot's
+description, `enabled` is the screenshots setting, and at most forty notes are listed.
+
+```
+Screenshots = { "enabled": bool, "available": bool, "pending": n, "max_pending": 30,
+                "notes": [{"id","note","taken_at"|null,"created_at","used_at": null}] }
 ```
 
 - `GET /me/screenshots` → Screenshots; `PUT /me/screenshots` `{"enabled": bool}` → Screenshots
 - `POST /me/screenshots` `{"image": base64, "mime_type": "image/jpeg|image/png|image/webp",
-  "taken_at"?}` → `202 {"pending": n}`. `409` while off or when the model reads no pictures,
-  `413` over about 1.5 MB, `415` another type, `429` when six are waiting.
-- `DELETE /me/screenshots/{id}` → 204; `DELETE /me/screenshots` → `{"deleted": n, "dropped": n}`
-
-The choice is the member preference `ideas_from_screenshots`. An idea built on a note says so:
-`grounded_in: [{"kind":"screenshot","label": the note}]`.
+  "taken_at"?}` → `202 {"pending": n}`, for a screenshot already sent as well. The refusals are
+  those of `POST /me/captures`
+- `DELETE /me/screenshots/{id}` → 204; `DELETE /me/screenshots` → `{"deleted": n, "dropped": n}`:
+  every screenshot the member sent, read or waiting, and no photo
 
 ## 7. What else Goose can do
 

@@ -16,6 +16,9 @@ pub trait CaptureRepository: Send + Sync {
 
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Capture>>;
 
+    /// The member's capture of the picture with that content hash, held for Budget or not.
+    async fn by_hash(&self, profile_id: &str, content_hash: &str) -> Result<Option<Capture>>;
+
     /// The member's captures, newest first, without the ones held for the Budget specialist.
     async fn list(&self, profile_id: &str) -> Result<Vec<Capture>>;
 

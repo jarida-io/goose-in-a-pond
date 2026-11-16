@@ -45,6 +45,14 @@ impl CaptureRepository for InMemoryCaptureRepository {
             .cloned())
     }
 
+    async fn by_hash(&self, profile_id: &str, content_hash: &str) -> Result<Option<Capture>> {
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .iter()
+            .find(|c| c.profile_id == profile_id && c.content_hash.as_deref() == Some(content_hash))
+            .cloned())
+    }
+
     async fn list(&self, profile_id: &str) -> Result<Vec<Capture>> {
         let mut found: Vec<Capture> = self
             .rows
