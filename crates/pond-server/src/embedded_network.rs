@@ -1765,7 +1765,7 @@ async fn register_phone(
         Arc<dyn pond_core::security::ports::handshake::Handshake>,
     >,
     axum::Extension(profile_repo): axum::Extension<
-        Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
+        Arc<dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync>,
     >,
     axum::Extension(device_attribution): axum::Extension<
         Arc<dyn pond_core::user_data::ports::device_attribution::DeviceAttribution>,
