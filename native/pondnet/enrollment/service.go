@@ -63,6 +63,9 @@ type Registered struct {
 	Tags       []string
 	Routes     []string
 	MachineKey string
+	// Online is whether the coordinator sees the node connected now. It informs the Pond
+	// status answer only, never a permission.
+	Online bool
 }
 
 // Backend is the private Headscale administrative boundary.
@@ -118,6 +121,14 @@ type Service struct {
 	households    *sources
 	// degraded is set while the coordinator cannot be reconciled; requests still run.
 	degraded atomic.Bool
+	// status keeps each household's last Pond report; statusReports and statusReads
+	// limit reports and phone reads per household.
+	status        *statusStore
+	statusReports *sources
+	statusReads   *sources
+	// presence is what the last inventory said about each node, by node ID. Guarded by
+	// Store.mu, and replaced whole by every inventory the policy is computed from.
+	presence map[string]nodePresence
 	// applied is the decoded policy document this service last wrote to the coordinator
 	// or found already there, and nil while that is unknown: before the first policy
 	// evaluation and after a write whose outcome is unknown. Guarded by Store.mu.
@@ -133,6 +144,10 @@ func New(ctx context.Context, s *Store, b Backend) (*Service, error) {
 		registrations: newSources(rate.Limit(1.0/60.0), 3),
 		approvals:     newSources(rate.Limit(1), 10),
 		households:    newSources(rate.Limit(1.0/6.0), 10),
+		status:        openStatus(s.directory),
+		statusReports: newSources(rate.Limit(1.0/20.0), 6),
+		statusReads:   newSources(rate.Limit(1.0/5.0), 10),
+		presence:      map[string]nodePresence{},
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,6 +188,11 @@ func (s *Service) enforcePolicy(ctx context.Context) (inventory []Registered, er
 	if err != nil {
 		return nil, err
 	}
+	presence := make(map[string]nodePresence, len(inventory))
+	for _, node := range inventory {
+		presence[node.ID] = nodePresence{Online: node.Online}
+	}
+	s.presence = presence
 	// Indexed once, so matching runs under the store lock in devices plus nodes rather
 	// than their product. The first node with a given ID wins, as a scan would find it.
 	byID := make(map[string]Registered, len(inventory))
@@ -343,6 +363,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == "POST" && r.URL.Path == "/v1/household" {
 		s.registerHousehold(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/pond/status" {
+		switch r.Method {
+		case "POST":
+			s.reportStatus(w, r)
+		case "GET":
+			s.readStatus(w, r)
+		default:
+			http.NotFound(w, r)
+		}
 		return
 	}
 	if r.Method != "POST" || r.URL.Path != "/v1/approval" {

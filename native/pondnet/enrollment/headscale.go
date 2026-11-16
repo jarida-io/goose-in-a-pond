@@ -217,6 +217,7 @@ type coordinatorNode struct {
 	Addresses  []string `json:"ipAddresses"`
 	Tags       []string `json:"tags"`
 	Routes     []string `json:"approvedRoutes"`
+	Online     bool     `json:"online"`
 	User       struct {
 		ID string `json:"id"`
 	} `json:"user"`
@@ -267,7 +268,7 @@ func decodeNodes(body io.Reader, limit int) ([]Registered, error) {
 			if err := decoder.Decode(&n); err != nil {
 				return nil, err
 			}
-			nodes = append(nodes, Registered{ID: n.ID, Key: n.Key, UserID: n.User.ID, Addresses: n.Addresses, Tags: n.Tags, Routes: n.Routes, MachineKey: n.MachineKey})
+			nodes = append(nodes, Registered{ID: n.ID, Key: n.Key, UserID: n.User.ID, Addresses: n.Addresses, Tags: n.Tags, Routes: n.Routes, MachineKey: n.MachineKey, Online: n.Online})
 		}
 		if err := expect(decoder, json.Delim(']')); err != nil {
 			return nil, err

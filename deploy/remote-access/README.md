@@ -183,6 +183,7 @@ admitting.
 | Enrolled devices across all households (`EnrollmentCapacity`) | 4096, then `503 capacity` |
 | Coordinator inventory read (`MaxNodes`) | 8192 nodes, streamed node by node |
 | Request body | 8 KiB |
+| Pond status reports / phone status reads, per household | 1 per 20 s, burst 6 / 1 per 5 s, burst 10 |
 | Concurrent operations | 8 |
 | Public requests | 10/s, burst 20 |
 | Coordinator response headers | 10 s |
@@ -290,6 +291,12 @@ refused with `409 retired_capacity` until records expire; the Pond answers its p
 Rolling back to a `pond-enrollment` that does not know `absentSince` makes it refuse the
 state file and restart in a loop. Back up `/state` before upgrading; a rollback needs that
 backup, or `absentSince` removed from the state file.
+
+`pond-enrollment` keeps each household's last Pond status report in `status.json` beside
+`state.json` ([why the Pond is offline](../../docs/remote-access.md#why-the-pond-is-offline)).
+It is not security state: an unreadable file is moved to `status.json.unreadable` and the
+service carries on without last-seen times. Rolling back to a service without
+`/v1/pond/status` leaves the file unread; Ponds then get `404` and keep retrying quietly.
 
 The Pond's helper ignores answer fields it does not know. Helpers built before
 2026-10-12 refuse them, so add a field to the approval answer only once the Ponds this
