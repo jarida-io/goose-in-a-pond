@@ -46,6 +46,7 @@ It maps them onto app state:
 | `voice-tool-call` / `voice-tool-result` | a context card, updated with its result by call id |
 | `voice-done` | flushes tokens, marks the reply done, state `wait` |
 | `voice-error` | error state with the message |
+| `voice-waiting` | `waitingMessage`, shown as the state label until the next state, token, tool call, error or done |
 | `voice-audio-level` | `audioLevel` for the orb (mic level while listening, playback level while speaking) |
 | `voice-session-ended` | session inactive; `stopped`, `stdin_eof` and `dismissed` return to `idle`, anything else shows `endedErrorMessage` (for `failed_to_start`, the last stderr line) |
 

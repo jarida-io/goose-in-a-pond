@@ -51,6 +51,11 @@ pub struct SessionControls {
     /// What this session's engine calls run under on the inference bus: its turn's floor, or the
     /// run it is a helper of. `None` makes each call claim the bus for itself.
     inference_hold: Mutex<Option<InferenceHold>>,
+    /// Where a call tells the live turn why its reply has not started.
+    wait_notices: Mutex<Option<crate::orchestrator::WaitSender>>,
+    /// Set once memory was too short for this session's earlier pictures and recordings: they
+    /// stay notes from then on, so its prompt does not flip back and its cache is reused.
+    earlier_media_dropped: std::sync::atomic::AtomicBool,
 }
 
 // `pictures_readable` values. Zero, the default, is "no turn has said", which promotes.
@@ -58,6 +63,30 @@ const PICTURES_READABLE: u8 = 1;
 const PICTURES_UNREADABLE: u8 = 2;
 
 impl SessionControls {
+    pub fn set_wait_notices(&self, notices: Option<crate::orchestrator::WaitSender>) {
+        *self.wait_notices.lock().unwrap_or_else(|e| e.into_inner()) = notices;
+    }
+
+    /// Tells the live turn, if any, why its reply has not started.
+    pub fn say_waiting(&self, reason: pond_core::shared::domain::agent::TurnWait, line: &str) {
+        if let Some(notices) = self
+            .wait_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = notices.send((reason, line.to_string()));
+        }
+    }
+
+    pub fn earlier_media_dropped(&self) -> bool {
+        self.earlier_media_dropped.load(Ordering::SeqCst)
+    }
+
+    fn note_earlier_media_dropped(&self) {
+        self.earlier_media_dropped.store(true, Ordering::SeqCst);
+    }
+
     pub fn set_inference_hold(&self, hold: Option<InferenceHold>) {
         *self
             .inference_hold
@@ -332,6 +361,149 @@ impl GiapProviderShim {
                     "GIAP refused this model call before it left the machine: {denied}"
                 ))),
             },
+        }
+    }
+
+    /// One engine call under the inference bus and the GPU gate.
+    async fn call_engine(
+        &self,
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+        session: Option<&Arc<SessionControls>>,
+    ) -> Result<MessageStream, ProviderError> {
+        loop {
+            let call = hold_for_shim_call(self.inner.get_name(), session).await;
+            let lease = gpu_gate().lease().await;
+            let streamed = self.inner.stream(model_config, system, messages, tools);
+            let streamed = match &call {
+                Some(call) => {
+                    goose_providers::request_context::stopping_when(call.stop_when(), streamed)
+                        .await
+                }
+                None => streamed.await,
+            };
+            match (streamed, call) {
+                // A call below a person's turn is read whole: nothing watches it token by token,
+                // and one cut for a turn is asked again once it holds the bus anew.
+                (Ok(stream), Some(call)) if call.can_be_cut() => {
+                    use futures::StreamExt;
+                    let items: Vec<_> = stream.collect().await;
+                    lease.finished();
+                    let finished = items.iter().any(|item| matches!(item, Ok((_, Some(_)))));
+                    if call.was_cut() && !finished {
+                        drop(call);
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "inference_call_resumed",
+                            "a call was cut for a turn; it runs again once the turn ends"
+                        );
+                        continue;
+                    }
+                    break Ok(Box::pin(futures::stream::iter(items)) as MessageStream);
+                }
+                (Ok(stream), call) => break Ok(hold_until_closed(stream, lease, call)),
+                (Err(e), _) => {
+                    lease.finished();
+                    break Err(e);
+                }
+            }
+        }
+    }
+
+    /// [`Self::call_engine`] for a call carrying a recording or picture, which memory may be too
+    /// short to take in: it goes down `media_room`'s steps rather than fail, telling the turn.
+    async fn call_with_room(
+        &self,
+        model_config: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+        session: Option<&Arc<SessionControls>>,
+    ) -> Result<MessageStream, ProviderError> {
+        use crate::media_room::{self, Peeked, Step};
+        use pond_core::shared::domain::agent::TurnWait;
+
+        if !media_room::carries_media(messages) {
+            return self
+                .call_engine(model_config, system, messages, tools, session)
+                .await;
+        }
+        let say = |line: &str| {
+            if let Some(s) = session {
+                s.say_waiting(TurnWait::MakingRoom, line);
+            }
+        };
+        let mut asked = std::borrow::Cow::Borrowed(messages);
+        let mut step = Step::AsAsked;
+        loop {
+            let result = self
+                .call_engine(model_config, system, &asked, tools, session)
+                .await;
+            let (needed_mb, error) = match media_room::peek(result).await {
+                Peeked::Go(result) => {
+                    if step != Step::AsAsked {
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "media_room_settled",
+                            step = ?step,
+                            ok = result.is_ok(),
+                            "a call short of memory for its encoder went ahead"
+                        );
+                    }
+                    return result;
+                }
+                Peeked::NoRoom { needed_mb, error } => (needed_mb, error),
+            };
+            step = match step {
+                Step::AsAsked => {
+                    say(media_room::making_room_line(&asked));
+                    let freed = media_room::make_room().await;
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "media_room_made",
+                        needed_mb,
+                        freed = ?freed,
+                        "gave back what reloads by itself to take in a recording or picture"
+                    );
+                    Step::RoomMade
+                }
+                Step::RoomMade => match media_room::drop_earlier_media(&asked) {
+                    Some(dropped) => {
+                        if let Some(s) = session {
+                            s.note_earlier_media_dropped();
+                        }
+                        asked = std::borrow::Cow::Owned(dropped);
+                        Step::EarlierDropped
+                    }
+                    None => {
+                        say(media_room::STILL_MAKING_ROOM);
+                        media_room::wait_for_room(needed_mb).await;
+                        Step::Waited
+                    }
+                },
+                Step::EarlierDropped => {
+                    say(media_room::STILL_MAKING_ROOM);
+                    media_room::wait_for_room(needed_mb).await;
+                    Step::Waited
+                }
+                Step::Waited => match media_room::as_words(&asked).await {
+                    Some(worded) => {
+                        asked = std::borrow::Cow::Owned(worded);
+                        Step::AsWords
+                    }
+                    None => return Err(error),
+                },
+                Step::AsWords => return Err(error),
+            };
+            tracing::info!(
+                target: "giap::trace",
+                kind = "media_room_step",
+                step = ?step,
+                needed_mb,
+                "no room for the encoder; trying the next step"
+            );
         }
     }
 
@@ -819,6 +991,7 @@ impl Provider for GiapProviderShim {
                 ),
                 None => (None, None, None, true, false),
             };
+        let earlier_media_dropped = session.as_ref().is_some_and(|s| s.earlier_media_dropped());
 
         // A subagent's owned prompt skips the rebuild (see `system_override`).
         let enforced_system = match &owned_system {
@@ -854,11 +1027,12 @@ impl Provider for GiapProviderShim {
         // `strip_turn_context` remains the lever if its KV churn costs more than it returns.
         let stripped_messages: Option<Vec<Message>> = None;
         // After a refusal, scrub history pictures so later turns don't replay the failure.
-        let scrubbed_messages: Option<Vec<Message>> = if image_failed_before {
-            scrub_history_images(stripped_messages.as_deref().unwrap_or(messages))
-        } else {
-            None
-        };
+        let scrubbed_messages: Option<Vec<Message>> =
+            if image_failed_before || earlier_media_dropped {
+                scrub_history_images(stripped_messages.as_deref().unwrap_or(messages))
+            } else {
+                None
+            };
         let hearing_short = session.as_ref().is_some_and(|s| s.hearing_short());
         let local = !provider_relocates_tool_images(self.inner.get_name());
         // Recordings of earlier turns go to the model as sound whenever it can take them in:
@@ -876,6 +1050,7 @@ impl Provider for GiapProviderShim {
             crate::held_recordings::resolve(unheard_messages, |files| {
                 local
                     && !image_failed_before
+                    && !earlier_media_dropped
                     && (!hearing_short
                         || goose::providers::local_inference::cache_holds_media(files))
             })
@@ -1000,45 +1175,15 @@ impl Provider for GiapProviderShim {
         );
 
         let final_system = enforced_system.as_deref().unwrap_or(system);
-        let result = loop {
-            let call = hold_for_shim_call(self.inner.get_name(), session.as_ref()).await;
-            let lease = gpu_gate().lease().await;
-            let streamed =
-                self.inner
-                    .stream(model_config, final_system, final_messages, final_tools);
-            let streamed = match &call {
-                Some(call) => {
-                    goose_providers::request_context::stopping_when(call.stop_when(), streamed)
-                        .await
-                }
-                None => streamed.await,
-            };
-            match (streamed, call) {
-                // A call below a person's turn is read whole: nothing watches it token by token,
-                // and one cut for a turn is asked again once it holds the bus anew.
-                (Ok(stream), Some(call)) if call.can_be_cut() => {
-                    use futures::StreamExt;
-                    let items: Vec<_> = stream.collect().await;
-                    lease.finished();
-                    let finished = items.iter().any(|item| matches!(item, Ok((_, Some(_)))));
-                    if call.was_cut() && !finished {
-                        drop(call);
-                        tracing::info!(
-                            target: "giap::trace",
-                            kind = "inference_call_resumed",
-                            "a call was cut for a turn; it runs again once the turn ends"
-                        );
-                        continue;
-                    }
-                    break Ok(Box::pin(futures::stream::iter(items)) as MessageStream);
-                }
-                (Ok(stream), call) => break Ok(hold_until_closed(stream, lease, call)),
-                (Err(e), _) => {
-                    lease.finished();
-                    break Err(e);
-                }
-            }
-        };
+        let result = self
+            .call_with_room(
+                model_config,
+                final_system,
+                final_messages,
+                final_tools,
+                session.as_ref(),
+            )
+            .await;
         if let Some(call) = egress {
             // Real status is hidden by the provider: synthesise 200/500; latency is time-to-stream.
             call.finish(Some(if result.is_ok() { 200 } else { 500 }));
@@ -2226,6 +2371,190 @@ mod tests {
         Message::user()
             .with_text(text)
             .with_image("AAAA", "image/png")
+    }
+
+    // ── Short of memory for the encoder: wait, never fail ───────────────────
+
+    use pond_core::shared::domain::agent::TurnWait;
+
+    /// Fake engine that refuses its first `refusals` calls carrying media for want of room, as the
+    /// Orin did on 2026-11-15 (1,201 MB wanted, 1,021 MB available), and answers otherwise.
+    struct ShortOfRoom {
+        refusals: AtomicU32,
+        seen: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ShortOfRoom {
+        fn get_name(&self) -> &str {
+            "local"
+        }
+        async fn stream(
+            &self,
+            _: &ModelConfig,
+            _: &str,
+            messages: &[Message],
+            _: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            self.seen.lock().unwrap().push(messages.to_vec());
+            let refuse = crate::media_room::carries_media(messages)
+                && self
+                    .refusals
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok();
+            Ok(Box::pin(futures::stream::iter(vec![if refuse {
+                Err(ModelLoadError::NoRoomForEncoder {
+                    needed_mb: 1_201,
+                    available_mb: 1_021,
+                }
+                .into())
+            } else {
+                Ok((Some(Message::assistant().with_text("heard it")), None))
+            }])))
+        }
+    }
+
+    /// The shim, its session "s1" listening for waits, and every message list the engine saw.
+    fn short_of_room(
+        refusals: u32,
+    ) -> (
+        GiapProviderShim,
+        Arc<SessionControls>,
+        tokio::sync::mpsc::UnboundedReceiver<(TurnWait, String)>,
+        Arc<Mutex<Vec<Vec<Message>>>>,
+    ) {
+        let controls = Arc::new(ShimControls::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let shim = GiapProviderShim::new(
+            Arc::new(ShortOfRoom {
+                refusals: AtomicU32::new(refusals),
+                seen: seen.clone(),
+            }),
+            controls.clone(),
+            None,
+        );
+        let session = controls.session("s1");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        session.set_wait_notices(Some(tx));
+        (shim, session, rx, seen)
+    }
+
+    async fn reply_of(shim: &GiapProviderShim, messages: &[Message]) -> Result<String, String> {
+        use futures::StreamExt;
+        goose::session_context::with_session_id(Some("s1".to_string()), async {
+            let mut stream = shim
+                .stream(&ModelConfig::new("m"), "sys", messages, &[])
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut said = String::new();
+            while let Some(item) = stream.next().await {
+                if let Some(m) = item.map_err(|e| e.to_string())?.0 {
+                    said.push_str(&m.as_concat_text());
+                }
+            }
+            Ok(said)
+        })
+        .await
+    }
+
+    fn with_media(seen: &[Message]) -> bool {
+        crate::media_room::carries_media(seen)
+    }
+
+    #[tokio::test]
+    async fn a_voice_note_short_of_room_is_heard_after_room_is_made_and_the_turn_is_told() {
+        let (shim, session, mut waits, seen) = short_of_room(1);
+        let note = Message::user()
+            .with_text("")
+            .with_audio("UklGRg==", "audio/wav");
+        assert_eq!(reply_of(&shim, &[note]).await, Ok("heard it".into()));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "asked once more after making room");
+        assert!(with_media(&seen[1]), "the recording itself was heard");
+        assert_eq!(
+            waits.try_recv().ok(),
+            Some((
+                TurnWait::MakingRoom,
+                "Your pond is busy. Making room to hear you…".to_string()
+            ))
+        );
+        assert_eq!(
+            session.image_failures(),
+            0,
+            "memory, not the media, was short"
+        );
+    }
+
+    #[tokio::test]
+    async fn earlier_pictures_are_dropped_for_room_and_stay_dropped() {
+        let (shim, session, _waits, seen) = short_of_room(2);
+        let asked = vec![
+            picture("what is this?"),
+            Message::assistant().with_text("a heron"),
+            Message::user()
+                .with_text("")
+                .with_audio("UklGRg==", "audio/wav"),
+        ];
+        assert_eq!(reply_of(&shim, &asked).await, Ok("heard it".into()));
+        {
+            let seen = seen.lock().unwrap();
+            let last = seen.last().unwrap();
+            assert_eq!(
+                crate::goose_agent::image_part_count(&last[0]),
+                0,
+                "the earlier picture was dropped"
+            );
+            assert!(with_media(&last[2..]), "this turn's recording still went");
+        }
+        assert!(session.earlier_media_dropped());
+
+        // A later call in the session starts without the earlier picture, so its prompt is stable.
+        seen.lock().unwrap().clear();
+        assert_eq!(reply_of(&shim, &asked).await, Ok("heard it".into()));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(crate::goose_agent::image_part_count(&seen[0][0]), 0);
+    }
+
+    #[tokio::test]
+    async fn with_no_room_at_all_the_turn_answers_from_words_and_a_note() {
+        let (shim, session, mut waits, seen) = short_of_room(u32::MAX);
+        let asked = vec![picture("what is this?")];
+        assert_eq!(reply_of(&shim, &asked).await, Ok("heard it".into()));
+
+        let seen = seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert!(!with_media(last), "nothing left needs the encoder");
+        assert!(
+            last[0]
+                .as_concat_text()
+                .contains("no memory free to look at it"),
+            "{:?}",
+            last[0]
+        );
+        let lines: Vec<String> = std::iter::from_fn(|| waits.try_recv().ok())
+            .map(|(_, line)| line)
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Your pond is busy. Making room to look at your picture…".to_string(),
+                crate::media_room::STILL_MAKING_ROOM.to_string(),
+            ]
+        );
+        assert_eq!(session.image_failures(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_call_without_media_is_never_held_back() {
+        let (shim, _session, mut waits, seen) = short_of_room(u32::MAX);
+        assert_eq!(
+            reply_of(&shim, &[Message::user().with_text("hello")]).await,
+            Ok("heard it".into())
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(waits.try_recv().is_err());
     }
 
     /// The Jetson's E4B turns of 2026-10-27: the context could not allocate. The session counts it,

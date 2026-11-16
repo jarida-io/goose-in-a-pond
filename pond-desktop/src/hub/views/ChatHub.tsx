@@ -4,6 +4,7 @@ import { api } from "../../api/PondApiClient";
 import { useAppState, useAppDispatch } from "../../state/useAppContext";
 import { useChatRun, sendTurn, takeRefusedDraft } from "../../state/chatRunStore";
 import type { Message } from "../../state/chatRunStore";
+import type { WaitReason } from "../../api/types";
 import { CONTINUE_TURN_MESSAGE } from "../../api/types";
 import type { ContextWarning, MessageNote, TurnStats } from "../../api/types";
 import { HubIco } from "../primitives/HubIco";
@@ -45,6 +46,7 @@ import { useDeepResearch } from "../../hooks/useDeepResearch";
 import { NoModelPicks } from "../../components/models/NoModelPicks";
 import { MarkdownText } from "../../components/MarkdownText";
 import "./chat.css";
+import { WaitingLine } from "../../components/WaitingLine";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -57,6 +59,8 @@ interface Row {
   /** The web's results for the person, when the turn's last tool brought them. */
   webCard?: ContextCard;
   streaming?: boolean;
+  status?: string;
+  waiting?: WaitReason;
   turnStats?: TurnStats;
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
   turnLimit?: number;
@@ -109,6 +113,8 @@ function toRow(m: Message): Row {
     card: lastTool ? toolToCard(lastTool) : undefined,
     webCard: webCardOf(last) ?? undefined,
     streaming: m.streaming,
+    status: m.status,
+    waiting: m.waiting,
     turnStats: m.turnStats,
     turnLimit: m.turnLimit,
     contextWarning: m.contextWarning,
@@ -429,7 +435,13 @@ export function ChatHubView() {
                 )}
                 {m.who === "goose" && m.text
                   ? <MarkdownText source={m.text} />
-                  : m.text || (m.streaming ? " " : "")}
+                  : m.text || (m.streaming
+                    ? m.status
+                      ? m.waiting
+                        ? <WaitingLine message={m.status} />
+                        : <span className="ch-bubble__status">{m.status}</span>
+                      : " "
+                    : "")}
               </div>
               {m.who === "goose" && m.keptResults?.map((kept, i) => (
                 <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />

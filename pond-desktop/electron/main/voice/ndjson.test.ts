@@ -94,6 +94,13 @@ describe("classifyLine: the NDJSON to shell-event mapping", () => {
     expect(ev.payload).toEqual({ rms: 0.42 });
   });
 
+  it("maps waiting to voice-waiting with its reason and message", () => {
+    const ev = event('{"event":"waiting","reason":"making_room","message":"Your pond is busy. Making room to hear you…"}');
+    expect(ev.name).toBe("voice-waiting");
+    expect(ev.payload).toEqual({ reason: "making_room", message: "Your pond is busy. Making room to hear you…" });
+    expect(event('{"event":"waiting"}').payload).toEqual({ reason: "", message: "" });
+  });
+
   // Half an event is still worth showing; the renderer shows empty text as nothing.
   it("defaults missing string fields to empty rather than rejecting", () => {
     expect(event('{"event":"transcript"}').payload).toEqual({ text: "" });

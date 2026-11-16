@@ -21,6 +21,7 @@ import { ToolCallChip } from "../components/ToolCallChip";
 import { KeptResultNote } from "../components/KeptResultNote";
 import { NoteFromLine, ReceiptChips, SuggestionOffer } from "../components/MessageNoteView";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
+import { WaitingLine } from "../components/WaitingLine";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
 import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
@@ -842,7 +843,9 @@ export function Chat() {
                     msg.role === "agent" && msg.text && !msg.error
                       ? <MarkdownText source={msg.text} />
                       : msg.text || (msg.streaming
-                      ? msg.status
+                      ? msg.waiting && msg.status
+                        ? <WaitingLine message={msg.status} />
+                        : msg.status
                         ? <ThinkingPlaceholder status={msg.status} />
                         : <span className="stream-dots"><span /><span /><span /></span>
                       : "")

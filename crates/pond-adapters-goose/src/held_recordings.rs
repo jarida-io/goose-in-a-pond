@@ -21,6 +21,8 @@ struct Held {
     mime_type: Arc<str>,
     /// What the engine's cache knows the recording by.
     file: u64,
+    /// The words the client heard in it, for a call that cannot take the sound in.
+    words: Option<Arc<str>>,
 }
 
 static HELD: Mutex<VecDeque<Held>> = Mutex::new(VecDeque::new());
@@ -29,16 +31,30 @@ fn held() -> std::sync::MutexGuard<'static, VecDeque<Held>> {
     HELD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Keeps a recording and returns the reference a stored message carries for it.
-pub(crate) fn hold(data: &str, mime_type: &str) -> String {
+/// The reference and cache key of a recording's base64 `data`.
+fn id_of(data: &str) -> (String, u64) {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .unwrap_or_else(|_| data.as_bytes().to_vec());
     let file = goose::providers::local_inference::media_content_hash(&bytes, true);
-    let id = format!("{file:016x}");
+    (format!("{file:016x}"), file)
+}
+
+/// Keeps a recording and returns the reference a stored message carries for it.
+#[cfg(test)]
+pub(crate) fn hold(data: &str, mime_type: &str) -> String {
+    hold_heard(data, mime_type, None)
+}
+
+/// [`hold`], with the words the client heard in it.
+pub(crate) fn hold_heard(data: &str, mime_type: &str, words: Option<&str>) -> String {
+    let (id, file) = id_of(data);
     let mut held = held();
-    if held.iter().any(|clip| clip.id == id) {
+    if let Some(clip) = held.iter_mut().find(|clip| clip.id == id) {
+        if clip.words.is_none() {
+            clip.words = words.map(Into::into);
+        }
         return id;
     }
     held.push_back(Held {
@@ -46,6 +62,7 @@ pub(crate) fn hold(data: &str, mime_type: &str) -> String {
         data: data.into(),
         mime_type: mime_type.into(),
         file,
+        words: words.map(Into::into),
     });
     let mut bytes: usize = held.iter().map(|clip| clip.data.len()).sum();
     while bytes > MAX_HELD_BYTES && held.len() > 1 {
@@ -56,6 +73,11 @@ pub(crate) fn hold(data: &str, mime_type: &str) -> String {
 
 fn find(id: &str) -> Option<Held> {
     held().iter().find(|clip| clip.id == id).cloned()
+}
+
+/// The words the client heard in the recording whose base64 is `data`, if it sent any.
+pub(crate) fn words_for(data: &str) -> Option<String> {
+    find(&id_of(data).0).and_then(|clip| clip.words.map(|w| w.to_string()))
 }
 
 fn forget(ids: &[String]) {

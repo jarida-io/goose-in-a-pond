@@ -6,7 +6,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 import { ChatHubView } from "./ChatHub";
 import { api } from "../../api/PondApiClient";
 import { ApiError } from "../../api/types";
-import type { VisionStatus } from "../../api/types";
+import type { ChatEvent, VisionStatus } from "../../api/types";
 import { __resetChatRunForTests, openSession } from "../../state/chatRunStore";
 import { assistantRow, keptToolRow, userRow } from "../../test-support/keptRows";
 import { ATTACH_BLOCKED_COPY, NOT_DECLARED_COPY } from "../../components/imageSupportCopy";
@@ -413,5 +413,32 @@ describe("ChatHubView, the web's results on screen", () => {
     turn("giap-weather__get_current_weather", { card_type: "weather", data: { temp: 21 } });
     await ask("weather?");
     expect(screen.queryByRole("region", { name: /result$/ })).toBeNull();
+  });
+});
+
+describe("ChatHubView: waiting for the pond", () => {
+  it("shows the waiting line, then the answer once the wait ends", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    vi.mocked(api.chatStream).mockReturnValue(
+      (async function* () {
+        yield { type: "status", content: "Your pond is busy with another conversation. Yours is next.", waiting: "another_conversation" } as ChatEvent;
+        await gate;
+        yield { type: "text", content: "Here you go." } as ChatEvent;
+        yield { type: "done", done: true, session_id: "s1" } as ChatEvent;
+      })(),
+    );
+    render(<ChatHubView />);
+    await waitFor(() => expect(screen.getByLabelText("Message input")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Message input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByLabelText("Send message"));
+
+    const line = await screen.findByTestId("waiting-line");
+    expect(line.textContent).toContain("Your pond is busy with another conversation. Yours is next.");
+    expect(line.getAttribute("role")).toBe("status");
+
+    release();
+    await screen.findByText("Here you go.");
+    expect(screen.queryByTestId("waiting-line")).toBeNull();
   });
 });

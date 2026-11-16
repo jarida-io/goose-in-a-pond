@@ -157,6 +157,32 @@ fn wrap_up(steps: &[PlanStep]) -> NextRun<'_> {
     }
 }
 
+/// The deadline an unfinished task should have once the pond is back: the time it was off does
+/// not count against it. `None` keeps the deadline as it is, as for a task already out of time.
+pub fn deadline_after_downtime(
+    task: &LongTask,
+    steps: &[PlanStep],
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if !matches!(
+        task.state(),
+        LongTaskState::Planning | LongTaskState::Running
+    ) {
+        return None;
+    }
+    let deadline = task.budget().deadline()?;
+    let last_seen = steps
+        .iter()
+        .flat_map(|s| [s.started_at(), s.finished_at()])
+        .flatten()
+        .chain([task.updated_at()])
+        .max()?;
+    if last_seen >= deadline || now <= last_seen {
+        return None;
+    }
+    Some(deadline + (now - last_seen))
+}
+
 /// The one decision the runner makes per slot.
 pub fn next_run<'a>(
     task: &LongTask,
@@ -535,10 +561,13 @@ const DECIDE_ANSWER: &str = "Nobody has said how long the answer should be, so d
 const RESEARCH_STEP: &str = "This is research. Answer from sources, never from memory: the \
      house's own tools for what happened here, such as get_recent_camera_events, the sensor and \
      schedule tools and the memory tools, and search_web or get_wikipedia_article only for what \
-     is outside the house. Before you write a number, price, time or date from the web, read the \
-     page it came from with read_web_page: give the source's domain as search_web showed it, or \
-     the link the goal gives, and the question. Read one page in your step, two at most, and at \
-     most one more part of a page: each read is a turn. Then save what you found. Keep only what the sources say, and cite each web \
+     is outside the house. Go deep: read every page your step can use with read_web_page, giving \
+     the source's domain as search_web showed it, or the link the goal gives, and the question; \
+     each read is a turn, and the pond says when your step has read as much as it can hold. A \
+     site that will not let the pond read it costs nothing: read the next source. A number, \
+     price, time or date a search_web passage quotes comes from that page, so you may write it \
+     and cite that source; read the page for what the passages leave out. Then save what you \
+     found. Keep only what the sources say, and cite each web \
      source as a Markdown link, [its title](its address), using the address read_web_page gave, \
      or the search's domain. If the sources disagree, say so. Write only what your tools returned or your inputs say: never write that the house \
      has nothing of something unless the house's own tool said so. If what your step needs is \

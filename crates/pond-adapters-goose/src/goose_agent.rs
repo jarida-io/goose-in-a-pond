@@ -4062,11 +4062,24 @@ impl GooseAdapter {
             // ── Invariant 3: this turn's claim on the device ──────────────────
             // One KV prefix per model slot: a child replying mid-turn would overwrite ours.
             // Taken inside the stream so the client sees it waiting; `None` for remote providers.
-            let _device = crate::orchestrator::claim_device_for_turn(
+            guard_controls.set_wait_notices(Some(progress.waits()));
+            let claim = crate::orchestrator::claim_device_for_turn(
                 &device_session_id,
                 &turn_provider,
                 &cancel_token,
-            ).await;
+            );
+            tokio::pin!(claim);
+            let _device = match tokio::time::timeout(
+                crate::orchestrator::TURN_WAIT_SAID_AFTER,
+                claim.as_mut(),
+            ).await {
+                Ok(device) => device,
+                Err(_) => {
+                    let (reason, line) = crate::orchestrator::why_the_turn_waits();
+                    yield Ok(AgentStreamEvent::Waiting { reason, content: line.to_string() });
+                    claim.await
+                }
+            };
             // The turn's calls run under its floor; it is weak, so it lapses when the turn ends.
             guard_controls.set_inference_hold(_device.as_ref().map(|d| d.inference_hold()));
 
@@ -4664,6 +4677,9 @@ impl GooseAdapter {
                                     }
                                     if let Some(n_ctx) = stats.effective_context_tokens {
                                         turn_stats.context_limit_tokens = Some(n_ctx as u32);
+                                        pond_core::shared::services::context_window::record(
+                                            n_ctx as usize,
+                                        );
                                     }
                                     if let Some(draft) = &stats.draft {
                                         turn_stats.draft_accept_rate = Some(draft.accept_rate as f32);
@@ -5847,9 +5863,12 @@ fn attach_audio(
     msg: Message,
     audio: &[pond_core::models::domain::message::AudioAttachment],
 ) -> Message {
-    use crate::held_recordings::{hold, HELD_RECORDING_MIME};
+    use crate::held_recordings::{hold_heard, HELD_RECORDING_MIME};
     audio.iter().fold(msg, |m, clip| {
-        m.with_audio(hold(&clip.data, &clip.mime_type), HELD_RECORDING_MIME)
+        m.with_audio(
+            hold_heard(&clip.data, &clip.mime_type, clip.heard_as.as_deref()),
+            HELD_RECORDING_MIME,
+        )
     })
 }
 

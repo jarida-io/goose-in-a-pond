@@ -35,6 +35,7 @@ const EVERY_EVENT: Record<ShellEvent, true> = {
   "voice-tool-result": true,
   "voice-done": true,
   "voice-error": true,
+  "voice-waiting": true,
   "voice-audio-level": true,
   "voice-session-ended": true,
 };
@@ -56,9 +57,9 @@ describe("the shell contract", () => {
   });
 
   // Pinned so a new voice event without a `useVoiceSession` listener fails here, not as a dropped frame.
-  it("carries exactly eleven voice events", () => {
+  it("carries exactly twelve voice events", () => {
     const voice = SHELL_EVENTS.filter((e) => e.startsWith("voice-"));
-    expect(voice).toHaveLength(11);
+    expect(voice).toHaveLength(12);
   });
 });
 

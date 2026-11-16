@@ -49,6 +49,9 @@ const PART_BYTES: usize = 3_200;
 /// A question's quote at most, as a search's copy: the next turn prefills all of it.
 const ANSWER_BYTES: usize = 1_800;
 
+/// A deep-research step's quote: it reads to fill its window, so one page may answer at length.
+const RESEARCH_ANSWER_BYTES: usize = 6_000;
+
 /// One line at most; a longer paragraph is split at sentences.
 const LINE_BYTES: usize = 1_000;
 
@@ -173,6 +176,10 @@ whole, and what the page lists.")]
                  person gave, or to a source's domain as search_web showed it.",
             ));
         }
+        let room = crate::reading_room::left(&ctx.meta);
+        if room == Some(0) {
+            return Ok(text_result(crate::reading_room::ROOM_FULL));
+        }
         let session = crate::session_from_meta(&ctx.meta);
         let ledger = source_ledger::global();
         let turn_reads = session.as_deref().and_then(|s| ledger.turn_reads(s));
@@ -226,8 +233,12 @@ whole, and what the page lists.")]
                 Err(why) => return Ok(text_result(&why)),
             },
         };
-        let request = Request::from(&params);
+        let mut request = Request::from(&params);
+        if room.is_some() {
+            request.answer_bytes = RESEARCH_ANSWER_BYTES;
+        }
         let mut reply = page.reply_as(&request, turn_reads.map(|n| n + 1));
+        crate::reading_room::spend(&ctx.meta, reply.text.len());
         if let Some(note) = answer_note {
             reply.text = format!("{note}\n{}", reply.text);
         }
@@ -489,8 +500,12 @@ impl FetchFailure {
             FetchFailure::Status(code) => {
                 let why = match code {
                     404 | 410 => "There is no page at that address.".to_string(),
-                    401 | 403 => "The site would not let the pond read the page.".to_string(),
-                    429 => "The site asked the pond to wait before reading more.".to_string(),
+                    401 | 403 => "The site would not let the pond read the page. That read \
+                                  cost nothing: read the next source."
+                        .to_string(),
+                    429 => "The site asked the pond to wait before reading more. That read \
+                            cost nothing: read the next source."
+                        .to_string(),
                     code => format!("The site answered HTTP {code}."),
                 };
                 format_dead_end(what, &why)
@@ -1047,6 +1062,7 @@ struct Page {
 struct Request {
     question: String,
     part: Option<usize>,
+    answer_bytes: usize,
 }
 
 impl From<&ReadWebPageParams> for Request {
@@ -1054,6 +1070,7 @@ impl From<&ReadWebPageParams> for Request {
         Self {
             question: params.asked(),
             part: params.part(),
+            answer_bytes: ANSWER_BYTES,
         }
     }
 }
@@ -1180,7 +1197,7 @@ impl Page {
                 used: lines(&(0..self.lines.len())),
             };
         }
-        match self.quote(&request.question) {
+        match self.quote(&request.question, request.answer_bytes) {
             Some((text, used)) => Reply {
                 text,
                 mode: "question",
@@ -1356,9 +1373,9 @@ impl Page {
         out
     }
 
-    /// The lines that answer `question` within [`ANSWER_BYTES`], in page order under their parts;
+    /// The lines that answer `question` within `budget` bytes, in page order under their parts;
     /// `None` when no line shares a word or an answer's shape with it.
-    fn quote(&self, question: &str) -> Option<(String, Vec<String>)> {
+    fn quote(&self, question: &str, budget: usize) -> Option<(String, Vec<String>)> {
         let eligible: Vec<usize> = (0..self.lines.len())
             .filter(|&i| self.lines[i].is_quotable())
             .collect();
@@ -1378,7 +1395,7 @@ impl Page {
         for r in ranked.iter().filter(|r| r.score > 0.0) {
             let index = eligible[r.index];
             let cost = self.lines[index].text.len() + 1;
-            if used + cost > ANSWER_BYTES {
+            if used + cost > budget {
                 continue;
             }
             used += cost;
@@ -1566,6 +1583,7 @@ mod tests {
         Request {
             question: question.into(),
             part: None,
+            answer_bytes: ANSWER_BYTES,
         }
     }
 
@@ -1735,6 +1753,7 @@ mod tests {
         let reply = page.reply(&Request {
             question: "economy fare".into(),
             part: None,
+            answer_bytes: ANSWER_BYTES,
         });
         assert_eq!(reply.mode, "whole");
         assert!(reply.text.starts_with(
@@ -1788,6 +1807,7 @@ mod tests {
         let reply = page.reply(&Request {
             question: "What is the economy fare?".into(),
             part: None,
+            answer_bytes: ANSWER_BYTES,
         });
         assert_eq!(reply.mode, "question");
         // The quoted lines are held to ANSWER_BYTES; the header, markers and outline ride on top.
@@ -1824,6 +1844,7 @@ mod tests {
         let reply = page.reply(&Request {
             question: "Fares".into(),
             part: None,
+            answer_bytes: ANSWER_BYTES,
         });
         assert!(
             !reply.text.contains("\n## Fares\n## Fares"),
@@ -1838,6 +1859,7 @@ mod tests {
         let reply = page.reply(&Request {
             question: String::new(),
             part: Some(2),
+            answer_bytes: ANSWER_BYTES,
         });
         assert_eq!(reply.mode, "part");
         assert!(reply
@@ -1849,6 +1871,7 @@ mod tests {
         let missing = page.reply(&Request {
             question: String::new(),
             part: Some(99),
+            answer_bytes: ANSWER_BYTES,
         });
         assert_eq!(missing.mode, "no_such_part");
         assert!(missing
@@ -1862,6 +1885,7 @@ mod tests {
         let reply = page.reply(&Request {
             question: "zebra quokka".into(),
             part: None,
+            answer_bytes: ANSWER_BYTES,
         });
         assert_eq!(reply.mode, "first_part");
         assert!(reply.text.contains("Part 1 of"));
@@ -1950,7 +1974,11 @@ mod live {
                 eprintln!("{:>4} [{}] {}", i, page.part_of(i) + 1, line.text);
             }
         }
-        let reply = page.reply(&Request { question, part });
+        let reply = page.reply(&Request {
+            question,
+            part,
+            answer_bytes: ANSWER_BYTES,
+        });
         eprintln!(
             "--- {} ({} bytes)\n{}",
             reply.mode,
