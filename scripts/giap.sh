@@ -1296,6 +1296,7 @@ action_install() {
   if [ "$D_IS_JETSON" = true ] && [ "$D_SVC_ACTIVE" = "active" ]; then
     warn "the service is running and holding a model; the release link may be OOM-killed."
     if confirm "Stop it for the install and restart afterwards?"; then
+      note_stop_intent update
       svc_ctl stop && RESTART_SVC_AFTER=true
     fi
   fi
@@ -1465,6 +1466,7 @@ action_build_server() {
     detect_resources
     if [ "$D_SVC_ACTIVE" = "active" ]; then
       info "stopping the pond for the build to free memory and CPU cores; it starts again after"
+      note_stop_intent update
       svc_ctl stop && RESTART_SVC_AFTER=true
     fi
     info "This is the slow one — roughly 35 minutes from clean on an Orin Nano."
@@ -2129,6 +2131,14 @@ action_swap() { # $1 = "" | status | setup | <size_mb>
 }
 
 # ── service actions ──────────────────────────────────────────────────────────
+# Tells the pond why the stop about to come happens (restart|update|shutdown), so it reports that
+# to the remote-access coordinator and phones away from home say "updating" rather than "gone".
+# The pond reads it once, at its stop, and ignores one older than ten minutes (host_run.rs).
+note_stop_intent() {
+  [ -n "$D_DATA_DIR" ] && [ -d "$D_DATA_DIR" ] || return 0
+  (umask 077; printf '%s\n' "$1" > "$D_DATA_DIR/.stop_intent") 2>/dev/null || true
+}
+
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
     user)   run systemctl --user "$1" "$SERVICE_NAME" ;;
@@ -2355,6 +2365,7 @@ action_update() {
     user|system)
       # A build that stopped the pond has already started it on the new binary.
       if [ "$D_SVC_ACTIVE" != "active" ] || { [ "$rebuilt" = true ] && [ "${BUILD_STARTED_SVC:-false}" != true ]; }; then
+        note_stop_intent update
         svc_ctl restart || return 1
       fi
       await_health

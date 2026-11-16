@@ -1278,6 +1278,32 @@ async fn run_server(
     apply_face_recognition_defaults();
 
     let data_dir = default_data_dir();
+    // First, so that a start that fails later still leaves the marker that tells the next start
+    // whether this run ended gracefully.
+    let process_started = std::time::Instant::now();
+    let boot_id = pond_infra::host_run::read_boot_id();
+    let previous_run = match pond_infra::host_run::begin(&data_dir, boot_id.as_deref()) {
+        Ok(previous) => {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "pond_run_started",
+                previous_shutdown = ?previous.shutdown,
+                rebooted = ?previous.rebooted,
+                lost_power = previous.lost_power(),
+                "the Pond is starting"
+            );
+            previous
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "giap::trace",
+                kind = "run_marker_unavailable",
+                error = %format!("{error:#}"),
+                "could not read or write the run marker; a power cut before this start cannot be told"
+            );
+            pond_core::network::domain::pond_status::PreviousRun::from_marker(None, None)
+        }
+    };
     let db = Database::init(&data_dir).await?;
 
     // Idempotent (one stat() once migrated); per-file errors are logged, never fatal.
@@ -3882,6 +3908,41 @@ async fn run_server(
         targeted_notification_sender.clone(),
         spoken_watch_alerts,
     );
+    // The Pond's reports to the remote-access coordinator, so a phone away from home can learn
+    // why it does not answer, and the household's notice after a power cut.
+    #[cfg(unix)]
+    let read_host: Arc<
+        dyn Fn() -> pond_core::network::domain::pond_status::HostReading + Send + Sync,
+    > = {
+        let runtime = embedded.clone();
+        Arc::new(
+            move || pond_core::network::domain::pond_status::HostReading {
+                reporting: runtime.config().is_ok_and(|c| c.enabled) && runtime.registered(),
+                boot_id: boot_id.clone(),
+                uptime_seconds: pond_infra::host_run::read_uptime_seconds(),
+                process_seconds: process_started.elapsed().as_secs(),
+                clock_synchronized: runtime.clock_synchronized(),
+                node_state: runtime.state(),
+            },
+        )
+    };
+    #[cfg(unix)]
+    let status_reports = Arc::new(
+        pond_core::network::services::pond_status_reports::PondStatusReports::new(
+            Arc::new(pond_server::embedded_network::StatusViaHelper(
+                embedded.clone(),
+            )),
+            uuid::Uuid::new_v4().simple().to_string(),
+            previous_run,
+            process_started,
+        ),
+    );
+    #[cfg(unix)]
+    pond_server::system_notices::spawn_pond_status_reports(
+        status_reports.clone(),
+        read_host.clone(),
+        system_notices.clone(),
+    );
     #[cfg(unix)]
     {
         let runtime = embedded.clone();
@@ -5403,6 +5464,24 @@ async fn run_server(
         // stored before they stop.
         _ = async {
             shutdown_signal().await;
+            // First, while the home's connection is surely still up: phones away from home then
+            // say the Pond is restarting or updating rather than that it vanished.
+            #[cfg(unix)]
+            {
+                let reason = pond_infra::host_run::take_stop_intent(&data_dir)
+                    .unwrap_or(pond_core::network::domain::pond_status::StopReason::Shutdown);
+                if tokio::time::timeout(GOING_DOWN_WAIT, status_reports.going_down(reason, &read_host()))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        target: "giap::trace",
+                        kind = "pond_status_going_down_timed_out",
+                        reason = reason.as_str(),
+                        "the coordinator was not told the Pond is stopping in time; stopping anyway"
+                    );
+                }
+            }
             let waited = wait_for_turns_in_flight(&state, TURN_GRACE).await;
             tracing::info!(
                 target: "giap::trace",
@@ -5435,8 +5514,23 @@ async fn run_server(
     // other entry points; a second call finds nothing loaded.
     pond_adapters_goose::release_local_models(std::time::Duration::from_secs(20)).await;
 
+    // Last: from here on the next start calls this stop clean.
+    if let Err(error) = pond_infra::host_run::end(&data_dir) {
+        tracing::warn!(
+            target: "giap::trace",
+            kind = "run_marker_unremoved",
+            error = %format!("{error:#}"),
+            "could not mark this stop clean; the next start will think the Pond lost power"
+        );
+    }
+
     serve_result
 }
+
+/// How long a stop waits for the coordinator to take the Pond's `going_down` report. The helper
+/// that sends it gives up at 20 s; a stop should not wait that long for a courtesy.
+#[cfg(unix)]
+const GOING_DOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix (what `systemctl stop` and `docker stop` send).
 /// How long a stop waits for turns in flight. Shorter than systemd's default stop timeout, so

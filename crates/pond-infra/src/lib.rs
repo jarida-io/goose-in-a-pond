@@ -10,6 +10,7 @@ pub mod file_setup_code_store;
 pub mod file_test_pond;
 pub mod hf_cleanup;
 pub mod host_pond_admin;
+pub mod host_run;
 pub mod household_files;
 pub mod logging_device_control;
 pub mod mock_handshake;

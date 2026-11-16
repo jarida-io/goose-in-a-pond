@@ -2,6 +2,8 @@
 //! catalogue (`docs/architecture/notifications.md`). Each [`SystemEvent`] becomes exactly one
 //! [`Notification`], with its title, body, category and route hint decided here and nowhere else.
 
+use std::time::Duration;
+
 use crate::mcp::ports::notification::{Notification, OpenScreen};
 
 /// Which part of a model a download fetched.
@@ -70,6 +72,9 @@ pub enum SystemEvent {
     RemoteAccessNeedsSignIn,
     /// Remote access works again, after an outage was announced.
     RemoteAccessRestored,
+    /// The Pond started again after its host lost power. `off_for` is how long it was off, as
+    /// the remote-access coordinator timed it; `None` when no coordinator could say.
+    PondLostPower { off_for: Option<Duration> },
     /// A paired device was removed from the Pond and lost its access.
     DeviceRemoved { name: String },
     /// A provider refused an account's saved sign-in, so the Pond forgot it.
@@ -88,6 +93,7 @@ impl SystemEvent {
             Self::RemoteAccessDown => "remote_access_down",
             Self::RemoteAccessNeedsSignIn => "remote_access_sign_in",
             Self::RemoteAccessRestored => "remote_access_restored",
+            Self::PondLostPower { .. } => "pond_lost_power",
             Self::DeviceRemoved { .. } => "device_removed",
             Self::SignInExpired { .. } => "sign_in_expired",
         }
@@ -230,6 +236,18 @@ impl SystemEvent {
                 "This Pond can be reached from outside the home again.".to_string(),
                 Some(OpenScreen::RemoteAccess),
             ),
+            Self::PondLostPower { off_for } => (
+                "info",
+                "Your Pond lost power".to_string(),
+                match off_for {
+                    Some(off_for) => format!(
+                        "Your Pond lost power and was off for {}. It is running again.",
+                        about(*off_for)
+                    ),
+                    None => "Your Pond lost power and has started again.".to_string(),
+                },
+                None,
+            ),
             Self::DeviceRemoved { name } => (
                 "alert",
                 "Device removed".to_string(),
@@ -249,6 +267,25 @@ impl SystemEvent {
                 None,
             ),
         }
+    }
+}
+
+/// A duration as a person says it roughly: minutes up to an hour and a half, then hours, then
+/// days.
+fn about(duration: Duration) -> String {
+    let minutes = (duration.as_secs() + 30) / 60;
+    let plural = |n: u64, unit: &str| {
+        if n == 1 {
+            format!("about 1 {unit}")
+        } else {
+            format!("about {n} {unit}s")
+        }
+    };
+    match minutes {
+        0 => "less than a minute".to_string(),
+        1..=89 => plural(minutes, "minute"),
+        _ if minutes < 36 * 60 => plural((minutes + 30) / 60, "hour"),
+        _ => plural((minutes + 12 * 60) / (24 * 60), "day"),
     }
 }
 
@@ -376,6 +413,34 @@ mod tests {
             name: "Liz's phone".into(),
         });
         assert_eq!(n.data.unwrap()["open"], json!("devices"));
+    }
+
+    #[test]
+    fn a_power_loss_says_how_long_the_pond_was_off_when_that_is_known() {
+        let timed = notify(&SystemEvent::PondLostPower {
+            off_for: Some(Duration::from_secs(92 * 60)),
+        });
+        assert_eq!(timed.title, "Your Pond lost power");
+        assert_eq!(
+            timed.body,
+            "Your Pond lost power and was off for about 2 hours. It is running again."
+        );
+        assert_eq!(timed.category, "info");
+        assert_eq!(timed.data.unwrap()["kind"], json!("pond_lost_power"));
+        let untimed = notify(&SystemEvent::PondLostPower { off_for: None });
+        assert_eq!(untimed.body, "Your Pond lost power and has started again.");
+        assert!(!SystemEvent::PondLostPower { off_for: None }.is_security());
+    }
+
+    #[test]
+    fn durations_read_as_a_person_would_say_them() {
+        let said = |secs: u64| about(Duration::from_secs(secs));
+        assert_eq!(said(20), "less than a minute");
+        assert_eq!(said(60), "about 1 minute");
+        assert_eq!(said(72 * 60), "about 72 minutes");
+        assert_eq!(said(90 * 60), "about 2 hours");
+        assert_eq!(said(60 * 60 + 89 * 60), "about 2 hours");
+        assert_eq!(said(3 * 24 * 3600), "about 3 days");
     }
 
     #[test]

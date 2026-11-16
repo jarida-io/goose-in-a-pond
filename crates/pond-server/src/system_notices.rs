@@ -7,6 +7,7 @@
 //! - parts of the Pond that did not start: [`announce_startup_problems`]
 //! - a low disk: [`spawn_disk_watch`]
 //! - remote access stopping, or needing a sign-in: [`spawn_remote_access_watch`]
+//! - the Pond's status to the remote-access coordinator, and a power cut: [`spawn_pond_status_reports`]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use pond_core::mcp::ports::notification::{
 use pond_core::mcp::services::system_notices::{
     disk_is_low, OutageGate, OutageNotice, SystemNotices,
 };
+use pond_core::network::domain::pond_status::{HostReading, PowerNotice};
+use pond_core::network::services::pond_status_reports;
 use pond_core::shared::domain::long_task::LongTask;
 use pond_core::user_data::domain::proposal::Proposal;
 use pond_core::user_data::domain::schedule::{
@@ -551,6 +554,32 @@ where
             interval.tick().await;
             if let Some(event) = watch.observe(&read(), Instant::now()) {
                 notices.announce(event).await;
+            }
+        }
+    });
+}
+
+// The Pond's own status, told to the remote-access coordinator
+
+/// Send the Pond's status reports on their schedule (`network::services::pond_status_reports`),
+/// and announce a power cut once the coordinator has said how long the Pond was off, or once it is
+/// clear it will not. `read` runs every [`TICK`](pond_status_reports::TICK).
+pub fn spawn_pond_status_reports(
+    reports: Arc<pond_status_reports::PondStatusReports>,
+    read: Arc<dyn Fn() -> HostReading + Send + Sync>,
+    notices: Arc<SystemNotices>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(pond_status_reports::TICK);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Some(PowerNotice::Announce { off_for }) =
+                reports.tick(&read(), Instant::now()).await
+            {
+                notices
+                    .announce(SystemEvent::PondLostPower { off_for })
+                    .await;
             }
         }
     });

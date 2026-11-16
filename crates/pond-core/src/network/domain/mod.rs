@@ -6,6 +6,7 @@ pub mod factory_reset_phrases;
 pub mod interface;
 pub mod peripheral;
 pub mod pond_advert;
+pub mod pond_status;
 pub mod setup_card;
 pub mod setup_code;
 pub mod setup_record;
