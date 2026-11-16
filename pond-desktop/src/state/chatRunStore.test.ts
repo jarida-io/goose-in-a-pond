@@ -132,6 +132,48 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+// ── Waiting for the pond ──────────────────────────────────────────────────────
+
+describe("waiting for the pond", () => {
+  const WAIT: ChatEvent = {
+    type: "status",
+    content: "Your pond is busy with another conversation. Yours is next.",
+    waiting: "another_conversation",
+  };
+
+  it("keeps the reason beside the status, and re-wording replaces it", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: "hello" });
+    await held.push(WAIT);
+    const last = () => getChatRun().messages.at(-1)!;
+    expect(last().waiting).toBe("another_conversation");
+    expect(last().status).toBe(WAIT.content);
+
+    await held.push({ ...WAIT, content: "Still busy.", waiting: "making_room" });
+    expect(last().waiting).toBe("making_room");
+    expect(last().status).toBe("Still busy.");
+    await held.end();
+  });
+
+  it.each<[string, ChatEvent]>([
+    ["a status without waiting", { type: "status", content: "Agent working..." }],
+    ["text", { type: "text", content: "Hi" }],
+    ["thinking", { type: "thinking", content: "hm" }],
+    ["a tool call", { type: "tool_call", tool: "get_weather" }],
+    ["an error", { type: "error", error: "boom" }],
+    ["done", { type: "done", done: true, session_id: "s1" }],
+  ])("ends the wait at %s", async (_name, ev) => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: "hello" });
+    await held.push(WAIT);
+    await held.push(ev);
+    expect(getChatRun().messages.at(-1)!.waiting).toBeUndefined();
+    await held.end();
+  });
+});
+
 // ── Starting a turn ───────────────────────────────────────────────────────────
 
 describe("starting a turn", () => {

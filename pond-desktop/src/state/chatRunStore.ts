@@ -15,7 +15,8 @@ import { foldToolCall, type StepsCarrier } from "../lib/workingNotes";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
 import { keptResultOf, type KeptResult } from "./keptResults";
 import { startedTaskId, startedTaskIdOfRow } from "../longtasks/longTaskWords";
-import { ApiError } from "../api/types";
+import { ApiError, readWaitReason } from "../api/types";
+import type { WaitReason } from "../api/types";
 import type {
   ChatEvent,
   ContextWarning,
@@ -38,6 +39,8 @@ export interface Message extends StepsCarrier {
   role: "user" | "agent";
   streaming?: boolean;
   status?: string;
+  /** Set while `status` is a wait for the pond, not progress; drawn as the busy line. */
+  waiting?: WaitReason;
   cards?: ContextCardType[];
   thinkingBlocks?: string[];
   /** Reasoning-stream wall clock, so the disclosure can say how long it took. */
@@ -516,7 +519,7 @@ async function consume(
           }
           return [
             ...prev.slice(0, -1),
-            { ...last, text: last.text + visible, status: undefined },
+            { ...last, text: last.text + visible, status: undefined, waiting: undefined },
           ];
         });
       }
@@ -528,9 +531,12 @@ async function consume(
         // First chunk opens the span, each chunk moves the close: reasoning time, not turn time.
         thinkingStartedAt: last.thinkingStartedAt ?? now,
         thinkingEndedAt: now,
+        status: last.waiting ? undefined : last.status,
+        waiting: undefined,
       }));
     } else if (ev.type === "status" && ev.content) {
-      patchLastAgent((last) => ({ ...last, status: ev.content }));
+      const waiting = readWaitReason(ev.waiting);
+      patchLastAgent((last) => ({ ...last, status: ev.content, waiting }));
     } else if (ev.type === "tool_call" && ev.tool) {
       const card: ContextCardType = {
         id: nextCardId(),
@@ -544,6 +550,7 @@ async function consume(
         ...foldToolCall(last, ev.working_notes),
         cards: [...(last.cards ?? []), card],
         status: friendlyToolStatus(ev.tool ?? ""),
+        waiting: undefined,
       }));
     } else if (ev.type === "tool_result" && ev.id) {
       mutate((prev) => {
@@ -565,11 +572,11 @@ async function consume(
           task && !last.longTaskIds?.includes(task) ? [...(last.longTaskIds ?? []), task] : last.longTaskIds;
         return [
           ...prev.slice(0, -1),
-          { ...last, cards: newCards, longTaskIds, status: undefined },
+          { ...last, cards: newCards, longTaskIds, status: undefined, waiting: undefined },
         ];
       });
     } else if (ev.type === "review_status" && ev.content) {
-      patchLastAgent((last) => ({ ...last, status: ev.content }));
+      patchLastAgent((last) => ({ ...last, status: ev.content, waiting: undefined }));
     } else if (
       (ev.type === "review_revision" || ev.type === "tool_revision") &&
       ev.content
@@ -579,6 +586,7 @@ async function consume(
         ...last,
         text: ev.content!,
         status: undefined,
+        waiting: undefined,
       }));
     } else if (ev.type === "error" || ev.error) {
       const errMsg = ev.error ?? "Unknown error from agent";
@@ -587,12 +595,15 @@ async function consume(
         text: `Error: ${errMsg}`,
         streaming: false,
         error: true,
+        status: undefined,
+        waiting: undefined,
       }));
     } else if (ev.done && ev.session_id) {
       state.sessionId = ev.session_id;
       state.bridge?.onSessionId(ev.session_id);
       patchLastAgent((last) => ({
         ...last,
+        ...(last.waiting ? { status: undefined, waiting: undefined } : {}),
         ...(ev.model_role ? { modelRole: ev.model_role } : {}),
         ...(ev.usage && ev.usage.completion_tokens > 0
           ? { tokenUsage: ev.usage }

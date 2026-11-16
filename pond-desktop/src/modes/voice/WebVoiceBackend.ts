@@ -1,5 +1,6 @@
 // Browser VoiceBackend on Web Audio and pond-server HTTP; a plain class, no React.
 
+import { waitingLabel } from "./waitingFrame";
 import { api } from "../../api/PondApiClient";
 import { containsTrigger, normalizeTranscript } from "./wakePhrase";
 import type {
@@ -61,6 +62,7 @@ export class WebVoiceBackend implements VoiceBackend {
   onAgentToken: ((token: string, done: boolean) => void) | null = null;
   onToolCall: ((data: ToolCallData) => void) | null = null;
   onError: ((msg: string) => void) | null = null;
+  onWaiting: ((message: string | null) => void) | null = null;
   onSessionId: ((id: string) => void) | null = null;
   onResponseMeta: ((meta: ResponseMeta) => void) | null = null;
   onWakeDetected: ((wav: Blob) => void) | null = null;
@@ -257,6 +259,7 @@ export class WebVoiceBackend implements VoiceBackend {
       this.onError?.(String(err));
       this.onStateChange?.("error");
     } finally {
+      this.onWaiting?.(null);
       this.pipelineActive = false;
       this.wakeDetecting = false;
       this.abortController = null;
@@ -531,6 +534,9 @@ export class WebVoiceBackend implements VoiceBackend {
           const raw = tr.startsWith("data: ") ? tr.slice(6) : tr;
           let ev: Record<string, unknown>;
           try { ev = JSON.parse(raw); } catch { continue; }
+
+          const waitFrame = waitingLabel(ev);
+          if (waitFrame !== undefined) this.onWaiting?.(waitFrame);
 
           if (ev.error) { this.onError?.(String(ev.error)); this.onStateChange?.("error"); return; }
 

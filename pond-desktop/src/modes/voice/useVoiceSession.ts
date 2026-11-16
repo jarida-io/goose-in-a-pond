@@ -80,6 +80,8 @@ export interface VoiceSessionAPI {
   clearConversation(): void;
   /** Live mic RMS level (0-1) during wait/recording; 0 otherwise. */
   audioLevel: number;
+  /** The pond's own line while this turn waits before its reply can start; null once it ends. */
+  waitingMessage: string | null;
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -97,6 +99,7 @@ export function useVoiceSession(): VoiceSessionAPI {
   const [connecting, setConnecting] = useState(false);
   const [warmingUp, setWarmingUp] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [waitingMessage, setWaitingMessage] = useState<string | null>(null);
 
   // Filters stale events from a previous child; set on start and voice-ready, cleared on ended.
   const activeSessionIdRef = useRef<string | null>(null);
@@ -155,6 +158,7 @@ export function useVoiceSession(): VoiceSessionAPI {
     // voice-state: wait | listen | thinking | speak
     unlistenersRef.current.push(
       listen("voice-state", (payload) => {
+        setWaitingMessage(null);
         const mapped = CHILD_STATE_MAP[payload] ?? "idle";
         dispatch({ type: "SET_VOICE_STATE", payload: mapped });
       }),
@@ -186,6 +190,7 @@ export function useVoiceSession(): VoiceSessionAPI {
     // voice-token: assistant token delta, batched via rAF
     unlistenersRef.current.push(
       listen("voice-token", (payload) => {
+        setWaitingMessage(null);
         pendingTokensRef.current += payload.content;
         if (rafHandleRef.current === null) {
           rafHandleRef.current = requestAnimationFrame(flushPendingTokens);
@@ -196,6 +201,7 @@ export function useVoiceSession(): VoiceSessionAPI {
     // voice-tool-call: push a context card for the in-flight tool
     unlistenersRef.current.push(
       listen("voice-tool-call", (payload) => {
+        setWaitingMessage(null);
         dispatch({
           type: "PUSH_CONTEXT_CARD",
           payload: {
@@ -226,6 +232,7 @@ export function useVoiceSession(): VoiceSessionAPI {
     // voice-done: turn complete; flush any buffered tokens first, then mark done.
     unlistenersRef.current.push(
       listen("voice-done", (payload) => {
+        setWaitingMessage(null);
         if (rafHandleRef.current !== null) {
           cancelAnimationFrame(rafHandleRef.current);
           flushPendingTokens();
@@ -242,11 +249,19 @@ export function useVoiceSession(): VoiceSessionAPI {
     // voice-error: non-fatal child error.
     unlistenersRef.current.push(
       listen("voice-error", (payload) => {
+        setWaitingMessage(null);
         const msg =
           typeof payload === "string"
             ? payload
             : payload?.message ?? "Voice session error";
         flashError(msg);
+      }),
+    );
+
+    // voice-waiting: shown as the state label until the next state, token, tool call, error or done.
+    unlistenersRef.current.push(
+      listen("voice-waiting", (payload) => {
+        if (payload?.message) setWaitingMessage(payload.message);
       }),
     );
 
@@ -268,6 +283,7 @@ export function useVoiceSession(): VoiceSessionAPI {
         setSessionActive(false);
         setConnecting(false);
         setAudioLevel(0);
+        setWaitingMessage(null);
         activeSessionIdRef.current = null;
 
         // Best-effort, so the shell restores its wake listener when the child exits on its own.
@@ -358,5 +374,5 @@ export function useVoiceSession(): VoiceSessionAPI {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { sessionActive, connecting,
-    warmingUp, startSession, stopSession, interruptTurn, clearConversation, audioLevel };
+    warmingUp, startSession, stopSession, interruptTurn, clearConversation, audioLevel, waitingMessage };
 }

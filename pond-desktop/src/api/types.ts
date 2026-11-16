@@ -1491,8 +1491,19 @@ export interface CompactionReport {
   };
 }
 
+/** Why a turn is waiting before its reply can start; spellings are the server's. */
+export type WaitReason = "another_conversation" | "background_work" | "making_room";
+
+export const WAIT_REASONS: readonly WaitReason[] = ["another_conversation", "background_work", "making_room"];
+
+export function readWaitReason(v: unknown): WaitReason | undefined {
+  return WAIT_REASONS.find((r) => r === v);
+}
+
 export interface ChatEvent {
   type: ChatEventType;
+  /** On "status": set while the turn waits; a later frame without it ends the wait. */
+  waiting?: WaitReason;
   content?: string;         // for "text" events
   token?: string;           // legacy backend alias for content
   tool?: string;            // for "tool_call" and "tool_result" events

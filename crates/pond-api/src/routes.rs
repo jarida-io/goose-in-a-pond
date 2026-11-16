@@ -3044,6 +3044,29 @@ async fn words_instead_of_hearing(
     Some(transcribe)
 }
 
+/// What a turn's engine call asks of the server when memory is too short to take in its
+/// recording or picture.
+pub struct StateMediaRoom(pub Arc<AppState>);
+
+#[async_trait::async_trait]
+impl pond_core::models::ports::media_room::MediaRoom for StateMediaRoom {
+    async fn make_room(&self) -> Vec<&'static str> {
+        make_room_to_hear(&self.0).await
+    }
+
+    async fn words_of(&self, wav: Vec<u8>) -> Option<String> {
+        let transcribe = self.0.transcribe_audio.clone()?;
+        match tokio::task::spawn_blocking(move || transcribe(wav)).await {
+            Ok(Ok(words)) if !words.trim().is_empty() => Some(words),
+            Ok(Err(e)) => {
+                tracing::warn!(target: "giap::audio", error = %e, "could not transcribe a voice note");
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Gives back the memory of what loads again by itself when next needed: the Memory model and
 /// the voice the pond speaks in. Returns what was given back.
 async fn make_room_to_hear(state: &Arc<AppState>) -> Vec<&'static str> {
@@ -3562,6 +3585,11 @@ impl TurnAccumulator {
             AgentStreamEvent::Status { content } => {
                 StreamStep::Frame(json!({"type": "status", "content": content}).to_string())
             }
+            // A status frame, so a client that knows nothing of `waiting` still shows the line.
+            AgentStreamEvent::Waiting { reason, content } => StreamStep::Frame(
+                json!({"type": "status", "content": content, "waiting": reason.as_str()})
+                    .to_string(),
+            ),
             AgentStreamEvent::Thinking { content } => StreamStep::Reasoning {
                 frame: json!({"type": "thinking", "content": content}).to_string(),
                 block: content,
@@ -24253,6 +24281,17 @@ mod tests {
                     content: "Agent working".to_string(),
                 }),
                 json!({"type": "status", "content": "Agent working"}),
+            ),
+            (
+                turn.absorb(AgentStreamEvent::Waiting {
+                    reason: pond_core::shared::domain::agent::TurnWait::AnotherConversation,
+                    content: "Your pond is busy".to_string(),
+                }),
+                json!({
+                    "type": "status",
+                    "content": "Your pond is busy",
+                    "waiting": "another_conversation",
+                }),
             ),
             (
                 turn.absorb(AgentStreamEvent::ReviewStatus {

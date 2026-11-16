@@ -126,7 +126,9 @@ function VoiceModeChildProcess() {
 
   const stateLabel = serverDown
     ? "Server offline"
-    : session.warmingUp
+    : session.waitingMessage
+      ? session.waitingMessage
+      : session.warmingUp
       ? "Warming up…"
       : isConnecting
         ? "Starting voice session…"
@@ -284,9 +286,11 @@ function VoiceModePipeline() {
   const stateColor  = STATE_COLORS[voiceState] ?? "#8E8E93";
   const stateLabel  = serverDown
     ? "Server offline"
-    : isError && state.voiceError
-      ? state.voiceError
-      : STATE_LABELS[voiceState];
+    : pipeline.waitingMessage
+      ? pipeline.waitingMessage
+      : isError && state.voiceError
+        ? state.voiceError
+        : STATE_LABELS[voiceState];
 
   const lastMsg = state.transcript.length > 0
     ? state.transcript[state.transcript.length - 1]
@@ -388,7 +392,7 @@ function VoiceModePipeline() {
         {isThinking && (
           <div className="vm-busy-row">
             <span className="vm-busy-dots">&bull;&bull;&bull;</span>
-            <span className="vm-busy-label">Thinking&hellip;</span>
+            <span className="vm-busy-label">{pipeline.waitingMessage ?? <>Thinking&hellip;</>}</span>
           </div>
         )}
 

@@ -8,6 +8,7 @@ mod goose_nudges;
 mod held_recordings;
 pub mod litert_model;
 pub mod logging;
+pub mod media_room;
 pub mod mesh_provider;
 pub mod model_traits;
 pub mod mtp_drafter;
