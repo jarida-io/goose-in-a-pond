@@ -63,6 +63,7 @@ pub enum SourceKind {
     Watch,
     Heartbeat,
     Suggestion,
+    Deliverable,
 }
 
 impl SourceKind {
@@ -75,6 +76,7 @@ impl SourceKind {
             SourceKind::Watch => "watch",
             SourceKind::Heartbeat => "heartbeat",
             SourceKind::Suggestion => "suggestion",
+            SourceKind::Deliverable => "deliverable",
         }
     }
 }

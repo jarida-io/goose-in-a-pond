@@ -23,6 +23,7 @@ What a tap on a notice opens. The Pond writes `data.open` only through `OpenScre
 | `devices`, `models`, `extensions`, `remote_access` | none | that screen |
 | `my_pond` (2026-11-08) | none | the phone's My Pond screen; the "My Pond unlocked" notice carries it. The dashboard has no such screen and offers no action |
 | `goose_activity` (2026-11-12) | none | My Goose's list of what Goose did by itself; the notice after a heartbeat that set a reminder, paused a watch or looked something up carries it |
+| `anchor`, `deliverable`, `questions` | `anchor_id`; `deliverable_id`; `anchor_id` and `batch_id` | My Goose: one anchor with what was made for it; one deliverable at its body; the questions Goose is waiting on. The [idea engine](idea-engine.md) raises them |
 
 **The id rides beside the screen, never instead of it.** A client that does not read an id still
 opens the right screen, and a client that cannot open the id opens the screen alone. Each client
@@ -263,6 +264,8 @@ name in the first column.
 | to-do reminder | a hook of a reminder (or of a to-do Goose need not ask about) fires: a time, a repeat, a place, a Pond event or a connector event (`pond-server/src/hooks_runner.rs`) | `Reminder: {text}` / the notes, else the hook's sentence (`When you get home`) | `info` | `todos` with `todo_id` | the to-do's owner's devices only | one per to-do per pass; an event hook stays quiet 10 minutes after firing |
 | to-do check-in | a hook of a to-do with `ask` fires, or its follow-up after a not-yet comes (at the snooze, else 09:00 member time) | Goose's question (`Did you call the garage about the Fielder?`) / how to answer | `action_required` | `action: todo_checkin` with `todo_id`, `text`, `label`, and `todos` | the to-do's owner's devices only | at most three asks per to-do, then it stays open unasked |
 | to-do offer | memory extraction lifted a dated mention from a member's chat (`reminders`) | `Add '{text}' to your to-dos for {day}?` / what they said and the time Goose worked out | `action_required` | `action: todo_offer` with `reminder_id`, `text`, `when_said`, `due_at`, `label`, and `todos` | that member's devices only | one per mention (`todo-offer-{reminder_id}`); counts toward the shared daily proposal cap |
+| deliverable ready | the idea engine settles a deliverable `ready` (a first version, or a refresh that changed something) or `unsure` (`pond-server/src/engine_runner/notices.rs`) | `Ready: {title}`, `Updated: {title}` or `Ready, not fully checked: {title}` / its first sentence, or what the refresh changed | `info` | `deliverable` with `deliverable_id` | the anchor's owner's devices only | one per version (`deliverable-{id}-{version}`); said in the room when no phone fetches it; also a line in their Goose thread |
+| questions | a batch of questions about an anchor passed its check | `Questions about {anchor}` / the first question, and how many more | `action_required` | `questions` with `anchor_id` and `batch_id` | the anchor's owner's devices only | one per batch (`questions-{batch_id}`) |
 
 ### System notices (2026-10-27)
 

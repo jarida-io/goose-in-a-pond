@@ -4052,52 +4052,100 @@ async fn run_server(
     }
 
     // ── Long tasks ───────────────────────────────────────────────────────
-    // Claimed only with an orchestrator: the claim is what makes the lane report a loop.
-    if pond_mcp_server::installed_orchestrator_deps().is_some() {
+    // Claimed whether or not an orchestrator was installed: an idea-engine job's inline steps
+    // need none, and the claim is what makes the lane report a loop.
+    let engine_stores = pond_api::EngineStores::sqlite(db.system.clone());
+    {
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
         // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
         pond_core::shared::services::long_task_open::install_runner_bell(bells.nudge_bell());
-        if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
-            // Agents a schedule or a household event activates run as one-step long tasks.
-            let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
-            tokio::spawn(pond_server::agent_activations::run_agent_activations(
-                pond_server::agent_activations::ActivationDeps {
-                    settings: settings_repo.clone(),
-                    recipes: recipe_repo.clone(),
-                    tasks: repo.clone(),
-                    profiles: profile_repo.clone(),
-                    bus: event_bus.clone(),
-                    wake: bells.nudge_bell(),
-                    presence: agent_presence.clone(),
-                },
-            ));
-            let before_hooks = Arc::new(pond_server::agent_activations::BeforeHookSources {
-                scheduler: scheduler.clone(),
-                weather: weather.clone(),
-                presence: agent_presence,
-                profiles: profile_repo.clone(),
-                settings: settings_repo.clone(),
-            });
-            let prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry> =
+        let installed = install_long_task_deps(
+            db.system.clone(),
+            Some(bells.nudge_bell()),
+            engine_stores.jobs.clone(),
+        );
+        let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
+        let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = match installed
+        {
+            Some(repo) => {
+                // Agents a schedule or a household event activates run as one-step long tasks.
+                tokio::spawn(pond_server::agent_activations::run_agent_activations(
+                    pond_server::agent_activations::ActivationDeps {
+                        settings: settings_repo.clone(),
+                        recipes: recipe_repo.clone(),
+                        tasks: repo.clone(),
+                        profiles: profile_repo.clone(),
+                        bus: event_bus.clone(),
+                        wake: bells.nudge_bell(),
+                        presence: agent_presence.clone(),
+                    },
+                ));
+                repo
+            }
+            None => Arc::new(pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(
+                db.system.clone(),
+            )),
+        };
+        let before_hooks = Arc::new(pond_server::agent_activations::BeforeHookSources {
+            scheduler: scheduler.clone(),
+            weather: weather.clone(),
+            presence: agent_presence,
+            profiles: profile_repo.clone(),
+            settings: settings_repo.clone(),
+        });
+        let prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry> =
+            Arc::new(
+                pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
+                    db.system.clone(),
+                ),
+            );
+        let engine = pond_server::engine_runner::EngineDeps {
+            tasks: repo.clone(),
+            jobs: engine_stores.jobs.clone(),
+            anchors: engine_stores.anchors.clone(),
+            facts: engine_stores.facts.clone(),
+            dont: engine_stores.dont.clone(),
+            questions: engine_stores.questions.clone(),
+            captures: engine_stores.captures.clone(),
+            agents: engine_stores.agents.clone(),
+            profiles: profile_repo.clone(),
+            settings: settings_repo.clone(),
+            memories: memory_repo.clone(),
+            sessions: session_storage.clone(),
+            interests: Arc::new(pond_infra::sqlite_interests::SqliteInterestRepository::new(
+                db.system.clone(),
+            )),
+            model: Arc::new(pond_server::engine_runner::ProviderModel::new(
+                llm_provider.clone(),
+            )),
+            recall: embedding_provider.clone().map(|embedder| {
                 Arc::new(
-                    pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
-                        db.system.clone(),
+                    pond_core::context::retrieval_service::PersonalContextRetrieval::new(
+                        vector_index.clone(),
+                        embedder,
                     ),
-                );
-            tokio::spawn(run_long_task_runner(
-                settings_repo.clone(),
-                session_storage.clone(),
-                last_user_activity.clone(),
-                inference_lane.clone(),
-                bells,
-                repo,
-                recipe_repo.clone(),
-                targeted_notification_sender.clone(),
-                before_hooks,
-                prefills,
-            ));
-        }
+                ) as Arc<dyn pond_server::engine_runner::Recall>
+            }),
+            tools: Arc::new(registered_tool_hints),
+            notifier: targeted_notification_sender.clone(),
+            thread: pond_core::shared::services::goose_thread::installed(),
+            bell: Some(bells.nudge_bell()),
+        };
+        tokio::spawn(pond_server::engine_runner::run_ticks(engine.clone()));
+        tokio::spawn(run_long_task_runner(
+            settings_repo.clone(),
+            session_storage.clone(),
+            last_user_activity.clone(),
+            inference_lane.clone(),
+            bells,
+            repo,
+            recipe_repo.clone(),
+            targeted_notification_sender.clone(),
+            before_hooks,
+            prefills,
+            engine,
+        ));
     }
 
     // ── Composing suggestions out of the household's own memories ────────
@@ -4746,7 +4794,7 @@ async fn run_server(
         suggestion_queue: Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
-        engine: pond_api::EngineStores::sqlite(db.system.clone()),
+        engine: engine_stores,
         db,
         onboarding_repo,
         handshake: handshake.clone(),
@@ -6180,7 +6228,13 @@ async fn run_chat(
         )
         .await;
         // Steps run in serve; this process only takes `task_start` calls, which serve picks up.
-        let _ = install_long_task_deps(db.system.clone(), None);
+        let _ = install_long_task_deps(
+            db.system.clone(),
+            None,
+            Arc::new(
+                pond_infra::sqlite_engine_jobs::SqliteEngineJobRepository::new(db.system.clone()),
+            ),
+        );
         a
     };
 
@@ -8131,6 +8185,7 @@ async fn run_proactive_reviewer(
 fn install_long_task_deps(
     pool: sqlx::SqlitePool,
     wake: Option<Arc<tokio::sync::Notify>>,
+    engine_jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
     pond_mcp_server::saved_items::init_saved_item_deps(
@@ -8170,8 +8225,23 @@ fn install_long_task_deps(
         repo: repo.clone(),
         authorities: orchestration.authorities(),
         wake,
+        engine_jobs: Some(engine_jobs),
     });
     Some(repo)
+}
+
+/// The tools this pond registered, each with the first sentence of what it is for.
+fn registered_tool_hints() -> Vec<pond_core::user_data::services::fact_sheet::ToolHint> {
+    let registered = pond_adapters_goose::registered_extensions();
+    pond_mcp_server::prefix_oracle::all_tools()
+        .into_iter()
+        .filter(|(extension, _)| registered.iter().any(|name| name == extension))
+        .map(|(_, tool)| {
+            let about = tool.description.as_deref().unwrap_or_default();
+            let about = about.split_once(". ").map_or(about, |(first, _)| first);
+            pond_core::user_data::services::fact_sheet::ToolHint::new(&tool.name, about)
+        })
+        .collect()
 }
 
 /// Works through members' long tasks one helper at a time, while the household is quiet.
@@ -8187,6 +8257,7 @@ async fn run_long_task_runner(
     sender: Arc<pond_infra::broadcast_notification_sender::BroadcastNotificationSender>,
     before_hooks: Arc<pond_server::agent_activations::BeforeHookSources>,
     prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry>,
+    engine: pond_server::engine_runner::EngineDeps,
 ) {
     use pond_core::shared::domain::long_task::StepState;
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
@@ -8203,12 +8274,12 @@ async fn run_long_task_runner(
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
 
-    let Some(deps) = pond_mcp_server::installed_orchestrator_deps() else {
-        tracing::info!("long-task runner: no orchestrator was installed - not starting");
-        return;
-    };
-    let orchestrator = deps.orchestrator();
-    let authorities = deps.authorities();
+    // With no orchestrator the runner still works through the idea engine's inline steps.
+    let orchestration = pond_mcp_server::installed_orchestrator_deps()
+        .map(|deps| (deps.orchestrator(), deps.authorities()));
+    if orchestration.is_none() {
+        tracing::info!("long-task runner: no orchestrator was installed - only inline steps run");
+    }
     let (planner, verifier) = match (roles::planner_role(), roles::verifier_role()) {
         (Ok(planner), Ok(verifier)) => (planner, verifier),
         (Err(e), _) | (_, Err(e)) => {
@@ -8252,7 +8323,7 @@ async fn run_long_task_runner(
     // The roles last compiled; a start, a new recipe or an edited one makes a compile due.
     let mut compiled: Option<u64> = None;
     tracing::info!(
-        "long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`"
+        "long-task runner active - helpers are off unless `long_tasks_enabled` and `ext_orchestrator_enabled`"
     );
 
     let mut progressed = false;
@@ -8280,9 +8351,11 @@ async fn run_long_task_runner(
             .await
             .unwrap_or_default();
         // The same line the chat card and the phone show, so where a task waits is never a guess.
-        let candidate = pond_core::shared::services::long_task_queue::run_order(&open)
-            .first()
-            .map(|t| (*t).clone());
+        // With helpers off, an engine task whose next run needs none is still taken.
+        let helpers_on = settings.ext_orchestrator_enabled && settings.long_tasks_enabled;
+        let (candidate, inline) =
+            pond_server::engine_runner::next_task(&engine, &open, helpers_on, chrono::Utc::now())
+                .await;
 
         let household = recipes.list().await.unwrap_or_default();
         let offered = runner::step_roles(&household);
@@ -8291,8 +8364,8 @@ async fn run_long_task_runner(
         let roles_print = roles_fingerprint(&every_role);
         let progress = pond_core::shared::services::prefill_progress::process_prefill_progress();
         // A member's rebuild request makes a compile due even when no role changed.
-        let compile_due = (compiled != Some(roles_print)
-            || !progress.pending_rebuilds().is_empty())
+        let compile_due = orchestration.is_some()
+            && (compiled != Some(roles_print) || !progress.pending_rebuilds().is_empty())
             && matches!(settings.chat_provider.as_str(), "local" | "gguf");
 
         let sessions = storage.list_sessions().await.unwrap_or_default();
@@ -8310,8 +8383,9 @@ async fn run_long_task_runner(
         let Some(slot) = lane
             .acquire(
                 LaneJob::LongTaskStep,
-                settings.ext_orchestrator_enabled
-                    && ((settings.long_tasks_enabled && candidate.is_some()) || compile_due),
+                inline
+                    || (settings.ext_orchestrator_enabled
+                        && ((settings.long_tasks_enabled && candidate.is_some()) || compile_due)),
                 cadence,
                 tick.waives(),
                 sched::saw_activity_since_start(
@@ -8324,14 +8398,13 @@ async fn run_long_task_runner(
             )
             .await
         else {
-            if candidate.is_some() && settings.long_tasks_enabled {
+            if candidate.is_some() && (settings.long_tasks_enabled || inline) {
                 next_poll = Some(quiet_due_in(idle_for, QUIET_SECS, POLL_SECS));
             }
             continue;
         };
         let helpers = LongTaskHelpers {
-            orchestrator: orchestrator.clone(),
-            authorities: authorities.clone(),
+            orchestration: orchestration.clone(),
             tasks: tasks.clone(),
         };
         if compile_due {
@@ -8393,6 +8466,7 @@ async fn run_long_task_runner(
         let Some(task) = candidate else {
             continue;
         };
+        let task = pond_server::engine_runner::begin(&engine, task, chrono::Utc::now()).await;
         match advance_long_task(
             &task,
             tasks.as_ref(),
@@ -8404,6 +8478,8 @@ async fn run_long_task_runner(
             sender.as_ref(),
             before_hooks.as_ref(),
             prefills.as_ref(),
+            &engine,
+            helpers_on,
         )
         .await
         {
@@ -8416,10 +8492,17 @@ async fn run_long_task_runner(
     }
 }
 
+/// What a helper says it cannot do on a pond with no orchestrator.
+const LONG_TASKS_OFF: &str = "this pond has long tasks turned off";
+
 /// What one helper run needs from the server.
 struct LongTaskHelpers {
-    orchestrator: Arc<dyn pond_core::shared::ports::orchestrator::Orchestrator>,
-    authorities: Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
+    /// The orchestrator and the registry its runs are published in; `None` on a pond that
+    /// installed none, where no helper can run.
+    orchestration: Option<(
+        Arc<dyn pond_core::shared::ports::orchestrator::Orchestrator>,
+        Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
+    )>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
 }
 
@@ -8439,6 +8522,9 @@ impl LongTaskHelpers {
         use pond_core::shared::services::long_task_runner as runner;
         use pond_core::shared::services::step_bindings::{process_step_bindings, StepBinding};
 
+        let Some((orchestrator, authorities)) = &self.orchestration else {
+            anyhow::bail!(LONG_TASKS_OFF);
+        };
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = runner::long_task_session_id(task.id(), &run_id);
         let authority = runner::long_task_authority(&session_id, task.scope().clone());
@@ -8476,9 +8562,7 @@ impl LongTaskHelpers {
             spec
         };
         let cancel = tokio_util::sync::CancellationToken::new();
-        let lease = self
-            .authorities
-            .publish(&session_id, authority, cancel.clone());
+        let lease = authorities.publish(&session_id, authority, cancel.clone());
 
         // The run's own report stops it: the model's turn after "stop here" is reasoning nothing
         // reads. A person's turn does not: the helper gives the model up and resumes after it.
@@ -8503,7 +8587,7 @@ impl LongTaskHelpers {
             let held = held.clone();
             async move { held.give_way().await }
         });
-        let run = running_under(InferenceHold::Held(held), self.orchestrator.spawn(spec)).await;
+        let run = running_under(InferenceHold::Held(held), orchestrator.spawn(spec)).await;
         give_way.abort();
         watcher.abort();
         drop(lease);
@@ -8544,6 +8628,9 @@ impl LongTaskHelpers {
         use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
 
+        let Some((orchestrator, authorities)) = &self.orchestration else {
+            anyhow::bail!(LONG_TASKS_OFF);
+        };
         let session_id = format!(
             "{}prefill-compile-{}",
             runner::LONG_TASK_SESSION_PREFIX,
@@ -8569,8 +8656,8 @@ impl LongTaskHelpers {
             .retaining_helpers_for(retention);
         let spec = if rebuild { spec.rebuilding() } else { spec };
         let cancel = tokio_util::sync::CancellationToken::new();
-        let _lease = self.authorities.publish(&session_id, authority, cancel);
-        self.orchestrator.spawn(spec).await?;
+        let _lease = authorities.publish(&session_id, authority, cancel);
+        orchestrator.spawn(spec).await?;
         Ok(())
     }
 }
@@ -8645,6 +8732,8 @@ fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) 
 }
 
 /// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
+/// An idea-engine job's task takes its inline steps, its finish and its failures from the engine;
+/// with `helpers_on` false, a run that needs a helper waits.
 #[allow(clippy::too_many_arguments)]
 async fn advance_long_task(
     task: &pond_core::shared::domain::long_task::LongTask,
@@ -8657,11 +8746,17 @@ async fn advance_long_task(
     sender: &pond_infra::broadcast_notification_sender::BroadcastNotificationSender,
     before_hooks: &pond_server::agent_activations::BeforeHookSources,
     prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
+    engine: &pond_server::engine_runner::EngineDeps,
+    helpers_on: bool,
 ) -> anyhow::Result<bool> {
     use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind, StepState};
     use pond_core::shared::services::agent_activations as activations;
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
     use pond_core::shared::services::step_bindings::StepWork;
+    use pond_core::user_data::services::engine::is_inline_role;
+    use pond_server::engine_runner;
+
+    let engine_task = pond_core::user_data::domain::engine_job::is_engine_task(task.id());
 
     // The goal is the person's words, so a page it links stays readable however long the task runs.
     pond_core::mcp::services::page_addresses::global().note_words(task.goal());
@@ -8687,6 +8782,11 @@ async fn advance_long_task(
             );
             Ok(true)
         }
+        NextRun::GiveUp(reason) if engine_task => {
+            fruitless.remove(task.id());
+            engine_runner::give_up(engine, task, &reason, now).await?;
+            Ok(true)
+        }
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)
@@ -8702,6 +8802,10 @@ async fn advance_long_task(
                 .await;
             }
             Ok(true)
+        }
+        NextRun::Finish if engine_task => {
+            fruitless.remove(task.id());
+            engine_runner::at_finish(engine, task, now).await
         }
         NextRun::Finish => {
             let mut artifacts = artifacts;
@@ -8770,6 +8874,36 @@ async fn advance_long_task(
             Ok(true)
         }
         NextRun::Plan(reason) => {
+            if engine_task {
+                let instead = engine_runner::instead_of_planning(engine, task, &steps, now).await?;
+                if let Some(moved) = instead {
+                    fruitless.remove(task.id());
+                    return Ok(moved);
+                }
+            }
+            if !helpers_on {
+                return Ok(false);
+            }
+            if helpers.orchestration.is_none() {
+                fruitless.remove(task.id());
+                if engine_task {
+                    engine_runner::give_up(engine, task, LONG_TASKS_OFF, now).await?;
+                    return Ok(true);
+                }
+                tasks
+                    .set_task_state(task.id(), LongTaskState::Failed, now)
+                    .await?;
+                if activations::runner_notifies_at_end(task, &steps, offered, false) {
+                    notify_long_task_owner(
+                        sender,
+                        task,
+                        false,
+                        format!("I couldn't finish it: {LONG_TASKS_OFF}."),
+                    )
+                    .await;
+                }
+                return Ok(true);
+            }
             let plannable = activations::plannable_roles(offered);
             let context = match runner::brief_artifact(&artifacts) {
                 Some(found) => tasks
@@ -8810,6 +8944,10 @@ async fn advance_long_task(
             }
             Ok(true)
         }
+        NextRun::Do(step) if engine_task && is_inline_role(step.role()) => {
+            engine_runner::run_inline_step(engine, task, step, now).await
+        }
+        NextRun::Do(_) if !helpers_on => Ok(false),
         NextRun::Do(step) => {
             let mut step = step.clone();
             // A step names a saved role, or carries an agent its plan made when none fit.
@@ -8849,7 +8987,15 @@ async fn advance_long_task(
             let _ = prefills.note_used(role.name(), now).await;
             let key = step.key().clone();
             let mut bodies = std::collections::HashMap::new();
-            for id in runner::inline_ids(&step, &artifacts) {
+            let mut inlined = runner::inline_ids(&step, &artifacts);
+            // An engine task's brief is what makes the work the member's: it is read for every
+            // step whatever its size.
+            if let Some(brief) = runner::brief_artifact(&artifacts).filter(|_| engine_task) {
+                if !inlined.contains(&brief.id) {
+                    inlined.push(brief.id.clone());
+                }
+            }
+            for id in inlined {
                 if let Ok(Some(artifact)) = tasks.get_artifact(task.id(), &id).await {
                     bodies.insert(id, artifact.body().to_string());
                 }

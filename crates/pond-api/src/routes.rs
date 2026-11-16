@@ -18462,22 +18462,37 @@ async fn deep_research_brief(
     pond_core::shared::services::long_task_runner::conversation_brief(&earlier)
 }
 
-/// Every open task, in the order the runner takes them, read once for a request.
-async fn open_long_tasks(
+/// Every open task and the idea engine's open jobs, which share the one line, read once for a
+/// request.
+struct LongTaskLine {
+    open: Vec<pond_core::shared::domain::long_task::LongTask>,
+    jobs: Vec<pond_core::user_data::domain::engine_job::EngineJob>,
+}
+
+impl LongTaskLine {
+    /// The open tasks in the order the runner takes them.
+    fn order(&self) -> Vec<&pond_core::shared::domain::long_task::LongTask> {
+        pond_core::user_data::services::engine::queue::run_order(&self.open, &self.jobs)
+    }
+}
+
+async fn long_task_line(
+    state: &Arc<AppState>,
     repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
-) -> anyhow::Result<Vec<pond_core::shared::domain::long_task::LongTask>> {
+) -> anyhow::Result<LongTaskLine> {
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
-    repo.list_tasks(LongTaskOwnerFilter::Everyone, false).await
+    Ok(LongTaskLine {
+        open: repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, false)
+            .await?,
+        jobs: state.engine.jobs.open().await?,
+    })
 }
 
 /// Where one task waits, as `member` may see it; `null` once it is not in the line.
-fn long_task_queue_view(
-    open: &[pond_core::shared::domain::long_task::LongTask],
-    task_id: &str,
-    member: &str,
-) -> Value {
-    use pond_core::shared::services::long_task_queue::{place_of, run_order, Ahead};
-    let order = run_order(open);
+fn long_task_queue_view(line: &LongTaskLine, task_id: &str, member: &str) -> Value {
+    use pond_core::shared::services::long_task_queue::{place_of, Ahead};
+    let order = line.order();
     let Some(place) = place_of(&order, task_id, Some(member)) else {
         return Value::Null;
     };
@@ -18651,9 +18666,8 @@ async fn start_deep_research(
     answer: Option<&str>,
 ) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
     use pond_core::shared::domain::long_task::AnswerShape;
-    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
     use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
-    use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+    use pond_core::shared::services::long_task_queue::{place_of, waiting_line};
     let repo = long_task_repo(state);
     let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
     let task = pond_core::shared::services::deep_research::research_task(
@@ -18671,10 +18685,8 @@ async fn start_deep_research(
             body,
         });
     let task = open_task(&repo, task, brief).await?;
-    let open = repo
-        .list_tasks(LongTaskOwnerFilter::Everyone, false)
-        .await?;
-    let place = place_of(&run_order(&open), task.id(), Some(member));
+    let line = long_task_line(state, &repo).await?;
+    let place = place_of(&line.order(), task.id(), Some(member));
     tracing::info!(
         target: "giap::trace",
         kind = "long_task_started",
@@ -18693,7 +18705,7 @@ async fn start_deep_research(
 }
 
 /// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
-/// conversation started.
+/// conversation started. What the idea engine makes unasked is read through its own routes.
 async fn list_long_tasks(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -18735,14 +18747,15 @@ async fn list_long_tasks(
         }
     }
     tasks.retain(|task| {
-        query
-            .session_id
-            .as_deref()
-            .is_none_or(|session| task.origin_session_id() == Some(session))
+        !pond_core::user_data::domain::engine_job::is_engine_task(task.id())
+            && query
+                .session_id
+                .as_deref()
+                .is_none_or(|session| task.origin_session_id() == Some(session))
     });
     tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
-    let open = match open_long_tasks(&repo).await {
-        Ok(open) => open,
+    let line = match long_task_line(&state, &repo).await {
+        Ok(line) => line,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -18753,7 +18766,7 @@ async fn list_long_tasks(
     };
     let mut views = Vec::with_capacity(tasks.len());
     for task in &tasks {
-        let queue = long_task_queue_view(&open, task.id(), &member);
+        let queue = long_task_queue_view(&line, task.id(), &member);
         match long_task_view(&repo, task, queue).await {
             Ok(view) => views.push(view),
             Err(e) => {
@@ -18788,7 +18801,8 @@ async fn reachable_long_task(
 
 /// `GET /api/v1/long-tasks/queue` -- every open task in the order the pond will work on them. The
 /// caller's own and the household's carry their goal and progress, so a member can choose which to
-/// stop; another member's is only a place in the line.
+/// stop; another member's is only a place in the line. An idea-engine job keeps its place and is
+/// not listed, so a position here is the one the task's own card gives.
 async fn long_task_queue(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -18801,7 +18815,6 @@ async fn long_task_queue(
 ) -> Response<axum::body::Body> {
     use pond_core::shared::domain::long_task::StepState;
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
-    use pond_core::shared::services::long_task_queue::run_order;
     let Some(member) = long_task_caller(
         &state,
         principal.as_ref(),
@@ -18818,8 +18831,8 @@ async fn long_task_queue(
             .into_response();
     };
     let repo = long_task_repo(&state);
-    let open = match open_long_tasks(&repo).await {
-        Ok(open) => open,
+    let waiting = match long_task_line(&state, &repo).await {
+        Ok(waiting) => waiting,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -18829,8 +18842,11 @@ async fn long_task_queue(
         }
     };
     let mut line = Vec::new();
-    for (index, task) in run_order(&open).into_iter().enumerate() {
+    for (index, task) in waiting.order().into_iter().enumerate() {
         let position = index + 1;
+        if pond_core::user_data::domain::engine_job::is_engine_task(task.id()) {
+            continue;
+        }
         if !long_task_reaches(&member, task) {
             line.push(json!({"position": position, "another_member": true}));
             continue;
@@ -18888,8 +18904,8 @@ async fn get_long_task(
         Err(response) => return response,
     };
     let repo = long_task_repo(&state);
-    let queue = match open_long_tasks(&repo).await {
-        Ok(open) => long_task_queue_view(&open, task.id(), &member),
+    let queue = match long_task_line(&state, &repo).await {
+        Ok(line) => long_task_queue_view(&line, task.id(), &member),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
