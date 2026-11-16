@@ -1,8 +1,8 @@
 use super::*;
 use crate::mcp::mocks::mock_member_notifier::MockMemberNotifier;
 use crate::shared::domain::todo::{
-    resolve_hook, Answer, HookCatalog, HookEvent, HookSource, Place, TodoKind, TodoSource,
-    TodoState,
+    resolve_hook, Answer, HookCatalog, HookEvent, HookSource, Place, Priority, TodoKind,
+    TodoSource, TodoState,
 };
 use crate::shared::mocks::mock_todo::MockTodoRepository;
 use serde_json::Value;
@@ -55,6 +55,11 @@ fn todo(kind: TodoKind, text: &str, hooks: &[(&str, Value)]) -> Todo {
         kind,
         text: text.into(),
         notes: None,
+        list: None,
+        priority: Priority::Normal,
+        steps: Vec::new(),
+        goose_can: None,
+        anchor_id: None,
         state: TodoState::Open,
         due_at: None,
         ask: kind == TodoKind::Todo,

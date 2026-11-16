@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
+use pond_core::shared::domain::todo::{new_todo, zone, HookCatalog, TodoSource, MAX_TEXT_CHARS};
+use pond_core::shared::services::todo_add::add_once;
 use pond_core::user_data::domain::idea::{
     card_label, GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource,
     IdeaState,
@@ -14,6 +16,7 @@ use pond_core::user_data::domain::idea::{
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaRun, IdeaTodo, TopicSeed};
 
 use crate::sqlite_interests::{parse_time, stamp};
+use crate::sqlite_todo::SqliteTodoRepository;
 
 pub struct SqliteIdeaRepository {
     pool: Pool<Sqlite>,
@@ -321,25 +324,25 @@ impl IdeaRepository for SqliteIdeaRepository {
     }
 
     async fn add_todo(&self, profile_id: &str, idea_id: &str, text: &str) -> Result<IdeaTodo> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-        sqlx::query(
-            "INSERT INTO todos (id, profile_id, kind, text, ask, source, source_ref, created_at, \
-             updated_at) VALUES (?, ?, 'todo', ?, 1, 'idea', ?, ?, ?)",
+        let text: String = text.trim().chars().take(MAX_TEXT_CHARS).collect();
+        let todo = new_todo(
+            profile_id,
+            &serde_json::json!({ "text": text }),
+            &HookCatalog::default(),
+            TodoSource::Idea,
+            Some(idea_id.to_string()),
+            Utc::now(),
+            zone(""),
         )
-        .bind(&id)
-        .bind(profile_id)
-        .bind(text.trim())
-        .bind(idea_id)
-        .bind(stamp(now))
-        .bind(stamp(now))
-        .execute(&self.pool)
-        .await
         .context("add a to-do from an idea")?;
+        let added = add_once(&SqliteTodoRepository::new(self.pool.clone()), todo)
+            .await
+            .context("add a to-do from an idea")?;
+        let todo = added.todo();
         Ok(IdeaTodo {
-            id,
-            text: text.trim().to_string(),
-            created_at: now,
+            id: todo.id.clone(),
+            text: todo.text.clone(),
+            created_at: todo.created_at,
         })
     }
 }
@@ -548,6 +551,46 @@ mod tests {
             (source.as_str(), source_ref.as_str(), state.as_str(), ask),
             ("idea", "i1", "open", 1)
         );
+    }
+
+    #[tokio::test]
+    async fn a_step_already_open_on_the_list_is_not_added_twice() {
+        let pool = pool().await;
+        let repo = SqliteIdeaRepository::new(pool.clone());
+        let first = repo
+            .add_todo("jerry", "i1", "Compare three listings")
+            .await
+            .unwrap();
+        let again = repo
+            .add_todo("jerry", "i2", "compare three listings.")
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.id.as_str(), again.text.as_str()),
+            (first.id.as_str(), "Compare three listings")
+        );
+        let theirs = repo
+            .add_todo("liz", "i1", "Compare three listings")
+            .await
+            .unwrap();
+        assert_ne!(theirs.id, first.id, "another member's list");
+
+        sqlx::query("UPDATE todos SET state = 'done' WHERE id = ?")
+            .bind(&first.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let afresh = repo
+            .add_todo("jerry", "i2", "Compare three listings")
+            .await
+            .unwrap();
+        assert_ne!(afresh.id, first.id, "a done to-do does not block a new one");
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM todos WHERE profile_id = 'jerry'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]

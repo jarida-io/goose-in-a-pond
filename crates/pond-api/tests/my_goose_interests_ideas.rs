@@ -372,8 +372,17 @@ async fn taking_an_idea_on_yourself_leaves_goose_out_of_it() {
     assert_eq!(status, StatusCode::OK, "{taken}");
     assert_eq!(taken["todos"].as_array().unwrap().len(), 2);
     assert_eq!(
+        (&taken["todos"][0]["source"], &taken["todos"][0]["priority"]),
+        (&json!("idea"), &json!("normal"))
+    );
+    assert_eq!(
         taken["idea"]["state"], "done",
         "working would show Goose as on it"
+    );
+    let (_, again) = call(&pond, Method::POST, "/me/ideas/idea-1/mine", json!({})).await;
+    assert_eq!(
+        again["todos"], taken["todos"],
+        "steps already open on the list are not added twice"
     );
     let (_, ideas) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
     assert_eq!(ideas["ideas"][0]["state"], "done");

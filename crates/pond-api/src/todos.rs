@@ -18,10 +18,12 @@ use serde_json::{json, Value};
 
 use pond_core::security::ports::policy::Principal;
 use pond_core::shared::domain::todo::{
-    apply_patch, hook_drafts, new_todo, zone, Answer, AnswerRefused, HookCatalog, HookError,
-    HookEvent, Place, StateFilter, Todo, TodoSource, Transition, Tz, MAX_PLACES_PER_MEMBER,
+    apply_patch, hook_drafts, new_todo, todo_key, zone, Answer, AnswerRefused, HookCatalog,
+    HookError, HookEvent, Place, StateFilter, Todo, TodoSource, Transition, Tz,
+    MAX_PLACES_PER_MEMBER,
 };
 use pond_core::shared::ports::todo::{HookEventQueue, TodoRepository};
+use pond_core::shared::services::todo_add::{add_once, AddedTodo};
 use pond_core::shared::services::todo_offers::{offer_due, offer_view, todo_from_offer};
 use pond_core::user_data::ports::reminder_repository::ReminderRepository;
 use pond_infra::sqlite_reminder::SqliteReminderRepository;
@@ -124,15 +126,21 @@ async fn list(
     ))
 }
 
-/// Creates a to-do for `member` from a `POST /me/todos` body; also how an idea's steps or Goose
-/// add one with their own `source`.
+/// The to-do the member's list already held, answered with 200 in place of a second.
+fn already_listed(todo: &Todo) -> Response {
+    let mut view = todo.view();
+    view["duplicate_of"] = json!(todo.id);
+    (StatusCode::OK, Json(view)).into_response()
+}
+
+/// Adds a to-do for `member` from a `POST /me/todos` body, unless their list already holds it.
 pub(crate) async fn add(
     state: &AppState,
     member: &str,
     body: &Value,
     source: TodoSource,
     source_ref: Option<String>,
-) -> Result<Todo, Failure> {
+) -> Result<AddedTodo, Failure> {
     let catalog = catalog_for(state, member, body).await?;
     let todo = new_todo(
         member,
@@ -144,8 +152,7 @@ pub(crate) async fn add(
         timezone(state).await,
     )
     .map_err(refused)?;
-    repo(state).create(&todo).await.map_err(server_error)?;
-    Ok(todo)
+    add_once(&repo(state), todo).await.map_err(server_error)
 }
 
 async fn create(
@@ -155,8 +162,12 @@ async fn create(
 ) -> Result<Response, Failure> {
     let member = caller_member(&state, principal.as_ref()).await?;
     let body = body_of(&body)?;
-    let todo = add(&state, &member, &body, TodoSource::You, None).await?;
-    Ok((StatusCode::CREATED, Json(todo.view())).into_response())
+    Ok(
+        match add(&state, &member, &body, TodoSource::You, None).await? {
+            AddedTodo::New(todo) => (StatusCode::CREATED, Json(todo.view())).into_response(),
+            AddedTodo::Listed { todo, .. } => already_listed(&todo),
+        },
+    )
 }
 
 async fn edit(
@@ -397,6 +408,26 @@ async fn accept_offer(
     };
     let todo = todo_from_offer(reminder, &member, due, now, tz);
     let repo = repo(&state);
+    if let Some(mut kept) = repo
+        .open_with_key(&member, &todo_key(&todo.text))
+        .await
+        .map_err(server_error)?
+    {
+        // Settled first, so an answer from another screen never moves the to-do they have.
+        return match reminders
+            .settle_offer(&member, &reminder_id, true, now)
+            .await
+        {
+            Ok(true) => {
+                if kept.take_moment_from(&todo, now) {
+                    repo.update(&kept, true).await.map_err(server_error)?;
+                }
+                Ok(already_listed(&kept))
+            }
+            Ok(false) => Err(not_found("offer")),
+            Err(e) => Err(server_error(e)),
+        };
+    }
     repo.create(&todo).await.map_err(server_error)?;
     match reminders
         .settle_offer(&member, &reminder_id, true, now)

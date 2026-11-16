@@ -102,6 +102,7 @@ pub trait IdeaRepository: Send + Sync {
         at: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// One open to-do on the member's list, from an idea's step.
+    /// One open to-do on the member's list, from an idea's step: the one already there when
+    /// the list holds it.
     async fn add_todo(&self, profile_id: &str, idea_id: &str, text: &str) -> Result<IdeaTodo>;
 }

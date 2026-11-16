@@ -1,6 +1,6 @@
-//! SQLite-backed [`TodoRepository`] and [`HookEventQueue`], over migrations 0087 and 0088, and the
-//! member's rows a hook may name (cart items, mail and calendar accounts, webhooks). Every time is
-//! written as RFC 3339 UTC to the second, so the due queries compare text.
+//! SQLite-backed [`TodoRepository`] and [`HookEventQueue`], over migrations 0087, 0088 and 0115,
+//! and the member's rows a hook may name (cart items, mail and calendar accounts, webhooks). Every
+//! time is written as RFC 3339 UTC to the second, so the due queries compare text.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -10,8 +10,8 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
 use pond_core::shared::domain::todo::{
-    rfc3339, Hook, HookEvent, HookSource, HookSpec, Place, StateFilter, Todo, TodoKind, TodoSource,
-    TodoState, MAX_ASKS,
+    rfc3339, Hook, HookEvent, HookSource, HookSpec, Place, Priority, StateFilter, Todo, TodoKind,
+    TodoSource, TodoState, MAX_ASKS,
 };
 use pond_core::shared::ports::todo::{HookEventQueue, TodoRepository};
 
@@ -26,7 +26,8 @@ impl SqliteTodoRepository {
 }
 
 const TODO_COLUMNS: &str = "id, profile_id, kind, text, notes, state, due_at, ask, source, \
-     source_ref, last_asked_at, asked, snoozed_until, created_at, updated_at, done_at";
+     source_ref, last_asked_at, asked, snoozed_until, created_at, updated_at, done_at, list, \
+     priority, steps_json, goose_can_json, anchor_id";
 const HOOK_COLUMNS: &str =
     "id, todo_id, kind, spec, label, next_fire_at, last_fired_at, created_at";
 
@@ -60,6 +61,14 @@ fn todo_of(row: &SqliteRow) -> Result<Todo> {
         owner: row.try_get("profile_id")?,
         text: row.try_get("text")?,
         notes: row.try_get("notes")?,
+        list: row.try_get("list")?,
+        // An unreadable priority, steps or offer reads as none, so the to-do itself is kept.
+        priority: Priority::parse(&row.try_get::<String, _>("priority")?).unwrap_or_default(),
+        steps: serde_json::from_str(&row.try_get::<String, _>("steps_json")?).unwrap_or_default(),
+        goose_can: row
+            .try_get::<Option<String>, _>("goose_can_json")?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
+        anchor_id: row.try_get("anchor_id")?,
         due_at: maybe_time(row, "due_at")?,
         ask: row.try_get::<i64, _>("ask")? != 0,
         source_ref: row.try_get("source_ref")?,
@@ -72,6 +81,18 @@ fn todo_of(row: &SqliteRow) -> Result<Todo> {
         hooks: Vec::new(),
         id,
     })
+}
+
+fn steps_json(todo: &Todo) -> Result<String> {
+    serde_json::to_string(&todo.steps).context("writing a to-do's steps")
+}
+
+fn goose_can_json(todo: &Todo) -> Result<Option<String>> {
+    todo.goose_can
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("writing what Goose can do for a to-do")
 }
 
 fn hook_of(row: &SqliteRow) -> Result<(String, Hook)> {
@@ -261,7 +282,7 @@ impl TodoRepository for SqliteTodoRepository {
         let mut tx = self.pool.begin().await?;
         sqlx::query(&format!(
             "INSERT INTO todos ({TODO_COLUMNS}) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ))
         .bind(&todo.id)
         .bind(&todo.owner)
@@ -279,6 +300,11 @@ impl TodoRepository for SqliteTodoRepository {
         .bind(rfc3339(todo.created_at))
         .bind(rfc3339(todo.updated_at))
         .bind(todo.done_at.map(rfc3339))
+        .bind(&todo.list)
+        .bind(todo.priority.as_str())
+        .bind(steps_json(todo)?)
+        .bind(goose_can_json(todo)?)
+        .bind(&todo.anchor_id)
         .execute(&mut *tx)
         .await
         .context("saving a to-do")?;
@@ -317,7 +343,8 @@ impl TodoRepository for SqliteTodoRepository {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "UPDATE todos SET kind = ?, text = ?, notes = ?, state = ?, due_at = ?, ask = ?, \
-             last_asked_at = ?, asked = ?, snoozed_until = ?, updated_at = ?, done_at = ? \
+             last_asked_at = ?, asked = ?, snoozed_until = ?, updated_at = ?, done_at = ?, \
+             list = ?, priority = ?, steps_json = ?, goose_can_json = ?, anchor_id = ? \
              WHERE id = ? AND profile_id = ?",
         )
         .bind(todo.kind.as_str())
@@ -331,6 +358,11 @@ impl TodoRepository for SqliteTodoRepository {
         .bind(todo.snoozed_until.map(rfc3339))
         .bind(rfc3339(todo.updated_at))
         .bind(todo.done_at.map(rfc3339))
+        .bind(&todo.list)
+        .bind(todo.priority.as_str())
+        .bind(steps_json(todo)?)
+        .bind(goose_can_json(todo)?)
+        .bind(&todo.anchor_id)
         .bind(&todo.id)
         .bind(&todo.owner)
         .execute(&mut *tx)

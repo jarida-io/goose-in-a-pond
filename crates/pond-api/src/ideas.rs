@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use pond_core::security::ports::policy::Principal;
+use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::idea::{GooseKind, Idea, IdeaState};
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaTodo};
 use pond_core::user_data::services::inference_lane::LaneJob;
@@ -107,24 +108,14 @@ async fn the_idea(state: &AppState, member: &str, id: &str) -> Result<Idea, Fail
         .ok_or_else(|| failure(StatusCode::NOT_FOUND, "no such idea"))
 }
 
-/// A to-do as `/me/todos` shows one; its hooks are the to-do routes' business.
-fn todo_json(todo: &IdeaTodo) -> Value {
-    json!({
-        "id": todo.id,
-        "kind": "todo",
-        "text": todo.text,
-        "notes": null,
-        "state": "open",
-        "due_at": null,
-        "hooks": [],
-        "ask": true,
-        "source": "idea",
-        "last_asked_at": null,
-        "asked": 0,
-        "snoozed_until": null,
-        "created_at": todo.created_at,
-        "done_at": null,
-    })
+/// The to-do as `/me/todos` shows it.
+async fn todo_json(state: &AppState, member: &str, todo: &IdeaTodo) -> Result<Value, Failure> {
+    crate::todos::repo(state)
+        .get(member, &todo.id)
+        .await
+        .map_err(server_error)?
+        .map(|kept| kept.view())
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "no such to-do"))
 }
 
 /// `POST /me/ideas/{id}/mine`: each step the idea suggests becomes an open to-do, and a new idea
@@ -148,7 +139,7 @@ async fn mine(
             .add_todo(&member, &idea.id, step)
             .await
             .map_err(server_error)?;
-        todos.push(todo_json(&todo));
+        todos.push(todo_json(&state, &member, &todo).await?);
     }
     if idea.state == IdeaState::New {
         repo.set_state(&member, &idea.id, IdeaState::Done, None)
