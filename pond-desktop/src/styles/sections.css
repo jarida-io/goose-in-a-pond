@@ -2593,14 +2593,13 @@
   color: var(--fg);
   width: 100%;
   user-select: text;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition: border-color var(--transition-fast);
 }
 .row__control input:focus,
 .row__control select:focus,
 .row__control textarea:focus {
   outline: none;
   border-color: var(--purple-400);
-  box-shadow: 0 0 0 3px rgba(140, 75, 255, 0.10);
 }
 .row__control select {
   cursor: pointer;
@@ -3691,12 +3690,11 @@
   font-family: var(--font-body);
   color: var(--fg);
   outline: none;
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition: border-color var(--transition-fast);
 }
 
 .secret-modal__input:focus {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px rgba(140, 75, 255, 0.12);
   background: var(--color-surface);
 }
 

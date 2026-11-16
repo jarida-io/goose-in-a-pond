@@ -766,7 +766,7 @@ button.hm-tile:hover { background: var(--hub-bg); }
 .preset-chip { border: 1px solid var(--line); background: var(--panel); color: var(--ink-2); font-family: inherit; font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 11px; cursor: pointer; transition: all .15s; }
 .preset-chip[data-active="true"] { background: var(--pp); border-color: var(--pp); color: #fff; box-shadow: 0 4px 12px rgba(124,58,237,.26); }
 .prompt-ta { width: 100%; border: 1px solid var(--line); background: var(--hub-bg); border-radius: 13px; padding: 14px 16px; font-family: inherit; font-size: 13.5px; font-weight: 500; line-height: 1.6; color: var(--ink); resize: vertical; outline: none; }
-.prompt-ta:focus { border-color: var(--pp); box-shadow: 0 0 0 3px var(--pp-50); }
+.prompt-ta:focus { border-color: var(--pp); }
 .prompt-foot { display: flex; align-items: center; justify-content: space-between; padding: 12px 4px 4px; }
 .prompt-foot__tok { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; color: var(--mut); }
 .varchips { display: flex; flex-wrap: wrap; gap: 7px; padding: 8px; }

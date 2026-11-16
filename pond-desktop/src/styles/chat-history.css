@@ -90,24 +90,14 @@
   transition: border-color 0.15s;
 }
 
-/* One ring, and it belongs to the pill rather than the box inside it.
- *
- * base.css gives every input a 3px focus glow AND an !important focus-visible
- * outline — a deliberate safety net so no control can end up with no indicator
- * at all. This control already has one: the whole pill lights up. Left alone,
- * focusing the field drew the pill's ring, the input's glow and the net's
- * outline on the same event, three rings deep.
- *
- * The net is overridden here, with the same !important it uses, because what
- * it exists to prevent — zero feedback — is satisfied by the parent. Anything
- * that removes the rule below must put a ring back on the pill.
- */
+/* One ring, and it belongs to the pill rather than the box inside it: the
+ * field itself is borderless, so the pill's border is the only edge that lights
+ * up. No halo outside it -- that would be a second ring on the same event. */
 /* `--focus-ring`, not `--color-accent`: the accent measured 2.97:1 against the
    pill's own fill, just under the 3:1 a focus indicator owes its adjacent
    colours. The focus token is the lighter one the app reserves for this. */
 .chist__search:focus-within {
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 3px var(--color-accent-subtle);
 }
 
 .chist__searchInput {
@@ -118,13 +108,6 @@
   font-family: var(--font-body);
   font-size: var(--text-base);
   width: 140px;
-}
-
-.chist__searchInput:focus,
-.chist__searchInput:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
-  border-color: transparent;
 }
 
 .chist__searchInput::placeholder { color: var(--color-text-tertiary); }
