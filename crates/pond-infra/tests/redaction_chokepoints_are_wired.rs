@@ -95,10 +95,11 @@ fn every_event_log_write_sink_goes_through_the_redactor() {
         );
     }
     assert_eq!(
-        write_sinks, 2,
-        "expected exactly 2 write-path event logs (the shared binding and the \
-         SqliteSecurityPolicy audit sink); found {write_sinks}. A new one needs \
-         its own wrapper and a line in this count."
+        write_sinks, 3,
+        "expected exactly 3 write-path event logs (the shared binding, the \
+         SqliteSecurityPolicy audit sink, and the settings audit sink in \
+         audited_settings_repo); found {write_sinks}. A new one needs its own \
+         wrapper and a line in this count."
     );
 }
 
