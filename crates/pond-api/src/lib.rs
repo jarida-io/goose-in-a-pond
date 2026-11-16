@@ -2,6 +2,7 @@
 
 mod about_me;
 mod agent_notes;
+mod anchors;
 pub mod audio_devices;
 mod browser;
 mod camera;
@@ -13,10 +14,12 @@ mod catalog;
 pub mod connections;
 mod connectors;
 mod context_cards;
+mod deliverables;
 pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
+mod engine_log;
 pub mod engine_stores;
 mod fact_sheet;
 pub mod factory_reset;
@@ -41,6 +44,7 @@ pub mod oauth_callback;
 pub mod pairing_lock;
 pub mod player;
 pub mod pond_admin;
+mod questions;
 pub mod quiet_pass;
 mod report_export;
 pub mod rides;

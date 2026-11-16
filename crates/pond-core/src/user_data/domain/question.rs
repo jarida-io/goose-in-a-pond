@@ -13,6 +13,10 @@ const MAX_TEXT_CHARS: usize = 200;
 const MAX_OPTION_CHARS: usize = 60;
 const MAX_OTHER_CHARS: usize = 500;
 
+/// The two options of a question that asks whether a guessed interest is one.
+pub const INTEREST_FOLLOW: &str = "Follow it";
+pub const INTEREST_DROP: &str = "Not interested";
+
 /// The key two wordings of one question share.
 pub fn text_key(text: &str) -> String {
     topic_key(text)
@@ -120,6 +124,12 @@ impl Answer {
         let mut parts = self.choices.clone();
         parts.extend(self.text.clone());
         parts.join("; ")
+    }
+
+    /// Whether `option` is among the choices, however it is spelled.
+    pub fn chose(&self, option: &str) -> bool {
+        let key = topic_key(option);
+        self.choices.iter().any(|choice| topic_key(choice) == key)
     }
 }
 
@@ -417,6 +427,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(wants.answer.unwrap().choices, ["More", "Under KSh 50,000"]);
+    }
+
+    #[test]
+    fn an_interest_question_is_answered_with_its_two_options() {
+        let mut asked = Question::new(
+            "jerry",
+            "b1",
+            QuestionPurpose::Interest,
+            "Do you want to keep up with Formula 1?",
+            &[INTEREST_FOLLOW.to_string(), INTEREST_DROP.to_string()],
+            false,
+            Utc::now(),
+        )
+        .unwrap();
+        asked
+            .answer(chose(&["follow it"], None), Utc::now())
+            .unwrap();
+        let answer = asked.answer.unwrap();
+        assert!(answer.chose(INTEREST_FOLLOW));
+        assert!(!answer.chose(INTEREST_DROP));
     }
 
     #[test]
