@@ -1999,6 +1999,8 @@ export interface ActivitySummary {
   window: string;
   since: string;
   total: number;
+  /** True when the server stopped counting at its row cap, so `total` is a floor. */
+  truncated?: boolean;
   by_category: Record<string, number>;
 }
 
