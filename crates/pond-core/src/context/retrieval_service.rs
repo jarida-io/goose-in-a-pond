@@ -34,8 +34,12 @@ pub fn label(corpus: Corpus, row_id: &str) -> &'static str {
     }
     match row_id.split_once(':').map(|(kind, _)| kind) {
         Some("interest") => "from your interests",
-        Some("topic") => "from the news topics I keep for you",
-        Some("portrait") => "from what I have pieced together about you",
+        Some("fact") => "from your fact sheet",
+        Some("dont") => "something you asked me not to do",
+        Some("answer") => "from an answer you gave me",
+        Some("anchor") => "from something you are planning or following",
+        Some("deliverable") => "from something I made for you",
+        Some("capture") => "from a picture you shared",
         Some("saved") => "something you saved",
         Some("screenshot") => "from a screenshot you shared",
         _ => provenance(corpus),
@@ -305,6 +309,23 @@ mod tests {
             "from your interests"
         );
         assert_eq!(label(Corpus::Personal, "profile:abc"), "from your profile");
+        for (row_id, said) in [
+            ("fact:abc", "from your fact sheet"),
+            ("dont:abc", "something you asked me not to do"),
+            ("answer:abc", "from an answer you gave me"),
+            ("anchor:abc", "from something you are planning or following"),
+            (
+                "anchor:abc:liz",
+                "from something you are planning or following",
+            ),
+            ("deliverable:abc", "from something I made for you"),
+            ("capture:abc", "from a picture you shared"),
+        ] {
+            assert_eq!(label(Corpus::Personal, row_id), said);
+        }
+        for retired in ["portrait:jerry", "topic:abc"] {
+            assert_eq!(label(Corpus::Personal, retired), "from your profile");
+        }
         assert_eq!(
             label(Corpus::Digest, "saved:abc"),
             provenance(Corpus::Digest)

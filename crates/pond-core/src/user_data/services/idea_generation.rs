@@ -351,7 +351,7 @@ pub fn kind_guidance(kind: IdeaKind, name: &str, place: Option<&str>) -> String 
 }
 
 /// The seeds for one run: the topic map's best unused topic and something the member is working
-/// on; with no topic map yet, what they are working on and their research-worthy interests. A
+/// on; with no topic map yet, what they are working on and the interests they confirmed. A
 /// topic an idea built on in the last week rests.
 pub fn pick_seeds(
     topic_map: &[TopicSeed],
@@ -901,8 +901,8 @@ mod tests {
         let seeds = pick_seeds(
             &[],
             &[
-                interest("i1", "Primetime", false, 1),
-                interest("i2", "Toyota Fielder", false, 4),
+                interest("i1", "Primetime", false, 40),
+                interest("i2", "Toyota Fielder", true, 1),
             ],
             Some(&portrait(&["MCP Dev Summit Nairobi talk"])),
             &[],
@@ -914,7 +914,7 @@ mod tests {
         );
         assert!(
             !labels.contains(&"Primetime"),
-            "one conversation is curiosity, never a seed"
+            "an unconfirmed interest is a candidate, never a seed"
         );
     }
 

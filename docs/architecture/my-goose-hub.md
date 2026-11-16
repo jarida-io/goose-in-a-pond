@@ -130,7 +130,8 @@ The interests interview below and the setup interview in chat remain for older p
 
 ## 1. Interests, the interview that builds them, and the portrait
 
-Tables: `interests`, `member_portraits` (migration 0086).
+Tables: `interests` (migration 0086), `interest_sightings` (0089). The portrait has no table
+of its own: it is read from the member's fact sheet.
 
 ```
 Interest = { "id", "topic": "Formula 1",
@@ -151,9 +152,12 @@ Interest = { "id", "topic": "Formula 1",
 - `DELETE /me/interests/{id}` → 204
 
 Memory extraction stops turning a one-off question into a trait. What a conversation shows the
-member caring about goes to `interests` as an unconfirmed row (or adds one to its `evidence`);
-the phone offers guesses with `evidence >= 2` for the member to confirm. The news and ideas read
-confirmed rows and guesses with `evidence >= 3`, never an `avoid` row.
+member caring about goes to `interests` as an unconfirmed row (or adds one to its `evidence`).
+An unconfirmed row is a candidate: it stays listed for the member and feeds nothing. The news,
+ideas, prompts and the personal-context index read confirmed rows only, never an `avoid` row
+(`Interest::feeds_research`). A candidate is ready to be offered for confirming once
+conversations on three separate days, in the household's time zone, showed it, or the member
+voted a story of it up (`interest::ready_to_offer`, `InterestRepository::ready_to_offer`).
 
 The interview is a chat with tap answers, one question at a time, and digs into each answer
 (which team, which writers, how closely they follow it, whether they want news of it).
@@ -173,11 +177,46 @@ Interview = { "status": "not_started|asking|thinking|review|done",
 - `POST /me/interests/interview/approve` `{"keep":[draft ids], "edits":{id: partial Interest}}`
   → `{"saved": n}`, status `done`
 
-The portrait is the background model's account of the member, rewritten on the lane once a day
-or after the interests change. The news and ideas prompts read it.
+The portrait is read from the member's fact sheet (`fact_sheet::as_portrait`); no job writes
+it. Identity, work and home lines make the summary, interest lines `into`, plans and things
+they are looking for `working_on`, and tastes and food `likes`. The news, ideas and interview
+prompts read it.
 
-- `GET /me/portrait` → `{"summary": "two or three sentences", "into": [topic], "working_on":
-  [string], "likes": [string], "updated_at"}`, or 404 before the first is written
+- `GET /me/portrait` → `{"summary": "a few sentences", "into": [string], "working_on":
+  [string], "likes": [string], "updated_at"}`, or 404 while the fact sheet is empty
+
+### The fact sheet and the don't-list
+
+Tables: `fact_sheet` (migration 0109), `dont_list` (0110). The design is in
+[idea-engine.md](idea-engine.md), sections 6.2 and 6.7.
+
+```
+Fact = { "id", "category": "identity|home|work|people|plan|hunt|interest|food|health|style|
+                            routine|avoid|other",
+  "fact": "Lives in Kilimani", "confidence": "sure|likely|said", "since": string|null,
+  "source": {"kind": "memory|summary|interest|anchor|answer|interview|you", "ref": id|null},
+  "tools": ["get_weather"], "pinned": bool, "score": n, "used": n, "state": "active",
+  "created_at", "updated_at" }
+Rule = { "id", "rule": "recipes built on a colour preference", "strength": "never|avoid",
+  "reasons": ["too_generic|not_relevant|wrong_facts|already_know|bad_timing"],
+  "said": string|null, "origin": "reject|stop|fact|you", "origin_ref": id|null, "created_at" }
+```
+
+- `GET /me/facts` → `{"facts":[Fact], "limit": 100}`: the active lines, pinned first, then the
+  member's own, then by score
+- `POST /me/facts` `{category, fact}` → the same list. The line is the member's own: sure, and
+  kept whatever a rebuild says. Writing a line they once removed brings it back
+- `PATCH /me/facts/{id}` `{fact?, category?, pinned?}` → Fact. Rewording a line makes it the
+  member's own; 409 when another line already says that
+- `DELETE /me/facts/{id}` → 204. The line is marked removed, so no rebuild learns it again, and
+  an `avoid` rule with origin `fact` is added so nothing is built on it
+- `POST /me/facts/rebuild` → 202 `{"state":"queued|running"}`. It adds a queued `engine_jobs`
+  row of kind `fact_sheet`, class `asked`, with no task, unless the member already has one
+  open. Asking for any engine job works this way; the engine's runner picks queued rows up
+- `GET /me/dont` → `{"rules":[Rule]}`, `never` rules first, then newest
+- `POST /me/dont` `{rule, strength?}` → the same list; `strength` is `never` when left out. A
+  rule said twice is one rule, and a `never` is not weakened by a later `avoid`
+- `DELETE /me/dont/{id}` → the same list
 
 ## 2. News
 

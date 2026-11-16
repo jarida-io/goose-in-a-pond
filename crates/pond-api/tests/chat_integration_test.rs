@@ -92,6 +92,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -527,6 +528,7 @@ async fn make_app_with_agent(
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),

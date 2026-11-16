@@ -52,7 +52,7 @@ impl MapSources {
     /// The sources as both prompts quote them.
     pub fn block(&self) -> String {
         let mut out = format!("Member: {}\nToday: {}\n", self.name, self.today);
-        out.push_str("\nINTERESTS (confirmed by them, or seen in at least three conversations):\n");
+        out.push_str("\nINTERESTS (confirmed by them):\n");
         for (i, interest) in self.interests.iter().enumerate() {
             out.push_str(&format!(
                 "{}. {} [{}; {}]",

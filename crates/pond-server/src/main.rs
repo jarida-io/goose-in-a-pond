@@ -4122,6 +4122,8 @@ async fn run_server(
         let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
         let gen_interests =
             pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone());
+        let gen_facts =
+            pond_infra::sqlite_fact_sheet::SqliteFactSheetRepository::new(db.system.clone());
         let gen_queue: Arc<
             dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
         > = Arc::new(
@@ -4197,7 +4199,7 @@ async fn run_server(
                     }
                     res = compose_suggestions(
                         gen_memories.as_ref(),
-                        &gen_interests,
+                        (&gen_interests, &gen_facts),
                         gen_queue.as_ref(),
                         gen_provider.clone(),
                         &subjects,
@@ -4265,7 +4267,7 @@ async fn run_server(
         last_user_activity: last_user_activity.clone(),
         settings: settings_repo.clone(),
     };
-    my_goose_mind::spawn_portrait_job(mind.clone());
+    my_goose_mind::spawn_interest_pictures_job(mind.clone());
     my_goose_mind::spawn_memory_resort_job(mind.clone());
     my_goose_mind::spawn_screenshot_notes_job(mind.clone());
     my_goose_mind::spawn_watch_judge_job(mind.clone(), watch_repo, watch_notifier);
@@ -4744,6 +4746,7 @@ async fn run_server(
         suggestion_queue: Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db,
         onboarding_repo,
         handshake: handshake.clone(),
@@ -7026,7 +7029,11 @@ struct ComposeReport {
 /// Early returns still spend the lane's interval: the caller holds the slot guard.
 async fn compose_suggestions(
     memories: &dyn pond_core::user_data::ports::memory_repository::MemoryRepository,
-    interests: &dyn pond_core::user_data::ports::interests::InterestRepository,
+    // What is known of the notes' owner: their confirmed interests and their fact sheet.
+    (interests, facts): (
+        &dyn pond_core::user_data::ports::interests::InterestRepository,
+        &dyn pond_core::user_data::ports::fact_sheet::FactSheetRepository,
+    ),
     queue: &dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
     provider: Arc<
         tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>,
@@ -7080,10 +7087,17 @@ async fn compose_suggestions(
         return Ok(empty);
     };
 
-    // The owner's portrait and confirmed interests, so each question is worth looking up for them.
+    // The owner's fact sheet and confirmed interests, so each question is worth looking up for
+    // them.
     let about = match candidates.first().and_then(|m| m.profile_id.as_deref()) {
-        Some(owner) => pond_core::user_data::services::member_portrait::about_member(
-            interests.portrait(owner).await.ok().flatten().as_ref(),
+        Some(owner) => pond_core::user_data::services::fact_sheet::about_from_sheet(
+            &facts
+                .list(
+                    owner,
+                    pond_core::user_data::domain::fact_sheet::FactState::Active,
+                )
+                .await
+                .unwrap_or_default(),
             &interests.list(owner).await.unwrap_or_default(),
         ),
         None => None,

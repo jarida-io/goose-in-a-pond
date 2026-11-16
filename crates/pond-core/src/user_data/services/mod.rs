@@ -1,7 +1,10 @@
 pub mod activity_watcher;
 pub mod consolidation_schedule;
 pub mod device_edit;
+pub mod dont_list;
+pub mod engine;
 pub mod face_recognition_slot;
+pub mod fact_sheet;
 pub mod household_permission;
 pub mod idea_generation;
 pub mod identity_resolution;
@@ -10,7 +13,6 @@ pub mod interest_interview;
 pub mod location;
 pub mod member_attribution;
 pub mod member_interview;
-pub mod member_portrait;
 pub mod memory_cleanup;
 pub mod memory_consolidation;
 pub mod memory_extraction;

@@ -79,7 +79,8 @@ pub fn render_system(name: &str, planned: u32) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct KnownAboutMember {
     pub portrait: Option<MemberPortrait>,
-    /// Confirmed rows and strong guesses; avoided rows too, so they are not asked about again.
+    /// Confirmed rows, guesses ready to be offered, and avoided rows so they are not asked
+    /// about again.
     pub interests: Vec<Interest>,
     /// Memory texts, most important first.
     pub memories: Vec<String>,
@@ -95,10 +96,7 @@ fn interest_line(interest: &Interest) -> String {
     } else if interest.confirmed {
         line.push_str(&format!("; {}", interest.depth.as_str()));
     } else {
-        line.push_str(&format!(
-            "; a guess from {} conversations",
-            interest.evidence
-        ));
+        line.push_str("; a guess to confirm with them");
     }
     line.push(')');
     line
@@ -617,7 +615,7 @@ mod tests {
             memories: vec!["Jerry is shopping for a Toyota Fielder.".into()],
         };
         let message = build_user_message("Jerry", &known, &InterestInterview::default());
-        assert!(message.contains("- The Boys (film_tv; Gen V; a guess from 3 conversations)"));
+        assert!(message.contains("- The Boys (film_tv; Gen V; a guess to confirm with them)"));
         assert!(message.contains("- Jerry is shopping for a Toyota Fielder."));
         assert!(message.contains("write the first question"));
     }

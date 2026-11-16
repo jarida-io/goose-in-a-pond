@@ -149,6 +149,7 @@ async fn make_app_full(
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: db,
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -462,6 +463,7 @@ async fn prompt_template_delete_system_returns_403() {
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -1331,6 +1333,7 @@ async fn returns_501_when_repos_not_configured() {
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),

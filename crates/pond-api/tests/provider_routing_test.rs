@@ -206,6 +206,7 @@ async fn make_app_with_provider(
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -575,6 +576,7 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),
@@ -718,6 +720,7 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         suggestion_queue: std::sync::Arc::new(
             pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
         ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),

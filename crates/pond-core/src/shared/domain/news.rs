@@ -105,7 +105,7 @@ pub struct InterestRow {
     pub confirmed: bool,
 }
 
-/// The background model's account of a member (`member_portraits`), for tone and angle.
+/// A member's portrait, derived from their fact sheet, for tone and angle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Portrait {
     pub summary: String,

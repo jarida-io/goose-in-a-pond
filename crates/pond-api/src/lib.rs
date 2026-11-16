@@ -17,6 +17,8 @@ pub mod developer;
 pub mod device_events;
 pub(crate) mod document_extract;
 pub mod download_failure;
+pub mod engine_stores;
+mod fact_sheet;
 pub mod factory_reset;
 mod home_location;
 pub mod host_guard;
@@ -190,6 +192,8 @@ pub struct AppState {
     /// Suggestions composed from the household's memories; not an `Option`, since every DB has one.
     pub suggestion_queue:
         Arc<dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository>,
+    /// The idea engine's stores: fact sheets, don't-lists and the job log.
+    pub engine: EngineStores,
     /// Sync all connected accounts now rather than on the timer; `None` where nothing can sync.
     pub account_sync: Option<Arc<dyn pond_core::context::ports::AccountSync>>,
     /// IoT sensor reading storage (uses logs DB).
@@ -427,6 +431,7 @@ pub async fn apply_embedding_choice(
     state.embedder.choose(choice).await;
 }
 
+pub use engine_stores::EngineStores;
 pub use voice_agent::{compile_voice_prefill, spawn_voice_prefill};
 
 /// Background prefix warm-up, mirrored into `state.warmup`; a failed warm-up just starts cold.

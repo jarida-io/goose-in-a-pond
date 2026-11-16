@@ -307,6 +307,9 @@ async fn approve(
     if let Some(lane) = state.lane.as_ref().filter(|_| kept_interests > 0) {
         let _ = lane.wake(LaneJob::Ideas).await;
     }
+    if kept_facts + kept_interests > 0 {
+        crate::fact_sheet::rebuild_after_interview(&state, &member).await;
+    }
     Ok(Json(json!({
         "facts": kept_facts,
         "interests": kept_interests,

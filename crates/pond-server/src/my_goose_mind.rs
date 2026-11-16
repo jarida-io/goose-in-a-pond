@@ -1,7 +1,7 @@
-//! The background thinking behind My Goose, on the inference lane: each member's portrait (and
-//! the pictures of their interests), the ideas researched for them, and the filing of older
-//! memories into their profiles. Each acquires the lane like every idle job and yields to a
-//! returning member between model calls.
+//! The background thinking behind My Goose, on the inference lane: the ideas researched for
+//! each member, their screenshots read, their web watches judged and older memories filed into
+//! their profiles. Each acquires the lane like every idle job and yields to a returning member
+//! between model calls. The pictures of their interests need no model and keep their own tick.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,16 +10,19 @@ use chrono::Utc;
 
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::shared::domain::todo::{zone, Tz};
 use pond_core::shared::domain::web_watch::WatchChange;
 use pond_core::shared::ports::web_watch::{
     StoredChange, WatchNotifier, WebWatch, WebWatchRepository,
 };
 use pond_core::shared::services::web_watch_judge as judge;
-use pond_core::user_data::domain::interest::{topic_key, OFFERED_AT};
+use pond_core::user_data::domain::fact_sheet::FactState;
+use pond_core::user_data::domain::interest::{topic_key, MemberPortrait};
 use pond_core::user_data::domain::memory::{
     MemoryEventKind, MemoryFragment, MemoryLifecycle, MemorySegment,
 };
 use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
 use pond_core::user_data::ports::ideas::IdeaRepository;
 use pond_core::user_data::ports::interests::InterestRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
@@ -28,21 +31,24 @@ use pond_core::user_data::ports::screenshot_notes::ScreenshotNoteRepository;
 use pond_core::user_data::ports::session_storage::SessionStorage;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use pond_core::user_data::services::consolidation_schedule as sched;
+use pond_core::user_data::services::fact_sheet;
 use pond_core::user_data::services::idea_generation::{
     self as ideas, IdeaProfile, IdeaSeed, ReadPage, SeedFrom,
 };
 use pond_core::user_data::services::inference_lane::LaneJob;
-use pond_core::user_data::services::member_portrait as portrait;
 use pond_core::user_data::services::memory_resort::{self as resort, Verdict};
 use pond_core::user_data::services::screenshot_notes::{self as shots, ScreenshotNote, Seen};
 
 use crate::inference_lane_runner::{Cadence, InferenceLane, LaneSlot};
 
 /// How often each job asks whether a member is due; the gates decide whether it runs.
-const PORTRAIT_POLL: Duration = Duration::from_secs(20 * 60);
 const IDEAS_POLL: Duration = Duration::from_secs(15 * 60);
-/// Interests whose picture one portrait pass looks for at most.
+/// How often interests are looked through for one with no picture looked for yet.
+const PICTURES_POLL: Duration = Duration::from_secs(20 * 60);
+/// Interests whose picture one pass looks for at most.
 const PICTURES_PER_PASS: usize = 5;
+/// Rows with no picture read at once, to find those a member is shown among the candidates.
+const PICTURE_LOOKAHEAD: usize = 200;
 /// Search results tried per seed for readable pages.
 const HITS_TRIED: usize = 6;
 /// Memories read for the facts an idea has to fit.
@@ -58,6 +64,15 @@ fn interest_repository(db: &pond_infra::db::Database) -> Arc<dyn InterestReposit
     Arc::new(pond_infra::sqlite_interests::SqliteInterestRepository::new(
         db.system.clone(),
     ))
+}
+
+/// The member's portrait as their fact sheet gives it.
+async fn portrait_of(db: &pond_infra::db::Database, member: &str) -> Option<MemberPortrait> {
+    let sheet = pond_infra::sqlite_fact_sheet::SqliteFactSheetRepository::new(db.system.clone())
+        .list(member, FactState::Active)
+        .await
+        .ok()?;
+    fact_sheet::as_portrait(&sheet)
 }
 
 fn screenshot_notes(db: &pond_infra::db::Database) -> Arc<dyn ScreenshotNoteRepository> {
@@ -131,176 +146,50 @@ impl MindDeps {
     }
 }
 
-// ── The portrait ───────────────────────────────────────────────────────
+// ── Interest pictures ──────────────────────────────────────────────────
 
-pub fn spawn_portrait_job(deps: MindDeps) {
-    let wake = deps.lane.claim(LaneJob::Portrait);
-    let started_at = std::time::Instant::now();
-    let started_at_utc = Utc::now();
+/// Looks for a picture of each interest a member is shown. No model is called, so it keeps
+/// its own tick rather than a place on the lane.
+pub fn spawn_interest_pictures_job(deps: MindDeps) {
     tokio::spawn(async move {
         let interests = interest_repository(&deps.db);
         loop {
-            let tick = crate::inference_lane_runner::wait_for_tick(PORTRAIT_POLL, &wake).await;
-            let now = Utc::now();
-            let mut due = Vec::new();
-            for (id, name) in deps.member_ids().await {
-                let known = interests.portrait(&id).await.ok().flatten();
-                let changed = interests.last_changed(&id).await.ok().flatten();
-                if tick.waives() || portrait::portrait_is_due(known.as_ref(), changed, now) {
-                    due.push((id, name));
-                }
-            }
-            if due.is_empty() {
-                continue;
-            }
-            let (saw_activity, idle_for) = deps.activity(started_at, started_at_utc).await;
-            let cadence = Cadence::new(
-                PORTRAIT_POLL,
-                Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS),
-                false,
-            );
-            let enabled = deps.provider.read().await.is_some();
-            let Some(slot) = deps
-                .lane
-                .acquire(
-                    LaneJob::Portrait,
-                    enabled,
-                    cadence,
-                    tick.waives(),
-                    saw_activity,
-                    idle_for,
-                )
+            tokio::time::sleep(PICTURES_POLL).await;
+            let tz = deps
+                .settings
+                .get()
                 .await
-            else {
-                continue;
-            };
-            for (member, name) in due {
-                if slot.is_cancelled() {
-                    tracing::info!("[my-goose] portrait pass preempted by user activity");
-                    break;
-                }
-                write_portrait(&deps, interests.as_ref(), &slot, &member, &name).await;
-                find_pictures(interests.as_ref(), &member).await;
+                .map_or_else(|_| zone(""), |s| zone(&s.timezone));
+            for (member, _) in deps.member_ids().await {
+                find_pictures(interests.as_ref(), &member, tz).await;
             }
-            drop(slot);
         }
     });
 }
 
-async fn write_portrait(
-    deps: &MindDeps,
-    interests: &dyn InterestRepository,
-    slot: &LaneSlot<'_>,
-    member: &str,
-    name: &str,
-) {
-    let rows = interests.list(member).await.unwrap_or_default();
-    let confirmed: Vec<_> = rows
-        .iter()
-        .filter(|i| i.confirmed && !i.avoid)
-        .cloned()
-        .collect();
-    let guesses: Vec<_> = rows
-        .iter()
-        .filter(|i| !i.confirmed && !i.avoid && i.evidence >= OFFERED_AT)
-        .cloned()
-        .collect();
-    let memories = deps
-        .memories
-        .search_recent(&ProfileScope::Owner(member.to_string()), 150)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|m| m.profile_id.as_deref() == Some(member))
-        .filter(|m| m.segment != Some(MemorySegment::Knowledge))
-        .filter(|m| {
-            !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
-        })
-        .collect();
-    let memories = portrait::top_memories(memories, portrait::PORTRAIT_MEMORIES);
-    let summaries = recent_summaries(deps.sessions.as_ref(), member).await;
-
-    let started = std::time::Instant::now();
-    let Some(reply) = deps
-        .complete(
-            slot,
-            &portrait::render_system(name),
-            portrait::build_user_message(&confirmed, &guesses, &memories, &summaries),
-        )
-        .await
-    else {
-        return;
-    };
-    match portrait::parse_reply(&reply, Utc::now()) {
-        Some(written) => {
-            if let Err(e) = interests.save_portrait(member, &written).await {
-                tracing::warn!(error = %e, "[my-goose] the portrait could not be saved");
-                return;
-            }
-            tracing::info!(
-                target: "giap::trace",
-                kind = "portrait_written",
-                into = written.into.len(),
-                working_on = written.working_on.len(),
-                likes = written.likes.len(),
-                ms = started.elapsed().as_millis() as u64,
-                "a member's portrait was rewritten"
-            );
-        }
-        None => tracing::warn!(
-            target: "giap::trace",
-            kind = "portrait_unparseable",
-            "the portrait reply held no usable summary; the old portrait stays"
-        ),
-    }
-}
-
-/// The member's newest conversation summaries, each with its title.
-async fn recent_summaries(sessions: &dyn SessionStorage, member: &str) -> Vec<String> {
-    let Ok(mut all) = sessions.list_sessions().await else {
-        return Vec::new();
-    };
-    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let mut out = Vec::new();
-    for session in all.into_iter().take(60) {
-        if out.len() >= portrait::PORTRAIT_SUMMARIES {
-            break;
-        }
-        let owner = match session.profile_id.clone() {
-            Some(owner) => Some(owner),
-            None => sessions
-                .get_session_identity(&session.id)
-                .await
-                .ok()
-                .and_then(|i| i.profile_id),
-        };
-        if owner.as_deref() != Some(member) {
-            continue;
-        }
-        if let Ok((Some(summary), _)) = sessions.get_rolling_summary(&session.id).await {
-            let title = session.title.unwrap_or_default();
-            out.push(if title.is_empty() {
-                summary
-            } else {
-                format!("{title}: {summary}")
-            });
-        }
-    }
-    out
-}
-
-/// Best effort: a picture for each interest the phone would show, from its Wikipedia article.
-async fn find_pictures(interests: &dyn InterestRepository, member: &str) {
+/// Best effort: a picture for each interest the member confirmed or is about to be asked
+/// about, from its Wikipedia article.
+async fn find_pictures(interests: &dyn InterestRepository, member: &str, tz: Tz) {
     let Some(images) = pond_core::shared::services::report_images::installed() else {
         return;
     };
     let rows = interests
-        .without_picture(member, PICTURES_PER_PASS * 2)
+        .without_picture(member, PICTURE_LOOKAHEAD)
         .await
         .unwrap_or_default();
+    if rows.is_empty() {
+        return;
+    }
+    let offered: Vec<String> = interests
+        .ready_to_offer(member, tz)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
     for row in rows
         .into_iter()
-        .filter(|r| !r.avoid && (r.confirmed || r.evidence >= OFFERED_AT))
+        .filter(|r| !r.avoid && (r.confirmed || offered.contains(&r.id)))
         .take(PICTURES_PER_PASS)
     {
         let key = match wikipedia_page(&row.topic).await {
@@ -438,7 +327,7 @@ async fn think_of_ideas(
         .await
         .unwrap_or_default();
     let rows = interests.list(member).await.unwrap_or_default();
-    let known = interests.portrait(member).await.ok().flatten();
+    let known = portrait_of(&deps.db, member).await;
     let mut used = ideas_repo
         .topics_since(member, rest_since)
         .await
@@ -554,7 +443,7 @@ async fn idea_from(
     member: &str,
     name: &str,
     profile: &IdeaProfile,
-    known: Option<&pond_core::user_data::domain::interest::MemberPortrait>,
+    known: Option<&MemberPortrait>,
     seed: &IdeaSeed,
 ) -> Result<Option<pond_core::user_data::domain::idea::Idea>, String> {
     let query = match &seed.query {

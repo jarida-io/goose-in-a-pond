@@ -341,10 +341,12 @@ pub fn score(
     const HALF_LIFE_DAYS: f64 = 90.0;
     let age_days = (now - updated_at).num_hours().max(0) as f64 / 24.0;
     let recency = 3.0 * 0.5_f64.powf(age_days / HALF_LIFE_DAYS);
-    confidence.weight() * CONFIDENCE_STEP
-        + f64::from(evidence.min(6))
-        + recency
-        + f64::from(used.min(10)) * 0.2
+    confidence.weight() * CONFIDENCE_STEP + f64::from(evidence.min(6)) + recency + use_weight(used)
+}
+
+/// What a line's use adds to its score.
+pub fn use_weight(used: u32) -> f64 {
+    f64::from(used.min(10)) * 0.2
 }
 
 /// Orders lines best first: pinned, then the member's own, then by score, newest breaking ties.

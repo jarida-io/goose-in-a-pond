@@ -83,6 +83,7 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         .merge(crate::agent_notes::routes())
         .merge(crate::goose_activity::routes())
         .merge(crate::interests::routes())
+        .merge(crate::fact_sheet::routes())
         .merge(crate::member_interview::routes())
         .merge(crate::news::routes())
         .merge(crate::todos::routes())
