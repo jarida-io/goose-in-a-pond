@@ -364,6 +364,17 @@ function describeTitle(event: ActivityEvent): Omit<EventDescription, "technical"
           : `Setting changed: ${label} set to ${to}`,
       };
     }
+    case "extension.changed": {
+      const name = capitalise(words(text(a, "key") ?? "a tool set"));
+      const to = text(a, "to");
+      const did = to === "added" ? "were added" : to === "removed" ? "were removed"
+        : to === "enabled" ? "were switched on" : to === "disabled" ? "were switched off" : "were changed";
+      return { title: `${name} tools ${did}` };
+    }
+    case "schedule.changed": {
+      const to = text(a, "to");
+      return { title: to === "paused" ? "A routine was paused" : to === "active" ? "A routine was resumed" : "A routine was changed" };
+    }
     case "system.start":
     case "system.boot":
       return { title: "The Pond started" };

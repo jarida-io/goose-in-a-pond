@@ -128,6 +128,14 @@ describe("describeEvent", () => {
     expect(title("settings.changed", { key: "home_city" })).toBe("Home city was changed");
   });
 
+  it("says which tools were added, removed or switched, and when a routine paused or resumed", () => {
+    expect(title("extension.changed", { key: "music", to: "added" })).toBe("Music tools were added");
+    expect(title("extension.changed", { key: "web_search", to: "disabled" })).toBe("Web search tools were switched off");
+    expect(title("extension.changed", { key: "music", to: "enabled" })).toBe("Music tools were switched on");
+    expect(title("schedule.changed", { key: "2b4dd105", to: "paused" })).toBe("A routine was paused");
+    expect(title("schedule.changed", { key: "2b4dd105", to: "active" })).toBe("A routine was resumed");
+  });
+
   it("never shows raw dotted text for an action it does not know", () => {
     const t = title("system.brand_new_thing");
     expect(t).toBe("System: brand new thing");
