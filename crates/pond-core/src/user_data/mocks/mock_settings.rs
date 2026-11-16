@@ -219,6 +219,20 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
             s.system_notices_enabled = b;
         }
     }
+    // Answer review reads its limits per review: a test of that must see what it wrote.
+    if let Some(v) = store.get("review_mode") {
+        s.review_mode = v.clone();
+    }
+    if let Some(v) = store.get("review_max_rounds") {
+        if let Ok(n) = v.parse() {
+            s.review_max_rounds = n;
+        }
+    }
+    if let Some(v) = store.get("review_pass_threshold") {
+        if let Ok(n) = v.parse() {
+            s.review_pass_threshold = n;
+        }
+    }
     s
 }
 
@@ -344,6 +358,15 @@ impl SettingsRepository for MockSettingsRepository {
         store.insert(
             "system_notices_enabled".into(),
             settings.system_notices_enabled.to_string(),
+        );
+        store.insert("review_mode".into(), settings.review_mode.clone());
+        store.insert(
+            "review_max_rounds".into(),
+            settings.review_max_rounds.to_string(),
+        );
+        store.insert(
+            "review_pass_threshold".into(),
+            settings.review_pass_threshold.to_string(),
         );
         Ok(())
     }

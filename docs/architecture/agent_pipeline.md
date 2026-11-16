@@ -60,7 +60,7 @@ flowchart TD
 | 8. User text | `<user-message>` first, then `<system-context>` holding the dynamic suffix, the `<memories>` block and the answer contract (`answer_contract()`), so the system and tools prefix stays byte-stable across turns |
 | History rewrite | `rewrite_history_at_turn_start` bounds how many earlier pictures are replayed and reduces any transient tool result left in goose's store to its stub; the turn's `TurnSweep` does the same when the turn ends, however it ends ([small-model-tools.md §8.10](./small-model-tools.md)) |
 | Delegation | The turn's delegation authority and device claim (`GooseOrchestrator`, [pai/06-multi-agent-orchestration.md](./pai/06-multi-agent-orchestration.md)) |
-| Loop guards | A repetition guard on identical tool calls; empty-turn recovery (Goose returns an empty turn, GIAP re-engages with a changed prompt); Goose's completeness check armed with the raw request when `goal_check_enabled` (default on). A turn a guard stops after gathering tool results and before replying is asked once for its reply with tools off (`FinalReply`, [scheduling.md](./scheduling.md#a-turn-with-no-reply)) |
+| Loop guards | A repetition guard on identical tool calls; empty-turn recovery (Goose returns an empty turn, GIAP re-engages with a changed prompt); Goose's completeness check armed with the raw request when `goal_check_enabled` (default on). When the check fires after the model already answered (text after its last tool call) and no tool failed this turn, the adapter disarms it and stops the engine before the check's round runs (`kind="completeness_check_skipped"`): a round that called tools would stay visible, move the shown answer into working notes, and put a second, possibly contradicting, answer in its place. A turn a guard stops after gathering tool results and before replying is asked once for its reply with tools off (`FinalReply`, [scheduling.md](./scheduling.md#a-turn-with-no-reply)) |
 
 Context compaction of the conversation itself belongs to Goose; see
 [token_tracking.md](./token_tracking.md). Mid-turn, goose compacts only reactively: when the engine
@@ -90,8 +90,38 @@ there does a prompt that is not GIAP's mean the turn's extras and skills were lo
 |---|---|---|
 | Thought filter | `crates/pond-api/src/thought_filter.rs` | Strips Harmony thought channels and `<think>` blocks from visible text; captures them as `thinking` frames when `show_thinking` is on and the turn is not a voice turn |
 | Text tool calls | `ThoughtFilter::take_tool_calls`, `parse_tool_envelope` | A tool call the model wrote as Harmony text markup is executed through `Agent::call_tool` and reported as `tool_call` / `tool_result` frames |
-| Answer review | `AnswerReviewer` port (`crates/pond-core/src/models/ports/answer_reviewer.rs`), `GiapAnswerReviewer` in `crates/pond-server/src/main.rs` | `review_mode`: `off` (default), `on` (every turn), `auto` (messages containing `?` or opening with what, how, why, explain, compare, analyze). Critiques with `REVIEW_SYSTEM_PROMPT` on the side-call provider for up to `review_max_rounds` (default 1); below `review_pass_threshold` (default 3 of 5) the answer is revised |
+| Answer review | `AnswerReviewer` port (`crates/pond-core/src/models/ports/answer_reviewer.rs`), `LlmAnswerReviewer` (`crates/pond-core/src/models/services/answer_review.rs`) | See "Answer review" below |
 | Persistence | `ChatService::persist_assistant_turn` | Tool rows, the assistant row, usage, title |
+
+### Answer review
+
+`review_mode` decides whether a turn is reviewed (`should_review`): `off` (default) never, `on`
+every turn with an answer, `auto` only a turn that called tools. `auto` is limited to answers the
+reviewer can check: it is given this turn's tool results, while an answer from the model's own
+knowledge or from the household's memory gives it nothing to check against. Such an answer was
+what review used to damage: "Your girlfriend is Arlene", recalled from memory, was judged made up
+and revised into "As an AI I have no access to your personal life", which the client showed in
+its place and history kept.
+
+`LlmAnswerReviewer` runs on the side-call provider and reads `review_pass_threshold` (default 3
+of 5) and `review_max_rounds` (default 1) from settings on every review, so a change applies to
+the next turn:
+
+1. The answer is scored with `REVIEW_SYSTEM_PROMPT`, given the question, the tool results (each
+   cut to 2,000 characters, 8,000 in all) and the statement that the assistant also had the
+   household's private context, which the reviewer cannot see and must not judge as made up.
+2. A score at or above the pass mark passes. The reviewer's own `pass` flag is advisory only.
+3. Below it, and while rounds remain, `REVISION_SYSTEM_PROMPT` asks for a better answer in the
+   assistant's own persona (`assistant_name`, `assistant_personality`), keeping household facts.
+   The revision is scored in turn and replaces the answer only when it scores strictly higher.
+   A revision that refuses or disclaims access (`is_non_answer`) never replaces one that did not.
+   With `review_max_rounds` 0 the answer is scored and never revised.
+4. A verdict that cannot be parsed changes nothing.
+
+Only a replaced answer sends `review_revision`; otherwise the client gets a `review_status` line
+and the streamed answer is what history stores. Every review logs one `giap::trace` line,
+`kind="answer_review"`, with `verdict` (`passed`, `revised`, `kept_original`, `unjudged`),
+`score`, `first_score`, `threshold`, `rounds`, `revised` and `kept_original`.
 
 ## The optional parameter specialist (`ToolCaller`)
 
@@ -113,7 +143,7 @@ parameters the main model passed. With no tool model, handlers use the main mode
 | `subagent_progress` | Delegation | Child state; tool name or failure reason only |
 | `turn_limit_reached` | GooseAdapter | The turn budget ran out before the task finished |
 | `turn_stats` | GooseAdapter | TTFT, prefill, decode speed, token counts, context use |
-| `review_status`, `review_revision` | Answer review | Progress, or the revised answer that replaces the streamed text |
+| `review_status`, `review_revision` | Answer review | Progress, or a revision that scored strictly higher and replaces the streamed text |
 | `context_warning` | Context monitor | Utilisation and turns remaining |
 | `cancelled` | Run cancel | `run_id`, `at_seq` |
 | `reattached`, `replay_gap`, `run_evicted` | Detached runs | Reattach bookkeeping |
