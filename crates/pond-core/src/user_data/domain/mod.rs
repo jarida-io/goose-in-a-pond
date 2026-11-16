@@ -1,3 +1,4 @@
+pub mod config_change;
 pub mod device;
 pub mod draft;
 pub mod face_recognition;
