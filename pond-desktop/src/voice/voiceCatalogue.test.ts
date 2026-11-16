@@ -6,6 +6,7 @@ import {
   clampPace,
   describeQuality,
   voiceTitle,
+  voiceLabel,
   gradeFor,
   gradeRank,
   statementAt,
@@ -241,5 +242,16 @@ describe("onboarding tier", () => {
     const everyday = describeQuality(DEFAULT_QUALITY);
     expect(setup.sizeMb).toBeLessThanOrEqual(everyday.sizeMb);
     expect(Math.min(...VOICE_QUALITY_TIERS.map((t) => t.sizeMb))).toBe(setup.sizeMb);
+  });
+});
+
+describe("voiceLabel", () => {
+  it("names a voice, then its accent and gender", () => {
+    expect(voiceLabel("af_heart")).toBe("Heart (American English, female)");
+    expect(voiceLabel("bm_george")).toBe("George (British English, male)");
+  });
+
+  it("falls back to the name alone when the id has no known shape", () => {
+    expect(voiceLabel("custom_voice")).toBe("Custom Voice");
   });
 });

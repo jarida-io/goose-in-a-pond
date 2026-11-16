@@ -876,6 +876,13 @@ impl SettingsRepository for SqliteSettingsRepository {
     }
 }
 
+/// `voice_tts_voice` as its readers expect it. A Kokoro voice is its id (`af_heart`): the engine
+/// loads `<id>.bin` and refuses a name carrying the extension, which the settings page's voice
+/// picker used to save. Piper values are `.onnx` file names, so only `.bin` is dropped.
+fn stored_tts_voice(value: &str) -> String {
+    value.strip_suffix(".bin").unwrap_or(value).to_string()
+}
+
 fn apply_key(s: &mut Settings, key: &str, value: &str) {
     match key {
         "primary_profile_id" => {
@@ -938,7 +945,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.suggestions_muted = v;
             }
         }
-        "voice_tts_voice" => s.voice_tts_voice = value.to_string(),
+        "voice_tts_voice" => s.voice_tts_voice = stored_tts_voice(value),
         // Stored unclamped so write and read agree; consumers clamp. Non-finite is refused: NaN
         // would round-trip as `null` and silently read back as the default.
         "voice_tts_speed" => {
@@ -1375,6 +1382,25 @@ mod tests {
         assert!(!got.cameras_enabled);
         assert!(got.cloud_fallback_enabled);
         assert_eq!(got.home_name, "The Anyumba Home");
+    }
+
+    #[tokio::test]
+    async fn a_kokoro_voice_saved_as_its_file_reads_back_as_its_id() {
+        let repo = fresh_repo().await;
+
+        repo.set_key("voice_tts_voice", "bf_emma.bin".to_string())
+            .await
+            .unwrap();
+        assert_eq!(repo.get().await.unwrap().voice_tts_voice, "bf_emma");
+
+        // A Piper voice is stored as its file and must stay one.
+        repo.set_key("voice_tts_voice", "en_US-lessac-medium.onnx".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get().await.unwrap().voice_tts_voice,
+            "en_US-lessac-medium.onnx"
+        );
     }
 
     #[tokio::test]

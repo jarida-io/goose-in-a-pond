@@ -18,6 +18,7 @@ import { ConnectionsProvider } from "../network/ConnectionsProvider";
 import { BluetoothStatus, EthernetPanel, PairingStatus } from "../network/LinkPanels";
 import { WifiPanel } from "../network/WifiPanel";
 import { deviceOptions, isAudioStatus } from "../voice/audioDevices";
+import { voiceLabel } from "../voice/voiceCatalogue";
 import type {
   AudioDeviceStatus,
   ModelEntry,
@@ -88,6 +89,9 @@ const PROVIDERS: Record<
 interface Option {
   value: string;
   label: string;
+  /** Other spellings of the same row a stored value may hold (its file name, its id), so a
+   *  value saved in one of them still shows as this row rather than as "not installed". */
+  aliases?: string[];
 }
 
 type AudioSource = "audio-inputs" | "audio-outputs";
@@ -103,9 +107,23 @@ function audioOptions(status: AudioDeviceStatus, source: AudioSource): Option[] 
 }
 
 /** A stored value as its picker shows it: the server reads a provider of `gguf`, which this page
- *  once offered, as `local`. Display only, so it is never saved as a change. */
-function shownValue(source: OptionSource, value: string): string {
-  return source === "llm-providers" ? providerOf(value) : value;
+ *  once offered, as `local`, and a model stored by another spelling (a Whisper file name, a
+ *  Kokoro `af_heart.bin`) is its row. Display only, so it is never saved as a change. */
+function shownValue(source: OptionSource, value: string, options: Option[]): string {
+  if (source === "llm-providers") return providerOf(value);
+  if (options.some((o) => o.value === value)) return value;
+  return options.find((o) => o.aliases?.includes(value))?.value ?? value;
+}
+
+/** A Kokoro voice is stored as its id, the name the engine loads `<id>.bin` from; the file name
+ *  itself is refused. Piper's resolver reads either, and its picker has always saved the file. */
+function isKokoroVoice(m: ModelEntry): boolean {
+  return (m.category ?? m.provider) === "tts_kokoro";
+}
+
+/** The value a voice row saves as `voice_tts_voice`. */
+function voiceValue(m: ModelEntry): string {
+  return isKokoroVoice(m) ? m.name : (m.filename ?? m.name);
 }
 
 /** "Gemma 4 E4B · llama.cpp": the model's title and the engine that runs it. Never the scan's
@@ -114,6 +132,7 @@ function modelOptions(
   rows: ModelEntry[],
   valueOf: (m: ModelEntry) => string,
   withEngine: boolean,
+  labelOf: (m: ModelEntry) => string = modelLabel,
 ): Option[] {
   const seen = new Set<string>();
   const unique = rows.filter((m) => {
@@ -124,7 +143,7 @@ function modelOptions(
   });
   const base = (m: ModelEntry) => {
     const engine = withEngine ? engineOf(m) : null;
-    return engine ? `${modelLabel(m)} · ${engine.label}` : modelLabel(m);
+    return engine ? `${labelOf(m)} · ${engine.label}` : labelOf(m);
   };
   const counts = new Map<string, number>();
   for (const m of unique) counts.set(base(m), (counts.get(base(m)) ?? 0) + 1);
@@ -135,10 +154,17 @@ function modelOptions(
   const again = new Map<string, number>();
   for (const { label } of labelled) again.set(label, (again.get(label) ?? 0) + 1);
   return labelled
-    .map(({ m, label }) => ({
-      value: valueOf(m),
-      label: (again.get(label) ?? 0) > 1 ? `${label} (${m.filename ?? m.name})` : label,
-    }))
+    .map(({ m, label }) => {
+      const value = valueOf(m);
+      const aliases = [m.filename, m.name, m.id].filter(
+        (a): a is string => Boolean(a) && a !== value,
+      );
+      return {
+        value,
+        label: (again.get(label) ?? 0) > 1 ? `${label} (${m.filename ?? m.name})` : label,
+        aliases,
+      };
+    })
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -174,8 +200,10 @@ function optionsFor(
       .filter(PROVIDERS[source])
       // Only downloaded models can serve; an absent `downloaded` means untracked, not missing.
       .filter((m) => m.downloaded !== false),
-    (m) => (source === "tts-voices" ? (m.filename ?? m.name) : m.name),
+    source === "tts-voices" ? voiceValue : (m) => m.name,
     source === "chat-models" || source === "llm-models",
+    // "Heart (American English, female)", never the id's "Af_Heart".
+    source === "tts-voices" ? (m) => (isKokoroVoice(m) ? voiceLabel(m.name) : modelLabel(m)) : modelLabel,
   );
 }
 
@@ -388,7 +416,7 @@ function EntryRow({
                 aria-label={entry.label}
                 aria-describedby={described}
                 disabled={inert}
-                value={shownValue(control.source, String(value ?? ""))}
+                value={shownValue(control.source, String(value ?? ""), options)}
                 onChange={(e) => onChange(entry.key, e.target.value)}
               >
                 <option value="">{control.placeholder ?? "Not set"}</option>
@@ -397,7 +425,7 @@ function EntryRow({
                     configured but not currently installed. */}
                 {Boolean(value) &&
                   !options.some(
-                    (o) => o.value === shownValue(control.source, String(value)),
+                    (o) => o.value === shownValue(control.source, String(value), options),
                   ) && (
                     <option value={String(value)}>
                       {String(value)} —{" "}
