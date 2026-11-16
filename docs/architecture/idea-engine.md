@@ -430,7 +430,7 @@ Inline, with the picture attached to both the maker and the critic. The maker an
 | `sensitive` | What happens |
 |---|---|
 | `private` (a login, a private conversation, a document) | The picture and the row are deleted; nothing is kept |
-| `money` | Marked hot. With the Budget specialist on, a `ledger` job reads it and then the picture and the row are deleted. With it off they are deleted at once |
+| `money` | Marked hot, and nothing about it is indexed. With the Budget specialist on, a `ledger` job reads it and then the picture and the row are deleted. With it off, up to three are held until the member answers the offer to turn it on; a decline deletes them, and later ones are deleted at once |
 | `none` | Description, intent and details are kept and indexed; the picture is kept 30 days |
 
 A `plan` in the reply becomes a candidate anchor.
@@ -483,18 +483,19 @@ element is an intention or, for something only the member can approve, a proposa
 
 ```json
 {"do": "intend", "act": "push" | "refresh" | "look_into" | "ask" | "propose_todo",
- "text": "what to do or say", "when": "the condition, in plain words", "until": "the deadline",
+ "text": "what to do or say", "when": {"time": "3 December at 8am"}, "until": "the deadline",
  "about": "words from an anchor's title, or omit", "why": "one sentence"}
 ```
 
-Code turns `when` into a condition and refuses what it cannot check:
+`when` is one of four shapes, chosen from what the brief lists, so the code never guesses what a
+phrase means. It refuses what it cannot check:
 
-| Kind | Example | How it is checked |
+| Kind | Shape | How it is checked |
 |---|---|---|
-| `time` | "3 December at 8am" | `when_said::due_from_words`; fires when the time has come |
-| `place` | "when they arrive at the office" | A saved place of the member and a crossing reported by their phone |
-| `thing` | "when the gate camera sees a package" | A camera, sensor or device from the hook catalogue, and an event on the bus |
-| `chat` | "when they next talk to me" | The member's next turn |
+| `time` | `{"time": "3 December at 8am"}` | `when_said::due_from_words`; fires when the time has come |
+| `place` | `{"place": "office", "on": "arrive"}` | A saved place of the member, by its label, and a crossing reported by their phone |
+| `thing` | `{"thing": "gate camera", "event": "package"}` | A camera, sensor or device from the hook catalogue, by its label, and an event it lists |
+| `chat` | `{"chat": true}` | The member's next turn |
 
 An intention with no checkable condition, no deadline, a deadline already past, or the same key as
 a waiting one, an open to-do or a schedule is refused. The survivors go to a critic call, which
