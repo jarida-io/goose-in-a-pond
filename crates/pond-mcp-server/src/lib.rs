@@ -12,6 +12,7 @@ pub mod news_web;
 pub mod orchestrator;
 pub mod page_data;
 pub mod page_render;
+pub mod plan_tools;
 pub mod product_page;
 pub(crate) mod reading_room;
 pub mod report_images;

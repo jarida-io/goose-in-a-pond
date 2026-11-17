@@ -255,7 +255,7 @@ async fn add_to_heartbeat(p: AddToHeartbeatParams) -> CallToolResult {
 
 /// The household member speaking in this call: the turn's owner, else a one-member household's
 /// only member. A guest keeps no list.
-async fn speaker(meta: &RequestMetaObject) -> Option<String> {
+pub(crate) async fn speaker(meta: &RequestMetaObject) -> Option<String> {
     let session = crate::session_from_meta(meta)?;
     let owner = crate::installed_orchestrator_deps()
         .and_then(|deps| deps.authorities().authority_for_engine_session(&session))

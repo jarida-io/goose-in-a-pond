@@ -25,7 +25,6 @@ use pond_core::user_data::domain::interest_interview::InterviewStatus;
 use pond_core::user_data::domain::member_profile::About;
 use pond_core::user_data::domain::memory::normalise_fact_content;
 use pond_core::user_data::domain::profile::ProfileScope;
-use pond_core::user_data::services::inference_lane::LaneJob;
 use pond_core::user_data::services::member_interview::{
     self as interview, AnswerIn, MemberInterview, Refusal, Written, SECTIONS,
 };
@@ -303,10 +302,6 @@ async fn approve(
         news = news_set,
         "an interview's draft was kept"
     );
-    // What they kept changes what ideas should build on; a busy lane runs it later anyway.
-    if let Some(lane) = state.lane.as_ref().filter(|_| kept_interests > 0) {
-        let _ = lane.wake(LaneJob::Ideas).await;
-    }
     if kept_facts + kept_interests > 0 {
         crate::fact_sheet::rebuild_after_interview(&state, &member).await;
     }

@@ -203,9 +203,6 @@ async fn make_app_with_provider(
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
-        suggestion_queue: std::sync::Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
         engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
@@ -573,9 +570,6 @@ async fn no_provider_still_returns_agent_response_for_non_task_messages() {
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
-        suggestion_queue: std::sync::Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
         engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
@@ -717,9 +711,6 @@ async fn task_message_uses_agent_with_tool_call_events_without_provider() {
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
-        suggestion_queue: std::sync::Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
         engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),

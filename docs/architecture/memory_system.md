@@ -472,7 +472,6 @@ persist in `lane_job_runs` (migration `0059`) so a restart does not make every j
 | `proactive_review` | none |
 | `summary_refresh` | none |
 | `memory_extraction` | writes memories, reminders, interests and candidate anchors |
-| `suggestion_generation` | composes Home suggestions from memories into `suggestion_queue` (migration `0058`), gated by `suggestion_generation_enabled` |
 
 `GET /api/v1/lane` reports each job's state; `POST /api/v1/lane/jobs/{job}/run` runs one now,
 waiving its quiet period, interval floor and activity gate.
@@ -533,7 +532,6 @@ on needs the device.
 | `memory_consolidation_mode` | `single` | `single` or `adversarial` |
 | `memory_consolidation_interval_hours` | 24 | Minimum gap between runs |
 | `memory_consolidation_batch_size` | 50 | Rows per run (floor 6) |
-| `suggestion_generation_enabled` | true | Compose suggestions from memories |
 | `embedding_provider` | `fastembed` | `none` turns semantic search off and stops batch extraction; `auto`, `fastembed` and `gguf` all mean on, with the engine taken from `active_embedding_model` |
 | `memory_graph_enabled` | false | Stored, but nothing reads it: graph retrieval over `memory_edges` is not wired |
 
@@ -552,5 +550,5 @@ All in `pond_system.db`; migrations in `crates/pond-infra/migrations/system/`.
 | `0036_enable_memory_consolidation.sql` | turns consolidation on where the stored value was still the old default |
 | `0056_session_extraction_cursor.sql` | `sessions.extracted_through_id`, `extracted_at`, `extraction_attempts` |
 | `0057_reminders.sql` | `reminders` |
-| `0058_suggestion_queue.sql` | `suggestion_queue` |
+| `0058_suggestion_queue.sql` | `suggestion_queue`, no longer written; `0117` emptied its queued rows |
 | `0059_lane_job_runs.sql` | `lane_job_runs` |

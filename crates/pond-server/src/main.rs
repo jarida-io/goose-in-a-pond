@@ -4163,6 +4163,13 @@ async fn run_server(
             notifier: targeted_notification_sender.clone(),
             thread: pond_core::shared::services::goose_thread::installed(),
             bell: Some(bells.nudge_bell()),
+            pictures: engine_stores.pictures.clone().map(|store| {
+                pond_server::engine_runner::PictureDeps {
+                    store,
+                    ledger: engine_stores.ledger.clone(),
+                    indexed: Some(embedding_arrived.clone()),
+                }
+            }),
         };
         match heartbeat_jobs(
             engine.clone(),
@@ -4195,149 +4202,6 @@ async fn run_server(
         ));
     }
 
-    // ── Composing suggestions out of the household's own memories ────────
-    // Queued ahead, not composed on request: a model call on this board takes seconds.
-    {
-        use pond_core::user_data::domain::profile::ProfileScope;
-        use pond_core::user_data::services::consolidation_schedule as sched;
-        use pond_core::user_data::services::inference_lane::LaneJob;
-
-        /// How often a pass is considered. The gate decides whether one runs.
-        const POLL_SECS: u64 = 10 * 60;
-        /// Notes scanned per pass; exceeds `MEMORIES_PER_PASS` since queued ones are subtracted.
-        const MEMORY_SCAN: usize = 200;
-
-        let gen_settings = settings_repo.clone();
-        let gen_memories = memory_repo.clone();
-        let gen_provider = llm_provider.clone();
-        let gen_activity = last_user_activity.clone();
-        let gen_storage = session_storage.clone();
-        let gen_lane = inference_lane.clone();
-        let gen_profiles = profile_repo.clone();
-        let gen_wake = inference_lane.claim(LaneJob::SuggestionGeneration);
-        let gen_interests =
-            pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone());
-        let gen_facts =
-            pond_infra::sqlite_fact_sheet::SqliteFactSheetRepository::new(db.system.clone());
-        let gen_queue: Arc<
-            dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
-        > = Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        );
-
-        // Baselines for the "never on startup" guard; captured before the server binds.
-        let started_at = std::time::Instant::now();
-        let started_at_utc = chrono::Utc::now();
-
-        tokio::spawn(async move {
-            let idle_threshold = std::time::Duration::from_secs(sched::INACTIVITY_THRESHOLD_SECS);
-
-            loop {
-                let tick = crate::inference_lane_runner::wait_for_tick(
-                    std::time::Duration::from_secs(POLL_SECS),
-                    &gen_wake,
-                )
-                .await;
-
-                let settings = match gen_settings.get().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::debug!("[suggestions] settings read failed: {e}");
-                        continue;
-                    }
-                };
-
-                let db_activity = newest_session_activity(gen_storage.as_ref()).await;
-                let in_process_at = *gen_activity.read().await;
-                let now = chrono::Utc::now();
-                let saw_activity_since_start = sched::saw_activity_since_start(
-                    started_at,
-                    in_process_at,
-                    started_at_utc,
-                    db_activity,
-                );
-                let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
-
-                // Scheduled ticks are never exempt (no talk, no new notes); a hand-asked one is.
-                let cadence = crate::inference_lane_runner::Cadence::new(
-                    std::time::Duration::from_secs(POLL_SECS),
-                    idle_threshold,
-                    false,
-                );
-
-                let Some(slot) = gen_lane
-                    .acquire(
-                        LaneJob::SuggestionGeneration,
-                        settings.suggestion_generation_enabled,
-                        cadence,
-                        tick.waives(),
-                        saw_activity_since_start,
-                        idle_for,
-                    )
-                    .await
-                else {
-                    continue;
-                };
-
-                // Re-read per tick, plus `user_name`: the only name on a pond with no profile rows.
-                let mut subjects: Vec<String> = gen_profiles
-                    .list()
-                    .await
-                    .map(|p| p.into_iter().map(|p| p.display_name).collect())
-                    .unwrap_or_default();
-                subjects.push(settings.user_name.clone());
-
-                let outcome = tokio::select! {
-                    _ = slot.cancelled() => {
-                        tracing::info!("[suggestions] pass preempted by user activity");
-                        continue;
-                    }
-                    res = compose_suggestions(
-                        gen_memories.as_ref(),
-                        (&gen_interests, &gen_facts),
-                        gen_queue.as_ref(),
-                        gen_provider.clone(),
-                        &subjects,
-                        MEMORY_SCAN,
-                        now,
-                    ) => res,
-                };
-
-                // Logged even when nothing was composed: silent, a no-op looks like a bail.
-                match outcome {
-                    Ok(report) => {
-                        if report.considered > 0 {
-                            tracing::info!(
-                                target: "giap::trace",
-                                kind = "suggestions_composed",
-                                considered = report.considered,
-                                queued = report.queued,
-                                refused = report.refused,
-                                unparseable = report.unparseable,
-                                "composed suggestions from the household's memories"
-                            );
-                        } else {
-                            tracing::debug!(
-                                "[suggestions] nothing to compose from -- every recent memory \
-                                 already carries a question"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(error = %e, "suggestion generation failed"),
-                }
-
-                // Dropping the guard records the run and frees the slot on every path out.
-                drop(slot);
-            }
-        });
-        tracing::info!(
-            "suggestion composing active -- turns the household's own memories into questions, \
-             after {} min idle",
-            sched::INACTIVITY_THRESHOLD_SECS / 60,
-        );
-        let _ = ProfileScope::Household;
-    }
-
     news_runner::spawn(news_runner::NewsDeps {
         db: db.system.clone(),
         settings: settings_repo.clone(),
@@ -4364,7 +4228,6 @@ async fn run_server(
     };
     my_goose_mind::spawn_interest_pictures_job(mind.clone());
     my_goose_mind::spawn_memory_resort_job(mind.clone());
-    my_goose_mind::spawn_screenshot_notes_job(mind.clone());
     my_goose_mind::spawn_watch_judge_job(mind.clone(), watch_repo, watch_notifier);
     {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -4378,7 +4241,6 @@ async fn run_server(
             }
         });
     }
-    my_goose_mind::spawn_ideas_job(mind);
 
     // ── The personal-context corpus producer ─────────────────────────────
     // `IngestPipeline::new` takes the redactor by value, so it can't be left out. Own bus
@@ -4837,10 +4699,6 @@ async fn run_server(
         ),
         voice_match: Some(voice_match_engine),
         tts_control: tts_control.clone(),
-        // Before `db`: fields evaluate in source order and `db` is moved below.
-        suggestion_queue: Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
         engine: engine_stores,
         db,
         onboarding_repo,
@@ -7118,113 +6976,6 @@ async fn run_session_activity_observer(
     }
 }
 
-/// One composing pass's result; `considered` tells a zero-yield pass from an idle one.
-struct ComposeReport {
-    considered: usize,
-    queued: usize,
-    refused: usize,
-    unparseable: bool,
-}
-
-/// One pass: pick notes nobody has been asked about, compose questions, queue them.
-/// Early returns still spend the lane's interval: the caller holds the slot guard.
-async fn compose_suggestions(
-    memories: &dyn pond_core::user_data::ports::memory_repository::MemoryRepository,
-    // What is known of the notes' owner: their confirmed interests and their fact sheet.
-    (interests, facts): (
-        &dyn pond_core::user_data::ports::interests::InterestRepository,
-        &dyn pond_core::user_data::ports::fact_sheet::FactSheetRepository,
-    ),
-    queue: &dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository,
-    provider: Arc<
-        tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>,
-    >,
-    // Household names: the shown question is sent as-is when tapped, so it must not address one.
-    subjects: &[String],
-    scan: usize,
-    now: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<ComposeReport> {
-    use pond_core::models::domain::message::ChatMessage;
-    use pond_core::user_data::domain::profile::ProfileScope;
-    use pond_core::user_data::services::suggestion_generation as gen;
-
-    let empty = ComposeReport {
-        considered: 0,
-        queued: 0,
-        refused: 0,
-        unparseable: false,
-    };
-
-    // Subtract the queued first, or the unique index refuses what inference just composed.
-    let already: std::collections::HashSet<String> =
-        queue.live_memory_ids().await?.into_iter().collect();
-
-    // `Household` to choose from the whole store; each suggestion keeps its memory's
-    // `profile_id`, and the read path scopes it. `Owner` here would skip unattributed notes.
-    let mut pool: Vec<_> = memories
-        .search_recent(&ProfileScope::Household, scan)
-        .await?
-        .into_iter()
-        .filter(|m| !already.contains(&m.id))
-        // Too short to carry a question; asking would spend a slot to learn that.
-        .filter(|m| m.content.trim().chars().count() >= 20)
-        // A trait made of one question asked is curiosity: nothing to build a question on.
-        .filter(|m| {
-            !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
-        })
-        .collect();
-
-    // Which twelve matters most: habits and preferences before trivia, recency within each rank.
-    gen::order_candidates(&mut pool);
-    // One owner per call: the model's note number is the only attribution, so a mix could leak.
-    let candidates = gen::one_owners_candidates(pool);
-
-    if candidates.is_empty() {
-        return Ok(empty);
-    }
-
-    let Some(provider) = provider.read().await.clone() else {
-        tracing::debug!("[suggestions] no language model is configured");
-        return Ok(empty);
-    };
-
-    // The owner's fact sheet and confirmed interests, so each question is worth looking up for
-    // them.
-    let about = match candidates.first().and_then(|m| m.profile_id.as_deref()) {
-        Some(owner) => pond_core::user_data::services::fact_sheet::about_from_sheet(
-            &facts
-                .list(
-                    owner,
-                    pond_core::user_data::domain::fact_sheet::FactState::Active,
-                )
-                .await
-                .unwrap_or_default(),
-            &interests.list(owner).await.unwrap_or_default(),
-        ),
-        None => None,
-    };
-    let user = gen::build_user_prompt(&candidates, about.as_deref());
-    let reply = provider
-        .complete(gen::SYSTEM, vec![ChatMessage::user(user)])
-        .await?;
-    let outcome = gen::parse_response(&reply.content, &candidates, subjects, now);
-
-    for refusal in &outcome.refused {
-        tracing::debug!(
-            reason = refusal.as_str(),
-            "[suggestions] refused a candidate"
-        );
-    }
-
-    let queued = queue.queue(&outcome.accepted).await?;
-    Ok(ComposeReport {
-        considered: candidates.len(),
-        queued,
-        refused: outcome.refused.len(),
-        unparseable: outcome.unparseable,
-    })
-}
-
 /// Compacts conversations near the edge of their window while the household is quiet.
 ///
 /// goose compacts a conversation whose last turn passed 80% of its window before that
@@ -7988,6 +7739,14 @@ fn install_long_task_deps(
     pond_mcp_server::todo_tools::init_heartbeat_docs(Arc::new(
         SqlitePromptTemplateRepository::new(pool.clone()),
     ));
+    pond_mcp_server::plan_tools::init_plan_deps(pond_mcp_server::plan_tools::PlanDeps {
+        anchors: Arc::new(pond_infra::sqlite_anchors::SqliteAnchorRepository::new(
+            pool.clone(),
+        )),
+        dont: Arc::new(pond_infra::sqlite_dont_list::SqliteDontListRepository::new(
+            pool.clone(),
+        )),
+    });
     pond_mcp_server::memory::init_memory_profiles(Arc::new(
         pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
     ));
@@ -12362,24 +12121,6 @@ mod tests {
         assert!(
             took < std::time::Duration::from_secs(5),
             "shutdown waited {took:?} for a blocking thread that never finishes"
-        );
-    }
-
-    /// The generator's tests prove `one_owners_candidates`; this proves the pass calls it.
-    #[test]
-    fn the_composing_pass_gives_the_model_one_owners_notes() {
-        let src = include_str!("main.rs");
-        let start = src
-            .find("async fn compose_suggestions(")
-            .expect("vacuity: compose_suggestions was not found, so this read nothing");
-        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
-        assert!(
-            body.contains("search_recent"),
-            "vacuity: this is not the composing pass's body"
-        );
-        assert!(
-            body.contains("gen::one_owners_candidates("),
-            "the composing pass no longer restricts a call to one owner's notes"
         );
     }
 

@@ -329,9 +329,13 @@ async fn ideas_and_the_portrait_read_empty_before_anything_is_known() {
     assert_eq!(ideas, json!({"ideas": [], "state": "idle"}));
     let (status, asked) = call(&pond, Method::POST, "/me/ideas/refresh", json!({})).await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(asked["state"], "thinking");
+    assert_eq!(
+        asked,
+        json!({"state": "idle"}),
+        "no idea is thought of any more"
+    );
     let (_, ideas) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
-    assert_eq!(ideas["state"], "thinking");
+    assert_eq!(ideas["state"], "idle");
     let (status, _) = call(&pond, Method::POST, "/me/ideas/nope/goose", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

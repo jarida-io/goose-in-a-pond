@@ -196,9 +196,6 @@ pub struct AppState {
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
     /// Inference lane jobs and run-now; `None` (CLI, tests) is reported as no lane, not as empty.
     pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,
-    /// Suggestions composed from the household's memories; not an `Option`, since every DB has one.
-    pub suggestion_queue:
-        Arc<dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository>,
     /// The idea engine's stores: fact sheets, don't-lists and the job log.
     pub engine: EngineStores,
     /// Sync all connected accounts now rather than on the timer; `None` where nothing can sync.

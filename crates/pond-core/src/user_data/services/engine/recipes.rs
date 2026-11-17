@@ -20,6 +20,8 @@ pub struct Slot {
     /// The deliverable's title, with `{anchor}` where the anchor's own title goes.
     pub title: &'static str,
     pub must_contain: &'static str,
+    /// How the member asks Goose about it, with `{anchor}` where the anchor's title goes.
+    pub ask: &'static str,
 }
 
 /// Which standing anchor one is.
@@ -38,6 +40,7 @@ const EVENT: &[Slot] = &[Slot {
     must_contain: "what it is, when and where; the weather on the day; the agenda and the \
                    sessions that fit the member; people worth meeting and why; how to get there; \
                    what to bring",
+    ask: "Tell me about my dossier for {anchor}",
 }];
 
 const TRIP: &[Slot] = &[
@@ -47,6 +50,7 @@ const TRIP: &[Slot] = &[
         title: "Plan for {anchor}",
         must_contain: "each day with its date; transport there, around and back; where to stay; \
                        a budget table; the essentials to sort out before leaving",
+        ask: "Tell me about my plan for {anchor}",
     },
     Slot {
         slot: "stays",
@@ -54,6 +58,7 @@ const TRIP: &[Slot] = &[
         title: "Places to stay for {anchor}",
         must_contain: "places to stay compared in one table, each with its price for the dates, \
                        what it offers, how far it is from what the member will do, and a link",
+        ask: "Tell me about the places to stay for {anchor}",
     },
     Slot {
         slot: "packing",
@@ -61,6 +66,7 @@ const TRIP: &[Slot] = &[
         title: "Packing list for {anchor}",
         must_contain: "what to pack for these dates, this place and its weather, in groups, one \
                        item to a line, with the documents and bookings to carry",
+        ask: "Tell me about my packing list for {anchor}",
     },
 ];
 
@@ -71,6 +77,7 @@ const PURCHASE: &[Slot] = &[
         title: "Shortlist for {anchor}",
         must_contain: "listings worth a look, each with its price, its specifications, why it \
                        fits the member and a link",
+        ask: "Tell me about my shortlist for {anchor}",
     },
     Slot {
         slot: "costs",
@@ -78,6 +85,7 @@ const PURCHASE: &[Slot] = &[
         title: "Total cost of {anchor}",
         must_contain: "the total cost beyond the price: duty, fees, delivery and running costs, \
                        each as a figure with where it comes from",
+        ask: "Tell me what {anchor} will cost in all",
     },
 ];
 
@@ -87,6 +95,7 @@ const DIGEST: &[Slot] = &[Slot {
     title: "What is new in {anchor}",
     must_contain: "what is new since the last version: releases, news, people and deadlines, \
                    each with its date and why it matters to the member",
+    ask: "Tell me what is new in {anchor}",
 }];
 
 const EVERYDAY: &[Slot] = &[Slot {
@@ -95,6 +104,7 @@ const EVERYDAY: &[Slot] = &[Slot {
     title: "Out this week",
     must_contain: "named places and events near the member this week, each with its day, time, \
                    place, price and a link, and why it fits them",
+    ask: "Tell me what is on near me this week",
 }];
 
 const BUDGET: &[Slot] = &[Slot {
@@ -103,6 +113,7 @@ const BUDGET: &[Slot] = &[Slot {
     title: "Spending this month",
     must_contain: "the month's spending by category from the ledger, what changed from the \
                    month before, and each recurring payment with the date it next falls",
+    ask: "Tell me about my spending this month",
 }];
 
 /// Which standing anchor `anchor` is; `None` for any other kind.
@@ -160,6 +171,14 @@ pub fn deliverable_title(anchor: &Anchor, slot: &Slot) -> String {
     slot.title.replace(ANCHOR_MARK, name.trim_end())
 }
 
+/// What the member would say to ask Goose about `deliverable`, made for `anchor`.
+pub fn asked_about(anchor: &Anchor, deliverable: &Deliverable) -> String {
+    match slot_named(anchor, &deliverable.slot) {
+        Some(slot) => slot.ask.replace(ANCHOR_MARK, anchor.title.trim()),
+        None => format!("Tell me about {}", deliverable.title),
+    }
+}
+
 fn local(at: DateTime<Utc>, timezone: &str) -> String {
     let at = at.with_timezone(&timezone.parse().unwrap_or(chrono_tz::UTC));
     if at.hour() == 0 && at.minute() == 0 {
@@ -184,7 +203,7 @@ pub fn when_of(anchor: &Anchor, timezone: &str) -> Option<String> {
     }
 }
 
-pub(super) fn article(kind: DeliverableKind) -> &'static str {
+pub fn article(kind: DeliverableKind) -> &'static str {
     match kind {
         DeliverableKind::Dossier => "a dossier",
         DeliverableKind::Plan => "a plan",
@@ -330,6 +349,14 @@ mod tests {
                 let title = deliverable_title(&long, slot);
                 assert!(chars(&title) <= MAX_TITLE_CHARS, "{title}");
                 assert!(!title.contains(ANCHOR_MARK), "{title}");
+                assert!(slot.ask.starts_with("Tell me "), "{}", slot.slot);
+                assert!(!slot.ask.ends_with(['.', '?']), "{}", slot.slot);
+                assert_eq!(
+                    slot.title.contains(ANCHOR_MARK),
+                    slot.ask.contains(ANCHOR_MARK),
+                    "{}",
+                    slot.slot
+                );
             }
         }
     }
@@ -398,6 +425,29 @@ mod tests {
             "Out this week"
         );
         assert!(slot_named(&summit, "packing").is_none());
+    }
+
+    #[test]
+    fn the_member_asks_about_a_deliverable_by_its_anchor() {
+        let trip = anchor(AnchorKind::Trip, "Diani trip");
+        assert_eq!(
+            asked_about(&trip, &deliverable(&trip, "plan", DeliverableState::Ready)),
+            "Tell me about my plan for Diani trip"
+        );
+        let everyday = anchor(AnchorKind::Standing, "Everyday");
+        assert_eq!(
+            asked_about(
+                &everyday,
+                &deliverable(&everyday, "out", DeliverableState::Ready)
+            ),
+            "Tell me what is on near me this week"
+        );
+        let mut unknown = deliverable(&trip, "plan", DeliverableState::Ready);
+        unknown.slot = "gone".into();
+        assert_eq!(
+            asked_about(&trip, &unknown),
+            "Tell me about Plan for Diani trip"
+        );
     }
 
     #[test]

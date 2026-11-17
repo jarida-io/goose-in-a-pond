@@ -592,15 +592,24 @@ acted on.
 
 ```sql
 DELETE FROM suggestion_queue WHERE state = 'queued';
+DELETE FROM todo_hooks
+    WHERE todo_id IN (SELECT id FROM todos WHERE source = 'goose' AND state = 'open');
 DELETE FROM todos WHERE source = 'goose' AND state = 'open';
 DELETE FROM agent_notes WHERE kind = 'note';
 DELETE FROM ideas WHERE state = 'new';
 DELETE FROM member_topics;
 DELETE FROM member_portraits;
-INSERT INTO captures (id, profile_id, kind, taken_at, state, description, created_at, updated_at)
-    SELECT id, profile_id, 'screenshot', taken_at, 'read', note, created_at, created_at
-    FROM screenshot_notes;
+INSERT INTO captures (id, profile_id, kind, taken_at, state, sensitive, description, created_at,
+                      updated_at)
+    SELECT s.id, s.profile_id, 'screenshot', s.taken_at, 'read', 'none', s.note, s.created_at,
+           s.created_at
+    FROM screenshot_notes s
+    WHERE NOT EXISTS (SELECT 1 FROM captures c WHERE c.id = s.id)
+      AND EXISTS (SELECT 1 FROM profiles p WHERE p.id = s.profile_id);
 ```
+
+The `suggestion_queue`, `idea_runs` and `screenshot_notes` tables stay; a later change may drop
+them.
 
 Interests keep their rows: with `feeds_research` now true only for a confirmed interest, the
 unconfirmed ones are candidates and feed nothing. The topic map rebuilds from the fact sheet on

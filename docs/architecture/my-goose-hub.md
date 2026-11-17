@@ -2,8 +2,9 @@
 
 My Goose is the middle tab of Goose On The Go. It is where a member finds what the Pond has been
 doing for them: news written from their interests, their to-dos and reminders, the links they
-asked Goose to watch, ideas Goose researched for them, the services the Pond connects to, and what
-else Goose can do. This document is the contract between the Pond and the phone.
+asked Goose to watch, the work Goose made for the things in their life, the services the Pond
+connects to, and what else Goose can do. This document is the contract between the Pond and the
+phone.
 
 ## Ground rules
 
@@ -161,7 +162,7 @@ Interest = { "id", "topic": "Formula 1",
 Memory extraction stops turning a one-off question into a trait. What a conversation shows the
 member caring about goes to `interests` as an unconfirmed row (or adds one to its `evidence`).
 An unconfirmed row is a candidate: it stays listed for the member and feeds nothing. The news,
-ideas, prompts and the personal-context index read confirmed rows only, never an `avoid` row
+prompts and the personal-context index read confirmed rows only, never an `avoid` row
 (`Interest::feeds_research`). A candidate is ready to be offered for confirming once
 conversations on three separate days, in the household's time zone, showed it, or the member
 voted a story of it up (`interest::ready_to_offer`, `InterestRepository::ready_to_offer`).
@@ -186,8 +187,8 @@ Interview = { "status": "not_started|asking|thinking|review|done",
 
 The portrait is read from the member's fact sheet (`fact_sheet::as_portrait`); no job writes
 it. Identity, work and home lines make the summary, interest lines `into`, plans and things
-they are looking for `working_on`, and tastes and food `likes`. The news, ideas and interview
-prompts read it.
+they are looking for `working_on`, and tastes and food `likes`. The news and interview prompts
+read it.
 
 - `GET /me/portrait` → `{"summary": "a few sentences", "into": [string], "working_on":
   [string], "likes": [string], "updated_at"}`, or 404 while the fact sheet is empty
@@ -262,6 +263,11 @@ Question = { "id", "text", "options": ["..."], "multi": bool }   // the screen a
   `kind` is not `standing`. A title the member already has answers 200 with that anchor; one
   Goose offered is confirmed by it; one that faded or was stopped comes back (201); one that
   ended is 409
+- In a chat, the model's `plan_for` tool (`giap-schedule`) adds one the same way when the
+  member asks Goose to plan, prepare for or keep an eye on something: `{kind, title, when?,
+  until?, place?, details?}`, the dates read from the member's words. It answers in one line
+  ("I'll work on a plan for your Diani trip and tell you when it's ready."); a guest or an
+  unidentified speaker is refused
 - `GET /me/anchors/{id}` → Anchor with `"questions":[Question]` and the job's `steps`
 - `PATCH /me/anchors/{id}` `{title?, starts_at?, ends_at?, place?, facts?}` → Anchor. A date or
   place sent as `null` is cleared; `facts` replaces the whole list. 409 for a title the member
@@ -386,7 +392,7 @@ What to look up comes from the member's topic map (`member_topics`, rebuilt dail
 scored web-search queries written from that member's interests, portrait, memories and scheduled
 tasks, in batches by area, at most four per subject, weighted by what this member cares about,
 with private matters the public web cannot answer dropped. Newsworthy topics feed the tiles and
-the digest; the rest feed ideas and an occasional long read (a Story of kind `long_read`).
+the digest; the rest feed an occasional long read (a Story of kind `long_read`).
 
 Tiles are refreshed a few times a day, a handful per interest, each a page the Pond read and
 summarised itself. The digest is written once a day, ready by `digest_time`, from the day's
@@ -528,27 +534,36 @@ Idea = { "id",
   "state": "new|working|done|dismissed", "progress": {"task_id"}|null, "created_at" }
 ```
 
-- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle|thinking"}`; `GET /me/ideas/{id}` → Idea
+- `GET /me/ideas` → `{"ideas":[Idea], "state":"idle"}`; `GET /me/ideas/{id}` → Idea
 - `POST /me/ideas/{id}/goose` → Idea: Goose starts its part (a research task, a watch, a
   schedule, a to-do) and the idea moves to `working`
 - `POST /me/ideas/{id}/mine` → `{"idea": Idea, "todos": [Todo]}`: the steps become to-dos,
   and a new idea moves to `done`, so the phone lists them where its buttons were
-- `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202
+- `POST /me/ideas/{id}/dismiss` → 204; `POST /me/ideas/refresh` → 202 `{"state":"idle"}`
 
-Once a day on the lane, and when the member asks, the Pond writes up to three ideas for each
-member: one everyday idea and up to two from their interests and what they are working on.
-Each is searched for, read from the pages found, and written by the model as JSON.
+No new ideas are written: anchors and their deliverables ([idea-engine.md](idea-engine.md))
+replace them. These routes serve the ideas a pond already holds, and the engine purge
+(migration 0117) deleted the ones nobody acted on. `state` is always `idle` and `refresh` starts
+nothing, so a phone that still asks for ideas shows no error.
 
-The everyday kinds take turns by the day, and a kind rests three days after one is written: a
-nutritious recipe, somewhere to go outdoors, a date (with their partner when the profile names
-one, else with themselves), something fun to do, a holiday. They are written against the
-member's profile ([member-memory.md](member-memory.md)): what they eat, are allergic to,
-dislike and asked not to hear about, who they live with, where the household is. An idea that
-names something the member is allergic to is dropped in code, whatever the model wrote. A
-search never carries a person's name, an address or a health condition.
+### Suggestions on Home
 
-"Not for me" is heard: the kind of everyday idea turned down rests ten days rather than three,
-and the interest or piece of work an idea was built on rests thirty days rather than seven.
+`GET /suggestions` answers with questions derived from what the pond holds, never stored and
+never written by a model. The first is a member's finished work they have not opened: a
+deliverable of an anchor they own that is ready or unsure and not yet seen.
+
+```
+{"id": "ready_deliverable", "prompt": "Tell me about my plan for Diani trip",
+ "because": "Ready: Plan for Diani trip.", "answered_by": "giap-memory", "composed": false,
+ "context": {"type": "personal_memory", "source_memory_id": "deliverable:<id>",
+             "fact": "its title, hook and opening"}}
+```
+
+It counts against the four shown, is muted like the others (`suggestions_muted`), and goes once
+the member opens the deliverable (`POST /me/deliverables/{id}/seen`). Sent back as
+`suggestion_context` with the tap, its `fact` gives the chat model the deliverable's opening.
+`composed` is always `false`, and `POST /suggestions/{id}/taken` answers 200 with
+`"settled": false` for any id.
 
 ## 6a. Cards sent to chat
 

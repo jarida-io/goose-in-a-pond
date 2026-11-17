@@ -135,19 +135,6 @@ pub enum GooseKind {
     Chat,
 }
 
-impl GooseKind {
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_lowercase().as_str() {
-            "research" => Some(GooseKind::Research),
-            "watch" => Some(GooseKind::Watch),
-            "todo" | "to-do" | "to_do" => Some(GooseKind::Todo),
-            "schedule" => Some(GooseKind::Schedule),
-            "chat" => Some(GooseKind::Chat),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GooseCan {
     pub label: String,
@@ -189,7 +176,7 @@ pub struct Idea {
     pub id: String,
     #[serde(skip)]
     pub profile_id: String,
-    /// The interest or piece of work it builds on, so the next idea picks another.
+    /// The interest or piece of work it builds on.
     #[serde(skip)]
     pub topic: String,
     pub kind: IdeaKind,

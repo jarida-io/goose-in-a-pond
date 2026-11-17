@@ -89,7 +89,7 @@ async fn make_app(device_count: usize) -> Harness {
     let pool = db.system.clone();
     let storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
     let profiles = Arc::new(SqliteProfileRepository::new(pool.clone()));
-    // Not `MockSettingsRepository`: it persists few fields, not `suggestion_generation_enabled`.
+    // Not `MockSettingsRepository`: it persists few fields, not `suggestions_muted`.
     let settings = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
         pool.clone(),
     ));
@@ -102,9 +102,6 @@ async fn make_app(device_count: usize) -> Harness {
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
-        suggestion_queue: std::sync::Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
         engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db: Arc::new(db),
         onboarding_repo: Arc::new(CompletedOnboarding),
@@ -273,31 +270,36 @@ async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     id.to_string()
 }
 
-/// Queue a question composed from `member`'s own note, as the lane would.
-/// The note goes in the real `memory_fragments`: `offerable` joins it to check it's live.
-async fn compose_for(h: &Harness, member: &str, memory_id: &str, prompt: &str) {
-    use pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository;
-    use pond_core::user_data::services::suggestion_generation::GeneratedSuggestion;
-    sqlx::query(
-        "INSERT INTO memory_fragments (id, profile_id, content, source, created_at, lifecycle) \
-         VALUES (?, ?, 'a private note', 'extraction', datetime('now'), 'active')",
+/// A plan Goose finished for `owner`'s trip, shown to them and not yet opened.
+async fn ready_plan(h: &Harness, owner: &str, title: &str) -> String {
+    use pond_core::user_data::domain::anchor::{
+        Anchor, AnchorKind, AnchorOrigin, Deliverable, DeliverableKind, DeliverableState,
+    };
+    use pond_core::user_data::ports::anchors::AnchorRepository;
+    let anchors = pond_infra::sqlite_anchors::SqliteAnchorRepository::new(h.pool.clone());
+    let now = chrono::Utc::now();
+    let trip = Anchor::new(owner, AnchorKind::Trip, title, AnchorOrigin::You, now).unwrap();
+    assert!(anchors.add(&trip).await.unwrap());
+    let mut plan = Deliverable::new(
+        &trip.id,
+        DeliverableKind::Plan,
+        "plan",
+        &format!("Plan for {title}"),
+        now,
     )
-    .bind(memory_id)
-    .bind(member)
-    .execute(&h.pool)
-    .await
     .unwrap();
-    let queued = pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(h.pool.clone())
-        .queue(&[GeneratedSuggestion {
-            source_memory_id: memory_id.to_string(),
-            profile_id: Some(member.to_string()),
-            prompt: prompt.to_string(),
-            reason: "From something you told me, saved 3 days ago.".to_string(),
-            fact: "a private note".to_string(),
-        }])
-        .await
-        .unwrap();
-    assert_eq!(queued, 1, "the fixture must actually queue the question");
+    plan.state = DeliverableState::Ready;
+    plan.version = 1;
+    plan.hook = "Four days, the SGR both ways.".to_string();
+    assert!(anchors.add_deliverable(&plan).await.unwrap());
+    trip.id
+}
+
+fn the_ready_one(body: &Value) -> Option<&Value> {
+    body["suggestions"]
+        .as_array()?
+        .iter()
+        .find(|s| s["id"] == "ready_deliverable")
 }
 
 fn prompts(body: &Value) -> Vec<String> {
@@ -440,112 +442,139 @@ async fn the_route_never_refuses_whoever_is_asking() {
 
 /// `Owner(them)` on a pond of two must not widen to `Household`, which reads every member.
 #[tokio::test]
-async fn an_identified_member_is_never_offered_another_members_composed_question() {
+async fn a_members_finished_work_is_offered_to_them_and_to_nobody_else() {
     let h = make_app(19).await;
     let jerry = member(&h, "Jerry").await;
     let liz = member(&h, "Liz").await;
-    let lizs_question = "When is my appointment at the clinic?";
-    compose_for(&h, &liz, "m-liz-clinic", lizs_question).await;
-
-    let session = session_of(&h, "s-jerry", &jerry).await;
-    let (status, body) =
-        get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(
-        body["audience"].as_str(),
-        Some("personal"),
-        "Jerry is identified, so this is his personal tier; body: {body}"
-    );
-    assert!(
-        !prompts(&body).iter().any(|p| p == lizs_question),
-        "Liz's composed question reached Jerry; body: {body}"
-    );
-}
-
-/// Control: without it the test above passes if the composed tier is never served.
-#[tokio::test]
-async fn the_member_a_note_belongs_to_is_offered_the_question_composed_from_it() {
-    let h = make_app(19).await;
-    let _jerry = member(&h, "Jerry").await;
-    let liz = member(&h, "Liz").await;
-    let lizs_question = "When is my appointment at the clinic?";
-    compose_for(&h, &liz, "m-liz-clinic", lizs_question).await;
+    ready_plan(&h, &liz, "Diani trip").await;
 
     let session = session_of(&h, "s-liz", &liz).await;
     let (status, body) =
         get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ready = the_ready_one(&body).unwrap_or_else(|| panic!("Liz was not offered it: {body}"));
+    assert_eq!(ready["prompt"], "Tell me about my plan for Diani trip");
+    assert_eq!(ready["because"], "Ready: Plan for Diani trip.");
+    assert_eq!(ready["composed"], false);
+    assert_eq!(ready["context"]["type"], "personal_memory");
     assert!(
-        prompts(&body).iter().any(|p| p == lizs_question),
-        "Liz was not offered the question composed from her own note; body: {body}"
+        ready["context"]["fact"]
+            .as_str()
+            .is_some_and(|fact| fact.contains("Four days, the SGR both ways.")),
+        "body: {body}"
     );
-}
 
-/// The template-tier multi-member test can't catch this: its suggestors are all silent here.
-#[tokio::test]
-async fn nobody_identified_on_a_pond_of_two_is_offered_no_composed_question() {
-    let h = make_app(19).await;
-    let _jerry = member(&h, "Jerry").await;
-    let liz = member(&h, "Liz").await;
-    compose_for(
-        &h,
-        &liz,
-        "m-liz-clinic",
-        "When is my appointment at the clinic?",
-    )
-    .await;
-
-    let (status, body) = get_json(&h.app, "/api/v1/suggestions").await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let session = session_of(&h, "s-jerry", &jerry).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    assert!(
+        the_ready_one(&body).is_none(),
+        "Liz's plan reached Jerry: {body}"
+    );
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
     assert_eq!(body["audience"].as_str(), Some("shared"), "body: {body}");
-    let composed: Vec<&Value> = body["suggestions"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|s| s["composed"] == Value::Bool(true))
-                .collect()
-        })
-        .unwrap_or_default();
     assert!(
-        composed.is_empty(),
-        "a composed question reached the guest tier; body: {body}"
+        the_ready_one(&body).is_none(),
+        "it reached the guest tier: {body}"
     );
 }
 
-/// Off must hide already-queued composed questions too; back on returns the same ones.
+/// Only its owner can open it, so a shared plan would sit on the other member's Home for good.
 #[tokio::test]
-async fn turning_composed_suggestions_off_takes_the_queued_ones_off_home() {
-    use pond_core::user_data::ports::settings::SettingsRepository;
+async fn work_shared_with_a_member_is_not_offered_to_them() {
+    use pond_core::user_data::ports::anchors::AnchorRepository;
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    let liz = member(&h, "Liz").await;
+    let trip = ready_plan(&h, &liz, "Diani trip").await;
+    let anchors = pond_infra::sqlite_anchors::SqliteAnchorRepository::new(h.pool.clone());
+    assert!(anchors
+        .set_shares(&liz, &trip, std::slice::from_ref(&jerry))
+        .await
+        .unwrap());
 
+    let session = session_of(&h, "s-jerry", &jerry).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    assert!(the_ready_one(&body).is_none(), "body: {body}");
+}
+
+/// A household of one asks without saying who they are, and opening it ends the offer.
+#[tokio::test]
+async fn opening_the_work_or_muting_the_card_takes_it_off_home() {
+    use pond_core::user_data::ports::settings::SettingsRepository;
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    ready_plan(&h, &jerry, "Diani trip").await;
+
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert!(the_ready_one(&body).is_some(), "control: body: {body}");
+
+    let mut muted = h.settings.get().await.unwrap();
+    muted.suggestions_muted = vec!["ready_deliverable".to_string()];
+    h.settings.update(&muted).await.unwrap();
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert!(the_ready_one(&body).is_none(), "muted: body: {body}");
+    muted.suggestions_muted.clear();
+    h.settings.update(&muted).await.unwrap();
+
+    sqlx::query("UPDATE deliverables SET seen_at = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert!(the_ready_one(&body).is_none(), "opened: body: {body}");
+}
+
+/// A queued row from the retired composer is never served, and a tap on any id answers.
+#[tokio::test]
+async fn no_composed_question_is_served_and_a_tap_settles_nothing() {
     let h = make_app(19).await;
     let jerry = member(&h, "Jerry").await;
     let question = "What did I decide about the garden fence?";
-    compose_for(&h, &jerry, "m-jerry-fence", question).await;
+    sqlx::query(
+        "INSERT INTO suggestion_queue (id, profile_id, prompt, reason, source_memory_id, \
+         answered_by) VALUES ('q-1', ?, ?, 'From a note.', 'm-1', 'giap-memory')",
+    )
+    .bind(&jerry)
+    .bind(question)
+    .execute(&h.pool)
+    .await
+    .unwrap();
 
-    // Control: without it, "off" would pass on a harness that never serves the composed tier.
-    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
-    assert!(
-        prompts(&body).iter().any(|p| p == question),
-        "on: body: {body}"
-    );
-
-    let mut off = h.settings.get().await.unwrap();
-    off.suggestion_generation_enabled = false;
-    h.settings.update(&off).await.unwrap();
     let (status, body) = get_json(&h.app, "/api/v1/suggestions").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(
         !prompts(&body).iter().any(|p| p == question),
-        "off: a queued composed question is still on Home; body: {body}"
+        "body: {body}"
+    );
+    assert!(
+        body["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["composed"] == false),
+        "body: {body}"
     );
 
-    // Same queued row, not a rebuild: back on needn't wait for another composition pass.
-    let mut on = h.settings.get().await.unwrap();
-    on.suggestion_generation_enabled = true;
-    h.settings.update(&on).await.unwrap();
-    let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
-    assert!(
-        prompts(&body).iter().any(|p| p == question),
-        "back on: body: {body}"
-    );
+    for id in ["q-1", "never-queued"] {
+        let res = h
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/suggestions/{id}/taken"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, serde_json::json!({"id": id, "settled": false}));
+    }
 }

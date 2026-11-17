@@ -123,9 +123,6 @@ pub async fn app_state() -> TestState {
         answer_reviewer: None,
         lane: None,
         extraction_status: None,
-        suggestion_queue: Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(pool.clone()),
-        ),
         engine: crate::EngineStores::sqlite(pool.clone()),
         last_user_activity: Arc::new(tokio::sync::RwLock::new(std::time::Instant::now())),
         consolidation_cancel: Arc::new(tokio::sync::RwLock::new(None)),

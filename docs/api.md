@@ -444,7 +444,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /reminders | token +onb | scoped | Pending reminders |
 | POST | /reminders/{id}/dismiss | token +onb | scoped | Dismiss a reminder |
 | GET | /suggestions | token +onb | scoped | What the household might want to ask |
-| POST | /suggestions/{id}/taken | token +onb | | Record a composed suggestion as taken |
+| POST | /suggestions/{id}/taken | token +onb | | Kept for older clients; nothing is stored, so it settles nothing |
 | GET | /proposals | token +onb | scoped | This member's live proposals |
 | POST | /proposals/{id}/decide | token +onb | scoped | Approve or reject a proposal |
 
@@ -1519,7 +1519,7 @@ See [architecture/memory_system.md](architecture/memory_system.md).
 | `GET /reminders` | `?limit=&session_id=` | `{reminders, limit}`, pending only, newest first |
 | `POST /reminders/{id}/dismiss` | `?session_id=` | `{id, disposition}`; `404` when nothing moved |
 | `GET /suggestions` | `?session_id=` | `{suggestions: [{id, prompt, because, answered_by, composed}], considered, audience}` |
-| `POST /suggestions/{id}/taken` | | `{id, settled}`; an unknown id is `200` with `false` |
+| `POST /suggestions/{id}/taken` | | `{id, settled: false}` for any id |
 | `GET /proposals` | `?session_id=` (required) | `{profile_id, proposals}`, live only, newest first |
 | `POST /proposals/{id}/decide` | `{session_id, decision: "approve" \| "reject"}` (unknown fields refused) | `{id, status, executed}`; approving executes nothing. `403` when the caller may not decide it, `404` no live proposal, `409` cannot move to that status |
 

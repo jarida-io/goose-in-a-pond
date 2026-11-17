@@ -163,8 +163,6 @@ export interface Settings {
 
   // Memory lifecycle
   memory_extraction_enabled?: boolean;
-  /** Turn what the pond remembers into questions on Home. */
-  suggestion_generation_enabled?: boolean;
   memory_cleanup_enabled?: boolean;
   memory_consolidation_enabled?: boolean;
   /** Let the pond rename conversations while idle. Never touches a name you typed. */

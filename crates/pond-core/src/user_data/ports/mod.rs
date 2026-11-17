@@ -51,6 +51,5 @@ pub mod sensor_storage;
 pub mod session_storage;
 pub mod settings;
 pub mod skill;
-pub mod suggestion_queue;
 pub mod vision;
 pub mod voice_print;

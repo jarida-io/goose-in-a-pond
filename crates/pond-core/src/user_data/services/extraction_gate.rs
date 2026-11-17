@@ -19,7 +19,7 @@ const MAX_DETAILS_CHARS: usize = 300;
 const MAX_REASON_CHARS: usize = 120;
 
 /// The kinds a stated plan may be; an interest or a standing anchor is never read from one.
-const PLAN_KINDS: [AnchorKind; 4] = [
+pub(super) const PLAN_KINDS: [AnchorKind; 4] = [
     AnchorKind::Event,
     AnchorKind::Trip,
     AnchorKind::Purchase,

@@ -17628,6 +17628,11 @@ async fn list_suggestions(
     let (schedules_before_midnight, next_schedule_label) =
         suggestion_schedules_before(&state, now, day_end).await;
 
+    let unseen_work = match audience {
+        suggestion::Audience::Personal => suggestion_unseen_work(&state, &read_scope).await,
+        suggestion::Audience::Shared => None,
+    };
+
     let snapshot = suggestion::SuggestionSnapshot {
         audience,
         groups: suggestion_groups(&state).await,
@@ -17641,55 +17646,26 @@ async fn list_suggestions(
         devices_registered,
         weather_ready: settings.weather_enabled && place.weather_target().is_some(),
         place: place.is_named().then(|| place.name.clone()),
+        unseen_work,
     };
 
     let set = suggestion::suggest(&snapshot);
 
-    // Composed questions take the slots and templates fill the rest (a pond with no model, a
-    // drained queue, a first evening). Hidden at once when the toggle is off, but kept queued.
-    let composed = if settings.suggestion_generation_enabled {
-        state
-            .suggestion_queue
-            .offerable(&read_scope, suggestion::MAX_SUGGESTIONS)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(error = %e, "suggestions: could not read the composed queue");
-                Vec::new()
-            })
-    } else {
-        Vec::new()
-    };
-
-    let mut offered: Vec<Value> = composed
+    let offered: Vec<Value> = set
+        .offered
         .iter()
-        .map(|c| {
+        .map(|s| {
             json!({
-                // The queue row's id, so a tap can settle it.
-                "id": c.id,
-                "prompt": c.prompt,
-                "because": c.reason,
-                "answered_by": "giap-memory",
-                // Only composed ones are reported back when tapped.
-                "composed": true,
-                "context": c.context(),
+                "id": s.id,
+                "prompt": s.prompt,
+                "because": s.because,
+                "answered_by": s.answered_by,
+                // Clients report a tap only on a composed one, and none is.
+                "composed": false,
+                "context": s.context,
             })
         })
         .collect();
-
-    for s in set
-        .offered
-        .iter()
-        .take(suggestion::MAX_SUGGESTIONS.saturating_sub(offered.len()))
-    {
-        offered.push(json!({
-            "id": s.id,
-            "prompt": s.prompt,
-            "because": s.because,
-            "answered_by": s.answered_by,
-            "composed": false,
-            "context": s.context,
-        }));
-    }
 
     Json(json!({
         "suggestions": offered,
@@ -17700,25 +17676,42 @@ async fn list_suggestions(
     .into_response()
 }
 
-/// `POST /api/v1/suggestions/{id}/taken` — the household tapped a composed one.
-/// Settling drains the queue. An unknown id is 200 `false`, not 404: double taps happen.
-async fn suggestion_taken(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl axum::response::IntoResponse {
-    use pond_core::user_data::ports::suggestion_queue::Settled;
+/// `POST /api/v1/suggestions/{id}/taken` -- answered for clients that report a tap; nothing is
+/// stored, so nothing is settled.
+async fn suggestion_taken(Path(id): Path<String>) -> impl axum::response::IntoResponse {
+    Json(json!({ "id": id, "settled": false }))
+}
 
-    match state.suggestion_queue.settle(&id, Settled::Taken).await {
-        Ok(settled) => Json(json!({ "id": id, "settled": settled })).into_response(),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not settle a suggestion");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "could not record that"})),
-            )
-                .into_response()
+/// The caller's newest finished work they have not opened, on an anchor they own: only its
+/// owner can mark it seen, so a shared one would be offered for good.
+async fn suggestion_unseen_work(
+    state: &Arc<AppState>,
+    scope: &pond_core::user_data::domain::profile::ProfileScope,
+) -> Option<pond_core::user_data::services::suggestion::UnseenWork> {
+    use pond_core::user_data::domain::profile::ProfileScope;
+
+    let member = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
+        ProfileScope::Guest => return None,
+    };
+    let anchors = &state.engine.anchors;
+    let unseen = anchors.unseen(&member).await.unwrap_or_else(|e| {
+        tracing::debug!(error = %e, "suggestions: could not read unopened deliverables");
+        Vec::new()
+    });
+    for deliverable in unseen {
+        let Ok(Some(anchor)) = anchors.get(&member, &deliverable.anchor_id).await else {
+            continue;
+        };
+        if anchor.profile_id == member {
+            return Some(pond_core::user_data::services::suggestion::UnseenWork {
+                anchor,
+                deliverable,
+            });
         }
     }
+    None
 }
 
 /// The audience as a word, for a client that wants to explain itself.

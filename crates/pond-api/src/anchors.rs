@@ -22,6 +22,7 @@ use pond_core::user_data::domain::anchor::{
 use pond_core::user_data::domain::dont_list::{DontRule, Reason, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::EngineJob;
 use pond_core::user_data::domain::question::{QuestionState, QuestionView};
+use pond_core::user_data::services::anchor_add::{add_asked, AnchorAdded};
 
 use crate::engine_log::{call_off, job_steps, job_summary, shown_job};
 use crate::me::{caller_member, failure, server_error, Failure};
@@ -292,32 +293,6 @@ struct NewAnchor {
     notes: Option<String>,
 }
 
-/// Lays what the member typed just now over an anchor of theirs that already held details.
-fn lay_over(held: &mut Anchor, typed: Anchor, now: DateTime<Utc>) {
-    // The dates go as a pair, so an old end never sits before a new start.
-    if typed.starts_at.is_some() || typed.ends_at.is_some() {
-        held.starts_at = typed.starts_at;
-        held.ends_at = typed.ends_at;
-    }
-    if typed.place.is_some() {
-        held.place = typed.place;
-    }
-    for fact in typed.facts {
-        held.set_fact(fact, now);
-    }
-}
-
-/// Takes back the rule that stopping this anchor left, when the member adds it again.
-async fn forget_stop_rule(state: &AppState, member: &str, anchor_id: &str) -> Result<(), Failure> {
-    let dont = &state.engine.dont;
-    for rule in dont.list(member, None).await.map_err(server_error)? {
-        if rule.origin == RuleOrigin::Stop && rule.origin_ref.as_deref() == Some(anchor_id) {
-            dont.delete(member, &rule.id).await.map_err(server_error)?;
-        }
-    }
-    Ok(())
-}
-
 async fn add_anchor(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -344,65 +319,28 @@ async fn add_anchor(
         anchor.set_fact(AnchorFact::new(NOTES_LABEL, &notes, SAID_BY_MEMBER), now);
     }
 
-    let anchors = &state.engine.anchors;
-    let key = anchor.key();
-    let held = anchors
-        .by_title(&member, &key)
-        .await
-        .map_err(server_error)?;
-    if held.is_none() && anchors.add(&anchor).await.map_err(server_error)? {
-        let made = answer_with(&state, &member, &anchor.id).await?;
-        return Ok((StatusCode::CREATED, made));
-    }
-    // `add` refuses only a title taken since the read above, so the read now finds its holder.
-    let held = match held {
-        Some(held) => held,
-        None => anchors
-            .by_title(&member, &key)
-            .await
-            .map_err(server_error)?
-            .ok_or_else(|| server_error("the anchor could not be added: try again"))?,
-    };
-    let id = held.id.clone();
-    let status = match held.state {
-        AnchorState::Active => StatusCode::OK,
-        // Adding by hand what Goose offered is the member's yes to it.
-        AnchorState::Candidate => {
-            let mut confirmed = held;
-            confirmed.confirm(now).map_err(server_error)?;
-            confirmed.kind = anchor.kind;
-            confirmed.agent = anchor.agent;
-            lay_over(&mut confirmed, anchor, now);
-            save(&state, &confirmed).await?;
-            StatusCode::OK
-        }
-        AnchorState::Faded | AnchorState::Stopped => {
-            let mut revived = Anchor {
-                id: held.id,
-                starts_at: held.starts_at,
-                ends_at: held.ends_at,
-                place: held.place,
-                facts: held.facts,
-                ..anchor.clone()
-            };
-            // What was made for a stopped one hangs off the slots of the kind it had.
-            if held.state == AnchorState::Stopped {
-                revived.kind = held.kind;
-                revived.agent = held.agent;
-            }
-            lay_over(&mut revived, anchor, now);
-            save(&state, &revived).await?;
-            forget_stop_rule(&state, &member, &id).await?;
-            StatusCode::CREATED
-        }
-        AnchorState::Ended => {
+    let added = add_asked(
+        state.engine.anchors.as_ref(),
+        state.engine.dont.as_ref(),
+        anchor,
+        now,
+    )
+    .await
+    .map_err(server_error)?;
+    let status = match &added {
+        AnchorAdded::New(_) | AnchorAdded::Revived(_) => StatusCode::CREATED,
+        AnchorAdded::Held(_) | AnchorAdded::Confirmed(_) => StatusCode::OK,
+        AnchorAdded::Ended(_) => {
             return Err(failure(
                 StatusCode::CONFLICT,
                 "you had one called that and it has ended: give this one another name",
             ))
         }
     };
-    Ok((status, answer_with(&state, &member, &id).await?))
+    Ok((
+        status,
+        answer_with(&state, &member, &added.anchor().id).await?,
+    ))
 }
 
 /// A field left out of the body stays as it is; one sent as `null` is cleared.

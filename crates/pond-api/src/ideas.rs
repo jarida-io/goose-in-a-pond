@@ -1,5 +1,5 @@
-//! Ideas Goose researched for a member, which Goose or the member can act on. The lane writes
-//! them (`pond-server`'s `my_goose_mind`); these routes read them and start the member's choice.
+//! Ideas Goose researched for a member, which Goose or the member can act on. Nothing writes new
+//! ones any more; these routes read the ones a pond already holds and start the member's choice.
 
 use std::sync::Arc;
 
@@ -17,7 +17,6 @@ use pond_core::security::ports::policy::Principal;
 use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::idea::{GooseKind, Idea, IdeaState};
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaTodo};
-use pond_core::user_data::services::inference_lane::LaneJob;
 
 use crate::me::{caller_member, failure, server_error, Failure};
 use crate::AppState;
@@ -49,13 +48,8 @@ async fn list(
     principal: Option<Extension<Principal>>,
 ) -> Result<Json<Value>, Failure> {
     let member = caller_member(&state, principal.as_ref()).await?;
-    let repo = repo(&state);
-    let ideas = repo.list(&member).await.map_err(server_error)?;
-    let run = repo.run(&member).await.map_err(server_error)?;
-    Ok(Json(json!({
-        "ideas": ideas,
-        "state": if run.is_thinking(Utc::now()) { "thinking" } else { "idle" },
-    })))
+    let ideas = repo(&state).list(&member).await.map_err(server_error)?;
+    Ok(Json(json!({ "ideas": ideas, "state": "idle" })))
 }
 
 /// `GET /me/ideas/{id}`: the idea's own page.
@@ -68,20 +62,13 @@ async fn read(
     Ok(Json(json!(the_idea(&state, &member, &id).await?)))
 }
 
+/// Starts nothing: answered in its old shape so a phone that still asks shows no error.
 async fn refresh(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
 ) -> Result<Response, Failure> {
-    let member = caller_member(&state, principal.as_ref()).await?;
-    repo(&state)
-        .mark_requested(&member, Utc::now())
-        .await
-        .map_err(server_error)?;
-    // Without a lane (CLI, tests) the request waits for the next process that has one.
-    if let Some(lane) = &state.lane {
-        lane.wake(LaneJob::Ideas).await;
-    }
-    Ok((StatusCode::ACCEPTED, Json(json!({ "state": "thinking" }))).into_response())
+    caller_member(&state, principal.as_ref()).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "state": "idle" }))).into_response())
 }
 
 async fn dismiss(

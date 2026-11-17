@@ -155,7 +155,6 @@ pub(super) const EXPECTED_KEYS: &[&str] = &[
     "speak_unfetched_reminders",
     "notices_wait_in_quiet_hours",
     "tool_output_compaction",
-    "suggestion_generation_enabled",
     "memory_extraction_enabled",
     "memory_cleanup_enabled",
     "memory_consolidation_enabled",

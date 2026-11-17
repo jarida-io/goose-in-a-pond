@@ -3,7 +3,10 @@
 //! Unlike a proposal, a suggestion stages no action (the tap is the consent), so it needs no
 //! audience, expiry or daily cap. Derived on read, never stored; no suggestor spends inference.
 
+use crate::user_data::domain::anchor::{Anchor, Deliverable};
 use crate::user_data::domain::suggestion::SuggestionContext;
+use crate::user_data::services::engine::recipes::asked_about;
+use crate::user_data::services::engine::settle::ready_notice;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -94,6 +97,13 @@ impl GroupsKnown {
     }
 }
 
+/// A deliverable ready for the member that they have not opened, with the anchor it was made for.
+#[derive(Debug, Clone)]
+pub struct UnseenWork {
+    pub anchor: Anchor,
+    pub deliverable: Deliverable,
+}
+
 /// Everything the suggestors read, gathered once by the caller.
 /// Each field was measured; no `Option` stands in for "did not look".
 #[derive(Debug, Clone, Default)]
@@ -120,6 +130,9 @@ pub struct SuggestionSnapshot {
     pub weather_ready: bool,
     /// The household's own name for where it is, when it has one.
     pub place: Option<String>,
+    /// The newest work Goose finished for the member, of the anchors they own, that they have
+    /// not opened.
+    pub unseen_work: Option<UnseenWork>,
 }
 
 impl Default for Audience {
@@ -133,6 +146,7 @@ impl Default for Audience {
 
 /// Every suggestor, in offer order: most specific to today first.
 const SUGGESTOR_IDS: &[&str] = &[
+    "ready_deliverable",
     "calendar_today",
     "upcoming_schedule",
     "inbox_recent",
@@ -144,6 +158,9 @@ const SUGGESTOR_IDS: &[&str] = &[
 
 /// Max shown at once; more turns the Home column from a glance into a list.
 pub const MAX_SUGGESTIONS: usize = 4;
+
+/// What of a deliverable's own text rides the turn its card starts; the rest is in My Goose.
+const WORK_CHARS: usize = 1_500;
 
 /// Work out what this household might want to ask.
 pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
@@ -185,6 +202,7 @@ fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     }
 
     let built = match id {
+        "ready_deliverable" => ready_deliverable(s),
         "calendar_today" => calendar_today(s),
         "upcoming_schedule" => upcoming_schedule(s),
         "inbox_recent" => inbox_recent(s),
@@ -203,6 +221,53 @@ fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         ));
     }
     Ok(built)
+}
+
+fn ready_deliverable(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
+    if !s.audience.may_see_personal() {
+        return Err(
+            "what Goose made is for one person, and more than one member lives here \
+                    without saying who is asking"
+                .to_string(),
+        );
+    }
+    let Some(work) = &s.unseen_work else {
+        return Err("nothing Goose made is waiting to be read".to_string());
+    };
+    let (ready, _) = ready_notice(&work.anchor, &work.deliverable);
+    Ok(Suggestion {
+        id: "ready_deliverable".to_string(),
+        prompt: asked_about(&work.anchor, &work.deliverable),
+        because: format!("{ready}."),
+        answered_by: GROUP_MEMORY,
+        context: Some(SuggestionContext::PersonalMemory {
+            source_memory_id: format!("deliverable:{}", work.deliverable.id),
+            fact: what_was_made(work),
+        }),
+    })
+}
+
+/// What the model is told when the member taps it: the deliverable's title, hook and opening.
+fn what_was_made(work: &UnseenWork) -> String {
+    let made = &work.deliverable;
+    let mut fact = format!(
+        "\"{}\", which Goose made for {}, is ready for them to read.",
+        made.title, work.anchor.title
+    );
+    if !made.hook.trim().is_empty() {
+        fact.push(' ');
+        fact.push_str(made.hook.trim());
+    }
+    let body = made.body.trim();
+    if !body.is_empty() {
+        let opening: String = body.chars().take(WORK_CHARS).collect();
+        fact.push_str("\nIt begins:\n");
+        fact.push_str(&opening);
+        if opening.len() < body.len() {
+            fact.push_str("\n(The rest is in My Goose.)");
+        }
+    }
+    fact
 }
 
 fn calendar_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
@@ -402,6 +467,38 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_data::domain::anchor::{
+        AnchorKind, AnchorOrigin, DeliverableKind, DeliverableState,
+    };
+
+    /// A plan Goose finished for a trip, not yet opened.
+    fn diani_plan() -> UnseenWork {
+        let now = chrono::Utc::now();
+        let anchor = Anchor::new(
+            "jerry",
+            AnchorKind::Trip,
+            "Diani trip",
+            AnchorOrigin::You,
+            now,
+        )
+        .unwrap();
+        let mut deliverable = Deliverable::new(
+            &anchor.id,
+            DeliverableKind::Plan,
+            "plan",
+            "Plan for Diani trip",
+            now,
+        )
+        .unwrap();
+        deliverable.state = DeliverableState::Ready;
+        deliverable.version = 1;
+        deliverable.hook = "Four days, the SGR both ways, KSh 62,000 in all.".to_string();
+        deliverable.body = "## Day 1\nThe 08:00 SGR from Nairobi.".to_string();
+        UnseenWork {
+            anchor,
+            deliverable,
+        }
+    }
 
     /// A pond with everything connected, so a test can take things away.
     fn full() -> SuggestionSnapshot {
@@ -429,6 +526,7 @@ mod tests {
             devices_registered: 19,
             weather_ready: true,
             place: Some("Nairobi".to_string()),
+            unseen_work: Some(diani_plan()),
         }
     }
 
@@ -454,10 +552,10 @@ mod tests {
         assert_eq!(
             ids(&set),
             vec![
+                "ready_deliverable",
                 "calendar_today",
                 "upcoming_schedule",
-                "inbox_recent",
-                "routine_recall"
+                "inbox_recent"
             ]
         );
     }
@@ -521,6 +619,7 @@ mod tests {
         s.audience = Audience::Shared;
         let set = suggest(&s);
         for personal in [
+            "ready_deliverable",
             "calendar_today",
             "inbox_recent",
             "memory_recall",
@@ -566,7 +665,7 @@ mod tests {
         let set = suggest(&s);
         assert_eq!(
             ids(&set),
-            vec!["routine_recall", "memory_recall"],
+            vec!["ready_deliverable", "routine_recall", "memory_recall"],
             "a real extension list was not trusted"
         );
     }
@@ -605,7 +704,12 @@ mod tests {
             "the cap hid a suggestor that fired, so nothing can tell that the pond had more to say"
         );
         // The ones past the cap fired; they are simply not shown.
-        for past_cap in ["memory_recall", "devices_online", "weather_today"] {
+        for past_cap in [
+            "routine_recall",
+            "memory_recall",
+            "devices_online",
+            "weather_today",
+        ] {
             assert!(
                 silence(&set, past_cap).is_none(),
                 "{past_cap} was recorded as silent when it had actually produced something"
@@ -675,7 +779,9 @@ mod tests {
         let set = suggest(&full());
         for s in &set.offered {
             assert!(
-                s.because.chars().any(|c| c.is_ascii_digit()) || s.because.contains("Nairobi"),
+                s.because.chars().any(|c| c.is_ascii_digit())
+                    || s.because.contains("Nairobi")
+                    || s.because.contains("Diani"),
                 "{}'s reason quotes nothing the pond measured: {}",
                 s.id,
                 s.because
@@ -688,13 +794,74 @@ mod tests {
     fn the_prompt_is_the_sentence_the_household_reads() {
         let set = suggest(&full());
         for s in &set.offered {
-            assert!(s.prompt.ends_with('?'), "{} is not a question", s.id);
+            assert!(
+                s.prompt.ends_with('?') || s.prompt.starts_with("Tell me "),
+                "{} is neither a question nor a request",
+                s.id
+            );
+            assert!(!s.prompt.ends_with('.'), "{} reads as a statement", s.id);
             assert!(
                 s.prompt.len() <= 120,
                 "{} would be truncated on the card",
                 s.id
             );
         }
+    }
+
+    #[test]
+    fn work_goose_finished_is_offered_in_the_members_words() {
+        let set = suggest(&full());
+        let ready = set
+            .offered
+            .iter()
+            .find(|s| s.id == "ready_deliverable")
+            .unwrap();
+        assert_eq!(ready.prompt, "Tell me about my plan for Diani trip");
+        assert_eq!(ready.because, "Ready: Plan for Diani trip.");
+        let Some(SuggestionContext::PersonalMemory {
+            source_memory_id,
+            fact,
+        }) = &ready.context
+        else {
+            panic!("no context the model can use: {:?}", ready.context)
+        };
+        assert!(source_memory_id.starts_with("deliverable:"));
+        assert!(fact.contains("Plan for Diani trip"), "{fact}");
+        assert!(fact.contains("KSh 62,000"), "{fact}");
+        assert!(fact.contains("The 08:00 SGR"), "{fact}");
+        assert!(!fact.contains("The rest is in My Goose"), "{fact}");
+    }
+
+    #[test]
+    fn nothing_unread_and_a_mute_each_silence_the_finished_work() {
+        let mut s = full();
+        s.unseen_work = None;
+        assert_eq!(
+            silence(&suggest(&s), "ready_deliverable").as_deref(),
+            Some("nothing Goose made is waiting to be read")
+        );
+        let mut s = full();
+        s.muted.insert("ready_deliverable".to_string());
+        let set = suggest(&s);
+        assert!(!ids(&set).contains(&"ready_deliverable".to_string()));
+        assert_eq!(
+            set.offered.len(),
+            MAX_SUGGESTIONS,
+            "the next one takes its place"
+        );
+    }
+
+    #[test]
+    fn a_long_deliverable_rides_the_card_cut_and_says_so() {
+        let mut s = full();
+        let work = s.unseen_work.as_mut().unwrap();
+        work.deliverable.body = "Day by day. ".repeat(400);
+        let set = suggest(&s);
+        let Some(SuggestionContext::PersonalMemory { fact, .. }) = &set.offered[0].context else {
+            panic!("no context")
+        };
+        assert!(fact.chars().count() < WORK_CHARS + 300, "{}", fact.len());
+        assert!(fact.ends_with("(The rest is in My Goose.)"), "{fact}");
     }
 
     #[test]
