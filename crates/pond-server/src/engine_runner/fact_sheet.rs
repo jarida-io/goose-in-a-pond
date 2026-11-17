@@ -18,9 +18,9 @@ use pond_core::user_data::services::engine::steps::{
     critic_step, draft_artifact, latest_draft_step, verdict_artifact,
 };
 use pond_core::user_data::services::fact_sheet::{
-    build_critic_message, build_message, counting_use, parse, parse_drops, sources, surviving,
-    ConversationSummary, Drafted, Source, SourceRows, ToolHint, CRITIC_SYSTEM, MAX_ANSWERS,
-    MAX_SUMMARIES, SYSTEM,
+    build_critic_message, build_message, counting_use, judged_drops, merged_draft, parse, passes,
+    sources, surviving, ConversationSummary, Drafted, Outcome, Source, SourceRows, ToolHint,
+    CRITIC_SYSTEM, MAX_ANSWERS, MAX_SUMMARIES, SYSTEM,
 };
 
 use super::finish::{close, stage, why_no_draft, Stage};
@@ -204,8 +204,15 @@ pub(super) async fn make(ctx: &StepCtx<'_>) -> Result<Saved, ModelStop> {
         .list(member, Some(Strength::Never))
         .await
         .map_err(failed)?;
-    let message = build_message(&sources, &sheet, &tools, &never);
-    let reply = ctx.ask(SYSTEM, message).await?;
+    let mut parts: Vec<(usize, Outcome)> = Vec::new();
+    for slice in passes(sources.len()) {
+        let shown = &sources[slice.clone()];
+        let reply = ctx
+            .ask(SYSTEM, build_message(shown, &sheet, &tools, &never))
+            .await?;
+        parts.push((slice.start, parse(&reply, shown, &tools, member, ctx.now)));
+    }
+    let reply = merged_draft(&parts);
 
     let shown = serde_json::to_string(&Shown::of(&sources, &tools)).map_err(failed)?;
     let kept = ctx
@@ -248,7 +255,7 @@ pub(super) async fn critic(ctx: &StepCtx<'_>) -> Result<Saved, ModelStop> {
     let reply = ctx
         .ask(CRITIC_SYSTEM, build_critic_message(&drafted, &sources))
         .await?;
-    let summary = match parse_drops(&reply, drafted.len()) {
+    let summary = match judged_drops(&reply, &drafted, &sources) {
         None => "The check could not be read.".to_string(),
         Some(drops) if drops.is_empty() => "The check kept every line.".to_string(),
         Some(drops) => format!(
@@ -285,6 +292,7 @@ async fn replace(
     job: &mut EngineJob,
     member: &str,
     drafted: Vec<Drafted>,
+    sources: &[Source],
     steps: &[PlanStep],
     artifacts: &[ArtifactSummary],
     now: DateTime<Utc>,
@@ -294,7 +302,7 @@ async fn replace(
         None => String::new(),
     };
     job.count_round(Vec::new());
-    let Some(drops) = parse_drops(&reply, drafted.len()) else {
+    let Some(drops) = judged_drops(&reply, &drafted, sources) else {
         let said = job_outcome_line(job, Some(&Verdict::unread()));
         return Ok((JobState::Dropped, said));
     };
@@ -358,6 +366,7 @@ pub(super) async fn after_steps(
                 &mut job,
                 &member,
                 outcome.drafted,
+                &sources,
                 &steps,
                 &artifacts,
                 now,

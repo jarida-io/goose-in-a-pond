@@ -20,6 +20,9 @@ use crate::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use crate::user_data::domain::question::{Question, QuestionState};
 use crate::user_data::ports::engine_jobs::EngineJobRepository;
 use crate::user_data::services::model_json::{list_in, text_of, texts_of};
+use crate::user_data::services::suggestion::{
+    TOOL_SEARCH_WEB, TOOL_WEATHER_FORECAST, TOOL_WEATHER_NOW, TOOL_WEB_WATCH,
+};
 
 /// A rebuild is due this long after the last one finished.
 pub const REBUILD_EVERY: Duration = Duration::hours(24);
@@ -276,25 +279,27 @@ anything for them, so every line must be true to the sources and worth knowing.
 
 You are given numbered sources (their memories, summaries of their conversations, interests \
 they confirmed, plans they are following and answers they gave), the current sheet, the \
-tools this pond has, and the rules they set. Write the whole sheet again from the sources. \
-Keep a line of the current sheet only while a source still supports it, reword it when the \
-sources say more, and add what the sources show that the sheet lacks.
+tools this pond has, and the rules they set. The sources may be one part of everything known \
+about them. Write a line for every lasting fact these sources show: most sources give one, \
+some give two or three. Keep a line of the current sheet when one of these sources supports \
+it, reword it when they say more, and add what they show that the sheet lacks.
 
 Reply with JSON and nothing else:
 
 {\"lines\": [{\"category\": \"<category>\", \"fact\": \"<fact>\", \"confidence\": \
 \"<confidence>\", \"since\": \"<when>\", \"sources\": [<numbers>], \"tools\": [\"<tool name>\"]}]}
 
-- At most 100 lines. A few true, specific lines beat many thin ones.
+- At most 100 lines.
 - \"category\": one of identity (who they are), home (where and with whom they live), work \
 (their job, studies or business), people (family, friends and colleagues, by name), plan \
 (something dated they are preparing for), hunt (something they are looking to buy or find), \
 interest (what they follow or do for fun), food (what they eat and drink, and what they \
 cannot), health, style (their tastes and how they like things done), routine (what they do \
 regularly), avoid (what they want kept away from them), other.
-- \"fact\": one plain statement about them, under 160 characters, in the third person and \
-without their name. One fact to a line. Use the names, places, amounts and dates the sources \
-give, never a general word in their place.
+- \"fact\": one plain statement about them, under 160 characters, starting with the verb: no \
+subject, not \"The member\" and not their name; \"they\" when a pronoun is needed. One fact \
+to a line. Use the names, places, amounts and dates the sources give, never a general word \
+in their place.
 - \"confidence\": \"sure\" when an answer or a confirmed interest says it, or two or more \
 sources agree; \"likely\" when you worked it out from what the sources show; \"said\" when \
 one source mentions it once.
@@ -307,7 +312,8 @@ changes a weather lookup. Only names from the list. [] when none.
 Never write a line that:
 - only says what they asked or looked up once: one question is curiosity, not a fact about \
 them;
-- is about the pond, the assistant, or how either works;
+- is about the pond or the assistant: how either works, how they use it, what they ask it \
+for, or which reports, snapshots or summaries they request;
 - says the same thing as another line;
 - says something the sources do not;
 - repeats a line they removed, or breaks one of their rules.
@@ -479,6 +485,81 @@ fn cited(map: &serde_json::Map<String, serde_json::Value>, source_count: usize) 
     cites
 }
 
+/// The tools a line of each category points to when the maker named none. Keyed on the category
+/// the model chose for the line, never on its words.
+const CATEGORY_TOOLS: [(FactCategory, &[&str]); 7] = [
+    (
+        FactCategory::Home,
+        &[TOOL_WEATHER_FORECAST, TOOL_WEATHER_NOW],
+    ),
+    (FactCategory::Routine, &[TOOL_WEATHER_FORECAST]),
+    (
+        FactCategory::Plan,
+        &[TOOL_WEATHER_FORECAST, TOOL_SEARCH_WEB],
+    ),
+    (FactCategory::Hunt, &[TOOL_WEB_WATCH, TOOL_SEARCH_WEB]),
+    (FactCategory::Work, &[TOOL_SEARCH_WEB]),
+    (FactCategory::Interest, &[TOOL_SEARCH_WEB]),
+    (FactCategory::Food, &[TOOL_SEARCH_WEB]),
+];
+
+/// The tools of [`CATEGORY_TOOLS`] for `category` that this pond has, by its own names.
+fn category_tools(category: FactCategory, known_tools: &[ToolHint]) -> Vec<String> {
+    CATEGORY_TOOLS
+        .iter()
+        .find(|(c, _)| *c == category)
+        .map(|(_, names)| {
+            names
+                .iter()
+                .filter_map(|name| {
+                    known_tools
+                        .iter()
+                        .find(|t| t.name.eq_ignore_ascii_case(name))
+                        .map(|t| t.name.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sources one maker call is shown: a small model writes a line or two per source only when it
+/// sees a few at a time, and stops at about ten lines when it sees them all.
+pub const SOURCES_PER_PASS: usize = 12;
+
+/// The slices of `count` sources the maker is shown, one call each; one empty slice for none.
+pub fn passes(count: usize) -> Vec<std::ops::Range<usize>> {
+    if count == 0 {
+        return std::iter::once(0..0).collect();
+    }
+    (0..count)
+        .step_by(SOURCES_PER_PASS)
+        .map(|start| start..(start + SOURCES_PER_PASS).min(count))
+        .collect()
+}
+
+/// One draft from the maker's passes, each given with the position its slice starts at: source
+/// numbers move from the slice to the whole list, and a fact written twice is kept once.
+pub fn merged_draft(parts: &[(usize, Outcome)]) -> String {
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for (offset, outcome) in parts {
+        for drafted in &outcome.drafted {
+            if !seen.insert(drafted.line.key()) {
+                continue;
+            }
+            lines.push(serde_json::json!({
+                "category": drafted.line.category.as_str(),
+                "fact": drafted.line.fact,
+                "confidence": drafted.line.confidence.as_str(),
+                "since": drafted.line.since.clone().unwrap_or_default(),
+                "sources": drafted.cites.iter().map(|c| c + offset + 1).collect::<Vec<_>>(),
+                "tools": drafted.line.tools,
+            }));
+        }
+    }
+    serde_json::json!({ "lines": lines }).to_string()
+}
+
 /// Reads the maker's reply into lines. `sources` must be the slice [`build_message`] numbered.
 /// Enforced here, not left to the model: a line citing no source that exists is refused, a
 /// tool this pond lacks is taken off its line, a line's source is the first it validly cites,
@@ -545,6 +626,9 @@ pub fn parse(
                 None => outcome.tools_removed += 1,
             }
         }
+        if line.tools.is_empty() {
+            line.tools = category_tools(line.category, known_tools);
+        }
         let newest = cites.iter().map(|i| sources[*i].at).max().unwrap_or(now);
         line.score = score(confidence, cites.len() as u32, newest, 0, now);
         outcome.drafted.push(Drafted { line, cites });
@@ -580,21 +664,28 @@ You check a draft of the fact sheet the pond keeps about one member of this hous
 before it is saved. Be hard to satisfy: a wrong line misleads everything the pond makes for \
 them, and a missing line costs little.
 
-You are given the draft's numbered lines, each with the sources it rests on. Name every line \
-to drop. Drop a line that:
+You are given the draft's numbered lines, each with the sources it rests on and when each \
+was said. Name every line to drop. Drop a line that:
 - only restates something they asked or looked up once;
-- is about the pond, the assistant, or how either works, and not about them;
-- says the same thing as an earlier line: drop the later one;
+- is about the pond or the assistant and not about them: how either works, how they use it, \
+what they ask it for, or which reports, snapshots or summaries they request;
+- says the same thing as an earlier line: drop the later one and name the earlier in \
+\"against\";
+- disagrees with another line: drop only the one whose sources were said earlier, and name \
+the other in \"against\";
 - its sources do not support: they say something else, say less, or are about someone else.
 
-Judge each line only by the sources shown under it. Do not rewrite a line and do not add one.
+Two lines on one subject that both hold, such as a liking and a habit, do not disagree: keep \
+both. Judge each line only by the sources shown under it. Do not rewrite a line and do not \
+add one.
 
 Reply with JSON and nothing else:
 
-{\"drop\": [{\"line\": <number>, \"why\": \"<reason>\"}]}
+{\"drop\": [{\"line\": <number>, \"why\": \"<reason>\", \"against\": <number or 0>}]}
 
 - \"line\": the number of a draft line.
 - \"why\": one short reason, under 100 characters.
+- \"against\": the other line's number when the reason is another line, else 0.
 - {\"drop\": []} when every line holds.
 No explanation, no preamble.";
 
@@ -615,8 +706,9 @@ pub fn build_critic_message(lines: &[Drafted], sources: &[Source]) -> String {
         ));
         for source in drafted.cites.iter().filter_map(|c| sources.get(*c)) {
             out.push_str(&format!(
-                "   - {}: {}\n",
+                "   - {}, {}: {}\n",
                 source_word(source.kind),
+                source.at.format("%-d %b %Y"),
                 source.text
             ));
         }
@@ -625,37 +717,104 @@ pub fn build_critic_message(lines: &[Drafted], sources: &[Source]) -> String {
     out
 }
 
-/// The lines the critic drops, as positions in the draft (from 0) with its reason, lowest
-/// first. `None` when the reply cannot be read: the caller discards the whole draft.
-pub fn parse_drops(raw: &str, line_count: usize) -> Option<Vec<(usize, String)>> {
+/// One line the critic drops: its position in the draft (from 0), the reason, and the other
+/// line it named, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Drop {
+    position: usize,
+    why: String,
+    against: Option<usize>,
+}
+
+/// A draft line's position from a number the model wrote, counted from 1.
+fn line_position(value: Option<&serde_json::Value>, line_count: usize) -> Option<usize> {
+    value
+        .and_then(|n| {
+            n.as_u64()
+                .or_else(|| n.as_str().and_then(|s| s.trim().parse().ok()))
+        })
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| (1..=line_count).contains(n))
+        .map(|n| n - 1)
+}
+
+fn read_drops(raw: &str, line_count: usize) -> Option<Vec<Drop>> {
     let items = list_in(raw, "drop")?;
-    let mut drops: Vec<(usize, String)> = Vec::new();
+    let mut drops: Vec<Drop> = Vec::new();
     for item in &items {
-        let (number, why) = match item {
+        let (number, why, against) = match item {
             serde_json::Value::Object(map) => (
                 map.get("line").or_else(|| map.get("number")),
                 text_of(map, "why").or_else(|| text_of(map, "reason")),
+                line_position(map.get("against"), line_count),
             ),
-            other => (Some(other), None),
+            other => (Some(other), None, None),
         };
-        let position = number
-            .and_then(|n| {
-                n.as_u64()
-                    .or_else(|| n.as_str().and_then(|s| s.trim().parse().ok()))
-            })
-            .and_then(|n| usize::try_from(n).ok())
-            .filter(|n| (1..=line_count).contains(n))
-            .map(|n| n - 1);
-        let Some(position) = position else {
+        let Some(position) = line_position(number, line_count) else {
             continue;
         };
-        if drops.iter().all(|(held, _)| *held != position) {
-            let why = why.map_or_else(String::new, |w| one_line(&w, MAX_REASON_CHARS));
-            drops.push((position, why));
+        if drops.iter().all(|held| held.position != position) {
+            drops.push(Drop {
+                position,
+                why: why.map_or_else(String::new, |w| one_line(&w, MAX_REASON_CHARS)),
+                against: against.filter(|other| *other != position),
+            });
         }
     }
-    drops.sort_by_key(|(position, _)| *position);
+    drops.sort_by_key(|drop| drop.position);
     Some(drops)
+}
+
+/// The lines the critic drops, as positions in the draft (from 0) with its reason, lowest
+/// first. `None` when the reply cannot be read: the caller discards the whole draft.
+pub fn parse_drops(raw: &str, line_count: usize) -> Option<Vec<(usize, String)>> {
+    read_drops(raw, line_count).map(|drops| {
+        drops
+            .into_iter()
+            .map(|drop| (drop.position, drop.why))
+            .collect()
+    })
+}
+
+/// [`parse_drops`] with one mistake a small critic makes undone: when it drops two lines each
+/// against the other, the line whose sources were said later stays.
+pub fn judged_drops(
+    raw: &str,
+    drafted: &[Drafted],
+    sources: &[Source],
+) -> Option<Vec<(usize, String)>> {
+    let drops = read_drops(raw, drafted.len())?;
+    let said = |position: usize| {
+        drafted.get(position).and_then(|d| {
+            d.cites
+                .iter()
+                .filter_map(|c| sources.get(*c))
+                .map(|s| s.at)
+                .max()
+        })
+    };
+    let spared: Vec<usize> = drops
+        .iter()
+        .filter_map(|drop| {
+            let other = drop.against?;
+            let mutual = drops
+                .iter()
+                .any(|o| o.position == other && o.against == Some(drop.position));
+            // Of the pair, the later-said line stays; on a tie the earlier line does.
+            let keep_this = match (said(drop.position), said(other)) {
+                (Some(this), Some(that)) if this != that => this > that,
+                _ => drop.position < other,
+            };
+            (mutual && keep_this).then_some(drop.position)
+        })
+        .collect();
+    Some(
+        drops
+            .into_iter()
+            .filter(|drop| !spared.contains(&drop.position))
+            .map(|drop| (drop.position, drop.why))
+            .collect(),
+    )
 }
 
 /// The draft without the lines the critic dropped, as the store's `replace` takes it.
@@ -1286,13 +1445,19 @@ mod tests {
     fn the_critic_sees_each_line_with_the_sources_under_it() {
         let (drafted, sources) = a_draft();
         let message = build_critic_message(&drafted, &sources);
-        assert!(message.starts_with(
-            "Draft:\n1. [work] Runs Jarida (sure)\n   - memory: Runs Jarida, which builds"
-        ));
-        assert!(message.contains(
-            "2. [home] Lives in Kilimani (likely)\n   - answer: Asked \"Where do you live?\""
-        ));
-        assert!(message.contains("\n   - memory: Runs Jarida, which builds an offline"));
+        let said = |i: usize| sources[i].at.format("%-d %b %Y").to_string();
+        assert!(message.starts_with(&format!(
+            "Draft:\n1. [work] Runs Jarida (sure)\n   - memory, {}: Runs Jarida, which builds",
+            said(0)
+        )));
+        assert!(message.contains(&format!(
+            "2. [home] Lives in Kilimani (likely)\n   - answer, {}: Asked \"Where do you live?\"",
+            said(1)
+        )));
+        assert!(message.contains(&format!(
+            "\n   - memory, {}: Runs Jarida, which builds an offline",
+            said(0)
+        )));
         assert!(message.ends_with("JSON:"));
         assert!(build_critic_message(&[], &sources).contains("No lines."));
     }
@@ -1427,5 +1592,101 @@ mod tests {
             about_from_sheet(&[], &[interest("Primetime", false, false)]),
             None
         );
+    }
+
+    #[test]
+    fn a_line_the_maker_left_without_tools_points_to_its_categorys_tools() {
+        let sources = three_sources();
+        let known = vec![
+            ToolHint::new(TOOL_WEATHER_FORECAST, "The forecast for a place"),
+            ToolHint::new(TOOL_SEARCH_WEB, "Look something up on the web"),
+        ];
+        let raw = r#"{"lines": [
+          {"category": "home", "fact": "Lives in Kilimani", "sources": [2], "tools": []},
+          {"category": "work", "fact": "Runs Jarida", "sources": [1]},
+          {"category": "people", "fact": "Lives with Emmanuel", "sources": [2]},
+          {"category": "interest", "fact": "Follows Formula 1", "sources": [3], "tools": ["search_web"]}
+        ]}"#;
+        let drafted = parse(raw, &sources, &known, "jerry", now()).drafted;
+        let tools: Vec<Vec<String>> = drafted.iter().map(|d| d.line.tools.clone()).collect();
+        assert_eq!(tools[0], vec![TOOL_WEATHER_FORECAST.to_string()]);
+        assert_eq!(tools[1], vec![TOOL_SEARCH_WEB.to_string()]);
+        assert!(tools[2].is_empty(), "a category with no tools gets none");
+        assert_eq!(tools[3], vec![TOOL_SEARCH_WEB.to_string()]);
+        let none = parse(raw, &sources, &[], "jerry", now()).drafted;
+        assert!(
+            none.iter().all(|d| d.line.tools.is_empty()),
+            "a tool this pond lacks is never filled in"
+        );
+    }
+
+    #[test]
+    fn the_maker_sees_the_sources_a_dozen_at_a_time_and_one_empty_pass_for_none() {
+        assert_eq!(passes(0), vec![0..0]);
+        assert_eq!(passes(5), vec![0..5]);
+        assert_eq!(passes(32), vec![0..12, 12..24, 24..32]);
+    }
+
+    #[test]
+    fn the_passes_become_one_draft_numbered_against_every_source() {
+        let sources = three_sources();
+        let first = parse(
+            r#"{"lines": [{"category": "work", "fact": "Runs Jarida", "sources": [1]}]}"#,
+            &sources[0..1],
+            &tools(),
+            "jerry",
+            now(),
+        );
+        let second = parse(
+            r#"{"lines": [
+              {"category": "home", "fact": "Lives in Kilimani", "sources": [1]},
+              {"category": "work", "fact": "Runs  Jarida", "sources": [1]}
+            ]}"#,
+            &sources[1..3],
+            &tools(),
+            "jerry",
+            now(),
+        );
+        let draft = merged_draft(&[(0, first), (1, second)]);
+        let whole = parse(&draft, &sources, &tools(), "jerry", now());
+        let facts: Vec<&str> = whole.drafted.iter().map(|d| d.line.fact.as_str()).collect();
+        assert_eq!(
+            facts,
+            vec!["Runs Jarida", "Lives in Kilimani"],
+            "a repeat is kept once"
+        );
+        assert_eq!(
+            whole.drafted[1].cites,
+            vec![1],
+            "the second pass's 1 is the whole list's 2"
+        );
+    }
+
+    #[test]
+    fn of_two_lines_dropped_against_each_other_the_later_said_one_stays() {
+        let (drafted, sources) = a_draft();
+        let raw = r#"{"drop": [
+          {"line": 1, "why": "Disagrees with line 2", "against": 2},
+          {"line": 2, "why": "Disagrees with line 1", "against": 1},
+          {"line": 3, "why": "Asked once", "against": 0}
+        ]}"#;
+        let drops = judged_drops(raw, &drafted, &sources).unwrap();
+        let dropped: Vec<usize> = drops.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            dropped,
+            vec![0, 2],
+            "line 2 rests on a source said later, so it stays"
+        );
+        let one_way = r#"{"drop": [{"line": 2, "why": "Same as line 1", "against": 1}]}"#;
+        assert_eq!(judged_drops(one_way, &drafted, &sources).unwrap().len(), 1);
+        assert!(judged_drops("not json", &drafted, &sources).is_none());
+    }
+
+    #[test]
+    fn the_prompts_keep_the_pond_out_and_name_the_other_line() {
+        assert!(SYSTEM.contains("how they use it"));
+        assert!(SYSTEM.contains("not \"The member\""));
+        assert!(CRITIC_SYSTEM.contains("\"against\""));
+        assert!(CRITIC_SYSTEM.contains("do not disagree: keep both"));
     }
 }
