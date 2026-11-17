@@ -32,6 +32,7 @@ use pond_core::user_data::domain::fact_sheet::{
 };
 use pond_core::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use pond_core::user_data::domain::profile::{CreateProfileRequest, ProfileScope};
+use pond_core::user_data::domain::question::QuestionPurpose;
 use pond_core::user_data::mocks::mock_anchors::InMemoryAnchorRepository;
 use pond_core::user_data::mocks::mock_capture_pictures::InMemoryCapturePictures;
 use pond_core::user_data::mocks::mock_captures::InMemoryCaptureRepository;
@@ -54,6 +55,7 @@ use pond_core::user_data::services::engine::{ROLE_CRITIC, ROLE_MAKE, ROLE_REVISE
 use pond_core::user_data::services::fact_sheet::{
     request_rebuild, CRITIC_SYSTEM as SHEET_CRITIC_SYSTEM, SYSTEM as SHEET_SYSTEM,
 };
+use pond_core::user_data::services::profile_gaps::PROFILE_QUESTION_SYSTEM;
 
 use super::*;
 
@@ -501,10 +503,29 @@ async fn a_queued_fact_sheet_job_runs_its_maker_and_critic_and_replaces_the_shee
     );
     pond.model
         .say(r#"{"drop": [{"line": 2, "why": "about the pond, not about them"}]}"#);
+    pond.model.say(
+        r#"{"header": "Work", "text": "What fills most of your weekdays?", "options": [{"label": "Office work", "description": "Goose plans around office hours"}, {"label": "Studying", "description": "Goose keeps term dates in mind"}]}"#,
+    );
     pond.drive(&task_id, now).await;
 
     let asked = pond.model.asked();
-    assert_eq!(asked.len(), 2, "one call to make it and one to check it");
+    assert_eq!(
+        asked.len(),
+        3,
+        "one call to make it, one to check it, and one to word the gap question"
+    );
+    assert_eq!(asked[2].0, PROFILE_QUESTION_SYSTEM);
+    assert!(
+        asked[2]
+            .1
+            .starts_with("Detail to ask about: what fills their weekdays"),
+        "the rebuilt sheet holds a home line, so the gap is work: {}",
+        asked[2].1
+    );
+    let gap = pond.questions.open(&pond.member).await.unwrap();
+    assert_eq!(gap.len(), 1, "{gap:?}");
+    assert_eq!(gap[0].purpose, QuestionPurpose::Profile);
+    assert_eq!(gap[0].gap.as_deref(), Some("work"));
     assert_eq!(asked[0].0, SHEET_SYSTEM);
     assert!(
         asked[0].1.contains("1. (memory) Lives in Nairobi"),
@@ -556,7 +577,30 @@ async fn a_queued_fact_sheet_job_runs_its_maker_and_critic_and_replaces_the_shee
     );
     assert!(
         pond.notifier.sent().is_empty(),
-        "a rebuilt sheet tells nobody"
+        "a rebuilt sheet tells nobody, and its gap question is not pushed"
+    );
+
+    request_rebuild(pond.jobs.as_ref(), &pond.member, JobClass::Upkeep, now)
+        .await
+        .unwrap();
+    tick(&pond.deps, now).await;
+    let again = pond
+        .jobs
+        .recent(&pond.member, 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|j| j.kind == JobKind::FactSheet && j.id != job.id)
+        .unwrap();
+    pond.model.say(
+        r#"{"lines": [{"category": "home", "fact": "Lives in Nairobi with two children", "confidence": "sure", "since": "", "sources": [1], "tools": []}]}"#,
+    );
+    pond.model.say(r#"{"drop": []}"#);
+    pond.drive(again.task_id.as_deref().unwrap(), now).await;
+    assert_eq!(
+        pond.model.asked().len(),
+        5,
+        "one gap question a day: the second rebuild words none"
     );
 }
 

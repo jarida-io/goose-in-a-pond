@@ -32,6 +32,7 @@ pub mod onboarding;
 pub mod phone_retirement;
 pub mod place_detection;
 pub mod proactive_review;
+pub mod profile_gaps;
 pub mod profile_interview;
 pub mod question_desk;
 pub mod redacting_memory_repository;

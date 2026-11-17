@@ -14,6 +14,7 @@ mod model;
 mod notices;
 mod open;
 mod pictures;
+mod profile_gaps;
 mod questions;
 mod rule;
 mod tick;
