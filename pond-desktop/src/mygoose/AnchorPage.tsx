@@ -283,13 +283,16 @@ function ShareSheet({ anchor, variant, onClose, onShared }: ShareProps) {
     }
   }
 
-  const list: HouseholdProfile[] = members.state.status === "ready" ? members.state.value.filter((p) => p.role !== "guest") : [];
+  const list: HouseholdProfile[] =
+    members.state.status === "ready"
+      ? members.state.value.filter((p) => p.role !== "guest" && p.id !== anchor.owner_id)
+      : [];
 
   return (
     <InkSheet open onClose={busy ? () => {} : onClose} title={`${SHARE} ${anchor.title}`} description={SHARE_DESCRIPTION}>
       {members.state.status === "failed" ? <LoadProblem problem={members.state.problem} onRetry={members.retry} variant={variant} /> : null}
-      {members.state.status === "ready" && list.length < 2 ? <p className="mg__note">{SHARE_NOBODY}</p> : null}
-      {list.length >= 2 ? (
+      {members.state.status === "ready" && list.length < 1 ? <p className="mg__note">{SHARE_NOBODY}</p> : null}
+      {list.length >= 1 ? (
         <div className="mg-share">
           {list.map((member) => (
             <InkCheckbox
@@ -303,7 +306,7 @@ function ShareSheet({ anchor, variant, onClose, onShared }: ShareProps) {
         </div>
       ) : null}
       <div className="mg__actions">
-        {list.length >= 2 ? (
+        {list.length >= 1 ? (
           <InkButton variant="primary" size={buttonSize(variant)} loading={busy} onPress={() => void save()}>
             {SAVE_SHARING}
           </InkButton>

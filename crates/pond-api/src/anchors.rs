@@ -222,6 +222,8 @@ async fn view(
         "created_at": anchor.created_at,
         "updated_at": anchor.updated_at,
         "mine": mine,
+        // Only ever the caller's own id, so a share list can leave its owner out.
+        "owner_id": mine.then(|| anchor.profile_id.clone()),
         "shared_by": shared_by,
         "shares": anchor.shared_with,
         "deliverables": deliverables

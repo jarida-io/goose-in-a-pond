@@ -2532,6 +2532,8 @@ export interface Anchor {
   updated_at: string;
   /** False when another member shared it: the caller reads it and answers its questions only. */
   mine: boolean;
+  /** The caller's own id when `mine`, so a share list can leave the owner out; else null. */
+  owner_id?: string | null;
   shared_by: string | null;
   shares: string[];
   deliverables: DeliverableSummary[];
