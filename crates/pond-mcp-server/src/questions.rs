@@ -11,7 +11,7 @@ use pond_core::security::ports::draft_authority::DraftAuthority;
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
 use pond_core::user_data::domain::interest::topic_key;
 use pond_core::user_data::domain::question::{QuestionDraft, QuestionOption};
-use pond_core::user_data::services::question_desk::{QuestionDesk, SPOKEN_REFUSAL};
+use pond_core::user_data::services::question_desk::{Chain, QuestionDesk, SPOKEN_REFUSAL};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -223,7 +223,11 @@ impl QuestionsMcpServer {
         let session =
             crate::session_meta::turn_session(meta, self.turns.clone()).ok_or(Refusal::NotAChat)?;
         let drafts: Vec<QuestionDraft> = p.questions.into_iter().map(AskQuestion::draft).collect();
-        desk.ask(&member, &session, drafts, false, Utc::now())
+        let chain = match crate::interview::interview_runs_in(&session, &member).await {
+            true => Chain::Interview,
+            false => Chain::Limited,
+        };
+        desk.ask_in(&member, &session, drafts, false, chain, Utc::now())
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "the ask tool could not store its questions");

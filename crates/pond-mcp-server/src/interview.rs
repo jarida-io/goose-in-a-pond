@@ -32,6 +32,17 @@ pub fn init_interview_deps(service: Arc<InterviewService>) {
     let _ = INTERVIEW_SERVICE.set(service);
 }
 
+/// Whether `member`'s open setup interview runs in pond session `session`.
+pub(crate) async fn interview_runs_in(session: &str, member: &str) -> bool {
+    let Some(service) = INTERVIEW_SERVICE.get() else {
+        return false;
+    };
+    match service.get(member).await {
+        Ok(Some(interview)) => interview.session_id == session && interview.status.is_open(),
+        _ => false,
+    }
+}
+
 /// Spawn function compatible with Goose's `SpawnServerFn` type.
 pub fn spawn_interview_server(reader: DuplexStream, writer: DuplexStream) {
     crate::serve_builtin(
@@ -308,8 +319,10 @@ Save the drafted notes. Only after the person said yes to the notes you showed t
 fn next_line(next: Option<Topic>) -> String {
     match next {
         Some(topic) => format!(
-            "Next topic: {} (for example: \"{}\").",
+            "Next topic: {}. Put it to them with ask: header \"{}\", a question such as \"{}\", \
+             and 2 to 4 options with a description each.",
             topic.id(),
+            topic.header(),
             topic.question()
         ),
         None => "No topic is left: draft their notes with propose_notes.".to_string(),

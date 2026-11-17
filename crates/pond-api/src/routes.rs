@@ -4134,11 +4134,13 @@ async fn drive_turn(
         );
     }
 
-    // The speaker's own setup interview runs in this session: its state, and only its tools.
+    // The speaker's own setup interview runs in this session: its state, its tools, and `ask`,
+    // which puts each topic to them as a card.
     let interview = interview_turn_for(state, &session_id, &turn_scope).await;
     let tool_group_allowlist = match &interview {
         Some(_) => Some(vec![
             pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION.to_string(),
+            pond_core::mcp::domain::tool_group::QUESTIONS_EXTENSION.to_string(),
         ]),
         None => req.tool_group_allowlist.clone(),
     };

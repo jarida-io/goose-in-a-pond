@@ -266,6 +266,14 @@ pub async fn keep_new(
         .collect())
 }
 
+/// Whether a chat's chain of batches stops at the soft limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chain {
+    Limited,
+    /// A setup interview: its topics are asked one a batch, more than the limit allows.
+    Interview,
+}
+
 /// Asks, stores, waits on and answers structured questions.
 pub struct QuestionDesk {
     repo: Arc<dyn QuestionRepository>,
@@ -317,6 +325,20 @@ impl QuestionDesk {
         spoken: bool,
         now: DateTime<Utc>,
     ) -> anyhow::Result<String> {
+        self.ask_in(profile_id, session_id, drafts, spoken, Chain::Limited, now)
+            .await
+    }
+
+    /// [`Self::ask`], for a chain that `chain` says may or may not run past the soft limit.
+    pub async fn ask_in(
+        &self,
+        profile_id: &str,
+        session_id: &str,
+        drafts: Vec<QuestionDraft>,
+        spoken: bool,
+        chain: Chain,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<String> {
         if spoken {
             return Ok(SPOKEN_REFUSAL.to_string());
         }
@@ -324,7 +346,7 @@ impl QuestionDesk {
             return Ok("No question was asked: give one to four questions.".to_string());
         }
         let round = self.chat_round(profile_id, session_id, now).await?;
-        if round > SOFT_LIMIT_ROUNDS {
+        if chain == Chain::Limited && round > SOFT_LIMIT_ROUNDS {
             return Ok(SOFT_LIMIT_REPLY.to_string());
         }
         let batch_id = uuid::Uuid::new_v4().to_string();
@@ -823,6 +845,21 @@ mod tests {
             assert_eq!(ask(text, false).await, NOT_YET_REPLY);
         }
         assert_eq!(ask("Six?", false).await, SOFT_LIMIT_REPLY);
+        let interview = desk
+            .ask_in(
+                "jerry",
+                "s1",
+                vec![draft("Q", "Seven?")],
+                false,
+                Chain::Interview,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            interview, NOT_YET_REPLY,
+            "an interview asks a topic a batch"
+        );
     }
 
     #[tokio::test]
