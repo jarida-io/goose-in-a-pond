@@ -3,7 +3,16 @@
 //! Unlike a proposal, a suggestion stages no action (the tap is the consent), so it needs no
 //! audience, expiry or daily cap. Derived on read, never stored; no suggestor spends inference.
 
+use crate::user_data::domain::anchor::{
+    Anchor, AnchorKind, AnchorState, Deliverable, DeliverableKind, DeliverableState,
+};
+use crate::user_data::domain::fact_sheet::{rank, FactCategory, FactLine, FactState};
+use crate::user_data::domain::question::{Question, QuestionPurpose, QuestionState};
 use crate::user_data::domain::suggestion::SuggestionContext;
+use crate::user_data::services::engine::recipes::{asked_about, when_of};
+use crate::user_data::services::engine::settle::ready_notice;
+use chrono::{DateTime, Datelike, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -33,6 +42,13 @@ pub const GROUP_SCHEDULE: &str = "giap-schedule";
 pub const GROUP_MEMORY: &str = "giap-memory";
 pub const GROUP_DEVICE: &str = "giap-device";
 pub const GROUP_WEATHER: &str = "giap-weather";
+pub const GROUP_KNOWLEDGE: &str = "giap-knowledge";
+
+/// Tool names as a fact line's hints spell them.
+pub const TOOL_WEATHER_FORECAST: &str = "get_weather_forecast";
+pub const TOOL_WEATHER_NOW: &str = "get_current_weather";
+pub const TOOL_WEB_WATCH: &str = "web_watch";
+pub const TOOL_SEARCH_WEB: &str = "search_web";
 
 /// One thing the household might want to ask.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -94,6 +110,30 @@ impl GroupsKnown {
     }
 }
 
+/// The hinted tools this pond can use now; search only with its key, as without one it answers
+/// with a setup message.
+pub fn tools_ready(weather_on: bool, knowledge_on: bool, search_has_key: bool) -> BTreeSet<String> {
+    let mut ready = BTreeSet::new();
+    if weather_on {
+        ready.insert(TOOL_WEATHER_FORECAST.to_string());
+        ready.insert(TOOL_WEATHER_NOW.to_string());
+    }
+    if knowledge_on {
+        ready.insert(TOOL_WEB_WATCH.to_string());
+        if search_has_key {
+            ready.insert(TOOL_SEARCH_WEB.to_string());
+        }
+    }
+    ready
+}
+
+/// A deliverable ready for the member that they have not opened, with the anchor it was made for.
+#[derive(Debug, Clone)]
+pub struct UnseenWork {
+    pub anchor: Anchor,
+    pub deliverable: Deliverable,
+}
+
 /// Everything the suggestors read, gathered once by the caller.
 /// Each field was measured; no `Option` stands in for "did not look".
 #[derive(Debug, Clone, Default)]
@@ -120,6 +160,24 @@ pub struct SuggestionSnapshot {
     pub weather_ready: bool,
     /// The household's own name for where it is, when it has one.
     pub place: Option<String>,
+
+    /// The member asking, when one is known. Only their own anchors count, but for questions.
+    pub member: Option<String>,
+    pub now: DateTime<Utc>,
+    /// The household's IANA zone, which names the days.
+    pub timezone: String,
+    /// The place the household set for the pond, never one guessed from the time zone.
+    pub home_place: Option<String>,
+    /// The member's candidate and active anchors, their own and those shared with them.
+    pub anchors: Vec<Anchor>,
+    /// Work Goose finished for the member that they have not opened, newest first.
+    pub unseen_work: Vec<UnseenWork>,
+    /// Open questions the member may answer: theirs, and those asked for anchors shared with them.
+    pub open_questions: Vec<Question>,
+    /// The member's fact sheet lines.
+    pub facts: Vec<FactLine>,
+    /// Tool names this pond can use now, from [`tools_ready`].
+    pub tools_ready: BTreeSet<String>,
 }
 
 impl Default for Audience {
@@ -131,8 +189,15 @@ impl Default for Audience {
 
 // ── The suggestors ──────────────────────────────────────────────────────────
 
-/// Every suggestor, in offer order: most specific to today first.
+/// Every suggestor: cards about a dated anchor lead, nearest date first, and the rest keep this
+/// order.
 const SUGGESTOR_IDS: &[&str] = &[
+    "anchor_soon",
+    "questions_waiting",
+    "plan_to_confirm",
+    "changed_since",
+    "ready_deliverable",
+    "fact_hint",
     "calendar_today",
     "upcoming_schedule",
     "inbox_recent",
@@ -145,20 +210,66 @@ const SUGGESTOR_IDS: &[&str] = &[
 /// Max shown at once; more turns the Home column from a glance into a list.
 pub const MAX_SUGGESTIONS: usize = 4;
 
+/// Longest chip text, in characters; tapped, it is the member's own message.
+pub const MAX_PROMPT_CHARS: usize = 90;
+
+/// What of a deliverable's own text rides the turn its card starts; the rest is in My Goose.
+const WORK_CHARS: usize = 1_500;
+
+/// What of a refresh's list of changes rides the turn.
+const CHANGED_CHARS: usize = 600;
+
+/// The most a card's grounding carries, as a card sent to chat does.
+const GROUNDING_CHARS: usize = 2_400;
+
+/// An anchor starting within this many days, on the household's clock, is coming up.
+const SOON_DAYS: i64 = 3;
+
+/// Open questions a card's grounding lists; the rest wait in My Goose.
+const QUESTIONS_LISTED: usize = 8;
+
+/// The best fact lines the hint takes turns with, one a day.
+const FACT_HINT_TURNS: usize = 3;
+
+const ANCHOR_MARK: &str = "{anchor}";
+const PLACE_MARK: &str = "{place}";
+
+/// A suggestion, and how far the date of the anchor it is about lies from now.
+struct Built {
+    suggestion: Suggestion,
+    /// Seconds; `None` when it is about no dated anchor.
+    near: Option<i64>,
+}
+
+impl Built {
+    fn undated(suggestion: Suggestion) -> Self {
+        Self {
+            suggestion,
+            near: None,
+        }
+    }
+
+    fn about(suggestion: Suggestion, anchor: &Anchor, now: DateTime<Utc>) -> Self {
+        Self {
+            suggestion,
+            near: distance(anchor, now),
+        }
+    }
+}
+
 /// Work out what this household might want to ask.
 pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
-    let mut offered = Vec::new();
+    let mut built = Vec::new();
     let mut considered = Vec::new();
 
     for id in SUGGESTOR_IDS {
-        let outcome = run_one(id, snapshot);
-        match outcome {
-            Ok(suggestion) => {
+        match run_one(id, snapshot) {
+            Ok(one) => {
                 considered.push(Considered {
                     id: (*id).to_string(),
                     silent_because: None,
                 });
-                offered.push(suggestion);
+                built.push(one);
             }
             Err(reason) => considered.push(Considered {
                 id: (*id).to_string(),
@@ -167,10 +278,14 @@ pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
         }
     }
 
-    // Truncate after the loop so `considered` still records suggestors the cap cut.
-    if offered.len() > MAX_SUGGESTIONS {
-        offered.truncate(MAX_SUGGESTIONS);
-    }
+    // Stable, so the undated keep `SUGGESTOR_IDS` order.
+    built.sort_by_key(|one| (one.near.is_none(), one.near.unwrap_or(0)));
+    // Cut after the loop so `considered` still records suggestors the cap left out.
+    let offered = built
+        .into_iter()
+        .map(|one| one.suggestion)
+        .take(MAX_SUGGESTIONS)
+        .collect();
 
     SuggestionSet {
         offered,
@@ -179,30 +294,468 @@ pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
 }
 
 /// One suggestor. `Err` carries the sentence explaining the silence.
-fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Suggestion, String> {
+fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Built, String> {
     if s.muted.contains(id) {
         return Err("the household muted this suggestion".to_string());
     }
 
-    let built = match id {
-        "calendar_today" => calendar_today(s),
-        "upcoming_schedule" => upcoming_schedule(s),
-        "inbox_recent" => inbox_recent(s),
-        "routine_recall" => routine_recall(s),
-        "memory_recall" => memory_recall(s),
-        "devices_online" => devices_online(s),
-        "weather_today" => weather_today(s),
+    let mut built = match id {
+        "anchor_soon" => anchor_soon(s),
+        "questions_waiting" => questions_waiting(s),
+        "plan_to_confirm" => plan_to_confirm(s),
+        "changed_since" => changed_since(s),
+        "ready_deliverable" => ready_deliverable(s),
+        "fact_hint" => fact_hint(s),
+        "calendar_today" => calendar_today(s).map(Built::undated),
+        "upcoming_schedule" => upcoming_schedule(s).map(Built::undated),
+        "inbox_recent" => inbox_recent(s).map(Built::undated),
+        "routine_recall" => routine_recall(s).map(Built::undated),
+        "memory_recall" => memory_recall(s).map(Built::undated),
+        "devices_online" => devices_online(s).map(Built::undated),
+        "weather_today" => weather_today(s).map(Built::undated),
         // Unreachable while SUGGESTOR_IDS matches this list (`every_suggestor_id_is_reachable`).
         other => Err(format!("no suggestor is registered under '{other}'")),
     }?;
 
-    if !s.groups.has(built.answered_by) {
+    let answered_by = built.suggestion.answered_by;
+    if !s.groups.has(answered_by) {
         return Err(format!(
-            "nothing on this pond could answer it: {} is not installed",
-            built.answered_by
+            "nothing on this pond could answer it: {answered_by} is not installed"
         ));
     }
+    built.suggestion.prompt = cut(&built.suggestion.prompt, MAX_PROMPT_CHARS);
     Ok(built)
+}
+
+/// The member whose engine data a suggestor reads: personal facts may be shown and one member
+/// is known to be asking.
+fn caller<'a>(s: &'a SuggestionSnapshot, what: &str) -> Result<&'a str, String> {
+    if !s.audience.may_see_personal() {
+        return Err(format!(
+            "{what} is for one person, and more than one member lives here without saying who \
+             is asking"
+        ));
+    }
+    s.member
+        .as_deref()
+        .ok_or_else(|| "the pond does not know which member is asking".to_string())
+}
+
+fn anchor_soon(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "what someone has coming up")?;
+    let tz = zone(s);
+    let soon = s
+        .anchors
+        .iter()
+        .filter(|a| a.profile_id == member && a.state == AnchorState::Active)
+        .filter_map(|a| {
+            let start = a.starts_at?;
+            (0..=SOON_DAYS)
+                .contains(&days_until(s.now, start, tz))
+                .then_some((a, start))
+        })
+        .min_by_key(|(a, start)| (*start, a.created_at));
+    let Some((anchor, start)) = soon else {
+        return Err("nothing they are doing starts in the next three days".to_string());
+    };
+    let day = day_words(s.now, start, tz);
+    let date = start.with_timezone(&tz).format("%-d %B");
+    Ok(Built::about(
+        Suggestion {
+            id: "anchor_soon".to_string(),
+            prompt: fitted(&anchor.title, |title| {
+                format!(
+                    "What do I need for {} {day}?",
+                    named(anchor.kind, title, true)
+                )
+            }),
+            because: format!("{} starts {day}, {date}.", anchor.title),
+            answered_by: GROUP_MEMORY,
+            context: Some(SuggestionContext::Temporal {
+                event_title: anchor.title.clone(),
+                timing_summary: grounding(&about_anchor(anchor, &s.timezone)),
+            }),
+        },
+        anchor,
+        s.now,
+    ))
+}
+
+fn questions_waiting(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "a question Goose asks")?;
+    let waiting = s
+        .anchors
+        .iter()
+        .filter(|a| a.is_readable_by(member) && AnchorState::LIVE.contains(&a.state))
+        .filter_map(|a| {
+            let open = open_for(s, member, a);
+            (!open.is_empty()).then_some((a, open))
+        })
+        .min_by_key(|(a, _)| nearest(a, s.now));
+    let Some((anchor, open)) = waiting else {
+        return Err("Goose has no open questions about anything they are doing".to_string());
+    };
+    let asked = plural(open.len(), "question", "questions");
+    let mine = anchor.profile_id == member;
+    Ok(Built::about(
+        Suggestion {
+            id: "questions_waiting".to_string(),
+            prompt: fitted(&anchor.title, |title| {
+                format!("Answer {asked} about {}", named(anchor.kind, title, mine))
+            }),
+            because: format!(
+                "{asked} about {} {} waiting for an answer.",
+                anchor.title,
+                if open.len() == 1 { "is" } else { "are" }
+            ),
+            answered_by: GROUP_MEMORY,
+            context: Some(SuggestionContext::PersonalMemory {
+                source_memory_id: format!("anchor:{}", anchor.id),
+                fact: grounding(&questions_brief(anchor, &open)),
+            }),
+        },
+        anchor,
+        s.now,
+    ))
+}
+
+/// The open questions asked for `anchor` that `member` may answer, oldest first.
+fn open_for<'a>(s: &'a SuggestionSnapshot, member: &str, anchor: &Anchor) -> Vec<&'a Question> {
+    s.open_questions
+        .iter()
+        .filter(|q| q.profile_id == member || q.profile_id == anchor.profile_id)
+        .filter(|q| q.purpose == QuestionPurpose::Anchor && q.state == QuestionState::Open)
+        .filter(|q| q.anchor_id.as_deref() == Some(anchor.id.as_str()) && !q.is_overdue(s.now))
+        .collect()
+}
+
+/// What the model is told when the member taps it: the questions, so the reply can put them.
+fn questions_brief(anchor: &Anchor, open: &[&Question]) -> String {
+    let mut brief = format!(
+        "Goose has {} about {} for the member, so that what it makes for it fits them. Ask \
+         them here, one at a time, each with its options, and say they may answer in their \
+         own words instead.\n{}",
+        plural(open.len(), "open question", "open questions"),
+        anchor.title,
+        about_anchor_short(anchor)
+    );
+    for (n, question) in open.iter().take(QUESTIONS_LISTED).enumerate() {
+        brief.push_str(&format!(
+            "\n{}. {} Options: {}{}.",
+            n + 1,
+            question.text,
+            question.options.join("; "),
+            if question.multi {
+                " (more than one may be chosen)"
+            } else {
+                ""
+            }
+        ));
+    }
+    let more = open.len().saturating_sub(QUESTIONS_LISTED);
+    if more > 0 {
+        brief.push_str(&format!("\n({more} more are in My Goose.)"));
+    }
+    brief
+}
+
+fn plan_to_confirm(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "a plan Goose noticed")?;
+    let offered = s
+        .anchors
+        .iter()
+        .filter(|a| a.profile_id == member && a.state == AnchorState::Candidate)
+        // The kinds `plan_for` takes, so the tap can confirm it.
+        .filter(|a| {
+            matches!(
+                a.kind,
+                AnchorKind::Event | AnchorKind::Trip | AnchorKind::Purchase | AnchorKind::Project
+            )
+        })
+        .min_by_key(|a| (nearest(a, s.now), std::cmp::Reverse(a.created_at)));
+    let Some(anchor) = offered else {
+        return Err("Goose has offered to plan nothing they mentioned".to_string());
+    };
+    let ask = match anchor.kind {
+        AnchorKind::Trip => "Plan my {anchor}",
+        AnchorKind::Event => "Help me prepare for {anchor}",
+        _ => "Keep an eye on {anchor} for me",
+    };
+    let because = match anchor.why.trim() {
+        "" => format!("Goose noticed {} and waits for your yes.", anchor.title),
+        why => sentence(why),
+    };
+    Ok(Built::about(
+        Suggestion {
+            id: "plan_to_confirm".to_string(),
+            prompt: fitted(&anchor.title, |title| ask.replace(ANCHOR_MARK, title)),
+            because,
+            answered_by: GROUP_SCHEDULE,
+            context: Some(SuggestionContext::PersonalMemory {
+                source_memory_id: format!("anchor:{}", anchor.id),
+                fact: grounding(&format!(
+                    "Goose offered to work on this and is waiting for the member's yes:\n{}\n\
+                     Asking for it is their yes: call plan_for with kind \"{}\" and title \
+                     \"{}\". Its dates and place are already kept.",
+                    about_anchor(anchor, &s.timezone),
+                    anchor.kind.as_str(),
+                    anchor.title
+                )),
+            }),
+        },
+        anchor,
+        s.now,
+    ))
+}
+
+/// The member's unopened work on anchors they own: only the owner can mark it seen, so a
+/// shared one would be offered for good.
+fn unseen_of<'a>(
+    s: &'a SuggestionSnapshot,
+    member: &'a str,
+) -> impl Iterator<Item = &'a UnseenWork> + 'a {
+    s.unseen_work.iter().filter(move |w| {
+        w.anchor.profile_id == member
+            && w.deliverable.anchor_id == w.anchor.id
+            && w.deliverable.is_unseen()
+    })
+}
+
+/// A refresh that changed something: `changed_since` offers it, never `ready_deliverable`.
+fn is_change(deliverable: &Deliverable) -> bool {
+    deliverable.state == DeliverableState::Ready
+        && deliverable.version > 1
+        && !deliverable.changed.trim().is_empty()
+}
+
+fn changed_since(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "what Goose made")?;
+    let Some(work) = unseen_of(s, member).find(|w| is_change(&w.deliverable)) else {
+        return Err("nothing Goose refreshed has changed since it was last read".to_string());
+    };
+    let (updated, change) = ready_notice(&work.anchor, &work.deliverable);
+    let made = &work.deliverable;
+    Ok(Built::about(
+        Suggestion {
+            id: "changed_since".to_string(),
+            prompt: fitted(&work.anchor.title, |title| {
+                change_question(&made.slot, made.kind, title)
+            }),
+            because: format!("{updated}. {}", sentence(&change)),
+            answered_by: GROUP_MEMORY,
+            context: Some(SuggestionContext::PersonalMemory {
+                source_memory_id: format!("deliverable:{}", made.id),
+                fact: grounding(&what_changed(work)),
+            }),
+        },
+        &work.anchor,
+        s.now,
+    ))
+}
+
+/// How the member asks what a refresh changed, by the slot it fills.
+fn change_question(slot: &str, kind: DeliverableKind, title: &str) -> String {
+    let asked = match slot {
+        "dossier" => "What changed in my dossier for {anchor}?",
+        "plan" => "What changed in my plan for {anchor}?",
+        "stays" => "What changed in the places to stay for {anchor}?",
+        "packing" => "What changed in my packing list for {anchor}?",
+        "shortlist" => "What changed in my shortlist for {anchor}?",
+        "costs" => "What changed in what {anchor} will cost?",
+        "digest" => "What's new in {anchor} since last time?",
+        "out" => "What changed in what's on near me this week?",
+        "month" => "What changed in my spending this month?",
+        _ => return format!("What changed in my {} for {title}?", kind.as_str()),
+    };
+    asked.replace(ANCHOR_MARK, title)
+}
+
+/// What the model is told when the member taps it: what changed, and the new opening.
+fn what_changed(work: &UnseenWork) -> String {
+    let made = &work.deliverable;
+    let mut fact = format!(
+        "Goose refreshed \"{}\", which it made for {}. What changed:\n{}",
+        made.title,
+        work.anchor.title,
+        cut(made.changed.trim(), CHANGED_CHARS)
+    );
+    let body = made.body.trim();
+    if !body.is_empty() {
+        let opening: String = body.chars().take(WORK_CHARS).collect();
+        fact.push_str("\nIt now begins:\n");
+        fact.push_str(&opening);
+        if opening.len() < body.len() {
+            fact.push_str("\n(The rest is in My Goose.)");
+        }
+    }
+    fact
+}
+
+fn ready_deliverable(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "what Goose made")?;
+    let mut unseen = unseen_of(s, member).peekable();
+    if unseen.peek().is_none() {
+        return Err("nothing Goose made is waiting to be read".to_string());
+    }
+    let Some(work) = unseen.find(|w| !is_change(&w.deliverable)) else {
+        return Err("what waits to be read is a refresh, which changed_since offers".to_string());
+    };
+    let (ready, _) = ready_notice(&work.anchor, &work.deliverable);
+    Ok(Built::about(
+        Suggestion {
+            id: "ready_deliverable".to_string(),
+            prompt: fitted(&work.anchor.title, |title| {
+                let shown = Anchor {
+                    title: title.to_string(),
+                    ..work.anchor.clone()
+                };
+                asked_about(&shown, &work.deliverable)
+            }),
+            because: format!("{ready}."),
+            answered_by: GROUP_MEMORY,
+            context: Some(SuggestionContext::PersonalMemory {
+                source_memory_id: format!("deliverable:{}", work.deliverable.id),
+                fact: what_was_made(work),
+            }),
+        },
+        &work.anchor,
+        s.now,
+    ))
+}
+
+/// What the model is told when the member taps it: the deliverable's title, hook and opening.
+fn what_was_made(work: &UnseenWork) -> String {
+    let made = &work.deliverable;
+    let mut fact = format!(
+        "\"{}\", which Goose made for {}, is ready for them to read.",
+        made.title, work.anchor.title
+    );
+    if !made.hook.trim().is_empty() {
+        fact.push(' ');
+        fact.push_str(made.hook.trim());
+    }
+    let body = made.body.trim();
+    if !body.is_empty() {
+        let opening: String = body.chars().take(WORK_CHARS).collect();
+        fact.push_str("\nIt begins:\n");
+        fact.push_str(&opening);
+        if opening.len() < body.len() {
+            fact.push_str("\n(The rest is in My Goose.)");
+        }
+    }
+    fact
+}
+
+/// One ask a fact line can become: a line of `category` whose tool hints name one of `tools`.
+struct FactAsk {
+    category: FactCategory,
+    tools: &'static [&'static str],
+    answered_by: &'static str,
+    ask: &'static str,
+    /// The ask naming the place the household set, used when it set one.
+    at_place: Option<&'static str>,
+}
+
+const WEATHER_TOOLS: &[&str] = &[TOOL_WEATHER_FORECAST, TOOL_WEATHER_NOW];
+
+/// In preference order for a line that fits more than one; interests and plans have none, as
+/// their anchors already get a digest or a plan.
+const FACT_ASKS: &[FactAsk] = &[
+    FactAsk {
+        category: FactCategory::Home,
+        tools: WEATHER_TOOLS,
+        answered_by: GROUP_WEATHER,
+        ask: "What's the weather at home this weekend?",
+        at_place: Some("What's the weather in {place} this weekend?"),
+    },
+    FactAsk {
+        category: FactCategory::Routine,
+        tools: WEATHER_TOOLS,
+        answered_by: GROUP_WEATHER,
+        ask: "Will the weather suit my routine this week?",
+        at_place: None,
+    },
+    FactAsk {
+        category: FactCategory::Hunt,
+        tools: &[TOOL_WEB_WATCH],
+        answered_by: GROUP_KNOWLEDGE,
+        ask: "Watch the web for what I'm looking to buy",
+        at_place: None,
+    },
+    FactAsk {
+        category: FactCategory::Work,
+        tools: &[TOOL_SEARCH_WEB],
+        answered_by: GROUP_KNOWLEDGE,
+        ask: "What's new in my line of work this week?",
+        at_place: None,
+    },
+    FactAsk {
+        category: FactCategory::Food,
+        tools: &[TOOL_SEARCH_WEB],
+        answered_by: GROUP_KNOWLEDGE,
+        ask: "Find me a dinner idea that suits how I eat",
+        at_place: None,
+    },
+];
+
+/// The first ask that fits `line`: its category, and a hinted tool this pond can use now.
+fn ask_for(line: &FactLine, ready: &BTreeSet<String>) -> Option<&'static FactAsk> {
+    FACT_ASKS.iter().find(|ask| {
+        ask.category == line.category
+            && ask.tools.iter().any(|tool| {
+                ready.contains(*tool) && line.tools.iter().any(|hint| hint.as_str() == *tool)
+            })
+    })
+}
+
+fn fact_hint(s: &SuggestionSnapshot) -> Result<Built, String> {
+    let member = caller(s, "what Goose knows about someone")?;
+    let mut lines: Vec<FactLine> = s
+        .facts
+        .iter()
+        .filter(|line| line.profile_id == member && line.state == FactState::Active)
+        .cloned()
+        .collect();
+    if lines.is_empty() {
+        return Err("Goose has no fact sheet for them yet".to_string());
+    }
+    rank(&mut lines);
+    let fitting: Vec<(FactLine, &FactAsk)> = lines
+        .into_iter()
+        .filter_map(|line| {
+            let ask = ask_for(&line, &s.tools_ready)?;
+            Some((line, ask))
+        })
+        .take(FACT_HINT_TURNS)
+        .collect();
+    if fitting.is_empty() {
+        return Err("no line of their fact sheet names a tool this pond can use now".to_string());
+    }
+    let day = s
+        .now
+        .with_timezone(&zone(s))
+        .date_naive()
+        .num_days_from_ce();
+    let (line, ask) = &fitting[day.rem_euclid(fitting.len() as i32) as usize];
+    let place = s
+        .home_place
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    let prompt = match (ask.at_place, place) {
+        (Some(at_place), Some(place)) => fitted(place, |p| at_place.replace(PLACE_MARK, p)),
+        _ => ask.ask.to_string(),
+    };
+    Ok(Built::undated(Suggestion {
+        id: "fact_hint".to_string(),
+        prompt,
+        because: format!("On your fact sheet: {}", sentence(&line.fact)),
+        answered_by: ask.answered_by,
+        context: Some(SuggestionContext::PersonalMemory {
+            source_memory_id: format!("fact:{}", line.id),
+            fact: grounding(&line.fact),
+        }),
+    }))
 }
 
 fn calendar_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
@@ -390,6 +943,128 @@ fn weather_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     })
 }
 
+// ── Wording ─────────────────────────────────────────────────────────────────
+
+fn zone(s: &SuggestionSnapshot) -> Tz {
+    s.timezone.parse().unwrap_or(chrono_tz::UTC)
+}
+
+/// Whole days from `now`'s date to `at`'s, on the household's clock.
+fn days_until(now: DateTime<Utc>, at: DateTime<Utc>, tz: Tz) -> i64 {
+    (at.with_timezone(&tz).date_naive() - now.with_timezone(&tz).date_naive()).num_days()
+}
+
+/// "today", "tomorrow" or "on Thursday", for a day less than a week off.
+fn day_words(now: DateTime<Utc>, at: DateTime<Utc>, tz: Tz) -> String {
+    match days_until(now, at, tz) {
+        0 => "today".to_string(),
+        1 => "tomorrow".to_string(),
+        _ => format!("on {}", at.with_timezone(&tz).format("%A")),
+    }
+}
+
+/// Seconds between now and an anchor's date, its start or else its end; `None` for no date.
+fn distance(anchor: &Anchor, now: DateTime<Utc>) -> Option<i64> {
+    anchor
+        .starts_at
+        .or(anchor.ends_at)
+        .map(|at| (at - now).num_seconds().abs())
+}
+
+/// Orders anchors nearest date first and the undated last.
+fn nearest(anchor: &Anchor, now: DateTime<Utc>) -> (bool, i64) {
+    let away = distance(anchor, now);
+    (away.is_none(), away.unwrap_or(0))
+}
+
+/// An anchor as the member says it: "my Diani trip" for what they are doing, the bare title of
+/// an event or an interest, and "the" before what someone else shared with them.
+fn named(kind: AnchorKind, title: &str, mine: bool) -> String {
+    match kind {
+        AnchorKind::Trip | AnchorKind::Purchase | AnchorKind::Project if mine => {
+            format!("my {title}")
+        }
+        AnchorKind::Trip | AnchorKind::Purchase | AnchorKind::Project => format!("the {title}"),
+        _ => title.to_string(),
+    }
+}
+
+fn kind_words(kind: AnchorKind) -> &'static str {
+    match kind {
+        AnchorKind::Event => "an event",
+        AnchorKind::Trip => "a trip",
+        AnchorKind::Purchase => "something to buy",
+        AnchorKind::Project => "a project",
+        AnchorKind::Interest => "something they follow",
+        AnchorKind::Standing => "Goose's standing work for them",
+    }
+}
+
+/// An anchor's title and kind, for a line of grounding.
+fn about_anchor_short(anchor: &Anchor) -> String {
+    format!("{} is {}.", anchor.title, kind_words(anchor.kind))
+}
+
+/// An anchor for a card's grounding: what it is, when, where, and the facts it holds.
+fn about_anchor(anchor: &Anchor, timezone: &str) -> String {
+    let mut about = format!("{}: {}", anchor.title, kind_words(anchor.kind));
+    if let Some(when) = when_of(anchor, timezone) {
+        about.push(' ');
+        about.push_str(&when);
+    }
+    if let Some(place) = anchor
+        .place
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        about.push_str(&format!(", at {place}"));
+    }
+    about.push('.');
+    for fact in &anchor.facts {
+        about.push_str(&format!("\n{}: {}", fact.label, fact.value));
+    }
+    about
+}
+
+/// Text a card's grounding carries: bounded, and with nothing that could close its envelope.
+fn grounding(text: &str) -> String {
+    cut(&text.replace('<', "(").replace('>', ")"), GROUNDING_CHARS)
+}
+
+/// `text` ending in a full stop, unless it already ends a sentence.
+fn sentence(text: &str) -> String {
+    let text = text.trim();
+    if text.ends_with(['.', '!', '?']) {
+        text.to_string()
+    } else {
+        format!("{text}.")
+    }
+}
+
+/// `text` within `max` characters, cut at a word and marked "..." when it had to be cut.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(3)).collect();
+    let kept = match kept.rfind(char::is_whitespace) {
+        Some(at) if at > 0 => kept[..at].trim_end(),
+        _ => kept.as_str(),
+    };
+    format!("{kept}...")
+}
+
+/// `ask` with `title` in it, the title cut at a word so the whole fits [`MAX_PROMPT_CHARS`].
+fn fitted(title: &str, ask: impl Fn(&str) -> String) -> String {
+    let whole = ask(title);
+    let over = whole.chars().count().saturating_sub(MAX_PROMPT_CHARS);
+    if over == 0 {
+        return whole;
+    }
+    ask(&cut(title, title.chars().count().saturating_sub(over)))
+}
+
 /// "1 event" / "3 events"; the caller spells both ("routine runs" / "routines run").
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
@@ -400,306 +1075,4 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A pond with everything connected, so a test can take things away.
-    fn full() -> SuggestionSnapshot {
-        SuggestionSnapshot {
-            audience: Audience::Personal,
-            groups: GroupsKnown::These(
-                [
-                    GROUP_CONTEXT,
-                    GROUP_SCHEDULE,
-                    GROUP_MEMORY,
-                    GROUP_DEVICE,
-                    GROUP_WEATHER,
-                ]
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-            ),
-            muted: BTreeSet::new(),
-            calendar_events_today: Some(3),
-            mail_items_this_week: Some(237),
-            schedules_before_midnight: 2,
-            next_schedule_label: Some("Porch lights".to_string()),
-            active_memories: 379,
-            routine_memories: 4,
-            devices_registered: 19,
-            weather_ready: true,
-            place: Some("Nairobi".to_string()),
-        }
-    }
-
-    fn ids(set: &SuggestionSet) -> Vec<String> {
-        set.offered.iter().map(|s| s.id.clone()).collect()
-    }
-
-    fn silence(set: &SuggestionSet, id: &str) -> Option<String> {
-        set.considered
-            .iter()
-            .find(|c| c.id == id)
-            .and_then(|c| c.silent_because.clone())
-    }
-
-    // ── The vacuity control ─────────────────────────────────────────────────
-    // Each suggestor gets a fires test and a silent test; either alone passes on a broken one.
-
-    #[test]
-    fn a_fully_connected_pond_offers_the_cap() {
-        let set = suggest(&full());
-        assert_eq!(set.offered.len(), MAX_SUGGESTIONS);
-        // Ordered by how specific the answer is to today.
-        assert_eq!(
-            ids(&set),
-            vec![
-                "calendar_today",
-                "upcoming_schedule",
-                "inbox_recent",
-                "routine_recall"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_bare_pond_offers_nothing_and_says_why_for_every_suggestor() {
-        let set = suggest(&SuggestionSnapshot {
-            audience: Audience::Personal,
-            groups: GroupsKnown::These(BTreeSet::new()),
-            ..Default::default()
-        });
-        assert!(set.offered.is_empty());
-        // The whole point of `considered`: silence is enumerated, not implied.
-        assert_eq!(set.considered.len(), SUGGESTOR_IDS.len());
-        for c in &set.considered {
-            let reason = c
-                .silent_because
-                .as_ref()
-                .unwrap_or_else(|| panic!("{} offered nothing and gave no reason", c.id));
-            assert!(
-                !reason.trim().is_empty(),
-                "{} gave a blank reason, which tells a reader nothing",
-                c.id
-            );
-        }
-    }
-
-    #[test]
-    fn calendar_tells_no_account_apart_from_an_empty_day() {
-        let mut s = full();
-        s.calendar_events_today = None;
-        assert_eq!(
-            silence(&suggest(&s), "calendar_today").as_deref(),
-            Some("no calendar account is connected")
-        );
-
-        s.calendar_events_today = Some(0);
-        assert_eq!(
-            silence(&suggest(&s), "calendar_today").as_deref(),
-            Some("a calendar is connected and today is empty")
-        );
-    }
-
-    #[test]
-    fn calendar_fires_when_today_has_something_in_it() {
-        let mut s = full();
-        s.calendar_events_today = Some(1);
-        let set = suggest(&s);
-        let c = set
-            .offered
-            .iter()
-            .find(|x| x.id == "calendar_today")
-            .unwrap();
-        assert_eq!(c.prompt, "What's on my calendar today?");
-        assert_eq!(c.because, "1 event between now and midnight.");
-    }
-
-    #[test]
-    fn a_shared_pond_is_offered_nothing_personal() {
-        let mut s = full();
-        s.audience = Audience::Shared;
-        let set = suggest(&s);
-        for personal in [
-            "calendar_today",
-            "inbox_recent",
-            "memory_recall",
-            "routine_recall",
-        ] {
-            assert!(
-                !ids(&set).contains(&personal.to_string()),
-                "{personal} was offered to an unidentified speaker on a multi-member pond"
-            );
-        }
-        // Control: house facts still show, so the rule narrows rather than empties.
-        assert!(ids(&set).contains(&"devices_online".to_string()));
-        assert!(ids(&set).contains(&"upcoming_schedule".to_string()));
-    }
-
-    #[test]
-    fn a_suggestion_nothing_can_answer_is_not_offered() {
-        let mut s = full();
-        let GroupsKnown::These(ref mut set) = s.groups else {
-            unreachable!("the fixture names its groups explicitly")
-        };
-        set.remove(GROUP_WEATHER);
-        let set = suggest(&s);
-        assert!(!ids(&set).contains(&"weather_today".to_string()));
-        assert_eq!(
-            silence(&set, "weather_today").as_deref(),
-            Some("nothing on this pond could answer it: giap-weather is not installed")
-        );
-    }
-
-    #[test]
-    fn an_unanswerable_report_is_permissive_and_a_real_one_is_not() {
-        let mut s = full();
-
-        s.groups = GroupsKnown::Unknown;
-        assert!(
-            !suggest(&s).offered.is_empty(),
-            "an unconfirmed extension list silenced the whole column"
-        );
-
-        // A populated answer IS evidence, and is trusted completely.
-        s.groups = GroupsKnown::These([GROUP_MEMORY.to_string()].into_iter().collect());
-        let set = suggest(&s);
-        assert_eq!(
-            ids(&set),
-            vec!["routine_recall", "memory_recall"],
-            "a real extension list was not trusted"
-        );
-    }
-
-    #[test]
-    fn an_empty_report_is_unknown_rather_than_nothing() {
-        assert_eq!(GroupsKnown::from_report(None), GroupsKnown::Unknown);
-        assert_eq!(GroupsKnown::from_report(Some(vec![])), GroupsKnown::Unknown);
-        assert_eq!(
-            GroupsKnown::from_report(Some(vec![GROUP_MEMORY.to_string()])),
-            GroupsKnown::These([GROUP_MEMORY.to_string()].into_iter().collect())
-        );
-        assert_eq!(GroupsKnown::default(), GroupsKnown::Unknown);
-    }
-
-    #[test]
-    fn muting_silences_one_suggestor_and_only_that_one() {
-        let mut s = full();
-        s.muted.insert("memory_recall".to_string());
-        let set = suggest(&s);
-        assert!(!ids(&set).contains(&"memory_recall".to_string()));
-        assert_eq!(
-            silence(&set, "memory_recall").as_deref(),
-            Some("the household muted this suggestion")
-        );
-        assert!(silence(&set, "devices_online").is_none());
-    }
-
-    #[test]
-    fn the_cap_shortens_the_offer_and_never_the_record() {
-        let set = suggest(&full());
-        assert_eq!(set.offered.len(), MAX_SUGGESTIONS);
-        assert_eq!(
-            set.considered.len(),
-            SUGGESTOR_IDS.len(),
-            "the cap hid a suggestor that fired, so nothing can tell that the pond had more to say"
-        );
-        // The ones past the cap fired; they are simply not shown.
-        for past_cap in ["memory_recall", "devices_online", "weather_today"] {
-            assert!(
-                silence(&set, past_cap).is_none(),
-                "{past_cap} was recorded as silent when it had actually produced something"
-            );
-        }
-    }
-
-    #[test]
-    fn every_suggestor_id_is_reachable() {
-        let s = full();
-        for id in SUGGESTOR_IDS {
-            let outcome = run_one(id, &s);
-            if let Err(reason) = outcome {
-                assert!(
-                    !reason.starts_with("no suggestor is registered"),
-                    "{id} is listed but has no arm in run_one"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn nothing_claims_a_device_is_on() {
-        let set = suggest(&full());
-        for s in &set.offered {
-            let text = format!("{} {}", s.prompt, s.because).to_lowercase();
-            for claim in [
-                " is on",
-                " are on",
-                "switched on",
-                "turned on",
-                " is off",
-                " are off",
-            ] {
-                assert!(
-                    !text.contains(claim),
-                    "{} asserts device state the pond cannot read: {text}",
-                    s.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn nothing_claims_a_habit_the_pond_has_not_counted() {
-        let set = suggest(&full());
-        for s in &set.offered {
-            let text = format!("{} {}", s.prompt, s.because).to_lowercase();
-            for claim in [
-                "you usually",
-                "you always",
-                "you often",
-                "every day",
-                "as usual",
-            ] {
-                assert!(
-                    !text.contains(claim),
-                    "{} claims a pattern nothing counted: {text}",
-                    s.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_offered_suggestion_carries_a_number_or_a_name() {
-        let set = suggest(&full());
-        for s in &set.offered {
-            assert!(
-                s.because.chars().any(|c| c.is_ascii_digit()) || s.because.contains("Nairobi"),
-                "{}'s reason quotes nothing the pond measured: {}",
-                s.id,
-                s.because
-            );
-            assert!(!s.because.trim().is_empty(), "{} has a blank reason", s.id);
-        }
-    }
-
-    #[test]
-    fn the_prompt_is_the_sentence_the_household_reads() {
-        let set = suggest(&full());
-        for s in &set.offered {
-            assert!(s.prompt.ends_with('?'), "{} is not a question", s.id);
-            assert!(
-                s.prompt.len() <= 120,
-                "{} would be truncated on the card",
-                s.id
-            );
-        }
-    }
-
-    #[test]
-    fn the_snapshot_defaults_to_showing_less() {
-        assert_eq!(Audience::default(), Audience::Shared);
-        assert!(!Audience::default().may_see_personal());
-    }
-}
+mod tests;

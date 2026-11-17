@@ -1,11 +1,11 @@
-//! Where a member's interests, their portrait and their interests interview are kept.
+//! Where a member's interests and their interests interview are kept.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 
 use crate::user_data::domain::interest::{
-    Interest, InterestInput, InterestPatch, MemberPortrait, Observed, ObservedInterest, Origin,
+    Interest, InterestInput, InterestPatch, Observed, ObservedInterest, Origin,
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
 use crate::user_data::services::member_interview::MemberInterview;
@@ -47,19 +47,19 @@ pub trait InterestRepository: Send + Sync {
     /// `false` when the member has no row by that id.
     async fn delete(&self, profile_id: &str, id: &str) -> Result<bool>;
 
-    /// When a row the research reads last changed (confirmed, or a strong guess).
-    async fn last_changed(&self, profile_id: &str) -> Result<Option<DateTime<Utc>>>;
+    /// How many separate days, in `tz`, a conversation showed this interest.
+    async fn sighted_days(&self, profile_id: &str, id: &str, tz: Tz) -> Result<u32>;
 
-    /// Rows no picture has been looked for yet, research-worthy first.
+    /// The member's guesses worth asking them to confirm (`interest::ready_to_offer`): seen on
+    /// three separate days in `tz`, or the subject of a news story they voted up.
+    async fn ready_to_offer(&self, profile_id: &str, tz: Tz) -> Result<Vec<Interest>>;
+
+    /// Rows no picture has been looked for yet, confirmed first.
     async fn without_picture(&self, profile_id: &str, limit: usize) -> Result<Vec<Interest>>;
 
     /// The picture found for a row; `None` records that none was found, so it is not looked
     /// for again.
     async fn set_picture(&self, profile_id: &str, id: &str, key: Option<&str>) -> Result<()>;
-
-    async fn portrait(&self, profile_id: &str) -> Result<Option<MemberPortrait>>;
-
-    async fn save_portrait(&self, profile_id: &str, portrait: &MemberPortrait) -> Result<()>;
 
     /// `None` before the member ever started one.
     async fn interview(&self, profile_id: &str) -> Result<Option<InterestInterview>>;

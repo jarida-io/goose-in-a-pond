@@ -40,13 +40,14 @@ describe("desktopState", () => {
   });
 
   it("DESKTOP_SECTIONS is a flat ordered list of all sidebar items", () => {
-    // 16 sidebar items; canvas, faces and hub are routable but hidden (HIDDEN_SECTIONS).
-    expect(DESKTOP_SECTIONS).toHaveLength(16);
+    // 17 sidebar items; canvas, faces and hub are routable but hidden (HIDDEN_SECTIONS).
+    expect(DESKTOP_SECTIONS).toHaveLength(17);
     expect(DESKTOP_SECTIONS[0]).toEqual({ section: "dashboard", label: "Home" });
     expect(DESKTOP_SECTIONS[1]).toEqual({ section: "chat", label: "Chat" });
     const sectionKeys = DESKTOP_SECTIONS.map((s) => s.section);
     expect(sectionKeys).toContain("saved");
     expect(sectionKeys).toContain("watches");
+    expect(sectionKeys).toContain("mygoose");
     expect(sectionKeys).toContain("devices");
     expect(sectionKeys).toContain("mesh");
     expect(sectionKeys).toContain("pairing");
@@ -72,6 +73,7 @@ describe("desktopState", () => {
     expect(getDesktopSectionLabel("chat")).toBe("Chat");
     expect(getDesktopSectionLabel("settings")).toBe("Settings");
     expect(getDesktopSectionLabel("models")).toBe("Models");
+    expect(getDesktopSectionLabel("mygoose")).toBe("My Goose");
   });
 
   it("derives initials from assistant name", () => {

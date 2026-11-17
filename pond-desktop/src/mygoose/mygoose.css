@@ -1,0 +1,638 @@
+/* My Goose. The ink edge marks the content (anchor cards, a question, a candidate); headings, lists
+   and forms stay on hairlines (DESIGN.md rule 3). Secondary text on --color-bg: 5.62:1 light, 5.65:1 dark. */
+
+.mg {
+  --mg-control-h: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 880px;
+  min-width: 0;
+  color: var(--color-text);
+  font-family: var(--font-body);
+}
+
+.mg--hub {
+  --mg-control-h: var(--tap-min);
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 26px 30px 40px;
+}
+
+@media (max-width: 860px) {
+  .mg--hub {
+    padding: 18px 16px 32px;
+  }
+}
+
+@media (pointer: coarse) {
+  .mg {
+    --mg-control-h: var(--tap-min);
+  }
+}
+
+.mg__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.mg__title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-xl);
+  font-style: italic;
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.mg__title:focus {
+  outline: none;
+}
+
+.mg__title:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.mg__intro,
+.mg__note {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+
+.mg__prose {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--text-base);
+  line-height: var(--leading-base, 1.5);
+  white-space: pre-line;
+}
+
+.mg__h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+}
+
+.mg__h3 {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-base);
+  font-weight: var(--weight-bold);
+}
+
+.mg__count {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  color: var(--color-text-secondary);
+}
+
+.mg__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+.mg__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.mg__problem {
+  margin: 0;
+  color: var(--color-destructive-fg);
+  font-size: var(--text-base);
+}
+
+.mg__bar {
+  display: flex;
+  align-items: center;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mg__back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  min-height: var(--mg-control-h);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mg__back:hover {
+  border-color: var(--color-text);
+}
+
+.mg-tabs {
+  max-width: 100%;
+}
+
+.mg-panel,
+.mg-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.mg-sec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.mg-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mg-asks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-base);
+}
+
+/* An anchor card. The pressable one is a real button, so it takes the page's text, not a button's. */
+.mg-anchor {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  align-items: stretch;
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+}
+
+.mg-anchor__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.mg-anchor__title {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+.mg-anchor__go {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.mg-anchor__meta,
+.mg-anchor__shared {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.mg-anchor__why {
+  margin: 0;
+  font-size: var(--text-base);
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+
+.mg-anchor__why-label {
+  font-weight: var(--weight-semibold);
+}
+
+.mg-anchor__made {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.mg-anchor__made-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 var(--space-3);
+  font-size: var(--text-base);
+}
+
+.mg-anchor__made-name {
+  font-weight: var(--weight-semibold);
+}
+
+.mg-anchor__made-state {
+  color: var(--color-text-secondary);
+}
+
+.mg-anchor__job {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.mg-anchor__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mg-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  min-width: 0;
+}
+
+.mg-form--inline {
+  padding: var(--space-3) 0 0;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  background: none;
+}
+
+.mg-form__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: end;
+}
+
+@media (max-width: 700px) {
+  .mg-form__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.mg-form__dates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.mg-made {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.mg-made__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: var(--tap-min);
+  box-sizing: border-box;
+  padding: var(--space-2) 0;
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+}
+
+.mg-made__row--open {
+  cursor: pointer;
+}
+
+.mg-made__row--open:hover .mg-made__title {
+  text-decoration: underline;
+}
+
+.mg-made__row--open:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.mg-made__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mg-made__title {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
+}
+
+.mg-made__meta,
+.mg-made__hook {
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.mg-made__go {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.mg-facts {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+.mg-facts__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--text-base);
+}
+
+.mg-facts__row dt {
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.mg-facts__row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mg-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* A chip's dense face sits in a band that takes the tap vertically too (DESIGN.md: touch the chrome,
+   not the data); never sideways, so neighbours keep their own taps. */
+.mg-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-2);
+}
+
+.mg-reasons__reach {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  cursor: pointer;
+}
+
+.mg-q > section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.mg-q__batch {
+  margin: 0;
+  font-family: var(--font-heading);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.mg-q__step {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.mg-q__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mg-q__text {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  overflow-wrap: anywhere;
+}
+
+/* base.css centres every button; Ink's radio leaves alignment to the default, so it is restored here. */
+.mg-q__radios .ink-radio {
+  justify-content: flex-start;
+}
+
+.mg-q__radios:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.mg-q__pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-2);
+}
+
+.mg-doc__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mg-unsure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mg-unsure__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mg-unsure__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) 0 var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-border-strong, var(--color-border));
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.mg-unsure__kind {
+  font-weight: var(--weight-semibold);
+}
+
+.mg-unsure__fix {
+  color: var(--color-text-secondary);
+}
+
+.mg-facts-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mg-lines {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.mg-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.mg-line--editing {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mg-line__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.mg-line__fact {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.mg-line__pin {
+  flex-shrink: 0;
+}
+
+.mg-line__note,
+.mg-line__outcome {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.mg-line__outcome {
+  font-size: var(--text-base);
+  color: var(--color-text);
+}
+
+.mg-line__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mg-agent__title {
+  font-weight: var(--weight-bold);
+  font-size: var(--text-md);
+}
+
+.mg-agent__about,
+.mg-agent__why {
+  margin: 0;
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.mg-agent__state {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.mg-closed {
+  max-width: 52ch;
+  margin: 0 auto;
+}
+
+.mg-said {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-6);
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: min(560px, calc(100vw - 32px));
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-base);
+  transform: translateX(-50%);
+  box-sizing: border-box;
+}

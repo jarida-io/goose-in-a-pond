@@ -12,6 +12,7 @@ import { Dashboard } from "../sections/Dashboard";
 import { Chat } from "../sections/Chat";
 import { Saved } from "../sections/Saved";
 import { Watches } from "../sections/Watches";
+import { MyGoose } from "../sections/MyGoose";
 import { Devices } from "../sections/Devices";
 import { Mesh } from "../sections/Mesh";
 import { Pairing } from "../sections/Pairing";
@@ -35,6 +36,7 @@ function SectionContent({ section }: { section: GuiSection }) {
     case "chat":      return <Chat />;
     case "saved":     return <Saved />;
     case "watches":   return <Watches />;
+    case "mygoose":   return <MyGoose />;
     case "devices":   return <Devices />;
     case "mesh":      return <Mesh />;
     case "pairing":   return <Pairing />;

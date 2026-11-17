@@ -1,5 +1,6 @@
 //! My Goose's to-dos over HTTP: each member reaches only their own to-dos, places and offers,
-//! a malformed body is refused by field, and an offered mention becomes a to-do once.
+//! a malformed body is refused by field, what is already open on a list is never added twice,
+//! and an offered mention becomes a to-do once.
 
 use std::sync::Arc;
 
@@ -259,11 +260,170 @@ async fn a_member_reaches_only_their_own_todos() {
 }
 
 #[tokio::test]
+async fn a_list_priority_steps_gooses_offer_and_anchor_round_trip_and_a_patch_ticks_a_step() {
+    let p = pond().await;
+    let (status, plain) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos",
+        Some(json!({"text": "renew the logbook"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{plain}");
+    assert_eq!(
+        (&plain["list"], &plain["goose_can"], &plain["anchor_id"]),
+        (&Value::Null, &Value::Null, &Value::Null)
+    );
+    assert_eq!(
+        (&plain["priority"], &plain["steps"]),
+        (&json!("normal"), &json!([]))
+    );
+    assert!(plain.get("duplicate_of").is_none());
+
+    let offer = json!({
+        "label": "Find hotels",
+        "kind": "research",
+        "prompt": "Hotels in Mombasa under KSh 8,000 a night",
+    });
+    let (status, todo) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos",
+        Some(json!({
+            "text": "Plan the Mombasa trip",
+            "list": " Personal ",
+            "priority": "high",
+            "steps": [{"text": "Book the train"}, {"text": "Pack", "done": false}],
+            "goose_can": offer,
+            "anchor_id": "a-1",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{todo}");
+    let path = format!("/me/todos/{}", todo["id"].as_str().unwrap());
+    let (_, listed) = call(&p, "jerry-token", Method::GET, "/me/todos", None).await;
+    let kept = listed["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == todo["id"])
+        .unwrap();
+    for read in [&todo, kept] {
+        assert_eq!(read["list"], "Personal");
+        assert_eq!(read["priority"], "high");
+        assert_eq!(
+            read["steps"],
+            json!([{"text": "Book the train", "done": false}, {"text": "Pack", "done": false}])
+        );
+        assert_eq!(read["goose_can"], offer);
+        assert_eq!(read["anchor_id"], "a-1");
+    }
+
+    let (status, ticked) = call(
+        &p,
+        "jerry-token",
+        Method::PATCH,
+        &path,
+        Some(json!({
+            "steps": [{"text": "Book the train", "done": true}, {"text": "Pack", "done": true}],
+            "priority": "low",
+            "goose_can": null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticked}");
+    assert_eq!(
+        ticked["steps"],
+        json!([{"text": "Book the train", "done": true}, {"text": "Pack", "done": true}])
+    );
+    assert_eq!(
+        ticked["state"], "open",
+        "every step done closes nothing: the member closes it"
+    );
+    assert_eq!(
+        (&ticked["priority"], &ticked["goose_can"], &ticked["list"]),
+        (&json!("low"), &Value::Null, &json!("Personal"))
+    );
+    let (_, again) = call(&p, "jerry-token", Method::GET, "/me/todos", None).await;
+    assert!(again["todos"].as_array().unwrap().contains(&ticked));
+
+    let (status, refused) = call(
+        &p,
+        "jerry-token",
+        Method::PATCH,
+        &path,
+        Some(json!({"steps": [{"done": true}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused["error"].as_str().unwrap().contains("steps[0]"));
+}
+
+#[tokio::test]
+async fn a_second_post_of_an_open_todo_answers_the_one_already_there() {
+    let p = pond().await;
+    let post = |token: &'static str, body: Value| {
+        let p = &p;
+        async move { call(p, token, Method::POST, "/me/todos", Some(body)).await }
+    };
+    let (status, first) = post("jerry-token", json!({"text": "Call the garage"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let id = first["id"].clone();
+
+    let (status, again) = post(
+        "jerry-token",
+        json!({"kind": "reminder", "text": " call the GARAGE! ", "list": "Car"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!((&again["id"], &again["duplicate_of"]), (&id, &id));
+    assert_eq!(
+        (&again["kind"], &again["text"], &again["list"]),
+        (&json!("todo"), &json!("Call the garage"), &Value::Null),
+        "the one already there, as it was"
+    );
+    let (_, mine) = call(&p, "jerry-token", Method::GET, "/me/todos?state=all", None).await;
+    assert_eq!(mine["todos"].as_array().unwrap().len(), 1);
+
+    let (status, theirs) = post("emmanuel-token", json!({"text": "Call the garage"})).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "another member's list: {theirs}"
+    );
+
+    let (status, _) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        &format!("/me/todos/{}/answer", id.as_str().unwrap()),
+        Some(json!({"answer": "done"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, afresh) = post("jerry-token", json!({"text": "call the garage"})).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a done to-do does not block a new one: {afresh}"
+    );
+    assert_ne!(afresh["id"], id);
+    assert!(afresh.get("duplicate_of").is_none());
+}
+
+#[tokio::test]
 async fn a_bad_body_is_refused_by_field() {
     let p = pond().await;
     for (body, says) in [
         (json!({"kind": "todo"}), "`text` is required"),
         (json!({"text": "x", "due_at": "Friday"}), "RFC 3339"),
+        (
+            json!({"text": "x", "priority": "urgent"}),
+            "low, normal or high",
+        ),
+        (json!({"text": "x", "steps": {}}), "`steps` must be a list"),
         (
             json!({"text": "x", "hooks": [{"kind": "place", "spec": {"place_id": "nowhere"}}]}),
             "no such place",
@@ -400,11 +560,11 @@ async fn places_are_hook_sources_and_the_phones_geofence_is_queued() {
     );
 }
 
-fn mention(id: &str, owner: &str, when_said: &str) -> CapturedReminder {
+fn mention(id: &str, owner: &str, about: &str, when_said: &str) -> CapturedReminder {
     let said = chrono::Utc::now();
     CapturedReminder {
         id: id.into(),
-        about: "call the garage".into(),
+        about: about.into(),
         when_said: when_said.into(),
         session_id: "s1".into(),
         window_id: format!("w-{id}"),
@@ -420,13 +580,13 @@ fn mention(id: &str, owner: &str, when_said: &str) -> CapturedReminder {
 async fn an_offered_mention_becomes_a_reminder_once_or_is_declined() {
     let p = pond().await;
     let now = chrono::Utc::now();
-    for (id, when) in [
-        ("r-tomorrow", "tomorrow at 6pm"),
-        ("r-vague", "after the rains"),
-        ("r-no", "on Friday"),
+    for (id, about, when) in [
+        ("r-tomorrow", "call the garage", "tomorrow at 6pm"),
+        ("r-vague", "service the Fielder", "after the rains"),
+        ("r-no", "renew the logbook", "on Friday"),
     ] {
         p.reminders
-            .capture(&mention(id, &p.jerry, when))
+            .capture(&mention(id, &p.jerry, about, when))
             .await
             .unwrap();
         assert!(p.reminders.offer(id, now).await.unwrap());
@@ -516,4 +676,73 @@ async fn an_offered_mention_becomes_a_reminder_once_or_is_declined() {
     assert_eq!(left["offers"], json!([]));
     let (_, todos) = call(&p, "jerry-token", Method::GET, "/me/todos", None).await;
     assert_eq!(todos["todos"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn accepting_an_offer_for_what_is_already_listed_settles_it_without_a_second() {
+    let p = pond().await;
+    let now = chrono::Utc::now();
+    let (_, listed) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos",
+        Some(json!({"text": "Call the garage"})),
+    )
+    .await;
+    let id = listed["id"].clone();
+    for (reminder, when) in [("r-first", "tomorrow at 6pm"), ("r-second", "next week")] {
+        p.reminders
+            .capture(&mention(reminder, &p.jerry, "call the garage", when))
+            .await
+            .unwrap();
+        assert!(p.reminders.offer(reminder, now).await.unwrap());
+    }
+
+    let (status, timed) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos/offers/r-first/accept",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{timed}");
+    assert_eq!((&timed["id"], &timed["duplicate_of"]), (&id, &id));
+    assert_eq!(
+        timed["hooks"][0]["kind"], "time",
+        "it had no time of its own, so it takes the offer's"
+    );
+    assert!(timed["due_at"].is_string());
+
+    let later = (now + chrono::Duration::days(5)).to_rfc3339();
+    let (status, kept) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos/offers/r-second/accept",
+        Some(json!({"due_at": later})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(kept["duplicate_of"], id);
+    assert_eq!(
+        (&kept["due_at"], &kept["hooks"]),
+        (&timed["due_at"], &timed["hooks"]),
+        "its own time is still to come, so it keeps it"
+    );
+
+    let (_, left) = call(&p, "jerry-token", Method::GET, "/me/todos/offers", None).await;
+    assert_eq!(left["offers"], json!([]), "both offers are settled");
+    let (_, todos) = call(&p, "jerry-token", Method::GET, "/me/todos?state=all", None).await;
+    assert_eq!(todos["todos"].as_array().unwrap().len(), 1);
+    let (status, _) = call(
+        &p,
+        "jerry-token",
+        Method::POST,
+        "/me/todos/offers/r-first/accept",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "accepted once");
 }

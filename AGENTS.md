@@ -77,9 +77,10 @@ KV-cost or throughput number.
 
 One slot (`crates/pond-server/src/inference_lane_runner.rs`; policy in
 `crates/pond-core/src/user_data/services/inference_lane.rs`) runs compaction, consolidation,
-titling, proactive review, summary refresh, memory extraction and suggestion generation. Nothing is
-pre-empted mid-call: no job starts while a turn is in flight, user activity cancels consolidation,
-and a quiet compaction of the session a turn arrives on makes that turn wait (`QuietPasses`). The
+titling, long-task steps, proactive review, summary refresh, memory extraction, the news, web watch
+judging and the memory re-sort. Nothing is pre-empted mid-call: no job starts while a turn is in
+flight, user activity cancels consolidation, and a quiet compaction of the session a turn arrives
+on makes that turn wait (`QuietPasses`). The
 embedding slot (`crates/pond-server/src/embedding_slot_runner.rs`, pass in
 `crates/pond-core/src/context/embedding_slot.rs`) is not a lane job: it loads the Memory-role
 embedder and re-embeds stale rows beside a chore, never beside a turn, a compaction or a due

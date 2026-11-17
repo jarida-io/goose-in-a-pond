@@ -1,13 +1,15 @@
 //! The line open long tasks wait in. One slot runs them, so the runner, the chat card, the phone
-//! and the prime all read the same order from here, and none of them can disagree about it.
+//! and the prime all read the same order, and none of them can disagree about it: the order
+//! here, with the idea engine's jobs placed in it by `engine::queue::run_order`.
 
 use crate::shared::domain::long_task::{LongTask, LongTaskState};
 
 const GOAL_CHARS: usize = 80;
 
-/// Open tasks in the order the runner takes them: the order they were asked for. The runner
-/// finishes the task at the front before it starts the next, so the first answer comes as soon as
-/// one slot can give it, and a member can see where a task stands and stop what they no longer need.
+/// Open tasks in the order they were asked for, activations last: the order the runner takes
+/// them in before the idea engine's jobs are placed. The runner finishes the task at the front
+/// before it starts the next, so the first answer comes as soon as one slot can give it, and a
+/// member can see where a task stands and stop what they no longer need.
 pub fn run_order(tasks: &[LongTask]) -> Vec<&LongTask> {
     use crate::shared::services::agent_activations::is_activation_task;
     let mut open: Vec<&LongTask> = tasks

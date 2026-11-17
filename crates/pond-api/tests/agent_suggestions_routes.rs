@@ -27,6 +27,7 @@ struct Pond {
     member: String,
     profiles: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
+    engine_jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
     settings: Arc<SqliteSettingsRepository>,
     agent: Arc<pond_core::shared::mocks::mock_agent::MockAgent>,
     _dir: tempfile::TempDir,
@@ -85,6 +86,7 @@ async fn pond(paired: bool, primary: bool) -> Pond {
     Pond {
         profiles: state.profile_repo.clone(),
         tasks,
+        engine_jobs: state.engine.jobs.clone(),
         settings,
         agent,
         router: build_router(
@@ -1058,4 +1060,75 @@ async fn a_long_report_is_joined_from_its_sections_and_exports_three_ways() {
     let stranger = pond_with_no_member().await;
     let (status, ..) = fetch(&stranger, &format!("{uri}/export?format=markdown")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// What the idea engine makes unasked waits in the same line as the household's tasks, in the
+/// engine's order, and is not one of the member's tasks.
+#[tokio::test]
+async fn an_engine_jobs_task_keeps_its_place_in_the_line_and_is_not_listed() {
+    use pond_core::shared::domain::long_task::{LongTask, LongTaskBudget};
+    use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind};
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::services::engine::task::task_for_job;
+
+    let pond = pond(true, false).await;
+    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let mut refresh = EngineJob::new(
+        JobKind::Deliverable,
+        JobClass::Asked,
+        Some(&pond.member),
+        "Dossier for the summit",
+        start,
+    );
+    let (unasked, _) = task_for_job(
+        &refresh,
+        "Bring the dossier for the summit up to date.",
+        &pond.member,
+        start,
+    )
+    .unwrap();
+    pond.tasks.create_task(&unasked).await.unwrap();
+    refresh.task_id = Some(unasked.id().to_string());
+    pond.engine_jobs.add(&refresh).await.unwrap();
+    let mine = LongTask::start(
+        ProfileScope::Owner(pond.member.clone()),
+        None,
+        "a packing list",
+        None,
+        LongTaskBudget::new(12, None).unwrap(),
+        start + chrono::Duration::minutes(1),
+    )
+    .unwrap();
+    pond.tasks.create_task(&mine).await.unwrap();
+
+    let (status, listed) = send(&pond, call(Method::GET, "/api/v1/long-tasks", None, false)).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let listed = listed.as_array().unwrap().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["id"], mine.id());
+    assert_eq!(
+        listed[0]["queue"]["position"], 2,
+        "a refresh the member asked for first runs first"
+    );
+    assert_eq!(listed[0]["queue"]["ahead"][0]["id"], unasked.id());
+
+    let (_, line) = send(
+        &pond,
+        call(Method::GET, "/api/v1/long-tasks/queue", None, false),
+    )
+    .await;
+    let line = line["line"].as_array().unwrap().clone();
+    assert_eq!(line.len(), 1, "{line:?}");
+    assert_eq!(line[0]["id"], mine.id());
+    assert_eq!(line[0]["position"], 2, "the same place its card gives");
+
+    refresh.class = JobClass::Open;
+    assert!(pond.engine_jobs.save(&refresh).await.unwrap());
+    let view = format!("/api/v1/long-tasks/{}", mine.id());
+    let (_, view) = send(&pond, call(Method::GET, &view, None, false)).await;
+    assert_eq!(
+        view["queue"]["position"], 1,
+        "what the engine makes unasked waits behind what a member asked for: {view}"
+    );
+    assert_eq!(view["queue"]["of"], 2);
 }

@@ -9,7 +9,6 @@ vi.mock("../../api/PondApiClient", () => ({
     listProposals: vi.fn(),
     decideProposal: vi.fn(),
     listSuggestions: vi.fn(),
-    markSuggestionTaken: vi.fn(),
   },
 }));
 
@@ -182,7 +181,7 @@ describe("SuggestionQueue cursor", () => {
 
 /** A suggestion as the wire sends one. */
 function suggestion(id: string, prompt: string, because: string): Suggestion {
-  return { id, prompt, because, answered_by: "giap-memory", composed: false };
+  return { id, prompt, because, answered_by: "giap-memory" };
 }
 
 const OFFERS = [
@@ -215,41 +214,6 @@ describe("SuggestionQueue offers", () => {
       "Which of my devices are online?",
     ]);
     expect(document.querySelector(".sq__quiet")).toBeNull();
-  });
-
-  // Without this the queue never drains.
-  it("tells the pond when a composed suggestion is taken", async () => {
-    vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    vi.mocked(api.markSuggestionTaken).mockResolvedValue({ id: "q-1", settled: true });
-    vi.mocked(api.listSuggestions).mockResolvedValue({
-      suggestions: [
-        { ...suggestion("q-1", "How did the swim go?", "From something you do regularly, saved 3 days ago."), composed: true },
-      ],
-      considered: [],
-      audience: "personal",
-    });
-    const asked: string[] = [];
-    render(<SuggestionQueue sessionId="s-1" onAsk={(p) => asked.push(p)} />);
-
-    fireEvent.click(await screen.findByText("How did the swim go?"));
-    // Sent first and unawaited.
-    expect(asked).toEqual(["How did the swim go?"]);
-    await waitFor(() => expect(api.markSuggestionTaken).toHaveBeenCalledWith("q-1"));
-  });
-
-  // A template suggestion's id is a suggestor name, not a row.
-  it("does not try to settle a template suggestion", async () => {
-    vi.mocked(api.listProposals).mockResolvedValue({ profile_id: null, proposals: [] });
-    vi.mocked(api.listSuggestions).mockResolvedValue({
-      suggestions: [suggestion("memory_recall", "What do you remember about me?", "38 things remembered.")],
-      considered: [],
-      audience: "personal",
-    });
-    render(<SuggestionQueue sessionId="s-1" onAsk={() => {}} />);
-
-    fireEvent.click(await screen.findByText("What do you remember about me?"));
-    await waitFor(() => expect(api.listSuggestions).toHaveBeenCalled());
-    expect(api.markSuggestionTaken).not.toHaveBeenCalled();
   });
 
   // No destination: the classic composer hides its chips once the transcript has a message.

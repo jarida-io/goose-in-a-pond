@@ -4,12 +4,13 @@ use crate::user_data::domain::interest::ObservedInterest;
 use crate::user_data::domain::member_profile::About;
 use crate::user_data::domain::memory::{MemorySegment, MemoryTier};
 use crate::user_data::domain::profile::ProfileScope;
+use crate::user_data::services::extraction_gate::PlanCandidate;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 /// Token budget for one window's whole prompt, well under the local providers' 8192 clamp.
 /// Shared: `pond-core` carves the window to fit it and the `pond-server` adapter trims to it.
-pub const EXTRACTION_PROMPT_BUDGET_TOKENS: usize = 2_400;
+pub const EXTRACTION_PROMPT_BUDGET_TOKENS: usize = 2_600;
 
 /// A heuristic (no tokeniser is reachable here); the budget leaves room for it to be a third off.
 pub const CHARS_PER_TOKEN: usize = 4;
@@ -184,6 +185,7 @@ pub struct KnownMemory {
     pub pattern: bool,
 }
 
+#[derive(Clone, Copy)]
 pub struct ExtractionWindow<'a> {
     pub subject: &'a WindowSubject,
     pub assistant_name: &'a str,
@@ -196,6 +198,9 @@ pub struct ExtractionWindow<'a> {
     pub max_memories: usize,
     /// `false` when the window's last message is older than the staleness cutoff.
     pub allow_reminders: bool,
+    /// `false` when a plan from this window could become no anchor: it is stale, or nobody
+    /// is named to hold one.
+    pub allow_plans: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,13 +225,18 @@ pub struct WindowExtraction {
     pub reminders: Vec<ExtractedReminder>,
     /// What the window showed the subject caring about; never a memory of who they are.
     pub interests: Vec<ObservedInterest>,
+    /// What the subject said they plan to attend, go on, buy or build.
+    pub plans: Vec<PlanCandidate>,
     /// Items labelled outside the catalogue; counted so a misread prompt shows up as a number.
     pub rejected: usize,
 }
 
 impl WindowExtraction {
     pub fn is_empty(&self) -> bool {
-        self.memories.is_empty() && self.reminders.is_empty() && self.interests.is_empty()
+        self.memories.is_empty()
+            && self.reminders.is_empty()
+            && self.interests.is_empty()
+            && self.plans.is_empty()
     }
 }
 

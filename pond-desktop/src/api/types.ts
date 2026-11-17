@@ -163,8 +163,6 @@ export interface Settings {
 
   // Memory lifecycle
   memory_extraction_enabled?: boolean;
-  /** Turn what the pond remembers into questions on Home. */
-  suggestion_generation_enabled?: boolean;
   memory_cleanup_enabled?: boolean;
   memory_consolidation_enabled?: boolean;
   /** Let the pond rename conversations while idle. Never touches a name you typed. */
@@ -2174,9 +2172,6 @@ export interface Suggestion {
   because: string;
   /** The tool group that can answer `prompt`. */
   answered_by: string;
-
-  /** Composed from one of your memories (a row, so settled on tap) rather than from a template. */
-  composed: boolean;
 }
 
 /** Why one suggestor produced nothing, so quiet can be told from broken. */
@@ -2447,4 +2442,276 @@ export interface HouseholdProfile {
   guest_until: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// The idea engine's routes under `/api/v1/me`, as docs/architecture/idea-engine.md section 11 gives them.
+
+export type AnchorKind = "event" | "trip" | "purchase" | "project" | "interest" | "standing";
+/** The kinds a member may add; the standing one belongs to the pond. */
+export type NewAnchorKind = Exclude<AnchorKind, "standing">;
+export type AnchorState = "candidate" | "active" | "ended" | "stopped" | "faded";
+export type SpecialistId = "budget" | "work" | "trip" | "hunt";
+
+/** One fact an anchor or a deliverable holds, and where it came from. */
+export interface AnchorFact {
+  label: string;
+  value: string;
+  source: string;
+}
+
+export type DeliverableKind = "dossier" | "plan" | "shortlist" | "digest" | "checklist";
+export type DeliverableState = "queued" | "making" | "ready" | "unsure" | "rejected" | "archived";
+
+/** A deliverable as an anchor lists it. `unseen` is only ever true for its owner. */
+export interface DeliverableSummary {
+  id: string;
+  kind: DeliverableKind;
+  slot: string;
+  title: string;
+  state: DeliverableState;
+  hook: string;
+  version: number;
+  changed: string;
+  unseen: boolean;
+}
+
+export type EngineJobKind =
+  | "deliverable"
+  | "fact_sheet"
+  | "memory"
+  | "consolidation"
+  | "heartbeat"
+  | "capture"
+  | "ledger"
+  | "rule"
+  | "questions";
+export type EngineJobState = "queued" | "running" | "passed" | "unsure" | "dropped" | "failed" | "cancelled";
+
+/** A long-task step of an engine job, labelled by the pond in words a member reads. */
+export interface EngineJobStep {
+  key: string;
+  role: string;
+  label: string;
+  state: "pending" | "running" | "completed" | "failed" | "skipped" | "awaiting_approval";
+  summary: string | null;
+}
+
+/** The open job an anchor or deliverable shows; `steps` only on a whole anchor. */
+export interface EngineJobSummary {
+  kind: EngineJobKind;
+  subject: string;
+  state: "queued" | "running";
+  rounds: number;
+  steps?: EngineJobStep[];
+}
+
+export interface QuestionView {
+  id: string;
+  text: string;
+  /** Two to four options. "Other" is never among them: every surface offers it as free text. */
+  options: string[];
+  multi: boolean;
+}
+
+export interface Anchor {
+  id: string;
+  kind: AnchorKind;
+  title: string;
+  state: AnchorState;
+  starts_at: string | null;
+  ends_at: string | null;
+  place: string | null;
+  facts: AnchorFact[];
+  agent: SpecialistId | null;
+  origin: "chat" | "capture" | "interest" | "you" | "goose";
+  /** Why Goose thinks this is real, for a candidate. */
+  why: string;
+  confirmed_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** False when another member shared it: the caller reads it and answers its questions only. */
+  mine: boolean;
+  /** The caller's own id when `mine`, so a share list can leave the owner out; else null. */
+  owner_id?: string | null;
+  shared_by: string | null;
+  shares: string[];
+  deliverables: DeliverableSummary[];
+  open_questions: number;
+  job: EngineJobSummary | null;
+  /** Only on `GET /me/anchors/{id}` and the answers that return a whole anchor. */
+  questions?: QuestionView[];
+}
+
+export interface NewAnchor {
+  kind: NewAnchorKind;
+  title: string;
+  starts_at?: string;
+  ends_at?: string;
+  place?: string;
+  notes?: string;
+}
+
+export type ReasonChip = "too_generic" | "not_relevant" | "wrong_facts" | "already_know" | "bad_timing";
+
+export interface StopAnchor {
+  reasons: ReasonChip[];
+  text?: string;
+  never?: boolean;
+}
+
+export type ObjectionKind = "grounding" | "relevance" | "duplicate" | "dont_list" | "vague" | "stale";
+
+/** What the critic held against a draft, and what would make it pass. */
+export interface Objection {
+  kind: ObjectionKind;
+  about: string;
+  fix: string;
+}
+
+export interface SourceLink {
+  title: string;
+  url: string;
+}
+
+export interface Deliverable {
+  id: string;
+  anchor_id: string;
+  anchor_title: string;
+  kind: DeliverableKind;
+  slot: string;
+  title: string;
+  state: DeliverableState;
+  hook: string;
+  /** Markdown. Empty until the first version is made. */
+  body: string;
+  facts: AnchorFact[];
+  sources: SourceLink[];
+  objections: Objection[];
+  /** What the last refresh changed; empty when it changed nothing. */
+  changed: string;
+  version: number;
+  task_id: string | null;
+  refresh_at: string | null;
+  unseen: boolean;
+  mine: boolean;
+  created_at: string;
+  updated_at: string;
+  job: EngineJobSummary | null;
+}
+
+export interface RejectDeliverable {
+  /** `not_this` turns down this one; `never` asks for a general rule from the member's words. */
+  verb: "not_this" | "never";
+  reasons: ReasonChip[];
+  text?: string;
+}
+
+export interface QuestionBatch {
+  id: string;
+  purpose: "anchor" | "interest" | "profile" | "ledger";
+  anchor_id: string | null;
+  title: string;
+  questions: QuestionView[];
+}
+
+/** Chosen options, by their words, and the member's own "Other" text. */
+export interface QuestionAnswer {
+  choices: string[];
+  text?: string;
+}
+
+export interface EngineLogJob {
+  id: string;
+  kind: EngineJobKind;
+  /** In words: the pond never sends an id here. */
+  subject: string;
+  state: EngineJobState;
+  rounds: number;
+  objections: Objection[];
+  outcome: string | null;
+  anchor_id: string | null;
+  deliverable_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type FactCategory =
+  | "identity"
+  | "home"
+  | "work"
+  | "people"
+  | "plan"
+  | "hunt"
+  | "interest"
+  | "food"
+  | "health"
+  | "style"
+  | "routine"
+  | "avoid"
+  | "other";
+
+export interface FactLine {
+  id: string;
+  category: FactCategory;
+  fact: string;
+  confidence: "sure" | "likely" | "said";
+  since: string | null;
+  source: { kind: "memory" | "summary" | "interest" | "anchor" | "answer" | "interview" | "you"; ref: string | null };
+  /** Names of the pond's tools the line bears on. */
+  tools: string[];
+  pinned: boolean;
+  score: number;
+  used: number;
+  state: "active" | "retired" | "removed";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FactSheet {
+  facts: FactLine[];
+  limit: number;
+}
+
+export interface FactPatch {
+  fact?: string;
+  category?: FactCategory;
+  pinned?: boolean;
+}
+
+export interface DontRule {
+  id: string;
+  rule: string;
+  /** `never` rules are read by every job; `avoid` ones where they are relevant. */
+  strength: "never" | "avoid";
+  reasons: ReasonChip[];
+  said: string | null;
+  origin: "reject" | "stop" | "fact" | "you";
+  origin_ref: string | null;
+  created_at: string;
+}
+
+export interface Specialist {
+  id: SpecialistId;
+  title: string;
+  about: string;
+  state: "on" | "off" | "offered" | "declined";
+  /** Why it was offered; empty unless `state` is `offered`. */
+  why: string;
+}
+
+export interface Intention {
+  id: string;
+  act: "push" | "refresh" | "look_into" | "ask" | "propose_todo";
+  text: string;
+  why: string;
+  /** The condition in words, as the heartbeat wrote it. */
+  when: string;
+  until: string;
+  state: "waiting" | "done" | "expired" | "dropped";
+  outcome: string | null;
+  anchor_id: string | null;
+  created_at: string;
+  settled_at: string | null;
 }

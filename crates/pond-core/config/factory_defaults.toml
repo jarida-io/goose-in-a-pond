@@ -117,7 +117,6 @@ unseen_phone_skip_days = 14
 speak_unfetched_reminders = true
 notices_wait_in_quiet_hours = true
 tool_output_compaction = true
-suggestion_generation_enabled = true
 memory_extraction_enabled = true
 memory_cleanup_enabled = true
 memory_consolidation_enabled = true

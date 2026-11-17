@@ -3,12 +3,17 @@
 //! This is the write gate: adapters are not trusted to enforce their prompt (a 4B model ignores
 //! parts of it), so every candidate passes [`fact_defect`] (dates included), the subject gate and
 //! dedup here. A dedup match is dropped, not reinforced, and recorded with the id it lost to.
+//! Before any of that a critic rules on the window's candidates together, and what it drops is
+//! never saved.
 //!
 //! On a multi-member pond an unidentified conversation (every voice-child one included) is never
 //! mined, only counted in [`PassReport::sessions_unnameable`]: misfiling is worse than losing it.
 use crate::models::domain::message::Role;
 use crate::models::ports::embedding::EmbeddingProvider;
 use crate::shared::domain::session_activity::SessionOrigin;
+use crate::shared::domain::todo::zone;
+use crate::user_data::domain::anchor::AnchorOrigin;
+use crate::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
 use crate::user_data::domain::interest::Observed;
 use crate::user_data::domain::member_profile::{file_under, same_sentence, About};
 use crate::user_data::domain::memory::{
@@ -21,18 +26,25 @@ use crate::user_data::domain::reminder::{
     window_is_fresh_enough, CapturedReminder, ReminderCandidate,
 };
 use crate::user_data::domain::session::{Session, SessionIdentity};
+use crate::user_data::ports::anchors::AnchorRepository;
 use crate::user_data::ports::conversation_extractor::{
     ConversationExtractor, ExtractionError, ExtractionWindow, KnownMemory, WindowExtraction,
     WindowMessage, WindowSubject,
 };
+use crate::user_data::ports::engine_jobs::EngineJobRepository;
+use crate::user_data::ports::extraction_gate::ExtractionGate;
 use crate::user_data::ports::interests::InterestRepository;
 use crate::user_data::ports::memory_repository::MemoryRepository;
 use crate::user_data::ports::reminder_repository::ReminderRepository;
 use crate::user_data::ports::session_storage::SessionStorage;
+use crate::user_data::services::extraction_gate::{
+    anchor_from_plan, apply_gate, GateCandidate, GateKind,
+};
 use crate::user_data::services::memory_relevance::{
     is_duplicate_content, rank_by_relevance, DEDUP_RECENT_WINDOW,
 };
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +73,12 @@ pub const BAND_NEIGHBOURS: usize = 5;
 
 /// How long an embed failure stands the engine down: banding without an embedder is blind.
 pub const EMBED_FAILURE_COOLDOWN_SECS: u64 = 300;
+
+/// The critic's reasons one line of the engine log names; the rest are only counted.
+const OUTCOME_REASONS_SHOWN: usize = 4;
+
+/// Why an interest or a plan went when the critic's ruling could not be read.
+const UNREAD_RULING: &str = "the check could not be read";
 
 /// What the engine may do; an unknown setting parses as `Shadow`, so a typo can never write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +150,7 @@ pub struct SessionCandidate {
 struct WindowTarget<'a> {
     session_id: &'a str,
     subject: WindowSubject,
+    cancel: &'a CancellationToken,
 }
 
 /// Whether a person had this conversation. Cron and proactive-review sessions are the pond's
@@ -334,13 +353,67 @@ struct WindowOutcome {
     dropped_onto: Vec<String>,
     /// Interests this window added a conversation to: a new guess or one more behind a row.
     interests_noted: usize,
+    /// Plans this window turned into candidate anchors.
+    anchors_offered: usize,
+}
+
+/// What the critic ruled on one member's windows in a pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Judged {
+    /// `None` for windows nobody is named for.
+    pub profile_id: Option<String>,
+    /// Windows judged, one to a conversation.
+    pub conversations: usize,
+    /// Candidates the critic was shown.
+    pub offered: usize,
+    /// Of `offered`, the ones it let through to the write gate.
+    pub kept: usize,
+    /// Why each dropped candidate went, in the critic's words; a drop it gave no reason for
+    /// has none here.
+    pub reasons: Vec<String>,
+}
+
+impl Judged {
+    /// The pass as one line of the engine log.
+    pub fn outcome_line(&self) -> String {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let mut line = format!(
+            "Kept {} of {} thing{} from {} conversation{}",
+            self.kept,
+            self.offered,
+            plural(self.offered),
+            self.conversations,
+            plural(self.conversations),
+        );
+        let dropped = self.offered.saturating_sub(self.kept);
+        if dropped == 0 {
+            return line;
+        }
+        line.push_str(&format!("; dropped {dropped}"));
+        let mut reasons: Vec<&str> = Vec::new();
+        for reason in self.reasons.iter().map(|r| r.trim()) {
+            if !reason.is_empty() && !reasons.iter().any(|held| held.eq_ignore_ascii_case(reason)) {
+                reasons.push(reason);
+            }
+        }
+        if !reasons.is_empty() {
+            let shown = reasons.len().min(OUTCOME_REASONS_SHOWN);
+            line.push_str(": ");
+            line.push_str(&reasons[..shown].join(", "));
+            if reasons.len() > shown {
+                line.push_str(&format!(" and {} more", reasons.len() - shown));
+            }
+        }
+        line
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PassReport {
     /// Windows read by the model and banded.
     pub windows_examined: usize,
-    /// Model calls made, whatever the outcome: the loop's bound, so failure paths are not free.
+    /// Windows the model was asked to read, whatever the outcome: the loop's bound, so failure
+    /// paths are not free.
     pub model_calls: usize,
     /// Conversations passed over: too few new messages, or no complete exchange.
     pub windows_skipped: usize,
@@ -356,6 +429,16 @@ pub struct PassReport {
     pub interests_offered: usize,
     /// Interests a window added its conversation to: a new guess, or evidence for a row.
     pub interests_noted: usize,
+    /// Plans the model named in windows asked for them, whatever became of them.
+    pub plans_offered: usize,
+    /// Plans that became candidate anchors.
+    pub anchors_offered: usize,
+    /// Calls to the critic, heard or not; they are not counted against the pass's call budget.
+    pub gate_calls: usize,
+    /// Rulings nobody could read: memories and reminders were kept, interests and plans were not.
+    pub gate_unreadable: usize,
+    /// What the critic ruled, a tally per member whose windows it judged.
+    pub judged: Vec<Judged>,
     /// Items carrying a label outside the five-value catalogue.
     pub rejected_kinds: usize,
     pub bands: BandHistogram,
@@ -385,7 +468,7 @@ pub struct PassReport {
     pub windows_oversized: usize,
     /// Windows skipped because that exact stretch already produced memories (a re-walk).
     pub windows_already_mined: usize,
-    /// Windows where the provider was called and failed.
+    /// Windows where the provider was called and failed, for the read or for the critic.
     pub provider_failures: usize,
     /// Whether any window found no provider at all.
     pub no_provider: bool,
@@ -393,6 +476,15 @@ pub struct PassReport {
     pub deadline_reached: bool,
     /// Why the pass could do nothing, decided once at the end from the whole pass.
     pub blocked_on: Option<String>,
+}
+
+impl PassReport {
+    /// Candidates the critic was shown across the pass, and the ones it let through.
+    pub fn judged_totals(&self) -> (usize, usize) {
+        self.judged.iter().fold((0, 0), |(shown, kept), tally| {
+            (shown + tally.offered, kept + tally.kept)
+        })
+    }
 }
 
 /// What the engine did lately, for `GET /api/v1/memories/extraction-status`; resets on restart.
@@ -485,6 +577,8 @@ pub struct BatchExtractionConfig {
     pub roster: HouseholdRoster,
     /// Whether reminders are wanted; a window must also pass [`window_is_fresh_enough`].
     pub allow_reminders: bool,
+    /// The household's time zone, in which a plan's date is read.
+    pub timezone: Tz,
     /// Wall-clock cap per pass, in seconds. A safety bound, deliberately not a setting; a field
     /// only so a test can shrink it.
     pub max_pass_secs: u64,
@@ -511,11 +605,13 @@ impl BatchExtractionConfig {
             // Empty until `with_household`: assuming one member would stamp one name on everybody.
             roster: HouseholdRoster::default(),
             allow_reminders: settings.memory_date_proposals_enabled,
+            timezone: zone(&settings.timezone),
             max_pass_secs: EXTRACTION_PASS_MAX_SECS,
         }
     }
 
-    /// Max model calls per pass, failed or not: the dial buys inference, not outcomes.
+    /// Max windows read per pass, failed or not: the dial buys inference, not outcomes. The
+    /// critic's call on a window that yielded something rides on top of it.
     pub fn model_call_budget(&self) -> usize {
         self.sessions_per_pass
     }
@@ -603,6 +699,12 @@ pub struct BatchExtractionService {
     reminder_repository: Option<Arc<dyn ReminderRepository>>,
     /// Where what a member cares about goes; `None` drops it.
     interest_repository: Option<Arc<dyn InterestRepository>>,
+    /// The critic a window's candidates pass before any is saved; `None` keeps them all.
+    gate: Option<Arc<dyn ExtractionGate>>,
+    /// Where a stated plan becomes a candidate anchor; `None` asks no window for plans.
+    anchor_repository: Option<Arc<dyn AnchorRepository>>,
+    /// The engine's log, where a pass the critic judged is recorded; `None` records none.
+    engine_jobs: Option<Arc<dyn EngineJobRepository>>,
     health: EmbedderHealth,
 }
 
@@ -618,6 +720,9 @@ impl BatchExtractionService {
             embedding_provider: None,
             reminder_repository: None,
             interest_repository: None,
+            gate: None,
+            anchor_repository: None,
+            engine_jobs: None,
             health: EmbedderHealth::default(),
         }
     }
@@ -634,6 +739,21 @@ impl BatchExtractionService {
 
     pub fn with_interest_repository(mut self, repository: Arc<dyn InterestRepository>) -> Self {
         self.interest_repository = Some(repository);
+        self
+    }
+
+    pub fn with_gate(mut self, gate: Arc<dyn ExtractionGate>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    pub fn with_anchor_repository(mut self, repository: Arc<dyn AnchorRepository>) -> Self {
+        self.anchor_repository = Some(repository);
+        self
+    }
+
+    pub fn with_engine_jobs(mut self, repository: Arc<dyn EngineJobRepository>) -> Self {
+        self.engine_jobs = Some(repository);
         self
     }
 
@@ -660,6 +780,7 @@ impl BatchExtractionService {
         cancel: &CancellationToken,
     ) -> PassReport {
         let mut report = PassReport::default();
+        let pass_started = Utc::now();
 
         if !self.embedder_is_usable() {
             // Extracting blind is pointless: without an embedder every candidate is unscored.
@@ -788,6 +909,7 @@ impl BatchExtractionService {
                 WindowTarget {
                     session_id: &candidate.id,
                     subject,
+                    cancel,
                 },
                 &mut report,
             )
@@ -795,7 +917,36 @@ impl BatchExtractionService {
         }
 
         report.blocked_on = pass_blocker(&report);
+        if config.mode.writes() {
+            self.log_pass(&report.judged, pass_started).await;
+        }
         report
+    }
+
+    /// Records the pass in the engine's log: a row for each member whose windows the critic
+    /// judged, so no member's log carries what was said in another's conversation.
+    async fn log_pass(&self, judged: &[Judged], started: DateTime<Utc>) {
+        let Some(jobs) = self.engine_jobs.as_ref() else {
+            return;
+        };
+        for tally in judged {
+            let mut job = EngineJob::new(
+                JobKind::Memory,
+                JobClass::Upkeep,
+                tally.profile_id.as_deref(),
+                "",
+                started,
+            );
+            let settled = job
+                .start(None, started)
+                .and_then(|()| job.settle(JobState::Passed, &tally.outcome_line(), Utc::now()));
+            if settled.is_err() {
+                continue;
+            }
+            if let Err(e) = jobs.add(&job).await {
+                tracing::warn!("[batch-extraction] the pass could not be logged: {e}");
+            }
+        }
     }
 
     /// Read one window of one conversation, or say why not.
@@ -811,6 +962,7 @@ impl BatchExtractionService {
         let WindowTarget {
             session_id,
             subject,
+            cancel,
         } = target;
         let Some(state) = self.cursor_state(storage, session_id).await else {
             return;
@@ -936,26 +1088,33 @@ impl BatchExtractionService {
         // Ask for reminders only while one could still lie ahead: a backfill reads months of
         // history, and the date can't be parsed to tell. Older windows still yield memories.
         let last_said_at = carved.last().map(|m| m.created_at).unwrap_or_else(Utc::now);
-        let allow_reminders =
-            config.allow_reminders && window_is_fresh_enough(last_said_at, Utc::now());
+        let fresh = window_is_fresh_enough(last_said_at, Utc::now());
+        let allow_reminders = config.allow_reminders && fresh;
+        // A plan is asked for only where it could become an anchor: one that may still lie
+        // ahead, for a member to hold it, on a pond that keeps anchors.
+        let allow_plans = fresh
+            && config.mode.writes()
+            && subject.profile_id.is_some()
+            && self.anchor_repository.is_some();
+
+        let window = ExtractionWindow {
+            subject: &subject,
+            assistant_name: &config.assistant_name,
+            session_id,
+            window_id: &window_id,
+            messages: carved,
+            known: &known,
+            max_memories: config.max_memories,
+            allow_reminders,
+            allow_plans,
+        };
 
         // Counted before the call, on every path: this is the counter that bounds the pass.
         report.model_calls += 1;
 
-        let extraction = extractor
-            .extract_window(ExtractionWindow {
-                subject: &subject,
-                assistant_name: &config.assistant_name,
-                session_id,
-                window_id: &window_id,
-                messages: carved,
-                known: &known,
-                max_memories: config.max_memories,
-                allow_reminders,
-            })
-            .await;
+        let extraction = extractor.extract_window(window).await;
 
-        let extraction = match extraction {
+        let mut extraction = match extraction {
             Ok(e) => e,
             Err(ExtractionError::NoProvider) => {
                 // Not the window's fault: no attempt, no advance; `pass_blocker` judges the pass.
@@ -1000,10 +1159,26 @@ impl BatchExtractionService {
             }
         };
 
-        report.memories_offered += extraction.memories.len();
+        // An extractor may answer what the window was never asked for.
+        if !allow_reminders {
+            extraction.reminders.clear();
+        }
+        if !allow_plans {
+            extraction.plans.clear();
+        }
+        let offered = extraction.memories.len();
+        report.memories_offered += offered;
         report.reminders_offered += extraction.reminders.len();
         report.interests_offered += extraction.interests.len();
+        report.plans_offered += extraction.plans.len();
         report.rejected_kinds += extraction.rejected;
+
+        let Some((extraction, gate_dropped)) = self
+            .judge_window(window, extraction, config, cancel, report)
+            .await
+        else {
+            return;
+        };
 
         let outcome = self
             .dispose_candidates(
@@ -1030,6 +1205,7 @@ impl BatchExtractionService {
         report.reminders_written += outcome.reminders_stored;
         report.reminders_lost += outcome.reminders_lost;
         report.interests_noted += outcome.interests_noted;
+        report.anchors_offered += outcome.anchors_offered;
 
         let _ = repo
             .log_event(
@@ -1037,14 +1213,16 @@ impl BatchExtractionService {
                 &window_event_id(&window_id),
                 Some(session_id),
                 Some(&format!(
-                    "{{\"window\":\"{}\",\"mode\":\"{}\",\"offered\":{},\"kept\":{},\
+                    "{{\"window\":\"{}\",\"mode\":\"{}\",\"offered\":{},\"gate_dropped\":{},\
+                     \"kept\":{},\
                      \"refused\":{},\"dated\":{},\"dates_lost\":{},\"demoted\":{},\
                      \"reminders\":{},\"reminders_stored\":{},\"reminders_lost\":{},\
-                     \"rejected\":{},\"interests\":{},\
+                     \"rejected\":{},\"interests\":{},\"anchors\":{},\
                      \"same\":{},\"related\":{},\"new\":{},\"unscored\":{},\"dropped_onto\":[{}]}}",
                     escape_json(&window_id),
                     config.mode.as_str(),
-                    extraction.memories.len(),
+                    offered,
+                    gate_dropped,
                     outcome.written,
                     outcome.refused,
                     outcome.dated,
@@ -1055,6 +1233,7 @@ impl BatchExtractionService {
                     outcome.reminders_lost,
                     extraction.rejected,
                     outcome.interests_noted,
+                    outcome.anchors_offered,
                     outcome.bands.same,
                     outcome.bands.related,
                     outcome.bands.fresh,
@@ -1188,6 +1367,92 @@ impl BatchExtractionService {
         known
     }
 
+    /// What the critic lets a window keep, and how many candidates it dropped. `None` when the
+    /// critic was never heard or the pass was cancelled meanwhile: the window is read again.
+    async fn judge_window(
+        &self,
+        window: ExtractionWindow<'_>,
+        mut extraction: WindowExtraction,
+        config: &BatchExtractionConfig,
+        cancel: &CancellationToken,
+        report: &mut PassReport,
+    ) -> Option<(WindowExtraction, usize)> {
+        let Some(gate) = self.gate.as_ref() else {
+            return Some((extraction, 0));
+        };
+        // An interest nothing would note is no candidate: it would only cost a call.
+        if !self.notes_interests(config, window.subject) {
+            extraction.interests.clear();
+        }
+        let candidates = gate_candidates(&extraction);
+        if candidates.is_empty() {
+            return Some((extraction, 0));
+        }
+
+        report.gate_calls += 1;
+        let ruling = match gate.judge(window, &candidates).await {
+            Ok(ruling) => ruling,
+            Err(e) => {
+                tracing::debug!(
+                    session_id = %window.session_id,
+                    "[batch-extraction] the critic was not heard, so the window stays unread: {e}"
+                );
+                report.provider_failures += 1;
+                return None;
+            }
+        };
+        // Whatever cancelled the pass wants the pond's attention now, not a window's writes.
+        if cancel.is_cancelled() {
+            return None;
+        }
+
+        let kinds: Vec<GateKind> = candidates.iter().map(|c| c.kind).collect();
+        let keep = apply_gate(&kinds, ruling.as_deref());
+        let dropped = keep.iter().filter(|kept| !**kept).count();
+        if ruling.is_none() {
+            report.gate_unreadable += 1;
+        }
+
+        let owner = &window.subject.profile_id;
+        let at = match report.judged.iter().position(|j| &j.profile_id == owner) {
+            Some(at) => at,
+            None => {
+                report.judged.push(Judged {
+                    profile_id: owner.clone(),
+                    ..Judged::default()
+                });
+                report.judged.len() - 1
+            }
+        };
+        let tally = &mut report.judged[at];
+        tally.conversations += 1;
+        tally.offered += candidates.len();
+        tally.kept += candidates.len() - dropped;
+        match &ruling {
+            Some(drops) => tally.reasons.extend(
+                drops
+                    .iter()
+                    .filter(|(place, _)| *place < candidates.len())
+                    .map(|(_, why)| why.clone()),
+            ),
+            None if dropped > 0 => tally.reasons.push(UNREAD_RULING.to_string()),
+            None => {}
+        }
+
+        // The candidates were numbered in this order, so one walk over `keep` filters all four.
+        let mut keep = keep.into_iter();
+        extraction.memories.retain(|_| keep.next().unwrap_or(true));
+        extraction.interests.retain(|_| keep.next().unwrap_or(true));
+        extraction.reminders.retain(|_| keep.next().unwrap_or(true));
+        extraction.plans.retain(|_| keep.next().unwrap_or(true));
+        Some((extraction, dropped))
+    }
+
+    /// Whether an interest this window shows would be noted at all.
+    fn notes_interests(&self, config: &BatchExtractionConfig, subject: &WindowSubject) -> bool {
+        self.interest_repository.is_some() && subject.profile_id.is_some() && config.mode.writes()
+    }
+
     /// Put each candidate through the write gate in one pass: banding and writing share a vector.
     #[allow(clippy::too_many_arguments)]
     async fn dispose_candidates(
@@ -1227,6 +1492,15 @@ impl BatchExtractionService {
 
         self.note_interests(extraction, config, subject, session_id, &mut outcome)
             .await;
+        self.offer_anchors(
+            extraction,
+            config,
+            subject,
+            session_id,
+            said_at,
+            &mut outcome,
+        )
+        .await;
 
         if extraction.memories.is_empty() {
             return outcome;
@@ -1478,8 +1752,38 @@ impl BatchExtractionService {
         session_id: &str,
         outcome: &mut WindowOutcome,
     ) {
+        if !self.notes_interests(config, subject) {
+            return;
+        }
         let (Some(repository), Some(profile_id)) = (
             self.interest_repository.as_ref(),
+            subject.profile_id.as_deref(),
+        ) else {
+            return;
+        };
+        for seen in &extraction.interests {
+            match repository.observe(profile_id, session_id, seen).await {
+                Ok(Observed::Created | Observed::Counted) => outcome.interests_noted += 1,
+                Ok(Observed::AlreadyCounted | Observed::Avoided) => {}
+                Err(e) => {
+                    tracing::warn!("[batch-extraction] an interest could not be noted: {e}");
+                }
+            }
+        }
+    }
+
+    /// A plan the member stated becomes a candidate anchor of theirs, once per title.
+    async fn offer_anchors(
+        &self,
+        extraction: &WindowExtraction,
+        config: &BatchExtractionConfig,
+        subject: &WindowSubject,
+        session_id: &str,
+        said_at: DateTime<Utc>,
+        outcome: &mut WindowOutcome,
+    ) {
+        let (Some(repository), Some(profile_id)) = (
+            self.anchor_repository.as_ref(),
             subject.profile_id.as_deref(),
         ) else {
             return;
@@ -1487,12 +1791,42 @@ impl BatchExtractionService {
         if !config.mode.writes() {
             return;
         }
-        for seen in &extraction.interests {
-            match repository.observe(profile_id, session_id, seen).await {
-                Ok(Observed::Created | Observed::Counted) => outcome.interests_noted += 1,
-                Ok(Observed::AlreadyCounted | Observed::Avoided) => {}
+        for plan in &extraction.plans {
+            let Some(anchor) = anchor_from_plan(
+                plan,
+                profile_id,
+                AnchorOrigin::Chat,
+                Some(session_id),
+                said_at,
+                config.timezone,
+                Utc::now(),
+            ) else {
+                continue;
+            };
+            // In any state: an anchor the member stopped, or let fade, never comes back from a
+            // later mention.
+            match repository.by_title(profile_id, &anchor.key()).await {
+                Ok(None) => {}
+                Ok(Some(_)) => continue,
                 Err(e) => {
-                    tracing::warn!("[batch-extraction] an interest could not be noted: {e}");
+                    tracing::warn!(
+                        "[batch-extraction] a plan's anchor could not be looked up: {e}"
+                    );
+                    continue;
+                }
+            }
+            match repository.add(&anchor).await {
+                Ok(true) => {
+                    outcome.anchors_offered += 1;
+                    tracing::info!(
+                        anchor_id = %anchor.id,
+                        kind = anchor.kind.as_str(),
+                        "[batch-extraction] a stated plan became a candidate anchor"
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("[batch-extraction] a plan's anchor could not be stored: {e}");
                 }
             }
         }
@@ -1584,6 +1918,31 @@ impl BatchExtractionService {
 
 pub use crate::user_data::domain::member_profile::describes_a_question;
 
+/// A window's candidates as the critic numbers them: memories, interests, reminders, plans.
+fn gate_candidates(extraction: &WindowExtraction) -> Vec<GateCandidate> {
+    let memories = extraction
+        .memories
+        .iter()
+        .map(|memory| GateCandidate::new(GateKind::Memory, &memory.note));
+    let interests = extraction
+        .interests
+        .iter()
+        .map(|interest| GateCandidate::new(GateKind::Interest, &interest.topic));
+    let reminders = extraction.reminders.iter().map(|reminder| {
+        let text = match reminder.when_said.trim() {
+            "" => reminder.about.clone(),
+            when => format!("{} ({when})", reminder.about),
+        };
+        GateCandidate::new(GateKind::Reminder, &text)
+    });
+    let plans = extraction.plans.iter().map(GateCandidate::plan);
+    memories
+        .chain(interests)
+        .chain(reminders)
+        .chain(plans)
+        .collect()
+}
+
 /// Why a finished pass could do nothing, or `None` once any window was read. Parse failures set
 /// nothing: a model answering badly is not a stopped engine.
 fn pass_blocker(report: &PassReport) -> Option<String> {
@@ -1634,8 +1993,13 @@ mod batch_tests {
     use super::*;
     use crate::models::domain::embedding_models::{DedupBands, SimilarityFloors, ALL_MINILM_L6_V2};
     use crate::models::domain::message::ChatMessage;
+    use crate::user_data::domain::anchor::{Anchor, AnchorKind, AnchorState};
     use crate::user_data::domain::memory::MemoryTier;
     use crate::user_data::domain::session::SessionMessage;
+    use crate::user_data::mocks::mock_anchors::InMemoryAnchorRepository;
+    use crate::user_data::mocks::mock_engine_jobs::InMemoryEngineJobRepository;
+    use crate::user_data::mocks::mock_extraction_gate::ScriptedExtractionGate;
+    use crate::user_data::mocks::mock_interests::InMemoryInterestRepository;
     use crate::user_data::mocks::mock_memory::MockMemoryRepository;
     use crate::user_data::mocks::mock_reminder::{
         FailingReminderRepository, MockReminderRepository,
@@ -1644,6 +2008,7 @@ mod batch_tests {
     use crate::user_data::ports::conversation_extractor::{
         ExtractedMemory, ExtractedReminder, MemoryKind,
     };
+    use crate::user_data::services::extraction_gate::PlanCandidate;
     use async_trait::async_trait;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1725,6 +2090,7 @@ mod batch_tests {
         reply: std::result::Result<WindowExtraction, &'static str>,
         calls: AtomicUsize,
         windows: std::sync::Mutex<Vec<String>>,
+        asked_for_plans: std::sync::Mutex<Vec<bool>>,
     }
 
     impl ScriptedExtractor {
@@ -1741,10 +2107,12 @@ mod batch_tests {
                         .collect(),
                     reminders: Vec::new(),
                     interests: Vec::new(),
+                    plans: Vec::new(),
                     rejected: 0,
                 }),
                 calls: AtomicUsize::new(0),
                 windows: std::sync::Mutex::new(Vec::new()),
+                asked_for_plans: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1771,6 +2139,7 @@ mod batch_tests {
                 reply: Err("Sure! Here is what I remembered."),
                 calls: AtomicUsize::new(0),
                 windows: std::sync::Mutex::new(Vec::new()),
+                asked_for_plans: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1780,6 +2149,11 @@ mod batch_tests {
 
         fn windows(&self) -> Vec<String> {
             self.windows.lock().unwrap().clone()
+        }
+
+        /// Whether each window read was asked for plans, in the order read.
+        fn asked_for_plans(&self) -> Vec<bool> {
+            self.asked_for_plans.lock().unwrap().clone()
         }
     }
 
@@ -1794,6 +2168,10 @@ mod batch_tests {
                 .lock()
                 .unwrap()
                 .push(window.window_id.to_string());
+            self.asked_for_plans
+                .lock()
+                .unwrap()
+                .push(window.allow_plans);
             match &self.reply {
                 Ok(e) => Ok(e.clone()),
                 Err(raw) => Err(ExtractionError::Unparseable {
@@ -1818,6 +2196,7 @@ mod batch_tests {
             fallback_subject: WindowSubject::named("Jerry"),
             roster: HouseholdRoster::default(),
             allow_reminders: true,
+            timezone: chrono_tz::Africa::Nairobi,
             max_pass_secs: EXTRACTION_PASS_MAX_SECS,
         }
     }
@@ -1912,6 +2291,7 @@ mod batch_tests {
                         .collect(),
                     reminders: Vec::new(),
                     interests: Vec::new(),
+                    plans: Vec::new(),
                     rejected: 0,
                 },
             }
@@ -2221,7 +2601,7 @@ mod batch_tests {
         };
 
         // Mirrors the adapter's system-prompt cap: pond-core may not depend on the adapter.
-        const SYSTEM_PROMPT_CEILING_CHARS: usize = 2_300;
+        const SYSTEM_PROMPT_CEILING_CHARS: usize = 3_400;
 
         let worst_case =
             (EXTRACTION_WINDOW_CHARS + KNOWN_MEMORIES_CHARS + SYSTEM_PROMPT_CEILING_CHARS)
@@ -2446,6 +2826,566 @@ mod batch_tests {
             "an unattributed subject owns no rows"
         );
         assert!(interests.all().is_empty());
+    }
+
+    const EVERY_ANCHOR_STATE: [AnchorState; 5] = [
+        AnchorState::Candidate,
+        AnchorState::Active,
+        AnchorState::Ended,
+        AnchorState::Stopped,
+        AnchorState::Faded,
+    ];
+
+    fn summit() -> PlanCandidate {
+        PlanCandidate {
+            kind: AnchorKind::Event,
+            title: "AI Summit".to_string(),
+            when: String::new(),
+            place: "KICC".to_string(),
+            details: "Going with Amina".to_string(),
+        }
+    }
+
+    /// One candidate of each kind, in the order the critic numbers them.
+    fn one_of_each() -> ScriptedExtractor {
+        let mut extractor = ScriptedExtractor::yielding_with_reminders(
+            vec![("Jerry is lactose intolerant.", MemoryKind::Context)],
+            vec![("the dentist", "on Friday")],
+        );
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.interests = vec![fielder_seen()];
+            extraction.plans = vec![summit()];
+        }
+        extractor
+    }
+
+    /// A writing pond whose unidentified conversations are its one member's.
+    fn jerrys() -> BatchExtractionConfig {
+        BatchExtractionConfig {
+            fallback_subject: WindowSubject::member("p-jerry", "Jerry"),
+            ..writing()
+        }
+    }
+
+    /// The engine behind a critic, with the stores a kept candidate lands in.
+    struct Gated {
+        service: BatchExtractionService,
+        gate: Arc<ScriptedExtractionGate>,
+        reminders: Arc<MockReminderRepository>,
+        interests: Arc<InMemoryInterestRepository>,
+        anchors: Arc<InMemoryAnchorRepository>,
+        jobs: Arc<InMemoryEngineJobRepository>,
+    }
+
+    fn gated(gate: ScriptedExtractionGate) -> Gated {
+        let gate = Arc::new(gate);
+        let reminders = Arc::new(MockReminderRepository::new());
+        let interests = Arc::new(InMemoryInterestRepository::new());
+        let anchors = Arc::new(InMemoryAnchorRepository::new());
+        let jobs = Arc::new(InMemoryEngineJobRepository::new());
+        Gated {
+            service: service_storing_into(reminders.clone())
+                .with_interest_repository(interests.clone())
+                .with_gate(gate.clone())
+                .with_anchor_repository(anchors.clone())
+                .with_engine_jobs(jobs.clone()),
+            gate,
+            reminders,
+            interests,
+            anchors,
+            jobs,
+        }
+    }
+
+    impl Gated {
+        async fn pass(
+            &self,
+            storage: &InMemorySessionStorage,
+            repo: &MockMemoryRepository,
+            extractor: &dyn ConversationExtractor,
+            config: &BatchExtractionConfig,
+        ) -> PassReport {
+            self.service
+                .run_pass(storage, repo, extractor, config, &CancellationToken::new())
+                .await
+        }
+
+        async fn anchors_of(&self, member: &str) -> Vec<Anchor> {
+            self.anchors
+                .list(member, &EVERY_ANCHOR_STATE)
+                .await
+                .unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_memory_the_critic_drops_is_not_saved_and_one_it_keeps_is() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let extractor = ScriptedExtractor::yielding(vec![
+            ("Jerry is lactose intolerant.", MemoryKind::Context),
+            (
+                "Jerry's sister Amara lives in Nakuru.",
+                MemoryKind::Relationship,
+            ),
+        ]);
+        let pond = gated(ScriptedExtractionGate::dropping(&[(0, "a guess")]));
+
+        let report = pond.pass(&storage, &repo, &extractor, &writing()).await;
+
+        assert_eq!(report.memories_offered, 2);
+        assert_eq!(report.memories_written, 1);
+        let rows = stored(&repo).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "Jerry's sister Amara lives in Nakuru.");
+        assert_eq!(
+            pond.gate.shown(),
+            [vec![
+                GateCandidate::new(GateKind::Memory, "Jerry is lactose intolerant."),
+                GateCandidate::new(GateKind::Memory, "Jerry's sister Amara lives in Nakuru."),
+            ]],
+            "one call for the window, with every candidate in it"
+        );
+        assert_eq!(report.gate_calls, 1);
+        assert_eq!(report.windows_examined, 1);
+    }
+
+    #[tokio::test]
+    async fn the_critic_rules_on_every_kind_of_candidate_in_one_call() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let pond = gated(ScriptedExtractionGate::dropping(&[
+            (1, "asked once"),
+            (2, "the assistant set it"),
+        ]));
+
+        let report = pond.pass(&storage, &repo, &one_of_each(), &jerrys()).await;
+
+        assert_eq!(
+            pond.gate.shown(),
+            [vec![
+                GateCandidate::new(GateKind::Memory, "Jerry is lactose intolerant."),
+                GateCandidate::new(GateKind::Interest, "Toyota Fielder"),
+                GateCandidate::new(GateKind::Reminder, "the dentist (on Friday)"),
+                GateCandidate::plan(&summit()),
+            ]]
+        );
+        assert_eq!(report.memories_written, 1);
+        assert_eq!(report.anchors_offered, 1);
+        assert!(pond.interests.all().is_empty(), "the interest was dropped");
+        assert!(pond.reminders.rows().is_empty(), "the reminder was dropped");
+        assert_eq!(report.reminders_captured, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_ruling_keeps_memories_and_reminders_and_drops_interests_and_plans() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let pond = gated(ScriptedExtractionGate::unreadable());
+
+        let report = pond.pass(&storage, &repo, &one_of_each(), &jerrys()).await;
+
+        assert_eq!(report.gate_unreadable, 1);
+        assert_eq!(stored(&repo).await.len(), 1, "the memory is kept");
+        assert_eq!(pond.reminders.rows().len(), 1, "the reminder is kept");
+        assert!(pond.interests.all().is_empty(), "the interest is not");
+        assert!(pond.anchors_of("p-jerry").await.is_empty(), "nor the plan");
+        assert_eq!(
+            report.judged,
+            [Judged {
+                profile_id: Some("p-jerry".to_string()),
+                conversations: 1,
+                offered: 4,
+                kept: 2,
+                reasons: vec![UNREAD_RULING.to_string()],
+            }]
+        );
+
+        // Vacuity control: the same window under a ruling that reads keeps all four.
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let kept = gated(ScriptedExtractionGate::keeping_everything());
+        kept.pass(
+            &storage,
+            &MockMemoryRepository::new(),
+            &one_of_each(),
+            &jerrys(),
+        )
+        .await;
+        assert_eq!(kept.interests.all().len(), 1);
+        assert_eq!(kept.anchors_of("p-jerry").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_window_that_yields_nothing_never_reaches_the_critic() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let extractor = ScriptedExtractor::yielding(vec![]);
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+
+        let report = pond.pass(&storage, &repo, &extractor, &jerrys()).await;
+
+        assert_eq!(report.windows_examined, 1);
+        assert_eq!(pond.gate.calls(), 0);
+        assert_eq!(report.gate_calls, 0);
+        assert!(report.judged.is_empty());
+        assert!(
+            pond.jobs.recent("p-jerry", 10).await.unwrap().is_empty(),
+            "a pass that judged nothing is not in the engine's log"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kept_plan_becomes_one_candidate_anchor_and_a_second_mention_adds_none() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        seed(&storage, "sess-2", 3).await;
+        let repo = MockMemoryRepository::new();
+        let mut extractor = ScriptedExtractor::yielding(vec![]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.plans = vec![summit()];
+        }
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+
+        let report = pond.pass(&storage, &repo, &extractor, &jerrys()).await;
+
+        assert_eq!(extractor.asked_for_plans(), [true, true]);
+        assert_eq!(report.plans_offered, 2, "both conversations mention it");
+        assert_eq!(report.anchors_offered, 1);
+        let anchors = pond.anchors_of("p-jerry").await;
+        assert_eq!(anchors.len(), 1);
+        let anchor = &anchors[0];
+        assert_eq!(anchor.state, AnchorState::Candidate);
+        assert_eq!(anchor.origin, AnchorOrigin::Chat);
+        assert_eq!(anchor.kind, AnchorKind::Event);
+        assert_eq!(anchor.title, "AI Summit");
+        assert_eq!(anchor.place.as_deref(), Some("KICC"));
+        assert_eq!(
+            anchor.origin_ref.as_deref(),
+            extractor.windows()[0].split("-m").next(),
+            "it points at the conversation that first said it"
+        );
+        assert!(anchor.why.starts_with("You mentioned it on "));
+    }
+
+    #[tokio::test]
+    async fn a_plan_for_an_anchor_the_member_stopped_is_not_offered_again() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let mut extractor = ScriptedExtractor::yielding(vec![]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.plans = vec![PlanCandidate {
+                title: "ai summit!".to_string(),
+                ..summit()
+            }];
+        }
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+        let now = Utc::now();
+        let mut stopped = Anchor::new(
+            "p-jerry",
+            AnchorKind::Event,
+            "AI Summit",
+            AnchorOrigin::You,
+            now,
+        )
+        .unwrap();
+        stopped.stop(now).unwrap();
+        assert!(pond.anchors.add(&stopped).await.unwrap());
+
+        let report = pond.pass(&storage, &repo, &extractor, &jerrys()).await;
+
+        assert_eq!(report.plans_offered, 1);
+        assert_eq!(report.anchors_offered, 0);
+        let anchors = pond.anchors_of("p-jerry").await;
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].id, stopped.id);
+        assert_eq!(anchors[0].state, AnchorState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn a_plan_is_asked_for_only_where_it_could_become_an_anchor() {
+        let mut extractor = ScriptedExtractor::yielding(vec![]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.plans = vec![summit()];
+        }
+
+        // Nobody is named for the window, so there is nobody to hold an anchor.
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+        let report = pond
+            .pass(
+                &storage,
+                &MockMemoryRepository::new(),
+                &extractor,
+                &writing(),
+            )
+            .await;
+        assert_eq!(
+            report.plans_offered, 0,
+            "a plan nobody asked for is dropped"
+        );
+        assert_eq!(pond.gate.calls(), 0);
+        assert!(pond.anchors_of("p-jerry").await.is_empty());
+
+        // A conversation from last month: whatever it planned has likely passed.
+        let storage = InMemorySessionStorage::new();
+        seed_at(
+            &storage,
+            "sess-old",
+            3,
+            Utc::now() - chrono::Duration::days(30),
+        )
+        .await;
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+        pond.pass(
+            &storage,
+            &MockMemoryRepository::new(),
+            &extractor,
+            &jerrys(),
+        )
+        .await;
+        assert!(pond.anchors_of("p-jerry").await.is_empty());
+
+        // A pond that keeps no anchors.
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-2", 3).await;
+        service()
+            .run_pass(
+                &storage,
+                &MockMemoryRepository::new(),
+                &extractor,
+                &jerrys(),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(extractor.asked_for_plans(), [false, false, false]);
+    }
+
+    #[tokio::test]
+    async fn the_pass_is_logged_as_one_job_with_what_the_critic_kept_and_dropped() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        seed(&storage, "sess-2", 3).await;
+        let repo = MockMemoryRepository::new();
+        let mut extractor = ScriptedExtractor::yielding(vec![
+            ("Jerry is lactose intolerant.", MemoryKind::Context),
+            (
+                "Jerry's sister Amara lives in Nakuru.",
+                MemoryKind::Relationship,
+            ),
+        ]);
+        if let Ok(extraction) = &mut extractor.reply {
+            extraction.interests = vec![fielder_seen()];
+        }
+        let pond = gated(ScriptedExtractionGate::dropping(&[(2, "a one-off lookup")]));
+        let before = Utc::now();
+
+        let report = pond.pass(&storage, &repo, &extractor, &jerrys()).await;
+
+        assert_eq!(report.gate_calls, 2);
+        let jobs = pond.jobs.recent("p-jerry", 10).await.unwrap();
+        assert_eq!(jobs.len(), 1, "one row for the pass, not one a window");
+        let job = &jobs[0];
+        assert_eq!(job.kind, JobKind::Memory);
+        assert_eq!(job.class, JobClass::Upkeep);
+        assert_eq!(job.state, JobState::Passed);
+        assert_eq!(job.task_id, None);
+        assert_eq!(
+            job.outcome.as_deref(),
+            Some("Kept 4 of 6 things from 2 conversations; dropped 2: a one-off lookup")
+        );
+        let (started, finished) = (job.started_at.unwrap(), job.finished_at.unwrap());
+        assert_eq!(job.created_at, started);
+        assert!(before <= started && started <= finished);
+    }
+
+    #[tokio::test]
+    async fn each_members_windows_are_logged_under_their_own_name() {
+        let (storage, config) = two_member_pond().await;
+        seed(&storage, "sess-jerry", 4).await;
+        storage
+            .set_session_identity(
+                "sess-jerry",
+                &SessionIdentity {
+                    profile_id: Some("p-jerry".to_string()),
+                    source: crate::user_data::domain::session::IdentificationSource::PairedDevice,
+                    confidence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let repo = MockMemoryRepository::new();
+        let extractor = ScriptedExtractor::yielding(vec![(
+            "The user is lactose intolerant.",
+            MemoryKind::Context,
+        )]);
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+
+        pond.pass(&storage, &repo, &extractor, &config).await;
+
+        for member in ["p-jerry", "p-amara"] {
+            let jobs = pond.jobs.recent(member, 10).await.unwrap();
+            assert_eq!(jobs.len(), 1, "{member}");
+            assert_eq!(
+                jobs[0].outcome.as_deref(),
+                Some("Kept 1 of 1 thing from 1 conversation"),
+                "{member}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shadow_pass_logs_no_job() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let extractor = ScriptedExtractor::yielding(vec![(
+            "Jerry is lactose intolerant.",
+            MemoryKind::Context,
+        )]);
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+        let config = BatchExtractionConfig {
+            mode: ExtractionMode::Shadow,
+            ..jerrys()
+        };
+
+        let report = pond.pass(&storage, &repo, &extractor, &config).await;
+
+        assert_eq!(report.gate_calls, 1);
+        assert!(pond.jobs.recent("p-jerry", 10).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pass_reads_as_one_line_in_plain_words() {
+        let tally = Judged {
+            profile_id: None,
+            conversations: 2,
+            offered: 6,
+            kept: 4,
+            reasons: vec!["a one-off lookup".to_string(), "already known".to_string()],
+        };
+        assert_eq!(
+            tally.outcome_line(),
+            "Kept 4 of 6 things from 2 conversations; dropped 2: a one-off lookup, already known"
+        );
+        let all_kept = Judged {
+            conversations: 1,
+            offered: 1,
+            kept: 1,
+            ..Judged::default()
+        };
+        assert_eq!(
+            all_kept.outcome_line(),
+            "Kept 1 of 1 thing from 1 conversation"
+        );
+        let unexplained = Judged {
+            conversations: 1,
+            offered: 3,
+            kept: 1,
+            reasons: vec![String::new(), " ".to_string()],
+            ..Judged::default()
+        };
+        assert_eq!(
+            unexplained.outcome_line(),
+            "Kept 1 of 3 things from 1 conversation; dropped 2"
+        );
+        let many = Judged {
+            conversations: 3,
+            offered: 9,
+            kept: 2,
+            reasons: ["a guess", "A guess", "b", "c", "d", "e", "f"]
+                .map(str::to_string)
+                .to_vec(),
+            ..Judged::default()
+        };
+        assert_eq!(
+            many.outcome_line(),
+            "Kept 2 of 9 things from 3 conversations; dropped 7: a guess, b, c, d and 2 more"
+        );
+    }
+
+    /// Lets everything through, once the pass it rules for has been cancelled.
+    struct CancellingGate(CancellationToken);
+
+    #[async_trait]
+    impl ExtractionGate for CancellingGate {
+        async fn judge(
+            &self,
+            _window: ExtractionWindow<'_>,
+            _candidates: &[GateCandidate],
+        ) -> anyhow::Result<Option<Vec<(usize, String)>>> {
+            self.0.cancel();
+            Ok(Some(Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_cancelled_while_the_critic_rules_saves_nothing_of_that_window() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        seed(&storage, "sess-2", 3).await;
+        let repo = MockMemoryRepository::new();
+        let extractor = one_of_each();
+        let cancel = CancellationToken::new();
+        let reminders = Arc::new(MockReminderRepository::new());
+        let anchors = Arc::new(InMemoryAnchorRepository::new());
+        let jobs = Arc::new(InMemoryEngineJobRepository::new());
+        let service = service_storing_into(reminders.clone())
+            .with_gate(Arc::new(CancellingGate(cancel.clone())))
+            .with_anchor_repository(anchors.clone())
+            .with_engine_jobs(jobs.clone());
+
+        let report = service
+            .run_pass(&storage, &repo, &extractor, &jerrys(), &cancel)
+            .await;
+
+        assert_eq!(extractor.calls(), 1, "no further window is started");
+        assert_eq!(report.windows_examined, 0);
+        assert!(stored(&repo).await.is_empty());
+        assert!(reminders.rows().is_empty());
+        assert!(anchors
+            .list("p-jerry", &EVERY_ANCHOR_STATE)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(jobs.recent("p-jerry", 10).await.unwrap().is_empty());
+        for session in ["sess-1", "sess-2"] {
+            let cursor = storage.extraction_cursor(session).await.unwrap();
+            assert_eq!(cursor.through_message_id, None, "{session} is read again");
+        }
+
+        // The next pass reads the window again and keeps it.
+        let pond = gated(ScriptedExtractionGate::keeping_everything());
+        let report = pond.pass(&storage, &repo, &extractor, &jerrys()).await;
+        assert_eq!(report.windows_examined, 2);
+        assert_eq!(stored(&repo).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_critic_that_is_not_heard_leaves_the_window_unread() {
+        let storage = InMemorySessionStorage::new();
+        seed(&storage, "sess-1", 3).await;
+        let repo = MockMemoryRepository::new();
+        let pond = gated(ScriptedExtractionGate::unheard());
+
+        let report = pond.pass(&storage, &repo, &one_of_each(), &jerrys()).await;
+
+        assert_eq!(report.windows_examined, 0);
+        assert_eq!(report.provider_failures, 1);
+        assert_eq!(report.blocked_on.as_deref(), Some("provider_error"));
+        assert!(stored(&repo).await.is_empty());
+        assert!(pond.reminders.rows().is_empty());
+        assert!(pond.interests.all().is_empty());
+        assert!(pond.anchors_of("p-jerry").await.is_empty());
+        let cursor = storage.extraction_cursor("sess-1").await.unwrap();
+        assert_eq!(cursor.through_message_id, None);
     }
 
     #[tokio::test]

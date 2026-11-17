@@ -4,8 +4,10 @@
 
 use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 pub use chrono_tz::Tz;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::user_data::domain::interest::topic_key;
 
 mod edit;
 pub use edit::{apply_patch, hook_drafts, new_todo};
@@ -16,6 +18,12 @@ pub const MAX_ASKS: u32 = 3;
 pub const MAX_HOOKS: usize = 8;
 pub const MAX_TEXT_CHARS: usize = 500;
 pub const MAX_NOTES_CHARS: usize = 4000;
+pub const MAX_LIST_CHARS: usize = 40;
+pub const MAX_STEPS: usize = 12;
+pub const MAX_STEP_CHARS: usize = 120;
+/// The words on the button that starts what Goose offers to do.
+pub const MAX_GOOSE_LABEL_CHARS: usize = 30;
+pub const MAX_GOOSE_PROMPT_CHARS: usize = 1000;
 /// The longest snooze a not-yet may ask for: a week.
 pub const MAX_SNOOZE_MINUTES: u32 = 7 * 24 * 60;
 /// The local hour a follow-up without a snooze is asked at.
@@ -42,6 +50,11 @@ pub fn zone(name: &str) -> Tz {
 
 /// The id of the one presence source: the household's home.
 pub const PRESENCE_HOME: &str = "presence:home";
+
+/// The key two wordings of one to-do share; a member keeps one open to-do under it.
+pub fn todo_key(text: &str) -> String {
+    topic_key(text)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoKind {
@@ -119,6 +132,67 @@ impl TodoSource {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Priority {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "normal" => Some(Self::Normal),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoStep {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GooseCanKind {
+    Research,
+    Chat,
+    Watch,
+}
+
+impl GooseCanKind {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "research" => Some(Self::Research),
+            "chat" => Some(Self::Chat),
+            "watch" => Some(Self::Watch),
+            _ => None,
+        }
+    }
+}
+
+/// Something Goose offers to do for a to-do: the button's words, and what Goose is asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GooseCan {
+    pub label: String,
+    pub kind: GooseCanKind,
+    pub prompt: String,
 }
 
 /// Which to-dos a list read returns.
@@ -658,6 +732,12 @@ pub struct Todo {
     pub kind: TodoKind,
     pub text: String,
     pub notes: Option<String>,
+    /// The list the member files it under, such as "Work".
+    pub list: Option<String>,
+    pub priority: Priority,
+    pub steps: Vec<TodoStep>,
+    pub goose_can: Option<GooseCan>,
+    pub anchor_id: Option<String>,
     pub state: TodoState,
     pub due_at: Option<DateTime<Utc>>,
     pub ask: bool,
@@ -696,24 +776,32 @@ impl Todo {
         (self.asked < MAX_ASKS).then_some(PushKind::CheckIn)
     }
 
-    /// Whether `asked` is this same request made again: a turn re-run after a stop, or the tool
-    /// called twice. One that has fired is not, so "again in ten minutes" still stands.
-    pub fn is_repeated_by(&self, asked: &Todo) -> bool {
-        const MADE_WITHIN_MINUTES: i64 = 60;
-        const SAME_MOMENT_SECONDS: i64 = 120;
-        let same_moment = match (self.due_at, asked.due_at) {
-            (None, None) => true,
-            (Some(kept), Some(new)) => (kept - new).num_seconds().abs() <= SAME_MOMENT_SECONDS,
-            _ => false,
-        };
-        self.state == TodoState::Open
-            && self.owner == asked.owner
-            && self.kind == asked.kind
-            && self.text.trim().eq_ignore_ascii_case(asked.text.trim())
-            && self.hooks.len() == asked.hooks.len()
-            && self.hooks.iter().all(|hook| hook.last_fired_at.is_none())
-            && same_moment
-            && (asked.created_at - self.created_at).num_minutes().abs() <= MADE_WITHIN_MINUTES
+    /// Whether anything is still set to fire it: a hook other than a time that has passed, or a
+    /// due time not yet pushed.
+    pub fn awaits_a_moment(&self) -> bool {
+        if self.hooks.is_empty() {
+            return self
+                .due_at
+                .is_some_and(|due| self.last_asked_at.is_none_or(|last| last < due));
+        }
+        self.hooks
+            .iter()
+            .any(|h| !matches!(h.spec, HookSpec::Time { .. }) || h.last_fired_at.is_none())
+    }
+
+    /// Takes `asked`'s hooks and due time when nothing of its own is left to fire, so "again in
+    /// ten minutes" re-arms the to-do already on the list; returns whether it did.
+    pub fn take_moment_from(&mut self, asked: &Todo, now: DateTime<Utc>) -> bool {
+        let names_a_moment = !asked.hooks.is_empty() || asked.due_at.is_some();
+        if !names_a_moment || self.awaits_a_moment() {
+            return false;
+        }
+        self.hooks = asked.hooks.clone();
+        self.due_at = asked.due_at;
+        self.asked = 0;
+        self.snoozed_until = None;
+        self.updated_at = now;
+        true
     }
 
     /// Whether its due time stands in for a time hook and has come without a push since.

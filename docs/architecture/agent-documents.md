@@ -9,7 +9,7 @@ Before this they were three rows in the prompt-style table that nothing read.
 | | A person edits | Goose does |
 |---|---|---|
 | **Soul** | Who Goose is | Speaks as it in every prompt style |
-| **Heartbeat** | The checklist | Goes through it by itself while the house is quiet, and acts within limits |
+| **Heartbeat** | The checklist | Goes through it by itself while the house is quiet, and leaves itself jobs that code carries out |
 | **Scratchpad** | The rules for memory | Follows them; writes its own lessons and follow-ups |
 
 The three editable texts are rows of `prompt_templates` named `soul`, `heartbeat` and
@@ -44,10 +44,11 @@ describe is enforced in code as well ([member-memory.md](member-memory.md)).
 
 They are never facts about people. Each belongs to the member whose conversation it came from
 (or to the household for a household turn) and reaches only that member's turns, like a memory.
-An owner keeps at most eight of each; a ninth drops the oldest. A follow-up nobody came back to
-in 30 days is dropped. A member's lessons ride the first turn of each of their conversations in
-`<lessons>`, next to their own notes, never the shared prefix. Follow-ups are shown only to the
-heartbeat. A member reads both and removes any with `GET /me/notes` and `DELETE /me/notes/{id}`.
+An owner keeps at most eight of each; a ninth drops the oldest. A member's lessons ride the
+first turn of each of their conversations in `<lessons>`, next to their own notes, never the
+shared prefix. A follow-up is shown to one heartbeat, which turns it into a job or lets it go,
+and is deleted once that heartbeat has answered; one no heartbeat reached in 30 days is dropped.
+A member reads both and removes any with `GET /me/notes` and `DELETE /me/notes/{id}`.
 
 ## Heartbeat
 
@@ -59,26 +60,45 @@ The heartbeat is the proactive review, made to run by itself with something to g
   (off by default, as before: nothing runs agents on a Pond that has not allowed them) are both
   set.
 - **What it is given.** The recent events of the house, the person's local time, the checklist,
-  and Goose's open follow-ups for that member. It may read memory, devices, sensors, weather and
-  the web. It holds no tool that acts.
-- **What it may answer.** A JSON array, empty when nothing needs anyone. Each element is a
-  suggestion or one of four acts, named by `"do"`.
+  their plans (active anchors), the jobs it left itself that are still waiting, the follow-ups
+  their conversations left it, their web watches that keep failing, and the conditions a job
+  may wait for: a time, their next turn, their saved places, and this pond's cameras and
+  switched devices by label. It may read memory, devices, sensors, weather and the web. It
+  holds no tool that acts.
+- **What it may answer.** A JSON array, empty when nothing needs anyone. Each element is a job
+  it leaves itself or a suggestion, named by `"do"` (`HEARTBEAT_RECIPE` in
+  `user_data/services/intentions.rs`).
 
 | `do` | What code does with it | Limits |
 |---|---|---|
-| absent, `suggest` | A proposal the member is shown and approves, as before | 3 a run, 6 a day |
-| `remind` | A reminder on the member's own list, pushed at its time; `when` is read in plain words | 2 a run, 3 a day, within 14 days |
-| `note` | A follow-up in Goose's notes | 3 a run with `done` |
-| `done` | Closes the one follow-up its words fit | |
-| `pause_watch` | Pauses the one web watch of the member's that its words fit, only when that watch has failed three checks in a row, and writes a follow-up saying so | 1 a run |
+| `intend` | An intention: one act, done once its condition holds, until a deadline | 3 a run, 20 waiting |
+| absent, `suggest` | A proposal the member is shown and approves | 3 a run, 6 a day |
 
-The model never performs an act. `proactive_review::interpret_heartbeat` checks each one (a
-`when` that names no time, one that has passed or is too far off, an act with no words, an act
-that is not on this list) and `HeartbeatDeps::carry_out` in `pond-server` does it. Anything that
-reaches further than the member's own list or Goose's own notes is a suggestion: devices,
-messages, forms and money stay behind the member's tap. A reminder Goose set carries
-`source: "goose"` on the to-do, so the member sees whose it is and deletes it like any other.
+The heartbeat sets no reminder, writes no to-do and keeps no notes. The whole design is in
+[idea-engine.md](idea-engine.md) section 8; in short:
 
-Starting or resuming a web watch is never an act: a watch needs an address a person gave, and
-a watch the member paused stays paused until they say otherwise. The heartbeat proposes it and
-the member taps.
+- **Kept.** `proactive_review::interpret_heartbeat` reads the suggestions and
+  `intentions::parse_intents` the jobs. `intention_runner::close_review` in `pond-server` checks
+  each job in code (`intentions::validate`: a condition that can be checked, a deadline within
+  30 days, nothing a waiting job, an open to-do or a schedule already says), puts the survivors
+  to one critic call, stores what is left, and logs the run as an engine job of kind
+  `heartbeat` whose outcome says how many were kept and why each of the others was not. A
+  critic that cannot be read, or that a turn cut short, keeps none.
+- **Carried out.** `intention_runner` checks conditions with no model call: times on a
+  30-second tick, cameras, sensors and devices from the event bus, a place crossing from
+  `POST /me/places/{id}/event`, and a member's next turn from `ChatService` as it saves the
+  turn (in this process: a turn taken by a separate `chat --voice` process is not heard). A met
+  intention is carried out and marked `done`; one past its deadline is marked `expired`. Both
+  are written to the member's Goose activity.
+
+| `act` | What happens when the condition holds |
+|---|---|
+| `push` | An `alert` notice with the words, and the same line in the member's Goose thread |
+| `refresh` | The plan's shown deliverables are queued to be made again, class `deadline` |
+| `look_into` | The errand role looks it up with reading tools; the answer goes to the Goose thread and a notice. Four a day |
+| `ask` | One notice opening the plan's open questions |
+| `propose_todo` | An offer the member answers with Add or No (`/me/todos/offers`); never a to-do |
+
+Anything that changes a device, spends, sends or schedules is a suggestion: it stays behind the
+member's tap. Starting, pausing or resuming a web watch is never done unasked: the brief lists
+the watches that keep failing, and the heartbeat tells the member or proposes the pause.

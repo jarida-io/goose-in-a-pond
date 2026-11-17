@@ -587,9 +587,6 @@ pub struct Settings {
     /// Extract durable facts from each turn into categorised memories.
     #[serde(default = "Settings::default_memory_extraction_enabled")]
     pub memory_extraction_enabled: bool,
-    /// Compose questions from memories, on the lane. Kept apart from `memory_extraction_enabled`.
-    #[serde(default = "Settings::default_suggestion_generation_enabled")]
-    pub suggestion_generation_enabled: bool,
 
     /// When true, a background task periodically prunes/archives decayed memories.
     #[serde(default = "Settings::default_memory_cleanup_enabled")]
@@ -971,7 +968,6 @@ impl Default for Settings {
             agent_memory_limit: Self::default_agent_memory_limit(),
             tool_output_compaction: Self::default_tool_output_compaction(),
             memory_extraction_enabled: true,
-            suggestion_generation_enabled: Self::default_suggestion_generation_enabled(),
             memory_cleanup_enabled: true,
             memory_consolidation_enabled: Self::default_memory_consolidation_enabled(),
             session_titling_enabled: Self::default_session_titling_enabled(),
@@ -1395,10 +1391,6 @@ impl Settings {
     }
     fn default_tool_output_compaction() -> bool {
         factory_defaults::boolean("tool_output_compaction", true)
-    }
-    /// On: one model call per idle period, versus the same three template questions forever.
-    fn default_suggestion_generation_enabled() -> bool {
-        factory_defaults::boolean("suggestion_generation_enabled", true)
     }
     fn default_memory_extraction_enabled() -> bool {
         factory_defaults::boolean("memory_extraction_enabled", true)
@@ -2290,7 +2282,6 @@ mod tests {
             "memory_extraction_enabled",
             "memory_extraction_interval_secs",
             "memory_extraction_max_facts",
-            "suggestion_generation_enabled",
             "memory_graph_enabled",
             "memory_prune_threshold",
             "mic_enabled",

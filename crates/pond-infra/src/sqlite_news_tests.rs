@@ -2,6 +2,7 @@ use super::*;
 use crate::db::Database;
 use chrono::TimeZone;
 use pond_core::shared::domain::news::{DigestPicture, DigestSection};
+use pond_core::user_data::domain::fact_sheet::{FactCategory, FactLine};
 
 async fn store() -> (SqliteNewsStore, Pool<Sqlite>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
@@ -135,7 +136,7 @@ async fn settings_default_until_saved_and_the_book_follows_a_pass() {
 }
 
 #[tokio::test]
-async fn interests_and_the_portrait_read_as_the_other_tables_write_them() {
+async fn interests_read_as_their_table_writes_them_and_the_portrait_comes_from_the_fact_sheet() {
     let (news, pool, _tmp) = store().await;
     seed_interest(
         &pool,
@@ -165,14 +166,15 @@ async fn interests_and_the_portrait_read_as_the_other_tables_write_them() {
         &pool, "i3", "emmanuel", "Football", "[]", "both", false, 1, true,
     )
     .await;
-    sqlx::query(
-        "INSERT INTO member_portraits (profile_id, summary, into_json, working_on_json, \
-         likes_json, updated_at) VALUES ('jerry', 'Runs Jarida.', '[\"MCP\"]', '[\"GIAP\"]', '[]', \
-         datetime('now'))",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    let facts = SqliteFactSheetRepository::new(pool.clone());
+    for (category, fact) in [
+        (FactCategory::Work, "Runs Jarida"),
+        (FactCategory::Interest, "MCP"),
+        (FactCategory::Plan, "GIAP"),
+    ] {
+        let line = FactLine::written_by_member("jerry", category, fact, at(9)).unwrap();
+        facts.write(&line).await.unwrap().unwrap();
+    }
     let rows = news.interests("jerry").await.unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].topic, "MCP");
@@ -181,6 +183,7 @@ async fn interests_and_the_portrait_read_as_the_other_tables_write_them() {
     assert!(rows[1].avoid && !rows[1].confirmed && rows[1].evidence == 5);
     let portrait = news.portrait("jerry").await.unwrap().unwrap();
     assert_eq!(portrait.summary, "Runs Jarida.");
+    assert_eq!(portrait.into, vec!["MCP"]);
     assert_eq!(portrait.working_on, vec!["GIAP"]);
     assert_eq!(news.portrait("emmanuel").await.unwrap(), None);
     assert!(news

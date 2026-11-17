@@ -130,6 +130,10 @@ lasts), and a reply in the older `kind` shape is still read. A fact filed by ext
 tier at most, never `permanent`: it was heard in passing, not told to the Pond. A new value for a
 one-at-a-time `about` is not dropped as "related" to the old one; it replaces it.
 
+Before a window's memories reach this policy, a critic rules on everything the window would
+save, memories, interests, reminders and plans together, and what it drops is never saved
+([memory_system.md](memory_system.md#the-critic)).
+
 ## Existing memories
 
 A lane job re-sorts every live row that has no `about`, ten at a time while the house is quiet: the

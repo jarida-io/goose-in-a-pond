@@ -5,6 +5,7 @@ export type GuiSection =
   | "chat"
   | "saved"
   | "watches"
+  | "mygoose"
   | "devices"
   | "mesh"
   | "pairing"
@@ -38,6 +39,7 @@ export const SIDEBAR_GROUPS: SidebarGroup[] = [
       { section: "chat",      label: "Chat",      icon: "chat" },
       { section: "saved",     label: "Saved",     icon: "saved" },
       { section: "watches",   label: "Watches",   icon: "watches" },
+      { section: "mygoose",   label: "My Goose",  icon: "mygoose" },
     ],
   },
   {

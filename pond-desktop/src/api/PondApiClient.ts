@@ -108,6 +108,22 @@ import {
   type WebSearchState,
   type ZoneChoice,
   type DetectedPlace,
+  type Anchor,
+  type NewAnchor,
+  type StopAnchor,
+  type Deliverable,
+  type RejectDeliverable,
+  type QuestionBatch,
+  type QuestionAnswer,
+  type EngineLogJob,
+  type FactSheet,
+  type FactCategory,
+  type FactLine,
+  type FactPatch,
+  type DontRule,
+  type Specialist,
+  type SpecialistId,
+  type Intention,
 } from "./types";
 import { filenameFromDisposition } from "../lib/saveFile";
 import { voiceTitle } from "../voice/voiceCatalogue";
@@ -1159,11 +1175,6 @@ export class PondApiClient {
     return this.post<ContextIndexRebuild>("/api/v1/context/index/rebuild", {});
   }
 
-  /** Settles a tapped composed suggestion (template ones have no row); without it the queue never drains. */
-  markSuggestionTaken(id: string): Promise<{ id: string; settled: boolean }> {
-    return this.post(`/api/v1/suggestions/${encodeURIComponent(id)}/taken`, {});
-  }
-
   // ── The inference lane ────────────────────────────────────
 
   /** What every background job is doing and waiting for. */
@@ -1972,6 +1983,144 @@ export class PondApiClient {
   /** "Watch price": a watch on a saved listing's or place's link, or the one already on it. */
   watchSavedItem(id: string, body: { max_price?: number; every_hours?: number } = {}): Promise<WebWatch> {
     return this.post(`/api/v1/saved-items/${encodeURIComponent(id)}/watch`, body);
+  }
+
+  // Every `/me` call acts for the calling device's member, else the household's only one; any
+  // other caller is refused with 409 (`isUnknownCaller` in `mygoose/caller.ts`).
+
+  /** Candidates and active anchors, each with its deliverables, open questions and open job. */
+  async listAnchors(): Promise<Anchor[]> {
+    const answer = await this.get<{ anchors?: Anchor[] }>("/api/v1/me/anchors");
+    return answer.anchors ?? [];
+  }
+
+  /** One anchor whole: its open questions and its job's steps too. */
+  getAnchor(id: string): Promise<Anchor> {
+    return this.get(`/api/v1/me/anchors/${encodeURIComponent(id)}`);
+  }
+
+  /** 201 for a new one; 200 with the one already called that. */
+  addAnchor(anchor: NewAnchor): Promise<Anchor> {
+    return this.post("/api/v1/me/anchors", anchor);
+  }
+
+  confirmAnchor(id: string): Promise<Anchor> {
+    return this.post(`/api/v1/me/anchors/${encodeURIComponent(id)}/confirm`, {});
+  }
+
+  /** A candidate only; an anchor already said yes to is stopped instead. */
+  async dismissAnchor(id: string): Promise<void> {
+    await this.post(`/api/v1/me/anchors/${encodeURIComponent(id)}/dismiss`, {});
+  }
+
+  async stopAnchor(id: string, stop: StopAnchor): Promise<void> {
+    await this.post(`/api/v1/me/anchors/${encodeURIComponent(id)}/stop`, stop);
+  }
+
+  /** Replaces who the anchor is shared with; the pond leaves its owner out. */
+  shareAnchor(id: string, profileIds: string[]): Promise<Anchor> {
+    return this.put(`/api/v1/me/anchors/${encodeURIComponent(id)}/shares`, { profile_ids: profileIds });
+  }
+
+  getDeliverable(id: string): Promise<Deliverable> {
+    return this.get(`/api/v1/me/deliverables/${encodeURIComponent(id)}`);
+  }
+
+  /** Queues a refresh ahead of the engine's own work, or finds the one already open. */
+  refreshDeliverable(id: string): Promise<{ state: "queued" | "running" }> {
+    return this.post(`/api/v1/me/deliverables/${encodeURIComponent(id)}/refresh`, {});
+  }
+
+  async rejectDeliverable(id: string, rejection: RejectDeliverable): Promise<void> {
+    await this.post(`/api/v1/me/deliverables/${encodeURIComponent(id)}/reject`, rejection);
+  }
+
+  async markDeliverableSeen(id: string): Promise<void> {
+    await this.post(`/api/v1/me/deliverables/${encodeURIComponent(id)}/seen`, {});
+  }
+
+  /** The body as a Markdown file. Fetched here because the route needs the bearer token. */
+  async getDeliverableFile(id: string): Promise<{ blob: Blob; filename: string | null }> {
+    const res = await this.send("GET", `/api/v1/me/deliverables/${encodeURIComponent(id)}/file`);
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
+  }
+
+  async listQuestionBatches(): Promise<QuestionBatch[]> {
+    const answer = await this.get<{ batches?: QuestionBatch[] }>("/api/v1/me/questions");
+    return answer.batches ?? [];
+  }
+
+  async answerQuestion(id: string, answer: QuestionAnswer): Promise<void> {
+    await this.post(`/api/v1/me/questions/${encodeURIComponent(id)}/answer`, answer);
+  }
+
+  /** The asker's own questions only: a member an anchor is shared with may answer, not skip. */
+  async skipQuestion(id: string): Promise<void> {
+    await this.post(`/api/v1/me/questions/${encodeURIComponent(id)}/skip`, {});
+  }
+
+  async listEngineJobs(limit = 30): Promise<EngineLogJob[]> {
+    const answer = await this.get<{ jobs?: EngineLogJob[] }>(`/api/v1/me/engine/jobs?limit=${limit}`);
+    return answer.jobs ?? [];
+  }
+
+  listFacts(): Promise<FactSheet> {
+    return this.get("/api/v1/me/facts");
+  }
+
+  /** Answers the whole sheet; writing a removed line again brings it back. */
+  addFact(category: FactCategory, fact: string): Promise<FactSheet> {
+    return this.post("/api/v1/me/facts", { category, fact });
+  }
+
+  /** Rewording a line makes it the member's own. 409 when another line already says that. */
+  changeFact(id: string, patch: FactPatch): Promise<FactLine> {
+    return this.patch(`/api/v1/me/facts/${encodeURIComponent(id)}`, patch);
+  }
+
+  /** Removed for good: no rebuild learns it again, and it goes on the don't-list. */
+  async removeFact(id: string): Promise<void> {
+    await this.del(`/api/v1/me/facts/${encodeURIComponent(id)}`);
+  }
+
+  rebuildFacts(): Promise<{ state: string }> {
+    return this.post("/api/v1/me/facts/rebuild", {});
+  }
+
+  async listDontRules(): Promise<DontRule[]> {
+    const answer = await this.get<{ rules?: DontRule[] }>("/api/v1/me/dont");
+    return answer.rules ?? [];
+  }
+
+  async addDontRule(rule: string, strength: DontRule["strength"]): Promise<DontRule[]> {
+    const answer = await this.post<{ rules?: DontRule[] }>("/api/v1/me/dont", { rule, strength });
+    return answer.rules ?? [];
+  }
+
+  async removeDontRule(id: string): Promise<DontRule[]> {
+    const answer = await this.del<{ rules?: DontRule[] } | undefined>(`/api/v1/me/dont/${encodeURIComponent(id)}`);
+    return answer?.rules ?? [];
+  }
+
+  async listSpecialists(): Promise<Specialist[]> {
+    const answer = await this.get<{ agents?: Specialist[] }>("/api/v1/me/agents");
+    return answer.agents ?? [];
+  }
+
+  /** Off after an offer stays a no, so the pond does not offer it again. */
+  async switchSpecialist(id: SpecialistId, on: boolean): Promise<Specialist[]> {
+    const answer = await this.put<{ agents?: Specialist[] }>(`/api/v1/me/agents/${encodeURIComponent(id)}`, { on });
+    return answer.agents ?? [];
+  }
+
+  async listIntentions(state: "waiting" | "settled" = "waiting"): Promise<Intention[]> {
+    const answer = await this.get<{ intentions?: Intention[] }>(`/api/v1/me/intentions?state=${state}`);
+    return answer.intentions ?? [];
+  }
+
+  /** 409 once it has been carried out or its time ran out. */
+  async withdrawIntention(id: string): Promise<void> {
+    await this.del(`/api/v1/me/intentions/${encodeURIComponent(id)}`);
   }
 
   /** An artifact's whole body, for "Read the result". */

@@ -17628,6 +17628,13 @@ async fn list_suggestions(
     let (schedules_before_midnight, next_schedule_label) =
         suggestion_schedules_before(&state, now, day_end).await;
 
+    let engine = match audience {
+        suggestion::Audience::Personal => suggestion_engine_data(&state, &read_scope, now).await,
+        suggestion::Audience::Shared => SuggestionEngineData::default(),
+    };
+    let search_has_key = crate::web_search::built_in_state(&state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
+
     let snapshot = suggestion::SuggestionSnapshot {
         audience,
         groups: suggestion_groups(&state).await,
@@ -17641,55 +17648,38 @@ async fn list_suggestions(
         devices_registered,
         weather_ready: settings.weather_enabled && place.weather_target().is_some(),
         place: place.is_named().then(|| place.name.clone()),
+        member: engine.member,
+        now,
+        timezone: place.timezone.clone(),
+        home_place: (place.origin == location::Origin::Configured).then(|| place.name.clone()),
+        anchors: engine.anchors,
+        unseen_work: engine.unseen_work,
+        open_questions: engine.open_questions,
+        facts: engine.facts,
+        tools_ready: suggestion::tools_ready(
+            settings.ext_weather_enabled,
+            settings.ext_knowledge_enabled,
+            search_has_key,
+        ),
     };
 
     let set = suggestion::suggest(&snapshot);
 
-    // Composed questions take the slots and templates fill the rest (a pond with no model, a
-    // drained queue, a first evening). Hidden at once when the toggle is off, but kept queued.
-    let composed = if settings.suggestion_generation_enabled {
-        state
-            .suggestion_queue
-            .offerable(&read_scope, suggestion::MAX_SUGGESTIONS)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(error = %e, "suggestions: could not read the composed queue");
-                Vec::new()
-            })
-    } else {
-        Vec::new()
-    };
-
-    let mut offered: Vec<Value> = composed
+    let offered: Vec<Value> = set
+        .offered
         .iter()
-        .map(|c| {
+        .map(|s| {
             json!({
-                // The queue row's id, so a tap can settle it.
-                "id": c.id,
-                "prompt": c.prompt,
-                "because": c.reason,
-                "answered_by": "giap-memory",
-                // Only composed ones are reported back when tapped.
-                "composed": true,
-                "context": c.context(),
+                "id": s.id,
+                "prompt": s.prompt,
+                "because": s.because,
+                "answered_by": s.answered_by,
+                // Clients report a tap only on a composed one, and none is.
+                "composed": false,
+                "context": s.context,
             })
         })
         .collect();
-
-    for s in set
-        .offered
-        .iter()
-        .take(suggestion::MAX_SUGGESTIONS.saturating_sub(offered.len()))
-    {
-        offered.push(json!({
-            "id": s.id,
-            "prompt": s.prompt,
-            "because": s.because,
-            "answered_by": s.answered_by,
-            "composed": false,
-            "context": s.context,
-        }));
-    }
 
     Json(json!({
         "suggestions": offered,
@@ -17700,24 +17690,104 @@ async fn list_suggestions(
     .into_response()
 }
 
-/// `POST /api/v1/suggestions/{id}/taken` — the household tapped a composed one.
-/// Settling drains the queue. An unknown id is 200 `false`, not 404: double taps happen.
-async fn suggestion_taken(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl axum::response::IntoResponse {
-    use pond_core::user_data::ports::suggestion_queue::Settled;
+/// `POST /api/v1/suggestions/{id}/taken` -- answered for clients that report a tap; nothing is
+/// stored, so nothing is settled.
+async fn suggestion_taken(Path(id): Path<String>) -> impl axum::response::IntoResponse {
+    Json(json!({ "id": id, "settled": false }))
+}
 
-    match state.suggestion_queue.settle(&id, Settled::Taken).await {
-        Ok(settled) => Json(json!({ "id": id, "settled": settled })).into_response(),
-        Err(e) => {
-            tracing::warn!(error = %e, "could not settle a suggestion");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "could not record that"})),
-            )
-                .into_response()
-        }
+/// Unopened deliverables read for the suggestors, which offer at most two of them.
+const SUGGESTION_UNSEEN_READ: usize = 20;
+
+/// What the idea engine holds for the member asking, as the suggestors read it.
+#[derive(Default)]
+struct SuggestionEngineData {
+    member: Option<String>,
+    anchors: Vec<pond_core::user_data::domain::anchor::Anchor>,
+    unseen_work: Vec<pond_core::user_data::services::suggestion::UnseenWork>,
+    open_questions: Vec<pond_core::user_data::domain::question::Question>,
+    facts: Vec<pond_core::user_data::domain::fact_sheet::FactLine>,
+}
+
+/// The engine's data for the one member `scope` names, empty for nobody; a failed read leaves
+/// its part empty, so the column falls back to what it showed without the engine.
+async fn suggestion_engine_data(
+    state: &Arc<AppState>,
+    scope: &pond_core::user_data::domain::profile::ProfileScope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SuggestionEngineData {
+    use pond_core::user_data::domain::anchor::AnchorState;
+    use pond_core::user_data::domain::fact_sheet::FactState;
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::domain::question::QuestionState;
+    use pond_core::user_data::services::suggestion::UnseenWork;
+
+    let member = match scope {
+        ProfileScope::Owner(id) => id.clone(),
+        ProfileScope::Household => match crate::member_notes::sole_member(state).await {
+            Some(member) => member,
+            None => return SuggestionEngineData::default(),
+        },
+        ProfileScope::Guest => return SuggestionEngineData::default(),
+    };
+    fn or_empty<T>(read: anyhow::Result<Vec<T>>, what: &str) -> Vec<T> {
+        read.unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "suggestions: could not read {what}");
+            Vec::new()
+        })
+    }
+    let engine = &state.engine;
+
+    let anchors = or_empty(
+        engine.anchors.list(&member, &AnchorState::LIVE).await,
+        "anchors",
+    );
+    let unseen_work = or_empty(
+        engine.anchors.unseen(&member).await,
+        "unopened deliverables",
+    )
+    .into_iter()
+    .take(SUGGESTION_UNSEEN_READ)
+    .filter_map(|deliverable| {
+        let anchor = anchors
+            .iter()
+            .find(|anchor| anchor.id == deliverable.anchor_id)?;
+        Some(UnseenWork {
+            anchor: anchor.clone(),
+            deliverable,
+        })
+    })
+    .collect();
+
+    let mut open_questions = or_empty(engine.questions.open(&member).await, "open questions");
+    // A shared anchor's questions are kept under its owner, and the member may answer them.
+    for anchor in anchors.iter().filter(|anchor| anchor.profile_id != member) {
+        let asked = or_empty(
+            engine
+                .questions
+                .for_anchor(&anchor.profile_id, &anchor.id)
+                .await,
+            "a shared anchor's questions",
+        );
+        open_questions.extend(
+            asked
+                .into_iter()
+                .filter(|question| question.state == QuestionState::Open),
+        );
+    }
+    open_questions.retain(|question| !question.is_overdue(now));
+
+    let facts = or_empty(
+        engine.facts.list(&member, FactState::Active).await,
+        "the fact sheet",
+    );
+
+    SuggestionEngineData {
+        member: Some(member),
+        anchors,
+        unseen_work,
+        open_questions,
+        facts,
     }
 }
 
@@ -18462,22 +18532,37 @@ async fn deep_research_brief(
     pond_core::shared::services::long_task_runner::conversation_brief(&earlier)
 }
 
-/// Every open task, in the order the runner takes them, read once for a request.
-async fn open_long_tasks(
+/// Every open task and the idea engine's open jobs, which share the one line, read once for a
+/// request.
+struct LongTaskLine {
+    open: Vec<pond_core::shared::domain::long_task::LongTask>,
+    jobs: Vec<pond_core::user_data::domain::engine_job::EngineJob>,
+}
+
+impl LongTaskLine {
+    /// The open tasks in the order the runner takes them.
+    fn order(&self) -> Vec<&pond_core::shared::domain::long_task::LongTask> {
+        pond_core::user_data::services::engine::queue::run_order(&self.open, &self.jobs)
+    }
+}
+
+async fn long_task_line(
+    state: &Arc<AppState>,
     repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
-) -> anyhow::Result<Vec<pond_core::shared::domain::long_task::LongTask>> {
+) -> anyhow::Result<LongTaskLine> {
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
-    repo.list_tasks(LongTaskOwnerFilter::Everyone, false).await
+    Ok(LongTaskLine {
+        open: repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, false)
+            .await?,
+        jobs: state.engine.jobs.open().await?,
+    })
 }
 
 /// Where one task waits, as `member` may see it; `null` once it is not in the line.
-fn long_task_queue_view(
-    open: &[pond_core::shared::domain::long_task::LongTask],
-    task_id: &str,
-    member: &str,
-) -> Value {
-    use pond_core::shared::services::long_task_queue::{place_of, run_order, Ahead};
-    let order = run_order(open);
+fn long_task_queue_view(line: &LongTaskLine, task_id: &str, member: &str) -> Value {
+    use pond_core::shared::services::long_task_queue::{place_of, Ahead};
+    let order = line.order();
     let Some(place) = place_of(&order, task_id, Some(member)) else {
         return Value::Null;
     };
@@ -18651,9 +18736,8 @@ async fn start_deep_research(
     answer: Option<&str>,
 ) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
     use pond_core::shared::domain::long_task::AnswerShape;
-    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
     use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
-    use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+    use pond_core::shared::services::long_task_queue::{place_of, waiting_line};
     let repo = long_task_repo(state);
     let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
     let task = pond_core::shared::services::deep_research::research_task(
@@ -18671,10 +18755,8 @@ async fn start_deep_research(
             body,
         });
     let task = open_task(&repo, task, brief).await?;
-    let open = repo
-        .list_tasks(LongTaskOwnerFilter::Everyone, false)
-        .await?;
-    let place = place_of(&run_order(&open), task.id(), Some(member));
+    let line = long_task_line(state, &repo).await?;
+    let place = place_of(&line.order(), task.id(), Some(member));
     tracing::info!(
         target: "giap::trace",
         kind = "long_task_started",
@@ -18693,7 +18775,7 @@ async fn start_deep_research(
 }
 
 /// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
-/// conversation started.
+/// conversation started. What the idea engine makes unasked is read through its own routes.
 async fn list_long_tasks(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -18735,14 +18817,15 @@ async fn list_long_tasks(
         }
     }
     tasks.retain(|task| {
-        query
-            .session_id
-            .as_deref()
-            .is_none_or(|session| task.origin_session_id() == Some(session))
+        !pond_core::user_data::domain::engine_job::is_engine_task(task.id())
+            && query
+                .session_id
+                .as_deref()
+                .is_none_or(|session| task.origin_session_id() == Some(session))
     });
     tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
-    let open = match open_long_tasks(&repo).await {
-        Ok(open) => open,
+    let line = match long_task_line(&state, &repo).await {
+        Ok(line) => line,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -18753,7 +18836,7 @@ async fn list_long_tasks(
     };
     let mut views = Vec::with_capacity(tasks.len());
     for task in &tasks {
-        let queue = long_task_queue_view(&open, task.id(), &member);
+        let queue = long_task_queue_view(&line, task.id(), &member);
         match long_task_view(&repo, task, queue).await {
             Ok(view) => views.push(view),
             Err(e) => {
@@ -18788,7 +18871,8 @@ async fn reachable_long_task(
 
 /// `GET /api/v1/long-tasks/queue` -- every open task in the order the pond will work on them. The
 /// caller's own and the household's carry their goal and progress, so a member can choose which to
-/// stop; another member's is only a place in the line.
+/// stop; another member's is only a place in the line. An idea-engine job keeps its place and is
+/// not listed, so a position here is the one the task's own card gives.
 async fn long_task_queue(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -18801,7 +18885,6 @@ async fn long_task_queue(
 ) -> Response<axum::body::Body> {
     use pond_core::shared::domain::long_task::StepState;
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
-    use pond_core::shared::services::long_task_queue::run_order;
     let Some(member) = long_task_caller(
         &state,
         principal.as_ref(),
@@ -18818,8 +18901,8 @@ async fn long_task_queue(
             .into_response();
     };
     let repo = long_task_repo(&state);
-    let open = match open_long_tasks(&repo).await {
-        Ok(open) => open,
+    let waiting = match long_task_line(&state, &repo).await {
+        Ok(waiting) => waiting,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -18829,8 +18912,11 @@ async fn long_task_queue(
         }
     };
     let mut line = Vec::new();
-    for (index, task) in run_order(&open).into_iter().enumerate() {
+    for (index, task) in waiting.order().into_iter().enumerate() {
         let position = index + 1;
+        if pond_core::user_data::domain::engine_job::is_engine_task(task.id()) {
+            continue;
+        }
         if !long_task_reaches(&member, task) {
             line.push(json!({"position": position, "another_member": true}));
             continue;
@@ -18888,8 +18974,8 @@ async fn get_long_task(
         Err(response) => return response,
     };
     let repo = long_task_repo(&state);
-    let queue = match open_long_tasks(&repo).await {
-        Ok(open) => long_task_queue_view(&open, task.id(), &member),
+    let queue = match long_task_line(&state, &repo).await {
+        Ok(line) => long_task_queue_view(&line, task.id(), &member),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

@@ -14,6 +14,7 @@ import { SettingsHubView } from "./views/SettingsHub";
 import { NotificationsView } from "./views/Notifications";
 import { WatchesScreen } from "../watches/WatchesScreen";
 import { SavedScreen } from "../saved/SavedScreen";
+import { MyGooseScreen } from "../mygoose/MyGooseScreen";
 import { ModelsDetail } from "./views/settings/Models";
 import { PromptsDetail } from "./views/settings/Prompts";
 import { VoiceDetail } from "./views/settings/Voice";
@@ -41,6 +42,7 @@ const HUB_ROUTE_FOR: Partial<Record<GuiSection, string>> = {
   chat:          "chat",
   saved:         "saved",
   watches:       "watches",
+  mygoose:       "mygoose",
   canvas:        "canvas",
   schedules:     "routines",
   recipes:       "agents",
@@ -58,6 +60,7 @@ const SECTION_FOR_HUB_ROUTE: Record<string, GuiSection> = {
   chat:          "chat",
   saved:         "saved",
   watches:       "watches",
+  mygoose:       "mygoose",
   canvas:        "canvas",
   routines:      "schedules",
   agents:        "recipes",
@@ -161,6 +164,7 @@ export function Hub() {
     if (route === "chat")          return <ChatHubView />;
     if (route === "saved")         return <SavedScreen variant="hub" onOpenChat={() => go("chat")} />;
     if (route === "watches")       return <WatchesScreen variant="hub" onOpenChat={() => go("chat")} />;
+    if (route === "mygoose")       return <MyGooseScreen variant="hub" />;
     if (route === "canvas")        return <CanvasHubView />;
     if (route === "routines")      return <RoutinesView />;
     if (route === "agents")        return <AgentsView go={go} />;

@@ -456,6 +456,7 @@ impl ScheduleMcpServer {
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         let mut tools = Self::tool_router().list_all();
         tools.extend(Self::todo_tool_router().list_all());
+        tools.extend(Self::plan_tool_router().list_all());
         tools
     }
 
@@ -467,8 +468,8 @@ impl ScheduleMcpServer {
             scheduler,
             settings_repo,
             authority: Dep::Installed(crate::speaker_authority),
-            // `todo_tools.rs` holds the second router.
-            tool_router: Self::tool_router() + Self::todo_tool_router(),
+            // `todo_tools.rs` and `plan_tools.rs` hold the other routers.
+            tool_router: Self::tool_router() + Self::todo_tool_router() + Self::plan_tool_router(),
         }
     }
 

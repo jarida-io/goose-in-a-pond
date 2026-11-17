@@ -74,7 +74,7 @@ FK = enforced foreign key. Key columns, not full column lists; read the migratio
 | `memory_events` | Audit trail of memory lifecycle events | `event_kind`, `memory_id`, `session_id`, `data` |
 | `consolidation_runs` | One row per memory consolidation pass | `mode`, `memory_count`, `accepted`, `rejected`, `duration_ms`, `details` |
 | `memory_edges` | Edges between memories (`from_id`, `to_id`, `relation`). No code reads or writes it, and its foreign keys name a `memories` table that does not exist | |
-| `suggestion_queue` | Suggestions the pond composed for Home | `profile_id`, `prompt`, `reason`, `source_memory_id`, `answered_by`, `state` (`queued`/`taken`/`dismissed`) |
+| `suggestion_queue` | Suggestions the pond once composed for Home. Nothing writes or reads it; migration `0117` deleted the queued rows | `profile_id`, `prompt`, `reason`, `source_memory_id`, `answered_by`, `state` (`queued`/`taken`/`dismissed`) |
 | `reminders` | Dated utterances held for proposal instead of becoming memories | `about`, `when_said`, `about_key`, `session_id`, `window_id`, `subject`, `profile_id`, `said_at`, `disposition` (`pending`/`proposed`/`dismissed`/`expired`), `decided_at` |
 | `drafts` | Staged actions awaiting approval, and proactive proposals (`origin = 'proactive'`) | `session_id`, `kind`, `summary`, `payload` (JSON), `status`, `profile_id`, `identification_source`, `origin`, `expires_at`, `rationale`. Triggers require a rationale and an expiry on proposals and refuse approving an expired row |
 | `context_sources` | Per-member sources of personal context (accounts, sensors, devices) | `kind`, `provider`, `profile_id` (FK cascade), `scopes`, `cursor`, `last_sync`, `status`, `secret_ref`. Owner and kind are immutable (triggers) |
@@ -159,7 +159,6 @@ Ports are traits in `crates/pond-core/src/`; adapters are in `crates/pond-infra/
 | `NotificationQueueRepository` (`mcp/ports/notification_queue.rs`) | `SqliteNotificationQueue` | `notifications` |
 | `FaceRecognition` (`user_data/ports/face_recognition.rs`) | `SqliteFaceRecognition` | `face_embeddings`, `face_profile_thresholds` |
 | `MemoryRepository` (`user_data/ports/memory_repository.rs`) | `SqliteMemoryRepository` | `memory_fragments`, `memory_events`, `consolidation_runs` |
-| `SuggestionQueueRepository` (`user_data/ports/suggestion_queue.rs`) | `SqliteSuggestionQueue` | `suggestion_queue` (reads `memory_fragments`) |
 | `ReminderRepository` (`user_data/ports/reminder_repository.rs`) | `SqliteReminderRepository` | `reminders` |
 | `DraftRepository` (`user_data/ports/draft.rs`) | `SqliteDraftRepository` | `drafts` |
 | `ProposalRepository` (`user_data/ports/proposal.rs`) | `SqliteProposalRepository` | `drafts` (rows with `origin = 'proactive'`) |

@@ -28,6 +28,18 @@ pub fn object_in(raw: &str) -> Option<serde_json::Map<String, serde_json::Value>
     })
 }
 
+/// The list the reply holds under `key`, or the reply itself when the model answered with a
+/// bare list; `None` when it holds neither.
+pub fn list_in(raw: &str, key: &str) -> Option<Vec<serde_json::Value>> {
+    let keyed = object_in(raw).and_then(|map| map.get(key).and_then(|v| v.as_array().cloned()));
+    if keyed.is_some() {
+        return keyed;
+    }
+    let cleaned = strip_reasoning(raw);
+    let (start, end) = (cleaned.find('[')?, cleaned.rfind(']')?);
+    serde_json::from_str(cleaned.get(start..=end)?).ok()
+}
+
 /// A string field, trimmed to one line; `None` when absent, empty or the schema's placeholder.
 pub fn text_of(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
     let value = map.get(key)?.as_str()?;
@@ -67,6 +79,26 @@ mod tests {
         }
         assert!(object_in("no json here").is_none());
         assert!(object_in("[1,2]").is_none());
+    }
+
+    #[test]
+    fn a_list_reads_under_its_key_or_bare() {
+        for raw in [
+            r#"{"drop":[1,2]}"#,
+            "```json\n[1, 2]\n```",
+            "Here:\n{\"drop\": [1, 2]}",
+            r#"{"other":[1,2]}"#,
+        ] {
+            let items = list_in(raw, "drop").unwrap_or_else(|| panic!("unread: {raw}"));
+            assert_eq!(items.len(), 2, "{raw}");
+        }
+        assert_eq!(list_in(r#"{"drop":[]}"#, "drop"), Some(vec![]));
+        assert!(list_in(r#"{"drop":"none"}"#, "drop").is_none());
+        assert!(list_in("nothing to drop", "drop").is_none());
+        assert!(
+            list_in(r#"{"drop":[{"line":1"#, "drop").is_none(),
+            "cut short"
+        );
     }
 
     #[test]
