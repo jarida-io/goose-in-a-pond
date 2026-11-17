@@ -4,22 +4,17 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use pond_core::mcp::ports::notification::{Notification, OpenScreen};
 use pond_core::shared::domain::long_task::LongTaskState;
 use pond_core::shared::domain::todo::zone;
 use pond_core::user_data::domain::anchor::{Anchor, AnchorOrigin, AnchorState};
 use pond_core::user_data::domain::engine_job::{EngineJob, JobState};
 use pond_core::user_data::domain::interest::Interest;
-use pond_core::user_data::domain::question::{
-    Question, QuestionPurpose, INTEREST_DROP, INTEREST_FOLLOW, QUESTIONS_PER_BATCH,
-};
+use pond_core::user_data::domain::question::{interest_question, QuestionPurpose};
 
-use super::{deliverable, notices, EngineDeps};
+use super::{deliverable, EngineDeps};
 
 /// One batch of interest questions a member gets in this long at most.
 const ONE_BATCH_EVERY: Duration = Duration::days(1);
-/// Matches the title `GET /me/questions` gives an interest batch.
-const BATCH_TITLE: &str = "Things you keep coming back to";
 
 /// What one look at a member's interests did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,28 +94,8 @@ fn ask_text(interest: &Interest) -> String {
     )
 }
 
-fn batch_notice(batch: &[Question], now: DateTime<Utc>) -> Option<Notification> {
-    let first = batch.first()?;
-    let body = match batch.len() - 1 {
-        0 => first.text.clone(),
-        1 => format!("{} And one more.", first.text),
-        more => format!("{} And {more} more.", first.text),
-    };
-    let mut fields = serde_json::Map::new();
-    fields.insert("batch_id".into(), first.batch_id.as_str().into());
-    Some(Notification {
-        id: format!("questions-{}", first.batch_id),
-        target: String::new(),
-        category: "action_required".to_string(),
-        title: BATCH_TITLE.to_string(),
-        body,
-        timestamp: now.to_rfc3339(),
-        data: Some(OpenScreen::Questions.merged_into(fields)),
-    })
-}
-
-/// Asks the member about the guesses worth confirming that were never asked about, at most a
-/// batch of four a day, and tells them once; returns how many were asked.
+/// Asks the member about one guess worth confirming that was never asked about, at most one a
+/// day; returns how many were asked.
 pub(super) async fn offer(
     deps: &EngineDeps,
     member: &str,
@@ -138,33 +113,24 @@ pub(super) async fn offer(
         .interests
         .ready_to_offer(member, zone(&timezone))
         .await?;
-    if ready.is_empty() {
-        return Ok(0);
-    }
     let batch_id = uuid::Uuid::new_v4().to_string();
-    let options = [INTEREST_FOLLOW.to_string(), INTEREST_DROP.to_string()];
     let mut asked = Vec::new();
     for interest in &ready {
-        if asked.len() == QUESTIONS_PER_BATCH {
-            break;
-        }
-        let text = ask_text(interest);
-        let purpose = QuestionPurpose::Interest;
-        let Some(mut question) =
-            Question::new(member, &batch_id, purpose, &text, &options, false, now)
+        let Some(mut question) = interest_question(member, &batch_id, &ask_text(interest), now)
         else {
             continue;
         };
         question.subject_ref = Some(interest.id.clone());
-        // One at a time: the store refuses one asked before, and the batch fills with new ones.
-        asked.extend(deps.questions.add_batch(&[question]).await?);
+        // The store refuses one asked before; the next guess is tried in its place.
+        asked = deps.questions.add_batch(&[question]).await?;
+        if !asked.is_empty() {
+            break;
+        }
     }
     if asked.is_empty() {
         return Ok(0);
     }
+    // Not pushed: the question waits in My Goose and on Home until the member looks.
     deps.questions.mark_asked(member, &batch_id, now).await?;
-    if let Some(notice) = batch_notice(&asked, now) {
-        notices::tell_member(deps, member, notice, None).await;
-    }
     Ok(asked.len())
 }

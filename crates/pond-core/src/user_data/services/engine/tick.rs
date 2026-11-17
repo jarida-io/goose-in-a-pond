@@ -3,10 +3,9 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+use super::gaps::gaps_of;
 use super::recipes::{next_slot, slots_of, Slot};
-use crate::user_data::domain::anchor::{
-    Anchor, AnchorKind, AnchorState, Deliverable, DeliverableState,
-};
+use crate::user_data::domain::anchor::{Anchor, AnchorState, Deliverable, DeliverableState};
 use crate::user_data::domain::capture::{Capture, CaptureState};
 use crate::user_data::domain::engine_job::{
     EngineJob, JobClass, JobKind, OPEN_CLASS_JOBS_PER_MEMBER,
@@ -173,7 +172,7 @@ pub fn plan_tick(snapshot: &TickSnapshot<'_>, now: DateTime<Utc>) -> Vec<TickAct
             continue;
         };
         let (class, due_at) = class_of(anchor);
-        let asks = anchor.kind != AnchorKind::Standing
+        let asks = !gaps_of(anchor.kind).is_empty()
             && !open.iter().any(|job| {
                 job.kind == JobKind::Questions
                     && job.anchor_id.as_deref() == Some(anchor.id.as_str())
@@ -246,7 +245,7 @@ pub fn plan_tick(snapshot: &TickSnapshot<'_>, now: DateTime<Utc>) -> Vec<TickAct
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_data::domain::anchor::AnchorOrigin;
+    use crate::user_data::domain::anchor::{AnchorKind, AnchorOrigin};
     use crate::user_data::domain::capture::{CaptureKind, MAX_ATTEMPTS};
     use crate::user_data::domain::specialist::SpecialistId;
     use crate::user_data::services::engine::recipes::{deliverable_title, slot_named};

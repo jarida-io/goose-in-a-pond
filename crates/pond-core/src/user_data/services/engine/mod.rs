@@ -3,6 +3,7 @@
 
 pub mod brief;
 pub mod critic;
+pub mod gaps;
 pub mod questions;
 pub mod queue;
 pub mod recipes;

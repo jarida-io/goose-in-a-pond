@@ -95,15 +95,3 @@ pub fn questions_notice(
         data: Some(OpenScreen::Questions.merged_into(fields)),
     })
 }
-
-/// Tells an anchor's owner of the batch of questions just stored for it.
-pub(super) async fn questions_asked(
-    deps: &EngineDeps,
-    anchor: &Anchor,
-    batch: &[Question],
-    now: DateTime<Utc>,
-) {
-    if let Some(notice) = questions_notice(anchor, batch, now) {
-        tell_member(deps, &anchor.profile_id, notice, None).await;
-    }
-}

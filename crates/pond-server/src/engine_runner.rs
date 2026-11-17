@@ -153,6 +153,8 @@ pub struct EngineDeps {
     pub model: Arc<dyn EngineModel>,
     /// `None` on a pond with no embedder: relevance then falls back to recency.
     pub recall: Option<Arc<dyn Recall>>,
+    /// Compares a new question with stored ones by meaning; by key alone while `None` or unloaded.
+    pub similar: Option<Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>>,
     /// `None` on a pond with no web search: a card set rests on what is known alone.
     pub web: Option<Arc<dyn WebFinder>>,
     pub tools: ToolList,

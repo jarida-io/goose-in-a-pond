@@ -1,51 +1,55 @@
-//! The questions Goose asks a member about an anchor: the maker's prompt and parse, and the
-//! critic that drops what the facts or their earlier answers already settle.
+//! The questions Goose asks a member about a plan: code picks the open gaps (`gaps.rs`), the
+//! maker words one question for each, and the critic drops what the shown facts already settle
+//! or whose options do not fit its gap.
 
 use chrono::{DateTime, Utc};
 
 use super::brief::anchor_block;
+use super::gaps::Gap;
 use super::{answer_lines, section};
 use crate::models::services::thought_filter::strip_reasoning;
 use crate::user_data::domain::anchor::Anchor;
 use crate::user_data::domain::interest::topic_key;
-use crate::user_data::domain::question::{Question, QuestionPurpose, QUESTIONS_PER_BATCH};
-use crate::user_data::services::model_json::{object_in, text_of, texts_of};
+use crate::user_data::domain::question::{
+    Question, QuestionDraft, QuestionPurpose, MAX_HEADER_CHARS, QUESTIONS_PER_BATCH,
+};
+use crate::user_data::services::model_json::{object_in, text_of};
 
 /// Fixed so it stays in the KV prefix. It shows no worked question: a small model copies one.
 pub const QUESTIONS_SYSTEM: &str = "\
-You write the questions Goose asks a member of this household before it \
-prepares something for them, so the work fits them. You are given what the \
-work is for, what is already known about the member, and what they already \
-answered.
+You word the questions Goose asks a member of this household before it \
+prepares something for them. Code has already chosen what to ask: the \
+details listed under \"Details to ask about\". You are given what the work \
+is for, the facts about the member that bear on those details, what they \
+already answered, and what the sources say.
 
-Ask only what would change the work: a budget, a date, who is coming, what \
-matters most, a choice between real options. Never ask:
-- what the facts or their earlier answers already say;
-- what Goose can look up itself;
-- a question with one sensible answer.
+For each detail, write one question with options the member can tap.
 
 Reply with JSON and nothing else:
 
-{\"questions\": [{\"text\": \"<the question>\", \"options\": [\"<option>\", \"<option>\"], \"multi\": false}]}
+{\"questions\": [{\"gap\": \"<the detail's name>\", \"header\": \"<1 to 2 words>\", \
+\"text\": \"<the question>\", \"options\": [{\"label\": \"<short answer>\", \"description\": \
+\"<what choosing it means>\"}], \"recommended\": \"<the label you would pick, or empty>\", \
+\"multi\": false}]}
 
-- At most 4 questions. Fewer is better, and an empty list when nothing is missing.
+- One question for each detail listed, and none for anything else.
 - \"text\": one short question to the member, as \"you\", under 120 characters.
-- \"options\": 2 to 4 short answers they could tap, each different, each under \
-40 characters. Never \"Other\": it is always offered beside them.
+- \"options\": 2 to 4 answers, each different and each under 40 characters. Take them \
+from the facts and the sources, or use plain ranges such as \"Under KSh 20,000\". Never \
+invent places, names or prices. Never \"Other\": it is always offered beside them.
+- \"description\": one short line on what choosing the option means for the work.
 - \"multi\": true only when several options can be chosen together.
 - No explanation, no preamble.";
 
 /// Fixed so it stays in the KV prefix.
 pub const QUESTIONS_CRITIC_SYSTEM: &str = "\
 You check questions before Goose asks them of a member of this household. You \
-are given what the work is for, what is already known about the member, what \
-they already answered, and the numbered questions.
+are given what the work is for, the facts about the member that bear on it, what \
+they already answered, and the numbered questions, each with the detail it asks about.
 
 Drop a question when any of these is true:
 - the facts or an earlier answer already settle it;
-- it repeats another question in the list;
-- Goose could look the answer up itself;
-- no answer to it would change what Goose prepares.
+- its options do not fit the detail it asks about, or are unrelated to the work.
 
 Reply with JSON and nothing else:
 
@@ -55,36 +59,49 @@ Reply with JSON and nothing else:
 - No explanation, no preamble.";
 
 const ANCHOR_HEADING: &str = "What the work is for:";
-const SHEET_HEADING: &str = "What is known about the member:";
+const SHEET_HEADING: &str = "Facts about the member that bear on these details:";
 const ANSWERED_HEADING: &str = "What they already answered:";
+const SOURCES_HEADING: &str = "What the sources say:";
+const GAPS_HEADING: &str = "Details to ask about:";
 const QUESTIONS_HEADING: &str = "Questions to check:";
 const REPLY_CUE: &str = "JSON:";
 
-/// What a surface offers beside every question's options, so no option may mean it.
-const OTHER_KEYS: [&str; 3] = ["other", "others", "something else"];
+/// What a maker and its critic are both shown.
+#[derive(Debug, Clone, Copy)]
+pub struct Shown<'a> {
+    pub anchor: &'a Anchor,
+    /// The fact-sheet lines in the open gaps' categories, as a brief reads them.
+    pub sheet: &'a str,
+    pub answered: &'a [(String, String)],
+    /// Passages the plan's work already found, one per line.
+    pub sources: &'a str,
+    pub gaps: &'a [&'a Gap],
+    pub timezone: &'a str,
+}
 
-fn shared_parts(
-    anchor: &Anchor,
-    sheet: &str,
-    answered: &[(String, String)],
-    timezone: &str,
-) -> String {
+fn shared_parts(shown: &Shown<'_>) -> String {
     let mut out = String::new();
-    section(&mut out, ANCHOR_HEADING, &anchor_block(anchor, timezone));
-    section(&mut out, SHEET_HEADING, sheet);
-    section(&mut out, ANSWERED_HEADING, &answer_lines(answered));
+    section(
+        &mut out,
+        ANCHOR_HEADING,
+        &anchor_block(shown.anchor, shown.timezone),
+    );
+    section(&mut out, SHEET_HEADING, shown.sheet);
+    section(&mut out, ANSWERED_HEADING, &answer_lines(shown.answered));
+    section(&mut out, SOURCES_HEADING, shown.sources);
     out
 }
 
-/// The maker's user message: the anchor on the household's clock, the fact sheet and the
-/// member's stored answers as question and answer.
-pub fn build_questions_message(
-    anchor: &Anchor,
-    sheet: &str,
-    answered: &[(String, String)],
-    timezone: &str,
-) -> String {
-    let mut out = shared_parts(anchor, sheet, answered, timezone);
+/// The maker's user message: the plan, the gap-relevant facts, the stored answers, what the
+/// sources say, and the open gaps by name.
+pub fn build_questions_message(shown: &Shown<'_>) -> String {
+    let mut out = shared_parts(shown);
+    let gaps: Vec<String> = shown
+        .gaps
+        .iter()
+        .map(|gap| format!("- {}: {}", gap.id, gap.means))
+        .collect();
+    section(&mut out, GAPS_HEADING, &gaps.join("\n"));
     out.push_str(REPLY_CUE);
     out
 }
@@ -99,49 +116,50 @@ fn list_under(raw: &str, key: &str) -> Option<Vec<serde_json::Value>> {
     serde_json::from_str(cleaned.get(start..=end)?).ok()
 }
 
-fn means_other(option: &str) -> bool {
-    let named = option.split('(').next().unwrap_or(option);
-    OTHER_KEYS.contains(&topic_key(named).as_str())
+/// A maker's question as a draft for `gap`: a header that is missing or too long becomes the
+/// gap's.
+fn draft_of(item: &serde_json::Value, gap: &Gap) -> QuestionDraft {
+    let mut draft = QuestionDraft::read(item).unwrap_or_default();
+    if draft.header.is_empty() || draft.header.chars().count() > MAX_HEADER_CHARS {
+        draft.header = gap.header.to_string();
+    }
+    draft.gap = Some(gap.id.to_string());
+    draft
 }
 
-/// The questions a maker wrote, as one open batch for an anchor: at most four, each with two
-/// to four options, none of them "Other". A question that does not fit is left out.
+/// The questions a maker wrote, as one open batch for a plan: one per open gap, each passing
+/// the shape code holds every question to. A question with no gap, or for a gap that is not
+/// open, is ignored.
 pub fn parse_questions(
     raw: &str,
     profile_id: &str,
     batch_id: &str,
     anchor_id: &str,
+    gaps: &[&Gap],
     now: DateTime<Utc>,
 ) -> Vec<Question> {
     let items = list_under(raw, "questions")
         .or_else(|| object_in(raw).map(|one| vec![serde_json::Value::Object(one)]))
         .unwrap_or_default();
     let mut batch: Vec<Question> = Vec::new();
-    for item in items.iter().filter_map(serde_json::Value::as_object) {
+    for value in &items {
+        let Some(item) = value.as_object() else {
+            continue;
+        };
         if batch.len() == QUESTIONS_PER_BATCH {
             break;
         }
-        let Some(text) = text_of(item, "text").or_else(|| text_of(item, "question")) else {
+        let named = text_of(item, "gap").map(|g| topic_key(&g).replace(' ', "_"));
+        let Some(gap) = named.and_then(|g| gaps.iter().find(|gap| gap.id == g)) else {
             continue;
         };
-        let options: Vec<String> = texts_of(item, "options")
-            .into_iter()
-            .filter(|option| !means_other(option))
-            .collect();
-        let multi = item
-            .get("multi")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let asked = Question::new(
-            profile_id,
-            batch_id,
-            QuestionPurpose::Anchor,
-            &text,
-            &options,
-            multi,
-            now,
-        );
-        let Some(mut question) = asked else {
+        if batch.iter().any(|held| held.gap.as_deref() == Some(gap.id)) {
+            continue;
+        }
+        let draft = draft_of(value, gap);
+        let Ok(mut question) =
+            Question::from_draft(profile_id, batch_id, QuestionPurpose::Anchor, &draft, now)
+        else {
             continue;
         };
         if batch.iter().any(|held| held.key() == question.key()) {
@@ -154,36 +172,31 @@ pub fn parse_questions(
 }
 
 /// The critic's user message: what the maker saw, then the questions numbered from 1.
-pub fn build_questions_critic_message(
-    anchor: &Anchor,
-    sheet: &str,
-    answered: &[(String, String)],
-    questions: &[Question],
-    timezone: &str,
-) -> String {
+pub fn build_questions_critic_message(shown: &Shown<'_>, questions: &[Question]) -> String {
     let numbered: Vec<String> = questions
         .iter()
         .enumerate()
         .map(|(at, question)| {
             format!(
-                "{}. {}\n   Options: {}",
+                "{}. ({}) {}\n   Options: {}",
                 at + 1,
+                question.gap.as_deref().unwrap_or("detail"),
                 question.text,
-                question.options.join(" | ")
+                question.labels().join(" | ")
             )
         })
         .collect();
-    let mut out = shared_parts(anchor, sheet, answered, timezone);
+    let mut out = shared_parts(shown);
     section(&mut out, QUESTIONS_HEADING, &numbered.join("\n"));
     out.push_str(REPLY_CUE);
     out
 }
 
 /// Which of `count` questions a critic dropped, as places from 0. A reply that cannot be read
-/// drops them all: an unchecked question is not asked.
+/// drops none: the batch is kept and code's own checks still run on it.
 pub fn parse_question_drops(raw: &str, count: usize) -> Vec<usize> {
     let Some(items) = list_under(raw, "drop") else {
-        return (0..count).collect();
+        return Vec::new();
     };
     let mut drops: Vec<usize> = items
         .iter()
@@ -216,6 +229,7 @@ mod tests {
     use super::*;
     use crate::user_data::domain::anchor::{AnchorKind, AnchorOrigin};
     use crate::user_data::domain::question::{QuestionState, MAX_OPTIONS, MIN_OPTIONS};
+    use crate::user_data::services::engine::gaps::{gap_named, gaps_of};
     use chrono::TimeZone;
 
     fn now() -> DateTime<Utc> {
@@ -235,160 +249,143 @@ mod tests {
         trip
     }
 
+    fn trip_gaps() -> Vec<&'static Gap> {
+        ["budget", "stay", "who"]
+            .iter()
+            .map(|id| gap_named(AnchorKind::Trip, id).unwrap())
+            .collect()
+    }
+
     fn answered() -> Vec<(String, String)> {
         vec![("Who is coming?".into(), "Two adults".into())]
     }
 
     fn read(raw: &str) -> Vec<Question> {
-        parse_questions(raw, "jerry", "batch-1", "anchor-1", now())
+        parse_questions(raw, "jerry", "batch-1", "anchor-1", &trip_gaps(), now())
     }
 
     const TWO: &str = r#"{"questions": [
-        {"text": "What is your budget for the trip?", "options": ["Under KSh 50,000", "KSh 50,000 to 100,000", "More"], "multi": false},
-        {"text": "What do you want most from it?", "options": ["Rest", "Food", "The lake", "Other"], "multi": true}]}"#;
+        {"gap": "budget", "header": "Budget", "text": "What is your budget for the trip?", "options": [{"label": "Under KSh 50,000", "description": "Buses and guest houses"}, {"label": "KSh 50,000 to 100,000", "description": "A mid-range hotel"}, {"label": "More", "description": "Flights and a resort"}], "recommended": "KSh 50,000 to 100,000", "multi": false},
+        {"gap": "stay", "text": "Where do you want to stay?", "options": ["By the lake", "In town"], "multi": true}]}"#;
 
     #[test]
-    fn the_maker_is_shown_the_anchor_the_sheet_and_the_stored_answers() {
-        let message = build_questions_message(
-            &trip(),
-            "home: lives in Nairobi\nfood: does not eat pork",
-            &answered(),
-            "Africa/Nairobi",
-        );
+    fn the_maker_is_shown_the_plan_the_relevant_facts_and_the_gaps_to_ask_about() {
+        let gaps = trip_gaps();
+        let anchor = trip();
+        let message = build_questions_message(&Shown {
+            anchor: &anchor,
+            sheet: "People: lives with Amina",
+            answered: &answered(),
+            sources: "- Lake Victoria hotels from KSh 6,000 a night",
+            gaps: &gaps,
+            timezone: "Africa/Nairobi",
+        });
         assert_eq!(
             message,
             "What the work is for:\nKind: trip\nTitle: Kisumu in December\n\
              When: on Saturday 12 December 2026\n\n\
-             What is known about the member:\nhome: lives in Nairobi\nfood: does not eat pork\n\n\
+             Facts about the member that bear on these details:\nPeople: lives with Amina\n\n\
              What they already answered:\n- Who is coming? Answer: Two adults\n\n\
+             What the sources say:\n- Lake Victoria hotels from KSh 6,000 a night\n\n\
+             Details to ask about:\n- budget: how much they want to spend in all\n\
+             - stay: where to stay, or the base to work from\n- who: who is going\n\n\
              JSON:"
         );
-        let bare = build_questions_message(&trip(), "", &[], "Africa/Nairobi");
-        assert!(!bare.contains("What is known"), "{bare}");
-        assert!(!bare.contains("already answered"), "{bare}");
+        let bare = build_questions_message(&Shown {
+            anchor: &anchor,
+            sheet: "",
+            answered: &[],
+            sources: "",
+            gaps: &gaps,
+            timezone: "Africa/Nairobi",
+        });
+        assert!(!bare.contains("Facts about"), "{bare}");
+        assert!(!bare.contains("sources say"), "{bare}");
     }
 
     #[test]
-    fn a_batch_reads_as_open_questions_of_its_anchor() {
+    fn a_batch_reads_as_structured_questions_one_per_gap() {
         let batch = read(TWO);
         assert_eq!(batch.len(), 2);
         let budget = &batch[0];
-        assert_eq!(budget.text, "What is your budget for the trip?");
-        assert_eq!(
-            budget.options,
-            ["Under KSh 50,000", "KSh 50,000 to 100,000", "More"]
-        );
-        assert!(!budget.multi);
-        assert_eq!(budget.profile_id, "jerry");
-        assert_eq!(budget.batch_id, "batch-1");
+        assert_eq!(budget.header, "Budget");
+        assert_eq!(budget.gap.as_deref(), Some("budget"));
+        assert_eq!(budget.options[1].description, "A mid-range hotel");
+        assert_eq!(budget.recommended, Some(1), "the pick read from its label");
         assert_eq!(budget.anchor_id.as_deref(), Some("anchor-1"));
         assert_eq!(budget.purpose, QuestionPurpose::Anchor);
         assert_eq!(budget.state, QuestionState::Open);
-        assert_eq!(budget.created_at, now());
-        assert!(batch[1].multi);
+        let stay = &batch[1];
         assert_eq!(
-            batch[1].options,
-            ["Rest", "Food", "The lake"],
-            "never Other"
+            stay.header, "Stay",
+            "the gap's header when the maker gave none"
         );
+        assert!(stay.multi);
+    }
+
+    #[test]
+    fn an_option_meaning_other_refuses_its_question() {
+        let raw = r#"{"questions": [{"gap": "stay", "header": "Stay", "text": "Where?", "options": ["Lake", "Town", "Other"]}]}"#;
+        assert!(read(raw).is_empty());
+        let fine = r#"{"questions": [{"gap": "stay", "header": "Stay", "text": "Where?", "options": ["Lake", "Town"]}]}"#;
+        assert_eq!(read(fine).len(), 1);
+    }
+
+    #[test]
+    fn a_question_with_no_open_gap_is_ignored() {
+        let raw = r#"{"questions": [
+            {"text": "Do you like physics?", "header": "Physics", "options": ["Yes", "No"]},
+            {"gap": "dates", "header": "Dates", "text": "When do you leave?", "options": ["Friday", "Saturday"]},
+            {"gap": "who", "header": "Who", "text": "Who is going?", "options": ["Just me", "Two of us"]},
+            {"gap": "who", "header": "Who", "text": "Who else comes?", "options": ["Kids", "Friends"]}]}"#;
+        let batch = read(raw);
+        assert_eq!(batch.len(), 1, "{batch:?}");
+        assert_eq!(batch[0].gap.as_deref(), Some("who"));
     }
 
     #[test]
     fn the_shapes_a_small_model_writes_all_read() {
-        let one = r#"{"text": "Do you want to drive there?", "options": ["Yes", "No"]}"#;
+        let one = r#"{"gap": "budget", "header": "Budget", "text": "How much will you spend?", "options": ["Under 50k", "Over 50k"]}"#;
         for raw in [
             TWO.to_string(),
             format!("```json\n{TWO}\n```"),
             format!("Here are the questions:\n{TWO}\nI hope these help."),
             format!("<think>what is missing?</think>{TWO}"),
-            format!("[{one}, {}]", one.replace("drive", "fly")),
+            format!(
+                "[{one}, {}]",
+                one.replace("budget", "stay").replace("How much", "Where")
+            ),
         ] {
             assert_eq!(read(&raw).len(), 2, "{raw}");
         }
         assert_eq!(read(one).len(), 1, "one question with no list round it");
-        assert_eq!(
-            read(r#"{"questions": [{"question": "Do you want to drive there?", "options": ["Yes", "No"]}]}"#).len(),
-            1
-        );
-        for nothing in [
-            "",
-            "No questions are needed.",
-            r#"{"questions": []}"#,
-            r#"{"questions": "none"}"#,
-        ] {
+        for nothing in ["", "No questions are needed.", r#"{"questions": []}"#] {
             assert!(read(nothing).is_empty(), "{nothing}");
         }
     }
 
     #[test]
-    fn a_batch_is_four_questions_at_most_each_asked_once() {
-        let many: Vec<String> = (1..=6)
-            .map(|n| format!(r#"{{"text": "Question number {n}?", "options": ["Yes", "No"]}}"#))
-            .collect();
-        let repeat = r#"{"text": "question NUMBER 1", "options": ["Maybe", "Never"]}"#;
-        let raw = format!(
-            r#"{{"questions": [{}, {repeat}, {}]}}"#,
-            many[0],
-            many[1..].join(",")
-        );
-        let batch = read(&raw);
-        assert_eq!(batch.len(), QUESTIONS_PER_BATCH);
-        let texts: Vec<&str> = batch.iter().map(|q| q.text.as_str()).collect();
-        assert_eq!(
-            texts,
-            [
-                "Question number 1?",
-                "Question number 2?",
-                "Question number 3?",
-                "Question number 4?"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_question_needs_words_and_two_real_options() {
-        let raw = r#"{"questions": [
-            {"text": "", "options": ["Yes", "No"]},
-            {"text": "<the question>", "options": ["Yes", "No"]},
-            {"text": "Which airline do you prefer?", "options": ["Any", "Other (please say)"]},
-            {"text": "Which seat do you prefer?", "options": ["Window", "window", "Something else"]},
-            {"text": "Which day do you leave?", "options": "Friday"},
-            "When do you leave?",
-            {"text": "How long will you stay?", "options": ["2 nights", "3 nights", "4 nights", "5 nights", "A week", "Others"]}]}"#;
-        let batch = read(raw);
-        assert_eq!(batch.len(), 1, "{batch:?}");
-        assert_eq!(batch[0].text, "How long will you stay?");
-        assert_eq!(
-            batch[0].options,
-            ["2 nights", "3 nights", "4 nights", "5 nights"]
-        );
-        assert!((MIN_OPTIONS..=MAX_OPTIONS).contains(&batch[0].options.len()));
-    }
-
-    #[test]
-    fn the_critic_is_shown_what_the_maker_saw_and_the_questions_by_number() {
-        let batch = read(TWO);
-        let message = build_questions_critic_message(
-            &trip(),
-            "home: lives in Nairobi",
-            &answered(),
-            &batch,
-            "Africa/Nairobi",
-        );
-        let maker = build_questions_message(
-            &trip(),
-            "home: lives in Nairobi",
-            &answered(),
-            "Africa/Nairobi",
-        );
-        assert!(message.starts_with(maker.trim_end_matches(REPLY_CUE)));
+    fn the_critic_is_shown_what_the_maker_saw_and_each_questions_gap() {
+        let gaps = trip_gaps();
+        let anchor = trip();
+        let shown = Shown {
+            anchor: &anchor,
+            sheet: "People: lives with Amina",
+            answered: &answered(),
+            sources: "",
+            gaps: &gaps,
+            timezone: "Africa/Nairobi",
+        };
+        let message = build_questions_critic_message(&shown, &read(TWO));
+        assert!(message.starts_with("What the work is for:"));
+        assert!(!message.contains("Details to ask about"));
         assert!(
             message.ends_with(
                 "Questions to check:\n\
-             1. What is your budget for the trip?\n   \
+             1. (budget) What is your budget for the trip?\n   \
              Options: Under KSh 50,000 | KSh 50,000 to 100,000 | More\n\
-             2. What do you want most from it?\n   \
-             Options: Rest | Food | The lake\n\nJSON:"
+             2. (stay) Where do you want to stay?\n   \
+             Options: By the lake | In town\n\nJSON:"
             ),
             "{message}"
         );
@@ -406,14 +403,10 @@ mod tests {
             [0, 1, 2]
         );
         assert_eq!(parse_question_drops("Drop these: [1, 3]", 3), [0, 2]);
-        assert_eq!(
-            parse_question_drops("<think>2 is settled</think>{\"drop\":[2]}", 2),
-            [1]
-        );
     }
 
     #[test]
-    fn a_critic_that_cannot_be_read_drops_every_question() {
+    fn a_critic_that_cannot_be_read_keeps_the_batch() {
         for raw in [
             "",
             "They all look fine to me.",
@@ -421,9 +414,8 @@ mod tests {
             r#"{"drop": "none"}"#,
             r#"{"drop": [1"#,
         ] {
-            assert_eq!(parse_question_drops(raw, 3), [0, 1, 2], "{raw}");
+            assert_eq!(parse_question_drops(raw, 3), [0usize; 0], "{raw}");
         }
-        assert_eq!(parse_question_drops("nonsense", 0), [0usize; 0]);
     }
 
     #[test]
@@ -431,22 +423,21 @@ mod tests {
         let batch = read(TWO);
         let kept = without_dropped(batch.clone(), &[0]);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].text, "What do you want most from it?");
-        assert_eq!(without_dropped(batch.clone(), &[]).len(), 2);
-        assert!(without_dropped(batch, &[0, 1]).is_empty());
+        assert_eq!(kept[0].text, "Where do you want to stay?");
+        assert_eq!(without_dropped(batch, &[]).len(), 2);
     }
 
     #[test]
     fn the_prompts_state_the_caps_the_code_holds_them_to() {
-        assert!(QUESTIONS_SYSTEM.contains(&format!("At most {QUESTIONS_PER_BATCH} questions")));
-        assert!(QUESTIONS_SYSTEM.contains(&format!("{MIN_OPTIONS} to {MAX_OPTIONS} short answers")));
+        assert!(QUESTIONS_SYSTEM.contains(&format!("{MIN_OPTIONS} to {MAX_OPTIONS} answers")));
+        let all: Vec<&Gap> = gaps_of(AnchorKind::Trip).iter().collect();
         assert!(
-            read(QUESTIONS_SYSTEM).is_empty(),
+            parse_questions(QUESTIONS_SYSTEM, "jerry", "b", "a", &all, now()).is_empty(),
             "the schema line is not a batch"
         );
         assert_eq!(
             parse_question_drops(QUESTIONS_CRITIC_SYSTEM, 2),
-            [0, 1],
+            [0usize; 0],
             "the schema line is not a ruling"
         );
     }
