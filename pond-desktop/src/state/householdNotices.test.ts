@@ -127,6 +127,9 @@ describe("openSection", () => {
     ["extensions", "extensions"],
     ["remote_access", "pairing"],
     ["watch", "watches"],
+    ["anchor", "mygoose"],
+    ["deliverable", "mygoose"],
+    ["questions", "mygoose"],
   ])("maps %s to %s", (hint, section) => {
     expect(openSection({ data: { open: hint } })).toBe(section);
   });
