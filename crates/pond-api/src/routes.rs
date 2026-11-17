@@ -2702,8 +2702,8 @@ async fn chat_stream(
     insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
     tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<ChatRequest>, JsonRejection>,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
-{
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    use axum::response::IntoResponse;
     // From the principal, never the body: `ChatRequest` must never grow a device field.
     let device = proven_device(principal.as_ref());
 
@@ -2729,6 +2729,12 @@ async fn chat_stream(
 
     if let Some(session_id) = req.session_id.as_deref() {
         refuse_another_members_session(&state, principal.as_ref(), session_id).await?;
+        // A turn there waits on questions: the typed words answer them as "Other".
+        if !req.device_locked && req.audio.is_empty() {
+            if let Some(answered) = typed_answer(&state, session_id, &req.message).await {
+                return Ok(answered.into_response());
+            }
+        }
     }
     if req.device_locked {
         if let Some(session_id) = req.session_id.take() {
@@ -2777,7 +2783,7 @@ async fn chat_stream(
     if !req.resumable {
         // Ends with its last reader. Unregistered: it must not consume the detached-run cap.
         let run = new_run(&req, &device, crate::runs::RunPolicy::Ephemeral);
-        return Ok(spawn_run(state, permit, run, None, req, device));
+        return Ok(spawn_run(state, permit, run, None, req, device).into_response());
     }
 
     // Not `sse_semaphore` (which counts readers): a detached run outlives its reader, and
@@ -2827,7 +2833,35 @@ async fn chat_stream(
         false,
     );
 
-    Ok(spawn_run(state, permit, run, Some(run_permit), req, device))
+    Ok(spawn_run(state, permit, run, Some(run_permit), req, device).into_response())
+}
+
+/// The stream a message gets when it answered the questions a turn of its chat waits on: the
+/// waiting turn carries on in its own stream, so this one only says which batch it answered.
+async fn typed_answer(
+    state: &AppState,
+    session_id: &str,
+    message: &str,
+) -> Option<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
+    let batch_id = match state
+        .engine
+        .desk
+        .typed_while_open(session_id, message, chrono::Utc::now())
+        .await
+    {
+        Ok(found) => found?,
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "a typed answer could not be kept");
+            return None;
+        }
+    };
+    let frames = [
+        json!({"type": "question_answered", "batch_id": batch_id, "session_id": session_id}),
+        json!({"done": true, "session_id": session_id, "question_answered": true}),
+    ];
+    Some(Sse::new(futures::stream::iter(
+        frames.map(|frame| Ok(Event::default().data(frame.to_string()))),
+    )))
 }
 
 /// Maps an image-limit violation onto an HTTP status, or passes a legal set through.
@@ -3846,6 +3880,41 @@ pub async fn answer_cut_turns(state: Arc<AppState>, since: chrono::DateTime<chro
         }
     }
     answered
+}
+
+/// Sends `message` into `session_id` as the member's next message and runs the turn detached,
+/// so a reader reattaches to it as to any resumable run. Used when answers arrive after the
+/// `ask` tool stopped waiting. Returns whether a turn was started.
+pub(crate) async fn answer_in_session(
+    state: Arc<AppState>,
+    session_id: String,
+    message: String,
+) -> bool {
+    let Ok(req) = serde_json::from_value::<ChatRequest>(json!({
+        "session_id": session_id,
+        "message": message,
+        "resumable": true,
+    })) else {
+        return false;
+    };
+    let Ok(run_permit) = state.runs.permits.clone().try_acquire_owned() else {
+        tracing::warn!(%session_id, "late answers could not start a turn: the run cap is full");
+        return false;
+    };
+    let device = ProvenDevice::none();
+    let run = new_run(&req, &device, crate::runs::RunPolicy::Detached);
+    if state.runs.registry.insert(run.clone()).is_err() {
+        return false;
+    }
+    tracing::info!(
+        target: "giap::trace",
+        kind = "late_answers_sent",
+        session_id = %run.session_id,
+        run_id = %run.run_id,
+        "answers that arrived after the ask tool stopped waiting were sent into the chat"
+    );
+    tokio::spawn(run_turn(state, run, Some(run_permit), req, device));
+    true
 }
 
 /// One agent turn, start to finish, whether or not anybody is listening.
@@ -5292,6 +5361,16 @@ async fn delete_session(
 
     // Otherwise the growth map leaks, and a recycled id would inherit this session's state.
     state.context_monitor.reset_session(&session_id);
+
+    // A chat's questions go with it; a failure leaves them open, never the delete undone.
+    if let Err(e) = state
+        .engine
+        .questions
+        .expire_session(&session_id, chrono::Utc::now())
+        .await
+    {
+        tracing::warn!(error = %e, %session_id, "a deleted chat's questions could not be expired");
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
