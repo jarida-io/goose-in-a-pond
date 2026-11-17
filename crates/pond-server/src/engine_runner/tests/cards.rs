@@ -23,7 +23,10 @@ const MAKER_REPLY: &str = r#"{"cards": [
   {"kind": "next_step", "title": "Pick the summit sessions you want", "why": "You are going to the AI Summit",
    "sources": [1], "when": "Saturday", "action": {"kind": "go_deeper"}},
   {"kind": "ask", "title": "What should I bring to the summit?", "why": "You are going to the AI Summit",
-   "sources": [1], "action": {"kind": "chat", "prompt": "What should I bring to the AI Summit?"}},
+   "sources": [1], "action": {"kind": "chat", "prompt": "What should I bring to the AI Summit?",
+   "question": {"header": "Summit", "text": "What should Goose look into for the summit?",
+   "options": [{"label": "What to bring", "description": "A packing list for the day"},
+               {"label": "Which talks to see", "description": "The sessions that fit you"}]}}},
   {"kind": "do", "title": "Something made up", "why": "You like things", "sources": [9], "effort": "1 hour"},
   {"kind": "do", "title": "Do something fun", "why": "You like fun", "sources": [2], "effort": "1 hour"}
 ]}"#;
