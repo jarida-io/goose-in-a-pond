@@ -227,17 +227,18 @@ curl -s -o /dev/null -X PUT "http://127.0.0.1:$PORT/api/v1/settings" \
 curl -s -o /dev/null -X POST "http://127.0.0.1:$PORT/api/v1/onboard/complete"
 
 # ── API checks ───────────────────────────────────────────────────────────────
-say "API checks"
 RC=0
+# The printed setup card: this fresh pond starts unclaimed, and a pairing-code pairing claims it.
+# Before the API checks, which pair members' phones of their own and so claim the pond too.
+say "setup code: a pairing claims the pond"
+POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py pairing || RC=1
+
+say "API checks"
 if [ -f scripts/live_checks.py ]; then
   POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/live_checks.py || RC=$?
 else
   echo "scripts/live_checks.py not present; skipping the assertion suite"
 fi
-
-# The printed setup card: this fresh pond starts unclaimed, and a pairing-code pairing claims it.
-say "setup code: a pairing claims the pond"
-POND_DATA_DIR="$DATA_DIR" POND_SERVER_BIN="$BIN" python3 scripts/setup_code_checks.py pairing || RC=1
 
 # ── Migration idempotence ────────────────────────────────────────────────────
 #
