@@ -576,8 +576,9 @@ All under `/api/v1/me`, resolved by `caller_member`.
 
 Existing routes that change: the to-do view and its `POST` and `PATCH` gain `list`, `priority`,
 `steps`, `goose_can` and `anchor_id`; `/me/screenshots` becomes an alias over captures; `GET
-/me/hub` lists the new parts; `GET /suggestions` no longer returns composed questions and gains a
-template for a ready deliverable.
+/me/hub` lists the new parts; `GET /suggestions` no longer returns composed questions and gains
+cards derived from anchors, questions, deliverables and the fact sheet ([my-goose-hub.md,
+Suggestions on Home](my-goose-hub.md#suggestions-on-home)).
 
 Reason chips, the same on every surface: `too_generic`, `not_relevant`, `wrong_facts`,
 `already_know`, `bad_timing`.

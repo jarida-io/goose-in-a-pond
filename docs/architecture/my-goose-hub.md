@@ -549,8 +549,18 @@ nothing, so a phone that still asks for ideas shows no error.
 ### Suggestions on Home
 
 `GET /suggestions` answers with questions derived from what the pond holds, never stored and
-never written by a model. The first is a member's finished work they have not opened: a
-deliverable of an anchor they own that is ready or unsure and not yet seen.
+never written by a model. Six read what the idea engine holds for the member asking, and only
+from anchors they own, but for `questions_waiting`, which also asks the questions of an anchor
+shared with them:
+
+| Id | When | Prompt, for example | `because` | `context` |
+|---|---|---|---|---|
+| `anchor_soon` | An active anchor starts within three days, on the household's clock | "What do I need for MCP Dev Summit on Thursday?" | "MCP Dev Summit starts on Thursday, 19 November." | `temporal`: its title, dates, place and facts |
+| `questions_waiting` | A live anchor has open questions | "Answer 3 questions about my Diani trip" | "3 questions about Diani trip are waiting for an answer." | `personal_memory`, `anchor:<id>`: the questions and their options, which the reply puts one at a time |
+| `plan_to_confirm` | A candidate anchor waits for the member's yes | "Plan my Lamu trip" | Its `why`: "You mentioned it on 12 November." | `personal_memory`, `anchor:<id>`: the anchor, and to call `plan_for` with its kind and title, which confirms it |
+| `changed_since` | A refresh changed a deliverable they have not opened | "What changed in my plan for Diani trip?" | "Updated: Plan for Diani trip. The SGR fare rose to KSh 3,000." | `personal_memory`, `deliverable:<id>`: what changed and the new opening |
+| `ready_deliverable` | A first version, or an unsure one, they have not opened | "Tell me about my plan for Diani trip" | "Ready: Plan for Diani trip." | `personal_memory`, `deliverable:<id>`: its title, hook and opening |
+| `fact_hint` | An active fact line hints a tool the pond can use now | "What's the weather in Ndenderu this weekend?" | "On your fact sheet: Lives in Ndenderu with family." | `personal_memory`, `fact:<id>`: the line |
 
 ```
 {"id": "ready_deliverable", "prompt": "Tell me about my plan for Diani trip",
@@ -559,11 +569,23 @@ deliverable of an anchor they own that is ready or unsure and not yet seen.
              "fact": "its title, hook and opening"}}
 ```
 
-It counts against the four shown, is muted like the others (`suggestions_muted`), and goes once
-the member opens the deliverable (`POST /me/deliverables/{id}/seen`). Sent back as
-`suggestion_context` with the tap, its `fact` gives the chat model the deliverable's opening.
-`composed` is always `false`, and `POST /suggestions/{id}/taken` answers 200 with
-`"settled": false` for any id.
+A card about an anchor with a date comes first, the nearest date first; then, in this order,
+`questions_waiting`, `plan_to_confirm`, `changed_since`, `ready_deliverable`, `fact_hint` and the
+templates (`calendar_today`, `upcoming_schedule`, `inbox_recent`, `routine_recall`,
+`memory_recall`, `devices_online`, `weather_today`). A refresh that changed something is offered
+only as `changed_since`, so one deliverable never takes two cards. `fact_hint` turns one line
+into a fixed ask by its category and the tool it hints: `home` with weather, `routine` with
+weather, `hunt` with `web_watch`, `work` and `food` with `search_web`. The tool must be on (search
+also needs its key), the best three such lines take a day each, and the place named is the one
+the household set. A prompt is at most 90 characters; a long title is cut to fit, and the
+`context` keeps it whole. A pond with no engine data is offered what it was before.
+
+Each counts against the four shown and is muted like the others (`suggestions_muted`). A
+deliverable's card goes once the member opens it (`POST /me/deliverables/{id}/seen`), a
+candidate's once it is confirmed, and a question's once it is answered or skipped in My Goose:
+an answer given in the chat is not written to the question. Sent back as `suggestion_context`
+with the tap, the `context` grounds the chat model's reply. `composed` is always `false`, and
+`POST /suggestions/{id}/taken` answers 200 with `"settled": false` for any id.
 
 ## 6a. Cards sent to chat
 

@@ -295,11 +295,61 @@ async fn ready_plan(h: &Harness, owner: &str, title: &str) -> String {
     trip.id
 }
 
+/// An anchor of `owner`'s, stored; a `Chat` origin makes it a candidate Goose offers.
+async fn stored_anchor(
+    h: &Harness,
+    owner: &str,
+    title: &str,
+    origin: pond_core::user_data::domain::anchor::AnchorOrigin,
+    starts_in_days: Option<i64>,
+) -> pond_core::user_data::domain::anchor::Anchor {
+    use pond_core::user_data::domain::anchor::{Anchor, AnchorKind};
+    use pond_core::user_data::ports::anchors::AnchorRepository;
+    let anchors = pond_infra::sqlite_anchors::SqliteAnchorRepository::new(h.pool.clone());
+    let now = chrono::Utc::now();
+    let mut trip = Anchor::new(owner, AnchorKind::Trip, title, origin, now).unwrap();
+    trip.starts_at = starts_in_days.map(|days| now + chrono::Duration::days(days));
+    assert!(anchors.add(&trip).await.unwrap());
+    trip
+}
+
+/// Open questions Goose asked `owner` for `anchor`.
+async fn ask(h: &Harness, owner: &str, anchor: &str, texts: &[&str]) {
+    use pond_core::user_data::domain::question::{Question, QuestionPurpose};
+    use pond_core::user_data::ports::questions::QuestionRepository;
+    let questions = pond_infra::sqlite_questions::SqliteQuestionRepository::new(h.pool.clone());
+    let batch: Vec<Question> = texts
+        .iter()
+        .map(|text| {
+            let mut asked = Question::new(
+                owner,
+                "b1",
+                QuestionPurpose::Anchor,
+                text,
+                &["Yes".to_string(), "No".to_string()],
+                false,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+            asked.anchor_id = Some(anchor.to_string());
+            asked
+        })
+        .collect();
+    assert_eq!(
+        questions.add_batch(&batch).await.unwrap().len(),
+        texts.len()
+    );
+}
+
 fn the_ready_one(body: &Value) -> Option<&Value> {
+    the_one(body, "ready_deliverable")
+}
+
+fn the_one<'a>(body: &'a Value, id: &str) -> Option<&'a Value> {
     body["suggestions"]
         .as_array()?
         .iter()
-        .find(|s| s["id"] == "ready_deliverable")
+        .find(|s| s["id"] == id)
 }
 
 fn prompts(body: &Value) -> Vec<String> {
@@ -367,8 +417,9 @@ async fn considered_names_every_suggestor_even_when_all_are_silent() {
         offered(&body).is_empty(),
         "nothing should be offered with no extensions and no data; body: {body}"
     );
-    assert!(
-        considered(&body).len() >= 7,
+    assert_eq!(
+        considered(&body).len(),
+        13,
         "an empty column must still say what was looked at, or a quiet house and a \
          broken engine are the same response. Body: {body}"
     );
@@ -577,4 +628,140 @@ async fn no_composed_question_is_served_and_a_tap_settles_nothing() {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body, serde_json::json!({"id": id, "settled": false}));
     }
+}
+
+/// A household of one is offered what waits on them: a plan Goose noticed, the questions it
+/// asked, and a fact line whose hint names a tool the pond has.
+#[tokio::test]
+async fn the_engine_offers_its_member_what_waits_on_them() {
+    use pond_core::user_data::domain::anchor::AnchorOrigin;
+    use pond_core::user_data::domain::fact_sheet::{
+        Confidence, FactCategory, FactLine, FactSource, FactSourceKind,
+    };
+    use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
+    use pond_core::user_data::ports::settings::SettingsRepository;
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    stored_anchor(&h, &jerry, "Lamu trip", AnchorOrigin::Chat, None).await;
+    let diani = stored_anchor(&h, &jerry, "Diani trip", AnchorOrigin::You, None).await;
+    ask(
+        &h,
+        &jerry,
+        &diani.id,
+        &["Will you take the SGR?", "Is Liz coming?"],
+    )
+    .await;
+    let mut home = FactLine::new(
+        &jerry,
+        FactCategory::Home,
+        "Lives in Ndenderu with family",
+        Confidence::Sure,
+        FactSource::new(FactSourceKind::Memory, Some("m1")),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    home.tools = vec!["get_weather_forecast".to_string()];
+    let facts = pond_infra::sqlite_fact_sheet::SqliteFactSheetRepository::new(h.pool.clone());
+    assert!(facts.write(&home).await.unwrap().is_some());
+    let mut settings = h.settings.get().await.unwrap();
+    settings.weather_location_name = "Ndenderu".to_string();
+    h.settings.update(&settings).await.unwrap();
+
+    let (status, body) = get_json(&h.app, "/api/v1/suggestions").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        offered(&body)[..3],
+        ["questions_waiting", "plan_to_confirm", "fact_hint"],
+        "body: {body}"
+    );
+    let plan = the_one(&body, "plan_to_confirm").unwrap();
+    assert_eq!(plan["prompt"], "Plan my Lamu trip");
+    assert_eq!(plan["answered_by"], "giap-schedule");
+    assert!(
+        plan["context"]["fact"]
+            .as_str()
+            .is_some_and(|fact| fact.contains("title \"Lamu trip\"")),
+        "body: {body}"
+    );
+    let waiting = the_one(&body, "questions_waiting").unwrap();
+    assert_eq!(waiting["prompt"], "Answer 2 questions about my Diani trip");
+    assert!(
+        waiting["context"]["fact"]
+            .as_str()
+            .is_some_and(|fact| fact.contains("Is Liz coming?")),
+        "body: {body}"
+    );
+    let hint = the_one(&body, "fact_hint").unwrap();
+    assert_eq!(
+        hint["prompt"],
+        "What's the weather in Ndenderu this weekend?"
+    );
+}
+
+/// A trip Liz shares with Jerry asks him its questions and offers him nothing else of hers.
+#[tokio::test]
+async fn a_shared_trip_offers_the_member_it_is_shared_with_only_its_questions() {
+    use pond_core::user_data::domain::anchor::{
+        AnchorOrigin, Deliverable, DeliverableKind, DeliverableState,
+    };
+    use pond_core::user_data::ports::anchors::AnchorRepository;
+    let h = make_app(19).await;
+    let jerry = member(&h, "Jerry").await;
+    let liz = member(&h, "Liz").await;
+    let trip = stored_anchor(&h, &liz, "Naivasha trip", AnchorOrigin::You, Some(1)).await;
+    let anchors = pond_infra::sqlite_anchors::SqliteAnchorRepository::new(h.pool.clone());
+    assert!(anchors
+        .set_shares(&liz, &trip.id, std::slice::from_ref(&jerry))
+        .await
+        .unwrap());
+    ask(&h, &liz, &trip.id, &["Shall we drive?"]).await;
+    let mut plan = Deliverable::new(
+        &trip.id,
+        DeliverableKind::Plan,
+        "plan",
+        "Plan for Naivasha trip",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    plan.state = DeliverableState::Ready;
+    plan.version = 2;
+    plan.changed = "- The lake road is closed.".to_string();
+    plan.body = "## Day 1\nLeave by 07:00.".to_string();
+    assert!(anchors.add_deliverable(&plan).await.unwrap());
+
+    let session = session_of(&h, "s-jerry", &jerry).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    let waiting =
+        the_one(&body, "questions_waiting").unwrap_or_else(|| panic!("not asked: {body}"));
+    assert_eq!(
+        waiting["prompt"],
+        "Answer 1 question about the Naivasha trip"
+    );
+    for hers in [
+        "anchor_soon",
+        "changed_since",
+        "ready_deliverable",
+        "plan_to_confirm",
+    ] {
+        assert!(
+            the_one(&body, hers).is_none(),
+            "{hers} offered Liz's trip to Jerry: {body}"
+        );
+    }
+
+    let session = session_of(&h, "s-liz", &liz).await;
+    let (_, body) = get_json(&h.app, &format!("/api/v1/suggestions?session_id={session}")).await;
+    assert_eq!(
+        offered(&body)[..3],
+        ["anchor_soon", "questions_waiting", "changed_since"],
+        "body: {body}"
+    );
+    assert_eq!(
+        the_one(&body, "anchor_soon").unwrap()["prompt"],
+        "What do I need for my Naivasha trip tomorrow?"
+    );
+    assert_eq!(
+        the_one(&body, "changed_since").unwrap()["prompt"],
+        "What changed in my plan for Naivasha trip?"
+    );
 }

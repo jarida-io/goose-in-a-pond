@@ -17628,10 +17628,12 @@ async fn list_suggestions(
     let (schedules_before_midnight, next_schedule_label) =
         suggestion_schedules_before(&state, now, day_end).await;
 
-    let unseen_work = match audience {
-        suggestion::Audience::Personal => suggestion_unseen_work(&state, &read_scope).await,
-        suggestion::Audience::Shared => None,
+    let engine = match audience {
+        suggestion::Audience::Personal => suggestion_engine_data(&state, &read_scope, now).await,
+        suggestion::Audience::Shared => SuggestionEngineData::default(),
     };
+    let search_has_key = crate::web_search::built_in_state(&state).await
+        == pond_core::mcp::domain::web_search::BuiltInSearchState::On;
 
     let snapshot = suggestion::SuggestionSnapshot {
         audience,
@@ -17646,7 +17648,19 @@ async fn list_suggestions(
         devices_registered,
         weather_ready: settings.weather_enabled && place.weather_target().is_some(),
         place: place.is_named().then(|| place.name.clone()),
-        unseen_work,
+        member: engine.member,
+        now,
+        timezone: place.timezone.clone(),
+        home_place: (place.origin == location::Origin::Configured).then(|| place.name.clone()),
+        anchors: engine.anchors,
+        unseen_work: engine.unseen_work,
+        open_questions: engine.open_questions,
+        facts: engine.facts,
+        tools_ready: suggestion::tools_ready(
+            settings.ext_weather_enabled,
+            settings.ext_knowledge_enabled,
+            search_has_key,
+        ),
     };
 
     let set = suggestion::suggest(&snapshot);
@@ -17682,36 +17696,99 @@ async fn suggestion_taken(Path(id): Path<String>) -> impl axum::response::IntoRe
     Json(json!({ "id": id, "settled": false }))
 }
 
-/// The caller's newest finished work they have not opened, on an anchor they own: only its
-/// owner can mark it seen, so a shared one would be offered for good.
-async fn suggestion_unseen_work(
+/// Unopened deliverables read for the suggestors, which offer at most two of them.
+const SUGGESTION_UNSEEN_READ: usize = 20;
+
+/// What the idea engine holds for the member asking, as the suggestors read it.
+#[derive(Default)]
+struct SuggestionEngineData {
+    member: Option<String>,
+    anchors: Vec<pond_core::user_data::domain::anchor::Anchor>,
+    unseen_work: Vec<pond_core::user_data::services::suggestion::UnseenWork>,
+    open_questions: Vec<pond_core::user_data::domain::question::Question>,
+    facts: Vec<pond_core::user_data::domain::fact_sheet::FactLine>,
+}
+
+/// The engine's data for the one member `scope` names, empty for nobody; a failed read leaves
+/// its part empty, so the column falls back to what it showed without the engine.
+async fn suggestion_engine_data(
     state: &Arc<AppState>,
     scope: &pond_core::user_data::domain::profile::ProfileScope,
-) -> Option<pond_core::user_data::services::suggestion::UnseenWork> {
+    now: chrono::DateTime<chrono::Utc>,
+) -> SuggestionEngineData {
+    use pond_core::user_data::domain::anchor::AnchorState;
+    use pond_core::user_data::domain::fact_sheet::FactState;
     use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::domain::question::QuestionState;
+    use pond_core::user_data::services::suggestion::UnseenWork;
 
     let member = match scope {
         ProfileScope::Owner(id) => id.clone(),
-        ProfileScope::Household => crate::member_notes::sole_member(state).await?,
-        ProfileScope::Guest => return None,
+        ProfileScope::Household => match crate::member_notes::sole_member(state).await {
+            Some(member) => member,
+            None => return SuggestionEngineData::default(),
+        },
+        ProfileScope::Guest => return SuggestionEngineData::default(),
     };
-    let anchors = &state.engine.anchors;
-    let unseen = anchors.unseen(&member).await.unwrap_or_else(|e| {
-        tracing::debug!(error = %e, "suggestions: could not read unopened deliverables");
-        Vec::new()
-    });
-    for deliverable in unseen {
-        let Ok(Some(anchor)) = anchors.get(&member, &deliverable.anchor_id).await else {
-            continue;
-        };
-        if anchor.profile_id == member {
-            return Some(pond_core::user_data::services::suggestion::UnseenWork {
-                anchor,
-                deliverable,
-            });
-        }
+    fn or_empty<T>(read: anyhow::Result<Vec<T>>, what: &str) -> Vec<T> {
+        read.unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "suggestions: could not read {what}");
+            Vec::new()
+        })
     }
-    None
+    let engine = &state.engine;
+
+    let anchors = or_empty(
+        engine.anchors.list(&member, &AnchorState::LIVE).await,
+        "anchors",
+    );
+    let unseen_work = or_empty(
+        engine.anchors.unseen(&member).await,
+        "unopened deliverables",
+    )
+    .into_iter()
+    .take(SUGGESTION_UNSEEN_READ)
+    .filter_map(|deliverable| {
+        let anchor = anchors
+            .iter()
+            .find(|anchor| anchor.id == deliverable.anchor_id)?;
+        Some(UnseenWork {
+            anchor: anchor.clone(),
+            deliverable,
+        })
+    })
+    .collect();
+
+    let mut open_questions = or_empty(engine.questions.open(&member).await, "open questions");
+    // A shared anchor's questions are kept under its owner, and the member may answer them.
+    for anchor in anchors.iter().filter(|anchor| anchor.profile_id != member) {
+        let asked = or_empty(
+            engine
+                .questions
+                .for_anchor(&anchor.profile_id, &anchor.id)
+                .await,
+            "a shared anchor's questions",
+        );
+        open_questions.extend(
+            asked
+                .into_iter()
+                .filter(|question| question.state == QuestionState::Open),
+        );
+    }
+    open_questions.retain(|question| !question.is_overdue(now));
+
+    let facts = or_empty(
+        engine.facts.list(&member, FactState::Active).await,
+        "the fact sheet",
+    );
+
+    SuggestionEngineData {
+        member: Some(member),
+        anchors,
+        unseen_work,
+        open_questions,
+        facts,
+    }
 }
 
 /// The audience as a word, for a client that wants to explain itself.
