@@ -17664,12 +17664,23 @@ async fn list_suggestions(
     };
 
     let set = suggestion::suggest(&snapshot);
+    let ask_cards = match snapshot.member.as_deref() {
+        Some(member) => state
+            .engine
+            .cards
+            .shown(member, now)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "suggestions: could not read idea cards");
+                Vec::new()
+            }),
+        None => Vec::new(),
+    };
 
-    let offered: Vec<Value> = set
-        .offered
+    let offered: Vec<Value> = suggestion::led_by_ask_cards(&ask_cards, set.offered)
         .iter()
         .map(|s| {
-            json!({
+            let mut chip = json!({
                 "id": s.id,
                 "prompt": s.prompt,
                 "because": s.because,
@@ -17677,7 +17688,12 @@ async fn list_suggestions(
                 // Clients report a tap only on a composed one, and none is.
                 "composed": false,
                 "context": s.context,
-            })
+            });
+            // The card a chat about it sends, so the turn gets the card's notes.
+            if let Some(card_id) = s.id.strip_prefix(suggestion::CARD_PREFIX) {
+                chip["card"] = json!({"kind": "idea_card", "id": card_id});
+            }
+            chip
         })
         .collect();
 

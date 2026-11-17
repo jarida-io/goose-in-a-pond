@@ -51,6 +51,7 @@ impl Database {
         "anchor_shares",
         "anchors",
         "captures",
+        "cards",
         "cart_items",
         "cart_prices",
         "connector_webhooks",

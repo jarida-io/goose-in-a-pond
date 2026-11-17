@@ -1,5 +1,6 @@
 pub mod anchor;
 pub mod capture;
+pub mod card;
 pub mod device;
 pub mod dont_list;
 pub mod draft;

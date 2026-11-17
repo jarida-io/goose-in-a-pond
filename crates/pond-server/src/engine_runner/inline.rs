@@ -12,7 +12,9 @@ use pond_core::user_data::domain::engine_job::{EngineJob, JobKind};
 use pond_core::user_data::services::engine::steps::{draft_artifact, verdict_artifact};
 use pond_core::user_data::services::engine::{ROLE_CRITIC, ROLE_MAKE, ROLE_REVISE};
 
-use super::{capture, deliverable, fact_sheet, ledger, questions, rule, EngineDeps, ModelStop};
+use super::{
+    capture, cards, deliverable, fact_sheet, ledger, questions, rule, EngineDeps, ModelStop,
+};
 
 /// Why a step of a kind with no case here fails.
 pub const CANNOT_RUN: &str = "this pond cannot run this job yet";
@@ -30,6 +32,7 @@ pub fn runs(kind: JobKind) -> bool {
             | JobKind::Capture
             | JobKind::Ledger
             | JobKind::Rule
+            | JobKind::Cards
     )
 }
 
@@ -163,6 +166,8 @@ async fn run_case(ctx: &StepCtx<'_>) -> Result<Saved, ModelStop> {
         (JobKind::Rule, ROLE_MAKE) => rule::make(ctx).await,
         (JobKind::Rule, ROLE_CRITIC) => rule::critic(ctx).await,
         (JobKind::Rule, ROLE_REVISE) => rule::revise(ctx).await,
+        (JobKind::Cards, ROLE_MAKE) => cards::make(ctx).await,
+        (JobKind::Cards, ROLE_CRITIC) => cards::critic(ctx).await,
         _ => Err(failed(CANNOT_RUN)),
     }
 }

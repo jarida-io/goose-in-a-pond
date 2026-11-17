@@ -30,6 +30,7 @@ pub mod sqlite_agent_prefill;
 pub mod sqlite_agent_suggestion;
 pub mod sqlite_anchors;
 pub mod sqlite_captures;
+pub mod sqlite_cards;
 pub mod sqlite_cart;
 pub mod sqlite_connector_webhooks;
 pub mod sqlite_context;

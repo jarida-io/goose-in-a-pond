@@ -7,6 +7,7 @@ use std::sync::Arc;
 use pond_core::user_data::ports::anchors::AnchorRepository;
 use pond_core::user_data::ports::capture_pictures::CapturePictures;
 use pond_core::user_data::ports::captures::CaptureRepository;
+use pond_core::user_data::ports::cards::CardRepository;
 use pond_core::user_data::ports::dont_list::DontListRepository;
 use pond_core::user_data::ports::engine_jobs::EngineJobRepository;
 use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
@@ -17,6 +18,7 @@ use pond_core::user_data::ports::questions::QuestionRepository;
 use pond_infra::disk_capture_pictures::DiskCapturePictures;
 use pond_infra::sqlite_anchors::SqliteAnchorRepository;
 use pond_infra::sqlite_captures::SqliteCaptureRepository;
+use pond_infra::sqlite_cards::SqliteCardRepository;
 use pond_infra::sqlite_dont_list::SqliteDontListRepository;
 use pond_infra::sqlite_engine_jobs::SqliteEngineJobRepository;
 use pond_infra::sqlite_fact_sheet::SqliteFactSheetRepository;
@@ -39,6 +41,7 @@ pub struct EngineStores {
     pub ledger: Arc<dyn LedgerRepository>,
     pub intentions: Arc<dyn IntentionRepository>,
     pub jobs: Arc<dyn EngineJobRepository>,
+    pub cards: Arc<dyn CardRepository>,
 }
 
 impl EngineStores {
@@ -54,6 +57,7 @@ impl EngineStores {
             agents: Arc::new(SqliteMemberAgentRepository::new(system.clone())),
             ledger: Arc::new(SqliteLedgerRepository::new(system.clone())),
             intentions: Arc::new(SqliteIntentionRepository::new(system.clone())),
+            cards: Arc::new(SqliteCardRepository::new(system.clone())),
             jobs: Arc::new(SqliteEngineJobRepository::new(system)),
         }
     }

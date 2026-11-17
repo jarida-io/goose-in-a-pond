@@ -3,6 +3,7 @@
 //! runner calls in here for a task whose id marks it as an engine job's.
 
 mod capture;
+mod cards;
 mod deliverable;
 mod fact_sheet;
 mod finish;
@@ -31,6 +32,7 @@ use pond_core::mcp::ports::notification::MemberNotifier;
 use pond_core::models::domain::message::ImageAttachment;
 use pond_core::shared::domain::long_task::{LongTask, PlanStep, StepState};
 use pond_core::shared::ports::long_task::LongTaskRepository;
+use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::shared::services::goose_thread::GooseThread;
 use pond_core::shared::services::long_task_runner::{next_run, NextRun};
 use pond_core::user_data::domain::engine_job::{is_engine_task, EngineJob, JobKind, JobState};
@@ -38,6 +40,7 @@ use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::anchors::AnchorRepository;
 use pond_core::user_data::ports::capture_pictures::CapturePictures;
 use pond_core::user_data::ports::captures::CaptureRepository;
+use pond_core::user_data::ports::cards::CardRepository;
 use pond_core::user_data::ports::dont_list::DontListRepository;
 use pond_core::user_data::ports::engine_jobs::EngineJobRepository;
 use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
@@ -53,6 +56,7 @@ use pond_core::user_data::services::engine::is_inline_role;
 use pond_core::user_data::services::engine::queue::run_order;
 use pond_core::user_data::services::fact_sheet::ToolHint;
 
+pub use cards::{PondWebSearch, WebFinder};
 pub use finish::{at_finish, give_up, instead_of_planning};
 pub use inline::{run_inline_step, runs, CANNOT_RUN};
 pub use model::ProviderModel;
@@ -144,9 +148,13 @@ pub struct EngineDeps {
     pub memories: Arc<dyn MemoryRepository + Send + Sync>,
     pub sessions: Arc<dyn SessionStorage>,
     pub interests: Arc<dyn InterestRepository>,
+    pub cards: Arc<dyn CardRepository>,
+    pub todos: Arc<dyn TodoRepository>,
     pub model: Arc<dyn EngineModel>,
     /// `None` on a pond with no embedder: relevance then falls back to recency.
     pub recall: Option<Arc<dyn Recall>>,
+    /// `None` on a pond with no web search: a card set rests on what is known alone.
+    pub web: Option<Arc<dyn WebFinder>>,
     pub tools: ToolList,
     pub notifier: Arc<dyn MemberNotifier>,
     pub thread: Option<Arc<GooseThread>>,

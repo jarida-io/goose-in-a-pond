@@ -74,6 +74,8 @@ pub enum OpenScreen {
     Deliverable { deliverable_id: String },
     /// The questions Goose is waiting on.
     Questions,
+    /// My Goose's idea cards, at one card when there is a `card_id`; not the chat's context cards.
+    Cards,
 }
 
 impl OpenScreen {
@@ -160,6 +162,7 @@ impl OpenScreen {
                 "deliverable"
             }
             Self::Questions => "questions",
+            Self::Cards => "idea_cards",
         };
         fields.insert("open".into(), screen.into());
         fields
@@ -280,6 +283,7 @@ mod tests {
             json!({"open": "deliverable", "deliverable_id": "d1"})
         );
         assert_eq!(OpenScreen::Questions.data(), json!({"open": "questions"}));
+        assert_eq!(OpenScreen::Cards.data(), json!({"open": "idea_cards"}));
     }
 
     #[test]

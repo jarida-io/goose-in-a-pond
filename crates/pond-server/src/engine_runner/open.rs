@@ -25,6 +25,9 @@ fn inline_goal(job: &EngineJob) -> String {
         JobKind::Capture => "Read what one of this member's pictures shows.".to_string(),
         JobKind::Ledger => "Read the payments one of this member's pictures shows.".to_string(),
         JobKind::Rule => "Write one rule from what this member turned down.".to_string(),
+        JobKind::Cards => {
+            "Write idea cards for this member from what is known and found.".to_string()
+        }
         JobKind::Deliverable | JobKind::Memory | JobKind::Consolidation => job.subject.clone(),
     }
 }

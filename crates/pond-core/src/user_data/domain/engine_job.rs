@@ -34,6 +34,7 @@ pub enum JobKind {
     Ledger,
     Rule,
     Questions,
+    Cards,
 }
 
 impl JobKind {
@@ -48,6 +49,7 @@ impl JobKind {
             Self::Ledger => "ledger",
             Self::Rule => "rule",
             Self::Questions => "questions",
+            Self::Cards => "cards",
         }
     }
 
@@ -62,6 +64,7 @@ impl JobKind {
             "ledger" => Some(Self::Ledger),
             "rule" => Some(Self::Rule),
             "questions" => Some(Self::Questions),
+            "cards" => Some(Self::Cards),
             _ => None,
         }
     }

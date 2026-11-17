@@ -26,6 +26,7 @@ mod fact_sheet;
 pub mod factory_reset;
 mod home_location;
 pub mod host_guard;
+mod idea_cards;
 mod ideas;
 pub mod idempotency;
 pub(crate) mod image_normalize;
