@@ -2,14 +2,19 @@
 //! the inline steps that are one model call each, and what follows a job's steps. The long-task
 //! runner calls in here for a task whose id marks it as an engine job's.
 
+mod capture;
 mod deliverable;
 mod fact_sheet;
 mod finish;
 mod inline;
+mod interests;
+mod ledger;
 mod model;
 mod notices;
 mod open;
+mod pictures;
 mod questions;
+mod rule;
 mod tick;
 
 #[cfg(test)]
@@ -23,6 +28,7 @@ use tokio::sync::Notify;
 
 use pond_core::context::retrieval_service::{PersonalContextRetrieval, Recollection};
 use pond_core::mcp::ports::notification::MemberNotifier;
+use pond_core::models::domain::message::ImageAttachment;
 use pond_core::shared::domain::long_task::{LongTask, PlanStep, StepState};
 use pond_core::shared::ports::long_task::LongTaskRepository;
 use pond_core::shared::services::goose_thread::GooseThread;
@@ -30,11 +36,13 @@ use pond_core::shared::services::long_task_runner::{next_run, NextRun};
 use pond_core::user_data::domain::engine_job::{is_engine_task, EngineJob, JobKind, JobState};
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::anchors::AnchorRepository;
+use pond_core::user_data::ports::capture_pictures::CapturePictures;
 use pond_core::user_data::ports::captures::CaptureRepository;
 use pond_core::user_data::ports::dont_list::DontListRepository;
 use pond_core::user_data::ports::engine_jobs::EngineJobRepository;
 use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
 use pond_core::user_data::ports::interests::InterestRepository;
+use pond_core::user_data::ports::ledger::LedgerRepository;
 use pond_core::user_data::ports::member_agents::MemberAgentRepository;
 use pond_core::user_data::ports::memory_repository::MemoryRepository;
 use pond_core::user_data::ports::profile::ProfileRepository;
@@ -50,6 +58,9 @@ pub use inline::{run_inline_step, runs, CANNOT_RUN};
 pub use model::ProviderModel;
 pub use notices::{questions_notice, tell_member};
 pub use tick::{run_ticks, tick, TickReport, EVERYDAY_TITLE};
+
+/// Why a call that needs a picture was not made.
+pub const READS_NO_PICTURES: &str = "this pond's model cannot read pictures";
 
 /// The window assumed before any turn has reported one.
 const ASSUMED_WINDOW_TOKENS: usize = 32_768;
@@ -68,6 +79,22 @@ pub enum ModelStop {
 pub trait EngineModel: Send + Sync {
     /// One call with no tools, on the inference bus's Task lane.
     async fn complete(&self, system: &str, user: String) -> Result<String, ModelStop>;
+
+    /// The same call with one picture beside the words; a model that reads none refuses it.
+    async fn complete_seeing(
+        &self,
+        system: &str,
+        user: String,
+        picture: ImageAttachment,
+    ) -> Result<String, ModelStop> {
+        let _ = (system, user, picture);
+        Err(ModelStop::Failed(READS_NO_PICTURES.to_string()))
+    }
+
+    /// Whether the model can be shown a picture now.
+    async fn reads_pictures(&self) -> bool {
+        false
+    }
 }
 
 /// What a member's stored context holds that bears on some words.
@@ -91,6 +118,15 @@ impl Recall for PersonalContextRetrieval {
 
 /// The tools this pond registers, each with what it is for.
 pub type ToolList = Arc<dyn Fn() -> Vec<ToolHint> + Send + Sync>;
+
+/// What reading members' pictures needs beyond the engine's own stores.
+#[derive(Clone)]
+pub struct PictureDeps {
+    pub store: Arc<dyn CapturePictures>,
+    pub ledger: Arc<dyn LedgerRepository>,
+    /// The embedder's bell, rung when a capture it indexes was read.
+    pub indexed: Option<Arc<Notify>>,
+}
 
 /// What the engine reads, writes and calls.
 #[derive(Clone)]
@@ -116,6 +152,8 @@ pub struct EngineDeps {
     pub thread: Option<Arc<GooseThread>>,
     /// The long-task runner's bell, rung when a job's task is ready to run.
     pub bell: Option<Arc<Notify>>,
+    /// `None` on a pond with nowhere to keep pictures: its captures wait unread.
+    pub pictures: Option<PictureDeps>,
 }
 
 impl EngineDeps {

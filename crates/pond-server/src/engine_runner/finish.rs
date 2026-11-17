@@ -15,7 +15,10 @@ use pond_core::user_data::services::engine::steps::{
 use pond_core::user_data::services::engine::ROLE_CRITIC;
 
 use super::inline::{body_of, CANNOT_RUN};
-use super::{deliverable, fact_sheet, is_failed_inline, plans_itself, questions, EngineDeps};
+use super::{
+    capture, deliverable, fact_sheet, is_failed_inline, ledger, plans_itself, questions, rule,
+    EngineDeps,
+};
 
 /// How far a job of one maker step and one check has got.
 pub(super) enum Stage {
@@ -186,6 +189,9 @@ pub async fn at_finish(
         JobKind::Questions => {
             questions::after_steps(deps, task, job, steps, artifacts, now).await?
         }
+        JobKind::Capture => capture::after_steps(deps, task, job, steps, artifacts, now).await?,
+        JobKind::Ledger => ledger::after_steps(deps, task, job, steps, artifacts, now).await?,
+        JobKind::Rule => rule::after_steps(deps, task, job, steps, artifacts, now).await?,
         _ => {
             let outcome = format!("Failed: {CANNOT_RUN}.");
             close(deps, task, &mut job, JobState::Failed, &outcome, now).await?
@@ -204,8 +210,13 @@ pub async fn give_up(
     let Some(mut job) = open_job(deps, task, now).await? else {
         return Ok(());
     };
-    if job.kind == JobKind::Deliverable {
-        return deliverable::out_of_road(deps, task, job, reason, now).await;
+    match job.kind {
+        JobKind::Deliverable => {
+            return deliverable::out_of_road(deps, task, job, reason, now).await
+        }
+        JobKind::Capture => return capture::out_of_road(deps, task, job, reason, now).await,
+        JobKind::Ledger => return ledger::out_of_road(deps, task, job, reason, now).await,
+        _ => {}
     }
     let outcome = format!("Failed: {reason}.");
     close(deps, task, &mut job, JobState::Failed, &outcome, now).await

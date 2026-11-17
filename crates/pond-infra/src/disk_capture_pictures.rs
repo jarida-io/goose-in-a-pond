@@ -8,8 +8,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
 
+use chrono::{DateTime, Utc};
+
 use pond_core::user_data::ports::capture_pictures::{
-    mime_type_of, picture_file_name, CapturePictures,
+    mime_type_of, picture_file_name, CapturePictures, KeptPicture,
 };
 
 /// The directory under the data directory.
@@ -102,6 +104,36 @@ impl CapturePictures for DiskCapturePictures {
             Err(e) => Err(e).with_context(|| format!("deleting {}", path.display())),
         }
     }
+
+    async fn kept(&self) -> Result<Vec<KeptPicture>> {
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("listing {}", self.dir.display())),
+        };
+        let mut kept = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let Some(file) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            // Only names `save` gives: a half-written `.part` is never listed.
+            if mime_type_of(&file).is_none() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let saved_at: DateTime<Utc> = meta
+                .modified()
+                .map(DateTime::from)
+                .unwrap_or_else(|_| Utc::now());
+            kept.push(KeptPicture { file, saved_at });
+        }
+        Ok(kept)
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +168,24 @@ mod tests {
         pictures.delete(&file).await.unwrap();
         assert_eq!(pictures.read(&file).await.unwrap(), None);
         pictures.delete(&file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_the_pictures_it_kept_are_listed() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let pictures = DiskCapturePictures::under(data_dir.path());
+        assert!(
+            pictures.kept().await.unwrap().is_empty(),
+            "no directory yet"
+        );
+        let file = pictures.save("c1", "image/jpeg", b"jpeg").await.unwrap();
+        let dir = data_dir.path().join("captures");
+        std::fs::write(dir.join("c2.jpg.part"), b"half").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not a picture").unwrap();
+        let kept = pictures.kept().await.unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].file, file);
+        assert!(Utc::now() - kept[0].saved_at < chrono::Duration::minutes(1));
     }
 
     #[tokio::test]

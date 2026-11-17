@@ -19,11 +19,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use pond_core::security::ports::policy::Principal;
-use pond_core::user_data::domain::capture::{Capture, CaptureKind, CaptureState, Sensitivity};
-use pond_core::user_data::ports::capture_pictures::CapturePictures;
-use pond_core::user_data::services::screenshot_notes::{
-    NotTaken, MAX_IMAGE_CHARS, MIME_TYPES, PREFERENCE as OLD_SCREENSHOTS_PREFERENCE,
+use pond_core::user_data::domain::capture::{
+    Capture, CaptureKind, CaptureState, NotTaken, Sensitivity, MAX_IMAGE_CHARS, MIME_TYPES,
 };
+use pond_core::user_data::ports::capture_pictures::CapturePictures;
+use pond_core::user_data::services::screenshot_notes::PREFERENCE as OLD_SCREENSHOTS_PREFERENCE;
 
 use crate::engine_log::call_off;
 use crate::image_normalize::sniff;

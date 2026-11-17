@@ -17,7 +17,7 @@ use pond_core::user_data::services::engine::recipes::{deliverable_title, standin
 use pond_core::user_data::services::engine::tick::{plan_tick, TickAction, TickSnapshot};
 use pond_core::user_data::services::fact_sheet::{is_due, request_rebuild, REBUILD_AFTER_MEMORIES};
 
-use super::{deliverable, inline, open, EngineDeps};
+use super::{deliverable, inline, interests, open, pictures, EngineDeps};
 
 const TICK_EVERY: Duration = Duration::from_secs(60);
 /// The title of the standing anchor every member has.
@@ -47,6 +47,12 @@ pub struct TickReport {
     pub ended: usize,
     /// Open jobs closed because their task was stopped, failed or removed.
     pub closed: usize,
+    /// Picture files deleted: past their time, or named by no capture.
+    pub pictures_deleted: usize,
+    /// Anchors made for confirmed interests, and stopped for avoided ones.
+    pub interests_followed: usize,
+    /// Questions asked about guessed interests.
+    pub interests_asked: usize,
 }
 
 impl TickReport {
@@ -77,6 +83,7 @@ pub async fn tick(deps: &EngineDeps, now: DateTime<Utc>) -> TickReport {
             Vec::new()
         }
     };
+    report.pictures_deleted = pictures::tend(deps, &members, now).await;
     let open_jobs = deps.jobs.open().await.unwrap_or_default();
     for member in members.iter().filter(|p| p.role != Role::Guest) {
         if let Err(e) = tick_member(deps, &member.id, &open_jobs, now, &mut report).await {
@@ -93,6 +100,9 @@ pub async fn tick(deps: &EngineDeps, now: DateTime<Utc>) -> TickReport {
             faded = report.faded,
             ended = report.ended,
             closed = report.closed,
+            pictures_deleted = report.pictures_deleted,
+            interests_followed = report.interests_followed,
+            interests_asked = report.interests_asked,
             "the engine's tick changed something"
         );
     }
@@ -185,6 +195,12 @@ async fn tick_member(
 ) -> anyhow::Result<()> {
     let mut anchors = deps.anchors.list(member, &EVERY_STATE).await?;
     anchors.extend(ensure_everyday(deps, member, &anchors, now).await?);
+    match interests::follow(deps, member, &mut anchors, open_jobs, now).await {
+        Ok(followed) => report.interests_followed += followed.anchored + followed.stopped,
+        Err(e) => {
+            tracing::warn!(member = %member, error = %e, "the engine could not follow a member's interests")
+        }
+    }
     anchors.retain(|anchor| AnchorState::LIVE.contains(&anchor.state));
     let mut deliverables = Vec::new();
     for anchor in anchors.iter().filter(|anchor| anchor.profile_id == member) {
@@ -205,7 +221,7 @@ async fn tick_member(
             deliverables.push(made);
         }
     }
-    let pending = if inline::runs(JobKind::Capture) {
+    let pending = if inline::runs(JobKind::Capture) && pictures::can_read(deps).await {
         deps.captures.pending(CAPTURES_READ).await?
     } else {
         Vec::new()
@@ -225,6 +241,18 @@ async fn tick_member(
         let did = carry_out(deps, member, &anchors, &deliverables, &action, now, report).await;
         if let Err(e) = did {
             tracing::warn!(member = %member, ?action, error = %e, "the engine's tick could not carry out an action");
+        }
+    }
+    match interests::offer(deps, member, now).await {
+        Ok(asked) => report.interests_asked += asked,
+        Err(e) => {
+            tracing::warn!(member = %member, error = %e, "the engine could not offer a member's interests")
+        }
+    }
+    match pictures::read_held(deps, member, now).await {
+        Ok(queued) => report.queued += queued,
+        Err(e) => {
+            tracing::warn!(member = %member, error = %e, "the engine could not queue a held picture's reading")
         }
     }
     Ok(())

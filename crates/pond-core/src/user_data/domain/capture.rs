@@ -8,6 +8,27 @@ use serde::{Deserialize, Serialize};
 pub const PICTURE_KEPT_FOR: Duration = Duration::days(30);
 /// Reads a capture gets before its picture is deleted unread.
 pub const MAX_ATTEMPTS: u32 = 2;
+/// Largest picture taken, as base64 characters (about 1.5 MB of picture).
+pub const MAX_IMAGE_CHARS: usize = 2_000_000;
+/// Picture types the model reads.
+pub const MIME_TYPES: [&str; 3] = ["image/jpeg", "image/png", "image/webp"];
+
+/// Why a picture a phone sent was not taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotTaken {
+    TooLarge,
+    /// Not a picture type the model reads.
+    WrongType,
+}
+
+impl NotTaken {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TooLarge => "the picture is too large; send it smaller",
+            Self::WrongType => "the picture must be a JPEG, a PNG or a WebP",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

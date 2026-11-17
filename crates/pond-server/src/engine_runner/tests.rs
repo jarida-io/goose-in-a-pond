@@ -1,10 +1,15 @@
+mod pictures;
+mod rules_and_interests;
+
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
 use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
+use pond_core::models::domain::message::ImageAttachment;
 use pond_core::shared::domain::long_task::{
     validate_plan, Artifact, ArtifactKind, LongTask, LongTaskBudget, LongTaskState, OutcomeKind,
     StepDraft, StepOutcome, StepState,
@@ -26,11 +31,13 @@ use pond_core::user_data::domain::fact_sheet::{
 use pond_core::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use pond_core::user_data::domain::profile::{CreateProfileRequest, ProfileScope};
 use pond_core::user_data::mocks::mock_anchors::InMemoryAnchorRepository;
+use pond_core::user_data::mocks::mock_capture_pictures::InMemoryCapturePictures;
 use pond_core::user_data::mocks::mock_captures::InMemoryCaptureRepository;
 use pond_core::user_data::mocks::mock_dont_list::InMemoryDontListRepository;
 use pond_core::user_data::mocks::mock_engine_jobs::InMemoryEngineJobRepository;
 use pond_core::user_data::mocks::mock_fact_sheet::InMemoryFactSheetRepository;
 use pond_core::user_data::mocks::mock_interests::InMemoryInterestRepository;
+use pond_core::user_data::mocks::mock_ledger::InMemoryLedgerRepository;
 use pond_core::user_data::mocks::mock_member_agents::InMemoryMemberAgentRepository;
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
@@ -51,6 +58,9 @@ use super::*;
 struct Scripted {
     replies: Mutex<VecDeque<Result<String, ModelStop>>>,
     asked: Mutex<Vec<(String, String)>>,
+    /// The type of each picture it was shown, in order.
+    seen: Mutex<Vec<String>>,
+    blind: AtomicBool,
 }
 
 impl Scripted {
@@ -68,10 +78,28 @@ impl Scripted {
     fn asked(&self) -> Vec<(String, String)> {
         self.asked.lock().unwrap().clone()
     }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl EngineModel for Scripted {
+    async fn complete_seeing(
+        &self,
+        system: &str,
+        user: String,
+        picture: ImageAttachment,
+    ) -> Result<String, ModelStop> {
+        self.seen.lock().unwrap().push(picture.mime_type);
+        self.complete(system, user).await
+    }
+
+    async fn reads_pictures(&self) -> bool {
+        !self.blind.load(Ordering::Relaxed)
+    }
+
     async fn complete(&self, system: &str, user: String) -> Result<String, ModelStop> {
         self.asked.lock().unwrap().push((system.to_string(), user));
         self.replies
@@ -90,6 +118,12 @@ struct Pond {
     facts: Arc<InMemoryFactSheetRepository>,
     dont: Arc<InMemoryDontListRepository>,
     questions: Arc<InMemoryQuestionRepository>,
+    captures: Arc<InMemoryCaptureRepository>,
+    pictures: Arc<InMemoryCapturePictures>,
+    ledger: Arc<InMemoryLedgerRepository>,
+    agents: Arc<InMemoryMemberAgentRepository>,
+    interests: Arc<InMemoryInterestRepository>,
+    indexed: Arc<tokio::sync::Notify>,
     memories: Arc<MockMemoryRepository>,
     sessions: Arc<InMemorySessionStorage>,
     notifier: Arc<MockMemberNotifier>,
@@ -116,9 +150,17 @@ async fn pond() -> Pond {
     let memories = Arc::new(MockMemoryRepository::new());
     let sessions = Arc::new(InMemorySessionStorage::new());
     let notifier = Arc::new(MockMemberNotifier::new().with_devices(&member, &["phone-1"]));
+    let captures = Arc::new(InMemoryCaptureRepository::new());
+    let pictures = Arc::new(InMemoryCapturePictures::new());
+    let ledger = Arc::new(InMemoryLedgerRepository::new());
+    let agents = Arc::new(InMemoryMemberAgentRepository::new());
+    let interests = Arc::new(InMemoryInterestRepository::new());
+    let indexed = Arc::new(tokio::sync::Notify::new());
     let model = Arc::new(Scripted {
         replies: Mutex::new(VecDeque::new()),
         asked: Mutex::new(Vec::new()),
+        seen: Mutex::new(Vec::new()),
+        blind: AtomicBool::new(false),
     });
     let deps = EngineDeps {
         tasks: tasks.clone(),
@@ -127,19 +169,24 @@ async fn pond() -> Pond {
         facts: facts.clone(),
         dont: dont.clone(),
         questions: questions.clone(),
-        captures: Arc::new(InMemoryCaptureRepository::new()),
-        agents: Arc::new(InMemoryMemberAgentRepository::new()),
+        captures: captures.clone(),
+        agents: agents.clone(),
         profiles,
         settings: Arc::new(MockSettingsRepository::new()),
         memories: memories.clone(),
         sessions: sessions.clone(),
-        interests: Arc::new(InMemoryInterestRepository::new()),
+        interests: interests.clone(),
         model: model.clone(),
         recall: None,
         tools: Arc::new(|| vec![ToolHint::new("get_weather", "The forecast for a place")]),
         notifier: notifier.clone(),
         thread: Some(Arc::new(GooseThread::new(sessions.clone()))),
         bell: None,
+        pictures: Some(PictureDeps {
+            store: pictures.clone(),
+            ledger: ledger.clone(),
+            indexed: Some(indexed.clone()),
+        }),
     };
     Pond {
         deps,
@@ -149,6 +196,12 @@ async fn pond() -> Pond {
         facts,
         dont,
         questions,
+        captures,
+        pictures,
+        ledger,
+        agents,
+        interests,
+        indexed,
         memories,
         sessions,
         notifier,
@@ -297,7 +350,10 @@ impl Pond {
     /// or its next run needs a helper.
     async fn drive(&self, task_id: &str, now: DateTime<Utc>) {
         for _ in 0..40 {
-            let task = self.task(task_id).await;
+            // A picture job's settle deletes its task.
+            let Some(task) = self.tasks.get_task(task_id).await.unwrap() else {
+                return;
+            };
             if task.state().is_terminal() {
                 return;
             }
@@ -780,16 +836,16 @@ async fn a_call_a_persons_turn_cut_is_asked_again_without_spending_a_try() {
 async fn a_job_whose_maker_cannot_run_settles_failed_and_is_not_handed_to_the_planner() {
     let pond = pond().await;
     let now = Utc::now();
-    let rule = EngineJob::new(
-        JobKind::Rule,
+    let review = EngineJob::new(
+        JobKind::Heartbeat,
         JobClass::Asked,
         Some(&pond.member),
-        "never recipes",
+        "a look at the day",
         now,
     );
-    pond.jobs.add(&rule).await.unwrap();
+    pond.jobs.add(&review).await.unwrap();
     tick(&pond.deps, now).await;
-    let job = pond.job_of(JobKind::Rule).await;
+    let job = pond.job_of(JobKind::Heartbeat).await;
     let task_id = job.task_id.clone().expect("it is opened like any job");
     pond.drive(&task_id, now).await;
 
@@ -805,7 +861,7 @@ async fn a_job_whose_maker_cannot_run_settles_failed_and_is_not_handed_to_the_pl
         pond.roles_run(&task_id).await,
         [format!("{ROLE_MAKE}:skipped")]
     );
-    assert!(!runs(JobKind::Rule) && runs(JobKind::Questions));
+    assert!(!runs(JobKind::Heartbeat) && runs(JobKind::Rule));
 }
 
 #[tokio::test]

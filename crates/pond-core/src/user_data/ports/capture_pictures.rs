@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 /// The picture types a capture may be, each with the extension its file is kept under.
 const KEPT_TYPES: [(&str, &str); 3] = [
@@ -35,6 +36,13 @@ pub fn mime_type_of(file: &str) -> Option<&'static str> {
     is_plain_id(id).then_some(*mime)
 }
 
+/// A kept picture's file name and when it was last written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptPicture {
+    pub file: String,
+    pub saved_at: DateTime<Utc>,
+}
+
 /// Every picture is one member's; the caller checks whose before it reads or deletes one.
 #[async_trait]
 pub trait CapturePictures: Send + Sync {
@@ -48,6 +56,9 @@ pub trait CapturePictures: Send + Sync {
     /// Deletes the picture, where one already gone is no error and a name `save` never gave is
     /// refused.
     async fn delete(&self, file: &str) -> Result<()>;
+
+    /// Every picture kept, in no order, so the ones no capture names any more can be found.
+    async fn kept(&self) -> Result<Vec<KeptPicture>>;
 }
 
 #[cfg(test)]

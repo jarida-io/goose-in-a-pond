@@ -268,6 +268,7 @@ async fn pond() -> Pond {
         notifier: notifier.clone(),
         thread: Some(Arc::new(GooseThread::new(sessions.clone()))),
         bell: None,
+        pictures: None,
     };
     let deps = IntentionDeps {
         engine,

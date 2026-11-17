@@ -3,6 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
+use pond_core::models::domain::message::ImageAttachment;
 use pond_core::shared::domain::long_task::{
     Artifact, ArtifactKind, ArtifactSummary, LongTask, OutcomeKind, PlanStep, StepOutcome,
 };
@@ -11,7 +12,7 @@ use pond_core::user_data::domain::engine_job::{EngineJob, JobKind};
 use pond_core::user_data::services::engine::steps::{draft_artifact, verdict_artifact};
 use pond_core::user_data::services::engine::{ROLE_CRITIC, ROLE_MAKE, ROLE_REVISE};
 
-use super::{deliverable, fact_sheet, questions, EngineDeps, ModelStop};
+use super::{capture, deliverable, fact_sheet, ledger, questions, rule, EngineDeps, ModelStop};
 
 /// Why a step of a kind with no case here fails.
 pub const CANNOT_RUN: &str = "this pond cannot run this job yet";
@@ -23,7 +24,12 @@ const NO_REPLY: &str = "(the model gave no reply)";
 pub fn runs(kind: JobKind) -> bool {
     matches!(
         kind,
-        JobKind::Deliverable | JobKind::FactSheet | JobKind::Questions
+        JobKind::Deliverable
+            | JobKind::FactSheet
+            | JobKind::Questions
+            | JobKind::Capture
+            | JobKind::Ledger
+            | JobKind::Rule
     )
 }
 
@@ -59,6 +65,15 @@ impl StepCtx<'_> {
 
     pub async fn ask(&self, system: &str, user: String) -> Result<String, ModelStop> {
         self.deps.model.complete(system, user).await
+    }
+
+    pub async fn ask_seeing(
+        &self,
+        system: &str,
+        user: String,
+        picture: ImageAttachment,
+    ) -> Result<String, ModelStop> {
+        self.deps.model.complete_seeing(system, user, picture).await
     }
 
     pub async fn body_of(&self, artifact: &ArtifactSummary) -> Result<String, ModelStop> {
@@ -141,6 +156,13 @@ async fn run_case(ctx: &StepCtx<'_>) -> Result<Saved, ModelStop> {
         (JobKind::FactSheet, ROLE_CRITIC) => fact_sheet::critic(ctx).await,
         (JobKind::Questions, ROLE_MAKE) => questions::make(ctx).await,
         (JobKind::Questions, ROLE_CRITIC) => questions::critic(ctx).await,
+        (JobKind::Capture, ROLE_MAKE) => capture::make(ctx).await,
+        (JobKind::Capture, ROLE_CRITIC) => capture::critic(ctx).await,
+        (JobKind::Ledger, ROLE_MAKE) => ledger::make(ctx).await,
+        (JobKind::Ledger, ROLE_CRITIC) => ledger::critic(ctx).await,
+        (JobKind::Rule, ROLE_MAKE) => rule::make(ctx).await,
+        (JobKind::Rule, ROLE_CRITIC) => rule::critic(ctx).await,
+        (JobKind::Rule, ROLE_REVISE) => rule::revise(ctx).await,
         _ => Err(failed(CANNOT_RUN)),
     }
 }
