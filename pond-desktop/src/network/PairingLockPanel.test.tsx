@@ -60,8 +60,32 @@ describe("PairingLockPanel", () => {
     vi.mocked(api.getPairingLock).mockResolvedValue(lock({ can_change: true }));
     render(<PairingLockPanel variant="catalogue" />);
     fireEvent.change(await screen.findByLabelText("Set a recovery PIN"), { target: { value: "123" } });
+    fireEvent.change(screen.getByLabelText("Type the PIN again"), { target: { value: "123" } });
     fireEvent.click(screen.getByRole("button", { name: /Save PIN/ }));
     expect(await screen.findByText(/at least 6/)).toBeTruthy();
     expect(api.setRecoveryPin).not.toHaveBeenCalled();
+  });
+
+  it("keeps Save off until the PIN is typed twice, and says when the two differ", async () => {
+    vi.mocked(api.getPairingLock).mockResolvedValue(lock({ can_change: true }));
+    render(<PairingLockPanel variant="catalogue" />);
+    fireEvent.change(await screen.findByLabelText("Set a recovery PIN"), { target: { value: "482913" } });
+    const save = screen.getByRole("button", { name: /Save PIN/ }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Type the PIN again"), { target: { value: "482931" } });
+    expect(screen.getByRole("alert").textContent).toMatch(/not the same/);
+    fireEvent.click(save);
+    expect(api.setRecoveryPin).not.toHaveBeenCalled();
+  });
+
+  it("saves the PIN once both entries match", async () => {
+    vi.mocked(api.getPairingLock).mockResolvedValue(lock({ can_change: true }));
+    vi.mocked(api.setRecoveryPin).mockResolvedValue(undefined as never);
+    render(<PairingLockPanel variant="catalogue" />);
+    fireEvent.change(await screen.findByLabelText("Set a recovery PIN"), { target: { value: "482913" } });
+    fireEvent.change(screen.getByLabelText("Type the PIN again"), { target: { value: "482913" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Save PIN/ }));
+    await waitFor(() => expect(api.setRecoveryPin).toHaveBeenCalledWith("482913"));
   });
 });
