@@ -657,7 +657,12 @@ from chosen albums or the share sheet.
 - **Reading local folders** into the work specialist's context. The pond has no folder ingestion
   to build on; the specialist reads what the index already holds, the member's connectors and the
   web.
-- **A visual embedding model** for pictures. A capture is found by its description and details.
+- **Embedding the pictures themselves.** EmbeddingGemma 2 puts text, images, audio and video in
+  one space, so a picture could be found by how it looks and a text query could match it
+  directly. The pond's llama.cpp fork carries only the first EmbeddingGemma, the GGUF embedder's
+  width check refuses the second (`n_embd` 512 against a pooled 768), and its vision projector is
+  a 555 MB file beside the 310 MB text model, which needs a memory measurement on the Orin. Until
+  then a capture is found by its description and details, which the text embedder indexes.
 
 ## 17. Build order
 
