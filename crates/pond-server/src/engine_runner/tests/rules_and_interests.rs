@@ -168,7 +168,7 @@ async fn a_rule_the_check_keeps_failing_leaves_the_members_words_as_the_rule() {
 }
 
 #[tokio::test]
-async fn a_confirmed_interest_gets_one_anchor_which_stops_once_it_is_avoided() {
+async fn a_confirmed_interest_gets_no_anchor_and_an_avoided_ones_anchor_stops() {
     let pond = pond().await;
     let now = Utc::now();
     let followed = pond
@@ -185,21 +185,26 @@ async fn a_confirmed_interest_gets_one_anchor_which_stops_once_it_is_avoided() {
         .unwrap();
 
     let first = tick(&pond.deps, now).await;
-    let again = tick(&pond.deps, now + Duration::minutes(1)).await;
-    assert_eq!((first.interests_followed, again.interests_followed), (1, 0));
-    let mine: Vec<Anchor> = pond
+    assert_eq!(first.interests_followed, 0);
+    assert!(pond
         .anchors
         .list(&pond.member, &[AnchorState::Active])
         .await
         .unwrap()
-        .into_iter()
-        .filter(|anchor| anchor.kind == AnchorKind::Interest)
-        .collect();
-    assert_eq!(mine.len(), 1, "{mine:?}");
-    let anchor = &mine[0];
-    assert_eq!(anchor.title, "Formula 1");
-    assert_eq!(anchor.origin, AnchorOrigin::Interest);
-    assert_eq!(anchor.origin_ref.as_deref(), Some(followed.id.as_str()));
+        .iter()
+        .all(|anchor| anchor.kind != AnchorKind::Interest));
+
+    let mut made = Anchor::new(
+        &pond.member,
+        AnchorKind::Interest,
+        "Formula 1",
+        AnchorOrigin::Interest,
+        now,
+    )
+    .unwrap();
+    made.origin_ref = Some(followed.id.clone());
+    assert!(pond.anchors.add(&made).await.unwrap());
+    let anchor = &made;
     let mut working = EngineJob::new(
         JobKind::Questions,
         JobClass::Open,
