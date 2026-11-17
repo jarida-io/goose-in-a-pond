@@ -7117,7 +7117,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
         };
         let guest = at("subtract_guest_denied_tools(");
-        let voice = at("if is_voice && !voice_agent.tool_groups_off.is_empty()");
+        let voice = at("let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps)");
         let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
         let authority = at("self.turn_authorities.publish(");
         assert!(guest < voice, "a guest's subtraction comes first");
