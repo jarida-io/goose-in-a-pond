@@ -10,6 +10,7 @@ pub mod extraction_gate;
 pub mod hf_cache_migration;
 pub mod hooks_runner;
 pub mod host_credential;
+pub mod intention_runner;
 pub mod listeners;
 pub mod llm_memory_consolidator;
 pub mod notice_follow_up;

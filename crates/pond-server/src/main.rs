@@ -4017,7 +4017,8 @@ async fn run_server(
     // ── The proactive reviewer ───────────────────────────────────────────
     // A review is its own parent turn: it publishes a turn authority, whose token cascades
     // interruption. It reuses the `delegate` tool's orchestrator; no orchestrator, no review.
-    {
+    // Started below, once the engine its jobs are kept and carried out through exists.
+    let start_reviewer = {
         let review_settings = settings_repo.clone();
         let review_storage = session_storage.clone();
         let review_activity = last_user_activity.clone();
@@ -4056,32 +4057,30 @@ async fn run_server(
             });
         }
 
-        tokio::spawn(run_proactive_reviewer(
-            review_settings,
-            review_storage,
-            review_activity,
-            review_proposals,
-            review_sender,
-            observed,
-            inference_lane.clone(),
-            profile_repo.clone(),
-            HeartbeatDeps {
-                documents: prompt_template_repo.clone(),
-                notes: Arc::new(pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(
-                    db.system.clone(),
-                )),
-                todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
-                    db.system.clone(),
-                )),
-                watches: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
-                    db.system.clone(),
-                )),
-                activity: Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
-                    db.system.clone(),
-                )),
-            },
-        ));
-    }
+        let review_lane = inference_lane.clone();
+        let review_profiles = profile_repo.clone();
+        let review_documents = prompt_template_repo.clone();
+        let review_pool = db.system.clone();
+        move |jobs: pond_server::intention_runner::IntentionDeps| {
+            tokio::spawn(run_proactive_reviewer(
+                review_settings,
+                review_storage,
+                review_activity,
+                review_proposals,
+                review_sender,
+                observed,
+                review_lane,
+                review_profiles,
+                HeartbeatDeps {
+                    documents: review_documents,
+                    watches: Arc::new(pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(
+                        review_pool,
+                    )),
+                    jobs,
+                },
+            ));
+        }
+    };
 
     // ── Long tasks ───────────────────────────────────────────────────────
     // Claimed whether or not an orchestrator was installed: an idea-engine job's inline steps
@@ -4165,6 +4164,21 @@ async fn run_server(
             thread: pond_core::shared::services::goose_thread::installed(),
             bell: Some(bells.nudge_bell()),
         };
+        match heartbeat_jobs(
+            engine.clone(),
+            db.system.clone(),
+            device_registry.clone(),
+            scheduler.clone(),
+        ) {
+            Ok(jobs) => {
+                pond_server::intention_runner::spawn(jobs.clone(), event_bus.clone());
+                start_reviewer(jobs);
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                "the errand role does not parse: no review runs and no intention is carried out"
+            ),
+        }
         tokio::spawn(pond_server::engine_runner::run_ticks(engine.clone()));
         tokio::spawn(run_long_task_runner(
             settings_repo.clone(),
@@ -7445,16 +7459,14 @@ async fn run_quiet_compaction(
     }
 }
 
-/// What makes a review a heartbeat: the checklist it goes through, Goose's own notes, and the
-/// member's list its reminders go on.
+/// What makes a review a heartbeat: the checklist it goes through, the member's web watches,
+/// and what the jobs it leaves itself are checked, kept and carried out through.
 struct HeartbeatDeps {
     documents: Arc<
         dyn pond_core::user_data::ports::prompt_template::PromptTemplateRepository + Send + Sync,
     >,
-    notes: Arc<dyn pond_core::shared::ports::agent_notes::AgentNotesRepository>,
-    todos: Arc<dyn pond_core::shared::ports::todo::TodoRepository>,
     watches: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository>,
-    activity: Arc<dyn pond_core::shared::ports::goose_activity::GooseActivityRepository>,
+    jobs: pond_server::intention_runner::IntentionDeps,
 }
 
 impl HeartbeatDeps {
@@ -7478,251 +7490,56 @@ impl HeartbeatDeps {
             .collect()
     }
 
-    /// The checklist as the household keeps it, and the member's follow-ups still worth a look.
-    /// A follow-up nobody came back to in a month is dropped here.
-    async fn checklist_and_notes(
-        &self,
-        scope: &pond_core::user_data::domain::profile::ProfileScope,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> (
-        String,
-        Vec<pond_core::shared::domain::agent_note::AgentNote>,
-    ) {
-        use pond_core::shared::domain::agent_note::{is_stale, NoteKind};
-        let checklist = self
-            .documents
+    /// The checklist as the household keeps it.
+    async fn checklist(&self) -> String {
+        self.documents
             .get(pond_core::prompts::HEARTBEAT)
             .await
             .ok()
             .flatten()
             .map(|t| t.content)
-            .unwrap_or_else(|| pond_core::prompts::PROMPT_HEARTBEAT.to_string());
-        let mut notes = self
-            .notes
-            .list(scope, NoteKind::Note)
-            .await
-            .unwrap_or_default();
-        for stale in notes.iter().filter(|n| is_stale(n, now)) {
-            let _ = self.notes.remove(&stale.id, scope).await;
-        }
-        notes.retain(|n| !is_stale(n, now));
-        (checklist, notes)
+            .unwrap_or_else(|| pond_core::prompts::PROMPT_HEARTBEAT.to_string())
     }
+}
 
-    /// Reminders the heartbeat has set for `member` since `since`; the day's cap on failure, so
-    /// a store that cannot be read sets none.
-    async fn reminders_set_since(
-        &self,
-        member: &str,
-        since: chrono::DateTime<chrono::Utc>,
-    ) -> usize {
-        use pond_core::shared::domain::todo::{StateFilter, TodoSource};
-        match self.todos.list(member, StateFilter::All).await {
-            Ok(todos) => todos
-                .iter()
-                .filter(|t| t.source == TodoSource::Goose && t.created_at >= since)
-                .count(),
-            Err(_) => pond_core::user_data::services::proactive_review::MAX_REMINDERS_PER_DAY,
-        }
-    }
-
-    /// Do what the heartbeat decided, each act already checked and capped by `interpret_heartbeat`.
-    async fn carry_out(
-        &self,
-        member: &str,
-        acts: &[pond_core::user_data::services::proactive_review::HeartbeatAct],
-        open_notes: &[pond_core::shared::domain::agent_note::AgentNote],
-        now: chrono::DateTime<chrono::Utc>,
-        zone: pond_core::shared::domain::todo::Tz,
-    ) -> Vec<pond_core::shared::domain::goose_activity::GooseActivity> {
-        use pond_core::shared::domain::agent_note::{
-            dropped_for_room, same_note, AgentNote, NoteKind,
-        };
-        use pond_core::shared::domain::goose_activity::GooseActivity;
-        let mut did: Vec<GooseActivity> = Vec::new();
-        use pond_core::shared::domain::todo::{
-            new_todo, rfc3339, HookCatalog, HookSource, TodoSource,
-        };
-        use pond_core::user_data::domain::profile::ProfileScope;
-        use pond_core::user_data::services::proactive_review::HeartbeatAct;
-
-        let scope = ProfileScope::Owner(member.to_string());
-        for act in acts {
-            match act {
-                HeartbeatAct::Remind { text, due, why } => {
-                    let body = serde_json::json!({
-                        "kind": "reminder",
-                        "text": text,
-                        "notes": why,
-                        "due_at": rfc3339(*due),
-                        "ask": false,
-                        "hooks": [{"kind": "time", "spec": {"at": rfc3339(*due)}}],
-                    });
-                    let catalog = HookCatalog {
-                        places: Vec::new(),
-                        sources: vec![HookSource::presence()],
-                    };
-                    let made =
-                        match new_todo(member, &body, &catalog, TodoSource::Goose, None, now, zone)
-                        {
-                            Ok(todo) => self
-                                .todos
-                                .create(&todo)
-                                .await
-                                .map(|()| todo.id.clone())
-                                .map_err(|e| e.to_string()),
-                            Err(e) => Err(e.0),
-                        };
-                    match made {
-                        // Counts and kinds only: what it reminds of stays out of the log.
-                        Ok(todo_id) => {
-                            did.push(GooseActivity::reminder(
-                                member,
-                                text,
-                                &due.with_timezone(&zone)
-                                    .format("%a %-d %b, %H:%M")
-                                    .to_string(),
-                                &todo_id,
-                                now,
-                            ));
-                            tracing::info!(
-                                target: "giap::trace",
-                                kind = "heartbeat_act",
-                                act = "remind",
-                                member = %member,
-                                "the heartbeat set a reminder"
-                            )
-                        }
-                        Err(error) => tracing::warn!(
-                            %error,
-                            "heartbeat: a reminder it decided on could not be set"
-                        ),
-                    }
-                }
-                HeartbeatAct::Note { text } => {
-                    let existing = self
-                        .notes
-                        .owned(Some(member), NoteKind::Note)
-                        .await
-                        .unwrap_or_default();
-                    if existing.iter().any(|n| same_note(&n.text, text)) {
-                        continue;
-                    }
-                    for old in dropped_for_room(NoteKind::Note, &existing) {
-                        let _ = self.notes.remove(&old, &scope).await;
-                    }
-                    let note = AgentNote {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        profile_id: Some(member.to_string()),
-                        kind: NoteKind::Note,
-                        text: text.clone(),
-                        created_at: now,
-                    };
-                    let note_id = note.id.clone();
-                    match self.notes.add(note).await {
-                        Ok(()) => {
-                            did.push(GooseActivity::note(member, text, &note_id, now));
-                            tracing::info!(
-                                target: "giap::trace",
-                                kind = "heartbeat_act",
-                                act = "note",
-                                member = %member,
-                                "the heartbeat wrote itself a note"
-                            )
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "heartbeat: a note could not be kept")
-                        }
-                    }
-                }
-                HeartbeatAct::Done { words } => {
-                    let wanted: Vec<String> = words
-                        .to_lowercase()
-                        .split(|c: char| !c.is_alphanumeric())
-                        .filter(|w| w.chars().count() >= 3)
-                        .map(str::to_string)
-                        .collect();
-                    let fits: Vec<&AgentNote> = open_notes
-                        .iter()
-                        .filter(|n| {
-                            let text = n.text.to_lowercase();
-                            !wanted.is_empty() && wanted.iter().all(|w| text.contains(w.as_str()))
-                        })
-                        .collect();
-                    // Only when the words fit one note: a guess would close the wrong one.
-                    if let [note] = fits.as_slice() {
-                        if self.notes.remove(&note.id, &scope).await.unwrap_or(false) {
-                            did.push(GooseActivity::note_closed(member, &note.text, now));
-                            tracing::info!(
-                                target: "giap::trace",
-                                kind = "heartbeat_act",
-                                act = "done",
-                                member = %member,
-                                "the heartbeat closed one of its notes"
-                            );
-                        }
-                    }
-                }
-                HeartbeatAct::PauseWatch { words } => {
-                    use pond_core::shared::ports::web_watch::WatchEdit;
-                    use pond_core::user_data::services::proactive_review::watch_to_pause;
-                    let watches = self.watches.list_for(member).await.unwrap_or_default();
-                    let lines = self.watch_lines(member).await;
-                    // Checked again here: only one failing watch the words fit, never a guess.
-                    let Some(line) = watch_to_pause(&lines, words) else {
-                        continue;
-                    };
-                    let Some(watch) = watches.iter().find(|w| w.title == line.title) else {
-                        continue;
-                    };
-                    let paused = WatchEdit {
-                        paused: Some(true),
-                        ..WatchEdit::default()
-                    };
-                    if self
-                        .watches
-                        .edit(member, &watch.id, &paused)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        // Written where the member reads Goose's notes, so the pause is seen.
-                        let told = AgentNote {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            profile_id: Some(member.to_string()),
-                            kind: NoteKind::Note,
-                            text: format!(
-                                "Paused the web watch \"{}\": it could not be checked {} times \
-                                 in a row. Tell them, and offer to resume it.",
-                                watch.title, watch.failures
-                            )
-                            .chars()
-                            .take(pond_core::shared::domain::agent_note::NOTE_CHARS)
-                            .collect(),
-                            created_at: now,
-                        };
-                        let _ = self.notes.add(told).await;
-                        did.push(GooseActivity::watch_paused(
-                            member,
-                            &watch.title,
-                            watch.failures,
-                            &watch.id,
-                            now,
-                        ));
-                        tracing::info!(
-                            target: "giap::trace",
-                            kind = "heartbeat_act",
-                            act = "pause_watch",
-                            member = %member,
-                            "the heartbeat paused a watch that kept failing"
-                        );
-                    }
-                }
-                // Looked into by the loop itself, which holds the model.
-                HeartbeatAct::LookInto { .. } => {}
-            }
-        }
-        did
-    }
+/// What the review keeps its jobs through and the runner carries them out with, over the
+/// engine's own stores and model.
+fn heartbeat_jobs(
+    engine: pond_server::engine_runner::EngineDeps,
+    pool: sqlx::SqlitePool,
+    devices: Arc<dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync>,
+    scheduler: Option<Arc<dyn pond_core::user_data::ports::scheduler::SchedulerPort>>,
+) -> Result<
+    pond_server::intention_runner::IntentionDeps,
+    pond_core::shared::domain::orchestration::RoleError,
+> {
+    use pond_server::intention_runner as runner;
+    let settings = engine.settings.clone();
+    Ok(runner::IntentionDeps {
+        intentions: Arc::new(
+            pond_infra::sqlite_intentions::SqliteIntentionRepository::new(pool.clone()),
+        ),
+        todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
+            pool.clone(),
+        )),
+        reminders: Arc::new(pond_infra::sqlite_reminder::SqliteReminderRepository::new(
+            pool.clone(),
+        )),
+        notes: Arc::new(pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(
+            pool.clone(),
+        )),
+        activity: Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+            pool,
+        )),
+        things: Arc::new(runner::PondThings {
+            settings: settings.clone(),
+            devices,
+        }),
+        schedules: Arc::new(runner::PondSchedules(scheduler)),
+        errands: Arc::new(runner::HelperErrands::new(settings)?),
+        in_hand: runner::InHand::default(),
+        engine,
+    })
 }
 
 /// Idle-time proactive review; every failed read fails closed (skips the tick or hits the cap).
@@ -7765,14 +7582,6 @@ async fn run_proactive_reviewer(
             return;
         }
     };
-    let errand_role = match review::errand_role() {
-        Ok(role) => role,
-        Err(e) => {
-            tracing::error!(error = %e, "proactive reviewer: the errand role does not parse");
-            return;
-        }
-    };
-
     // Baselines for the never-at-startup guard, captured before the first poll.
     let started_at = std::time::Instant::now();
     let started_at_utc = chrono::Utc::now();
@@ -7847,7 +7656,7 @@ async fn run_proactive_reviewer(
         };
 
         // Whether a heartbeat is worth running, before `acquire` so the slot isn't taken just to
-        // find no work. A day of suggestions spent is no reason: it may still act by itself.
+        // find no work. A day of suggestions spent is no reason: it may still leave itself jobs.
         let refusal = review::heartbeat_refusal(
             // This loop awaits its own run, so runs never overlap here.
             false,
@@ -7922,22 +7731,27 @@ async fn run_proactive_reviewer(
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = review::review_session_id(&run_id);
         let zone = pond_core::shared::domain::todo::zone(&settings.timezone);
-        let member_scope = pond_core::user_data::domain::profile::ProfileScope::Owner(
-            audience.profile_id().to_string(),
-        );
-        let (checklist, open_notes) = heartbeat.checklist_and_notes(&member_scope, now).await;
-        let watch_lines = match member_scope.owner_id() {
-            Some(member) => heartbeat.watch_lines(member).await,
-            None => Vec::new(),
-        };
+        let checklist = heartbeat.checklist().await;
+        let watch_lines = heartbeat.watch_lines(audience.profile_id()).await;
+        let shown = pond_server::intention_runner::review_context(
+            &heartbeat.jobs,
+            audience.profile_id(),
+            now,
+        )
+        .await;
         let mut brief = review::heartbeat_brief(
             now,
             zone,
             &events,
             &ledger,
-            &checklist,
-            &open_notes,
-            &watch_lines,
+            &review::HeartbeatShown {
+                checklist: &checklist,
+                plans: &shown.plans,
+                conditions: &shown.conditions,
+                waiting: &shown.waiting,
+                notes: &shown.notes,
+                watches: &watch_lines,
+            },
         );
         if proposals_today >= review::MAX_PROPOSALS_PER_DAY {
             brief.push_str(review::SUGGESTIONS_SPENT);
@@ -8016,27 +7830,35 @@ async fn run_proactive_reviewer(
 
         // A cancelled or turn-exhausted run yields nothing here, never partial opinions.
         let acted_at = chrono::Utc::now();
-        let reminders_today = heartbeat
-            .reminders_set_since(audience.profile_id(), acted_at - chrono::Duration::days(1))
-            .await;
-        let errands_today = heartbeat
-            .activity
-            .count_since(
-                audience.profile_id(),
-                pond_core::shared::domain::goose_activity::ActivityKind::Errand,
-                acted_at - chrono::Duration::days(1),
-            )
-            .await
-            .unwrap_or(review::MAX_ERRANDS_PER_DAY);
-        let yielded = review::interpret_heartbeat(
-            &run,
-            &audience,
-            acted_at,
-            &ledger,
-            proposals_today,
-            review::ActAllowance::for_heartbeat(reminders_today, zone).with_errands(errands_today),
-        );
-        for refusal in &yielded.refusals {
+        let yielded =
+            review::interpret_heartbeat(&run, &audience, acted_at, &ledger, proposals_today);
+        // Checked and kept while the review still holds the lane: the check is a model call.
+        let kept = match run.result_for_parent() {
+            Some(answer) => Some(
+                pond_server::intention_runner::close_review(
+                    &heartbeat.jobs,
+                    audience.profile_id(),
+                    answer,
+                    &shown,
+                    &review::happened_lines(now, Some(zone), &events),
+                    now,
+                    acted_at,
+                )
+                .await,
+            ),
+            None => None,
+        };
+        let (jobs_read, jobs_kept) = kept
+            .as_ref()
+            .map_or((0, 0), |kept| (kept.read, kept.stored.len()));
+        // An answer cut short has jobs its reader recovers and no array the proposals' reader
+        // can find.
+        let refusals: Vec<&review::ImpulseRefused> = yielded
+            .refusals
+            .iter()
+            .filter(|refusal| jobs_read == 0 || **refusal != review::ImpulseRefused::NotAJsonArray)
+            .collect();
+        for refusal in &refusals {
             tracing::debug!(refusal = ?refusal, "proactive reviewer: impulse refused");
         }
         // Counts and the run's state only: what it said about the household stays out of the log.
@@ -8045,87 +7867,25 @@ async fn run_proactive_reviewer(
             kind = "heartbeat_run",
             status = ?run.status,
             proposals = yielded.proposals.len(),
-            acts = yielded.acts.len(),
-            refused = yielded.refusals.len(),
+            jobs = jobs_kept,
+            jobs_read,
+            refused = refusals.len(),
             answer_chars = run.result.as_deref().map_or(0, |a| a.chars().count()),
             error = run.error.as_deref().unwrap_or(""),
             "a heartbeat ended"
         );
-        let mut did = heartbeat
-            .carry_out(
-                audience.profile_id(),
-                &yielded.acts,
-                &open_notes,
-                acted_at,
-                zone,
-            )
-            .await;
-
-        // What it looks into runs here, while the review still holds the model and its lease.
-        for act in &yielded.acts {
-            let review::HeartbeatAct::LookInto { text, why } = act else {
-                continue;
-            };
-            if cancel.is_cancelled() {
-                break;
-            }
-            let brief = review::errand_brief(text, why, chrono::Utc::now(), zone);
-            let spec = match review::plan_errand(&errand_role, &audience, &session_id, &brief) {
-                Ok(spec) => spec,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "heartbeat: an errand was refused");
-                    continue;
-                }
-            };
-            let started = std::time::Instant::now();
-            let errand = orchestrator.spawn(spec).await;
-            let answer = errand
-                .as_ref()
-                .ok()
-                .and_then(|run| run.result_for_parent())
-                .map(str::trim)
-                .filter(|answer| !answer.is_empty());
-            // Counts and the run's state only: neither the question nor the answer is logged.
-            tracing::info!(
-                target: "giap::trace",
-                kind = "heartbeat_errand",
-                status = ?errand.as_ref().map(|run| run.status).ok(),
-                answered = answer.is_some(),
-                ms = started.elapsed().as_millis() as u64,
-                "the heartbeat looked something into"
-            );
-            if let Some(answer) = answer {
-                pond_core::shared::services::goose_thread::post(
-                    Some(audience.profile_id()),
-                    answer,
-                    pond_core::user_data::domain::message_note::MessageNote::from_source(
-                        pond_core::user_data::domain::message_note::SourceKind::Lookup,
-                        text.to_string(),
-                        None,
-                    ),
-                )
-                .await;
-                did.push(
-                    pond_core::shared::domain::goose_activity::GooseActivity::errand(
-                        audience.profile_id(),
-                        text,
-                        answer,
-                        chrono::Utc::now(),
-                    ),
-                );
-            }
-        }
         watcher.abort();
         drop(lease);
         // Spends the interval (failures too, or retries churn) and frees the model.
         drop(slot);
 
         // WARN: all-refused is a defect in a run that answered; one cut short for a turn is not,
-        // and a run with nothing to say returns an empty array.
+        // and a run with nothing to say returns an empty array. A job that was read and not
+        // kept is in the engine's log with its reason.
         if run.status.produced_an_answer()
             && yielded.proposals.is_empty()
-            && yielded.acts.is_empty()
-            && !yielded.refusals.is_empty()
+            && jobs_read == 0
+            && !refusals.is_empty()
         {
             // The outline of an answer nothing came of, its words masked: which keys the model
             // used is what a fix to the role needs.
@@ -8134,13 +7894,14 @@ async fn run_proactive_reviewer(
                 "proactive reviewer: nothing in the answer was kept"
             );
             tracing::warn!(
-                refused = yielded.refusals.len(),
-                first = ?yielded.refusals.first(),
+                refused = refusals.len(),
+                first = ?refusals.first(),
                 "proactive review produced nothing: every impulse was refused. The review ran and \
                  cost a model turn, so this is a defect rather than a quiet day."
             );
         }
 
+        let mut did: Vec<pond_core::shared::domain::goose_activity::GooseActivity> = Vec::new();
         for proposal in &yielded.proposals {
             if let Err(e) = proposals.save(proposal).await {
                 tracing::warn!(error = %e, "proactive reviewer: could not persist a proposal");
@@ -8189,25 +7950,14 @@ async fn run_proactive_reviewer(
             );
         }
 
-        // What it did is kept for the member to read and take back, and told in one notice.
+        // What it asked is kept for the member to read; each suggestion had its own notice.
+        let activity = &heartbeat.jobs.activity;
         for entry in &did {
-            if let Err(e) = heartbeat.activity.add(entry).await {
+            if let Err(e) = activity.add(entry).await {
                 tracing::warn!(error = %e, "heartbeat: what it did could not be recorded");
             }
         }
-        if let Some(notice) = pond_server::system_notices::goose_activity_notification(&did) {
-            let report = sender.send_to_profile(audience.profile_id(), notice).await;
-            tracing::info!(
-                target: "giap::trace",
-                kind = "heartbeat_told",
-                did = did.len(),
-                queued = report.queued.len(),
-                failed = report.failed.len(),
-                "the member was told what the heartbeat did"
-            );
-        }
-        let _ = heartbeat
-            .activity
+        let _ = activity
             .prune(acted_at - pond_core::shared::domain::goose_activity::ACTIVITY_KEPT)
             .await;
     }
@@ -8942,7 +8692,6 @@ async fn advance_long_task(
                 Some(found) => tasks
                     .get_artifact(task.id(), &found.id)
                     .await?
-    jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
                     .map(|artifact| artifact.body().to_string()),
                 None => None,
             };
@@ -8992,7 +8741,6 @@ async fn advance_long_task(
                 (false, Some(agent)) => offered
                     .iter()
                     .find(|r| r.name() == pond_core::shared::services::long_task_roles::WORKER_ROLE)
-            jobs.as_ref(),
                     .and_then(|worker| runner::role_for_agent(&step, agent, worker).ok()),
                 _ => None,
             };
@@ -9007,7 +8755,6 @@ async fn advance_long_task(
                     chrono::Utc::now(),
                 )?;
                 tasks.update_step(&step).await?;
-    jobs: &dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository,
                 return Ok(true);
             };
             if let Err(why) = activations::step_role_allowed(task, &step, role) {
@@ -9015,31 +8762,9 @@ async fn advance_long_task(
                 tasks.update_step(&step).await?;
                 step.fail(&why, chrono::Utc::now())?;
                 tasks.update_step(&step).await?;
-    use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
                 return Ok(true);
             }
             step.start(now)?;
-    let started = chrono::Utc::now();
-    let owner = selection.batch.first().and_then(|m| m.profile_id.clone());
-    let log = |state: JobState, outcome: String| async move {
-        let mut job = EngineJob::new(
-            JobKind::Consolidation,
-            JobClass::Upkeep,
-            owner.as_deref(),
-            "",
-            started,
-        );
-        let settled = job
-            .start(None, started)
-            .and_then(|()| job.settle(state, &outcome, chrono::Utc::now()));
-        if settled.is_err() {
-            return;
-        }
-        if let Err(e) = jobs.add(&job).await {
-            tracing::warn!("consolidation: the run could not be logged: {e}");
-        }
-    };
-
             tasks.update_step(&step).await?;
             // A role's use keeps its prefill inside the retention.
             let _ = prefills.note_used(role.name(), now).await;
@@ -9077,14 +8802,6 @@ async fn advance_long_task(
                     StepWork::Do(key.clone()),
                     brief,
                     may_retry,
-        // A cancelled run comes back empty, like one that proposed nothing.
-        Ok(ref result) if cancel.is_cancelled() && result.exchanges.is_empty() => {
-            log(
-                JobState::Cancelled,
-                consolidation::STOPPED_EARLY.to_string(),
-            )
-            .await;
-        }
                     Some(reply_draft),
                 )
                 .await
@@ -9105,15 +8822,9 @@ async fn advance_long_task(
             let verdict =
                 if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
                     let saved = tasks.list_artifacts(task.id()).await?;
-                        log(JobState::Failed, consolidation::COULD_NOT_SAVE.to_string()).await;
                     let context = match runner::brief_artifact(&saved) {
                         Some(found) => tasks
                             .get_artifact(task.id(), &found.id)
-            log(
-                JobState::Passed,
-                outcome.outcome_line(batch_len, result.rejected_count),
-            )
-            .await;
                             .await?
                             .map(|artifact| artifact.body().to_string()),
                         None => None,
@@ -9150,7 +8861,6 @@ async fn advance_long_task(
             // A retry clears its failure from the row once it succeeds; the reason lives on here.
             tracing::info!(
                 target: "giap::trace",
-            log(JobState::Failed, consolidation::MODEL_UNHEARD.to_string()).await;
                 kind = "long_task_step_settled",
                 task_id = %task.id(),
                 step = %step.key(),
@@ -9233,6 +8943,7 @@ async fn notify_long_task_owner(
 async fn run_consolidation_pipeline(
     repo: Arc<dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync>,
     provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
     broadcast_tx: tokio::sync::broadcast::Sender<
         pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
     >,
@@ -9282,6 +8993,7 @@ async fn run_consolidation_pipeline(
         consolidate_one_batch(
             repo.as_ref(),
             provider.clone(),
+            jobs.as_ref(),
             &broadcast_tx,
             cancel.clone(),
             mode,
@@ -9296,6 +9008,7 @@ async fn run_consolidation_pipeline(
 async fn consolidate_one_batch(
     repo: &(dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync),
     provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
+    jobs: &dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository,
     broadcast_tx: &tokio::sync::broadcast::Sender<
         pond_core::user_data::ports::memory_consolidator::ConsolidationEvent,
     >,
@@ -9303,8 +9016,30 @@ async fn consolidate_one_batch(
     mode: &str,
     selection: pond_core::user_data::services::memory_consolidation::BatchSelection,
 ) {
+    use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
     use pond_core::user_data::ports::memory_consolidator::ConsolidationEvent;
     use pond_core::user_data::services::memory_consolidation as consolidation;
+
+    let started = chrono::Utc::now();
+    let owner = selection.batch.first().and_then(|m| m.profile_id.clone());
+    let log = |state: JobState, outcome: String| async move {
+        let mut job = EngineJob::new(
+            JobKind::Consolidation,
+            JobClass::Upkeep,
+            owner.as_deref(),
+            "",
+            started,
+        );
+        let settled = job
+            .start(None, started)
+            .and_then(|()| job.settle(state, &outcome, chrono::Utc::now()));
+        if settled.is_err() {
+            return;
+        }
+        if let Err(e) = jobs.add(&job).await {
+            tracing::warn!("consolidation: the run could not be logged: {e}");
+        }
+    };
 
     if selection.deferred > 0 {
         tracing::info!(
@@ -9343,6 +9078,14 @@ async fn consolidate_one_batch(
     };
 
     match result {
+        // A cancelled run comes back empty, like one that proposed nothing.
+        Ok(ref result) if cancel.is_cancelled() && result.exchanges.is_empty() => {
+            log(
+                JobState::Cancelled,
+                consolidation::STOPPED_EARLY.to_string(),
+            )
+            .await;
+        }
         Ok(ref result) => {
             // Collected, not lazy: a borrowing iterator across the await breaks HRTB inference.
             let accepted: Vec<(
@@ -9363,9 +9106,15 @@ async fn consolidate_one_batch(
                         let _ = broadcast_tx.send(ConsolidationEvent::Error {
                             message: e.to_string(),
                         });
+                        log(JobState::Failed, consolidation::COULD_NOT_SAVE.to_string()).await;
                         return;
                     }
                 };
+            log(
+                JobState::Passed,
+                outcome.outcome_line(batch_len, result.rejected_count),
+            )
+            .await;
 
             if result.accepted_count > 0 || result.rejected_count > 0 {
                 tracing::info!(
@@ -9402,6 +9151,7 @@ async fn consolidate_one_batch(
             let _ = broadcast_tx.send(ConsolidationEvent::Error {
                 message: e.to_string(),
             });
+            log(JobState::Failed, consolidation::MODEL_UNHEARD.to_string()).await;
         }
     }
 }

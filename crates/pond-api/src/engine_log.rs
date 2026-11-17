@@ -2,7 +2,7 @@
 //! route asks for a refresh and how it calls a job off. A route never runs a job; the engine's
 //! runner does.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use axum::{
     extract::{rejection::QueryRejection, Query, State},
@@ -22,7 +22,7 @@ use pond_core::shared::services::long_task_roles::{
 };
 use pond_core::user_data::domain::anchor::{Anchor, Deliverable};
 use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
-use pond_core::user_data::services::engine::tick::class_of;
+use pond_core::user_data::services::engine::refresh::request_refresh;
 use pond_core::user_data::services::engine::{ROLE_CRITIC, ROLE_MAKE, ROLE_REVISE};
 use pond_infra::sqlite_long_task::SqliteLongTaskRepository;
 
@@ -31,10 +31,6 @@ use crate::AppState;
 
 const DEFAULT_JOBS: usize = 30;
 const MAX_JOBS: usize = 100;
-
-/// Serialises "has this deliverable an open job?" with queueing one, so two asks queue one job.
-static REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/me/engine/jobs", get(recent_jobs))
@@ -131,26 +127,14 @@ pub(crate) async fn ask_for_refresh(
     deliverable: &Deliverable,
     now: DateTime<Utc>,
 ) -> anyhow::Result<EngineJob> {
-    let _held = REFRESH_LOCK.lock().await;
-    let jobs = &state.engine.jobs;
-    if let Some(mut job) = jobs.open_for_deliverable(&deliverable.id).await? {
-        if job.state == JobState::Queued && JobClass::Asked < job.class {
-            job.class = JobClass::Asked;
-            jobs.save(&job).await?;
-        }
-        return Ok(job);
-    }
-    let job = EngineJob::for_deliverable(
-        &anchor.profile_id,
-        &anchor.id,
-        &deliverable.id,
-        &deliverable.title,
+    request_refresh(
+        state.engine.jobs.as_ref(),
+        anchor,
+        deliverable,
         JobClass::Asked,
-        class_of(anchor).1,
         now,
-    );
-    jobs.add(&job).await?;
-    Ok(job)
+    )
+    .await
 }
 
 /// Settles an open job as cancelled, stops its long task as a member's cancel does, and hands

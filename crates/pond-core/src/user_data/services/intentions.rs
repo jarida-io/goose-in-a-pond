@@ -225,7 +225,8 @@ fn elements_in(answer: &str) -> Vec<Value> {
     found
 }
 
-fn is_intent(map: &Map<String, Value>) -> bool {
+/// Whether an element of the reviewer's answer is a job it leaves itself.
+pub(super) fn is_intent(map: &Map<String, Value>) -> bool {
     map.get("do")
         .and_then(Value::as_str)
         .is_some_and(|word| matches!(spelled(word).as_str(), "intend" | "intent" | "intention"))

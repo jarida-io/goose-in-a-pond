@@ -69,16 +69,14 @@ pub(super) async fn deliverable_ready(
     tell_member(deps, &anchor.profile_id, notice, Some(note)).await;
 }
 
-/// The one notice a stored batch of questions gets, opening the questions.
-pub(super) async fn questions_asked(
-    deps: &EngineDeps,
+/// The one notice a batch of an anchor's questions gets, opening the questions; `None` for
+/// an empty batch.
+pub fn questions_notice(
     anchor: &Anchor,
     batch: &[Question],
     now: DateTime<Utc>,
-) {
-    let Some(first) = batch.first() else {
-        return;
-    };
+) -> Option<Notification> {
+    let first = batch.first()?;
     let body = match batch.len() - 1 {
         0 => first.text.clone(),
         1 => format!("{} And one more.", first.text),
@@ -87,7 +85,7 @@ pub(super) async fn questions_asked(
     let mut fields = serde_json::Map::new();
     fields.insert("anchor_id".into(), anchor.id.as_str().into());
     fields.insert("batch_id".into(), first.batch_id.as_str().into());
-    let notice = Notification {
+    Some(Notification {
         id: format!("questions-{}", first.batch_id),
         target: String::new(),
         category: "action_required".to_string(),
@@ -95,6 +93,17 @@ pub(super) async fn questions_asked(
         body,
         timestamp: now.to_rfc3339(),
         data: Some(OpenScreen::Questions.merged_into(fields)),
-    };
-    tell_member(deps, &anchor.profile_id, notice, None).await;
+    })
+}
+
+/// Tells an anchor's owner of the batch of questions just stored for it.
+pub(super) async fn questions_asked(
+    deps: &EngineDeps,
+    anchor: &Anchor,
+    batch: &[Question],
+    now: DateTime<Utc>,
+) {
+    if let Some(notice) = questions_notice(anchor, batch, now) {
+        tell_member(deps, &anchor.profile_id, notice, None).await;
+    }
 }

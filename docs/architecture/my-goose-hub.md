@@ -71,25 +71,29 @@ scratchpad's rules are read and saved with `GET/PUT /prompts/{soul|heartbeat|scr
 
 `GET /me/goose/activity` → `{"activity":[Entry], "unseen": n, "seen_at": time|null}`, newest
 first, at most 60. `Entry = {"id","kind","summary","detail": text|null,"at","can_undo": bool,
-"undone": bool}`. `kind` is `reminder` (one it set on their list), `note` and `note_closed`
-(its own follow-ups), `watch_paused` (a watch whose checks kept failing), `suggestion` (something
-it asked them to approve) or `errand` (something it looked up; `detail` is what it found).
-`summary` is one line written for the member.
+"undone": bool}`. `kind` is `intention` (a job it left itself, carried out or let go),
+`errand` (one that looked something up; `detail` is what it found, null when that was nothing)
+or `suggestion` (something it asked them to approve). Entries from before intentions keep
+their kinds until they age out: `reminder`, `note`, `note_closed` and `watch_paused`.
+`summary` is one line written for the member. For an intention it says what became of it:
+"Told you: Leave by 7:15. Sent to your phone.", "Offered you a to-do: Renew the insurance.
+Asked whether to add it to your to-dos.", "Let go, its time ran out: Ask about the trip".
 
 - `POST /me/goose/activity/seen` → `204`: the member has read the list down to now.
 - `POST /me/goose/activity/{id}/undo` → `{"undone":true}`: the reminder is removed, the note
   deleted or the watch resumed. `409` for an entry that cannot be taken back or already was,
   `404` for one that is not theirs.
 
-Only the heartbeat writes entries, after the thing is done. A run that did something the member
-should hear of (a reminder, a paused watch, an errand) sends one notification, category
-`update`, with `{"open":"goose_activity"}`; its own notes and its suggestions do not, the first
-being for itself and the second having a notification of their own. Entries are kept 30 days.
+The heartbeat and the runner of its intentions write entries, after the thing is done. A
+look-up that found something sends one notification, category `update`, with
+`{"open":"goose_activity"}`; every other entry has a notification of its own or needs none.
+Entries are kept 30 days. None of the kinds written now can be taken back; `undo` still
+serves the older ones.
 
-What the heartbeat may do alone is small and reversible or read-only: set a reminder for
-something already theirs (two a run, a few a day), write and close its own notes, pause a watch
-that keeps failing, and look one thing up a run (four a day) with reading tools only. Anything
-that changes a device, spends, sends or schedules is still a suggestion they approve.
+What the heartbeat does alone is leave itself [intentions](#intentions): tell the member
+something, make again what it made for a plan, look one thing up with reading tools only
+(four a day), put a plan's open questions to them, or offer a to-do. It never writes a to-do.
+Anything that changes a device, spends, sends or schedules is still a suggestion they approve.
 
 ## 0c. The interview
 

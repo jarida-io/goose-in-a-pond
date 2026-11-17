@@ -22,7 +22,7 @@ What a tap on a notice opens. The Pond writes `data.open` only through `OpenScre
 | `chat` | `session_id` when the notice is about a conversation | that conversation; the chat screen when there is no `session_id` |
 | `devices`, `models`, `extensions`, `remote_access` | none | that screen |
 | `my_pond` (2026-11-08) | none | the phone's My Pond screen; the "My Pond unlocked" notice carries it. The dashboard has no such screen and offers no action |
-| `goose_activity` (2026-11-12) | none | My Goose's list of what Goose did by itself; the notice after a heartbeat that set a reminder, paused a watch or looked something up carries it |
+| `goose_activity` (2026-11-12) | none | My Goose's list of what Goose did by itself; the notice of what an intention found when it looked something up carries it |
 | `anchor`, `deliverable`, `questions` | `anchor_id`; `deliverable_id`; `anchor_id` and `batch_id` | My Goose: one anchor with what was made for it; one deliverable at its body; the questions Goose is waiting on. The [idea engine](idea-engine.md) raises them |
 
 **The id rides beside the screen, never instead of it.** A client that does not read an id still

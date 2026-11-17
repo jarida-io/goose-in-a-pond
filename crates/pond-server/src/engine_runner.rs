@@ -48,7 +48,7 @@ use pond_core::user_data::services::fact_sheet::ToolHint;
 pub use finish::{at_finish, give_up, instead_of_planning};
 pub use inline::{run_inline_step, runs, CANNOT_RUN};
 pub use model::ProviderModel;
-pub use notices::tell_member;
+pub use notices::{questions_notice, tell_member};
 pub use tick::{run_ticks, tick, TickReport, EVERYDAY_TITLE};
 
 /// The window assumed before any turn has reported one.

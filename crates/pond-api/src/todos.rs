@@ -26,6 +26,8 @@ use pond_core::shared::ports::todo::{HookEventQueue, TodoRepository};
 use pond_core::shared::services::todo_add::{add_once, AddedTodo};
 use pond_core::shared::services::todo_offers::{offer_due, offer_view, todo_from_offer};
 use pond_core::user_data::ports::reminder_repository::ReminderRepository;
+use pond_core::user_data::services::condition_events;
+use pond_core::user_data::services::intentions::ConditionEvent;
 use pond_infra::sqlite_reminder::SqliteReminderRepository;
 use pond_infra::sqlite_todo::SqliteTodoRepository;
 
@@ -313,7 +315,8 @@ async fn remove_place(
     }
 }
 
-/// The phone's geofence crossing one of the member's places, queued for their hooks.
+/// The phone's geofence crossing one of the member's places, queued for their hooks and handed
+/// to whoever checks their intentions.
 async fn place_event(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -347,6 +350,10 @@ async fn place_event(
     ))
     .await
     .map_err(server_error)?;
+    condition_events::raise(ConditionEvent::Place {
+        place_id: place.id.clone(),
+        transition,
+    });
     Ok((StatusCode::ACCEPTED, Json(json!({}))).into_response())
 }
 

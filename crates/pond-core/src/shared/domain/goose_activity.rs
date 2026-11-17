@@ -30,6 +30,8 @@ pub enum ActivityKind {
     Errand,
     /// A paired phone that stopped connecting, removed.
     PhoneRemoved,
+    /// A job the heartbeat left itself, carried out or let go.
+    Intention,
 }
 
 impl ActivityKind {
@@ -42,6 +44,7 @@ impl ActivityKind {
             Self::Suggestion => "suggestion",
             Self::Errand => "errand",
             Self::PhoneRemoved => "phone_removed",
+            Self::Intention => "intention",
         }
     }
 
@@ -54,12 +57,13 @@ impl ActivityKind {
             "suggestion" => Self::Suggestion,
             "errand" => Self::Errand,
             "phone_removed" => Self::PhoneRemoved,
+            "intention" => Self::Intention,
             _ => return None,
         })
     }
 
     /// Whether the member is told at once. Goose's own notes wait to be read, and a suggestion
-    /// has a notification of its own.
+    /// or a settled intention has a notification of its own.
     pub fn tells(self) -> bool {
         matches!(self, Self::Reminder | Self::WatchPaused | Self::Errand)
     }
@@ -79,7 +83,7 @@ pub struct GooseActivity {
     pub summary: String,
     /// An errand's answer.
     pub detail: Option<String>,
-    /// The to-do, note, watch or proposal it made or changed.
+    /// The to-do, note, watch, proposal or intention it made, changed or settled.
     pub ref_id: Option<String>,
     pub at: DateTime<Utc>,
     pub undone_at: Option<DateTime<Utc>>,
@@ -190,19 +194,39 @@ impl GooseActivity {
 
     /// Something looked up, with what was found.
     pub fn errand(member: &str, asked: &str, answer: &str, at: DateTime<Utc>) -> Self {
-        let mut item = Self::new(
+        Self::new(
             member,
             ActivityKind::Errand,
             &format!("Looked into: {asked}"),
             None,
             at,
-        );
-        let answer = answer.trim();
-        item.detail = (!answer.is_empty()).then(|| {
-            let kept: String = answer.chars().take(DETAIL_CHARS).collect();
+        )
+        .with_detail(answer)
+    }
+
+    /// A settled intention under the line that says what became of it. One that looked
+    /// something up is an errand, kept with what it `found`: empty when that was nothing.
+    pub fn intention(
+        member: &str,
+        line: &str,
+        intention_id: &str,
+        found: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Self {
+        let kind = match found {
+            Some(_) => ActivityKind::Errand,
+            None => ActivityKind::Intention,
+        };
+        Self::new(member, kind, line, Some(intention_id), at).with_detail(found.unwrap_or_default())
+    }
+
+    fn with_detail(mut self, detail: &str) -> Self {
+        let detail = detail.trim();
+        self.detail = (!detail.is_empty()).then(|| {
+            let kept: String = detail.chars().take(DETAIL_CHARS).collect();
             kept.trim().to_string()
         });
-        item
+        self
     }
 
     pub fn can_undo(&self) -> bool {
@@ -250,6 +274,8 @@ mod tests {
             ActivityKind::WatchPaused,
             ActivityKind::Suggestion,
             ActivityKind::Errand,
+            ActivityKind::PhoneRemoved,
+            ActivityKind::Intention,
         ] {
             assert_eq!(ActivityKind::parse(kind.as_str()), Some(kind));
         }
@@ -300,5 +326,32 @@ mod tests {
         assert!(!item.can_undo());
         assert!(!GooseActivity::note_closed("m", "x", at()).can_undo());
         assert_eq!(GooseActivity::errand("m", "q", "  ", at()).detail, None);
+    }
+
+    #[test]
+    fn a_settled_intention_is_kept_under_its_line_and_one_that_looked_is_an_errand() {
+        let told = GooseActivity::intention("m", "Told you: Leave by 7:15.", "i1", None, at());
+        assert_eq!(told.kind, ActivityKind::Intention);
+        assert_eq!(told.summary, "Told you: Leave by 7:15.");
+        assert_eq!(told.ref_id.as_deref(), Some("i1"));
+        assert_eq!(told.detail, None);
+        assert!(!told.can_undo());
+        assert_eq!(notice(std::slice::from_ref(&told)), None);
+
+        let looked = GooseActivity::intention(
+            "m",
+            "Looked into: when the pool opens.",
+            "i2",
+            Some(" It opens at 6am. "),
+            at(),
+        );
+        assert_eq!(looked.kind, ActivityKind::Errand);
+        assert_eq!(looked.detail.as_deref(), Some("It opens at 6am."));
+        assert_eq!(looked.ref_id.as_deref(), Some("i2"));
+        assert!(!looked.can_undo());
+
+        let found_nothing = GooseActivity::intention("m", "Looked into: x.", "i3", Some(""), at());
+        assert_eq!(found_nothing.kind, ActivityKind::Errand);
+        assert_eq!(found_nothing.detail, None);
     }
 }
