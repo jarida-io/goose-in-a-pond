@@ -6,11 +6,20 @@ import { navigateTo } from "./helpers/nav";
 // ─── Mock data ──────────────────────────────────────────────────
 const MOCK_DEVICES = {
   devices: [
-    { id: "dev-1", name: "Jetson Orin Nano",  device_type: "host",   room: "Office",      is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-2", name: "Desk Sensor",        device_type: "sensor", room: "Office",      is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
-    { id: "dev-3", name: "Living Room Hub",    device_type: "host",   room: "Living Room", is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-4", name: "Motion Sensor",      device_type: "sensor", room: "Living Room", is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-5", name: "Front Door Camera",  device_type: "sensor", room: "Outdoor",     is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-1", name: "Jetson Orin Nano",  device_type: "host",   room_id: "room-office",  is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-2", name: "Desk Sensor",        device_type: "sensor", room_id: "room-office",  is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
+    { id: "dev-3", name: "Living Room Hub",    device_type: "host",   room_id: "room-living",  is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-4", name: "Motion Sensor",      device_type: "sensor", room_id: "room-living",  is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-5", name: "Front Door Camera",  device_type: "sensor", room_id: "room-outdoor", is_online: true,  last_seen: new Date().toISOString() },
+  ],
+};
+
+// Devices name their room by id; the screen labels each card with the room's name.
+const MOCK_ROOMS = {
+  rooms: [
+    { id: "room-office",  name: "Office",      created_at: "", guest_accessible: false },
+    { id: "room-living",  name: "Living Room", created_at: "", guest_accessible: false },
+    { id: "room-outdoor", name: "Outdoor",     created_at: "", guest_accessible: false },
   ],
 };
 
@@ -31,6 +40,7 @@ async function setupBaseRoutes(page: Page) {
   await page.route("**/api/v1/settings", (r) =>
     r.fulfill({ json: { assistant_name: "Pond", user_name: "Jerry", chat_provider: "llamafile", chat_model: "llama3.2", agent_memory_inject: false, prompt_style: "balanced", llm_temperature: 0.7, llm_max_tokens: 1024 } }),
   );
+  await page.route("**/api/v1/rooms", (r) => r.fulfill({ json: MOCK_ROOMS }));
   await page.route("**/api/v1/schedules", (r) => r.fulfill({ json: [] }));
   await page.route("**/api/v1/sessions", (r) => r.fulfill({ json: { sessions: [] } }));
   await page.route("**/api/v1/sessions/*/messages", (r) => r.fulfill({ json: { messages: [] } }));
