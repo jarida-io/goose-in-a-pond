@@ -95,4 +95,39 @@ describe("the focus ring", () => {
 
     expect(offenders, "one ring per control: recolour the border, do not also add a halo").toEqual([]);
   });
+
+  // A text field shows its focus state on every click, so a second ring there is seen by everyone;
+  // a button's outline appears only under the keyboard, where it is the one place focus shows.
+  it("never draws a focus outline outside a text field's own border", () => {
+    const offenders = cssFiles(SRC).flatMap((path) => {
+      const css = readFileSync(path, "utf8");
+      const plain = css.replace(/\/\*[\s\S]*?\*\//g, "");
+      // Elements this file gives a visible border of their own.
+      const bordered = new Set(
+        [...plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+          .filter(([, , body]) => /(^|[;\s])border\s*:\s*(?!none|0[;\s])/.test(body))
+          .flatMap(([, selector]) => selector.split(",").map((part) => part.trim())),
+      );
+      return focusRules(css)
+        .filter(({ body }) => {
+          const outline = body.match(/(^|[;\s])outline\s*:\s*([^;]+);/);
+          const offset = body.match(/outline-offset\s*:\s*([^;]+);/);
+          return outline && !/\bnone\b/.test(outline[2]) && !(offset && offset[1].trim().startsWith("-"));
+        })
+        .flatMap(({ selector }) =>
+          selector
+            .split(",")
+            .map((part) => part.trim())
+            .filter((part) => /:focus/.test(part))
+            .filter((part) => /\b(input|select|textarea)\b|__input|Input\b|-field|__select/.test(part))
+            .filter((part) => bordered.has(part.replace(/:has\([^)]*:focus[^)]*\)/, "").replace(/:focus(-visible|-within)?/, "").trim()))
+            .map((part) => `${relative(SRC, path)}: ${part}`),
+        );
+    });
+
+    expect(
+      offenders,
+      "one ring per control: recolour the border, or draw the outline over it (negative offset)",
+    ).toEqual([]);
+  });
 });

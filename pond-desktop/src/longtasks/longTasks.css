@@ -287,8 +287,9 @@
 }
 
 .lt__queueopt:has(input:focus-visible) {
+  /* Over the tile's own 2px border, not outside it as a second ring. */
   outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .lt__queuechoice:disabled .lt__queueopt {

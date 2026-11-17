@@ -153,7 +153,11 @@
   cursor: pointer;
 }
 .ctx__addBtn:disabled { opacity: 0.5; cursor: not-allowed; }
-.ctx__addInput:focus-visible,
+.ctx__addInput:focus-visible {
+  /* One ring: the field's own border takes the focus colour; an outline outside it was a second. */
+  outline: none;
+  border-color: var(--color-accent);
+}
 .ctx__addBtn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 /* ── The wall ───────────────────────────────────────────────────────────── */
