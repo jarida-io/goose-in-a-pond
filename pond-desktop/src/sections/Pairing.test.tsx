@@ -11,15 +11,18 @@ vi.mock("../api/PondApiClient", () => ({
     getPairingCode: vi.fn(),
     issuePairingCode: vi.fn(),
     listProfiles: vi.fn(async () => ({ profiles: [] })),
-    // Remote access sits on this page and asks for these as soon as it mounts.
-    remoteStatus: vi.fn(async () => ({ state: "Stopped" })),
-    ngrokTunnel: vi.fn(async () => ({ config: { enabled: false, endpoint: "tcp" }, tokenSet: false, status: { state: "off" } })),
-    remoteRecoveryRequests: vi.fn(async () => []),
-    remoteDevice: vi.fn(async () => ({ provisioned: false, registered: true })),
+    getPairingLock: vi.fn(),
+    listPairingRequests: vi.fn(async () => ({ requests: [] })),
+    approvePairingRequest: vi.fn(),
+    declinePairingRequest: vi.fn(),
   },
 }));
 
+const dispatch = vi.hoisted(() => vi.fn());
+vi.mock("../state/useAppContext", () => ({ useAppDispatch: () => dispatch }));
+
 import { api } from "../api/PondApiClient";
+import { takeSettingsCategory } from "../settings/openCategory";
 import { Pairing } from "./Pairing";
 
 describe("Pairing when the Pond refuses the host credential", () => {
@@ -134,5 +137,48 @@ describe("Pairing for a household member", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     render(<Pairing />);
     expect(await screen.findByText(/household members could not be read/)).toBeTruthy();
+  });
+
+  it("keeps only pairing here, and opens Settings at Connections for the lock and remote access", async () => {
+    vi.mocked(api.getPairingCode).mockResolvedValue(code("111111", null));
+    vi.mocked(api.getPairingLock).mockResolvedValue({
+      locked: true, enforced: true, owner_profile_id: null, has_recovery_pin: true, owner_has_a_phone: true,
+      min_pin_digits: 6, can_change: false,
+    } as never);
+    render(<Pairing />);
+    expect(await screen.findByText(/A new phone waits for the main member/)).toBeTruthy();
+    // The lock's controls and the remote-access choice are no longer on this page.
+    expect(screen.queryByRole("button", { name: "Unlock pairing" })).toBeNull();
+    expect(screen.queryByText("How phones reach this Pond away from home")).toBeNull();
+    expect(api.ngrokTunnel).toBeUndefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /remote access settings/ }));
+    expect(takeSettingsCategory()).toBe("connections");
+    expect(dispatch).toHaveBeenCalledWith({ type: "SET_SECTION", payload: "settings" });
+  });
+
+  it("lists phones waiting to pair only on the main member's device, with Accept and Decline", async () => {
+    vi.mocked(api.getPairingCode).mockResolvedValue(code("111111", null));
+    vi.mocked(api.getPairingLock).mockResolvedValue({
+      locked: true, enforced: true, owner_profile_id: "e", has_recovery_pin: false, owner_has_a_phone: true,
+      min_pin_digits: 6, can_change: true,
+    } as never);
+    vi.mocked(api.listPairingRequests).mockResolvedValue({ requests: [{ id: "r1", device_name: "Arlene's S22", client_type: "gotg" }] } as never);
+    vi.mocked(api.approvePairingRequest).mockResolvedValue(undefined as never);
+    render(<Pairing />);
+    expect(await screen.findByText("Arlene's S22")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Accept/ }));
+    await waitFor(() => expect(api.approvePairingRequest).toHaveBeenCalledWith("r1"));
+  });
+
+  it("shows no waiting list when nobody is asking", async () => {
+    vi.mocked(api.getPairingCode).mockResolvedValue(code("111111", null));
+    vi.mocked(api.getPairingLock).mockResolvedValue({
+      locked: true, enforced: true, owner_profile_id: "e", has_recovery_pin: false, owner_has_a_phone: true,
+      min_pin_digits: 6, can_change: true,
+    } as never);
+    render(<Pairing />);
+    await screen.findByText(/A new phone waits/);
+    expect(screen.queryByText("Phones asking to pair")).toBeNull();
   });
 });

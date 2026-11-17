@@ -1,15 +1,16 @@
 import i18n from '../i18n';
-import { RemoteProvider } from './RemoteProvider';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Chip } from "@heroui/react";
-import { RefreshCw, Smartphone, Wifi } from "lucide-react";
+import { RefreshCw, Settings2, Smartphone, Wifi } from "lucide-react";
 import QRCode from "qrcode";
 import { api } from "../api/PondApiClient";
 import type { PairingCodeBinding } from "../api/types";
 import { isSignInRequired } from "../api/hostCredential";
 import { signInRefusalKey } from "../api/signInRefusal";
 import { PageHeader } from "../components/shared";
-import { PairingLockPanel } from "../network/PairingLockPanel";
+import { PairingLockBrief } from "../network/PairingLockBrief";
+import { openSettingsAt } from "../settings/openCategory";
+import { useAppDispatch } from "../state/useAppContext";
 
 interface PairingInfo {
   code: string;
@@ -42,6 +43,11 @@ function timeUntil(isoString: string): string {
 }
 
 export function Pairing() {
+  const dispatch = useAppDispatch();
+  const openConnections = () => {
+    openSettingsAt("connections");
+    dispatch({ type: "SET_SECTION", payload: "settings" });
+  };
   const [info, setInfo] = useState<PairingInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -247,8 +253,13 @@ export function Pairing() {
               <code style={{ fontSize: 11 }}>_pond._tcp.local.</code> via mDNS.
             </Step>
           </div>
-          <div style={{ marginTop: 20 }}><PairingLockPanel variant="catalogue" /></div>
-          <RemoteProvider />
+          {/* Only what pairing a phone needs here; the lock's controls, the recovery PIN and the
+              ways phones reach the Pond from outside are in Settings > Connections. */}
+          <div style={{ marginTop: 20 }}><PairingLockBrief /></div>
+          <button type="button" className="net__btn" style={{ marginTop: 12 }} onClick={openConnections}>
+            <Settings2 size={13} aria-hidden="true" />
+            {i18n.t("pairing.moreSettings")}
+          </button>
         </div>
       </div>
     </div>

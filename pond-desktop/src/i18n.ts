@@ -174,6 +174,7 @@ void i18n.use(initReactI18next).init({
     unavailable: 'HTTPS pairing is unavailable. Check the Pond server logs.',
     fingerprint: 'Public-key fingerprint', address: 'HTTPS address',
     manual: 'For manual pairing, enter this address, fingerprint, and pairing code on your phone while connected to the same LAN.',
+    moreSettings: 'Pairing lock, recovery PIN and remote access settings',
     owner: 'Who will use this device?',
     ownerNobody: 'Nobody in particular (a guest or a shared screen)',
     boundTo: 'A device that pairs with this code becomes {{name}}\'s, and the Pond knows it is {{name}} speaking. A phone that is already paired is linked by pairing it again with this code.',

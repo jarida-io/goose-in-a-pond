@@ -16,6 +16,8 @@ import { BackgroundJobs } from "./BackgroundJobs";
 import { AudioDevicesPanel } from "../voice/AudioDevicesPanel";
 import { ConnectionsProvider } from "../network/ConnectionsProvider";
 import { BluetoothStatus, EthernetPanel, PairingStatus } from "../network/LinkPanels";
+import { RemoteProvider } from "../sections/RemoteProvider";
+import { takeSettingsCategory } from "./openCategory";
 import { WifiPanel } from "../network/WifiPanel";
 import { deviceOptions, isAudioStatus } from "../voice/audioDevices";
 import type {
@@ -478,7 +480,11 @@ export function SettingsCatalogueView({
   const [saved, setSaved] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [categoryId, setCategoryId] = useState(CATALOGUE[0].id);
+  // Another screen may ask to open at a category (the pairing page opens Connections).
+  const [categoryId, setCategoryId] = useState(() => {
+    const asked = takeSettingsCategory();
+    return asked && CATALOGUE.some((c) => c.id === asked) ? asked : CATALOGUE[0].id;
+  });
   const [query, setQuery] = useState("");
   /** Developer view: adds field names, consumer marks and their notes. */
   const [dev, setDev] = useState(false);
@@ -1270,7 +1276,15 @@ export function SettingsCatalogueView({
                         <BluetoothStatus variant="catalogue" />
                       )}
                       {!searching && category.id === "connections" && g.name === "Pairing" && (
-                        <PairingStatus variant="catalogue" />
+                        <>
+                          <PairingStatus variant="catalogue" />
+                          {/* How phones reach the Pond from outside: moved here from the pairing
+                              page, which keeps only what pairing a phone needs. */}
+                          <section className="scat__remote" aria-label="Remote access">
+                            <h3 className="scat__remoteTitle">Remote access</h3>
+                            <RemoteProvider />
+                          </section>
+                        </>
                       )}
                       {g.entries.map((e) => (
                         <EntryRow
