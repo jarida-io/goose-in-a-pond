@@ -5,6 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::anchor::IllegalMove;
+use super::question::{QuestionDraft, QuestionOption};
 
 /// How long a card stays on show after its set is made, unless it is saved.
 pub const FADE_HOURS: i64 = 36;
@@ -140,6 +141,31 @@ pub struct Why {
     pub source: WhySource,
 }
 
+/// The one structured question an ask card puts to the member. The option they pick is sent to
+/// Goose as their message; "Other" opens the composer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardQuestion {
+    pub header: String,
+    pub text: String,
+    pub options: Vec<QuestionOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended: Option<usize>,
+    #[serde(default)]
+    pub multi: bool,
+}
+
+impl From<QuestionDraft> for CardQuestion {
+    fn from(draft: QuestionDraft) -> Self {
+        Self {
+            header: draft.header,
+            text: draft.text,
+            options: draft.options,
+            recommended: draft.recommended,
+            multi: draft.multi,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardAction {
     pub kind: ActionKind,
@@ -153,6 +179,9 @@ pub struct CardAction {
     pub due: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// An ask card's question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<CardQuestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
