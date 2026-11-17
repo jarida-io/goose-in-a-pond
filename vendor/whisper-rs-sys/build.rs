@@ -106,7 +106,11 @@ fn main() {
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let whisper_root = out.join("whisper.cpp");
-    let isolated = target.contains("linux");
+    // Linux and macOS link Whisper and llama.cpp statically into one binary, each with its own
+    // GGML. Unrenamed, the linker took some GGML functions from each copy, and on macOS a
+    // flash-attention node made by Whisper's copy failed llama.cpp's
+    // `a->op == GGML_OP_FLASH_ATTN_EXT` assert: the two copies number their ops one apart.
+    let isolated = target.contains("linux") || target.contains("apple-darwin");
     let namespace_header = out.join("pond-whisper-namespace.h");
     if isolated {
         namespace::header(std::path::Path::new("whisper.cpp"), &namespace_header)
@@ -125,7 +129,7 @@ fn main() {
     });
 
     if isolated && env::var("WHISPER_DONT_GENERATE_BINDINGS").is_ok() {
-        panic!("Linux GGML isolation requires generated bindings; unset WHISPER_DONT_GENERATE_BINDINGS");
+        panic!("GGML isolation requires generated bindings; unset WHISPER_DONT_GENERATE_BINDINGS");
     }
     if env::var("WHISPER_DONT_GENERATE_BINDINGS").is_ok() {
         let _: u64 = std::fs::copy("src/bindings.rs", out.join("bindings.rs"))
@@ -162,7 +166,9 @@ fn main() {
         }
 
         if isolated {
-            bindings = bindings.parse_callbacks(Box::new(namespace::Bindings));
+            bindings = bindings.parse_callbacks(Box::new(namespace::Bindings {
+                symbol_prefix: if target.contains("apple") { "_" } else { "" },
+            }));
         }
         let bindings = bindings
             .clang_arg("-I./whisper.cpp/")
@@ -179,7 +185,7 @@ fn main() {
             }
             Err(e) => {
                 if isolated {
-                    panic!("Linux GGML isolation requires generated bindings: {e}");
+                    panic!("GGML isolation requires generated bindings: {e}");
                 }
                 println!("cargo:warning=Unable to generate bindings: {}", e);
                 println!("cargo:warning=Using bundled bindings.rs, which may be out of date");
@@ -212,6 +218,9 @@ fn main() {
         config.cxxflag(format!("-include{}", namespace_header.display()));
         // Dynamic backend lookup uses public symbol names; this build embeds each backend.
         config.define("GGML_BACKEND_DL", "OFF");
+        // The embedded Metal library's start and end are defined in generated assembly, which the
+        // forced include never reaches; name them as the renamed Objective-C refers to them.
+        config.define("GGML_METAL_EMBED_SYMBOL_PREFIX", "pond_whisper_");
     }
     if cfg!(target_os = "windows") {
         config.cxxflag("/utf-8");
