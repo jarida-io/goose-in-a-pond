@@ -1191,7 +1191,7 @@ mod tests {
             "b1",
             QuestionPurpose::Profile,
             "How do you get to work?",
-            &["Drive".into(), "Matatu".into()],
+            &["Drive", "Matatu"],
             false,
             now(),
         )

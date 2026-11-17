@@ -33,6 +33,7 @@ pub mod phone_retirement;
 pub mod place_detection;
 pub mod proactive_review;
 pub mod profile_interview;
+pub mod question_desk;
 pub mod redacting_memory_repository;
 pub mod reminder_proposal;
 pub mod screenshot_notes;
