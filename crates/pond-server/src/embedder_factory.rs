@@ -14,6 +14,11 @@ use crate::inference_lane_runner::InferenceLane;
 
 /// ONNX Runtime can hang rather than fail when its version does not match.
 const FASTEMBED_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The first load also fetches the weights from Hugging Face, which on a home line next to other
+/// first-run downloads takes longer than [`FASTEMBED_INIT_TIMEOUT`]: that budget is for a loader
+/// that hangs (the wrong ONNX Runtime), so a fetch gets its own. Only background work loads the
+/// embedder, so a turn never waits on this.
+const FASTEMBED_FIRST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// How often a load held off by the household's work looks again; a choice, not a measurement.
 #[cfg(feature = "local-inference")]
@@ -85,8 +90,30 @@ impl ServerEmbedderFactory {
     async fn fastembed(&self, model: &EmbeddingModel) -> Result<Arc<dyn EmbeddingProvider>> {
         let name = model.name.to_string();
         let cache = self.dir.clone();
+        let cached = pond_infra::fastembed_embedding::weights_cached(
+            &name,
+            &pond_infra::fastembed_embedding::cache_root(&cache),
+        );
+        let (budget, why) = if cached {
+            (
+                FASTEMBED_INIT_TIMEOUT,
+                "ONNX Runtime may be the wrong version",
+            )
+        } else {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "embedder_first_download",
+                model_id = %name,
+                budget_secs = FASTEMBED_FIRST_DOWNLOAD_TIMEOUT.as_secs(),
+                "the memory model's weights are not on disk yet; fetching them before it loads"
+            );
+            (
+                FASTEMBED_FIRST_DOWNLOAD_TIMEOUT,
+                "its weights were still downloading; the next load picks up what arrived",
+            )
+        };
         let built = tokio::time::timeout(
-            FASTEMBED_INIT_TIMEOUT,
+            budget,
             tokio::task::spawn_blocking(move || {
                 pond_infra::fastembed_embedding::FastembedEmbeddingProvider::new(&name, Some(cache))
             }),
@@ -94,8 +121,8 @@ impl ServerEmbedderFactory {
         .await
         .map_err(|_| {
             anyhow!(
-                "fastembed did not start within {} s; ONNX Runtime may be the wrong version",
-                FASTEMBED_INIT_TIMEOUT.as_secs()
+                "fastembed did not start within {} s; {why}",
+                budget.as_secs()
             )
         })?
         .map_err(|e| anyhow!("fastembed's loader stopped: {e}"))??;
