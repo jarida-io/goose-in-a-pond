@@ -88,9 +88,14 @@ numbers>], \"found\": \"<what the sources say>\", \"next\": \"<what Goose would 
 - \"why\": one line to the member that starts with \"You\" and names what the card builds on.
 - \"sources\": the number of every source the card uses, at least one.
 - Each card has a when or a where, a cost or an effort, or an action. Most have an action.
+- \"why\" names the specific thing it builds on; never \"so you should\".
 - Actions: todo adds a to-do, reminder adds a reminder at due, chat sends the prompt to \
-Goose, watch watches a web page from the sources, go_deeper has Goose research it.
-- An ask card's action is chat, with the question as its prompt.
+Goose, watch watches a page from the sources that lists things for sale or to book for one \
+of the member's plans, go_deeper has Goose research it.
+- A do card names one specific event, place or activity, with its when and where.
+- A reminder or todo card adds something new that follows from a plan, a memory or the web; \
+never one the member's to-dos already hold, and never one due before today.
+- An ask card's action is chat, with a question ending in \"?\" as its prompt.
 - A next_step card moves one of the member's plans on.
 - Leave out what the member does not want and what they were shown lately.
 - No explanation, no preamble.";
@@ -164,6 +169,12 @@ pub enum CardRefused {
     /// It has none of when/where, cost/effort or an action.
     NothingToGoOn,
     UnknownAction,
+    /// A to-do or reminder resting only on a to-do the member already has.
+    RepeatsTodo,
+    /// Its to-do or reminder is due in the past.
+    DuePassed,
+    /// An ask card with no question for Goose.
+    NoQuestion,
 }
 
 fn one_line(text: &str) -> String {
@@ -373,6 +384,7 @@ fn action_of(
     item: &Item,
     title: &str,
     web_url: Option<&String>,
+    for_plan: bool,
 ) -> Result<Option<CardAction>, CardRefused> {
     let Some(raw) = item.get("action").filter(|a| !a.is_null()) else {
         return Ok(None);
@@ -406,8 +418,8 @@ fn action_of(
         ActionKind::Chat => {
             action.prompt = Some(field("prompt").unwrap_or_else(|| title.to_string()));
         }
-        // Nothing to watch but a page the sources gave.
-        ActionKind::Watch if web_url.is_none() => return Ok(None),
+        // Nothing to watch but a page the sources gave, for a plan the member is following.
+        ActionKind::Watch if web_url.is_none() || !for_plan => return Ok(None),
         ActionKind::Watch | ActionKind::GoDeeper => {}
     }
     Ok(Some(action))
@@ -448,7 +460,34 @@ pub fn validate(
         None => picked[0],
     };
     let web_url = picked.iter().find_map(|at| shown[*at].url.as_ref());
-    let action = action_of(item, &title, web_url)?;
+    let for_plan = picked
+        .iter()
+        .any(|at| shown[*at].kind == CardSourceKind::Plan);
+    let action = action_of(item, &title, web_url, for_plan)?;
+    if let Some(action) = &action {
+        let adds = matches!(action.kind, ActionKind::Todo | ActionKind::Reminder);
+        let only_todos = picked
+            .iter()
+            .all(|at| shown[*at].kind == CardSourceKind::Todo);
+        if adds && only_todos {
+            return Err(CardRefused::RepeatsTodo);
+        }
+        let due = action
+            .due
+            .as_deref()
+            .and_then(|d| due_time(d, chrono_tz::UTC));
+        if adds && due.is_some_and(|due| due < now) {
+            return Err(CardRefused::DuePassed);
+        }
+    }
+    if kind == CardKind::Ask {
+        let asks = action.as_ref().is_some_and(|a| {
+            a.kind == ActionKind::Chat && a.prompt.as_deref().is_some_and(|p| p.contains('?'))
+        });
+        if !asks {
+            return Err(CardRefused::NoQuestion);
+        }
+    }
     let field = |key: &str| text_of(item, key).map(|text| clipped(&text, 60));
     let (when, where_, cost, effort) = (
         field("when"),
@@ -613,6 +652,9 @@ fn score(card: &Card) -> usize {
     }
     if card.sources.iter().any(|s| s.kind == CardSourceKind::Web) {
         score += 1;
+    }
+    if card.kind == CardKind::Do && card.when.is_some() {
+        score += 2;
     }
     score
 }
@@ -894,6 +936,49 @@ mod tests {
     }
 
     #[test]
+    fn reminders_repeating_a_todo_or_already_past_are_refused() {
+        let mut todo = numbered(CardSourceKind::Todo, "Wash the dishes", "Wash the dishes");
+        todo.reference = "todo-1".to_string();
+        let mut with_todo = shown();
+        with_todo.push(todo);
+        let checked =
+            |value: serde_json::Value| validate(&item(value), &with_todo, "jerry", "batch", now());
+        let mut repeat = good();
+        repeat["kind"] = json!("reminder");
+        repeat["sources"] = json!([4]);
+        repeat["why_source"] = json!(4);
+        repeat["action"] = json!({"kind": "reminder", "text": "Wash the dishes"});
+        assert_eq!(checked(repeat).unwrap_err(), CardRefused::RepeatsTodo);
+
+        let mut past = good();
+        past["action"] = json!({"kind": "reminder", "due": "2026-11-13 19:00"});
+        assert_eq!(checked(past).unwrap_err(), CardRefused::DuePassed);
+        let mut ahead = good();
+        ahead["action"] = json!({"kind": "reminder", "due": "2026-11-21 07:00"});
+        assert!(checked(ahead).is_ok());
+    }
+
+    #[test]
+    fn an_ask_card_needs_a_question_and_a_watch_needs_a_plan() {
+        let mut ask = good();
+        ask["kind"] = json!("ask");
+        ask["action"] = json!({"kind": "chat", "prompt": "Find things to do"});
+        assert_eq!(check(ask.clone()).unwrap_err(), CardRefused::NoQuestion);
+        ask["action"] = json!({"kind": "chat", "prompt": "What's on at Karura this weekend?"});
+        assert!(check(ask).is_ok());
+
+        let mut watch = good();
+        watch["action"] = json!({"kind": "watch"});
+        assert!(
+            check(watch.clone()).unwrap().action.is_none(),
+            "a watch on a page for no plan is dropped"
+        );
+        watch["sources"] = json!([2, 3]);
+        let card = check(watch).unwrap();
+        assert_eq!(card.action.unwrap().kind, ActionKind::Watch);
+    }
+
+    #[test]
     fn a_reply_is_read_leniently_and_a_long_title_is_cut() {
         let mut long = good();
         long["title"] = json!("word ".repeat(30));
@@ -917,6 +1002,9 @@ mod tests {
         let mut value = good();
         value["kind"] = json!(kind.as_str());
         value["title"] = json!(title);
+        if kind == CardKind::Ask {
+            value["action"] = json!({"kind": "chat", "prompt": format!("{title}?")});
+        }
         if !action {
             value.as_object_mut().unwrap().remove("action");
         }
