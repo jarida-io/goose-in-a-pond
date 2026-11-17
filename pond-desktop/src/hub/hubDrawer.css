@@ -253,9 +253,6 @@
   background: transparent;
 }
 
-/* One edge per button: the border is the whole outline. An offset ink shadow
-   under it read as a second, accent-coloured ring around each circle, so the
-   lift ladder moves the button instead of drawing a plate behind it. */
 .shellbar__btn {
   --ink-lift: var(--ink-rest);
   position: relative;
@@ -271,8 +268,9 @@
   justify-content: center;
   gap: 4px;
   cursor: pointer;
+  box-shadow: var(--ink-lift) var(--ink-lift) 0 var(--border-ink);
   transform: translate(calc(var(--ink-rest) - var(--ink-lift)), calc(var(--ink-rest) - var(--ink-lift)));
-  transition: transform var(--dur-lift) var(--ink-ease);
+  transition: transform var(--dur-lift) var(--ink-ease), box-shadow var(--dur-lift) var(--ink-ease);
 }
 
 /* Compact lift ladder (small control): hover stays at rest, as ink's compact rule has it. */
@@ -313,9 +311,9 @@
   outline-offset: 2px;
 }
 
-/* The ring is drawn over the 2px border, not around it, so a focused button
-   still has one edge. !important and class specificity beat base.css's global
-   offset. */
+/* The focus ring is drawn over the 2px border, not around it: outside it, it was
+   a second ring beside the ink edge. !important and class specificity beat
+   base.css's global offset. */
 .shellbar__btn:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px !important;

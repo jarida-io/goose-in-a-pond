@@ -44,20 +44,10 @@ describe("controls", () => {
       expect(rule.test(stripComments(readFileSync(join(SRC, file), "utf8"))), `${file}: ${rule}`).toBe(true);
     }
   });
-  it("gives the shell bar's round buttons one edge, not a border plus an offset ring", () => {
-    // The offset plate behind a bordered circle reads as a second ring around it.
+  it("keeps the shell bar's ink edge, and draws its focus ring over the border, not around it", () => {
     const css = stripComments(readFileSync(join(SRC, "hub/hubDrawer.css"), "utf8"));
-    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selector]) =>
-      /\.shellbar__btn\b/.test(selector),
-    );
-    expect(rules.length).toBeGreaterThan(0);
-
-    const offsetRing = /box-shadow:(?![^;]*\binset\b)[^;]*\d+px\s+\d+px\s+0\b|box-shadow:[^;]*var\(--ink-lift\)/;
-    for (const [, selector, body] of rules) {
-      expect(offsetRing.test(body), `${selector.trim()} draws an offset ring`).toBe(false);
-    }
-
-    // Keyboard focus keeps one indicator, drawn over the border rather than outside it.
+    // The offset ink plate is the buttons' design; the double border was the focus ring outside it.
+    expect(css).toMatch(/\.shellbar__btn\s*\{[^}]*box-shadow:\s*var\(--ink-lift\)\s+var\(--ink-lift\)\s+0\s+var\(--border-ink\)/);
     expect(css).toMatch(/\.shellbar__btn:focus-visible\s*\{[^}]*outline-offset:\s*-/);
   });
 });
