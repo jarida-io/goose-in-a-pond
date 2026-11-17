@@ -4148,6 +4148,10 @@ async fn run_server(
             interests: Arc::new(pond_infra::sqlite_interests::SqliteInterestRepository::new(
                 db.system.clone(),
             )),
+            cards: engine_stores.cards.clone(),
+            todos: Arc::new(pond_infra::sqlite_todo::SqliteTodoRepository::new(
+                db.system.clone(),
+            )),
             model: Arc::new(pond_server::engine_runner::ProviderModel::new(
                 llm_provider.clone(),
             )),
@@ -4159,6 +4163,7 @@ async fn run_server(
                     ),
                 ) as Arc<dyn pond_server::engine_runner::Recall>
             }),
+            web: Some(Arc::new(pond_server::engine_runner::PondWebSearch)),
             tools: Arc::new(registered_tool_hints),
             notifier: targeted_notification_sender.clone(),
             thread: pond_core::shared::services::goose_thread::installed(),

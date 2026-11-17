@@ -6,6 +6,7 @@
 use crate::user_data::domain::anchor::{
     Anchor, AnchorKind, AnchorState, Deliverable, DeliverableKind, DeliverableState,
 };
+use crate::user_data::domain::card::{Card, CardKind};
 use crate::user_data::domain::fact_sheet::{rank, FactCategory, FactLine, FactState};
 use crate::user_data::domain::question::{Question, QuestionPurpose, QuestionState};
 use crate::user_data::domain::suggestion::SuggestionContext;
@@ -255,6 +256,31 @@ impl Built {
             near: distance(anchor, now),
         }
     }
+}
+
+/// What a suggestion's id starts with when it is one of the member's `ask` cards.
+pub const CARD_PREFIX: &str = "idea_card:";
+
+/// The member's `ask` cards as suggestions, in the order given, ahead of `rest` and within
+/// [`MAX_SUGGESTIONS`].
+pub fn led_by_ask_cards(cards: &[Card], rest: Vec<Suggestion>) -> Vec<Suggestion> {
+    cards
+        .iter()
+        .filter(|card| card.kind == CardKind::Ask)
+        .map(|card| Suggestion {
+            id: format!("{CARD_PREFIX}{}", card.id),
+            prompt: card
+                .action
+                .as_ref()
+                .and_then(|action| action.prompt.clone())
+                .unwrap_or_else(|| card.title.clone()),
+            because: card.why.text.clone(),
+            answered_by: GROUP_KNOWLEDGE,
+            context: None,
+        })
+        .chain(rest)
+        .take(MAX_SUGGESTIONS)
+        .collect()
 }
 
 /// Work out what this household might want to ask.

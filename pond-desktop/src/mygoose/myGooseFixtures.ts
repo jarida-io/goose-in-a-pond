@@ -1,6 +1,6 @@
 // Wire-shaped My Goose rows for tests, so each test names only what it is about.
 
-import type { Anchor, Deliverable, FactLine } from "../api/types";
+import type { Anchor, Deliverable, FactLine, IdeaCard } from "../api/types";
 
 export function anchor(over: Partial<Anchor> = {}): Anchor {
   return {
@@ -71,6 +71,31 @@ export function factLine(over: Partial<FactLine> = {}): FactLine {
     state: "active",
     created_at: "2026-11-10T08:00:00Z",
     updated_at: "2026-11-10T08:00:00Z",
+    ...over,
+  };
+}
+
+export function ideaCard(over: Partial<IdeaCard> = {}): IdeaCard {
+  return {
+    id: "c-1",
+    kind: "do",
+    title: "Walk the Karura Forest waterfall trail",
+    why: { text: "You said you want more time outdoors on weekends.", source: { kind: "interest", label: "Hiking" } },
+    when: "Saturday 9 am",
+    where: "Karura Forest",
+    cost: "KSh 600 entry",
+    effort: null,
+    action: { kind: "todo", label: "Add to-do", text: "Walk the Karura waterfall trail" },
+    sources: [
+      { kind: "web", title: "Karura Forest: visiting", url: "https://www.karurafriends.org/visit" },
+      { kind: "interest", title: "Hiking" },
+    ],
+    notes: { found: "The waterfall trail is about 5 km.", next: "Check the weather on Friday.", caveats: "Entry prices may have changed." },
+    anchor: null,
+    state: "new",
+    batch_id: "b-1",
+    created_at: "2026-11-17T06:00:00Z",
+    fades_at: "2026-11-18T18:00:00Z",
     ...over,
   };
 }

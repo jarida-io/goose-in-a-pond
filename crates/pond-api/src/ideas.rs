@@ -281,21 +281,35 @@ async fn start_schedule(state: &AppState, idea: &Idea) -> Result<(), Failure> {
 
 /// A web watch on the listings page the idea names; its first check sets the baseline.
 async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), Failure> {
-    use pond_core::shared::domain::web_watch::{
-        WatchFilters, DEFAULT_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
-    };
-    use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
-
     let Some(address) = idea.goose_plan.listing_url.clone() else {
         return Err(failure(
             StatusCode::CONFLICT,
             "this idea names no page of listings to watch",
         ));
     };
+    let looking_for: String = idea.pitch.chars().take(300).collect();
+    watch_page(state, member, address, &idea.title, &looking_for).await?;
+    Ok(())
+}
+
+/// Starts a web watch on `address` for the member and returns its id; the watch they already
+/// keep on that page is answered in place of a second.
+pub(crate) async fn watch_page(
+    state: &AppState,
+    member: &str,
+    address: String,
+    title: &str,
+    looking_for: &str,
+) -> Result<String, Failure> {
+    use pond_core::shared::domain::web_watch::{
+        WatchFilters, DEFAULT_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
+    };
+    use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
+
     let repo = pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(state.db.system.clone());
     let mine = repo.list_for(member).await.map_err(server_error)?;
-    if mine.iter().any(|w| w.address == address) {
-        return Ok(());
+    if let Some(held) = mine.iter().find(|w| w.address == address) {
+        return Ok(held.id.clone());
     }
     if mine.len() >= MAX_WATCHES_PER_MEMBER {
         return Err(failure(
@@ -304,12 +318,13 @@ async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), 
         ));
     }
     let now = Utc::now();
+    let id = uuid::Uuid::new_v4().to_string();
     repo.create(&WebWatch {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: id.clone(),
         owner: member.to_string(),
         address,
-        title: idea.title.clone(),
-        looking_for: idea.pitch.chars().take(300).collect(),
+        title: title.to_string(),
+        looking_for: looking_for.to_string(),
         filters: WatchFilters::default(),
         interval_hours: DEFAULT_INTERVAL_HOURS,
         paused: false,
@@ -322,5 +337,5 @@ async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), 
     })
     .await
     .map_err(server_error)?;
-    Ok(())
+    Ok(id)
 }

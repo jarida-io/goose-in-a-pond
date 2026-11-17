@@ -113,6 +113,12 @@ import {
   type StopAnchor,
   type Deliverable,
   type RejectDeliverable,
+  type IdeaCard,
+  type IdeaCardDismissal,
+  type IdeaCardDeeper,
+  type IdeaCardDone,
+  type IdeaCardSet,
+  type IdeaCardSetState,
   type QuestionBatch,
   type QuestionAnswer,
   type EngineLogJob,
@@ -2043,6 +2049,38 @@ export class PondApiClient {
   async getDeliverableFile(id: string): Promise<{ blob: Blob; filename: string | null }> {
     const res = await this.send("GET", `/api/v1/me/deliverables/${encodeURIComponent(id)}/file`);
     return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
+  }
+
+  /** New and saved cards, newest set first, and where the next set is. */
+  async listIdeaCards(): Promise<IdeaCardSet> {
+    const answer = await this.get<Partial<IdeaCardSet>>("/api/v1/me/idea-cards");
+    return { cards: answer.cards ?? [], set: answer.set ?? { state: "none", made_at: null } };
+  }
+
+  refreshIdeaCards(): Promise<{ state: IdeaCardSetState }> {
+    return this.post("/api/v1/me/idea-cards/refresh", {});
+  }
+
+  /** Carries out the card's own action and marks it done. */
+  doIdeaCard(id: string): Promise<IdeaCardDone> {
+    return this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/do`, {});
+  }
+
+  /** Finds or makes the card's plan and queues its first deliverable, whatever the card's action. */
+  goDeeperOnIdeaCard(id: string): Promise<IdeaCardDeeper> {
+    return this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/deeper`, {});
+  }
+
+  saveIdeaCard(id: string): Promise<IdeaCard> {
+    return this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/save`, {});
+  }
+
+  unsaveIdeaCard(id: string): Promise<IdeaCard> {
+    return this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/unsave`, {});
+  }
+
+  async dismissIdeaCard(id: string, dismissal: IdeaCardDismissal): Promise<void> {
+    await this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/dismiss`, dismissal);
   }
 
   async listQuestionBatches(): Promise<QuestionBatch[]> {

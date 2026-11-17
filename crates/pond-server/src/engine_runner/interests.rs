@@ -1,14 +1,13 @@
-//! A member's interests as the tick reads them: a confirmed one gets an anchor that one marked
-//! avoided stops, and a guess seen often enough is offered as a question.
+//! A member's interests as the tick reads them: an interest marked avoided stops the anchor made
+//! for it, and a guess seen often enough is offered as a question. A confirmed interest gets no
+//! anchor of its own: a standing topic gave only vague weekly digests.
 
 use chrono::{DateTime, Duration, Utc};
 
 use pond_core::mcp::ports::notification::{Notification, OpenScreen};
 use pond_core::shared::domain::long_task::LongTaskState;
 use pond_core::shared::domain::todo::zone;
-use pond_core::user_data::domain::anchor::{
-    title_key, Anchor, AnchorKind, AnchorOrigin, AnchorState,
-};
+use pond_core::user_data::domain::anchor::{Anchor, AnchorOrigin, AnchorState};
 use pond_core::user_data::domain::engine_job::{EngineJob, JobState};
 use pond_core::user_data::domain::interest::Interest;
 use pond_core::user_data::domain::question::{
@@ -21,12 +20,10 @@ use super::{deliverable, notices, EngineDeps};
 const ONE_BATCH_EVERY: Duration = Duration::days(1);
 /// Matches the title `GET /me/questions` gives an interest batch.
 const BATCH_TITLE: &str = "Things you keep coming back to";
-const WHY_FOLLOWED: &str = "You chose to follow it.";
 
 /// What one look at a member's interests did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Followed {
-    pub anchored: usize,
     pub stopped: usize,
 }
 
@@ -34,30 +31,17 @@ fn is_own(anchor: &Anchor, member: &str) -> bool {
     anchor.profile_id == member
 }
 
-/// Gives each confirmed interest an active anchor, once by its title, and stops the anchor of
-/// one now marked avoided. `anchors` is the member's in every state, and gains what is added.
+/// Stops the anchor of an interest now marked avoided. `anchors` is the member's in every state.
 pub(super) async fn follow(
     deps: &EngineDeps,
     member: &str,
-    anchors: &mut Vec<Anchor>,
+    anchors: &mut [Anchor],
     open_jobs: &[EngineJob],
     now: DateTime<Utc>,
 ) -> anyhow::Result<Followed> {
     let mut followed = Followed::default();
     for interest in deps.interests.list(member).await? {
-        if interest.feeds_research() {
-            let key = title_key(&interest.topic);
-            // In any state: one the member stopped or that ended is not made again.
-            if anchors.iter().any(|a| is_own(a, member) && a.key() == key) {
-                continue;
-            }
-            if let Some(anchor) = anchor_for(&interest, member, now) {
-                if deps.anchors.add(&anchor).await? {
-                    anchors.push(anchor);
-                    followed.anchored += 1;
-                }
-            }
-        } else if interest.avoid {
+        if interest.avoid {
             let held = anchors.iter_mut().find(|a| {
                 is_own(a, member)
                     && a.origin == AnchorOrigin::Interest
@@ -71,19 +55,6 @@ pub(super) async fn follow(
         }
     }
     Ok(followed)
-}
-
-fn anchor_for(interest: &Interest, member: &str, now: DateTime<Utc>) -> Option<Anchor> {
-    let mut anchor = Anchor::new(
-        member,
-        AnchorKind::Interest,
-        &interest.topic,
-        AnchorOrigin::Interest,
-        now,
-    )?;
-    anchor.origin_ref = Some(interest.id.clone());
-    anchor.why = WHY_FOLLOWED.to_string();
-    Some(anchor)
 }
 
 /// Stops an anchor the member no longer follows and calls off the jobs working for it.

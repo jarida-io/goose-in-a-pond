@@ -472,9 +472,11 @@ A tick every minute, with no model call:
 One open job per deliverable, per member's fact sheet and per capture. Two open jobs of class
 `open` per member at most.
 
-Anchors come from: a plan in a chat (candidate), a plan in a capture (candidate), a confirmed
-interest (active), the `plan_for` tool when the member asks Goose to plan or track something
-(active), and the member adding one (active). Each member has one standing everyday anchor.
+Anchors come from: a plan in a chat (candidate), a plan in a capture (candidate), the
+`plan_for` tool when the member asks Goose to plan or track something (active), and the member
+adding one (active). A confirmed interest gets no anchor of its own: a standing topic with no
+date, place or question gave only vague weekly digests. An interest marked avoided stops an
+anchor made for it. Each member has one standing everyday anchor.
 
 ## 8. Intentions: the heartbeat
 

@@ -130,6 +130,7 @@ describe("openSection", () => {
     ["anchor", "mygoose"],
     ["deliverable", "mygoose"],
     ["questions", "mygoose"],
+    ["idea_cards", "mygoose"],
   ])("maps %s to %s", (hint, section) => {
     expect(openSection({ data: { open: hint } })).toBe(section);
   });

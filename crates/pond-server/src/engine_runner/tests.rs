@@ -1,3 +1,4 @@
+mod cards;
 mod pictures;
 mod rules_and_interests;
 
@@ -15,6 +16,7 @@ use pond_core::shared::domain::long_task::{
     StepDraft, StepOutcome, StepState,
 };
 use pond_core::shared::mocks::mock_long_task::MockLongTaskRepository;
+use pond_core::shared::mocks::mock_todo::MockTodoRepository;
 use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
 use pond_core::shared::services::goose_thread::{thread_id, GooseThread};
 use pond_core::shared::services::long_task_roles::{COMPOSER_ROLE, WORKER_ROLE};
@@ -33,6 +35,7 @@ use pond_core::user_data::domain::profile::{CreateProfileRequest, ProfileScope};
 use pond_core::user_data::mocks::mock_anchors::InMemoryAnchorRepository;
 use pond_core::user_data::mocks::mock_capture_pictures::InMemoryCapturePictures;
 use pond_core::user_data::mocks::mock_captures::InMemoryCaptureRepository;
+use pond_core::user_data::mocks::mock_cards::InMemoryCardRepository;
 use pond_core::user_data::mocks::mock_dont_list::InMemoryDontListRepository;
 use pond_core::user_data::mocks::mock_engine_jobs::InMemoryEngineJobRepository;
 use pond_core::user_data::mocks::mock_fact_sheet::InMemoryFactSheetRepository;
@@ -110,6 +113,36 @@ impl EngineModel for Scripted {
     }
 }
 
+/// A web search that answers every query with the same passages and keeps what it was asked.
+#[derive(Default)]
+struct ScriptedWeb {
+    passages: Mutex<Vec<(String, String, String)>>,
+    asked: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl WebFinder for ScriptedWeb {
+    async fn find(
+        &self,
+        query: &str,
+    ) -> Result<Vec<pond_core::user_data::services::cards::Passage>, String> {
+        self.asked.lock().unwrap().push(query.to_string());
+        Ok(self
+            .passages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(
+                |(title, url, text)| pond_core::user_data::services::cards::Passage {
+                    title: title.clone(),
+                    url: url.clone(),
+                    text: text.clone(),
+                },
+            )
+            .collect())
+    }
+}
+
 struct Pond {
     deps: EngineDeps,
     tasks: Arc<MockLongTaskRepository>,
@@ -123,6 +156,8 @@ struct Pond {
     ledger: Arc<InMemoryLedgerRepository>,
     agents: Arc<InMemoryMemberAgentRepository>,
     interests: Arc<InMemoryInterestRepository>,
+    cards: Arc<InMemoryCardRepository>,
+    web: Arc<ScriptedWeb>,
     indexed: Arc<tokio::sync::Notify>,
     memories: Arc<MockMemoryRepository>,
     sessions: Arc<InMemorySessionStorage>,
@@ -155,6 +190,9 @@ async fn pond() -> Pond {
     let ledger = Arc::new(InMemoryLedgerRepository::new());
     let agents = Arc::new(InMemoryMemberAgentRepository::new());
     let interests = Arc::new(InMemoryInterestRepository::new());
+    let cards = Arc::new(InMemoryCardRepository::new());
+    let todos = Arc::new(MockTodoRepository::new());
+    let web = Arc::new(ScriptedWeb::default());
     let indexed = Arc::new(tokio::sync::Notify::new());
     let model = Arc::new(Scripted {
         replies: Mutex::new(VecDeque::new()),
@@ -176,8 +214,11 @@ async fn pond() -> Pond {
         memories: memories.clone(),
         sessions: sessions.clone(),
         interests: interests.clone(),
+        cards: cards.clone(),
+        todos: todos.clone(),
         model: model.clone(),
         recall: None,
+        web: Some(web.clone()),
         tools: Arc::new(|| vec![ToolHint::new("get_weather", "The forecast for a place")]),
         notifier: notifier.clone(),
         thread: Some(Arc::new(GooseThread::new(sessions.clone()))),
@@ -201,6 +242,8 @@ async fn pond() -> Pond {
         ledger,
         agents,
         interests,
+        cards,
+        web,
         indexed,
         memories,
         sessions,
@@ -260,6 +303,20 @@ impl Pond {
                     && job.anchor_id.as_deref() == Some(summit.id.as_str())
             })
             .expect("the summit's dossier has a job")
+    }
+
+    /// A set made already today, so the tick queues no morning set whatever the hour.
+    async fn made_todays_cards(&self, now: DateTime<Utc>) {
+        let mut made = EngineJob::new(
+            JobKind::Cards,
+            JobClass::Upkeep,
+            Some(&self.member),
+            "",
+            now,
+        );
+        made.start(None, now).unwrap();
+        made.settle(JobState::Passed, "made", now).unwrap();
+        self.jobs.add(&made).await.unwrap();
     }
 
     async fn job(&self, id: &str) -> EngineJob {
@@ -541,6 +598,7 @@ async fn a_tick_opens_one_task_for_each_queued_job_and_never_a_second_for_a_deli
     let pond = pond().await;
     let now = Utc::now();
     let summit = pond.summit(now).await;
+    pond.made_todays_cards(now).await;
 
     let first = tick(&pond.deps, now).await;
     assert_eq!(

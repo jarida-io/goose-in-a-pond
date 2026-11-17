@@ -4,6 +4,7 @@ pub mod anchors;
 pub mod camera_storage;
 pub mod capture_pictures;
 pub mod captures;
+pub mod cards;
 pub mod conversation_extractor;
 pub mod device_attribution;
 pub mod device_commissioning;

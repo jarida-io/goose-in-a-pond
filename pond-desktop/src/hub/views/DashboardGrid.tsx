@@ -9,6 +9,8 @@ import { AgentPrefillLine } from "../../agents/AgentPrefill";
 import { AgentSuggestions } from "../../agents/AgentSuggestions";
 import { requestOpenAgent } from "../../agents/openAgent";
 import { SuggestionChips } from "../primitives/SuggestionChips";
+import { CardDeck } from "../../mygoose/CardDeck";
+import type { Variant } from "../../mygoose/myGooseWords";
 import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
 import { HomeAlerts } from "./HomeAlerts";
@@ -53,9 +55,11 @@ export interface DashboardGridProps {
   sessionId: string | null;
   /** Asks the pond and goes where the answer appears; without it the offers fold away. */
   onAsk?: (prompt: string) => void;
+  /** The density of the idea cards: the panel's touch sizes, or the desktop's. */
+  variant?: Variant;
 }
 
-export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: DashboardGridProps): ReactElement {
+export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk, variant = "hub" }: DashboardGridProps): ReactElement {
   const home = useHomeData();
   const now = useNow();
   const layout = useDashboardLayout();
@@ -176,6 +180,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         <div className="dash__top-left">
           <HomeComposer onAsk={onAsk} onTalk={onTalk} />
           <SuggestionChips sessionId={sessionId} onAsk={onAsk} />
+          <CardDeck variant={variant} place="home" onAsk={onAsk} onOpenAll={() => onNavigate("mygoose")} />
           {/* Nothing until the pond has a template it can run; then one card, and the rest on Recipes.
               Turning one on opens the builder on the new copy, so it hands that copy to Recipes first. */}
           <AgentSuggestions

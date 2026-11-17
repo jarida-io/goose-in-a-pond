@@ -1,6 +1,7 @@
 pub mod activity_watcher;
 pub mod anchor_add;
 pub mod capture_reading;
+pub mod cards;
 pub mod condition_events;
 pub mod consolidation_schedule;
 pub mod device_edit;

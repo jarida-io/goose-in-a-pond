@@ -51,6 +51,7 @@ fn kind_in_words(kind: JobKind) -> &'static str {
         JobKind::Ledger => "A payment record",
         JobKind::Rule => "A rule",
         JobKind::Questions => "Questions for you",
+        JobKind::Cards => "Ideas for you",
     }
 }
 

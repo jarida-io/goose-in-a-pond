@@ -32,6 +32,7 @@ import { AppearanceView } from "./views/settings/Appearance";
 import { AccountDetail } from "./views/settings/Account";
 import { HubOverlay } from "./overlays/HubOverlay";
 import { centreUnreadCount } from "../state/householdNotices";
+import { sendTurn } from "../state/chatRunStore";
 import type { SettingsRowId } from "./data/settingsConfig";
 
 // ─── The drawer speaks GuiSection; the hub speaks its own routes ──
@@ -164,7 +165,7 @@ export function Hub() {
     if (route === "chat")          return <ChatHubView />;
     if (route === "saved")         return <SavedScreen variant="hub" onOpenChat={() => go("chat")} />;
     if (route === "watches")       return <WatchesScreen variant="hub" onOpenChat={() => go("chat")} />;
-    if (route === "mygoose")       return <MyGooseScreen variant="hub" />;
+    if (route === "mygoose")       return <MyGooseScreen variant="hub" onAsk={(prompt) => { sendTurn({ text: prompt }); go("chat"); }} />;
     if (route === "canvas")        return <CanvasHubView />;
     if (route === "routines")      return <RoutinesView />;
     if (route === "agents")        return <AgentsView go={go} />;

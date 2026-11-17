@@ -27,13 +27,14 @@ import { QuestionsPanel } from "./QuestionsPanel";
 import { AboutYouPanel } from "./AboutYouPanel";
 import { SpecialistsPanel } from "./SpecialistsPanel";
 import { ActivityPanel } from "./ActivityPanel";
+import { CardDeck } from "./CardDeck";
 
 type Open =
   | { view: "home" }
   | { view: "anchor"; anchorId: string }
   | { view: "deliverable"; anchorId: string; anchorTitle: string; deliverableId: string };
 
-export function MyGooseScreen({ variant }: { variant: Variant }) {
+export function MyGooseScreen({ variant, onAsk }: { variant: Variant; onAsk?: (prompt: string) => void }) {
   const [tab, setTab] = useState<MyGooseTab>("plans");
   const [open, setOpen] = useState<Open>({ view: "home" });
   const [refusal, setRefusal] = useState<Refusal | null>(null);
@@ -109,6 +110,7 @@ export function MyGooseScreen({ variant }: { variant: Variant }) {
               </h1>
               <p className="mg__intro">{MY_GOOSE_INTRO}</p>
             </header>
+            <CardDeck variant={variant} place="mygoose" onAsk={onAsk} />
             <InkTabs label={TABS_LABEL} value={tab} tabs={TABS} onChange={setTab} className="mg-tabs" />
             {tab === "plans" ? (
               <PlansPanel variant={variant} say={say} onOpen={openAnchor} onAnswerQuestions={() => setTab("questions")} />

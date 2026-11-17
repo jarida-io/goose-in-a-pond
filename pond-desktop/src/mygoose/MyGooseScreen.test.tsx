@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   listIntentions: vi.fn(),
   withdrawIntention: vi.fn(),
   listEngineJobs: vi.fn(),
+  listIdeaCards: vi.fn(),
 }));
 
 vi.mock("../api/PondApiClient", () => ({ api }));
@@ -44,6 +45,7 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   api.listAnchors.mockResolvedValue([TRIP]);
+  api.listIdeaCards.mockResolvedValue({ cards: [], set: { state: "none", made_at: null } });
   api.getAnchor.mockResolvedValue({ ...TRIP, questions: [] });
   api.getDeliverable.mockResolvedValue(deliverable());
   api.listQuestionBatches.mockResolvedValue([]);

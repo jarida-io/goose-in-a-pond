@@ -16,8 +16,8 @@ use pond_core::user_data::services::engine::ROLE_CRITIC;
 
 use super::inline::{body_of, CANNOT_RUN};
 use super::{
-    capture, deliverable, fact_sheet, is_failed_inline, ledger, plans_itself, questions, rule,
-    EngineDeps,
+    capture, cards, deliverable, fact_sheet, is_failed_inline, ledger, plans_itself, questions,
+    rule, EngineDeps,
 };
 
 /// How far a job of one maker step and one check has got.
@@ -192,6 +192,7 @@ pub async fn at_finish(
         JobKind::Capture => capture::after_steps(deps, task, job, steps, artifacts, now).await?,
         JobKind::Ledger => ledger::after_steps(deps, task, job, steps, artifacts, now).await?,
         JobKind::Rule => rule::after_steps(deps, task, job, steps, artifacts, now).await?,
+        JobKind::Cards => cards::after_steps(deps, task, job, steps, artifacts, now).await?,
         _ => {
             let outcome = format!("Failed: {CANNOT_RUN}.");
             close(deps, task, &mut job, JobState::Failed, &outcome, now).await?

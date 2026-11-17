@@ -17,7 +17,7 @@ use pond_core::user_data::services::engine::recipes::{deliverable_title, standin
 use pond_core::user_data::services::engine::tick::{plan_tick, TickAction, TickSnapshot};
 use pond_core::user_data::services::fact_sheet::{is_due, request_rebuild, REBUILD_AFTER_MEMORIES};
 
-use super::{deliverable, inline, interests, open, pictures, EngineDeps};
+use super::{cards, deliverable, inline, interests, open, pictures, EngineDeps};
 
 const TICK_EVERY: Duration = Duration::from_secs(60);
 /// The title of the standing anchor every member has.
@@ -49,7 +49,7 @@ pub struct TickReport {
     pub closed: usize,
     /// Picture files deleted: past their time, or named by no capture.
     pub pictures_deleted: usize,
-    /// Anchors made for confirmed interests, and stopped for avoided ones.
+    /// Anchors stopped because their interest was marked avoided.
     pub interests_followed: usize,
     /// Questions asked about guessed interests.
     pub interests_asked: usize,
@@ -84,6 +84,7 @@ pub async fn tick(deps: &EngineDeps, now: DateTime<Utc>) -> TickReport {
         }
     };
     report.pictures_deleted = pictures::tend(deps, &members, now).await;
+    cards::purge(deps, now).await;
     let open_jobs = deps.jobs.open().await.unwrap_or_default();
     for member in members.iter().filter(|p| p.role != Role::Guest) {
         if let Err(e) = tick_member(deps, &member.id, &open_jobs, now, &mut report).await {
@@ -196,7 +197,7 @@ async fn tick_member(
     let mut anchors = deps.anchors.list(member, &EVERY_STATE).await?;
     anchors.extend(ensure_everyday(deps, member, &anchors, now).await?);
     match interests::follow(deps, member, &mut anchors, open_jobs, now).await {
-        Ok(followed) => report.interests_followed += followed.anchored + followed.stopped,
+        Ok(followed) => report.interests_followed += followed.stopped,
         Err(e) => {
             tracing::warn!(member = %member, error = %e, "the engine could not follow a member's interests")
         }
@@ -247,6 +248,12 @@ async fn tick_member(
         Ok(asked) => report.interests_asked += asked,
         Err(e) => {
             tracing::warn!(member = %member, error = %e, "the engine could not offer a member's interests")
+        }
+    }
+    match cards::queue_morning(deps, member, open_jobs, now).await {
+        Ok(queued) => report.queued += usize::from(queued),
+        Err(e) => {
+            tracing::warn!(member = %member, error = %e, "the engine could not queue a member's cards")
         }
     }
     match pictures::read_held(deps, member, now).await {
