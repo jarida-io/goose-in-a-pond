@@ -10,9 +10,15 @@
 #
 # Each file is copied beside its destination and renamed over it, which is atomic: a running pond
 # keeps the inode it started from, and the next start takes the new one. The one replaced is kept
-# as <name>.previous, for a rollback by hand. Nothing else the pond reads moves: extensions/ and
-# matter-server/ are found through the checkout the binary was built from (asset_root.rs,
-# pond-adapters-matter server_setup.rs), and the LiteRT-LM library under the data directory.
+# as <name>.previous, for a rollback by hand.
+#
+# The pond also reads two folders of the checkout at run time: extensions/ (asset_root.rs) and the
+# Matter controller's sources, matter-server/ (pond-adapters-matter server_setup.rs). Both were found
+# through the checkout the binary was built from, or the service's working directory, so deleting
+# that checkout left a pond that started without Matter or its bundled extensions. They are copied
+# into the install root, the parent of the binaries' directory, and the user unit names that root
+# in GIAP_ASSET_ROOT, which both lookups try first. The LiteRT-LM library stays under the data
+# directory.
 #
 # Sourced by giap.sh, scripts/install-pond-binaries.sh and the tests; it defines functions only.
 
@@ -48,6 +54,55 @@ pond_binaries_install() {
     mv -f "$to/.$name.new" "$to/$name" || { rm -f "$to/.$name.new"; return 1; }
     printf 'installed %s\n' "$to/$name"
   done
+}
+
+# The checkout folders the pond reads at run time, copied by pond_assets_install.
+POND_ASSET_DIRS="extensions matter-server"
+
+# pond_assets_install <checkout> <install root>: copies each of POND_ASSET_DIRS into the root, without
+# node_modules or .git (the controller runs npm ci in its own copy under the data directory). Each is
+# copied beside its destination and renamed into place, so a failed copy leaves the installed one.
+# Returns 1 when the checkout lacks one of them or a copy fails.
+pond_assets_install() {
+  local from="$1" root="$2" name
+  for name in $POND_ASSET_DIRS; do
+    if [ ! -d "$from/$name" ]; then
+      printf 'no %s in %s, so the installed copy was not updated\n' "$name" "$from" >&2
+      return 1
+    fi
+  done
+  mkdir -p "$root" || { printf 'cannot make %s\n' "$root" >&2; return 1; }
+  for name in $POND_ASSET_DIRS; do
+    rm -rf "${root:?}/.$name.new" "${root:?}/.$name.old"
+    mkdir "$root/.$name.new" || return 1
+    if ! tar -C "$from/$name" --exclude=node_modules --exclude=.git -cf - . | tar -C "$root/.$name.new" -xf -; then
+      rm -rf "${root:?}/.$name.new"
+      printf 'could not copy %s into %s\n' "$from/$name" "$root" >&2
+      return 1
+    fi
+    chmod -R go-w "$root/.$name.new" || return 1
+    [ -d "$root/$name" ] && { mv -f "$root/$name" "$root/.$name.old" || return 1; }
+    mv -f "$root/.$name.new" "$root/$name" || return 1
+    rm -rf "${root:?}/.$name.old"
+    printf 'installed %s\n' "$root/$name"
+  done
+}
+
+# pond_unit_set_asset_root <unit file> <install root>: the unit's GIAP_ASSET_ROOT names the root,
+# added under [Service] or replaced where it names something else. Unchanged when it already does;
+# otherwise the unit as it was is kept as <unit>.pre-assets. Prints "changed" when it wrote the unit.
+pond_unit_set_asset_root() {
+  local unit="$1" root="$2" line
+  line="Environment=GIAP_ASSET_ROOT=$root"
+  grep -qxF "$line" "$unit" && return 0
+  grep -q '^\[Service\]' "$unit" || { printf 'no [Service] section in %s\n' "$unit" >&2; return 1; }
+  cp -p "$unit" "$unit.pre-assets" || return 1
+  awk -v line="$line" '
+    /^Environment="?GIAP_ASSET_ROOT=/ { next }
+    { print }
+    /^\[Service\]/ { print line }
+  ' "$unit.pre-assets" > "$unit.tmp" && mv -f "$unit.tmp" "$unit" || return 1
+  printf 'changed\n'
 }
 
 # The executable a unit's ExecStart names: its first word, without systemd's -@:+! prefixes.

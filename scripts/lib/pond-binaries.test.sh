@@ -125,6 +125,72 @@ test_repoint_takes_a_path_with_sed_specials_literally() {
   eq "$(sed -n 's/^ExecStart=//p' "$W/unit/u.service")" "/opt/a&b|c/pond-server serve"
 }
 
+checkout() { # a checkout with both asset folders, a node_modules and a .git to leave behind
+  C="$W/checkout"
+  mkdir -p "$C/extensions/music" "$C/matter-server/src" "$C/matter-server/node_modules/tsx" "$C/matter-server/.git"
+  printf '%s\n' "$1" > "$C/matter-server/package.json"
+  printf 'm\n' > "$C/extensions/music/server.py"
+  R="$W/root"
+}
+
+test_assets_are_copied_without_node_modules_or_git() {
+  fresh; checkout v1
+  pond_assets_install "$C" "$R" >/dev/null || return 1
+  eq "$(cat "$R/matter-server/package.json")" v1 || return 1
+  [ -f "$R/extensions/music/server.py" ] || { echo "extensions not copied"; return 1; }
+  [ ! -e "$R/matter-server/node_modules" ] || { echo "node_modules copied"; return 1; }
+  [ ! -e "$R/matter-server/.git" ] || { echo ".git copied"; return 1; }
+}
+
+test_assets_survive_the_checkout_being_deleted() {
+  fresh; checkout v1
+  pond_assets_install "$C" "$R" >/dev/null || return 1
+  rm -rf "$C"
+  [ -f "$R/matter-server/package.json" ] && [ -d "$R/extensions/music" ]
+}
+
+test_a_second_asset_install_replaces_and_drops_removed_files() {
+  fresh; checkout v1
+  printf 'old\n' > "$C/matter-server/src/gone.ts"
+  pond_assets_install "$C" "$R" >/dev/null
+  rm "$C/matter-server/src/gone.ts"; printf 'v2\n' > "$C/matter-server/package.json"
+  pond_assets_install "$C" "$R" >/dev/null || return 1
+  eq "$(cat "$R/matter-server/package.json")" v2 || return 1
+  [ ! -e "$R/matter-server/src/gone.ts" ] || { echo "stale file kept"; return 1; }
+  eq "$(find "$R" -maxdepth 1 -name '.*' ! -name . | wc -l | tr -d ' ')" 0
+}
+
+test_a_checkout_missing_a_folder_changes_nothing() {
+  fresh; checkout v1
+  pond_assets_install "$C" "$R" >/dev/null
+  rm -rf "$C/extensions"; printf 'v2\n' > "$C/matter-server/package.json"
+  if pond_assets_install "$C" "$R" 2>/dev/null; then echo "should refuse"; return 1; fi
+  eq "$(cat "$R/matter-server/package.json")" v1
+}
+
+test_asset_root_is_added_under_service() {
+  fresh; unit "/opt/bin/pond-server serve"
+  eq "$(pond_unit_set_asset_root "$W/unit/u.service" /opt)" changed || return 1
+  eq "$(sed -n '/^\[Service\]/{n;p;}' "$W/unit/u.service")" "Environment=GIAP_ASSET_ROOT=/opt" || return 1
+  [ -f "$W/unit/u.service.pre-assets" ]
+}
+
+test_asset_root_replaces_one_naming_a_checkout() {
+  fresh; unit "/opt/bin/pond-server serve"
+  printf 'Environment="GIAP_ASSET_ROOT=/home/x/giap"\n' >> "$W/unit/u.service"
+  pond_unit_set_asset_root "$W/unit/u.service" /opt >/dev/null || return 1
+  eq "$(grep -c GIAP_ASSET_ROOT "$W/unit/u.service")" 1 || return 1
+  grep -qxF "Environment=GIAP_ASSET_ROOT=/opt" "$W/unit/u.service"
+}
+
+test_asset_root_is_a_no_op_once_set() {
+  fresh; unit "/opt/bin/pond-server serve"
+  pond_unit_set_asset_root "$W/unit/u.service" /opt >/dev/null
+  rm "$W/unit/u.service.pre-assets"
+  eq "$(pond_unit_set_asset_root "$W/unit/u.service" /opt)" "" || return 1
+  [ ! -e "$W/unit/u.service.pre-assets" ]
+}
+
 test_bin_dir_defaults_and_overrides() {
   HOME=/home/x; unset GIAP_BIN_DIR
   eq "$(pond_bin_dir)" /home/x/.local/lib/goose-in-a-pond/bin || return 1
