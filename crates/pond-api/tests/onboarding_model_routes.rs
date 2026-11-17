@@ -12,6 +12,7 @@ use pond_api::{build_router, AppState};
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::ports::model_repository::ModelRepository;
 use pond_core::security::ports::handshake::Handshake;
+use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::ports::settings::SettingsRepository;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -29,11 +30,26 @@ struct Harness {
 /// A fresh pond mid-onboarding, its chat model in the catalogue and already on disk, so nothing
 /// here reaches the network.
 async fn fresh_pond() -> Harness {
+    pond_mid_onboarding(&[]).await
+}
+
+/// As [`fresh_pond`], but with members left over, as a reset pond keeps its household.
+async fn pond_mid_onboarding(members: &[&str]) -> Harness {
     let pond_api::test_support::TestState {
         mut state,
         handshake,
         dir,
     } = pond_api::test_support::app_state().await;
+    for name in members {
+        state
+            .profile_repo
+            .create(CreateProfileRequest {
+                display_name: (*name).into(),
+                avatar_emoji: "duck".into(),
+            })
+            .await
+            .unwrap();
+    }
     state.skip_onboarding = false;
     // No data directory, so the catalogue's background disk scan cannot mark the model missing.
     state.data_dir = None;
@@ -240,6 +256,61 @@ async fn a_paired_phone_chooses_the_chat_model_before_onboarding_and_can_then_fi
             "{method} {path} after onboarding: {status} {answer}"
         );
     }
+}
+
+/// The claimant's phone belongs to none of a reset pond's members until completion, so a gate that
+/// asked for the owner before then would refuse the model that completion requires.
+#[tokio::test]
+async fn a_reset_ponds_wizard_picks_the_model_and_then_only_the_owner_may() {
+    let h = pond_mid_onboarding(&["Jerry", "Liz"]).await;
+    let token = paired(&h).await;
+    let pick = || {
+        let lan = h.lan.clone();
+        let token = token.clone();
+        async move {
+            let (status, saved) = send(
+                &lan,
+                Method::PUT,
+                "/api/v1/settings",
+                Some(json!({
+                    "user_name": "Jerry",
+                    "assistant_name": "Goose",
+                    "timezone": "UTC",
+                    "chat_model": CHAT_MODEL,
+                })),
+                Some(&token),
+            )
+            .await;
+            let (activated, answer) = send(
+                &lan,
+                Method::POST,
+                &format!("/api/v1/models/gguf/{CHAT_MODEL}/activate"),
+                Some(json!({"role": "chat"})),
+                Some(&token),
+            )
+            .await;
+            ((status, saved), (activated, answer))
+        }
+    };
+
+    let ((status, saved), (activated, answer)) = pick().await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(activated, StatusCode::OK, "{answer}");
+
+    let (status, done) = send(
+        &h.lan,
+        Method::POST,
+        "/api/v1/onboard/complete",
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+
+    let ((status, saved), (activated, answer)) = pick().await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{saved}");
+    assert_eq!(saved["error"], "only the owner may change the model");
+    assert_eq!(activated, StatusCode::FORBIDDEN, "{answer}");
 }
 
 #[tokio::test]

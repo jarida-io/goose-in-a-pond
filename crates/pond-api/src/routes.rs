@@ -7414,10 +7414,11 @@ pub(crate) async fn update_settings(
             may_change_model, PermissionDecision,
         };
         let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+        let onboarded = crate::middleware::pond_is_onboarded(&state).await;
         if let PermissionDecision::Denied {
             reason,
             grantable_by,
-        } = may_change_model(role)
+        } = may_change_model(role, onboarded)
         {
             return Err(permission_denied(&state, reason, grantable_by).await);
         }
@@ -9095,10 +9096,11 @@ async fn activate_model(
         may_change_model, PermissionDecision,
     };
     let caller_role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    let onboarded = crate::middleware::pond_is_onboarded(&state).await;
     if let PermissionDecision::Denied {
         reason,
         grantable_by,
-    } = may_change_model(caller_role)
+    } = may_change_model(caller_role, onboarded)
     {
         return Err(permission_denied(&state, reason, grantable_by).await);
     }

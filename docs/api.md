@@ -263,7 +263,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
 | GET | /settings | token | | The whole `Settings` record |
-| PUT | /settings | wizard | owner, to change `primary_profile_id` | Partial update; answers with the merged record |
+| PUT | /settings | wizard | owner, to change `primary_profile_id`, or `chat_model` and `chat_provider` once onboarded | Partial update; answers with the merged record |
 
 ### Chat and runs
 
@@ -322,7 +322,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /models/download/progress | token | | Downloads in flight and recently finished |
 | POST | /models/download/control | token | | Pause, resume or cancel a download |
 | POST | /models/{category}/{name}/download | token | | Download a catalog model |
-| POST | /models/{category}/{name}/activate | token | | Assign a model to a role |
+| POST | /models/{category}/{name}/activate | token | owner, once onboarded | Assign a model to a role |
 | POST | /models/download/url | token +onb | | Download a model file from an HTTPS URL |
 | POST | /models/{category}/{name}/companions/pictures | token +onb | | Add picture support to a model |
 | POST | /models/{category}/{name}/revoke | token +onb | | Revoke a model's role |
@@ -993,6 +993,7 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
 | 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
 | 403 | `{"error", "who_can_grant": "owner", "owners"}` when `primary_profile_id` changes and the caller is not the owner; a pond that names nobody yet, in settings or as its main member, takes its first from anyone. Nothing in the patch is saved |
+| 403 | The same body when `chat_model` or `chat_provider` is in the patch, the pond is onboarded, and the caller is not the owner. Until onboarding finishes, the wizard's caller picks the model. Nothing in the patch is saved |
 
 Naming `primary_profile_id` names no owner: the owner is the main member (see below).
 
