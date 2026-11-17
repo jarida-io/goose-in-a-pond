@@ -335,7 +335,9 @@ impl BroadcastNotificationSender {
                             tracing::warn!(error = %e, "could not record a notice's wake");
                         }
                     }
-                    Ok(Wake::NotSent(gap)) => tracing::debug!(
+                    // INFO, not DEBUG: production drops DEBUG, and "why did my phone not
+                    // buzz?" is answered by exactly this line. One per queued notice.
+                    Ok(Wake::NotSent(gap)) => tracing::info!(
                         target: "giap::trace",
                         kind = "push_wake_not_sent",
                         notification_id = %notification.id,
