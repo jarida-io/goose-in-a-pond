@@ -7354,7 +7354,8 @@ async fn refuse_primary_profile_that_is_not_a_member(
 }
 
 /// Only the owner changes the household's primary member. A pond that names nobody yet, in
-/// settings or in the main member's seat, takes its first from whoever sets it up.
+/// settings or in the main member's seat, takes its first from whoever sets it up, and a pond
+/// still in its setup wizard takes it from the wizard's caller ([`is_wizard_caller`]).
 async fn refuse_primary_profile_change_by_a_non_owner(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -7379,6 +7380,11 @@ async fn refuse_primary_profile_change_by_a_non_owner(
     if named.is_empty() && seat_empty {
         return Ok(());
     }
+    // A pond set up again (onboarding reset, which needs the host credential) names its main
+    // member in the wizard, before the claimant is anyone's phone.
+    if is_wizard_caller(state, principal).await {
+        return Ok(());
+    }
     let role = resolve_role_from_principal(state, principal).await;
     if let PermissionDecision::Denied {
         reason,
@@ -7395,6 +7401,42 @@ async fn refuse_primary_profile_change_by_a_non_owner(
     Ok(())
 }
 
+/// Whether this caller is the one running the setup wizard, which picks the model and names the
+/// main member before any member is the owner. Only before setup completes, and only for the caller the middleware lets
+/// into the wizard: the tokenless host of an unclaimed pond, or the device that claimed it. Any
+/// other paired device, a household's phone kept across a reset among them, stays owner-gated.
+async fn is_wizard_caller(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> bool {
+    if state.skip_onboarding {
+        return false;
+    }
+    // Unreadable reads as set up, so a fault never opens the gate.
+    if !matches!(state.onboarding_repo.is_complete().await, Ok(false)) {
+        return false;
+    }
+    let claimant = match state.setup_claims.as_ref() {
+        Some(claims) => claims.claimed_by().await.ok().flatten(),
+        None => None,
+    };
+    wizard_caller_decision(principal.map(|p| &p.0), claimant.as_deref())
+}
+
+/// The pure half of [`is_wizard_caller`], for a pond still in its wizard: a tokenless or loopback
+/// caller (which the middleware admits only while the pond is unclaimed), or the claiming device.
+fn wizard_caller_decision(
+    principal: Option<&pond_core::security::ports::policy::Principal>,
+    claimant: Option<&str>,
+) -> bool {
+    use pond_core::security::ports::policy::PrincipalKind;
+    match principal {
+        None => true,
+        Some(p) if p.kind == PrincipalKind::Loopback => true,
+        Some(p) => p.device_id.is_some() && p.device_id.as_deref() == claimant,
+    }
+}
+
 pub(crate) async fn update_settings(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
@@ -7409,7 +7451,11 @@ pub(crate) async fn update_settings(
 
     // Only the model fields are owner-gated; the rest of this patch may touch unrelated settings
     // (voice, appearance, retention, ...) that any household member may already freely change.
-    if patch.get("chat_model").is_some() || patch.get("chat_provider").is_some() {
+    // The setup wizard chooses the model before anyone is attributed as the owner, so its own
+    // caller is exempt until setup completes.
+    if (patch.get("chat_model").is_some() || patch.get("chat_provider").is_some())
+        && !is_wizard_caller(&state, principal.as_ref()).await
+    {
         use pond_core::user_data::services::household_permission::{
             may_change_model, PermissionDecision,
         };
@@ -24840,5 +24886,50 @@ mod locked_turn_tests {
     #[test]
     fn a_locked_phone_asks_as_an_unidentified_speaker() {
         assert_eq!(locked_turn_scope("s"), ProfileScope::Guest);
+    }
+}
+
+#[cfg(test)]
+mod wizard_caller_tests {
+    use super::wizard_caller_decision;
+    use pond_core::security::ports::policy::{Principal, PrincipalKind};
+
+    fn phone(device: &str) -> Principal {
+        Principal {
+            kind: PrincipalKind::Token("client".into()),
+            device_id: Some(device.into()),
+            ..Principal::loopback()
+        }
+    }
+
+    #[test]
+    fn the_host_running_the_wizard_may_choose_the_model() {
+        assert!(wizard_caller_decision(None, None));
+        assert!(wizard_caller_decision(
+            Some(&Principal::loopback()),
+            Some("claimant")
+        ));
+    }
+
+    #[test]
+    fn only_the_claiming_device_among_paired_phones() {
+        assert!(wizard_caller_decision(
+            Some(&phone("claimant")),
+            Some("claimant")
+        ));
+        assert!(!wizard_caller_decision(
+            Some(&phone("kept-phone")),
+            Some("claimant")
+        ));
+        assert!(!wizard_caller_decision(Some(&phone("kept-phone")), None));
+    }
+
+    #[test]
+    fn a_token_with_no_device_is_not_the_claimant() {
+        let anonymous = Principal {
+            kind: PrincipalKind::Token("client".into()),
+            ..Principal::loopback()
+        };
+        assert!(!wizard_caller_decision(Some(&anonymous), None));
     }
 }
