@@ -129,7 +129,8 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
               </button>
             )}
           </div>
-          <div className="net__row">
+          {/* One grid, so both labels share a column and both fields start and end together. */}
+          <div className="net__pinGrid">
             <label className="net__line" htmlFor={`recovery-pin-${variant}`}>
               {lock.has_recovery_pin ? "Change the recovery PIN" : "Set a recovery PIN"}
             </label>
@@ -144,8 +145,6 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
               aria-describedby={pinError ? `recovery-pin-err-${variant}` : undefined}
               onChange={(e) => { setPin(e.target.value); setPinError(null); }}
             />
-          </div>
-          <div className="net__row">
             <label className="net__line" htmlFor={`recovery-pin-again-${variant}`}>
               Type the PIN again
             </label>
@@ -161,7 +160,7 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
               aria-describedby={pinNote ? `recovery-pin-err-${variant}` : undefined}
               onChange={(e) => { setAgain(e.target.value); setPinError(null); }}
             />
-            <button type="button" className="net__btn" disabled={busy || pin.length === 0 || again.length === 0} onClick={savePin}>
+            <button type="button" className="net__btn net__pinSave" disabled={busy || pin.length === 0 || again.length === 0} onClick={savePin}>
               <KeyRound size={13} aria-hidden="true" />
               Save PIN
             </button>

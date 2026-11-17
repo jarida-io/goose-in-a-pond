@@ -47,6 +47,35 @@
   gap: 8px 12px;
 }
 
+/* The recovery PIN and its repeat: labels in one column, fields in the next, so the two fields
+   line up and are the same width whatever their labels say. Stacked on a narrow screen. */
+.net__pinGrid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 28rem);
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.net__pinGrid .net__input {
+  width: 100%;
+  max-width: none;
+}
+
+.net__pinSave {
+  grid-column: 2;
+  justify-self: start;
+}
+
+@media (max-width: 520px) {
+  .net__pinGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .net__pinSave {
+    grid-column: 1;
+  }
+}
+
 .net__rowActions {
   display: flex;
   align-items: center;

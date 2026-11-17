@@ -78,6 +78,15 @@ describe("PairingLockPanel", () => {
     expect(api.setRecoveryPin).not.toHaveBeenCalled();
   });
 
+  it("lays both PIN fields out in one grid, so they line up", async () => {
+    vi.mocked(api.getPairingLock).mockResolvedValue(lock({ can_change: true }));
+    render(<PairingLockPanel variant="catalogue" />);
+    const first = await screen.findByLabelText("Set a recovery PIN");
+    const again = screen.getByLabelText("Type the PIN again");
+    expect(first.parentElement).toBe(again.parentElement);
+    expect(first.parentElement?.className).toBe("net__pinGrid");
+  });
+
   it("saves the PIN once both entries match", async () => {
     vi.mocked(api.getPairingLock).mockResolvedValue(lock({ can_change: true }));
     vi.mocked(api.setRecoveryPin).mockResolvedValue(undefined as never);
