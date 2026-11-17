@@ -84,7 +84,8 @@ in the host's own browser.
 
 `POND_DEV_ALLOW_LOOPBACK=1` is a development bypass: any loopback request (except on the
 development plaintext listener) skips the bearer check, and an empty `X-Pond-Host-Credential` is
-accepted. It is off unless set.
+accepted. Its caller names no member, so it reads only what a caller nobody identifies may, but the
+owner-only checks count it as the owner. It is off unless set.
 
 The device behind a token comes only from the token (`Handshake::caller_for_token`), never from a
 request field. Handlers read it as a `Principal`/`ProvenDevice`.

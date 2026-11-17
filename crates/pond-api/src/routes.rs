@@ -21896,6 +21896,14 @@ async fn resolve_role_from_principal(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Option<Role> {
+    use pond_core::security::ports::policy::PrincipalKind;
+    // The dev bypass admits the host's own processes, which the host credential already lets wipe
+    // the pond; it still names no member, so only its authority changes, never whose data it reads.
+    if principal.is_some_and(|axum::Extension(p)| p.kind == PrincipalKind::Loopback)
+        && crate::middleware::dev_allow_loopback()
+    {
+        return Some(Role::Owner);
+    }
     resolve_role(state, &scope_from_principal(state, principal).await).await
 }
 
