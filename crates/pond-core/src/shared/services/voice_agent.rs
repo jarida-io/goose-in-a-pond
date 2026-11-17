@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::domain::tool_group::{
-    find_group, INTERVIEW_EXTENSION, TASK_WORK_EXTENSION, TOOLKIT_EXTENSION, TOOL_GROUPS,
+    find_group, INTERVIEW_EXTENSION, QUESTIONS_EXTENSION, TASK_WORK_EXTENSION, TOOLKIT_EXTENSION,
+    TOOL_GROUPS,
 };
 use crate::shared::domain::orchestration::{
     AgentRole, RolePersonalData, DEFAULT_CONTEXT_FRACTION, DEFAULT_ROLE_MAX_TURNS,
@@ -92,7 +93,15 @@ pub fn voice_tool_groups() -> Vec<(&'static str, &'static str)> {
     TOOL_GROUPS
         .iter()
         .map(|g| g.extension)
-        .filter(|g| ![TOOLKIT_EXTENSION, INTERVIEW_EXTENSION, TASK_WORK_EXTENSION].contains(g))
+        .filter(|g| {
+            ![
+                TOOLKIT_EXTENSION,
+                INTERVIEW_EXTENSION,
+                TASK_WORK_EXTENSION,
+                QUESTIONS_EXTENSION,
+            ]
+            .contains(g)
+        })
         .map(|g| (g, group_label(g)))
         .collect()
 }
@@ -203,9 +212,10 @@ impl VoiceAgent {
         Some(body.trim_end().to_string())
     }
 
-    /// Whether a voice turn keeps the tools of `group`.
+    /// Whether a voice turn keeps the tools of `group`. Never the structured questions: a card
+    /// to tap cannot be spoken.
     pub fn keeps_group(&self, group: &str) -> bool {
-        !self.tool_groups_off.contains(group)
+        group != QUESTIONS_EXTENSION && !self.tool_groups_off.contains(group)
     }
 
     /// The role its prefill is tracked under: the text and groups its preamble is built from.
@@ -724,7 +734,12 @@ mod tests {
     #[test]
     fn the_offered_groups_never_include_a_helpers_or_the_escape_hatch() {
         let groups: Vec<&str> = voice_tool_groups().into_iter().map(|(g, _)| g).collect();
-        for never in [TOOLKIT_EXTENSION, INTERVIEW_EXTENSION, TASK_WORK_EXTENSION] {
+        for never in [
+            TOOLKIT_EXTENSION,
+            INTERVIEW_EXTENSION,
+            TASK_WORK_EXTENSION,
+            QUESTIONS_EXTENSION,
+        ] {
             assert!(!groups.contains(&never), "{never}");
         }
         assert!(groups.contains(&"giap-weather"));

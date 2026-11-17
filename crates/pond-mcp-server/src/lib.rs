@@ -14,6 +14,7 @@ pub mod page_data;
 pub mod page_render;
 pub mod plan_tools;
 pub mod product_page;
+pub mod questions;
 pub(crate) mod reading_room;
 pub mod report_images;
 pub mod saved_items;
@@ -244,6 +245,7 @@ pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
 pub use interview::{init_interview_deps, spawn_interview_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
+pub use questions::{init_questions_deps, spawn_questions_server};
 // Installed by pond-server once the Goose adapter exists, like the orchestrator's.
 pub use long_task::{
     init_long_task_deps, installed_long_task_deps, spawn_task_work_server, spawn_tasks_server,

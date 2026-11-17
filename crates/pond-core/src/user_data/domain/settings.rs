@@ -779,6 +779,10 @@ pub struct Settings {
     #[serde(default = "Settings::default_ext_enabled")]
     pub ext_weather_enabled: bool,
 
+    /// Lets the chat model ask the member structured questions mid-turn (`giap-questions__ask`).
+    #[serde(default = "Settings::default_ext_enabled")]
+    pub ext_questions_enabled: bool,
+
     /// Enable the knowledge tools module (Wikipedia search, article fetch).
     #[serde(default = "Settings::default_ext_enabled")]
     pub ext_knowledge_enabled: bool,
@@ -1014,6 +1018,7 @@ impl Default for Settings {
             ext_memory_enabled: true,
             ext_schedule_enabled: true,
             ext_weather_enabled: true,
+            ext_questions_enabled: true,
             ext_knowledge_enabled: true,
             ext_system_enabled: true,
             ext_device_enabled: true,
@@ -2261,6 +2266,7 @@ mod tests {
             "ext_system_enabled",
             "ext_travel_enabled",
             "ext_weather_enabled",
+            "ext_questions_enabled",
             "home_name",
             // Privacy hub view and the catalogue's Privacy & Security section, both of them.
             "spoken_pairing_codes",

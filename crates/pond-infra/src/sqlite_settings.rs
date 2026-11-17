@@ -649,6 +649,14 @@ impl SettingsRepository for SqliteSettingsRepository {
             }
         );
         upsert!(
+            "ext_questions_enabled",
+            if settings.ext_questions_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
             "ext_knowledge_enabled",
             if settings.ext_knowledge_enabled {
                 "true"
@@ -1289,6 +1297,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "ext_memory_enabled" => s.ext_memory_enabled = value == "true",
         "ext_schedule_enabled" => s.ext_schedule_enabled = value == "true",
         "ext_weather_enabled" => s.ext_weather_enabled = value == "true",
+        "ext_questions_enabled" => s.ext_questions_enabled = value == "true",
         "ext_knowledge_enabled" => s.ext_knowledge_enabled = value == "true",
         "ext_system_enabled" => s.ext_system_enabled = value == "true",
         "ext_device_enabled" => s.ext_device_enabled = value == "true",
