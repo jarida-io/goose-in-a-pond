@@ -58,10 +58,10 @@ It then stores the set. A new set replaces the member's unsaved `new` cards.
 **When a set is made:**
 
 - Each morning at 06:00 in the member's time zone.
-- When the member taps refresh (`POST /me/cards/refresh`, class `asked`).
+- When the member taps refresh (`POST /me/idea-cards/refresh`, class `asked`).
 - Never twice at once for one member.
 
-**Push:** a card whose `when` falls today, and that has an action, is pushed once, with category `info`, opening `cards`.
+**Push:** a card whose `when` falls today, and that has an action, is pushed once, with category `info`, opening `idea_cards`.
 
 ## 3. Actions
 
@@ -79,13 +79,15 @@ It then stores the set. A new set replaces the member's unsaved `new` cards.
 
 | Method and path | Body | Answer |
 |---|---|---|
-| `GET /cards` | | `{cards: [Card], set: {state: "none"\|"queued"\|"making"\|"ready", made_at}}`, with new and saved cards, newest set first |
-| `POST /cards/refresh` | | 202 `{state}` |
-| `POST /cards/{id}/do` | | `{card, result: {kind, todo?, prompt?, anchor_id?, watch_id?}}` |
-| `POST /cards/{id}/save` and `POST /cards/{id}/unsave` | | `Card` |
-| `POST /cards/{id}/dismiss` | `{reasons: [], text?}` | 204 |
+| `GET /idea-cards` | | `{cards: [Card], set: {state: "none"\|"queued"\|"making"\|"ready", made_at}}`, with new and saved cards, newest set first |
+| `POST /idea-cards/refresh` | | 202 `{state}` |
+| `POST /idea-cards/{id}/do` | | `{card, result: {kind, todo?, prompt?, anchor_id?, watch_id?}}` |
+| `POST /idea-cards/{id}/save` and `POST /idea-cards/{id}/unsave` | | `Card` |
+| `POST /idea-cards/{id}/dismiss` | `{reasons: [], text?}` | 204 |
 
-`GET /me/hub` gains `"cards": true`.
+| `POST /idea-cards/{id}/deeper` | | `{card, anchor_id}`: Go deeper on any card (finds or makes its plan and queues the plan's first deliverable) |
+
+`GET /me/hub` gains `"idea_cards": true`. The existing `cards` key there, and `/me/cards/{kind}/{id}`, are the chat's context cards and stay as they are.
 
 `GET /suggestions` leads with the member's `ask` cards as chips. Each chip's prompt is the card's `action.prompt` or `title`, and its `because` is the card's `why.text`.
 

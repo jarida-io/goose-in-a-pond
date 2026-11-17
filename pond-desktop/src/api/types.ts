@@ -2607,6 +2607,68 @@ export interface RejectDeliverable {
   text?: string;
 }
 
+export type IdeaCardKind = "do" | "next_step" | "reminder" | "ask";
+export type IdeaCardSourceKind = "memory" | "fact" | "plan" | "interest" | "todo" | "web";
+export type IdeaCardActionKind = "todo" | "reminder" | "chat" | "watch" | "go_deeper";
+export type IdeaCardState = "new" | "saved" | "done" | "dismissed";
+export type IdeaCardSetState = "none" | "queued" | "making" | "ready";
+
+export interface IdeaCardAction {
+  kind: IdeaCardActionKind;
+  /** What "Do it" says on this card, such as "Add to-do". */
+  label: string;
+  prompt?: string | null;
+  text?: string | null;
+  due?: string | null;
+  url?: string | null;
+}
+
+export interface IdeaCardSource {
+  kind: IdeaCardSourceKind;
+  title: string;
+  url?: string | null;
+}
+
+/** One short, sourced suggestion; docs/architecture/idea-cards.md section 1 is the contract. */
+export interface IdeaCard {
+  id: string;
+  kind: IdeaCardKind;
+  title: string;
+  why: { text: string; source: { kind: IdeaCardSourceKind; label: string; url?: string | null } };
+  when?: string | null;
+  where?: string | null;
+  cost?: string | null;
+  effort?: string | null;
+  action?: IdeaCardAction | null;
+  sources: IdeaCardSource[];
+  notes: { found: string; next: string; caveats: string };
+  anchor?: { id: string; title: string } | null;
+  state: IdeaCardState;
+  batch_id: string;
+  created_at: string;
+  fades_at: string | null;
+}
+
+export interface IdeaCardSet {
+  cards: IdeaCard[];
+  set: { state: IdeaCardSetState; made_at: string | null };
+}
+
+export interface IdeaCardDone {
+  card: IdeaCard;
+  result: { kind: IdeaCardActionKind; todo?: unknown; prompt?: string; anchor_id?: string; watch_id?: string };
+}
+
+export interface IdeaCardDeeper {
+  card: IdeaCard;
+  anchor_id: string;
+}
+
+export interface IdeaCardDismissal {
+  reasons: ReasonChip[];
+  text?: string;
+}
+
 export interface QuestionBatch {
   id: string;
   purpose: "anchor" | "interest" | "profile" | "ledger";

@@ -258,6 +258,8 @@ export async function mockMyGoose(page: Page, opts: { unknownCaller?: boolean } 
         ],
       });
     }
+    // An empty deck by default; `mockCards` in card-mocks.ts serves a full one.
+    if (parts[0] === "idea-cards") return json(route, { cards: [], set: { state: "none", made_at: null } });
     if (parts[0] === "intentions") return json(route, { intentions: [] });
     if (parts[0] === "engine") return json(route, { jobs: [] });
 
