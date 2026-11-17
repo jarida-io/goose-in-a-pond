@@ -1422,7 +1422,7 @@ export interface ActiveRun {
   epoch: string;
 }
 
-export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled";
+export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled" | "question_answered";
 
 /** One delegation's progress; spellings are pond-core's `SubagentStatus::as_str`. */
 export type SubagentStatus =
@@ -1509,6 +1509,10 @@ export interface ChatEvent {
   tool?: string;            // for "tool_call" and "tool_result" events
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
+  /** On "question_answered": the batch of questions the typed message answered. */
+  batch_id?: string;
+  /** On the "done" that follows "question_answered": no turn ran; a waiting one carries on. */
+  question_answered?: boolean;
   result?: unknown;         // for "tool_call" events
   /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
   working_notes?: string;
