@@ -82,9 +82,11 @@ in the host's own browser.
 | Internal extension token | `Authorization: Bearer <token>` | A per-process value handed to extension subprocesses in `GIAP_INTERNAL_TOKEN` (`oauth_callback::internal_extension_token`). Accepted only by the routes that say so |
 | Session token as a query | `?token=<percent-encoded token>` | The session token again, for an `<img>` tag or MJPEG viewer that cannot set a header. Accepted only on `GET` camera snapshot, stream and event-snapshot routes (`QUERY_TOKEN_ROUTES`, `crates/pond-api/src/middleware/mod.rs`); every other route answers `401`. Any `token` parameter is written to the request log as `token=<redacted>` |
 
-`POND_DEV_ALLOW_LOOPBACK=1` is a development bypass: any loopback request (except on the
-development plaintext listener) skips the bearer check, and an empty `X-Pond-Host-Credential` is
-accepted. It is off unless set.
+`POND_DEV_ALLOW_LOOPBACK=1` is a development bypass: a loopback request that presents no
+`Authorization` header (except on the development plaintext listener) skips the bearer check and
+names no device, and an empty `X-Pond-Host-Credential` is accepted. A loopback request that does
+present a token is validated like any other and acts as its own paired device, so the live checks
+can call member-only and owner-only routes as a member's paired phone. It is off unless set.
 
 The device behind a token comes only from the token (`Handshake::caller_for_token`), never from a
 request field. Handlers read it as a `Principal`/`ProvenDevice`.

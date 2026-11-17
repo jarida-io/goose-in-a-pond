@@ -180,6 +180,17 @@ if [ -z "${ORT_DYLIB_PATH:-}" ] && [ -n "$ORT_PINNED" ] \
   export ORT_DYLIB_PATH="$REAL_DATA_DIR/lib/libonnxruntime.$ORT_PINNED.dylib"
   say "reusing ONNX Runtime $ORT_PINNED from the real data dir"
 fi
+# The memory model fastembed fetches on first load is ~90 MB; on a fresh $DATA_DIR that download
+# outlasts the memory checks' wait, so they found the embedder still loading. Copied, as espeak is.
+# Only fastembed's own cache entries (models--*), not the GGUF files beside them.
+seed_embedder() { # seed_embedder <data-dir>
+  local src="$REAL_DATA_DIR/models/embedding" entry
+  [ -d "$1/models/embedding" ] && return 0
+  for entry in "$src"/models--*; do
+    [ -d "$entry" ] || continue
+    mkdir -p "$1/models/embedding" && cp -R "$entry" "$1/models/embedding/"
+  done
+}
 seed_espeak() { # seed_espeak <data-dir>
   [ -d "$REAL_DATA_DIR/bin/espeak-ng-data" ] && [ ! -d "$1/bin/espeak-ng-data" ] || return 0
   mkdir -p "$1/bin" && cp -R "$REAL_DATA_DIR/bin/espeak-ng-data" "$1/bin/"
@@ -187,6 +198,7 @@ seed_espeak() { # seed_espeak <data-dir>
 
 mkdir -p "$DATA_DIR"
 seed_espeak "$DATA_DIR"
+seed_embedder "$DATA_DIR"
 say "starting pond-server against $DATA_DIR"
 
 # `serve` shuts down on stdin EOF when detached, so stdin is held open.
