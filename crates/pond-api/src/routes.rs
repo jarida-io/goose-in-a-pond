@@ -35,6 +35,7 @@ use pond_core::security::ports::handshake::{
 };
 use pond_core::shared::ports::event_bus::BusEvent;
 use pond_core::shared::services::chat::ChatService;
+use pond_core::user_data::domain::config_change::{ConfigChange, ConfigChangeKind};
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::{CreateProfileRequest, Role};
 use pond_core::user_data::domain::schedule::{
@@ -53,6 +54,7 @@ use pond_core::user_data::ports::scheduler::{
     CreateScheduleRequest, SchedulerPort, UpdateScheduleRequest,
 };
 use pond_core::user_data::ports::session_storage::SessionStorageError;
+use pond_core::user_data::services::audited_settings_repository::record_config_change;
 use pond_core::user_data::services::face_recognition_slot::{
     FaceModelsProgress, FaceRecognitionNotReady,
 };
@@ -12947,7 +12949,10 @@ async fn pause_schedule(
         return refusal;
     }
     match scheduler.pause_task(&id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"paused": id}))),
+        Ok(()) => {
+            record_user_change(&state, ConfigChangeKind::Schedule, &id, "paused").await;
+            (StatusCode::OK, Json(json!({"paused": id})))
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -12970,7 +12975,10 @@ async fn resume_schedule(
         return refusal;
     }
     match scheduler.resume_task(&id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"resumed": id}))),
+        Ok(()) => {
+            record_user_change(&state, ConfigChangeKind::Schedule, &id, "active").await;
+            (StatusCode::OK, Json(json!({"resumed": id})))
+        }
         // The schedule exists and stays paused: a conflict with its state, not a missing id.
         Err(e) if e.downcast_ref::<OneShotTimePassed>().is_some() => (
             StatusCode::CONFLICT,
@@ -13392,7 +13400,10 @@ async fn pause_rule(
         return r;
     }
     match scheduler.pause_task(&id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"paused": id}))),
+        Ok(()) => {
+            record_user_change(&state, ConfigChangeKind::Schedule, &id, "paused").await;
+            (StatusCode::OK, Json(json!({"paused": id})))
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -13410,7 +13421,10 @@ async fn resume_rule(
         return r;
     }
     match scheduler.resume_task(&id).await {
-        Ok(()) => (StatusCode::OK, Json(json!({"resumed": id}))),
+        Ok(()) => {
+            record_user_change(&state, ConfigChangeKind::Schedule, &id, "active").await;
+            (StatusCode::OK, Json(json!({"resumed": id})))
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -14754,6 +14768,7 @@ async fn add_extension_handler(
     };
     match manager.add_extension(req.clone()).await {
         Ok(info) => {
+            record_user_change(&state, ConfigChangeKind::Extension, &req.name, "added").await;
             // Persist so the server reconnects on restart.
             if let Some(repo) = &state.mcp_server_repo {
                 let cfg = pond_core::mcp::ports::mcp_server::McpServerConfig {
@@ -14815,6 +14830,7 @@ async fn remove_extension_handler(
     };
     match manager.remove_extension(&name).await {
         Ok(()) => {
+            record_user_change(&state, ConfigChangeKind::Extension, &name, "removed").await;
             if let Some(repo) = &state.mcp_server_repo {
                 if let Err(e) = repo.delete(&name).await {
                     tracing::warn!("Failed to remove persisted MCP server '{name}': {e}");
@@ -14827,6 +14843,13 @@ async fn remove_extension_handler(
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response(),
     }
+}
+
+/// Record an extension or schedule change the user made: a `giap::trace` line and an activity
+/// event. The previous state is not looked up, so the change carries only its new state.
+async fn record_user_change(state: &AppState, kind: ConfigChangeKind, key: &str, to: &str) {
+    let change = ConfigChange::new(kind, key, None, Some(to.to_string()));
+    record_config_change(state.event_log.as_deref(), &change).await;
 }
 
 /// `PATCH /api/v1/extensions/{name}` — `{"enabled": bool}`; applies to future Goose sessions.
@@ -14859,6 +14882,8 @@ pub(crate) async fn toggle_extension_handler(
 
     match manager.set_enabled(&name, enabled).await {
         Ok(()) => {
+            let to = if enabled { "enabled" } else { "disabled" };
+            record_user_change(&state, ConfigChangeKind::Extension, &name, to).await;
             if let Some(repo) = &state.mcp_server_repo {
                 if let Err(e) = repo.set_enabled(&name, enabled).await {
                     tracing::warn!("Failed to persist enabled state for '{}': {e}", name);
@@ -15110,6 +15135,7 @@ pub(crate) async fn install_marketplace_handler(
 
     match manager.add_extension(req.clone()).await {
         Ok(info) => {
+            record_user_change(&state, ConfigChangeKind::Extension, &req.name, "added").await;
             // Persist so the extension reconnects on restart. Key values stay in the secret store
             // only, and the per-run token is minted again at every start.
             if let Some(repo) = &state.mcp_server_repo {

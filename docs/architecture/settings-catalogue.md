@@ -358,6 +358,31 @@ voice repair). `check_raw_key` exists for key/value writers but nothing calls it
 
 At `serve` startup a stored `agent_backend` of `pond` is rewritten to `goose` and persisted.
 
+### 5.5 Every change is logged
+
+The serve path's one `SettingsRepository` is wrapped in `AuditedSettingsRepository`
+(`pond-core/src/user_data/services/audited_settings_repository.rs`), so every write, from the
+`PUT`, a model activation, a tool, or a background task, is recorded per key whose value moved:
+
+- a `giap::trace` INFO line, `kind = "setting_changed"`, with `key`, `from` and `to` (persisted to
+  `event_log` in `pond_logs.db`, see `docs/developer/debug_guide.md`);
+- an activity event, category `system`, action `settings.changed`, attributes `key`, `from`, `to`
+  and `redacted`.
+
+An unchanged key is not recorded. Values are cut to 120 characters and URL credentials removed.
+Credentials (`mesh_identity_secret`, `lightning_wallet_mnemonic`, `api_key_*`, and any key with a
+`token`, `secret`, `password`, `passphrase`, `mnemonic` or `credential` segment) and household
+values (`user_name`, `home_name`, the weather location, `assistant_personality`,
+`primary_profile_id`, `voice_wake_word_transcriptions`, `custom_system_prompt`,
+`prompt_addendum`) are recorded as changed with `redacted = true` and no values; a household
+change is also raised to `Sensitive`. The classification is `Disclosure::for_key` in
+`pond-core/src/user_data/domain/config_change.rs`. Matching is per name segment, so
+`llm_max_tokens` keeps its values while `mesh_lend_token_ceiling` loses them.
+
+Extensions (added, removed, enabled, disabled) and schedules and rules (paused, resumed) live
+outside the settings table; their handlers record the same way with `kind = "extension_changed"` /
+`"schedule_changed"` and actions `extension.changed` / `schedule.changed`, carrying only `to`.
+
 ## 6. Findings and their status
 
 Status against the code at the date above.

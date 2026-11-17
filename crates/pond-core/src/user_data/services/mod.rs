@@ -1,4 +1,5 @@
 pub mod activity_watcher;
+pub mod audited_settings_repository;
 pub mod consolidation_schedule;
 pub mod device_edit;
 pub mod face_recognition_slot;
