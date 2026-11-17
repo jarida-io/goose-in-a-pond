@@ -2,7 +2,7 @@
 
 import { useId, useState } from "react";
 import { ChevronDown } from "lucide-react";
-import { InkButton, InkCard, InkLink } from "@jarida/ink/react";
+import { InkButton, InkCard, InkChip, InkFormField, InkLink, InkTextArea } from "@jarida/ink/react";
 import type { IdeaCard, IdeaCardDismissal } from "../api/types";
 import {
   CAVEATS_HEADING,
@@ -19,12 +19,13 @@ import {
   cardKindWords,
   sourceWords,
 } from "./cardWords";
-import { buttonSize, type Variant } from "./myGooseWords";
+import { OTHER, OTHER_ANSWER, RECOMMENDED, buttonSize, type Variant } from "./myGooseWords";
+import { shownOptions } from "./questionShape";
 import { problemWords } from "./problems";
 import { ActionProblem } from "./MyGooseParts";
 import { RejectSheet } from "./TurnDownSheets";
 
-type Busy = "do" | "deeper" | "save" | null;
+type Busy = "do" | "deeper" | "save" | "answer" | null;
 
 export interface IdeaCardViewProps {
   card: IdeaCard;
@@ -33,9 +34,11 @@ export interface IdeaCardViewProps {
   onGoDeeper: (card: IdeaCard) => Promise<void>;
   onSave: (card: IdeaCard, save: boolean) => Promise<void>;
   onDismiss: (card: IdeaCard, dismissal: IdeaCardDismissal) => Promise<void>;
+  /** An ask card's option, or the member's own words, sent to Goose as their message. */
+  onAnswer?: (card: IdeaCard, words: string) => Promise<void>;
 }
 
-export function IdeaCardView({ card, variant, onDo, onGoDeeper, onSave, onDismiss }: IdeaCardViewProps) {
+export function IdeaCardView({ card, variant, onDo, onGoDeeper, onSave, onDismiss, onAnswer }: IdeaCardViewProps) {
   const ids = useId();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
@@ -44,6 +47,9 @@ export function IdeaCardView({ card, variant, onDo, onGoDeeper, onSave, onDismis
   const size = buttonSize(variant);
   const fields = cardFields(card);
   const saved = card.state === "saved";
+  const question = card.kind === "ask" && onAnswer ? card.action?.question ?? null : null;
+  const [otherOn, setOtherOn] = useState(false);
+  const [otherText, setOtherText] = useState("");
 
   async function act(which: Exclude<Busy, null>, work: () => Promise<void>) {
     setBusy(which);
@@ -82,8 +88,65 @@ export function IdeaCardView({ card, variant, onDo, onGoDeeper, onSave, onDismis
             ))}
           </dl>
         ) : null}
+        {question && onAnswer ? (
+          <div className="cd-card__ask" role="group" aria-labelledby={`${ids}-ask`}>
+            {question.header ? <InkChip tone="brand">{question.header}</InkChip> : null}
+            <p id={`${ids}-ask`} className="cd-card__ask-text">
+              {question.text}
+            </p>
+            <div className="cd-card__ask-options">
+              {shownOptions(question).map((option) => (
+                <InkButton
+                  key={option.label}
+                  variant={option.recommended ? "primary" : undefined}
+                  size={size}
+                  disabled={busy !== null}
+                  loading={busy === "answer"}
+                  onPress={() => void act("answer", () => onAnswer(card, option.label))}
+                >
+                  {option.label}
+                </InkButton>
+              ))}
+              <InkButton size={size} disabled={busy !== null} onPress={() => setOtherOn((on) => !on)}>
+                {OTHER}
+              </InkButton>
+            </div>
+            <ul className="cd-card__ask-means">
+              {shownOptions(question)
+                .filter((o) => o.description || o.recommended)
+                .map((o) => (
+                  <li key={o.label}>
+                    <strong>{o.label}</strong>
+                    {o.recommended ? ` (${RECOMMENDED})` : ""}
+                    {o.description ? `: ${o.description}` : ""}
+                  </li>
+                ))}
+            </ul>
+            {otherOn ? (
+              <div className="cd-card__ask-other">
+                <InkFormField id={`${ids}-other`} label={OTHER_ANSWER}>
+                  <InkTextArea
+                    label={OTHER_ANSWER}
+                    value={otherText}
+                    rows={2}
+                    inputProps={{ id: `${ids}-other-control` }}
+                    onChange={setOtherText}
+                  />
+                </InkFormField>
+                <InkButton
+                  variant="primary"
+                  size={size}
+                  disabled={busy !== null || otherText.trim() === ""}
+                  onPress={() => void act("answer", () => onAnswer(card, otherText.trim()))}
+                >
+                  {card.action?.label.trim() || DO_IT}
+                </InkButton>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="cd-card__actions">
-          {card.action && card.action.kind !== "go_deeper" ? (
+          {card.action && card.action.kind !== "go_deeper" && !question ? (
             <InkButton
               variant="primary"
               size={size}

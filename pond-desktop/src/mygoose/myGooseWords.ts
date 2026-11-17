@@ -126,6 +126,15 @@ export const ANSWER_SENT = "Answer sent.";
 export const SKIP = "Skip";
 export const SKIPPED = "Skipped.";
 export const BATCH_DONE = "That's all. Goose uses your answers from now on.";
+export const RECOMMENDED = "Recommended";
+export const DONE_ASKING = "Done";
+export const WENT_AHEAD = "Goose goes ahead with what it has.";
+export const QUESTIONS_PAGER = "Questions in this set";
+export const WAITING_FOR_YOU = "Waiting for your answers";
+export const GETTING_READY = "Getting the questions ready...";
+export const YOUR_ANSWERS = "Your answers";
+export const PREVIEW_HEADING = "What this leads to";
+export const OPEN_PAGE = "Open the page";
 
 export const ABOUT_HEADING = "What Goose knows about you";
 export const ABOUT_INTRO =

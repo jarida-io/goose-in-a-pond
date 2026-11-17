@@ -1,4 +1,5 @@
-// Every open question batch as a card. On the kiosk one batch at a time: one decision per screen.
+// Every open and waiting question batch as a card, newest first. On the kiosk, and on Home, one
+// batch at a time: one decision per screen.
 
 import { useState } from "react";
 import { MessageCircleQuestion } from "lucide-react";
@@ -23,9 +24,11 @@ interface Props {
   variant: Variant;
   say: (text: string) => void;
   onSeePlans: () => void;
+  /** Home shows the newest batch alone and keeps quiet while there is none. */
+  place?: "home" | "mygoose";
 }
 
-export function QuestionsPanel({ variant, say, onSeePlans }: Props) {
+export function QuestionsPanel({ variant, say, onSeePlans, place = "mygoose" }: Props) {
   const batches = useLoaded(async () => {
     const [found, anchors] = await Promise.all([api.listQuestionBatches(), api.listAnchors()]);
     return { found, shared: new Set(anchors.filter((a) => !a.mine).map((a) => a.id)) };
@@ -39,8 +42,26 @@ export function QuestionsPanel({ variant, say, onSeePlans }: Props) {
 
   const open = batches.state.status === "ready" ? batches.state.value.found.filter((b) => !done.has(b.id)) : [];
   const shared = batches.state.status === "ready" ? batches.state.value.shared : new Set<string>();
-  const shown = variant === "hub" ? open.slice(0, 1) : open;
+  const shown = variant === "hub" || place === "home" ? open.slice(0, 1) : open;
   const rest = open.length - shown.length;
+
+  if (place === "home") {
+    if (shown.length === 0) return null;
+    return (
+      <section className="mg-panel mg-panel--home" aria-label={QUESTIONS_HEADING}>
+        {shown.map((batch) => (
+          <QuestionCard
+            key={batch.id}
+            batch={batch}
+            variant={variant}
+            canSkip={batch.anchor_id === null || !shared.has(batch.anchor_id)}
+            say={say}
+            onDone={() => finished(batch.id)}
+          />
+        ))}
+      </section>
+    );
+  }
 
   return (
     <section className="mg-panel" aria-label={QUESTIONS_HEADING}>

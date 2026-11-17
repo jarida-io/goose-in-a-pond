@@ -1,13 +1,42 @@
-// A batch of up to four questions, asked one at a time: the options, always an "Other" that
-// opens a text field, and Skip. Each answer is sent on its own, so a member can stop halfway.
+// A batch of up to four structured questions, asked one at a time with a pager: the header chip,
+// the options with what each means and Goose's pick first, the preview of the chosen option, an
+// "Other" that opens a text field, Skip, and Done. Each answer is sent on its own, so a member
+// can stop halfway.
 
 import { useId, useState, type FocusEvent } from "react";
-import { InkButton, InkCard, InkChoice, InkFormField, InkRadioGroup, InkTextArea } from "@jarida/ink/react";
+import {
+  InkBadge,
+  InkButton,
+  InkCard,
+  InkCheckbox,
+  InkChip,
+  InkFormField,
+  InkPagination,
+  InkRadioGroup,
+  InkTextArea,
+} from "@jarida/ink/react";
 import { api } from "../api/PondApiClient";
 import { ApiError, type QuestionAnswer, type QuestionBatch, type QuestionView } from "../api/types";
-import { ANSWER_SENT, OTHER, OTHER_ANSWER, SEND_ANSWER, SKIP, SKIPPED, buttonSize, questionStep, type Variant } from "./myGooseWords";
+import {
+  ANSWER_SENT,
+  DONE_ASKING,
+  OTHER,
+  OTHER_ANSWER,
+  QUESTIONS_PAGER,
+  RECOMMENDED,
+  SEND_ANSWER,
+  SKIP,
+  SKIPPED,
+  WAITING_FOR_YOU,
+  WENT_AHEAD,
+  buttonSize,
+  questionStep,
+  type Variant,
+} from "./myGooseWords";
 import { problemWords } from "./problems";
 import { ActionProblem } from "./MyGooseParts";
+import { QuestionPreview } from "./QuestionPreview";
+import { shownOptions } from "./questionShape";
 
 /** Never one of a question's options: the pond keeps "Other" out of them. */
 const OTHER_VALUE = "\u0000other";
@@ -15,24 +44,43 @@ const OTHER_VALUE = "\u0000other";
 interface Props {
   batch: QuestionBatch;
   variant: Variant;
-  /** A member an anchor is shared with may answer its questions, not skip them. */
+  /** A member an anchor is shared with may answer its questions, not skip them or say Done. */
   canSkip: boolean;
+  /** Whether Done is offered; off where the card gathers questions from several batches. */
+  canEnd?: boolean;
   say: (text: string) => void;
-  /** Every question of the batch has been answered or skipped. */
+  /** Every question of the batch has been answered or skipped, or the member said Done. */
   onDone: () => void;
 }
 
-export function QuestionCard({ batch, variant, canSkip, say, onDone }: Props) {
+export function QuestionCard({ batch, variant, canSkip, canEnd = canSkip, say, onDone }: Props) {
   // By id, not position: a fresh read of the batch leaves out what was answered meanwhile.
   const [settled, setSettled] = useState<string[]>([]);
+  const [at, setAt] = useState(0);
+  const [ending, setEnding] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   const remaining = batch.questions.filter((q) => !settled.includes(q.id));
-  const question = remaining[0];
+  const shown = Math.min(at, Math.max(0, remaining.length - 1));
+  const question = remaining[shown];
   const total = settled.length + remaining.length;
   const titleId = useId();
 
   function next(id: string) {
     setSettled((all) => [...all, id]);
     if (remaining.length <= 1) onDone();
+  }
+
+  async function enough() {
+    setEnding(true);
+    setProblem(null);
+    try {
+      await api.questionsEnough(batch.id);
+      say(WENT_AHEAD);
+      onDone();
+    } catch (e) {
+      setProblem(problemWords(e));
+      setEnding(false);
+    }
   }
 
   if (!question) return null;
@@ -42,7 +90,17 @@ export function QuestionCard({ batch, variant, canSkip, say, onDone }: Props) {
         <h3 id={titleId} className="mg-q__batch">
           {batch.title}
         </h3>
+        {batch.state === "waiting" ? <p className="mg-q__waiting">{WAITING_FOR_YOU}</p> : null}
         {total > 1 ? <p className="mg-q__step">{questionStep(settled.length + 1, total)}</p> : null}
+        {remaining.length > 1 ? (
+          <InkPagination
+            className="mg-q__pager"
+            label={QUESTIONS_PAGER}
+            page={shown + 1}
+            count={remaining.length}
+            onChange={(page) => setAt(page - 1)}
+          />
+        ) : null}
         <QuestionItem
           key={question.id}
           question={question}
@@ -51,6 +109,14 @@ export function QuestionCard({ batch, variant, canSkip, say, onDone }: Props) {
           say={say}
           onSettled={() => next(question.id)}
         />
+        {canEnd ? (
+          <div className="mg-q__done">
+            <InkButton size={buttonSize(variant)} disabled={ending} loading={ending} onPress={() => void enough()}>
+              {DONE_ASKING}
+            </InkButton>
+          </div>
+        ) : null}
+        <ActionProblem text={problem} />
       </section>
     </InkCard>
   );
@@ -64,10 +130,23 @@ interface ItemProps {
   onSettled: () => void;
 }
 
+function OptionWords({ description, recommended }: { description: string; recommended: boolean }) {
+  if (!description && !recommended) return null;
+  return (
+    <span className="mg-q__means">
+      {recommended ? <InkBadge tone="brand">{RECOMMENDED}</InkBadge> : null}
+      {description ? <span>{description}</span> : null}
+    </span>
+  );
+}
+
 function QuestionItem({ question, variant, canSkip, say, onSettled }: ItemProps) {
   const ids = useId();
+  const options = shownOptions(question);
   const [choice, setChoice] = useState("");
   const [chosen, setChosen] = useState<string[]>([]);
+  // The option whose preview is shown: the last one chosen.
+  const [focused, setFocused] = useState<string | null>(null);
   const [otherOn, setOtherOn] = useState(false);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState<"send" | "skip" | null>(null);
@@ -78,6 +157,7 @@ function QuestionItem({ question, variant, canSkip, say, onSettled }: ItemProps)
   const ready = question.multi
     ? (chosen.length > 0 || otherOn) && (!otherOn || otherWords !== "")
     : choice !== "" && (choice !== OTHER_VALUE || otherWords !== "");
+  const previewed = options.find((o) => o.label === focused && o.preview);
 
   function answer(): QuestionAnswer {
     if (question.multi) return otherOn ? { choices: chosen, text: otherWords } : { choices: chosen };
@@ -110,36 +190,63 @@ function QuestionItem({ question, variant, canSkip, say, onSettled }: ItemProps)
     e.currentTarget.querySelector<HTMLElement>("[role='radio']")?.focus();
   }
 
-  function toggle(option: string) {
-    setChosen((all) => (all.includes(option) ? all.filter((o) => o !== option) : [...all, option]));
+  function pick(value: string) {
+    setChoice(value);
+    setFocused(value === OTHER_VALUE ? null : value);
+  }
+
+  function toggle(option: string, on: boolean) {
+    setChosen((all) => (on ? [...all.filter((o) => o !== option), option] : all.filter((o) => o !== option)));
+    setFocused(on ? option : null);
   }
 
   return (
     <div className="mg-q__item">
+      {question.header ? (
+        <div className="mg-q__chip">
+          <InkChip tone="brand">{question.header}</InkChip>
+        </div>
+      ) : null}
       <p className="mg-q__text" id={`${ids}-text`}>
         {question.text}
       </p>
       {question.multi ? (
-        <div className="mg-q__pills" role="group" aria-labelledby={`${ids}-text`}>
-          {question.options.map((option) => (
-            <InkChoice key={option} shape="pill" selected={chosen.includes(option)} onSelect={() => toggle(option)}>
-              {option}
-            </InkChoice>
+        <div className="mg-q__checks" role="group" aria-labelledby={`${ids}-text`}>
+          {options.map((option) => (
+            <InkCheckbox
+              key={option.label}
+              label={option.label}
+              checked={chosen.includes(option.label)}
+              onChange={(on) => toggle(option.label, on)}
+            >
+              <span className="mg-q__option">
+                <span className="mg-q__label">{option.label}</span>
+                <OptionWords description={option.description} recommended={option.recommended} />
+              </span>
+            </InkCheckbox>
           ))}
-          <InkChoice shape="pill" selected={otherOn} onSelect={() => setOtherOn((v) => !v)}>
+          <InkCheckbox label={OTHER} checked={otherOn} onChange={setOtherOn}>
             {OTHER}
-          </InkChoice>
+          </InkCheckbox>
         </div>
       ) : (
         <div className="mg-q__radios" tabIndex={choice === "" ? 0 : -1} onFocus={forwardFocus}>
           <InkRadioGroup
             label={question.text}
             value={choice}
-            options={[...question.options.map((o) => ({ value: o, label: o })), { value: OTHER_VALUE, label: OTHER }]}
-            onChange={setChoice}
+            options={[
+              ...options.map((o) => ({
+                value: o.label,
+                label: o.label,
+                description: <OptionWords description={o.description} recommended={o.recommended} />,
+              })),
+              { value: OTHER_VALUE, label: OTHER },
+            ]}
+            onChange={pick}
           />
         </div>
       )}
+      {previewed?.preview ? <QuestionPreview preview={previewed.preview} label={previewed.label} /> : null}
       {showOther ? (
         <InkFormField id={`${ids}-other`} label={OTHER_ANSWER}>
           <InkTextArea

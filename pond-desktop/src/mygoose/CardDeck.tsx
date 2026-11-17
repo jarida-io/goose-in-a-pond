@@ -113,6 +113,12 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
     say(doneWords(done.result.kind, card.title));
   }
 
+  async function answer(card: IdeaCard, words: string) {
+    await api.doIdeaCard(card.id);
+    without(card);
+    onAsk?.(words);
+  }
+
   async function goDeeper(card: IdeaCard) {
     const answer = await api.goDeeperOnIdeaCard(card.id);
     keepOrDrop(answer.card);
@@ -157,6 +163,7 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
         onGoDeeper={goDeeper}
         onSave={save}
         onDismiss={dismiss}
+        onAnswer={onAsk ? answer : undefined}
       />
     );
   }

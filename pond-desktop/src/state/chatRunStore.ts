@@ -544,6 +544,7 @@ async function consume(
         callId: ev.id as string | undefined,
         data: (ev.result as Record<string, unknown>) ?? {},
         timestamp_ms: Date.now(),
+        ...(ev.input !== undefined ? { input: ev.input } : {}),
       };
       state.bridge?.onContextCard(card);
       patchLastAgent((last) => ({

@@ -121,6 +121,7 @@ import {
   type IdeaCardSetState,
   type QuestionBatch,
   type QuestionAnswer,
+  type BatchAnswer,
   type EngineLogJob,
   type FactSheet,
   type FactCategory,
@@ -2083,9 +2084,21 @@ export class PondApiClient {
     await this.post(`/api/v1/me/idea-cards/${encodeURIComponent(id)}/dismiss`, dismissal);
   }
 
-  async listQuestionBatches(): Promise<QuestionBatch[]> {
-    const answer = await this.get<{ batches?: QuestionBatch[] }>("/api/v1/me/questions");
+  /** Open and waiting batches, newest first; `sessionId` narrows them to one chat's. */
+  async listQuestionBatches(sessionId?: string): Promise<QuestionBatch[]> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    const answer = await this.get<{ batches?: QuestionBatch[] }>(`/api/v1/me/questions${query}`);
     return answer.batches ?? [];
+  }
+
+  /** Answers several questions of a batch at once; a waiting chat turn carries on with them. */
+  async answerQuestionBatch(batchId: string, answers: BatchAnswer[]): Promise<void> {
+    await this.post(`/api/v1/me/questions/batches/${encodeURIComponent(batchId)}/answer`, { answers });
+  }
+
+  /** "Done": go ahead with what Goose has; the batch's open questions are passed on. */
+  async questionsEnough(batchId: string): Promise<void> {
+    await this.post(`/api/v1/me/questions/batches/${encodeURIComponent(batchId)}/enough`, {});
   }
 
   async answerQuestion(id: string, answer: QuestionAnswer): Promise<void> {

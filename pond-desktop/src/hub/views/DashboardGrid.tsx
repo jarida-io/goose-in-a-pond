@@ -10,6 +10,7 @@ import { AgentSuggestions } from "../../agents/AgentSuggestions";
 import { requestOpenAgent } from "../../agents/openAgent";
 import { SuggestionChips } from "../primitives/SuggestionChips";
 import { CardDeck } from "../../mygoose/CardDeck";
+import { HomeQuestions } from "../../mygoose/HomeQuestions";
 import type { Variant } from "../../mygoose/myGooseWords";
 import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
@@ -181,6 +182,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk, variant = 
           <HomeComposer onAsk={onAsk} onTalk={onTalk} />
           <SuggestionChips sessionId={sessionId} onAsk={onAsk} />
           <CardDeck variant={variant} place="home" onAsk={onAsk} onOpenAll={() => onNavigate("mygoose")} />
+          <HomeQuestions variant={variant} onSeePlans={() => onNavigate("mygoose")} />
           {/* Nothing until the pond has a template it can run; then one card, and the rest on Recipes.
               Turning one on opens the builder on the new copy, so it hands that copy to Recipes first. */}
           <AgentSuggestions
