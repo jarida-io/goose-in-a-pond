@@ -22,8 +22,10 @@ document and that one differ on segments or on what `save_memory` takes, that on
                                          BatchExtractionService::run_pass
                                            one window per conversation, one model call each
                                            (LlmConversationExtractor)
+                                           critic: one call over the window's candidates
                                            write gate: fact_defect, subject gate, dedup bands
                                            dated items ──> reminders ──> proposals
+                                           stated plans ──> candidate anchors
                                                                │
   save_memory (MCP) ──────────┐                                │
   POST /api/v1/memories ──────┴──────────────> memory_fragments <┘
@@ -103,8 +105,9 @@ activity costs at most one window's inference.
 - Per conversation, one window: messages after the cursor (`sessions.extracted_through_id`,
   migration `0056`), up to `memory_extraction_window_messages` (20) and `EXTRACTION_WINDOW_CHARS`
   (6000), cut to end on an assistant reply. Fewer than two new messages is skipped.
-- Up to `memory_extraction_sessions_per_pass` (3) model calls per pass, and at most
-  `EXTRACTION_PASS_MAX_SECS` (300) of wall clock.
+- Up to `memory_extraction_sessions_per_pass` (3) windows per pass, and at most
+  `EXTRACTION_PASS_MAX_SECS` (300) of wall clock. Reading a window is one model call; a window
+  that yields anything costs one more, for [the critic](#the-critic).
 - Who the window is about: `resolve_window_subject` names the member from the session's
   `SessionIdentity`. With no identity, a single-member pond uses `settings.user_name` (or "the
   user"); on a multi-member pond the conversation is not mined, only counted
@@ -122,12 +125,52 @@ A window whose first exchange alone exceeds the budget is stepped past unread.
 
 `LlmConversationExtractor` (`pond-server/src/conversation_extractor.rs`) sends one system prompt
 and one user message (known memories, then the conversation) per window, within
-`EXTRACTION_PROMPT_BUDGET_TOKENS` (2400). The rendered system prompt is held under
-`EXTRACTION_PROMPT_CEILING` (2300 chars, enforced by a test). Its opening differs from every chat
+`EXTRACTION_PROMPT_BUDGET_TOKENS` (2600). The rendered system prompt is held under
+`EXTRACTION_PROMPT_CEILING` (3400 chars, enforced by a test). Its opening differs from every chat
 prompt so Goose's prefix reuse does not overwrite the chat's cached prefix. It carries no worked
 example, because small models copy examples. The model answers
-`{"memories":[{"note","kind"}],"reminders":[{"about","when"}]}`, at most
-`memory_extraction_max_facts` (3) memories per window.
+
+```json
+{"interests": [{"topic", "category", "facets", "signal"}],
+ "memories": [{"note", "about"}],
+ "reminders": [{"about", "when"}],
+ "plans": [{"kind", "title", "when", "where", "details"}]}
+```
+
+with at most `memory_extraction_max_facts` (3) memories, 5 interests and 3 plans per window.
+`reminders` and `plans` are each in the prompt only when the window is asked for them (see
+[Dates become reminders](#dates-become-reminders) and
+[Plans become candidate anchors](#plans-become-candidate-anchors)); what a window was not asked
+for is discarded if the model writes it anyway.
+
+### The critic
+
+Before anything from a window is saved, one more model call rules on its candidates together
+(`ExtractionGate`, `pond-core/src/user_data/ports/extraction_gate.rs`; live in
+`pond-server/src/extraction_gate.rs`). The critic is shown the window as the extraction saw it,
+the member's don't-list (every `never` rule and the ten newest `avoid` rules) and the candidates
+numbered in one list: memories, then interests, reminders and plans. It answers
+`{"drop": [{"n", "why"}]}`, and drops what the member did not say themselves, a one-off lookup,
+anything about the pond or the assistant, what is already known, and what breaks a don't-list
+rule (`GATE_SYSTEM` in `pond-core/src/user_data/services/extraction_gate.rs`).
+
+| The critic's answer | What happens |
+|---|---|
+| A list of numbers | Those candidates are dropped; the rest go on to the write gate |
+| A reply that cannot be read | Memories and reminders are kept; interests and plans are dropped |
+| No answer: the call failed, or a person's turn took the model | Nothing from the window is saved and the cursor stays, so the window is read again |
+| The pass was cancelled while it ruled | The same: nothing saved, the window is read again |
+
+A window that yielded nothing makes no call, and neither does a service with no critic wired
+(tests). The call runs on the inference bus's Task lane and is not counted against
+`memory_extraction_sessions_per_pass`.
+
+A pass that judged at least one window, in a writing mode, adds a row to `engine_jobs` (kind
+`memory`, class `upkeep`, no `task_id`), settled `passed`, whose outcome is one line: "Kept 4 of
+6 things from 2 conversations; dropped 2: a one-off lookup, already known". The counts are the
+critic's verdict, before the write gate. There is one row per member whose windows were judged,
+so a member's log never carries the critic's words about another member's conversation;
+windows nobody is named for share a row with no member.
 
 ### Kinds and segments
 
@@ -161,8 +204,9 @@ prefix such as "Active Project:" dropped), then:
    embedding.
 
 Every window logs a `memory_events` row (`event_kind = extracted`, `memory_id = window:<id>`) with
-counts of what was offered, kept, refused, dated, demoted and dropped; each stored memory logs its
-own row with its window, kind and band. Fact text never reaches the INFO log.
+counts of what was offered, dropped by the critic, kept, refused, dated, demoted and dropped, and
+of the candidate anchors it made; each stored memory logs its own row with its window, kind and
+band. Fact text never reaches the INFO log.
 
 `memory_extraction_mode` is `write` by default; `shadow` bands and logs but writes nothing;
 `reinforce` currently behaves as `write` (a match is still dropped). An unrecognised value reads
@@ -215,6 +259,18 @@ under `REMINDER_MAX_AGE_DAYS` (7) old, the model is also asked for reminders: `a
 `reminders` table (migration `0057`, deduplicated on `(window_id, about_key)`). After each pass,
 `promote_pending_reminders` turns up to 50 pending reminders into proposals; one with no member to
 address stays `pending`. `GET /api/v1/reminders` lists them.
+
+### Plans become candidate anchors
+
+A window is asked for `plans` (what the member said they will attend, go on, buy or build) when
+its last message is under `REMINDER_MAX_AGE_DAYS` (7) old, its subject is a household member and
+the mode writes. Each plan the critic keeps goes through `anchor_from_plan`: origin `chat`,
+`origin_ref` the conversation, the date read from the member's own words in the household's
+time zone as of the window's last message. A plan whose date has already passed makes no
+anchor; words that place no date are kept as a fact on an undated one. The anchor is added as a
+`candidate` unless the member already has an anchor under that title key in any state, so one
+they stopped or let fade does not come back from a later mention. See
+[idea-engine.md](idea-engine.md).
 
 ### Dedup bands
 
@@ -364,8 +420,12 @@ Both modes apply through `memory_consolidation::apply_actions`, so the guards ca
 `corrects` forward (a split gives it to the first `Correction` entry), a replacement that fails to
 insert aborts before its sources are superseded, and a `Permanent` row is never pruned while a
 merge or split involving one stays `Permanent`. A consolidation prune archives the row. Every
-lifecycle change is written to `memory_events`; each run is recorded in `consolidation_runs` with
-its mode.
+lifecycle change is written to `memory_events`; each run that proposed anything is recorded in
+`consolidation_runs` with its mode. Every owner's batch a pass takes up also adds a row to
+`engine_jobs` (kind `consolidation`, class `upkeep`, no `task_id`) under that owner: `passed`
+with a line such as "Looked over 50 memories: merged 2, removed 1; turned down 3 changes",
+`cancelled` when the run was stopped, or `failed` when the model gave no answer or the changes
+could not be saved.
 
 **Batch**: `select_batch` takes up to `memory_consolidation_batch_size` (50) segmented rows,
 oldest first, because duplicates cluster in time. Fewer than `MIN_MEMORIES_TO_CONSOLIDATE` (6)
@@ -411,7 +471,7 @@ persist in `lane_job_runs` (migration `0059`) so a restart does not make every j
 | `titling` | none |
 | `proactive_review` | none |
 | `summary_refresh` | none |
-| `memory_extraction` | writes memories and reminders |
+| `memory_extraction` | writes memories, reminders, interests and candidate anchors |
 | `suggestion_generation` | composes Home suggestions from memories into `suggestion_queue` (migration `0058`), gated by `suggestion_generation_enabled` |
 
 `GET /api/v1/lane` reports each job's state; `POST /api/v1/lane/jobs/{job}/run` runs one now,
@@ -454,7 +514,7 @@ on needs the device.
 | `agent_memory_limit` | 5 | Sizes the injection candidate pool (`max(limit * 8, 40)`); the injected count comes from the context profile |
 | `memory_extraction_enabled` | true | Run batch extraction |
 | `memory_extraction_mode` | `write` | `shadow` / `write` / `reinforce` (internal, not a user control) |
-| `memory_extraction_sessions_per_pass` | 3 | Model calls (windows) per pass |
+| `memory_extraction_sessions_per_pass` | 3 | Windows read per pass; the critic's call on each is extra |
 | `memory_extraction_window_messages` | 20 | Messages per window |
 | `memory_extraction_idle_secs` | 900 | Quiet before a pass |
 | `memory_extraction_interval_secs` | 60 | Minimum gap between passes |

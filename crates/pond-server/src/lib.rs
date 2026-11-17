@@ -6,6 +6,7 @@ pub mod ble_setup;
 pub mod cart_runner;
 pub mod conversation_extractor;
 pub mod engine_runner;
+pub mod extraction_gate;
 pub mod hf_cache_migration;
 pub mod hooks_runner;
 pub mod host_credential;

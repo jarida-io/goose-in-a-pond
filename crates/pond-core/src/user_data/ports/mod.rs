@@ -13,6 +13,7 @@ pub mod device_registry;
 pub mod dont_list;
 pub mod draft;
 pub mod engine_jobs;
+pub mod extraction_gate;
 pub mod face_detector;
 pub mod face_embedding_extractor;
 pub mod face_recognition;

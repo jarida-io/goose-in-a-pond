@@ -2064,17 +2064,24 @@ async fn run_server(
         });
     }
 
+    // Extraction and consolidation keep their own lane slot and are no long task, so each logs
+    // its own pass in the engine's log.
+    let upkeep_jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository> =
+        Arc::new(pond_infra::sqlite_engine_jobs::SqliteEngineJobRepository::new(db.system.clone()));
+
     // For POST /api/v1/memory/consolidate; a closure so pond-api never imports the consolidator.
     // Built unconditionally: the enable toggle is read fresh from settings at run time.
     let consolidation_runner: Option<pond_api::ConsolidationRunner> = {
         let cr_repo = memory_repo.clone();
         let cr_provider = llm_provider.clone();
+        let cr_jobs = upkeep_jobs.clone();
         let cr_broadcast_tx = consolidation_event_tx.clone();
         let cr_settings_repo = settings_repo.clone();
         Some(Arc::new(
             move |cancel: tokio_util::sync::CancellationToken| {
                 let repo = cr_repo.clone();
                 let provider = cr_provider.clone();
+                let jobs = cr_jobs.clone();
                 let broadcast_tx = cr_broadcast_tx.clone();
                 let settings_repo = cr_settings_repo.clone();
                 Box::pin(async move {
@@ -2098,6 +2105,7 @@ async fn run_server(
                     run_consolidation_pipeline(
                         repo,
                         provider,
+                        jobs,
                         broadcast_tx,
                         cancel,
                         &mode,
@@ -2119,6 +2127,7 @@ async fn run_server(
 
         let inact_repo = memory_repo.clone();
         let inact_provider = llm_provider.clone();
+        let inact_jobs = upkeep_jobs.clone();
         let inact_activity = last_user_activity.clone();
         let inact_cancel = consolidation_cancel.clone();
         let inact_event_tx = consolidation_event_tx.clone();
@@ -2243,6 +2252,7 @@ async fn run_server(
                 run_consolidation_pipeline(
                     inact_repo.clone(),
                     inact_provider.clone(),
+                    inact_jobs.clone(),
                     inact_event_tx.clone(),
                     cancel,
                     &settings.memory_consolidation_mode,
@@ -2784,13 +2794,27 @@ async fn run_server(
         let extraction_embedder = embedder.clone();
         let extraction_factory = embedder_factory.clone();
         let extraction_arrived = embedding_arrived.clone();
+        // The critic every window's candidates pass, on the chat model and the bus's Task lane.
+        let extraction_gate = pond_server::extraction_gate::ModelExtractionGate::new(
+            Arc::new(pond_server::engine_runner::ProviderModel::new(
+                llm_provider.clone(),
+            )),
+            Arc::new(pond_infra::sqlite_dont_list::SqliteDontListRepository::new(
+                db.system.clone(),
+            )),
+        );
         let service = Arc::new(
             BatchExtractionService::new()
                 .with_embedding_provider(embedder.clone())
                 .with_reminder_repository(reminder_repo)
                 .with_interest_repository(Arc::new(
                     pond_infra::sqlite_interests::SqliteInterestRepository::new(db.system.clone()),
-                )),
+                ))
+                .with_gate(Arc::new(extraction_gate))
+                .with_anchor_repository(Arc::new(
+                    pond_infra::sqlite_anchors::SqliteAnchorRepository::new(db.system.clone()),
+                ))
+                .with_engine_jobs(upkeep_jobs.clone()),
         );
         let extraction_storage = session_storage.clone();
         let extraction_repo = memory_repo.clone();
@@ -2993,6 +3017,7 @@ async fn run_server(
                 // Logged whenever the slot was spent, not only on success: an all-unparseable
                 // pass examines no window and isn't blocked, yet is the costliest failure.
                 if report.model_calls > 0 || report.blocked_on.is_some() {
+                    let (shown_to_critic, kept_by_critic) = report.judged_totals();
                     // Counts only: INFO is kept on disk, beyond the store's scoping, retention
                     // and redaction, so the notes themselves stay at DEBUG.
                     tracing::info!(
@@ -3021,6 +3046,13 @@ async fn run_server(
                         reminders_lost = report.reminders_lost,
                         offered = report.memories_offered,
                         reminders = report.reminders_offered,
+                        plans = report.plans_offered,
+                        anchors = report.anchors_offered,
+                        // The critic: calls made, what it was shown and what it let through.
+                        gate_calls = report.gate_calls,
+                        gate_unreadable = report.gate_unreadable,
+                        judged = shown_to_critic,
+                        judged_kept = kept_by_critic,
                         rejected = report.rejected_kinds,
                         parse_failures = report.parse_failures,
                         gave_up = report.gave_up,
@@ -4054,7 +4086,8 @@ async fn run_server(
     // ── Long tasks ───────────────────────────────────────────────────────
     // Claimed whether or not an orchestrator was installed: an idea-engine job's inline steps
     // need none, and the claim is what makes the lane report a loop.
-    let engine_stores = pond_api::EngineStores::sqlite(db.system.clone());
+    let engine_stores =
+        pond_api::EngineStores::sqlite(db.system.clone()).keeping_pictures_under(&data_dir);
     {
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
@@ -8909,6 +8942,7 @@ async fn advance_long_task(
                 Some(found) => tasks
                     .get_artifact(task.id(), &found.id)
                     .await?
+    jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
                     .map(|artifact| artifact.body().to_string()),
                 None => None,
             };
@@ -8958,6 +8992,7 @@ async fn advance_long_task(
                 (false, Some(agent)) => offered
                     .iter()
                     .find(|r| r.name() == pond_core::shared::services::long_task_roles::WORKER_ROLE)
+            jobs.as_ref(),
                     .and_then(|worker| runner::role_for_agent(&step, agent, worker).ok()),
                 _ => None,
             };
@@ -8972,6 +9007,7 @@ async fn advance_long_task(
                     chrono::Utc::now(),
                 )?;
                 tasks.update_step(&step).await?;
+    jobs: &dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository,
                 return Ok(true);
             };
             if let Err(why) = activations::step_role_allowed(task, &step, role) {
@@ -8979,9 +9015,31 @@ async fn advance_long_task(
                 tasks.update_step(&step).await?;
                 step.fail(&why, chrono::Utc::now())?;
                 tasks.update_step(&step).await?;
+    use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
                 return Ok(true);
             }
             step.start(now)?;
+    let started = chrono::Utc::now();
+    let owner = selection.batch.first().and_then(|m| m.profile_id.clone());
+    let log = |state: JobState, outcome: String| async move {
+        let mut job = EngineJob::new(
+            JobKind::Consolidation,
+            JobClass::Upkeep,
+            owner.as_deref(),
+            "",
+            started,
+        );
+        let settled = job
+            .start(None, started)
+            .and_then(|()| job.settle(state, &outcome, chrono::Utc::now()));
+        if settled.is_err() {
+            return;
+        }
+        if let Err(e) = jobs.add(&job).await {
+            tracing::warn!("consolidation: the run could not be logged: {e}");
+        }
+    };
+
             tasks.update_step(&step).await?;
             // A role's use keeps its prefill inside the retention.
             let _ = prefills.note_used(role.name(), now).await;
@@ -9019,6 +9077,14 @@ async fn advance_long_task(
                     StepWork::Do(key.clone()),
                     brief,
                     may_retry,
+        // A cancelled run comes back empty, like one that proposed nothing.
+        Ok(ref result) if cancel.is_cancelled() && result.exchanges.is_empty() => {
+            log(
+                JobState::Cancelled,
+                consolidation::STOPPED_EARLY.to_string(),
+            )
+            .await;
+        }
                     Some(reply_draft),
                 )
                 .await
@@ -9039,9 +9105,15 @@ async fn advance_long_task(
             let verdict =
                 if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
                     let saved = tasks.list_artifacts(task.id()).await?;
+                        log(JobState::Failed, consolidation::COULD_NOT_SAVE.to_string()).await;
                     let context = match runner::brief_artifact(&saved) {
                         Some(found) => tasks
                             .get_artifact(task.id(), &found.id)
+            log(
+                JobState::Passed,
+                outcome.outcome_line(batch_len, result.rejected_count),
+            )
+            .await;
                             .await?
                             .map(|artifact| artifact.body().to_string()),
                         None => None,
@@ -9078,6 +9150,7 @@ async fn advance_long_task(
             // A retry clears its failure from the row once it succeeds; the reason lives on here.
             tracing::info!(
                 target: "giap::trace",
+            log(JobState::Failed, consolidation::MODEL_UNHEARD.to_string()).await;
                 kind = "long_task_step_settled",
                 task_id = %task.id(),
                 step = %step.key(),
@@ -9218,7 +9291,8 @@ async fn run_consolidation_pipeline(
     }
 }
 
-/// One owner's batch through the consolidator, then `apply_actions` and an audit row.
+/// One owner's batch through the consolidator, then `apply_actions`, an audit row and a line
+/// in the engine's log under that owner.
 async fn consolidate_one_batch(
     repo: &(dyn pond_core::user_data::ports::memory_repository::MemoryRepository + Send + Sync),
     provider: Arc<tokio::sync::RwLock<Option<Arc<dyn LlmProvider>>>>,
@@ -9256,11 +9330,16 @@ async fn consolidate_one_batch(
 
     let result = if resolved_mode.is_adversarial() {
         three_stage_consolidator::ThreeStageConsolidator::new(provider)
-            .run(&selection.batch, cancel, Some(mpsc_tx))
+            .run(&selection.batch, cancel.clone(), Some(mpsc_tx))
             .await
     } else {
-        llm_memory_consolidator::run_single_pass(provider, &selection.batch, cancel, Some(mpsc_tx))
-            .await
+        llm_memory_consolidator::run_single_pass(
+            provider,
+            &selection.batch,
+            cancel.clone(),
+            Some(mpsc_tx),
+        )
+        .await
     };
 
     match result {

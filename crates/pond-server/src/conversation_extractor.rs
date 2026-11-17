@@ -13,6 +13,7 @@ use pond_core::user_data::ports::conversation_extractor::{
     estimated_tokens, ConversationExtractor, ExtractedMemory, ExtractedReminder, ExtractionError,
     ExtractionWindow, MemoryKind, WindowExtraction, EXTRACTION_PROMPT_BUDGET_TOKENS,
 };
+use pond_core::user_data::services::extraction_gate::{parse_plans, PLANS_SECTION, PLANS_SKELETON};
 use tokio::sync::RwLock;
 
 /// Per-window system prompt. Its opening must differ from every chat prompt's, or Goose's
@@ -57,18 +58,16 @@ memories: NEW facts about who {subject} is that outlast this conversation.
   {assistant} said, a guess. One question says nothing about who they are.
 - Never copy a line of \"Already remembered\": it is known. Write one
   again only when this conversation says it more exactly.
-{reminders}
+{reminders}{plans}
 Most conversations hold no memory, and \"memories\" is then []. At most
 {n} memories; fewer is better.";
 
-const SKELETON_WITH_REMINDERS: &str = "{\"interests\":[{\"topic\":\"...\",\"category\":\"...\",\
+/// The reply skeleton every window is shown, still open: what else it is asked for follows.
+const SKELETON_OPENING: &str = "{\"interests\":[{\"topic\":\"...\",\"category\":\"...\",\
      \"facets\":[\"...\"],\"signal\":\"asked\"}],\"memories\":[{\"note\":\"...\",\
-     \"about\":\"...\"}],\"reminders\":[{\"about\":\"...\",\"when\":\"...\"}]}";
+     \"about\":\"...\"}]";
 
-/// The skeleton for a window too old to propose anything from.
-const SKELETON_NO_REMINDERS: &str = "{\"interests\":[{\"topic\":\"...\",\"category\":\"...\",\
-     \"facets\":[\"...\"],\"signal\":\"asked\"}],\"memories\":[{\"note\":\"...\",\
-     \"about\":\"...\"}]}";
+const REMINDERS_SKELETON: &str = "\"reminders\":[{\"about\":\"...\",\"when\":\"...\"}]";
 
 const REMINDERS_PARAGRAPH: &str = "\n\
 reminders: anything that happens on one named day or at one named time. In\n\
@@ -77,7 +76,7 @@ conversation -- do not work out the actual date, and do not invent one.\n";
 
 /// Max rendered system-prompt length, in chars: the one fixed-size part of the prompt budget.
 #[cfg(test)]
-pub const EXTRACTION_PROMPT_CEILING: usize = 2_700;
+pub const EXTRACTION_PROMPT_CEILING: usize = 3_400;
 
 /// Interests kept from one window; more is a list of everything mentioned, not what they care about.
 const MAX_INTERESTS: usize = 5;
@@ -95,24 +94,39 @@ impl LlmConversationExtractor {
     }
 }
 
+/// A window is asked for reminders and plans only when it may hold one worth keeping: each
+/// brings its member of the skeleton and its paragraph, or neither.
 pub fn render_extraction_prompt(
     subject: &str,
     assistant: &str,
     max_memories: usize,
     allow_reminders: bool,
+    allow_plans: bool,
 ) -> String {
-    let (skeleton, reminders) = if allow_reminders {
-        (
-            SKELETON_WITH_REMINDERS,
-            REMINDERS_PARAGRAPH.replace("{subject}", subject),
-        )
-    } else {
-        (SKELETON_NO_REMINDERS, String::new())
-    };
+    let mut skeleton = String::from(SKELETON_OPENING);
+    for member in [
+        allow_reminders.then_some(REMINDERS_SKELETON),
+        allow_plans.then_some(PLANS_SKELETON),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        skeleton.push(',');
+        skeleton.push_str(member);
+    }
+    skeleton.push('}');
 
     EXTRACTION_PROMPT
-        .replace("{skeleton}", skeleton)
-        .replace("{reminders}", &reminders)
+        .replace("{skeleton}", &skeleton)
+        .replace(
+            "{reminders}",
+            if allow_reminders {
+                REMINDERS_PARAGRAPH
+            } else {
+                ""
+            },
+        )
+        .replace("{plans}", if allow_plans { PLANS_SECTION } else { "" })
         .replace("{subject}", subject)
         .replace("{assistant}", assistant)
         .replace("{n}", &max_memories.to_string())
@@ -192,6 +206,7 @@ impl ConversationExtractor for LlmConversationExtractor {
             window.assistant_name,
             window.max_memories,
             window.allow_reminders,
+            window.allow_plans,
         );
         let user = render_window_message(
             &window,
@@ -207,6 +222,7 @@ impl ConversationExtractor for LlmConversationExtractor {
             &response.content,
             window.max_memories,
             window.allow_reminders,
+            window.allow_plans,
             &[window.subject.name.as_str(), window.assistant_name],
         )
     }
@@ -278,7 +294,7 @@ fn unescaped(slice: &str) -> Option<String> {
 /// every gate below — a partial object missing `note` is dropped there, not
 /// admitted here.
 fn salvage_truncated(cleaned: &str) -> Option<serde_json::Value> {
-    // Both arrays: `reminders` follows `memories`, so a cut near the end loses reminders first.
+    // Every array: the later ones follow `memories`, so a cut near the end loses them first.
     let memories = match array_after_key(cleaned, "memories") {
         Some(start) => complete_items(cleaned, start),
         // No "memories" key: a bare array counts only when it opens the reply (see above).
@@ -291,20 +307,25 @@ fn salvage_truncated(cleaned: &str) -> Option<serde_json::Value> {
         // "memories" is not an array (`null`, say): the next `[` belongs to another key.
         None => Vec::new(),
     };
-    let reminders = array_after_key(cleaned, "reminders")
-        .map(|start| complete_items(cleaned, start))
-        .unwrap_or_default();
-    let interests = array_after_key(cleaned, "interests")
-        .map(|start| complete_items(cleaned, start))
-        .unwrap_or_default();
+    let items_under = |key: &str| {
+        array_after_key(cleaned, key)
+            .map(|start| complete_items(cleaned, start))
+            .unwrap_or_default()
+    };
+    let (reminders, interests, plans) = (
+        items_under("reminders"),
+        items_under("interests"),
+        items_under("plans"),
+    );
 
-    if memories.is_empty() && reminders.is_empty() && interests.is_empty() {
+    if memories.is_empty() && reminders.is_empty() && interests.is_empty() && plans.is_empty() {
         return None;
     }
     Some(serde_json::json!({
         "memories": memories,
         "reminders": reminders,
         "interests": interests,
+        "plans": plans,
     }))
 }
 
@@ -372,12 +393,12 @@ fn complete_items(cleaned: &str, start: usize) -> Vec<serde_json::Value> {
     items
 }
 
-/// `None` for an object with neither key: an answer to another question, not an empty one.
+/// `None` for an object with none of the keys: an answer to another question, not an empty one.
 fn usable_shape(value: serde_json::Value) -> Option<serde_json::Value> {
     match value {
         serde_json::Value::Array(items) => Some(serde_json::json!({ "memories": items })),
         other
-            if ["memories", "reminders", "interests"]
+            if ["memories", "reminders", "interests", "plans"]
                 .iter()
                 .any(|key| other.get(key).is_some()) =>
         {
@@ -393,6 +414,7 @@ pub fn parse_window_response(
     raw: &str,
     max_memories: usize,
     allow_reminders: bool,
+    allow_plans: bool,
     subject_names: &[&str],
 ) -> Result<WindowExtraction, ExtractionError> {
     let cleaned = strip_thinking(raw.trim());
@@ -504,6 +526,11 @@ pub fn parse_window_response(
         }
     }
 
+    // As with reminders: a window not asked for plans keeps none the model volunteers.
+    if allow_plans {
+        extraction.plans = parse_plans(&value);
+    }
+
     Ok(extraction)
 }
 
@@ -563,7 +590,7 @@ mod tests {
     };
 
     fn rendered() -> String {
-        render_extraction_prompt("Jerry", "Goose", 3, true)
+        render_extraction_prompt("Jerry", "Goose", 3, true, true)
     }
 
     // ── strip_thinking ───────────────────────────────────────────────────
@@ -624,7 +651,7 @@ mod tests {
             "the fixture must be the malformed thing the model actually sent"
         );
 
-        let out = parse_window_response(over_escaped, 5, false, &[])
+        let out = parse_window_response(over_escaped, 5, false, false, &[])
             .expect("a correct answer must not be lost to the escaping of a quote");
         assert_eq!(out.memories.len(), 2);
         assert!(out.memories[0].note.contains("coffee only before noon"));
@@ -634,7 +661,7 @@ mod tests {
     #[test]
     fn a_note_containing_a_real_quotation_is_not_unescaped() {
         let raw = r#"{"memories":[{"note":"Jerry says \"no confirmations\" when asked twice.","kind":"preference"}]}"#;
-        let out = parse_window_response(raw, 5, false, &[]).expect("valid JSON");
+        let out = parse_window_response(raw, 5, false, false, &[]).expect("valid JSON");
         assert_eq!(out.memories.len(), 1);
         assert!(
             out.memories[0].note.contains("\"no confirmations\""),
@@ -648,7 +675,7 @@ mod tests {
     fn a_reply_the_model_ran_out_of_room_to_finish_keeps_what_it_finished() {
         let truncated = "```json\n{\n  \"memories\": [\n    {\n      \"note\": \"Jerry moves the espresso machine to the window shelf so it is reachable before the 7:15 school run every morning.\",\n      \"kind\": \"context\"\n    },\n    {\n      \"note\": \"Jerry buys beans from Kahawa on Ngong Road, a kilo at a time.\",\n      \"kind\": \"context\"\n    },\n    {\n      \"note\": \"Jerry prefer";
 
-        let out = parse_window_response(truncated, 5, false, &[])
+        let out = parse_window_response(truncated, 5, false, false, &[])
             .expect("two finished notes are worth more than nothing");
         assert_eq!(
             out.memories.len(),
@@ -673,6 +700,7 @@ mod tests {
                 r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"}]}"#,
                 3,
                 false,
+                false,
                 &[]
             )
             .is_err(),
@@ -685,6 +713,7 @@ mod tests {
                 r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"},{"content":"Jerry buys"#,
                 3,
                 false,
+                false,
                 &[]
             )
             .is_err(),
@@ -695,7 +724,8 @@ mod tests {
     #[test]
     fn a_closed_array_with_a_malformed_tail_still_yields_its_notes() {
         let raw = "{\"memories\":[{\"note\":\"Jerry buys beans from Kahawa on Ngong Road.\",\"kind\":\"context\"}],}";
-        let out = parse_window_response(raw, 5, false, &[]).expect("the notes inside are fine");
+        let out =
+            parse_window_response(raw, 5, false, false, &[]).expect("the notes inside are fine");
         assert_eq!(out.memories.len(), 1);
         assert!(out.memories[0].note.contains("Kahawa"));
     }
@@ -703,8 +733,8 @@ mod tests {
     #[test]
     fn a_reply_cut_off_inside_its_reminders_keeps_the_finished_one() {
         let raw = r#"{"memories":[{"note":"Jerry sees a dentist in Kisumu.","kind":"context"}],"reminders":[{"about":"the dentist","when":"next Tuesday"},{"about":"collect the tract"#;
-        let out =
-            parse_window_response(raw, 5, true, &[]).expect("finished items are worth keeping");
+        let out = parse_window_response(raw, 5, true, false, &[])
+            .expect("finished items are worth keeping");
         assert_eq!(
             out.memories.len(),
             1,
@@ -717,7 +747,7 @@ mod tests {
     #[test]
     fn a_null_memories_value_does_not_read_the_reminders_as_memories() {
         let raw = r#"{"memories":null,"reminders":[{"about":"the clinic","when":"on the 14th"},{"about":"the bi"#;
-        let out = parse_window_response(raw, 5, true, &[])
+        let out = parse_window_response(raw, 5, true, false, &[])
             .expect("the finished reminder is worth keeping");
         assert!(
             out.memories.is_empty(),
@@ -732,7 +762,7 @@ mod tests {
     fn a_null_memories_value_lends_no_other_array_to_the_memories_reader() {
         let raw = r#"{"memories":null,"example":[{"note":"Jerry likes his tea strong.","kind":"preference"},{"note":"Jerry wal"#;
         assert!(
-            parse_window_response(raw, 5, true, &[]).is_err(),
+            parse_window_response(raw, 5, true, false, &[]).is_err(),
             "an array that is not the memories value was admitted as memories"
         );
     }
@@ -740,7 +770,7 @@ mod tests {
     #[test]
     fn a_reply_that_parses_never_reaches_the_salvage() {
         let whole = r#"{"memories":[{"note":"one thing worth keeping about them","kind":"context"},{"note":"a second thing worth keeping too","kind":"context"}]}"#;
-        let out = parse_window_response(whole, 5, false, &[]).expect("valid JSON");
+        let out = parse_window_response(whole, 5, false, false, &[]).expect("valid JSON");
         assert_eq!(
             out.memories.len(),
             2,
@@ -757,7 +787,7 @@ mod tests {
             "",
         ] {
             assert!(
-                parse_window_response(raw, 5, false, &[]).is_err(),
+                parse_window_response(raw, 5, false, false, &[]).is_err(),
                 "should stay unparseable: {raw:?}"
             );
         }
@@ -779,13 +809,14 @@ mod tests {
     #[test]
     fn every_placeholder_is_filled() {
         for allow in [true, false] {
-            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow);
+            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow, allow);
             for placeholder in [
                 "{subject}",
                 "{assistant}",
                 "{n}",
                 "{skeleton}",
                 "{reminders}",
+                "{plans}",
             ] {
                 assert!(
                     !prompt.contains(placeholder),
@@ -869,7 +900,7 @@ mod tests {
     #[test]
     fn the_prompt_says_that_most_windows_hold_no_memory() {
         for allow in [true, false] {
-            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow);
+            let prompt = render_extraction_prompt("Jerry", "Goose", 3, allow, allow);
             assert!(prompt.contains("Most conversations hold no memory"));
             assert!(prompt.contains("\"memories\" is then []"));
         }
@@ -923,9 +954,11 @@ mod tests {
                 about.as_str()
             );
         }
+        // Read without the plans paragraph: `project` is a kind of plan, never of memory.
+        let memories_only = render_extraction_prompt("Jerry", "Goose", 3, true, false);
         for gone in ["identity", "project", "knowledge"] {
             assert!(
-                !prompt.contains(gone),
+                !memories_only.contains(gone),
                 "{gone:?} is in the prompt but the parser rejects it"
             );
         }
@@ -933,8 +966,9 @@ mod tests {
 
     #[test]
     fn a_stale_window_is_never_asked_for_a_reminder() {
-        let prompt = render_extraction_prompt("Jerry", "Goose", 3, false);
+        let prompt = render_extraction_prompt("Jerry", "Goose", 3, false, false);
         assert!(!prompt.contains("reminders"));
+        assert!(!prompt.contains("plans"));
         assert!(!prompt.contains("\"when\""));
         assert!(prompt.contains("\"memories\":[{\"note\""));
         assert!(
@@ -944,12 +978,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_skeleton_is_one_json_object_whatever_the_window_is_asked_for() {
+        for (reminders, plans) in [(true, true), (true, false), (false, true), (false, false)] {
+            let prompt = render_extraction_prompt("Jerry", "Goose", 3, reminders, plans);
+            let skeleton = prompt
+                .lines()
+                .find(|line| line.starts_with("{\"interests\""))
+                .expect("the skeleton is on a line of its own");
+            let shape: serde_json::Value =
+                serde_json::from_str(skeleton).unwrap_or_else(|e| panic!("{skeleton}: {e}"));
+            assert_eq!(shape.get("reminders").is_some(), reminders);
+            assert_eq!(shape.get("plans").is_some(), plans);
+            assert_eq!(prompt.contains("\nreminders: "), reminders);
+            assert_eq!(prompt.contains("\nplans: "), plans);
+            assert!(
+                !prompt.contains("\n\n\n"),
+                "no paragraph leaves a gap behind"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plans_paragraph_names_the_subject_and_the_assistant() {
+        let prompt = rendered();
+        assert!(prompt.contains("plans: concrete things Jerry said they themselves plan"));
+        assert!(prompt.contains("anything Goose proposed"));
+        let plans = prompt.find("\nplans: ").unwrap();
+        assert!(prompt.find("\nreminders: ").unwrap() < plans);
+        assert!(plans < prompt.find("Most conversations hold no memory").unwrap());
+    }
+
     // ── Parsing ──────────────────────────────────────────────────────────
 
     #[test]
     fn a_clean_reply_parses() {
         let raw = r#"{"memories":[{"note":"Jerry waters the greenhouse before work.","kind":"routine"}],"reminders":[{"about":"the dentist","when":"next Tuesday"}]}"#;
-        let out = parse_window_response(raw, 3, true, &[]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &[]).unwrap();
         assert_eq!(out.memories.len(), 1);
         assert_eq!(out.memories[0].kind, MemoryKind::Routine);
         assert_eq!(out.reminders.len(), 1);
@@ -961,7 +1026,7 @@ mod tests {
         let raw = "<think>hmm, what did they say</think>Here you go:\n\
                    {\"memories\":[{\"note\":\"Jerry's sister is Amara.\",\"kind\":\"relationship\"}]}\n\
                    Hope that helps!";
-        let out = parse_window_response(raw, 3, true, &[]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &[]).unwrap();
         assert_eq!(out.memories.len(), 1);
     }
 
@@ -969,14 +1034,14 @@ mod tests {
     #[test]
     fn a_bare_array_is_read_as_the_memories_list() {
         let raw = r#"[{"note":"Jerry prefers short answers.","kind":"preference"}]"#;
-        let out = parse_window_response(raw, 3, true, &[]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &[]).unwrap();
         assert_eq!(out.memories.len(), 1);
         assert_eq!(out.memories[0].kind, MemoryKind::Preference);
 
         // With a preamble, as local models actually send it.
         let with_preamble = format!("Here is what I found:\n{raw}");
         assert_eq!(
-            parse_window_response(&with_preamble, 3, true, &[])
+            parse_window_response(&with_preamble, 3, true, false, &[])
                 .unwrap()
                 .memories
                 .len(),
@@ -990,14 +1055,14 @@ mod tests {
         let raw =
             r#"{"facts":[{"content":"Jerry prefers short answers.","segment":"preference"}]}"#;
         assert!(matches!(
-            parse_window_response(raw, 3, true, &[]),
+            parse_window_response(raw, 3, true, false, &[]),
             Err(ExtractionError::Unparseable { .. })
         ));
 
         // Vacuity control: the same item under the right key parses.
         let right = r#"{"memories":[{"note":"Jerry prefers short answers.","kind":"preference"}]}"#;
         assert_eq!(
-            parse_window_response(right, 3, true, &[])
+            parse_window_response(right, 3, true, false, &[])
                 .unwrap()
                 .memories
                 .len(),
@@ -1007,19 +1072,25 @@ mod tests {
 
     #[test]
     fn an_unreadable_reply_is_not_an_empty_one() {
-        let empty =
-            parse_window_response(r#"{"memories":[],"reminders":[]}"#, 3, true, &[]).unwrap();
+        let empty = parse_window_response(r#"{"memories":[],"reminders":[]}"#, 3, true, false, &[])
+            .unwrap();
         assert!(empty.is_empty());
 
-        let err = parse_window_response("Sure! I had a look and nothing stood out.", 3, true, &[])
-            .expect_err("no JSON is recoverable here");
+        let err = parse_window_response(
+            "Sure! I had a look and nothing stood out.",
+            3,
+            true,
+            false,
+            &[],
+        )
+        .expect_err("no JSON is recoverable here");
         assert!(matches!(err, ExtractionError::Unparseable { .. }));
     }
 
     #[test]
     fn the_unparseable_error_carries_a_bounded_excerpt() {
         let long = "not json ".repeat(400);
-        let err = parse_window_response(&long, 3, true, &[]).expect_err("unparseable");
+        let err = parse_window_response(&long, 3, true, false, &[]).expect_err("unparseable");
         match err {
             ExtractionError::Unparseable { raw_head } => {
                 assert!(raw_head.chars().count() <= RAW_HEAD_CHARS);
@@ -1034,7 +1105,7 @@ mod tests {
             {"note":"William Ruto is the president of Kenya.","kind":"knowledge"},
             {"note":"Jerry prefers short answers.","kind":"preference"}
         ]}"#;
-        let out = parse_window_response(raw, 3, true, &[]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &[]).unwrap();
         assert_eq!(out.memories.len(), 1);
         assert_eq!(out.rejected, 1);
     }
@@ -1042,12 +1113,12 @@ mod tests {
     #[test]
     fn reminders_from_a_stale_window_are_discarded() {
         let raw = r#"{"memories":[],"reminders":[{"about":"the dentist","when":"next Tuesday"}]}"#;
-        let out = parse_window_response(raw, 3, false, &[]).unwrap();
+        let out = parse_window_response(raw, 3, false, false, &[]).unwrap();
         assert!(out.reminders.is_empty());
 
         // Vacuity control: the same reply yields a reminder when one was asked for.
         assert_eq!(
-            parse_window_response(raw, 3, true, &[])
+            parse_window_response(raw, 3, true, false, &[])
                 .unwrap()
                 .reminders
                 .len(),
@@ -1064,7 +1135,7 @@ mod tests {
             {"note":"Jerry runs the standup.","kind":"routine"}
         ]}"#;
         assert_eq!(
-            parse_window_response(raw, 2, true, &[])
+            parse_window_response(raw, 2, true, false, &[])
                 .unwrap()
                 .memories
                 .len(),
@@ -1078,7 +1149,7 @@ mod tests {
             {"topic":"Toyota Fielder","category":"cars","facets":["under KSh 1.2M","Kilimall"],"signal":"does"},
             {"topic":"Primetime","category":"Film/TV","facets":[],"signal":"asked"}
         ],"memories":[]}"#;
-        let out = parse_window_response(raw, 3, true, &["Jerry", "Goose"]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &["Jerry", "Goose"]).unwrap();
         assert!(out.memories.is_empty());
         assert_eq!(out.interests.len(), 2);
         assert_eq!(out.interests[0].category, "cars");
@@ -1101,7 +1172,7 @@ mod tests {
             {"topic":"Gen V","category":"film_tv","facets":["...","gen v"],"signal":"said"},
             {"topic":"gen v","category":"film_tv","facets":[],"signal":"said"}
         ],"memories":[]}"#;
-        let out = parse_window_response(raw, 3, true, &["Jerry", "Goose"]).unwrap();
+        let out = parse_window_response(raw, 3, true, false, &["Jerry", "Goose"]).unwrap();
         assert_eq!(out.interests.len(), 1, "{:?}", out.interests);
         assert_eq!(out.interests[0].topic, "Gen V");
         assert!(out.interests[0].facets.is_empty());
@@ -1110,9 +1181,65 @@ mod tests {
     #[test]
     fn a_reply_cut_off_inside_its_interests_keeps_the_finished_ones() {
         let raw = r#"{"interests":[{"topic":"The Boys","category":"film_tv","facets":["Homelander"],"signal":"said"},{"topic":"Gen"#;
-        let out = parse_window_response(raw, 3, true, &[]).expect("a finished interest is kept");
+        let out =
+            parse_window_response(raw, 3, true, false, &[]).expect("a finished interest is kept");
         assert_eq!(out.interests.len(), 1);
         assert_eq!(out.interests[0].topic, "The Boys");
+    }
+
+    #[test]
+    fn plans_are_read_beside_the_memories() {
+        let raw = r#"{"interests":[],"memories":[],"plans":[
+            {"kind":"event","title":"AI Summit","when":"3 December at 8am","where":"KICC","details":"Going with Amina"},
+            {"kind":"hobby","title":"Chess"}
+        ]}"#;
+        let out = parse_window_response(raw, 3, true, true, &[]).unwrap();
+        assert_eq!(out.plans.len(), 1, "{:?}", out.plans);
+        assert_eq!(out.plans[0].title, "AI Summit");
+        assert_eq!(out.plans[0].when, "3 December at 8am");
+        assert_eq!(out.plans[0].place, "KICC");
+        assert!(
+            !out.is_empty(),
+            "a window with only a plan still yielded something"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_holds_only_plans_is_an_answer() {
+        let raw = r#"{"plans":[{"kind":"trip","title":"Diani in April","when":"","where":"Diani","details":""}]}"#;
+        let out = parse_window_response(raw, 3, true, true, &[]).expect("plans alone are a reply");
+        assert_eq!(out.plans.len(), 1);
+        assert!(out.memories.is_empty());
+    }
+
+    #[test]
+    fn plans_from_a_window_not_asked_for_them_are_discarded() {
+        let raw = r#"{"memories":[],"plans":[{"kind":"trip","title":"Diani in April"}]}"#;
+        let out = parse_window_response(raw, 3, true, false, &[]).unwrap();
+        assert!(out.plans.is_empty());
+
+        // Vacuity control: the same reply yields the plan when one was asked for.
+        assert_eq!(
+            parse_window_response(raw, 3, true, true, &[])
+                .unwrap()
+                .plans
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_reply_cut_off_inside_its_plans_keeps_the_finished_one() {
+        let raw = r#"{"interests":[],"memories":[{"note":"Jerry sees a dentist in Kisumu.","about":"health"}],"plans":[{"kind":"purchase","title":"Toyota Fielder","when":"","where":"","details":"under KSh 1.2M"},{"kind":"trip","title":"Dia"#;
+        let out = parse_window_response(raw, 5, true, true, &[])
+            .expect("finished items are worth keeping");
+        assert_eq!(out.memories.len(), 1);
+        assert_eq!(out.plans.len(), 1, "the finished plan survives the cut");
+        assert_eq!(out.plans[0].title, "Toyota Fielder");
+
+        let only_plans = r#"{"plans":[{"kind":"event","title":"AI Summit"},{"kind":"ev"#;
+        let out = parse_window_response(only_plans, 5, true, true, &[]).unwrap();
+        assert_eq!(out.plans.len(), 1);
     }
 
     // ── The user message ─────────────────────────────────────────────────
@@ -1149,6 +1276,7 @@ mod tests {
                 known: &known,
                 max_memories: 3,
                 allow_reminders: true,
+                allow_plans: true,
             },
             EXTRACTION_PROMPT_BUDGET_TOKENS,
         );
@@ -1186,6 +1314,7 @@ mod tests {
             known: &known,
             max_memories: 3,
             allow_reminders: true,
+            allow_plans: true,
         };
 
         let budget = 200;
@@ -1232,6 +1361,7 @@ mod tests {
                 known: &known,
                 max_memories: 3,
                 allow_reminders: true,
+                allow_plans: true,
             },
             // Enough for the conversation and nothing else.
             5,
@@ -1259,6 +1389,7 @@ mod tests {
                 known: &[],
                 max_memories: 3,
                 allow_reminders: true,
+                allow_plans: true,
             },
             EXTRACTION_PROMPT_BUDGET_TOKENS,
         );

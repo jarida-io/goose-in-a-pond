@@ -7,6 +7,7 @@ pub mod mock_device_controller;
 pub mod mock_device_registry;
 pub mod mock_dont_list;
 pub mod mock_engine_jobs;
+pub mod mock_extraction_gate;
 pub mod mock_fact_sheet;
 pub mod mock_guest_device_access;
 pub mod mock_guest_room_access;
