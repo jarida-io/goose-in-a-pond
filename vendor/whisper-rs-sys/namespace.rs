@@ -1,9 +1,11 @@
-//! Linux static-link isolation for the pinned Whisper copy of GGML.
+//! Static-link isolation for the pinned Whisper copy of GGML, on Linux and macOS.
 use std::{collections::BTreeSet, fs, path::Path};
 
 fn owned(name: &str) -> bool {
     name == "ggml"
         || name == "sum_rows_f32_cuda"
+        // An Objective-C class is a global name too, and llama.cpp's Metal backend has its own.
+        || name == "GGMLMetalClass"
         || [
             "ggml_",
             "gguf_",
@@ -24,7 +26,7 @@ fn collect(path: &Path, names: &mut BTreeSet<String>) -> std::io::Result<()> {
         }
     } else if matches!(
         path.extension().and_then(|x| x.to_str()),
-        Some("h" | "hpp" | "c" | "cpp" | "cu" | "cuh" | "inc")
+        Some("h" | "hpp" | "c" | "cpp" | "cu" | "cuh" | "inc" | "m")
     ) {
         let source = fs::read_to_string(path)?;
         for token in source.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
@@ -35,7 +37,7 @@ fn collect(path: &Path, names: &mut BTreeSet<String>) -> std::io::Result<()> {
     }
     Ok(())
 }
-/// Compile every C, C++ and CUDA use with the same private names. Rust sees the
+/// Compile every C, C++, Objective-C and CUDA use with the same private names. Rust sees the
 /// original types and API names; bindgen emits explicit names for the FFI links.
 pub fn header(source: &Path, destination: &Path) -> std::io::Result<()> {
     let mut names = BTreeSet::new();
@@ -52,13 +54,17 @@ pub fn header(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
     fs::write(destination, output)
 }
+/// Bindgen writes an overridden link name verbatim, so it carries the platform's C symbol
+/// prefix itself: `_` on Apple targets, where C's `f` is the symbol `_f`, and none on Linux.
 #[derive(Debug)]
-pub struct Bindings;
+pub struct Bindings {
+    pub symbol_prefix: &'static str,
+}
 impl bindgen::callbacks::ParseCallbacks for Bindings {
     fn generated_link_name_override(
         &self,
         item: bindgen::callbacks::ItemInfo<'_>,
     ) -> Option<String> {
-        owned(item.name).then(|| format!("pond_whisper_{}", item.name))
+        owned(item.name).then(|| format!("{}pond_whisper_{}", self.symbol_prefix, item.name))
     }
 }
