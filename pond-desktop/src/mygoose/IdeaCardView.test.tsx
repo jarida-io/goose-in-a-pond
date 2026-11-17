@@ -95,4 +95,51 @@ describe("IdeaCardView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add to-do" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/couldn't do that just now/);
   });
+
+  it("asks an ask card's one question: an option or the member's own words go to Goose", async () => {
+    const card = ideaCard({
+      kind: "ask",
+      action: {
+        kind: "chat",
+        label: "Ask Goose",
+        prompt: "What's on at Karura?",
+        question: {
+          header: "Saturday",
+          text: "What should Goose look into?",
+          options: [
+            { label: "Kids' things nearby", description: "Within 20 minutes" },
+            { label: "What's on at Karura", description: "Events this weekend" },
+          ],
+          recommended: 1,
+          multi: false,
+        },
+      },
+    });
+    const onAnswer = vi.fn().mockResolvedValue(undefined);
+    render(
+      <IdeaCardView
+        card={card}
+        variant="classic"
+        onDo={vi.fn()}
+        onGoDeeper={vi.fn()}
+        onSave={vi.fn()}
+        onDismiss={vi.fn()}
+        onAnswer={onAnswer}
+      />,
+    );
+    expect(screen.getByText("What should Goose look into?")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Ask Goose" })).toBeNull();
+    const group = screen.getByRole("group", { name: "What should Goose look into?" });
+    const options = within(group)
+      .getAllByRole("button")
+      .map((b) => b.textContent);
+    expect(options.slice(0, 3)).toEqual(["What's on at Karura", "Kids' things nearby", "Other"]);
+    fireEvent.click(within(group).getByRole("button", { name: "What's on at Karura" }));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith(card, "What's on at Karura"));
+
+    fireEvent.click(within(group).getByRole("button", { name: "Other" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: " Something for a rainy day " } });
+    fireEvent.click(within(group).getByRole("button", { name: "Ask Goose" }));
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith(card, "Something for a rainy day"));
+  });
 });

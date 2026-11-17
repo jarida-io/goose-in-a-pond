@@ -943,11 +943,18 @@ impl GooseAdapter {
     }
 
     fn builtin_extension_config(name: &str) -> ExtensionConfig {
+        use pond_core::mcp::domain::tool_group::{
+            QUESTIONS_EXTENSION, QUESTIONS_TOOL_TIMEOUT_SECS,
+        };
+        let timeout = match name {
+            QUESTIONS_EXTENSION => QUESTIONS_TOOL_TIMEOUT_SECS,
+            _ => 600,
+        };
         ExtensionConfig::Builtin {
             name: name.to_string(),
             description: String::new(),
             display_name: None,
-            timeout: Some(600),
+            timeout: Some(timeout),
             bundled: Some(false),
             available_tools: vec![],
         }
@@ -3788,24 +3795,26 @@ impl GooseAdapter {
             }
         });
 
-        // The groups the household turned off for the Voice agent, from both sets: only ever
-        // narrower than the prime's.
+        // The groups the household turned off for the Voice agent, and the questions card no
+        // voice can draw, from both sets: only ever narrower than the prime's.
         let voice_keeps = |tool: &String| {
             pond_core::mcp::domain::tool_group::group_of_tool(tool)
                 .is_none_or(|group| voice_agent.keeps_group(group))
         };
         let (allowed_tools, entitled_tools): (HashSet<String>, Option<HashSet<String>>) =
-            if is_voice && !voice_agent.tool_groups_off.is_empty() {
+            if is_voice {
                 let before = allowed_tools.len();
                 let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps).collect();
-                tracing::info!(
-                    target: "giap::trace",
-                    kind = "voice_agent_tools_off",
-                    session_id = %session_id,
-                    groups = ?voice_agent.tool_groups_off,
-                    removed = before - kept.len(),
-                    "the Voice agent's groups that are off were withheld from the turn"
-                );
+                if before != kept.len() {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "voice_agent_tools_off",
+                        session_id = %session_id,
+                        groups = ?voice_agent.tool_groups_off,
+                        removed = before - kept.len(),
+                        "the Voice agent's groups that are off were withheld from the turn"
+                    );
+                }
                 (
                     kept,
                     entitled_tools.map(|t| t.into_iter().filter(voice_keeps).collect()),
@@ -7108,7 +7117,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
         };
         let guest = at("subtract_guest_denied_tools(");
-        let voice = at("if is_voice && !voice_agent.tool_groups_off.is_empty()");
+        let voice = at("let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps)");
         let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
         let authority = at("self.turn_authorities.publish(");
         assert!(guest < voice, "a guest's subtraction comes first");

@@ -24,6 +24,7 @@ use pond_core::user_data::domain::dont_list::{Reason, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::{JobClass, JobKind, JobState};
 use pond_core::user_data::services::anchor_add::{add_asked, AnchorAdded};
 use pond_core::user_data::services::cards::{due_time, request_cards};
+use pond_core::user_data::services::engine::gaps::request_questions;
 use pond_core::user_data::services::engine::recipes::{deliverable_title, slots_of};
 
 use crate::anchors::{bad_body, members_words, turned_down};
@@ -133,8 +134,8 @@ async fn refresh(
     Ok((StatusCode::ACCEPTED, Json(json!({"state": word}))))
 }
 
-/// The plan the card belongs to, or one made from the card, with its first deliverable queued
-/// as asked for. Returns the plan's id.
+/// The plan the card belongs to, or one made from the card, with its first deliverable and its
+/// questions queued as asked for. Returns the plan's id.
 async fn go_deeper(state: &AppState, member: &str, card: &Card) -> Result<String, Failure> {
     let now = Utc::now();
     let held = match &card.anchor {
@@ -176,6 +177,10 @@ async fn go_deeper(state: &AppState, member: &str, card: &Card) -> Result<String
         }
     };
     crate::engine_log::ask_for_refresh(state, &anchor, &deliverable, now)
+        .await
+        .map_err(server_error)?;
+    // Research does not wait for the answers: it states its assumptions until they come.
+    request_questions(state.engine.jobs.as_ref(), &anchor, JobClass::Asked, now)
         .await
         .map_err(server_error)?;
     Ok(anchor.id)

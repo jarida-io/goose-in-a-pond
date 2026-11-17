@@ -131,6 +131,7 @@ fn card(owner: &str, kind: CardKind, title: &str, action: Option<(ActionKind, &s
             text: None,
             due: None,
             url: (kind == ActionKind::Watch).then(|| extra.to_string()),
+            question: None,
         }),
         sources: vec![CardSource {
             kind: CardSourceKind::Web,

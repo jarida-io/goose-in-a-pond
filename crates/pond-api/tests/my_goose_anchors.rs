@@ -325,6 +325,16 @@ async fn asked(
     question
 }
 
+/// Options as a surface reads them: a label and a description each.
+fn options(labels: &[&str]) -> Value {
+    Value::Array(
+        labels
+            .iter()
+            .map(|label| json!({"label": label, "description": ""}))
+            .collect(),
+    )
+}
+
 async fn question(pond: &Pond, id: &str) -> Question {
     pond.stores
         .questions
@@ -688,8 +698,8 @@ async fn an_anchor_shows_its_deliverables_questions_and_the_steps_of_its_job() {
     let whole = get(&p, JERRY, &format!("/me/anchors/{trip}")).await;
     assert_eq!(
         whole["questions"],
-        json!([{"id": budget.id, "text": "What is your budget?",
-                "options": ["Under KSh 50,000", "More"], "multi": false}])
+        json!([{"id": budget.id, "header": "", "text": "What is your budget?",
+                "options": options(&["Under KSh 50,000", "More"]), "multi": false}])
     );
     assert_eq!(whole["deliverables"], shown["deliverables"]);
     assert_eq!(
@@ -1050,12 +1060,13 @@ async fn a_shared_anchor_is_read_and_its_questions_answered_but_not_changed() {
     assert_eq!(
         batches,
         json!({"batches": [{
-            "id": "b1", "purpose": "anchor", "anchor_id": trip, "title": "Trip to Mombasa",
+            "id": "b1", "purpose": "anchor", "anchor_id": trip, "session_id": null, "round": 1,
+            "title": "Trip to Mombasa", "state": "open",
             "questions": [
-                {"id": budget.id, "text": "What is your budget?",
-                 "options": ["Under KSh 50,000", "More"], "multi": false},
-                {"id": who.id, "text": "Who is going?",
-                 "options": ["Just me", "Two of us"], "multi": false},
+                {"id": budget.id, "header": "", "text": "What is your budget?",
+                 "options": options(&["Under KSh 50,000", "More"]), "multi": false},
+                {"id": who.id, "header": "", "text": "Who is going?",
+                 "options": options(&["Just me", "Two of us"]), "multi": false},
             ],
         }]}),
         "the shared anchor's questions, and none of Jerry's own"
@@ -1476,25 +1487,25 @@ async fn questions_come_in_batches_under_what_they_are_about() {
     assert_eq!(
         heads,
         [
-            json!(["b1", "anchor", trip, "Trip to Mombasa"]),
-            json!(["b2", "interest", null, "Things you keep coming back to"]),
-            json!(["b3", "profile", null, "A few things about you"]),
             json!(["b4", "ledger", null, "Your spending"]),
+            json!(["b3", "profile", null, "A few things about you"]),
+            json!(["b2", "interest", null, "Things you keep coming back to"]),
+            json!(["b1", "anchor", trip, "Trip to Mombasa"]),
         ],
-        "a question past its time is not asked"
+        "newest first, and a question past its time is not asked"
     );
     assert_eq!(
-        batches[0]["questions"],
+        batches[3]["questions"],
         json!([
-            {"id": budget.id, "text": "What is your budget?",
-             "options": ["Under KSh 50,000", "More"], "multi": false},
-            {"id": who.id, "text": "Who is going?",
-             "options": ["Just me", "Two of us"], "multi": false},
+            {"id": budget.id, "header": "", "text": "What is your budget?",
+             "options": options(&["Under KSh 50,000", "More"]), "multi": false},
+            {"id": who.id, "header": "", "text": "Who is going?",
+             "options": options(&["Just me", "Two of us"]), "multi": false},
         ])
     );
     assert_eq!(
-        batches[1]["questions"][0]["options"],
-        json!(["Follow it", "Not interested"])
+        batches[2]["questions"][0]["options"],
+        options(&["Follow it", "Not interested"])
     );
 
     let answer = format!("/me/questions/{}/answer", budget.id);
@@ -1545,7 +1556,7 @@ async fn questions_come_in_batches_under_what_they_are_about() {
     let skip = format!("/me/questions/{}/skip", budget.id);
     assert_eq!(post(&p, JERRY, &skip, None).await, StatusCode::CONFLICT);
     let shown = get(&p, JERRY, "/me/questions").await;
-    assert_eq!(ids(&shown["batches"]), ["b2", "b3", "b4"]);
+    assert_eq!(ids(&shown["batches"]), ["b4", "b3", "b2"]);
 
     // A stopped anchor's questions have nothing left to feed.
     let car = anchor(&p, "purchase", "A used Subaru Forester").await;
@@ -1559,11 +1570,11 @@ async fn questions_come_in_batches_under_what_they_are_about() {
     )
     .await;
     let shown = get(&p, JERRY, "/me/questions").await;
-    assert_eq!(ids(&shown["batches"]), ["b2", "b3", "b4", "b6"]);
+    assert_eq!(ids(&shown["batches"]), ["b6", "b4", "b3", "b2"]);
     let stop = format!("/me/anchors/{car}/stop");
     assert_eq!(post(&p, JERRY, &stop, None).await, StatusCode::NO_CONTENT);
     let shown = get(&p, JERRY, "/me/questions").await;
-    assert_eq!(ids(&shown["batches"]), ["b2", "b3", "b4"]);
+    assert_eq!(ids(&shown["batches"]), ["b4", "b3", "b2"]);
     let (status, _) = call(
         &p,
         JERRY,
@@ -1653,8 +1664,19 @@ async fn an_anchors_answer_asks_for_a_refresh_of_what_the_member_can_read() {
     let answered = question(&p, &who.id).await;
     assert!(answered.has_free_text());
     assert!(answered.answer.unwrap().choices.is_empty());
-    assert_eq!(p.stores.jobs.open().await.unwrap().len(), 2);
-    assert_eq!(p.stores.jobs.recent(&p.jerry, 10).await.unwrap().len(), 2);
+    let open = p.stores.jobs.open().await.unwrap();
+    assert_eq!(
+        open.len(),
+        3,
+        "no second refresh; the settled batch queues the next round"
+    );
+    let next: Vec<&EngineJob> = open
+        .iter()
+        .filter(|job| job.kind == JobKind::Questions)
+        .collect();
+    assert_eq!(next.len(), 1, "{open:?}");
+    assert_eq!(next[0].class, JobClass::Asked);
+    assert_eq!(next[0].anchor_id.as_deref(), Some(trip.as_str()));
 }
 
 #[tokio::test]
@@ -1876,4 +1898,185 @@ async fn the_engine_log_lists_a_members_recent_jobs_in_plain_words() {
     assert_eq!(newest["jobs"][0]["subject"], "A check-in");
     let (status, body) = call(&p, JERRY, Method::GET, "/me/engine/jobs?limit=lots", None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+/// A structured question of Jerry's for `trip`, settling `gap`, in `batch`.
+async fn about_gap(pond: &Pond, batch: &str, trip: &str, gap: &str, text: &str) -> Question {
+    let mut question = Question::new(
+        &pond.jerry,
+        batch,
+        QuestionPurpose::Anchor,
+        text,
+        &["Just me", "Two of us", "More"],
+        false,
+        Utc::now(),
+    )
+    .unwrap();
+    question.anchor_id = Some(trip.to_string());
+    question.gap = Some(gap.to_string());
+    question.header = "Who".into();
+    let kept = pond
+        .stores
+        .questions
+        .add_batch(std::slice::from_ref(&question))
+        .await
+        .unwrap();
+    assert_eq!(kept.len(), 1);
+    question
+}
+
+#[tokio::test]
+async fn a_batch_is_answered_at_once_and_its_plan_asks_the_next_round() {
+    let p = pond().await;
+    let trip = anchor(&p, "trip", "Diani in April").await;
+    let who = about_gap(&p, "b1", &trip, "who", "Who is going?").await;
+    let budget = about_gap(&p, "b1", &trip, "budget", "How much will you spend?").await;
+    let uri = "/me/questions/batches/b1/answer";
+
+    let (status, body) = call(&p, JERRY, Method::POST, uri, Some(json!({"answers": []}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let stranger = json!({"answers": [{"question_id": "nope", "choices": ["More"]}]});
+    let (status, _) = call(&p, JERRY, Method::POST, uri, Some(stranger)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &p,
+        JERRY,
+        Method::POST,
+        "/me/questions/batches/nope/answer",
+        Some(json!({"answers": [{"question_id": who.id, "choices": [0]}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let wrong = json!({"answers": [{"question_id": who.id, "choices": ["A crowd"]}]});
+    let (status, _) = call(&p, JERRY, Method::POST, uri, Some(wrong)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let both = json!({"answers": [
+        {"question_id": who.id, "choices": [1]},
+        {"question_id": budget.id, "choices": [], "text": "about 30k"},
+    ]});
+    assert_eq!(
+        post(&p, JERRY, uri, Some(both.clone())).await,
+        StatusCode::NO_CONTENT
+    );
+    let given = question(&p, &who.id).await.answer.unwrap();
+    assert_eq!(given.choices, ["Two of us"], "a place reads as its label");
+    assert_eq!(
+        question(&p, &budget.id)
+            .await
+            .answer
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("about 30k")
+    );
+    let (status, _) = call(&p, JERRY, Method::POST, uri, Some(both)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(get(&p, JERRY, "/me/questions").await["batches"], json!([]));
+
+    let open = p.stores.jobs.open().await.unwrap();
+    let next: Vec<&EngineJob> = open
+        .iter()
+        .filter(|j| j.kind == JobKind::Questions)
+        .collect();
+    assert_eq!(next.len(), 1, "the trip still has open gaps: {open:?}");
+    assert_eq!(next[0].anchor_id.as_deref(), Some(trip.as_str()));
+}
+
+#[tokio::test]
+async fn enough_passes_on_a_batch_and_ends_its_plans_chain() {
+    let p = pond().await;
+    let trip = anchor(&p, "trip", "Diani in April").await;
+    let who = about_gap(&p, "b1", &trip, "who", "Who is going?").await;
+    let (status, _) = call(
+        &p,
+        EMMANUEL,
+        Method::POST,
+        "/me/questions/batches/b1/enough",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "not his batch");
+    assert_eq!(
+        post(&p, JERRY, "/me/questions/batches/b1/enough", None).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(question(&p, &who.id).await.state, QuestionState::Skipped);
+    let plan = get(&p, JERRY, &format!("/me/anchors/{trip}")).await;
+    assert!(
+        plan["facts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["label"] == "Questions"),
+        "{plan}"
+    );
+    let open = p.stores.jobs.open().await.unwrap();
+    assert!(
+        !open.iter().any(|j| j.kind == JobKind::Questions),
+        "no next round after enough: {open:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_chats_batch_is_listed_for_that_chat_and_a_waiting_turn_takes_its_answers() {
+    use pond_core::user_data::domain::question::{QuestionDraft, QuestionOption};
+    let p = pond().await;
+    let draft = QuestionDraft {
+        header: "Dates".into(),
+        text: "When do you want to go?".into(),
+        options: vec![
+            QuestionOption::new("12-15 Dec", "A long weekend"),
+            QuestionOption::new("19-22 Dec", "Before Christmas"),
+        ],
+        recommended: Some(1),
+        ..QuestionDraft::default()
+    };
+    let desk = p.stores.desk.clone();
+    let jerry = p.jerry.clone();
+    let asking = tokio::spawn(async move {
+        desk.ask(&jerry, "chat-1", vec![draft], false, Utc::now())
+            .await
+            .unwrap()
+    });
+    let mut listed = Value::Null;
+    for _ in 0..100 {
+        listed = get(&p, JERRY, "/me/questions?session_id=chat-1").await;
+        if !listed["batches"].as_array().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let batch = &listed["batches"][0];
+    assert_eq!(batch["purpose"], "chat");
+    assert_eq!(batch["session_id"], "chat-1");
+    assert_eq!(batch["round"], 1);
+    assert_eq!(batch["state"], "open");
+    assert_eq!(batch["title"], "A chat with Goose");
+    let asked = &batch["questions"][0];
+    assert_eq!(asked["header"], "Dates");
+    assert_eq!(asked["recommended"], 1);
+    assert_eq!(
+        asked["options"][0],
+        json!({"label": "12-15 Dec", "description": "A long weekend"})
+    );
+    assert_eq!(
+        get(&p, JERRY, "/me/questions?session_id=chat-2").await["batches"],
+        json!([])
+    );
+    assert_eq!(
+        get(&p, EMMANUEL, "/me/questions?session_id=chat-1").await["batches"],
+        json!([])
+    );
+
+    let uri = format!(
+        "/me/questions/batches/{}/answer",
+        batch["id"].as_str().unwrap()
+    );
+    let answer = json!({"answers": [{"question_id": asked["id"], "choices": ["19-22 Dec"]}]});
+    assert_eq!(
+        post(&p, JERRY, &uri, Some(answer)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(asking.await.unwrap(), "Dates: 19-22 Dec");
 }

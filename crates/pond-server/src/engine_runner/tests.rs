@@ -22,8 +22,8 @@ use pond_core::shared::services::goose_thread::{thread_id, GooseThread};
 use pond_core::shared::services::long_task_roles::{COMPOSER_ROLE, WORKER_ROLE};
 use pond_core::shared::services::long_task_runner::{brief_artifact, next_run, NextRun};
 use pond_core::user_data::domain::anchor::{
-    Anchor, AnchorKind, AnchorOrigin, AnchorState, Deliverable, DeliverableDraft, DeliverableKind,
-    DeliverableState,
+    Anchor, AnchorFact, AnchorKind, AnchorOrigin, AnchorState, Deliverable, DeliverableDraft,
+    DeliverableKind, DeliverableState,
 };
 use pond_core::user_data::domain::dont_list::{DontRule, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::JobClass;
@@ -32,6 +32,7 @@ use pond_core::user_data::domain::fact_sheet::{
 };
 use pond_core::user_data::domain::memory::{MemoryFragment, MemorySegment};
 use pond_core::user_data::domain::profile::{CreateProfileRequest, ProfileScope};
+use pond_core::user_data::domain::question::QuestionPurpose;
 use pond_core::user_data::mocks::mock_anchors::InMemoryAnchorRepository;
 use pond_core::user_data::mocks::mock_capture_pictures::InMemoryCapturePictures;
 use pond_core::user_data::mocks::mock_captures::InMemoryCaptureRepository;
@@ -54,6 +55,7 @@ use pond_core::user_data::services::engine::{ROLE_CRITIC, ROLE_MAKE, ROLE_REVISE
 use pond_core::user_data::services::fact_sheet::{
     request_rebuild, CRITIC_SYSTEM as SHEET_CRITIC_SYSTEM, SYSTEM as SHEET_SYSTEM,
 };
+use pond_core::user_data::services::profile_gaps::PROFILE_QUESTION_SYSTEM;
 
 use super::*;
 
@@ -218,6 +220,7 @@ async fn pond() -> Pond {
         todos: todos.clone(),
         model: model.clone(),
         recall: None,
+        similar: None,
         web: Some(web.clone()),
         tools: Arc::new(|| vec![ToolHint::new("get_weather", "The forecast for a place")]),
         notifier: notifier.clone(),
@@ -500,10 +503,29 @@ async fn a_queued_fact_sheet_job_runs_its_maker_and_critic_and_replaces_the_shee
     );
     pond.model
         .say(r#"{"drop": [{"line": 2, "why": "about the pond, not about them"}]}"#);
+    pond.model.say(
+        r#"{"header": "Work", "text": "What fills most of your weekdays?", "options": [{"label": "Office work", "description": "Goose plans around office hours"}, {"label": "Studying", "description": "Goose keeps term dates in mind"}]}"#,
+    );
     pond.drive(&task_id, now).await;
 
     let asked = pond.model.asked();
-    assert_eq!(asked.len(), 2, "one call to make it and one to check it");
+    assert_eq!(
+        asked.len(),
+        3,
+        "one call to make it, one to check it, and one to word the gap question"
+    );
+    assert_eq!(asked[2].0, PROFILE_QUESTION_SYSTEM);
+    assert!(
+        asked[2]
+            .1
+            .starts_with("Detail to ask about: what fills their weekdays"),
+        "the rebuilt sheet holds a home line, so the gap is work: {}",
+        asked[2].1
+    );
+    let gap = pond.questions.open(&pond.member).await.unwrap();
+    assert_eq!(gap.len(), 1, "{gap:?}");
+    assert_eq!(gap[0].purpose, QuestionPurpose::Profile);
+    assert_eq!(gap[0].gap.as_deref(), Some("work"));
     assert_eq!(asked[0].0, SHEET_SYSTEM);
     assert!(
         asked[0].1.contains("1. (memory) Lives in Nairobi"),
@@ -555,7 +577,30 @@ async fn a_queued_fact_sheet_job_runs_its_maker_and_critic_and_replaces_the_shee
     );
     assert!(
         pond.notifier.sent().is_empty(),
-        "a rebuilt sheet tells nobody"
+        "a rebuilt sheet tells nobody, and its gap question is not pushed"
+    );
+
+    request_rebuild(pond.jobs.as_ref(), &pond.member, JobClass::Upkeep, now)
+        .await
+        .unwrap();
+    tick(&pond.deps, now).await;
+    let again = pond
+        .jobs
+        .recent(&pond.member, 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|j| j.kind == JobKind::FactSheet && j.id != job.id)
+        .unwrap();
+    pond.model.say(
+        r#"{"lines": [{"category": "home", "fact": "Lives in Nairobi with two children", "confidence": "sure", "since": "", "sources": [1], "tools": []}]}"#,
+    );
+    pond.model.say(r#"{"drop": []}"#);
+    pond.drive(again.task_id.as_deref().unwrap(), now).await;
+    assert_eq!(
+        pond.model.asked().len(),
+        5,
+        "one gap question a day: the second rebuild words none"
     );
 }
 
@@ -934,16 +979,34 @@ async fn the_questions_that_survive_their_check_are_stored_and_pushed_once() {
 
     pond.model.say(
         r#"{"questions": [
-            {"text": "Which track matters most to you?", "options": ["On-device models", "Agents", "Policy"], "multi": false},
-            {"text": "Where is the summit?", "options": ["KICC", "Elsewhere"], "multi": false}]}"#,
+            {"gap": "who", "header": "Who", "text": "Who is coming with you?", "options": [{"label": "Just me", "description": "One ticket"}, {"label": "A colleague", "description": "Two tickets"}], "recommended": "Just me"},
+            {"text": "Do you like advanced physics?", "header": "Physics", "options": ["Yes", "No"]},
+            {"gap": "place", "header": "Place", "text": "Where is the summit?", "options": ["KICC", "Elsewhere"]},
+            {"gap": "budget", "header": "Budget", "text": "How much will you spend?", "options": ["Under KSh 5,000", "More"]}]}"#,
     );
     pond.model.say(r#"{"drop": [2]}"#);
     pond.drive(&task_id, now).await;
 
-    assert_eq!(pond.model.asked()[0].0, QUESTIONS_SYSTEM);
+    let asked = pond.model.asked();
+    assert_eq!(asked[0].0, QUESTIONS_SYSTEM);
+    assert!(
+        asked[0]
+            .1
+            .contains("Details to ask about:\n- who: who is coming\n- budget"),
+        "code picked the gaps; the summit's date settles `when`: {}",
+        asked[0].1
+    );
     let open = pond.questions.open(&pond.member).await.unwrap();
-    assert_eq!(open.len(), 1, "{open:?}");
-    assert_eq!(open[0].text, "Which track matters most to you?");
+    let texts: Vec<&str> = open.iter().map(|q| q.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["Who is coming with you?", "How much will you spend?"],
+        "the question with no gap is ignored and the critic dropped the place"
+    );
+    assert_eq!(open[0].header, "Who");
+    assert_eq!(open[0].gap.as_deref(), Some("who"));
+    assert_eq!(open[0].recommended, Some(0));
+    assert_eq!(open[0].round, 1);
     assert_eq!(open[0].anchor_id.as_deref(), Some(summit.id.as_str()));
     assert_eq!(open[0].asked_at, Some(now));
 
@@ -951,15 +1014,52 @@ async fn the_questions_that_survive_their_check_are_stored_and_pushed_once() {
     assert_eq!(job.state, JobState::Passed);
     assert_eq!(
         job.outcome.as_deref(),
-        Some("Passed its first check. Asked one question.")
+        Some("Passed its first check. Asked 2 questions.")
     );
-    let sent = pond.notifier.sent();
-    assert_eq!(sent.len(), 1);
-    let notice = &sent[0].1;
-    assert_eq!(notice.category, "action_required");
-    assert_eq!(notice.title, "Questions about AI Summit Nairobi");
-    assert_eq!(notice.body, "Which track matters most to you?");
-    assert_eq!(notice.data.as_ref().unwrap()["open"], "questions");
+    assert!(pond.notifier.sent().is_empty(), "questions are not pushed");
+}
+
+#[tokio::test]
+async fn a_critic_that_cannot_be_read_keeps_the_batch_and_a_plan_with_no_gap_asks_nothing() {
+    let pond = pond().await;
+    let now = Utc::now();
+    let summit = pond.summit(now).await;
+    tick(&pond.deps, now).await;
+    let job = pond.job_of(JobKind::Questions).await;
+    pond.model.say(
+        r#"{"questions": [{"gap": "who", "header": "Who", "text": "Who is coming with you?", "options": ["Just me", "A colleague"]}]}"#,
+    );
+    pond.model.say("They all look fine to me.");
+    pond.drive(&job.task_id.clone().unwrap(), now).await;
+    let open = pond.questions.open(&pond.member).await.unwrap();
+    assert_eq!(open.len(), 1, "an unreadable check keeps the batch");
+    assert_eq!(pond.job(&job.id).await.state, JobState::Passed);
+
+    let mut settled = summit.clone();
+    settled.place = Some("KICC".into());
+    for (label, value) in [("Who", "Just me"), ("Budget", "KSh 5,000")] {
+        settled.set_fact(AnchorFact::new(label, value, "you"), now);
+    }
+    pond.anchors.save(&settled).await.unwrap();
+    let mut again = EngineJob::new(
+        JobKind::Questions,
+        JobClass::Asked,
+        Some(&pond.member),
+        &settled.title,
+        now,
+    );
+    again.anchor_id = Some(settled.id.clone());
+    pond.jobs.add(&again).await.unwrap();
+    let before = pond.model.asked().len();
+    tick(&pond.deps, now).await;
+    let again = pond.job(&again.id).await;
+    pond.drive(&again.task_id.clone().unwrap(), now).await;
+    assert_eq!(
+        pond.model.asked().len(),
+        before,
+        "no gap is open: no model call"
+    );
+    assert_eq!(pond.job(&again.id).await.state, JobState::Dropped);
 }
 
 #[tokio::test]

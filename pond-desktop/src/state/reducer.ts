@@ -33,6 +33,8 @@ export interface ContextCard {
   timestamp_ms: number;
   /** Explicit card type from MCP-APP UI hint — takes priority over tool name pattern matching */
   renderHint?: string;
+  /** The model's arguments to the call, which a card drawn before its result reads. */
+  input?: unknown;
 }
 
 const TRANSCRIPT_CAP = 50;

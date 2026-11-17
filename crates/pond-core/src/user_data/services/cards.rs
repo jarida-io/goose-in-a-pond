@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::shared::domain::todo::{Todo, Tz};
 use crate::user_data::domain::anchor::Anchor;
 use crate::user_data::domain::card::{
-    ActionKind, Card, CardAction, CardAnchor, CardKind, CardNotes, CardSource, CardSourceKind,
-    CardState, Why, WhySource, MAX_TITLE_CHARS,
+    ActionKind, Card, CardAction, CardAnchor, CardKind, CardNotes, CardQuestion, CardSource,
+    CardSourceKind, CardState, Why, WhySource, MAX_TITLE_CHARS,
 };
 use crate::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
 use crate::user_data::domain::fact_sheet::FactLine;
 use crate::user_data::domain::interest::{topic_key, Interest};
 use crate::user_data::domain::memory::MemoryFragment;
+use crate::user_data::domain::question::QuestionDraft;
 use crate::user_data::ports::engine_jobs::EngineJobRepository;
 use crate::user_data::services::engine::recipes::when_of;
 use crate::user_data::services::model_json::{list_in, object_in, text_of};
@@ -79,8 +80,10 @@ Reply with JSON and nothing else:
 \"where\": \"<where, or empty>\", \"cost\": \"<price, or empty>\", \"effort\": \"<time it \
 takes, or empty>\", \"action\": {\"kind\": \"<todo, reminder, chat, watch or go_deeper>\", \
 \"label\": \"<button words>\", \"text\": \"<to-do or reminder words>\", \"prompt\": \
-\"<message to Goose>\", \"due\": \"<YYYY-MM-DD HH:MM, or empty>\"}, \"sources\": [<source \
-numbers>], \"found\": \"<what the sources say>\", \"next\": \"<what Goose would do next>\", \
+\"<message to Goose>\", \"due\": \"<YYYY-MM-DD HH:MM, or empty>\", \"question\": \
+{\"header\": \"<1 to 2 words>\", \"text\": \"<question to the member>\", \"options\": \
+[{\"label\": \"<what they would ask Goose>\", \"description\": \"<what Goose then does>\"}]}}, \
+\"sources\": [<source numbers>], \"found\": \"<what the sources say>\", \"next\": \"<what Goose would do next>\", \
 \"caveats\": \"<what is unsure>\"}]}
 
 - At most 12 cards, each different. A few good cards beat many weak ones.
@@ -95,7 +98,9 @@ of the member's plans, go_deeper has Goose research it.
 - A do card names one specific event, place or activity, with its when and where.
 - A reminder or todo card adds something new that follows from a plan, a memory or the web; \
 never one the member's to-dos already hold, and never one due before today.
-- An ask card's action is chat, with a question ending in \"?\" as its prompt.
+- An ask card's action is chat, with a question to the member and 2 to 4 options. The \
+option they pick is sent to Goose as their message, so word each option as something they \
+would ask Goose; never \"Other\". Other cards have no question.
 - A next_step card moves one of the member's plans on.
 - Leave out what the member does not want and what they were shown lately.
 - No explanation, no preamble.";
@@ -409,6 +414,7 @@ fn action_of(
         text: None,
         due: None,
         url: web_url.cloned(),
+        question: None,
     };
     match kind {
         ActionKind::Todo | ActionKind::Reminder => {
@@ -417,6 +423,11 @@ fn action_of(
         }
         ActionKind::Chat => {
             action.prompt = Some(field("prompt").unwrap_or_else(|| title.to_string()));
+            action.question = fields
+                .and_then(|f| f.get("question"))
+                .and_then(QuestionDraft::read)
+                .and_then(|draft| draft.checked().ok())
+                .map(CardQuestion::from);
         }
         // Nothing to watch but a page the sources gave, for a plan the member is following.
         ActionKind::Watch if web_url.is_none() || !for_plan => return Ok(None),
@@ -463,7 +474,7 @@ pub fn validate(
     let for_plan = picked
         .iter()
         .any(|at| shown[*at].kind == CardSourceKind::Plan);
-    let action = action_of(item, &title, web_url, for_plan)?;
+    let mut action = action_of(item, &title, web_url, for_plan)?;
     if let Some(action) = &action {
         let adds = matches!(action.kind, ActionKind::Todo | ActionKind::Reminder);
         let only_todos = picked
@@ -481,12 +492,14 @@ pub fn validate(
         }
     }
     if kind == CardKind::Ask {
-        let asks = action.as_ref().is_some_and(|a| {
-            a.kind == ActionKind::Chat && a.prompt.as_deref().is_some_and(|p| p.contains('?'))
-        });
+        let asks = action
+            .as_ref()
+            .is_some_and(|a| a.kind == ActionKind::Chat && a.question.is_some());
         if !asks {
             return Err(CardRefused::NoQuestion);
         }
+    } else if let Some(action) = action.as_mut() {
+        action.question = None;
     }
     let field = |key: &str| text_of(item, key).map(|text| clipped(&text, 60));
     let (when, where_, cost, effort) = (
@@ -962,10 +975,37 @@ mod tests {
     fn an_ask_card_needs_a_question_and_a_watch_needs_a_plan() {
         let mut ask = good();
         ask["kind"] = json!("ask");
-        ask["action"] = json!({"kind": "chat", "prompt": "Find things to do"});
-        assert_eq!(check(ask.clone()).unwrap_err(), CardRefused::NoQuestion);
         ask["action"] = json!({"kind": "chat", "prompt": "What's on at Karura this weekend?"});
-        assert!(check(ask).is_ok());
+        assert_eq!(
+            check(ask.clone()).unwrap_err(),
+            CardRefused::NoQuestion,
+            "a prompt alone is no structured question"
+        );
+        ask["action"]["question"] = json!({"header": "Saturday", "text": "What should Goose look into?",
+            "options": ["What's on at Karura", "Other"]});
+        assert_eq!(
+            check(ask.clone()).unwrap_err(),
+            CardRefused::NoQuestion,
+            "an option meaning Other refuses it"
+        );
+        ask["action"]["question"] = json!({"header": "Saturday", "text": "What should Goose look into?",
+            "options": [{"label": "What's on at Karura", "description": "Events this weekend"},
+                        {"label": "Kids' things nearby", "description": "Within 20 minutes"}],
+            "recommended": "What's on at Karura"});
+        let card = check(ask).unwrap();
+        let question = card.action.unwrap().question.unwrap();
+        assert_eq!(question.header, "Saturday");
+        assert_eq!(question.recommended, Some(0));
+        assert_eq!(question.options[1].description, "Within 20 minutes");
+
+        let mut chat = good();
+        chat["action"] = json!({"kind": "chat", "prompt": "Plan it?",
+            "question": {"header": "Q", "text": "Which?", "options": ["A", "B"]}});
+        assert_eq!(
+            check(chat).unwrap().action.unwrap().question,
+            None,
+            "only an ask card carries a question"
+        );
 
         let mut watch = good();
         watch["action"] = json!({"kind": "watch"});
@@ -1003,7 +1043,9 @@ mod tests {
         value["kind"] = json!(kind.as_str());
         value["title"] = json!(title);
         if kind == CardKind::Ask {
-            value["action"] = json!({"kind": "chat", "prompt": format!("{title}?")});
+            value["action"] = json!({"kind": "chat", "prompt": format!("{title}?"),
+                "question": {"header": "Ask", "text": format!("{title}?"),
+                             "options": ["Yes, look into it", "Something nearby"]}});
         }
         if !action {
             value.as_object_mut().unwrap().remove("action");

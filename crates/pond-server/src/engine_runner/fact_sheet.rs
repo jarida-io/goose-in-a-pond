@@ -374,5 +374,13 @@ pub(super) async fn after_steps(
             .await?
         }
     };
-    close(deps, task, &mut job, state, &said, now).await
+    let rebuilt = state == JobState::Passed;
+    close(deps, task, &mut job, state, &said, now).await?;
+    // After the rebuild, so a gap the new sheet filled is not asked about.
+    if rebuilt {
+        if let Err(e) = super::profile_gaps::ask_profile_gap(deps, &member, now).await {
+            tracing::warn!(member = %member, error = %e, "the fact-sheet gap question was not asked");
+        }
+    }
+    Ok(())
 }

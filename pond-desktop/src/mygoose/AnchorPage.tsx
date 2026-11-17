@@ -166,6 +166,7 @@ function AnchorBody({ anchor, variant, titleRef, say, onChanged, onGone, onOpenD
           batch={{ id: `anchor-${anchor.id}`, purpose: "anchor", anchor_id: anchor.id, title: `Questions about ${anchor.title}`, questions }}
           variant={variant}
           canSkip={anchor.mine}
+          canEnd={false}
           say={say}
           onDone={() => onChanged()}
         />

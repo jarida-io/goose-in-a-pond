@@ -4085,8 +4085,15 @@ async fn run_server(
     // ── Long tasks ───────────────────────────────────────────────────────
     // Claimed whether or not an orchestrator was installed: an idea-engine job's inline steps
     // need none, and the claim is what makes the lane report a loop.
-    let engine_stores =
-        pond_api::EngineStores::sqlite(db.system.clone()).keeping_pictures_under(&data_dir);
+    let engine_stores = pond_api::EngineStores::sqlite(db.system.clone())
+        .keeping_pictures_under(&data_dir)
+        .comparing_questions_with(
+            embedding_provider
+                .clone()
+                .map(|e| e as Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>),
+        );
+    // The `ask` tool waits on the same desk the answer route resolves.
+    pond_mcp_server::init_questions_deps(engine_stores.desk.clone());
     {
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
@@ -4163,6 +4170,9 @@ async fn run_server(
                     ),
                 ) as Arc<dyn pond_server::engine_runner::Recall>
             }),
+            similar: embedding_provider
+                .clone()
+                .map(|e| e as Arc<dyn pond_core::models::ports::embedding::EmbeddingProvider>),
             web: Some(Arc::new(pond_server::engine_runner::PondWebSearch)),
             tools: Arc::new(registered_tool_hints),
             notifier: targeted_notification_sender.clone(),
@@ -5749,6 +5759,7 @@ async fn run_chat(
         ),
     ));
     init_interview_tools(&db.system);
+    init_question_tools(&db.system);
 
     let settings_repo_chat = SqliteSettingsRepository::new(db.system.clone());
     let settings = settings_repo_chat.get().await.unwrap_or_default();
@@ -11280,6 +11291,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
         ),
     ));
     init_interview_tools(&db.system);
+    init_question_tools(&db.system);
     // Used only when chat_provider = "llamafile"; other providers route themselves.
     let llamafile_url = format!("http://127.0.0.1:{}", ports::llamafile_port());
 
@@ -12075,6 +12087,16 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────────────
+
+/// The `ask` tool's desk for a binary path with no API to answer it: a spoken turn is refused
+/// anyway, but an uninstalled desk would leave the registered server without its deps.
+fn init_question_tools(pool: &sqlx::Pool<sqlx::Sqlite>) {
+    pond_mcp_server::init_questions_deps(Arc::new(
+        pond_core::user_data::services::question_desk::QuestionDesk::new(Arc::new(
+            pond_infra::sqlite_questions::SqliteQuestionRepository::new(pool.clone()),
+        )),
+    ));
+}
 
 /// The setup interview's tools act through this; every binary path that registers them needs it.
 fn init_interview_tools(pool: &sqlx::Pool<sqlx::Sqlite>) {

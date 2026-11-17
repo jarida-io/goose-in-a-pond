@@ -14,8 +14,17 @@ pub trait QuestionRepository: Send + Sync {
 
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Question>>;
 
-    /// The member's open questions, oldest first.
+    /// The member's open and waiting questions, oldest first.
     async fn open(&self, profile_id: &str) -> Result<Vec<Question>>;
+
+    /// Every question of one batch, in any state, in the order it was asked.
+    async fn in_batch(&self, profile_id: &str, batch_id: &str) -> Result<Vec<Question>>;
+
+    /// Every question one chat asked, in any state, oldest first.
+    async fn for_session(&self, profile_id: &str, session_id: &str) -> Result<Vec<Question>>;
+
+    /// The member's questions in any state, newest first: what a new question may repeat.
+    async fn recent(&self, profile_id: &str, limit: usize) -> Result<Vec<Question>>;
 
     /// Every question the member was asked for an anchor, in any state, oldest first.
     async fn for_anchor(&self, profile_id: &str, anchor_id: &str) -> Result<Vec<Question>>;
@@ -37,6 +46,12 @@ pub trait QuestionRepository: Send + Sync {
         purpose: QuestionPurpose,
     ) -> Result<Option<DateTime<Utc>>>;
 
+    /// Marks the open questions of a chat batch as waiting; returns how many.
+    async fn set_waiting(&self, profile_id: &str, batch_id: &str) -> Result<u64>;
+
     /// Expires every member's open questions whose deadline has passed; returns how many.
     async fn expire_due(&self, now: DateTime<Utc>) -> Result<u64>;
+
+    /// Expires the open and waiting questions of a chat that was deleted; returns how many.
+    async fn expire_session(&self, session_id: &str, now: DateTime<Utc>) -> Result<u64>;
 }

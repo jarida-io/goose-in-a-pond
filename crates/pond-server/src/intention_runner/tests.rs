@@ -266,6 +266,7 @@ async fn pond() -> Pond {
         todos: todos.clone(),
         model: model.clone(),
         recall: None,
+        similar: None,
         web: None,
         tools: Arc::new(Vec::<ToolHint>::new),
         notifier: notifier.clone(),

@@ -470,7 +470,7 @@ fn questions_brief(anchor: &Anchor, open: &[&Question]) -> String {
             "\n{}. {} Options: {}{}.",
             n + 1,
             question.text,
-            question.options.join("; "),
+            question.labels().join("; "),
             if question.multi {
                 " (more than one may be chosen)"
             } else {

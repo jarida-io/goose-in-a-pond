@@ -39,6 +39,13 @@ pub const TASK_WORK_EXTENSION: &str = "giap-task-work";
 /// Extension carrying the setup interview's tools; only an interview turn is offered it.
 pub const INTERVIEW_EXTENSION: &str = "giap-interview";
 
+/// Extension carrying `ask`, the structured questions the chat model puts to the member.
+pub const QUESTIONS_EXTENSION: &str = "giap-questions";
+
+/// Seconds a call to `giap-questions` may run: the `ask` tool waits ten minutes for the member,
+/// so the extension needs longer than every other builtin's ten-minute limit.
+pub const QUESTIONS_TOOL_TIMEOUT_SECS: u64 = 660;
+
 /// Separator in a prefixed tool name (`giap-weather__get_forecast`); Goose's convention.
 pub const TOOL_NAME_SEPARATOR: &str = "__";
 
@@ -167,6 +174,13 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
         extension: INTERVIEW_EXTENSION,
         description: "Running a member's setup interview: note each answer or skipped question, \
                       draft their standing notes, and save the notes once they approve them.",
+        core: false,
+    },
+    ToolGroup {
+        extension: QUESTIONS_EXTENSION,
+        description: "Asking the person a few quick questions with options to tap when a detail \
+                      is missing and the answer would change what you do: dates, who is coming, \
+                      a budget, a choice between real options.",
         core: false,
     },
     ToolGroup {
@@ -317,6 +331,8 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
         TASK_WORK_EXTENSION,
         // Writes one member's own notes; a guest has none.
         INTERVIEW_EXTENSION,
+        // Stores questions for one member; a guest has no store to answer them from.
+        QUESTIONS_EXTENSION,
     ]
 }
 
@@ -351,6 +367,8 @@ pub fn groups_denied_to_subagents() -> &'static [&'static str] {
         TASKS_EXTENSION,
         // Saves a member's notes, which only the member approves in their own conversation.
         INTERVIEW_EXTENSION,
+        // A helper has no screen to draw the card on and no member to answer it.
+        QUESTIONS_EXTENSION,
     ]
 }
 

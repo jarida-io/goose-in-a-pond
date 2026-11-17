@@ -1,9 +1,10 @@
-use pond_core::mcp::ports::notification::Notification;
 use pond_core::user_data::domain::dont_list::Reason;
 use pond_core::user_data::domain::interest::{
     InterestInput, InterestPatch, ObservedInterest, Origin, Signal,
 };
-use pond_core::user_data::domain::question::{QuestionPurpose, INTEREST_DROP, INTEREST_FOLLOW};
+use pond_core::user_data::domain::question::{
+    QuestionPurpose, INTEREST_DROP, INTEREST_FOLLOW, INTEREST_HEADER,
+};
 use pond_core::user_data::ports::interests::InterestRepository;
 use pond_core::user_data::services::dont_list::RULE_SYSTEM;
 
@@ -269,31 +270,20 @@ async fn an_interest_ready_to_offer_is_asked_about_once() {
     let asked = &open[0];
     assert_eq!(asked.purpose, QuestionPurpose::Interest);
     assert_eq!(asked.subject_ref.as_deref(), Some(guess.id.as_str()));
-    assert_eq!(asked.options, [INTEREST_FOLLOW, INTEREST_DROP]);
+    assert_eq!(asked.labels(), [INTEREST_FOLLOW, INTEREST_DROP]);
+    assert_eq!(asked.header, INTEREST_HEADER);
+    assert!(asked.options.iter().all(|o| !o.description.is_empty()));
     assert_eq!(
         asked.text,
         "You keep coming back to Safari Rally. Should I follow it for you?"
     );
     assert_eq!(asked.asked_at, Some(now));
 
-    let told = |pond: &Pond| -> Vec<Notification> {
-        pond.notifier
-            .sent()
-            .into_iter()
-            .map(|(_, notice)| notice)
-            .filter(|notice| notice.title == "Things you keep coming back to")
-            .collect()
-    };
-    let notices = told(&pond);
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].category, "action_required");
-    assert_eq!(notices[0].body, asked.text);
-    assert_eq!(notices[0].data.as_ref().unwrap()["open"], "questions");
+    assert!(pond.notifier.sent().is_empty(), "questions are not pushed");
 
     for later in [Duration::minutes(1), Duration::days(2)] {
         let report = tick(&pond.deps, now + later).await;
         assert_eq!(report.interests_asked, 0);
     }
     assert_eq!(pond.questions.open(&pond.member).await.unwrap().len(), 1);
-    assert_eq!(told(&pond).len(), 1, "told once");
 }

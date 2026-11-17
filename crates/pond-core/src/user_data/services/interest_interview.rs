@@ -8,6 +8,7 @@ use crate::user_data::domain::interest::{Depth, Interest, MemberPortrait, NewsMo
 use crate::user_data::domain::interest_interview::{
     InterestInterview, InterviewNote, InterviewStatus, Question, MAX_QUESTIONS,
 };
+use crate::user_data::domain::question::{means_other, text_key};
 use crate::user_data::services::model_json::{object_in, text_of, texts_of};
 
 /// Questions the model may end the round on, once it has enough.
@@ -196,9 +197,13 @@ pub fn parse_reply(raw: &str) -> Option<InterviewReply> {
     let question = text_of(&map, "text")
         .filter(|text| text.chars().count() <= MAX_QUESTION_CHARS)
         .map(|text| {
+            // Held to the structured questions' rules for options: no "Other", which the screen
+            // already offers as free text, and no two with the same key.
+            let mut seen = std::collections::HashSet::new();
             let choices: Vec<String> = texts_of(&map, "choices")
                 .into_iter()
                 .filter(|c| c.chars().count() <= MAX_CHOICE_CHARS)
+                .filter(|c| !means_other(c) && seen.insert(text_key(c)))
                 .take(MAX_CHOICES)
                 .collect();
             let allow_free = map
@@ -447,6 +452,15 @@ mod tests {
         let q = reply.question.unwrap();
         assert_eq!(q.choices.len(), 3);
         assert!(q.multi);
+    }
+
+    #[test]
+    fn a_choice_meaning_other_or_repeating_another_is_dropped() {
+        let reply = parse_reply(
+            r#"{"notes": [], "text": "Which team do you follow?", "choices": ["Arsenal", "arsenal!", "Other", "Gor Mahia"]}"#,
+        )
+        .unwrap();
+        assert_eq!(reply.question.unwrap().choices, ["Arsenal", "Gor Mahia"]);
     }
 
     #[test]

@@ -26,7 +26,18 @@ const RUNNING = anchor({
   deliverables: [
     { id: "d-1", kind: "dossier", slot: "dossier", title: "Dossier for AI Summit Nairobi", state: "ready", hook: "Who to meet", version: 2, changed: "", unseen: true },
   ],
-  questions: [{ id: "q-1", text: "Will you drive or take a matatu?", options: ["Drive", "Matatu"], multi: false }],
+  questions: [
+    {
+      id: "q-1",
+      header: "Travel",
+      text: "Will you drive or take a matatu?",
+      options: [
+        { label: "Drive", description: "" },
+        { label: "Matatu", description: "" },
+      ],
+      multi: false,
+    },
+  ],
   open_questions: 1,
   job: {
     kind: "deliverable",

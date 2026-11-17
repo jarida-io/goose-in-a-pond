@@ -374,7 +374,11 @@ async fn the_interview_runs_in_its_own_session_with_only_its_tools() {
     let request = p.agent.last_request().unwrap();
     assert_eq!(
         request.tool_group_allowlist,
-        Some(vec!["giap-interview".to_string()])
+        Some(vec![
+            "giap-interview".to_string(),
+            "giap-questions".to_string()
+        ]),
+        "its own tools, and ask to put each topic as a card"
     );
     let context = request.interview.expect("an interview turn");
     assert!(

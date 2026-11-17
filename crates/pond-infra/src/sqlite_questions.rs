@@ -24,9 +24,9 @@ impl SqliteQuestionRepository {
     }
 }
 
-const COLUMNS: &str = "id, profile_id, batch_id, purpose, anchor_id, subject_ref, text, \
-     options_json, multi, parent_id, state, choices_json, other_text, asked_at, answered_at, \
-     expires_at, created_at";
+const COLUMNS: &str = "id, profile_id, batch_id, purpose, anchor_id, subject_ref, header, text, \
+     options_json, recommended, multi, gap, session_id, round, parent_id, state, choices_json, \
+     other_text, asked_at, answered_at, expires_at, created_at";
 
 fn question_of(row: &SqliteRow) -> Result<Question> {
     let state = word_in(row, "state", QuestionState::parse)?;
@@ -45,9 +45,16 @@ fn question_of(row: &SqliteRow) -> Result<Question> {
         purpose: word_in(row, "purpose", QuestionPurpose::parse)?,
         anchor_id: row.try_get("anchor_id")?,
         subject_ref: row.try_get("subject_ref")?,
+        header: row.try_get("header")?,
         text: row.try_get("text")?,
         options: json_in(row, "options_json")?,
+        recommended: row
+            .try_get::<Option<i64>, _>("recommended")?
+            .and_then(|at| usize::try_from(at).ok()),
         multi: flag_in(row, "multi")?,
+        gap: row.try_get("gap")?,
+        session_id: row.try_get("session_id")?,
+        round: u32::try_from(row.try_get::<i64, _>("round")?).unwrap_or(1),
         parent_id: row.try_get("parent_id")?,
         state,
         answer,
@@ -75,9 +82,10 @@ impl QuestionRepository for SqliteQuestionRepository {
         for question in questions {
             let done = sqlx::query(
                 "INSERT INTO questions (id, profile_id, batch_id, purpose, anchor_id, \
-                 subject_ref, text, text_key, options_json, multi, parent_id, state, \
-                 choices_json, other_text, asked_at, answered_at, expires_at, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 subject_ref, header, text, text_key, options_json, recommended, multi, gap, \
+                 session_id, round, parent_id, state, choices_json, other_text, asked_at, \
+                 answered_at, expires_at, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT DO NOTHING",
             )
             .bind(&question.id)
@@ -86,10 +94,15 @@ impl QuestionRepository for SqliteQuestionRepository {
             .bind(question.purpose.as_str())
             .bind(&question.anchor_id)
             .bind(&question.subject_ref)
+            .bind(&question.header)
             .bind(&question.text)
             .bind(question.key())
             .bind(json_of(&question.options)?)
+            .bind(question.recommended.map(|at| at as i64))
             .bind(question.multi as i64)
+            .bind(&question.gap)
+            .bind(&question.session_id)
+            .bind(i64::from(question.round))
             .bind(&question.parent_id)
             .bind(question.state.as_str())
             .bind(choices_json(question)?)
@@ -123,13 +136,52 @@ impl QuestionRepository for SqliteQuestionRepository {
 
     async fn open(&self, profile_id: &str) -> Result<Vec<Question>> {
         let rows = sqlx::query(&format!(
-            "SELECT {COLUMNS} FROM questions WHERE profile_id = ? AND state = 'open' \
-             ORDER BY created_at, rowid"
+            "SELECT {COLUMNS} FROM questions WHERE profile_id = ? \
+             AND state IN ('open', 'waiting') ORDER BY created_at, rowid"
         ))
         .bind(profile_id)
         .fetch_all(&self.pool)
         .await
         .context("list a member's open questions")?;
+        rows.iter().map(question_of).collect()
+    }
+
+    async fn in_batch(&self, profile_id: &str, batch_id: &str) -> Result<Vec<Question>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM questions WHERE profile_id = ? AND batch_id = ? \
+             ORDER BY created_at, rowid"
+        ))
+        .bind(profile_id)
+        .bind(batch_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("read a batch of questions")?;
+        rows.iter().map(question_of).collect()
+    }
+
+    async fn for_session(&self, profile_id: &str, session_id: &str) -> Result<Vec<Question>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM questions WHERE profile_id = ? AND session_id = ? \
+             ORDER BY created_at, rowid"
+        ))
+        .bind(profile_id)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("list the questions a chat asked")?;
+        rows.iter().map(question_of).collect()
+    }
+
+    async fn recent(&self, profile_id: &str, limit: usize) -> Result<Vec<Question>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM questions WHERE profile_id = ? \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        ))
+        .bind(profile_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .context("list a member's recent questions")?;
         rows.iter().map(question_of).collect()
     }
 
@@ -208,10 +260,36 @@ impl QuestionRepository for SqliteQuestionRepository {
         latest.as_deref().map(parse_time).transpose()
     }
 
+    async fn set_waiting(&self, profile_id: &str, batch_id: &str) -> Result<u64> {
+        let done = sqlx::query(
+            "UPDATE questions SET state = 'waiting' \
+             WHERE profile_id = ? AND batch_id = ? AND state = 'open'",
+        )
+        .bind(profile_id)
+        .bind(batch_id)
+        .execute(&self.pool)
+        .await
+        .context("mark a batch of questions as waiting")?;
+        Ok(done.rows_affected())
+    }
+
+    async fn expire_session(&self, session_id: &str, now: DateTime<Utc>) -> Result<u64> {
+        let done = sqlx::query(
+            "UPDATE questions SET state = 'expired', answered_at = ? \
+             WHERE session_id = ? AND state IN ('open', 'waiting')",
+        )
+        .bind(stamp(now))
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .context("expire the questions of a deleted chat")?;
+        Ok(done.rows_affected())
+    }
+
     async fn expire_due(&self, now: DateTime<Utc>) -> Result<u64> {
         let done = sqlx::query(
             "UPDATE questions SET state = 'expired', answered_at = ? \
-             WHERE state = 'open' AND expires_at IS NOT NULL AND expires_at <= ?",
+             WHERE state IN ('open', 'waiting') AND expires_at IS NOT NULL AND expires_at <= ?",
         )
         .bind(stamp(now))
         .bind(stamp(now))
@@ -362,6 +440,61 @@ mod tests {
         assert!(repo.answered("liz", 5).await.unwrap().is_empty());
     }
 
+    async fn a_chat_batch_waits_and_goes_with_its_chat(repo: &dyn QuestionRepository) {
+        use pond_core::user_data::domain::question::{Preview, QuestionDraft, QuestionOption};
+        let mut train = QuestionOption::new("Train", "Four hours, scenic");
+        train.preview = Some(Preview::Place {
+            name: "Madaraka Express".into(),
+            price: Some("KSh 3,000".into()),
+            url: Some("https://metickets.krc.co.ke".into()),
+            image_url: None,
+        });
+        let draft = QuestionDraft {
+            header: "Travel".into(),
+            text: "How do you want to get to Diani?".into(),
+            options: vec![train, QuestionOption::new("Fly", "An hour from Wilson")],
+            recommended: Some(1),
+            multi: false,
+            gap: None,
+        };
+        let mut asked =
+            Question::from_draft("jerry", "c1", QuestionPurpose::Chat, &draft, noon()).unwrap();
+        asked.session_id = Some("s1".into());
+        asked.round = 2;
+        let other = question("jerry", "c2", "Do you drive?", 1);
+        repo.add_batch(&[asked.clone(), other.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get("jerry", &asked.id).await.unwrap(),
+            Some(asked.clone())
+        );
+        assert_eq!(
+            repo.in_batch("jerry", "c1").await.unwrap(),
+            vec![asked.clone()]
+        );
+        assert_eq!(
+            repo.for_session("jerry", "s1").await.unwrap(),
+            vec![asked.clone()]
+        );
+        assert!(repo.for_session("liz", "s1").await.unwrap().is_empty());
+        assert_eq!(repo.set_waiting("liz", "c1").await.unwrap(), 0);
+        assert_eq!(repo.set_waiting("jerry", "c1").await.unwrap(), 1);
+        let waiting = repo.get("jerry", &asked.id).await.unwrap().unwrap();
+        assert_eq!(waiting.state, QuestionState::Waiting);
+        assert_eq!(
+            repo.open("jerry").await.unwrap().len(),
+            2,
+            "waiting is still open"
+        );
+        assert_eq!(
+            texts(&repo.recent("jerry", 1).await.unwrap()),
+            ["How do you want to get to Diani?"]
+        );
+        assert_eq!(repo.expire_session("s1", noon()).await.unwrap(), 1);
+        assert_eq!(texts(&repo.open("jerry").await.unwrap()), ["Do you drive?"]);
+    }
+
     async fn sqlite() -> SqliteQuestionRepository {
         SqliteQuestionRepository::new(pool().await)
     }
@@ -376,6 +509,32 @@ mod tests {
     async fn an_answer_a_skip_and_an_expiry_are_kept_on_the_question() {
         an_answer_a_skip_and_an_expiry_are_kept(&sqlite().await).await;
         an_answer_a_skip_and_an_expiry_are_kept(&InMemoryQuestionRepository::new()).await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_batch_waits_and_expires_with_its_chat() {
+        a_chat_batch_waits_and_goes_with_its_chat(&sqlite().await).await;
+        a_chat_batch_waits_and_goes_with_its_chat(&InMemoryQuestionRepository::new()).await;
+    }
+
+    #[tokio::test]
+    async fn options_stored_as_plain_strings_read_as_labels() {
+        let pool = pool().await;
+        sqlx::query(
+            "INSERT INTO questions (id, profile_id, batch_id, purpose, text, text_key, \
+             options_json, created_at) VALUES ('q1', 'jerry', 'b1', 'profile', \
+             'Do you drive?', 'do you drive', '[\"Yes\",\"No\"]', '2026-11-16T12:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let read = SqliteQuestionRepository::new(pool)
+            .get("jerry", "q1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.labels(), ["Yes", "No"]);
+        assert_eq!((read.header.as_str(), read.round), ("", 1));
     }
 
     #[tokio::test]

@@ -115,8 +115,9 @@ running server writes `.runtime_api_port` and `.runtime_https_port` there.
 
 `crates/pond-adapters-goose/src/giap_registration.rs` registers them once at startup. The toolkit
 and vision servers are always on. Memory, schedule, weather, knowledge (web search lives here),
-system, device and sensors are on by default; travel, context and orchestrator are off. Each
-`ext_*_enabled` setting gates its server, and `GIAP_NO_TOOLS` registers none.
+system, device, sensors and questions (`giap-questions__ask`, never offered in a spoken turn) are
+on by default; travel, context and orchestrator are off. Each `ext_*_enabled` setting gates its
+server, and `GIAP_NO_TOOLS` registers none.
 
 ### Phones, pairing and the network
 

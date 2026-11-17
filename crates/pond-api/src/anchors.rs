@@ -21,7 +21,7 @@ use pond_core::user_data::domain::anchor::{
 };
 use pond_core::user_data::domain::dont_list::{DontRule, Reason, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::EngineJob;
-use pond_core::user_data::domain::question::{QuestionState, QuestionView};
+use pond_core::user_data::domain::question::QuestionView;
 use pond_core::user_data::services::anchor_add::{add_asked, AnchorAdded};
 
 use crate::engine_log::{call_off, job_steps, job_summary, shown_job};
@@ -195,13 +195,8 @@ async fn view(
         .await
         .map_err(server_error)?
         .into_iter()
-        .filter(|question| question.state == QuestionState::Open)
-        .map(|question| QuestionView {
-            id: question.id,
-            text: question.text,
-            options: question.options,
-            multi: question.multi,
-        })
+        .filter(|question| question.state.is_open())
+        .map(|question| QuestionView::from(&question))
         .collect();
     let job = shown_job(open_jobs, &anchor.id);
     let mut job_view = job.map(job_summary);

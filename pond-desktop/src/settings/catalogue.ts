@@ -418,6 +418,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "ext_memory_enabled", label: "Memories", description: "Let it remember, recall and forget things on request.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_schedule_enabled", label: "Schedules", description: "Let it create, pause and run things on a schedule.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_weather_enabled", label: "Weather", description: "Let it look up the weather.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "ext_questions_enabled", label: "Questions", description: "Let it ask you a few questions with options to tap when it needs a detail.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_knowledge_enabled", label: "Knowledge", description: "Let it look things up in an encyclopedia.", control: { kind: "toggle" }, consumer: "live" },
           { key: "browser_rendering_enabled", label: "Read pages that need a browser", description: "Some pages show nothing until their scripts have run. The pond reads those with a headless browser, when it finds one and has the memory free.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_system_enabled", label: "System", description: "Let it read files and check on the device it runs on.", control: { kind: "toggle" }, consumer: "live" },

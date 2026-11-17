@@ -18,6 +18,8 @@ import {
 } from "../state/chatRunStore";
 import type { Message } from "../state/chatRunStore";
 import { ToolCallChip } from "../components/ToolCallChip";
+import { AskQuestionsCard } from "../components/AskQuestionsCard";
+import { ASK_TOOL } from "../mygoose/questionShape";
 import { KeptResultNote } from "../components/KeptResultNote";
 import { NoteFromLine, ReceiptChips, SuggestionOffer } from "../components/MessageNoteView";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
@@ -755,12 +757,19 @@ export function Chat() {
             <div key={msg.id} className={`ch-row ${msg.role === "user" ? "ch-row--user" : "ch-row--goose"}`}>
               <div className="ch-bubble-wrap">
                 <NoteFromLine note={msg.note} />
+                {/* Structured questions: drawn while the turn waits for the answers. */}
+                {msg.role === "agent" &&
+                  msg.cards
+                    ?.filter((card) => card.tool === ASK_TOOL)
+                    .map((card) => <AskQuestionsCard key={card.id} card={card} sessionId={run.sessionId ?? null} />)}
                 {/* Tool call chips */}
-                {msg.role === "agent" && msg.cards && msg.cards.length > 0 && !msg.streaming && (
+                {msg.role === "agent" && msg.cards && msg.cards.some((card) => card.tool !== ASK_TOOL) && !msg.streaming && (
                   <div className="tool-call-chips" role="list" aria-label="Tools used">
-                    {msg.cards.map((card) => (
-                      <ToolCallChip key={card.id} card={card} onAction={sendMessage} />
-                    ))}
+                    {msg.cards
+                      .filter((card) => card.tool !== ASK_TOOL)
+                      .map((card) => (
+                        <ToolCallChip key={card.id} card={card} onAction={sendMessage} />
+                      ))}
                   </div>
                 )}
                 {/* History tool indicators */}

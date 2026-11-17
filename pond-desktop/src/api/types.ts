@@ -213,6 +213,8 @@ export interface Settings {
   ext_memory_enabled?: boolean;
   ext_schedule_enabled?: boolean;
   ext_weather_enabled?: boolean;
+  /** Let the chat model ask structured questions mid-turn. */
+  ext_questions_enabled?: boolean;
   ext_knowledge_enabled?: boolean;
   ext_system_enabled?: boolean;
   ext_device_enabled?: boolean;
@@ -1420,7 +1422,7 @@ export interface ActiveRun {
   epoch: string;
 }
 
-export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled";
+export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled" | "question_answered";
 
 /** One delegation's progress; spellings are pond-core's `SubagentStatus::as_str`. */
 export type SubagentStatus =
@@ -1507,6 +1509,10 @@ export interface ChatEvent {
   tool?: string;            // for "tool_call" and "tool_result" events
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
+  /** On "question_answered": the batch of questions the typed message answered. */
+  batch_id?: string;
+  /** On the "done" that follows "question_answered": no turn ran; a waiting one carries on. */
+  question_answered?: boolean;
   result?: unknown;         // for "tool_call" events
   /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
   working_notes?: string;
@@ -2505,12 +2511,35 @@ export interface EngineJobSummary {
   steps?: EngineJobStep[];
 }
 
-export interface QuestionView {
-  id: string;
+/** What an option leads to, shown only when options are hard to tell apart by their labels. */
+export type QuestionPreview =
+  | { kind: "draft"; text: string }
+  | { kind: "place"; name: string; price?: string; url?: string; image_url?: string }
+  | { kind: "table"; columns: string[]; rows: string[][] };
+
+export interface QuestionOption {
+  label: string;
+  /** One line on what choosing it means; empty on questions stored before descriptions. */
+  description: string;
+  preview?: QuestionPreview;
+}
+
+/** The structured question shape: docs/architecture/structured-questions.md section 1. */
+export interface QuestionDraft {
+  /** A chip of at most 12 characters naming what is asked; empty on older questions. */
+  header: string;
   text: string;
   /** Two to four options. "Other" is never among them: every surface offers it as free text. */
-  options: string[];
+  options: QuestionOption[];
+  /** The place of Goose's pick, shown first and marked Recommended. */
+  recommended?: number;
   multi: boolean;
+}
+
+export interface QuestionView extends QuestionDraft {
+  id: string;
+  /** The plan detail it settles; background questions only. */
+  gap?: string;
 }
 
 export interface Anchor {
@@ -2621,6 +2650,8 @@ export interface IdeaCardAction {
   text?: string | null;
   due?: string | null;
   url?: string | null;
+  /** An ask card's one question: the option picked is sent to Goose as the member's message. */
+  question?: QuestionDraft | null;
 }
 
 export interface IdeaCardSource {
@@ -2671,10 +2702,23 @@ export interface IdeaCardDismissal {
 
 export interface QuestionBatch {
   id: string;
-  purpose: "anchor" | "interest" | "profile" | "ledger";
+  purpose: "anchor" | "interest" | "profile" | "ledger" | "chat";
   anchor_id: string | null;
+  /** The chat that asked it, for a batch of purpose "chat". */
+  session_id?: string | null;
+  /** Its place in the chain of batches for one plan or one chat, from 1. */
+  round?: number;
   title: string;
+  /** "waiting" once the chat turn that asked it stopped waiting; answers are still taken. */
+  state?: "open" | "waiting";
   questions: QuestionView[];
+}
+
+/** One question's answer as the batch route takes it: options by label, and "Other" words. */
+export interface BatchAnswer {
+  question_id: string;
+  choices: string[];
+  text?: string;
 }
 
 /** Chosen options, by their words, and the member's own "Other" text. */
