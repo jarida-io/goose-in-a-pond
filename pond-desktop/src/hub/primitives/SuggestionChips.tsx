@@ -4,11 +4,11 @@
 // business living under the composer, so splitting this out was cheaper than
 // threading a render-location flag through all of that shared state.
 //
-// This duplicates SuggestionQueue's suggestions fetch and `take()` -- both are a
-// few lines, and importing SuggestionQueue's internals would couple two
-// independently-positioned pieces of UI for the sake of not repeating a fetch.
+// This duplicates SuggestionQueue's suggestions fetch -- a few lines, and importing
+// SuggestionQueue's internals would couple two independently-positioned pieces of UI
+// for the sake of not repeating a fetch.
 
-import { useCallback, useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import { api } from "../../api/PondApiClient";
 import type { Suggestion } from "../../api/types";
 import "./suggestion-queue.css";
@@ -47,15 +47,6 @@ export function SuggestionChips({ sessionId, onAsk }: SuggestionChipsProps): Rea
     };
   }, [sessionId]);
 
-  const take = useCallback(
-    async (offer: Suggestion) => {
-      onAsk?.(offer.prompt);
-      if (!offer.composed) return;
-      await api.markSuggestionTaken(offer.id).catch(() => {});
-    },
-    [onAsk],
-  );
-
   if (!onAsk || suggestions.length === 0) return null;
 
   const [lead, ...rest] = suggestions;
@@ -64,7 +55,7 @@ export function SuggestionChips({ sessionId, onAsk }: SuggestionChipsProps): Rea
 
   return (
     <div className="sq__offer-chips" data-hook="suggestion-chips">
-      <button type="button" className="sq__chip reach" title={lead.because} onClick={() => void take(lead)}>
+      <button type="button" className="sq__chip reach" title={lead.because} onClick={() => onAsk(lead.prompt)}>
         Try: {lead.prompt}
       </button>
       {rows.map((s) => (
@@ -73,7 +64,7 @@ export function SuggestionChips({ sessionId, onAsk }: SuggestionChipsProps): Rea
           type="button"
           className="sq__chip reach"
           title={s.because}
-          onClick={() => void take(s)}
+          onClick={() => onAsk(s.prompt)}
         >
           Try: {s.prompt}
         </button>

@@ -48,6 +48,7 @@ const MANAGE_ROWS: Array<{ label: string; section: GuiSection }> = [
 ];
 
 const HOME_ROW: NavRow     = { label: "Home",     icon: HP_PATHS.home,         section: "dashboard" };
+const MY_GOOSE_ROW: NavRow = { label: "My Goose", icon: HP_PATHS.person,       section: "mygoose" };
 const SETTINGS_ROW: NavRow = { label: "Settings", icon: HP_PATHS.railSettings, section: "settings" };
 
 /** The design's Manage glyph: three rules with a knob on the last. */
@@ -123,6 +124,12 @@ export function HubDrawer({ open, onClose, active, onNavigate }: HubDrawerProps)
               row={HOME_ROW}
               active={active === HOME_ROW.section}
               onClick={() => go({ kind: "section", section: HOME_ROW.section })}
+            />
+
+            <DrawerRow
+              row={MY_GOOSE_ROW}
+              active={active === MY_GOOSE_ROW.section}
+              onClick={() => go({ kind: "section", section: MY_GOOSE_ROW.section })}
             />
 
             <DrawerGroup
