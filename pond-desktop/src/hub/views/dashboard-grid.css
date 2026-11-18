@@ -88,10 +88,10 @@
 .dash__top-row {
   display: flex;
   flex-direction: column;
-  /* Shrinks and scrolls rather than pushing the widgets off the screen. `.dash`
-     owns its height and does not scroll, so everything here took height from
-     `.dash__body`: an idea card with its question and Details open left the
-     widgets a strip under the fold that nothing could scroll to. */
+  /* On the 1024x600 and 800x480 panels, which must fit their screen, the
+     composer and alerts shrink and scroll here rather than take the height the
+     dock needs: the alerts pushed Talk to Goose 60px under a 600px screen. The
+     desktop scrolls Home as one page instead (below). */
   flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -170,15 +170,40 @@
 .dash__body {
   position: relative;
   flex: 1 1 0;
-  /* The widgets keep at least this much of the screen however long the idea
-     cards above get; the top row scrolls for the rest. min() so a short panel
-     still gives the composer and alerts most of its height. */
+  /* Half the panel at least, so the top row shrinks first and the dock stays
+     on the screen; the desktop sets its own floor below. */
   min-height: min(320px, 50%);
   display: flex;
   /* No bottom padding. The dock's clearance is paid by the column it now
      floats over, in `.sq`'s own bottom padding; a rule here would be this file
      reaching into another component's column to fix it. */
   padding-bottom: 0;
+}
+
+/* One page on the desktop, where the idea cards sit on Home. When the composer,
+   alerts and cards are taller than the screen leaves them, Home scrolls as a
+   whole: the top row keeps its full height and the widgets follow it, never
+   less than a page of their own. It did not scroll, so a card with its
+   question and Details open pushed the widgets under the fold with nothing to
+   scroll to; giving the top row its own scroll box instead split Home in two.
+   Not on the 1024x600 and 800x480 panels, which show the cards behind one line
+   and must fit their screen (`.dash__top-row` above). 60vh, not a percentage of `.dash`, which would
+   shrink with it. */
+@media (min-width: 1101px) and (min-height: 700px) {
+  .dash {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .dash__top-row {
+    flex-shrink: 0;
+    overflow-y: visible;
+  }
+
+  .dash__body {
+    flex-shrink: 0;
+    min-height: min(440px, 60vh);
+  }
 }
 
 .dash__track {

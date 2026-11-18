@@ -72,9 +72,10 @@ test.describe("Idea cards in the classic shell", () => {
     expect(calls.refreshed).toBe(1);
   });
 
-  // A card with Details open took the whole screen: Home does not scroll, so the widgets under it
-  // were cut to a strip nothing could reach.
-  test("Home keeps room for the widgets under a long card, and the card scrolls", async ({ page }) => {
+  // A card with Details open took the whole screen: Home did not scroll, so the widgets under it
+  // were cut to a strip nothing could reach. Then a fix gave the top row its own scroll box, which
+  // split Home in two. It is one page that scrolls, the widgets whole under the cards.
+  test("Home scrolls as one page under a long card, the widgets whole below it", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await mockCards(page);
     await page.goto("/");
@@ -83,17 +84,23 @@ test.describe("Idea cards in the classic shell", () => {
     await deck.getByRole("button", { name: "Details" }).click();
 
     const box = await page.evaluate(() => {
-      const body = document.querySelector<HTMLElement>(".dash__body")!.getBoundingClientRect();
+      const dash = document.querySelector<HTMLElement>(".dash")!;
       const top = document.querySelector<HTMLElement>(".dash__top-row")!;
-      return { body: body.height, bottom: body.bottom, scrolls: getComputedStyle(top).overflowY };
+      const body = document.querySelector<HTMLElement>(".dash__body")!;
+      return {
+        body: body.getBoundingClientRect().height,
+        dashScrolls: getComputedStyle(dash).overflowY,
+        topScrolls: getComputedStyle(top).overflowY,
+        topClipped: top.scrollHeight > top.clientHeight + 1,
+      };
     });
-    expect(box.body).toBeGreaterThanOrEqual(300);
-    expect(box.bottom).toBeLessThanOrEqual(800);
-    expect(box.scrolls).toBe("auto");
+    expect(box.body).toBeGreaterThanOrEqual(440);
+    expect(box.dashScrolls).toBe("auto");
+    expect(box.topScrolls).toBe("visible");
+    expect(box.topClipped).toBe(false);
 
-    // What the card pushed out of view is still there, by scrolling the row it is in.
-    await deck.getByRole("button", { name: "Next" }).scrollIntoViewIfNeeded();
-    await expect(deck.getByRole("button", { name: "Next" })).toBeInViewport();
+    await page.locator(".dash__track").scrollIntoViewIfNeeded();
+    await expect(page.locator(".dash__track")).toBeInViewport({ ratio: 0.9 });
   });
 });
 
