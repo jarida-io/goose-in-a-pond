@@ -185,6 +185,11 @@ fn one_line(text: Option<&str>, max_chars: usize) -> String {
         .collect()
 }
 
+/// Parses natural-language date/time words relative to `said_at` in `tz`.
+pub fn parse_when_words(words: &str, said_at: DateTime<Utc>, tz: Tz) -> Option<DateTime<Utc>> {
+    moment_said(words, said_at, tz)
+}
+
 /// The active anchor `asked` is for, owned by `profile_id`, its dates read from words said at
 /// `said_at` in `tz`. Words that name no date are kept as a fact.
 pub fn anchor_for_plan(

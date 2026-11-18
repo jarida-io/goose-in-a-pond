@@ -72,6 +72,32 @@ fn unknown_caller() -> Response {
 /// One watch as its screen shows it.
 pub fn watch_view(watch: &WebWatch) -> Value {
     let items = watch.items.as_deref().unwrap_or_default();
+    let active = !watch.paused && watch.failures < 3 && watch.last_checked_at.is_some();
+    let preview = items.first().map(|item| {
+        json!({
+            "title": item.title,
+            "snippet": item.snippet,
+            "link": item.link,
+        })
+    });
+    let initial_thinking = if watch.last_checked_at.is_none() {
+        format!(
+            "Reading {} to establish an initial baseline for: {}.",
+            watch.title, watch.looking_for
+        )
+    } else if let Some(first) = items.first() {
+        format!(
+            "Active: indexed {} item(s) starting with \"{}\". Watching for: {}.",
+            items.len(),
+            first.title,
+            watch.looking_for
+        )
+    } else {
+        format!(
+            "Active: page reached, watching {} for: {}.",
+            watch.title, watch.looking_for
+        )
+    };
     json!({
         "id": watch.id,
         "title": watch.title,
@@ -83,6 +109,9 @@ pub fn watch_view(watch: &WebWatch) -> Value {
         "standing": watch.filters.tell_when.standing(items),
         "interval_hours": watch.interval_hours,
         "paused": watch.paused,
+        "active": active,
+        "preview": preview,
+        "initial_thinking": initial_thinking,
         "items_count": items.len(),
         "matching_count": items.iter().filter(|i| watch.filters.matches(i)).count(),
         "failures": watch.failures,
@@ -133,6 +162,103 @@ pub async fn list(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WatchCreateBody {
+    #[serde(default)]
+    pub url: Option<String>,
+    pub looking_for: String,
+    pub interval_hours: Option<u32>,
+    pub title: Option<String>,
+}
+
+pub async fn create(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    peer: Peer,
+    insecure: Insecure,
+    tailnet: Option<Extension<TailnetMachine>>,
+    Json(body): Json<WatchCreateBody>,
+) -> Response {
+    let Some(member) = caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return unknown_caller();
+    };
+    let looking_for = body.looking_for.trim().to_string();
+    if looking_for.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "looking_for must not be empty"})),
+        )
+            .into_response();
+    }
+    let raw_url = body.url.unwrap_or_default().trim().to_string();
+    let address = if raw_url.is_empty() {
+        reqwest::Url::parse_with_params("search://web", &[("q", &looking_for)])
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| "search://web".to_string())
+    } else if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+        raw_url
+    } else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "url must start with http:// or https://"})),
+        )
+            .into_response();
+    };
+    let interval_hours = body
+        .interval_hours
+        .unwrap_or(24)
+        .clamp(MIN_INTERVAL_HOURS, MAX_INTERVAL_HOURS);
+    let title = body
+        .title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            if address.starts_with("search://") {
+                looking_for.chars().take(60).collect()
+            } else {
+                address
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or(&address)
+                    .to_string()
+            }
+        });
+    let now = chrono::Utc::now();
+    let watch = WebWatch {
+        id: uuid::Uuid::new_v4().to_string(),
+        owner: member,
+        address,
+        title,
+        looking_for,
+        filters: WatchFilters::default(),
+        interval_hours,
+        paused: false,
+        items: None,
+        failures: 0,
+        last_checked_at: None,
+        next_check_at: now,
+        created_at: now,
+        session_id: None,
+    };
+    match repo(&state).create(&watch).await {
+        Ok(()) => {
+            pond_core::shared::services::web_watch_checker::wake_due_checks();
+            (StatusCode::CREATED, Json(watch_view(&watch))).into_response()
+        }
+        Err(e) => failed(e),
+    }
+}
+
 pub async fn get(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -165,6 +291,28 @@ pub async fn get(
     let mut view = watch_view(&watch);
     view["items"] = json!(watch.items.unwrap_or_default());
     view["changes"] = Value::Array(changes.iter().map(change_view).collect());
+    let prefix = format!("[watch:{}] ", watch.id);
+    let notes_repo = pond_infra::sqlite_agent_notes::SqliteAgentNotes::new(state.db.system.clone());
+    let scope = pond_core::user_data::domain::profile::ProfileScope::Owner(member);
+    let thinking_history = <pond_infra::sqlite_agent_notes::SqliteAgentNotes as pond_core::shared::ports::agent_notes::AgentNotesRepository>::list(
+        &notes_repo,
+        &scope,
+        pond_core::shared::domain::agent_note::NoteKind::Note,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|note| {
+        note.text.strip_prefix(&prefix).map(|body| {
+            json!({
+                "id": note.id,
+                "text": body,
+                "created_at": note.created_at,
+            })
+        })
+    })
+    .collect::<Vec<_>>();
+    view["thinking_history"] = Value::Array(thinking_history);
     Json(view).into_response()
 }
 

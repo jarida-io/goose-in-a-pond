@@ -528,6 +528,39 @@ async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
 /// Deep research asked partway through a conversation carries what was said before it, so the
 /// helpers, who start in empty windows, still know it.
 #[tokio::test]
+async fn deep_research_asks_clarifying_questions_before_starting_a_task() {
+    use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
+    let pond = pond(true, false).await;
+    turn_long_tasks_on(&pond).await;
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(serde_json::json!({
+                "message": "Compare solar inverters for my house",
+                "deep_research": true
+            })),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+    let tasks = pond
+        .tasks
+        .list_tasks(LongTaskOwnerFilter::Member(&pond.member), true)
+        .await
+        .unwrap();
+    assert!(
+        tasks.is_empty(),
+        "initial deep research turn asks clarifying questions before starting a task"
+    );
+    let sent = pond.agent.last_request().unwrap();
+    assert!(sent.deep_research_task.is_none());
+    assert!(sent.deep_research_clarify.is_some());
+}
+
+#[tokio::test]
 async fn deep_research_takes_what_was_said_before_the_ask_into_its_brief() {
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
     let pond = pond(true, false).await;
@@ -556,7 +589,8 @@ async fn deep_research_takes_what_was_said_before_the_ask_into_its_brief() {
             Some(serde_json::json!({
                 "message": "Plan our Mombasa trip.",
                 "session_id": session,
-                "deep_research": true
+                "deep_research": true,
+                "deep_research_clarified": true
             })),
             false,
         ),
@@ -684,7 +718,7 @@ async fn a_member_sees_where_their_task_waits_and_nothing_of_another_members() {
     }
 
     turn_long_tasks_on(&pond).await;
-    let ask = serde_json::json!({"message": "Which tents suit the rains?", "deep_research": true});
+    let ask = serde_json::json!({"message": "Which tents suit the rains?", "deep_research": true, "deep_research_clarified": true});
     let (status, frames) = stream(
         &pond,
         call(Method::POST, "/api/v1/chat/stream", Some(ask), false),
@@ -775,6 +809,7 @@ async fn deep_research_starts_a_research_task_the_chat_card_can_follow() {
     let ask = serde_json::json!({
         "message": "Which heat pumps suit a cold one-bedroom flat?",
         "deep_research": true,
+        "deep_research_clarified": true,
     });
     let availability = |pond: &Pond| {
         let request = call(Method::GET, "/api/v1/long-tasks/deep-research", None, false);

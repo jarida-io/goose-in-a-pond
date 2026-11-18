@@ -319,9 +319,24 @@ pub fn spawn_watch_judge_job(
                         break 'watches;
                     };
                     // An unusable reply leaves them held, to be asked about again.
-                    let Some(told) = judge::parse_reply(&reply, batch.len()) else {
+                    let Some((told, thinking)) =
+                        judge::parse_reply_with_thinking(&reply, batch.len())
+                    else {
                         continue;
                     };
+                    if !thinking.is_empty() {
+                        if let Some(notes) = pond_mcp_server::memory::agent_notes() {
+                            let _ = notes
+                                .add(pond_core::shared::domain::agent_note::AgentNote {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    profile_id: Some(watch.owner.clone()),
+                                    kind: pond_core::shared::domain::agent_note::NoteKind::Note,
+                                    text: format!("[watch:{}] {}", watch.id, thinking),
+                                    created_at: now,
+                                })
+                                .await;
+                        }
+                    }
                     release_watch_changes(
                         watches.as_ref(),
                         notifier.as_ref(),

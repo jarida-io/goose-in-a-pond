@@ -64,6 +64,8 @@ pub struct Suggestion {
     pub answered_by: &'static str,
     /// Grounding context passed to the model when the suggestion is tapped.
     pub context: Option<SuggestionContext>,
+    /// Deep operational instructions for the chat agent when this suggestion is tapped.
+    pub agent_notes: String,
 }
 
 /// One suggestor's outcome, returned even when silent so "broken" and "nothing to say" differ.
@@ -262,21 +264,57 @@ impl Built {
 pub const CARD_PREFIX: &str = "idea_card:";
 
 /// The member's `ask` cards as suggestions, in the order given, ahead of `rest` and within
+/// Deep operational instructions for the chat agent when a suggestion is tapped.
+fn build_agent_notes(
+    id: &str,
+    answered_by: &str,
+    because: &str,
+    context: Option<&SuggestionContext>,
+) -> String {
+    let grounding = match context {
+        Some(SuggestionContext::PersonalMemory { fact, .. }) => fact.as_str(),
+        Some(SuggestionContext::Temporal { timing_summary, .. }) => timing_summary.as_str(),
+        Some(SuggestionContext::Environmental { summary, .. }) => summary.as_str(),
+        _ => because,
+    };
+    let step = match id {
+        "anchor_soon" => "Check the goal's open to-dos and readiness, then propose concrete next steps or offer to add missing reminders.",
+        "questions_waiting" => "Walk through the open questions one by one using giap-questions__ask so the user can answer directly.",
+        "plan_to_confirm" => "Confirm the user's intent and call plan_for with the named kind and title to activate the goal.",
+        "changed_since" => "Summarize what changed in the deliverable, highlight key differences, and ask if they want to adjust the goal.",
+        "ready_deliverable" => "Present the completed deliverable concisely, cite key findings, and offer to create to-dos or follow-up watches.",
+        "fact_hint" => "Use the fact sheet entry and the named tool group to give a specific, personalized answer rather than generic advice.",
+        "calendar_today" => "Read today's calendar events via giap-context, group by time, and flag any conflicts or preparation needed.",
+        "upcoming_schedule" => "List today's scheduled routines via giap-schedule and offer to pause, run, or adjust any.",
+        "inbox_recent" => "Fetch recent messages via giap-context, summarize action items first, and offer to turn them into to-dos.",
+        "routine_recall" | "memory_recall" => "Query giap-memory for relevant facts and routines, organize by theme, and let the user correct or pin anything.",
+        "devices_online" => "Check device status via giap-device and report which are online, offline, or need attention.",
+        "weather_today" => "Call giap-weather for today's hourly forecast and highlight rain, temperature swings, or travel impact.",
+        _ => "Use the named tool group and grounding context to take concrete action or answer with specific facts.",
+    };
+    format!("Tool group: {answered_by}. Grounding: {grounding} Action: {step}")
+}
+
 /// [`MAX_SUGGESTIONS`].
 pub fn led_by_ask_cards(cards: &[Card], rest: Vec<Suggestion>) -> Vec<Suggestion> {
     cards
         .iter()
         .filter(|card| card.kind == CardKind::Ask)
-        .map(|card| Suggestion {
-            id: format!("{CARD_PREFIX}{}", card.id),
-            prompt: card
-                .action
-                .as_ref()
-                .and_then(|action| action.prompt.clone())
-                .unwrap_or_else(|| card.title.clone()),
-            because: card.why.text.clone(),
-            answered_by: GROUP_KNOWLEDGE,
-            context: None,
+        .map(|card| {
+            let because = card.why.text.clone();
+            let agent_notes = build_agent_notes("idea_card", GROUP_KNOWLEDGE, &because, None);
+            Suggestion {
+                id: format!("{CARD_PREFIX}{}", card.id),
+                prompt: card
+                    .action
+                    .as_ref()
+                    .and_then(|action| action.prompt.clone())
+                    .unwrap_or_else(|| card.title.clone()),
+                because,
+                answered_by: GROUP_KNOWLEDGE,
+                context: None,
+                agent_notes,
+            }
         })
         .chain(rest)
         .take(MAX_SUGGESTIONS)
@@ -350,6 +388,12 @@ fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Built, String> {
         ));
     }
     built.suggestion.prompt = cut(&built.suggestion.prompt, MAX_PROMPT_CHARS);
+    built.suggestion.agent_notes = build_agent_notes(
+        &built.suggestion.id,
+        built.suggestion.answered_by,
+        &built.suggestion.because,
+        built.suggestion.context.as_ref(),
+    );
     Ok(built)
 }
 
@@ -388,6 +432,7 @@ fn anchor_soon(s: &SuggestionSnapshot) -> Result<Built, String> {
     let date = start.with_timezone(&tz).format("%-d %B");
     Ok(Built::about(
         Suggestion {
+            agent_notes: String::new(),
             id: "anchor_soon".to_string(),
             prompt: fitted(&anchor.title, |title| {
                 format!(
@@ -425,6 +470,7 @@ fn questions_waiting(s: &SuggestionSnapshot) -> Result<Built, String> {
     let mine = anchor.profile_id == member;
     Ok(Built::about(
         Suggestion {
+            agent_notes: String::new(),
             id: "questions_waiting".to_string(),
             prompt: fitted(&anchor.title, |title| {
                 format!("Answer {asked} about {}", named(anchor.kind, title, mine))
@@ -513,6 +559,7 @@ fn plan_to_confirm(s: &SuggestionSnapshot) -> Result<Built, String> {
     };
     Ok(Built::about(
         Suggestion {
+            agent_notes: String::new(),
             id: "plan_to_confirm".to_string(),
             prompt: fitted(&anchor.title, |title| ask.replace(ANCHOR_MARK, title)),
             because,
@@ -563,6 +610,7 @@ fn changed_since(s: &SuggestionSnapshot) -> Result<Built, String> {
     let made = &work.deliverable;
     Ok(Built::about(
         Suggestion {
+            agent_notes: String::new(),
             id: "changed_since".to_string(),
             prompt: fitted(&work.anchor.title, |title| {
                 change_question(&made.slot, made.kind, title)
@@ -629,6 +677,7 @@ fn ready_deliverable(s: &SuggestionSnapshot) -> Result<Built, String> {
     let (ready, _) = ready_notice(&work.anchor, &work.deliverable);
     Ok(Built::about(
         Suggestion {
+            agent_notes: String::new(),
             id: "ready_deliverable".to_string(),
             prompt: fitted(&work.anchor.title, |title| {
                 let shown = Anchor {
@@ -773,6 +822,7 @@ fn fact_hint(s: &SuggestionSnapshot) -> Result<Built, String> {
         _ => ask.ask.to_string(),
     };
     Ok(Built::undated(Suggestion {
+        agent_notes: String::new(),
         id: "fact_hint".to_string(),
         prompt,
         because: format!("On your fact sheet: {}", sentence(&line.fact)),
@@ -800,6 +850,7 @@ fn calendar_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("a calendar is connected and today is empty".to_string());
     }
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "calendar_today".to_string(),
         prompt: "What's on my calendar today?".to_string(),
         because: format!(
@@ -830,6 +881,7 @@ fn upcoming_schedule(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         ),
     };
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "upcoming_schedule".to_string(),
         prompt: "What's set to run before tonight?".to_string(),
         because: because.clone(),
@@ -856,6 +908,7 @@ fn inbox_recent(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("a mail account is connected and nothing arrived this week".to_string());
     }
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "inbox_recent".to_string(),
         prompt: "What should I know from my inbox this week?".to_string(),
         because: format!(
@@ -882,6 +935,7 @@ fn routine_recall(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("nothing has been remembered as a standing habit yet".to_string());
     }
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "routine_recall".to_string(),
         prompt: "What do you know about my routines?".to_string(),
         // Notes filed, not observations: nothing counts repeats, so "you usually" can't be backed.
@@ -912,6 +966,7 @@ fn memory_recall(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("nothing has been remembered yet".to_string());
     }
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "memory_recall".to_string(),
         prompt: "What do you remember about me?".to_string(),
         because: format!(
@@ -934,6 +989,7 @@ fn devices_online(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("no devices are registered with this pond".to_string());
     }
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "devices_online".to_string(),
         prompt: "Which of my devices are online?".to_string(),
         // Registered, never "on": `LoggingDeviceControl` reads no state; `is_online` is real.
@@ -958,6 +1014,7 @@ fn weather_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         None => "Weather is on and this pond has coordinates.".to_string(),
     };
     Ok(Suggestion {
+        agent_notes: String::new(),
         id: "weather_today".to_string(),
         prompt: "What's the weather here today?".to_string(),
         because,
