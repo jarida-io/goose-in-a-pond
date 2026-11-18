@@ -11069,6 +11069,9 @@ struct ActivitySummaryParams {
 }
 
 /// `GET /api/v1/activity/summary` — per-category counts over at most `ACTIVITY_MAX_LIMIT` events.
+///
+/// `truncated` is true when the window held at least that many, so `total` is a floor and a
+/// reader shows it as "1000+" rather than as an exact count.
 async fn activity_summary(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<ActivitySummaryParams>,
@@ -11110,6 +11113,7 @@ async fn activity_summary(
             )
         })?;
 
+    let truncated = events.len() >= ACTIVITY_MAX_LIMIT;
     let mut by_category: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
     let mut total = 0usize;
@@ -11129,6 +11133,7 @@ async fn activity_summary(
         "window": window,
         "since": since.to_rfc3339(),
         "total": total,
+        "truncated": truncated,
         "by_category": by_category,
     })))
 }
