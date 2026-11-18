@@ -346,12 +346,10 @@
   background: linear-gradient(150deg, #60A5FA 0%, #3B82F6 55%, #818CF8 100%);
   display: flex;
   flex-direction: column;
-  /* The reading and the forecast take the top and the bottom of whatever
-     height the card is given, rather than stacking at the top and leaving a
-     band of flat sky under them. No effect where the card is only as tall as
-     its own content, which is every use outside a stretched widget frame. */
-  justify-content: space-between;
   gap: 12px;
+  /* One day tile's height. The strip below is at least this tall and grows by
+     whole tiles, so the forecast never shows a clipped half-row. */
+  --wx-day-h: 72px;
   box-shadow: 0 6px 18px rgba(59, 130, 246, 0.25);
 }
 
@@ -374,16 +372,36 @@
 .wx__cond { font-size: 13px; font-weight: 700; }
 .wx__range { font-size: 12px; font-weight: 600; opacity: 0.85; }
 
-.wx__fc { display: flex; gap: 6px; }
+/* The forecast strip takes whatever height the card has below the reading, and
+   WeatherWidget fills it with as many whole day tiles as fit (forecastFit.ts):
+   a card stretched by a taller neighbour on its row shows more of the week
+   instead of a band of empty sky. `flex-basis: 0` keeps the tiles from growing
+   the card themselves -- the strip's own share of the card is one row
+   (`min-height`) -- and `overflow: hidden` drops anything the measurement has
+   not yet trimmed rather than painting it over the frame below. Once every
+   day is showing, the rows share out what height is left, so the tiles grow
+   into it rather than leaving a gap under the reading. The template columns
+   here are the unmeasured fallback; the measured count is set inline. */
+.wx__fc {
+  flex: 1 1 0;
+  min-height: var(--wx-day-h);
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(46px, 1fr));
+  grid-auto-rows: minmax(var(--wx-day-h), 1fr);
+  gap: 6px;
+}
 .wx__fday {
-  flex: 1;
+  box-sizing: border-box;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   background: rgba(255, 255, 255, 0.16);
   border-radius: 11px;
-  padding: 8px 4px;
+  padding: 8px 2px;
 }
 .wx__fday span { font-size: 11px; font-weight: 700; opacity: 0.9; }
 .wx__fday strong { font-size: 13px; font-weight: 800; }
