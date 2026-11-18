@@ -947,9 +947,9 @@ impl Default for Settings {
             retention_events_by_category: std::collections::HashMap::new(),
             retention_sensitive_days: Self::default_sensitive_days(),
             thinking_mode: Self::default_thinking_mode(),
-            show_thinking: false,
+            show_thinking: true,
             reasoning_effort: Self::default_reasoning_effort(),
-            persist_thinking: false,
+            persist_thinking: true,
             review_mode: Self::default_review_mode(),
             review_max_rounds: Self::default_review_max_rounds(),
             review_pass_threshold: Self::default_review_pass_threshold(),
@@ -1258,7 +1258,7 @@ impl Settings {
         factory_defaults::u32("sensitive_days", 7)
     }
     fn default_thinking_mode() -> String {
-        factory_defaults::str("thinking_mode", "auto")
+        factory_defaults::str("thinking_mode", "on")
     }
     fn default_reasoning_effort() -> String {
         factory_defaults::str("reasoning_effort", "brief")

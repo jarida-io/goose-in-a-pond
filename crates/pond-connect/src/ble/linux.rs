@@ -297,6 +297,17 @@ async fn bring_up(control: &mut Control) -> Result<(), String> {
             "powered the Bluetooth adapter on for the setup channel"
         );
     }
+    if first_look {
+        if let Err(error) = adapter.set_discoverable_timeout(0).await {
+            tracing::warn!(adapter = adapter.name(), %error, "failed to set discoverable timeout");
+        }
+        if let Err(error) = adapter.set_discoverable(true).await {
+            tracing::warn!(adapter = adapter.name(), %error, "failed to enable Bluetooth discovery");
+        }
+        if let Err(error) = adapter.set_pairable(true).await {
+            tracing::warn!(adapter = adapter.name(), %error, "failed to enable Bluetooth pairing");
+        }
+    }
     match adapter.supported_advertising_instances().await {
         Ok(instances) if instances > 0 => {}
         _ => return Err(NO_LE_PERIPHERAL.to_string()),

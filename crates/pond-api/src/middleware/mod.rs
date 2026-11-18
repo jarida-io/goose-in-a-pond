@@ -295,6 +295,36 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
         "/connections/wifi/networks/{ssid}",
         Exposure::Authenticated,
     ),
+    (
+        Method::GET,
+        "/connections/bluetooth/devices",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/connections/bluetooth/scan",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/connections/bluetooth/power",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/connections/bluetooth/connect",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/connections/bluetooth/disconnect",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::DELETE,
+        "/connections/bluetooth/devices/{address}",
+        Exposure::Authenticated,
+    ),
     (Method::GET, "/setup/status", Exposure::Authenticated),
     (Method::GET, "/test", Exposure::HostOnly),
     // Speaks on the host's speaker; the handler also asks for the host credential.
@@ -1476,12 +1506,14 @@ mod tests {
         let expected = vec![
             // The connections settings: a token in every state; the writes' handlers also ask
             // whether the caller is the host, the claimant or a member's device.
+            "DELETE /connections/bluetooth/devices/{address} = Authenticated".to_string(),
             "DELETE /connections/wifi/networks/{ssid} = Authenticated".to_string(),
             // A phone's own device during owner setup; each handler admits only that device.
             "DELETE /devices/{id}/push-token = Authenticated".to_string(),
             "DELETE /voice/calibrate = UntilOnboarded".to_string(),
             "GET /admin/factory-reset/status = Authenticated".to_string(),
             "GET /connections = Authenticated".to_string(),
+            "GET /connections/bluetooth/devices = Authenticated".to_string(),
             "GET /connections/wifi/networks = Authenticated".to_string(),
             "GET /devices/self = Authenticated".to_string(),
             // Choosing the chat model completion requires, before onboarding (#365); token only.
@@ -1504,6 +1536,10 @@ mod tests {
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
             // Unlike `/onboard/reset`, no pre-onboarding exemption; the handler also asks who it is.
             "POST /admin/factory-reset = Authenticated".to_string(),
+            "POST /connections/bluetooth/connect = Authenticated".to_string(),
+            "POST /connections/bluetooth/disconnect = Authenticated".to_string(),
+            "POST /connections/bluetooth/power = Authenticated".to_string(),
+            "POST /connections/bluetooth/scan = Authenticated".to_string(),
             "POST /connections/wifi/join = Authenticated".to_string(),
             "POST /devices/{id}/push-token = Authenticated".to_string(),
             // The music player bridge and extension egress: the handlers check the internal
