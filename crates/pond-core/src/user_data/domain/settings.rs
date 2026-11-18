@@ -499,15 +499,15 @@ pub struct Settings {
     pub persist_thinking: bool,
 
     // ── Answer Review ──────────────────────────────────────────────────────
-    /// `on` reviews every answer; `auto` only Think-classified or tool-augmented ones.
+    /// `on` reviews every answer; `auto` only a turn that called tools (`should_review`).
     #[serde(default = "Settings::default_review_mode")]
     pub review_mode: String,
 
-    /// Maximum review-revision rounds. 1 = one review + one optional revision.
+    /// Maximum revision rounds, read per review. 0 = score only, never revise.
     #[serde(default = "Settings::default_review_max_rounds")]
     pub review_max_rounds: u32,
 
-    /// Minimum score (1-5) for the reviewer to pass an answer. Below this triggers revision.
+    /// Minimum score (1-5) to pass an answer, read per review. Below it a revision is tried.
     #[serde(default = "Settings::default_review_pass_threshold")]
     pub review_pass_threshold: u8,
 
