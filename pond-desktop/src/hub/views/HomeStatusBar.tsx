@@ -10,6 +10,9 @@ import "./home-status-bar.css";
 export interface HomeStatusBarProps {
   arranging: boolean;
   onToggleArrange: () => void;
+  /** Reopens the arrange sheet. Passed only while arranging with the sheet closed (a backdrop
+      click or Escape closes it without leaving the mode); its button shows only then. */
+  onShowArrangeList?: () => void;
   /** Outdoor temperature; null (weather off, unset or unanswered) hides the slot. */
   temp: number | null;
   /** True when the weather widget is already placed on the page -- its own card
@@ -24,6 +27,7 @@ export interface HomeStatusBarProps {
 export function HomeStatusBar({
   arranging,
   onToggleArrange,
+  onShowArrangeList,
   temp,
   hideTemp = false,
   userName,
@@ -60,6 +64,15 @@ export function HomeStatusBar({
             item that gives up width first when the cluster runs out. */}
         {arranging && (
           <p className="hbar__caption">Arranging · use the arrows to reorder</p>
+        )}
+
+        {/* Closing the sheet keeps the mode -- the frames' arrows still reorder -- so the list
+            needs a way back that is not leaving the mode and entering it again. */}
+        {arranging && onShowArrangeList && (
+          <button type="button" className="hbar__arrange" onClick={onShowArrangeList}>
+            <HubIco d={HP_PATHS.list} size={16} color="var(--color-text)" sw={2} />
+            Show arrange list
+          </button>
         )}
 
         {/* First member of the right-hand cluster, as the design has it: a
