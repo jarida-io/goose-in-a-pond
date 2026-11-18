@@ -29,6 +29,7 @@ import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
 import { StepsDisclosure } from "../hub/views/chat/StepsDisclosure";
 import { AttachmentTray } from "../components/AttachmentTray";
 import { ComposerMenu } from "../components/ComposerMenu";
+import { sendsMessage, useEnterSends } from "../hub/state/enterSendsStore";
 import { ResearchModeChip } from "../components/ResearchModeChip";
 import { ImageSupportStatus } from "../components/ImageSupportStatus";
 import {
@@ -75,6 +76,7 @@ export function Chat() {
   const longTasks = useLongTasks(run.sessionId ?? null, startedTasks);
 
   const [input, setInput]                   = useState("");
+  const { enterSends }                      = useEnterSends();
   const [sessions, setSessions]             = useState<SessionSummary[]>([]);
   const [retitling, setRetitling]           = useState(false);
   const [editingTitle, setEditingTitle]     = useState(false);
@@ -571,7 +573,7 @@ export function Chat() {
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    if (sendsMessage(e, enterSends)) {
       e.preventDefault();
       sendMessage();
     }
@@ -1108,7 +1110,9 @@ export function Chat() {
         </button>
 
         <span className="chat2__hint-sep">·</span>
-        <span className="chat2__hint-kbd">Cmd + Enter to send</span>
+        <span className="chat2__hint-kbd">
+          {enterSends ? "Enter to send · Shift + Enter for a new line" : "Ctrl + Enter to send"}
+        </span>
       </div>
     </div>
     )
