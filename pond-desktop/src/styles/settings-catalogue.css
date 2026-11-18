@@ -90,13 +90,12 @@
   border-radius: var(--radius-pill);
   padding: var(--space-2) var(--space-4) var(--space-2) var(--space-8);
   width: 230px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.15s;
 }
 
 .scat__searchInput:focus {
   outline: none;
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 /* ── posture card — the one bold moment ─────────────────────────────────── */

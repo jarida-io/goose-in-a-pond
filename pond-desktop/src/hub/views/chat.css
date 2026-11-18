@@ -273,7 +273,6 @@
 
 .chat2__input input:focus {
   border-color: var(--pp);
-  box-shadow: 0 0 0 3px var(--pp-50);
 }
 
 .chat2__input input::placeholder {
@@ -345,7 +344,6 @@
 }
 .chat2__textarea:focus {
   border-color: var(--pp);
-  box-shadow: 0 0 0 3px var(--pp-50);
 }
 .chat2__textarea::placeholder {
   color: #A8A8B3;
@@ -1155,10 +1153,10 @@
   flex-shrink: 0;
 }
 
-/* The lift on focus is the one place this screen raises its voice. */
+/* One ring: the composer's border is the highlight, with no halo outside it,
+   and the borderless textarea inside it draws none of its own. */
 .chat2__composer:focus-within {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px var(--color-accent-soft), var(--shadow-sm);
 }
 
 /* The textarea has no chrome of its own — the box around it is the control. */
@@ -1173,11 +1171,6 @@
   max-height: 168px;
   font-size: var(--text-md);
   line-height: 1.5;
-}
-
-.chat2__composer .chat2__textarea:focus {
-  border: 0;
-  box-shadow: none;
 }
 
 .ch-icon-btn {
@@ -1405,26 +1398,6 @@
 
 /* The user bubble still hugs its text; it is a discrete object, not a column. */
 .ch-row--user .ch-bubble-wrap { max-width: min(80%, 68ch); }
-
-/* ── One glow ────────────────────────────────────────────────────────────
- *
- * The composer drew its own focus ring AND the textarea inside it drew the
- * app-wide one from `base.css`, so focusing produced two nested purple
- * rectangles. The surface owns the highlight; the control inside it does not.
- */
-
-.chat2__composer .chat2__textarea:focus,
-.chat2__composer .chat2__textarea:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
-  border: 0 !important;
-}
-
-/* A single soft ring — no second inset shadow stacked under it. */
-.chat2__composer:focus-within {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 4px var(--color-accent-soft);
-}
 
 /* ── Room to breathe ─────────────────────────────────────────────────────
  * The model chip and shortcut were pressed against the composer.

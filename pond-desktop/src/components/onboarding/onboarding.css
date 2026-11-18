@@ -373,7 +373,6 @@
 
 .ob-textarea:focus {
   border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 /* ── Secondary button ─────────────────────────────────────── */
@@ -643,7 +642,6 @@
 
 .ob-input:focus {
   border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 .ob-input::placeholder {
@@ -673,7 +671,6 @@
 
 .ob-select:focus {
   border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 /* ── Slider (range) ───────────────────────────────────────── */

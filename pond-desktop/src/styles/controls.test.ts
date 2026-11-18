@@ -44,4 +44,10 @@ describe("controls", () => {
       expect(rule.test(stripComments(readFileSync(join(SRC, file), "utf8"))), `${file}: ${rule}`).toBe(true);
     }
   });
+  it("keeps the shell bar's ink edge, and draws its focus ring over the border, not around it", () => {
+    const css = stripComments(readFileSync(join(SRC, "hub/hubDrawer.css"), "utf8"));
+    // The offset ink plate is the buttons' design; the double border was the focus ring outside it.
+    expect(css).toMatch(/\.shellbar__btn\s*\{[^}]*box-shadow:\s*var\(--ink-lift\)\s+var\(--ink-lift\)\s+0\s+var\(--border-ink\)/);
+    expect(css).toMatch(/\.shellbar__btn:focus-visible\s*\{[^}]*outline-offset:\s*-/);
+  });
 });

@@ -353,10 +353,15 @@
   color: var(--color-destructive-fg, #b91c1c);
 }
 
-.net__btn:focus-visible,
-.net__input:focus-visible {
+.net__btn:focus-visible {
   outline: 2px solid var(--focus-ring, var(--color-accent, #8c4bff));
   outline-offset: 2px;
+}
+
+.net__input:focus-visible {
+  /* One ring: the field's own border takes the focus colour; an outline outside it was a second. */
+  outline: none;
+  border-color: var(--color-accent);
 }
 
 .net__form,
