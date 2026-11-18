@@ -89,3 +89,14 @@ describe("the pond group", () => {
     expect(onNavigate).toHaveBeenCalledWith({ kind: "section", section: "watches" });
   });
 });
+
+describe("my goose", () => {
+  it("is one tap from the top of the drawer, and marks itself while shown", () => {
+    const onNavigate = vi.fn();
+    render(<HubDrawer open onClose={() => {}} active="mygoose" onNavigate={onNavigate} />);
+    const row = screen.getByRole("button", { name: "My Goose" });
+    expect(row.getAttribute("aria-current")).toBe("page");
+    fireEvent.click(row);
+    expect(onNavigate).toHaveBeenCalledWith({ kind: "section", section: "mygoose" });
+  });
+});

@@ -6,6 +6,7 @@
 import { test, expect, Page } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { mockModels } from "./helpers/model-mocks";
+import { mockMyGoose } from "./helpers/my-goose-mocks";
 import { navigateTo, openDrawer } from "./helpers/nav";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -90,6 +91,21 @@ async function checkModelsTargets(page: Page): Promise<void> {
   expect(small, `Models targets under 44px: ${JSON.stringify(small)}`).toEqual([]);
 }
 
+/** My Goose's controls clear 44px on the hub; a dense one counts the band it reaches through. */
+async function checkMyGooseTargets(page: Page): Promise<void> {
+  const small = await page.evaluate(() =>
+    Array.from(document.querySelectorAll<HTMLElement>(".mg button, .mg [role='radio'], .mg [role='switch']"))
+      .filter((el) => el.getClientRects().length > 0)
+      .map((el) => {
+        const band = el.closest<HTMLElement>(".ink-labelled, .mg-reasons__reach");
+        const h = el.matches(".ink-reach, .reach") ? 44 : Math.round((band ?? el).getBoundingClientRect().height);
+        return { text: (el.textContent ?? "").trim().slice(0, 30), h };
+      })
+      .filter((t) => t.h < 44),
+  );
+  expect(small, `My Goose targets under 44px: ${JSON.stringify(small)}`).toEqual([]);
+}
+
 // ── Classic sections UI — 1024×600 ───────────────────────────────────────────
 
 test.describe("Classic sections UI — 1024×600", () => {
@@ -143,6 +159,16 @@ test.describe("Classic sections UI — 1024×600", () => {
     await expect(page.getByRole("heading", { name: "Recommended for this pond" })).toBeVisible();
     await checkNoHorizOverflow(page);
     await page.screenshot({ path: "kiosk-screenshots/sections-models-1024x600.png" });
+  });
+
+  test("my goose renders without overflow", async ({ page }) => {
+    await mockMyGoose(page);
+    await page.goto("/");
+    await navigateTo(page, "My Goose");
+    await expect(page.getByRole("heading", { name: "My Goose" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+    await checkNoHorizOverflow(page);
+    await page.screenshot({ path: "kiosk-screenshots/sections-mygoose-1024x600.png" });
   });
 
   test("settings page renders without overflow", async ({ page }) => {
@@ -241,6 +267,18 @@ test.describe("Hub UI — 1024×600", () => {
     await checkModelsTargets(page);
     await page.screenshot({ path: "kiosk-screenshots/hub-models-1024x600.png" });
   });
+
+  test("hub my goose renders without overflow, with 44px targets", async ({ page }) => {
+    await mockMyGoose(page);
+    await page.goto("/");
+    await page.waitForSelector(".ghub", { timeout: 10_000 });
+    await navigateTo(page, "My Goose");
+    await expect(page.getByRole("heading", { name: "My Goose" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+    await checkNoHorizOverflow(page);
+    await checkMyGooseTargets(page);
+    await page.screenshot({ path: "kiosk-screenshots/hub-mygoose-1024x600.png" });
+  });
 });
 
 // ── Hub UI — 800×480 ─────────────────────────────────────────────────────────
@@ -274,5 +312,17 @@ test.describe("Hub UI — 800×480", () => {
     await checkNoHorizOverflow(page);
     await checkModelsTargets(page);
     await page.screenshot({ path: "kiosk-screenshots/hub-models-800x480.png" });
+  });
+
+  test("hub my goose renders without overflow at 800×480, with 44px targets", async ({ page }) => {
+    await mockMyGoose(page);
+    await page.goto("/");
+    await page.waitForSelector(".ghub", { timeout: 10_000 });
+    await navigateTo(page, "My Goose");
+    await expect(page.getByRole("heading", { name: "My Goose" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+    await checkNoHorizOverflow(page);
+    await checkMyGooseTargets(page);
+    await page.screenshot({ path: "kiosk-screenshots/hub-mygoose-800x480.png" });
   });
 });

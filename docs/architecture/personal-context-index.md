@@ -10,6 +10,13 @@ captioning (waiting on an encoder measured on the Orin, §1.8). See §7.**
 > and `search_stale_dimension`. A row is now re-embedded whenever the index holds no vector for it
 > under the current model; nothing is adopted.
 
+> Status (2026-11-16): personal details gained the idea engine's rows (`idea-engine.md` 10):
+> `fact:` (active fact lines with their tool hints), `dont:` (don't rules), `answer:` (answered
+> questions), `anchor:` and `deliverable:` (active anchors and their ready deliverables, one row
+> for the owner and one for each member the anchor is shared with) and `capture:` (read captures
+> that are not sensitive). The `portrait:` and `topic:` limbs are gone, and `interest:` holds
+> only interests the member confirmed or asked to keep away.
+
 > Status (2026-11-14): the index covers seven more corpora on every pond: personal details
 > (profile, places, interests, news topics, portrait, saved items, screenshot notes), messages from
 > both sides of attributed conversations, news digests and stories, long-task reports, notifications

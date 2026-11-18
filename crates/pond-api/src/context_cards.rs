@@ -28,7 +28,7 @@ use crate::AppState;
 /// A card as a chat request names it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CardRef {
-    /// `idea`, `news`, `digest`, `todo`, `cart` or `watch`.
+    /// `idea`, `news`, `digest`, `todo`, `cart` or `watch`; `idea_card` for an idea card.
     pub kind: String,
     pub id: String,
 }
@@ -190,6 +190,13 @@ pub(crate) async fn resolve(
             .get(member, &card.id)
             .await?
             .map(|item| cart_card(&item)),
+        // Not in `KINDS`: the chat's own cards are those; an idea card rides a turn the same way.
+        "idea_card" => state
+            .engine
+            .cards
+            .get(member, &card.id)
+            .await?
+            .map(|found| crate::idea_cards::as_context(&found)),
         "watch" => {
             let watches = SqliteWebWatchRepository::new(state.db.system.clone());
             match watches.get(&card.id).await? {

@@ -118,6 +118,7 @@ async fn read_window(
             known: &[],
             max_memories: 3,
             allow_reminders,
+            allow_plans: false,
         })
         .await
     {

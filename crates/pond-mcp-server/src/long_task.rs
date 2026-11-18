@@ -16,15 +16,18 @@ use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
 use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
-use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+use pond_core::shared::services::long_task_queue::{place_of, waiting_line};
 use pond_core::shared::services::long_task_roles::WORKER_ROLE;
 use pond_core::shared::services::long_task_runner::{answer_artifact, clip_brief};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::engine_job::{is_engine_task, EngineJob};
 use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::engine_jobs::EngineJobRepository;
+use pond_core::user_data::services::engine::queue::run_order;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -60,6 +63,8 @@ pub struct LongTaskDeps {
     pub authorities: Arc<TurnAuthorityRegistry>,
     /// Woken when a task starts or is cancelled, so the runner need not poll for either.
     pub wake: Option<Arc<Notify>>,
+    /// The idea engine's jobs, which wait in the same line as the household's tasks.
+    pub engine_jobs: Option<Arc<dyn EngineJobRepository>>,
 }
 
 impl LongTaskDeps {
@@ -72,12 +77,26 @@ impl LongTaskDeps {
             repo,
             authorities,
             wake,
+            engine_jobs: None,
         }
+    }
+
+    pub fn with_engine_jobs(mut self, jobs: Arc<dyn EngineJobRepository>) -> Self {
+        self.engine_jobs = Some(jobs);
+        self
     }
 
     fn wake_runner(&self) {
         if let Some(wake) = &self.wake {
             wake.notify_one();
+        }
+    }
+
+    /// The engine's open jobs; none when they cannot be read, which only moves a place in line.
+    async fn open_engine_jobs(&self) -> Vec<EngineJob> {
+        match &self.engine_jobs {
+            Some(jobs) => jobs.open().await.unwrap_or_default(),
+            None => Vec::new(),
         }
     }
 }
@@ -534,7 +553,8 @@ impl TasksMcpServer {
             .list_tasks(LongTaskOwnerFilter::Everyone, false)
             .await
             .map_err(store)?;
-        let place = place_of(&run_order(&open), task.id(), task.owner_profile_id());
+        let jobs = deps.open_engine_jobs().await;
+        let place = place_of(&run_order(&open, &jobs), task.id(), task.owner_profile_id());
         tracing::info!(
             target: "giap::trace",
             kind = "long_task_started",
@@ -686,7 +706,8 @@ async fn reached_task(
     Ok(task)
 }
 
-/// Open tasks this scope reaches, newest first.
+/// Open tasks this scope reaches, newest first. An engine job's task is not one of them: what
+/// Goose makes unasked is read through the engine's own surfaces.
 async fn reached_tasks(
     deps: &LongTaskDeps,
     scope: &ProfileScope,
@@ -713,6 +734,7 @@ async fn reached_tasks(
             .map_err(store)?,
         ProfileScope::Guest => Vec::new(),
     };
+    tasks.retain(|task| !is_engine_task(task.id()));
     tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at()));
     Ok(tasks)
 }
@@ -2116,6 +2138,40 @@ mod tests {
         for task in [&hers, &his, &shared] {
             assert!(all.contains(task.id()), "{all}");
         }
+    }
+
+    #[tokio::test]
+    async fn status_leaves_out_what_the_idea_engine_is_making() {
+        use pond_core::user_data::domain::engine_job::{JobClass, JobKind};
+        let pond = Pond::new();
+        let prime = pond.prime();
+        let hers = pond
+            .task(ProfileScope::Owner("liz".into()), "her task")
+            .await;
+        let job = EngineJob::new(
+            JobKind::Deliverable,
+            JobClass::Open,
+            Some("liz"),
+            "a dossier",
+            Utc::now(),
+        );
+        let (unasked, _) = pond_core::user_data::services::engine::task::task_for_job(
+            &job,
+            "Write a dossier for the summit.",
+            "liz",
+            Utc::now(),
+        )
+        .unwrap();
+        pond.repo.create_task(&unasked).await.unwrap();
+        let _liz = pond.turn("engine-liz", "giap-liz", ProfileScope::Owner("liz".into()));
+
+        let listed = prime
+            .run_status(&meta_for("engine-liz"), TaskIdParams::default())
+            .await
+            .unwrap();
+        assert!(listed.contains(hers.id()), "{listed}");
+        assert!(listed.contains("still running: 1"), "{listed}");
+        assert!(!listed.contains(unasked.id()), "{listed}");
     }
 
     #[tokio::test]

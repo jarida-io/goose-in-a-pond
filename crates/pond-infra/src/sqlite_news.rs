@@ -1,6 +1,6 @@
 //! SQLite-backed `NewsStore`: a member's news settings, stories, digests and topic map
-//! (migration 0090), and the interests and portrait it reads (0086). Times are RFC 3339 in UTC to
-//! the millisecond, so they sort as text.
+//! (migration 0090), the interests it reads (0086) and the portrait it takes from their fact
+//! sheet. Times are RFC 3339 in UTC to the millisecond, so they sort as text.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -14,6 +14,11 @@ use pond_core::shared::domain::news::{
 };
 use pond_core::shared::ports::news::NewsStore;
 use pond_core::shared::services::news::dedupe::{headline_key, url_key};
+use pond_core::user_data::domain::fact_sheet::FactState;
+use pond_core::user_data::ports::fact_sheet::FactSheetRepository;
+use pond_core::user_data::services::fact_sheet::as_portrait;
+
+use crate::sqlite_fact_sheet::SqliteFactSheetRepository;
 
 pub struct SqliteNewsStore {
     pool: Pool<Sqlite>,
@@ -212,7 +217,8 @@ impl NewsStore for SqliteNewsStore {
                (SELECT stories_written_at FROM news_settings WHERE profile_id = ?1) AS stories, \
                (SELECT spoken_on FROM news_settings WHERE profile_id = ?1) AS spoken, \
                (SELECT MAX(built_at) FROM member_topics WHERE profile_id = ?1) AS built, \
-               (SELECT MAX(updated_at) FROM interests WHERE profile_id = ?1) AS changed",
+               (SELECT MAX(updated_at) FROM interests WHERE profile_id = ?1 \
+                 AND (confirmed = 1 OR avoid = 1)) AS changed",
         )
         .bind(member)
         .fetch_one(&self.pool)
@@ -292,22 +298,15 @@ impl NewsStore for SqliteNewsStore {
     }
 
     async fn portrait(&self, member: &str) -> Result<Option<Portrait>> {
-        let row = sqlx::query(
-            "SELECT summary, into_json, working_on_json, likes_json FROM member_portraits \
-             WHERE profile_id = ?",
-        )
-        .bind(member)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok(Portrait {
-                summary: row.try_get("summary")?,
-                into: json_list(&row.try_get::<String, _>("into_json")?),
-                working_on: json_list(&row.try_get::<String, _>("working_on_json")?),
-                likes: json_list(&row.try_get::<String, _>("likes_json")?),
-            })
-        })
-        .transpose()
+        let sheet = SqliteFactSheetRepository::new(self.pool.clone())
+            .list(member, FactState::Active)
+            .await?;
+        Ok(as_portrait(&sheet).map(|portrait| Portrait {
+            summary: portrait.summary,
+            into: portrait.into,
+            working_on: portrait.working_on,
+            likes: portrait.likes,
+        }))
     }
 
     async fn topics(&self, member: &str) -> Result<Vec<Topic>> {

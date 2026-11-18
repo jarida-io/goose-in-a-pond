@@ -11,6 +11,7 @@ use axum::http::{Method, Request, StatusCode};
 use pond_api::build_router;
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::models::ports::provider::LlmProvider;
+use pond_core::user_data::domain::engine_job::{JobClass, JobKind};
 use pond_core::user_data::domain::idea::{
     GooseCan, GooseKind, GoosePlan, Idea, IdeaKind, IdeaState,
 };
@@ -78,6 +79,7 @@ struct Pond {
     router: axum::Router,
     member: String,
     ideas: pond_infra::sqlite_ideas::SqliteIdeaRepository,
+    stores: pond_api::EngineStores,
     _dir: tempfile::TempDir,
 }
 
@@ -109,9 +111,11 @@ async fn a_pond(provider: Option<Arc<dyn LlmProvider>>) -> Pond {
     state.handshake = Arc::new(DeviceHandshake(device_id));
     state.llm_provider = Arc::new(tokio::sync::RwLock::new(provider));
     let ideas = pond_infra::sqlite_ideas::SqliteIdeaRepository::new(state.db.system.clone());
+    let stores = state.engine.clone();
     Pond {
         member,
         ideas,
+        stores,
         router: build_router(
             Arc::new(state),
             std::path::PathBuf::from("pond-desktop/dist"),
@@ -274,6 +278,19 @@ async fn the_interview_asks_drafts_reviews_and_saves() {
 
     let (_, done) = call(&pond, Method::GET, "/me/interests/interview", json!({})).await;
     assert_eq!(done["status"], "done");
+
+    let rebuilds = pond
+        .stores
+        .jobs
+        .open_of_kind(&pond.member, JobKind::FactSheet)
+        .await
+        .unwrap();
+    assert_eq!(
+        rebuilds.len(),
+        1,
+        "what they confirmed is owed to the fact sheet"
+    );
+    assert_eq!(rebuilds[0].class, JobClass::Upkeep);
 }
 
 #[tokio::test]
@@ -303,7 +320,7 @@ async fn with_no_model_the_interview_still_asks_a_question() {
 }
 
 #[tokio::test]
-async fn ideas_and_the_portrait_read_empty_before_the_lane_writes_them() {
+async fn ideas_and_the_portrait_read_empty_before_anything_is_known() {
     let pond = a_pond(None).await;
     let (status, portrait) = call(&pond, Method::GET, "/me/portrait", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{portrait}");
@@ -312,9 +329,13 @@ async fn ideas_and_the_portrait_read_empty_before_the_lane_writes_them() {
     assert_eq!(ideas, json!({"ideas": [], "state": "idle"}));
     let (status, asked) = call(&pond, Method::POST, "/me/ideas/refresh", json!({})).await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(asked["state"], "thinking");
+    assert_eq!(
+        asked,
+        json!({"state": "idle"}),
+        "no idea is thought of any more"
+    );
     let (_, ideas) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
-    assert_eq!(ideas["state"], "thinking");
+    assert_eq!(ideas["state"], "idle");
     let (status, _) = call(&pond, Method::POST, "/me/ideas/nope/goose", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -355,8 +376,17 @@ async fn taking_an_idea_on_yourself_leaves_goose_out_of_it() {
     assert_eq!(status, StatusCode::OK, "{taken}");
     assert_eq!(taken["todos"].as_array().unwrap().len(), 2);
     assert_eq!(
+        (&taken["todos"][0]["source"], &taken["todos"][0]["priority"]),
+        (&json!("idea"), &json!("normal"))
+    );
+    assert_eq!(
         taken["idea"]["state"], "done",
         "working would show Goose as on it"
+    );
+    let (_, again) = call(&pond, Method::POST, "/me/ideas/idea-1/mine", json!({})).await;
+    assert_eq!(
+        again["todos"], taken["todos"],
+        "steps already open on the list are not added twice"
     );
     let (_, ideas) = call(&pond, Method::GET, "/me/ideas", json!({})).await;
     assert_eq!(ideas["ideas"][0]["state"], "done");

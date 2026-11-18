@@ -128,7 +128,46 @@ impl ApplyOutcome {
     pub fn changed(&self) -> usize {
         self.merged + self.pruned + self.split + self.recategorized + self.superseded
     }
+
+    /// The run as one line of the engine's log: `reviewed` memories looked over, and
+    /// `rejected` proposals a review turned down before any guard saw them.
+    pub fn outcome_line(&self, reviewed: usize, rejected: usize) -> String {
+        let made: Vec<String> = [
+            (self.merged, "merged"),
+            (self.pruned, "removed"),
+            (self.split, "split"),
+            (self.recategorized, "re-filed"),
+            (self.superseded, "replaced"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, verb)| format!("{verb} {count}"))
+        .collect();
+        let memories = if reviewed == 1 { "memory" } else { "memories" };
+        let mut line = if made.is_empty() {
+            format!("Looked over {reviewed} {memories} and changed nothing")
+        } else {
+            format!("Looked over {reviewed} {memories}: {}", made.join(", "))
+        };
+        let turned_down = rejected + self.blocked;
+        if turned_down > 0 {
+            let changes = if turned_down == 1 {
+                "change"
+            } else {
+                "changes"
+            };
+            line.push_str(&format!("; turned down {turned_down} {changes}"));
+        }
+        line
+    }
 }
+
+/// How a run that was cancelled reads in the engine's log.
+pub const STOPPED_EARLY: &str = "Stopped before it finished";
+/// How a run whose model call failed reads in the engine's log.
+pub const MODEL_UNHEARD: &str = "The model gave no answer";
+/// How a run whose changes could not be written reads in the engine's log.
+pub const COULD_NOT_SAVE: &str = "The changes could not be saved";
 
 /// The one owner every id shares, all of them in the batch; `None` when any is outside it or two
 /// owners differ. The inner `None` is the household's shared memories.
@@ -637,6 +676,34 @@ mod tests {
         for mode in [ConsolidationMode::Single, ConsolidationMode::Adversarial] {
             assert_eq!(mode_from_setting(mode.as_str()), mode);
         }
+    }
+
+    #[test]
+    fn a_run_reads_as_one_line_in_plain_words() {
+        let outcome = ApplyOutcome {
+            merged: 2,
+            pruned: 1,
+            recategorized: 1,
+            blocked: 1,
+            ..ApplyOutcome::default()
+        };
+        assert_eq!(
+            outcome.outcome_line(50, 2),
+            "Looked over 50 memories: merged 2, removed 1, re-filed 1; turned down 3 changes"
+        );
+        assert_eq!(
+            ApplyOutcome::default().outcome_line(12, 0),
+            "Looked over 12 memories and changed nothing"
+        );
+        let one = ApplyOutcome {
+            split: 1,
+            superseded: 1,
+            ..ApplyOutcome::default()
+        };
+        assert_eq!(
+            one.outcome_line(1, 1),
+            "Looked over 1 memory: split 1, replaced 1; turned down 1 change"
+        );
     }
 
     #[test]

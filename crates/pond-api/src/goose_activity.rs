@@ -1,5 +1,5 @@
 //! What Goose did for the calling member by itself: the list they read, taking one back, and
-//! marking the list seen. Only the heartbeat writes entries.
+//! marking the list seen. The heartbeat and the runner of its intentions write the entries.
 
 use std::sync::Arc;
 
@@ -159,7 +159,8 @@ async fn undo(
         ActivityKind::NoteClosed
         | ActivityKind::Suggestion
         | ActivityKind::Errand
-        | ActivityKind::PhoneRemoved => {}
+        | ActivityKind::PhoneRemoved
+        | ActivityKind::Intention => {}
     }
     repo.mark_undone(&member, &id, chrono::Utc::now())
         .await

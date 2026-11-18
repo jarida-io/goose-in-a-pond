@@ -64,9 +64,7 @@ async fn make_app() -> (
         warmup: Default::default(),
         room_voice: None,
         voice_match: None,
-        suggestion_queue: std::sync::Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db,
         onboarding_repo: Arc::new(SqlxOnboardingRepository::new(pool.clone())),
         handshake: Arc::new(mock_hs),

@@ -5,12 +5,14 @@ use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Duration, NaiveDateTime, NaiveTime, Utc};
 use pond_core::shared::domain::todo::{
-    local_instant, new_todo, parse_clock, rfc3339, zone, Answer, HookCatalog, HookError,
-    HookSource, Place, StateFilter, Todo, TodoSource, TodoState, Transition, Tz, PRESENCE_HOME,
+    clock_label, local_instant, new_todo, parse_clock, rfc3339, zone, Answer, HookCatalog,
+    HookError, HookSource, HookSpec, Place, Priority, StateFilter, Todo, TodoKind, TodoSource,
+    TodoState, Transition, Tz, MAX_LIST_CHARS, MAX_STEPS, MAX_STEP_CHARS, PRESENCE_HOME,
 };
 use pond_core::shared::domain::when_repeats::{repeat_from_words, RepeatUnclear};
 use pond_core::shared::domain::when_said::due_from_words;
 use pond_core::shared::ports::todo::TodoRepository;
+use pond_core::shared::services::todo_add::{add_once, AddedTodo};
 use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
@@ -48,7 +50,8 @@ pub fn init_heartbeat_docs(documents: Arc<dyn PromptTemplateRepository>) {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct AddTodoParams {
-    /// What to do or remember, in the person's words, without the time or place: "call Emmanuel".
+    /// What to do, as a full action in the person's words, without the time or place:
+    /// "Watch Avengers: Doomsday", not "Doomsday".
     #[serde(default)]
     pub text: String,
     /// "reminder" when they said "remind me"; "todo" when they asked to add a task to their
@@ -67,6 +70,13 @@ pub struct AddTodoParams {
     /// true to have Goose ask afterwards whether it was done. Null: true for a todo, false for a
     /// reminder.
     pub ask: Option<bool>,
+    /// The list they named for it: "Work", "Personal". Null when they named none.
+    pub list: Option<String>,
+    /// "high" when they call it urgent, "low" when it can wait. Null: normal.
+    pub priority: Option<String>,
+    /// Its steps when they listed them, each a short action. Null when they gave none.
+    #[schemars(with = "Option<Vec<String>>")]
+    pub steps: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: std::collections::HashMap<String, Value>,
@@ -245,7 +255,7 @@ async fn add_to_heartbeat(p: AddToHeartbeatParams) -> CallToolResult {
 
 /// The household member speaking in this call: the turn's owner, else a one-member household's
 /// only member. A guest keeps no list.
-async fn speaker(meta: &RequestMetaObject) -> Option<String> {
+pub(crate) async fn speaker(meta: &RequestMetaObject) -> Option<String> {
     let session = crate::session_from_meta(meta)?;
     let owner = crate::installed_orchestrator_deps()
         .and_then(|deps| deps.authorities().authority_for_engine_session(&session))
@@ -419,18 +429,46 @@ fn place_hook(said: &str, transition: Transition, places: &[Place]) -> Result<Va
     })
 }
 
-pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
-    let what = "adding that to their to-dos";
+/// How `add` says no: `why` is advice for the model; `said` is the short reason the person is
+/// given.
+fn refusal(p: &AddTodoParams) -> impl Fn(&str, &str) -> Added {
     let asked = p.text.trim().to_string();
     let listed_as = match p.kind.as_deref() {
         Some(kind) if kind.eq_ignore_ascii_case("reminder") => "reminder",
         _ => "todo",
     };
-    // `why` is advice for the model; `said` is the short reason the person is given.
-    let refuse = |said: &str, why: &str| Added {
-        text: format_not_done(what, why),
+    move |said, why| Added {
+        text: format_not_done("adding that to their to-dos", why),
         receipt: Receipt::not_set(listed_as, asked.clone(), said),
+    }
+}
+
+fn clipped(text: &str, max: usize) -> String {
+    text.trim().chars().take(max).collect()
+}
+
+/// Steps as the model sent them: strings, or objects with `text`; anything else is no step.
+fn steps_from(sent: Option<&Value>) -> Vec<Value> {
+    let items = match sent {
+        Some(Value::Array(items)) => items.as_slice(),
+        Some(one @ Value::String(_)) => std::slice::from_ref(one),
+        _ => &[],
     };
+    items
+        .iter()
+        .filter_map(|item| {
+            item.as_str()
+                .or_else(|| item.get("text").and_then(Value::as_str))
+        })
+        .map(|text| clipped(text, MAX_STEP_CHARS))
+        .filter(|text| !text.is_empty())
+        .take(MAX_STEPS)
+        .map(|text| json!({ "text": text }))
+        .collect()
+}
+
+pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
+    let refuse = refusal(&p);
     let Some(repo) = TODO_DEPS.get().cloned() else {
         return refuse(
             "Reminders are not set up on this Pond yet.",
@@ -443,6 +481,18 @@ pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
             "Only a household member the Pond knows keeps a to-do list. Ask them who they are.",
         );
     };
+    add_for(repo.as_ref(), &owner, p, Utc::now(), household_zone().await).await
+}
+
+/// `add` for a member the Pond knows, at `now` in their timezone.
+async fn add_for(
+    repo: &dyn TodoRepository,
+    owner: &str,
+    p: AddTodoParams,
+    now: DateTime<Utc>,
+    tz: Tz,
+) -> Added {
+    let refuse = refusal(&p);
     let text = p.text.trim();
     if text.is_empty() {
         return refuse(
@@ -450,7 +500,6 @@ pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
             "Give `text`: what to do, in their words.",
         );
     }
-    let (now, tz) = (Utc::now(), household_zone().await);
     let mut hooks: Vec<Value> = Vec::new();
     let mut due_at: Option<DateTime<Utc>> = None;
     let repeat = p.repeat.as_ref().filter(|r| !r.is_null());
@@ -512,7 +561,7 @@ pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
             Err(why) => return refuse("I could not tell how often it should repeat.", &why),
         }
     }
-    let places = match repo.places(&owner).await {
+    let places = match repo.places(owner).await {
         Ok(places) => places,
         Err(e) => {
             tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
@@ -550,43 +599,69 @@ pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
         "due_at": due_at.map(rfc3339),
         "ask": p.ask,
         "hooks": hooks,
+        "list": p.list.as_deref().map(|list| clipped(list, MAX_LIST_CHARS)),
+        // A priority the model made up is no priority; it must not cost them the to-do.
+        "priority": p.priority.as_deref().and_then(Priority::parse).map(Priority::as_str),
+        "steps": steps_from(p.steps.as_ref()),
     });
     let catalog = HookCatalog {
         places,
         sources: vec![HookSource::presence()],
     };
-    let todo = match new_todo(&owner, &body, &catalog, TodoSource::Chat, None, now, tz) {
+    let todo = match new_todo(owner, &body, &catalog, TodoSource::Chat, None, now, tz) {
         Ok(todo) => todo,
         Err(HookError(why)) => return refuse("I could not make a reminder out of that.", &why),
     };
-    // A turn re-run after a stop, or a second call, must not leave two of the same.
-    let already = repo
-        .list(&owner, StateFilter::Open)
-        .await
-        .ok()
-        .and_then(|open| open.into_iter().find(|kept| kept.is_repeated_by(&todo)));
-    let todo = match already {
-        Some(kept) => {
-            tracing::info!(target: "giap::trace", kind = "todo_already_added");
-            kept
-        }
-        None => {
-            if let Err(e) = repo.create(&todo).await {
-                tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-                return refuse(
-                    "The Pond could not save it. Ask again in a moment.",
-                    "The Pond could not save it just now; try again shortly.",
-                );
-            }
-            tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
-            todo
+    let added = match add_once(repo, todo).await {
+        Ok(added) => added,
+        Err(e) => {
+            tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
+            return refuse(
+                "The Pond could not save it. Ask again in a moment.",
+                "The Pond could not save it just now; try again shortly.",
+            );
         }
     };
+    let todo = added.todo();
     let fires: Vec<&str> = todo.hooks.iter().map(|h| h.label.as_str()).collect();
-    let when = if fires.is_empty() {
-        "It has no time or place, so it waits on their list.".to_string()
-    } else {
-        format!("Their phone gets it: {}.", fires.join("; "))
+    let when = match (fires.as_slice(), todo.due_at) {
+        ([], Some(due)) => format!(
+            "It is due: {}.",
+            clock_label(&HookSpec::Time { at: due }, now, tz)
+        ),
+        ([], None) => "It has no time or place, so it waits on their list.".to_string(),
+        _ => format!("Their phone gets it: {}.", fires.join("; ")),
+    };
+    let named = match extras(todo).as_slice() {
+        [] => format!("\"{}\"", todo.text),
+        extras => format!("\"{}\" ({})", todo.text, extras.join(", ")),
+    };
+    let text = match &added {
+        AddedTodo::New(_) => {
+            tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
+            format!(
+                "Added to their {}: {named}. {when} Tell them in one short sentence.",
+                if todo.kind == TodoKind::Reminder {
+                    "reminders"
+                } else {
+                    "to-dos"
+                },
+            )
+        }
+        AddedTodo::Listed { moved: false, .. } => {
+            tracing::info!(target: "giap::trace", kind = "todo_already_added");
+            format!(
+                "That is already on their list: {named}. {when} Nothing was added. Tell them \
+                 it is already there."
+            )
+        }
+        AddedTodo::Listed { moved: true, .. } => {
+            tracing::info!(target: "giap::trace", kind = "todo_set_again");
+            format!(
+                "That was already on their list: {named}. No second one was added; it now has \
+                 the time or place they just gave. {when} Tell them in one short sentence."
+            )
+        }
     };
     let kept = if fires.is_empty() {
         todo.text.clone()
@@ -594,15 +669,7 @@ pub(crate) async fn add(meta: &RequestMetaObject, p: AddTodoParams) -> Added {
         format!("{}: {}", todo.text, fires.join("; "))
     };
     Added {
-        text: format!(
-            "Added to their {}: \"{}\". {when} Tell them in one short sentence.",
-            if todo.kind.as_str() == "reminder" {
-                "reminders"
-            } else {
-                "to-dos"
-            },
-            todo.text
-        ),
+        text,
         receipt: Receipt::set(todo.kind.as_str(), kept, Some(todo.id.clone())),
     }
 }
@@ -619,9 +686,27 @@ impl Added {
     }
 }
 
+/// What a to-do carries beyond its words: its list, a priority that is not normal, its steps.
+fn extras(todo: &Todo) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(list) = &todo.list {
+        out.push(format!("list: {list}"));
+    }
+    if todo.priority != Priority::Normal {
+        out.push(format!("{} priority", todo.priority.as_str()));
+    }
+    if !todo.steps.is_empty() {
+        let done = todo.steps.iter().filter(|step| step.done).count();
+        out.push(format!("{done} of {} steps done", todo.steps.len()));
+    }
+    out
+}
+
 fn line(todo: &Todo) -> String {
     let fires: Vec<&str> = todo.hooks.iter().map(|h| h.label.as_str()).collect();
-    let mut out = format!("- [{}] {} ({})", todo.id, todo.text, todo.kind.as_str());
+    let mut tags = vec![todo.kind.as_str().to_string()];
+    tags.extend(extras(todo));
+    let mut out = format!("- [{}] {} ({})", todo.id, todo.text, tags.join(", "));
     if !fires.is_empty() {
         out.push_str(&format!(": {}", fires.join("; ")));
     } else if let Some(due) = todo.due_at {
@@ -729,6 +814,7 @@ async fn complete(meta: &RequestMetaObject, p: CompleteTodoParams) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pond_core::shared::mocks::mock_todo::MockTodoRepository;
 
     const NAIROBI: Tz = chrono_tz::Africa::Nairobi;
 
@@ -802,6 +888,193 @@ mod tests {
         );
         let why = place_hook("the office", Transition::Arrive, &places).unwrap_err();
         assert!(why.contains("Gym"), "{why}");
+    }
+
+    fn asks(text: &str) -> AddTodoParams {
+        AddTodoParams {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    async fn open(repo: &MockTodoRepository, owner: &str) -> Vec<Todo> {
+        repo.list(owner, StateFilter::Open).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_second_ask_for_what_is_open_on_their_list_adds_nothing_and_says_so() {
+        let repo = MockTodoRepository::new();
+        let first = add_for(&repo, "jerry", asks("Call the garage"), now(), NAIROBI).await;
+        assert!(
+            first
+                .text
+                .starts_with("Added to their to-dos: \"Call the garage\"."),
+            "{}",
+            first.text
+        );
+        let id = open(&repo, "jerry").await[0].id.clone();
+
+        let again = add_for(&repo, "jerry", asks(" call the GARAGE! "), now(), NAIROBI).await;
+        assert!(
+            again
+                .text
+                .starts_with("That is already on their list: \"Call the garage\"."),
+            "{}",
+            again.text
+        );
+        assert!(again.text.contains("Nothing was added"), "{}", again.text);
+        assert!(!again.text.contains(&id), "no id in the reply");
+
+        let at_home = AddTodoParams {
+            kind: Some("reminder".into()),
+            place: Some("home".into()),
+            ..asks("Call the garage")
+        };
+        let moved = add_for(&repo, "jerry", at_home, now(), NAIROBI).await;
+        assert!(
+            moved.text.contains("No second one was added")
+                && moved.text.contains("When you get home"),
+            "it had no time or place, so it takes this one: {}",
+            moved.text
+        );
+
+        let timed = AddTodoParams {
+            when: Some("tomorrow at 6pm".into()),
+            ..asks("call the garage")
+        };
+        let waiting = add_for(&repo, "jerry", timed, now(), NAIROBI).await;
+        assert!(
+            waiting.text.contains("Nothing was added")
+                && waiting.text.contains("When you get home"),
+            "what fires the one they have: {}",
+            waiting.text
+        );
+        let kept = open(&repo, "jerry").await;
+        assert_eq!(
+            kept.len(),
+            1,
+            "a reminder and a to-do in the same words are one"
+        );
+        assert_eq!((kept[0].id.as_str(), kept[0].hooks.len()), (id.as_str(), 1));
+
+        let theirs = add_for(&repo, "liz", asks("Call the garage"), now(), NAIROBI).await;
+        assert!(theirs.text.starts_with("Added"), "{}", theirs.text);
+
+        let mut done = kept[0].clone();
+        done.state = TodoState::Done;
+        repo.update(&done, false).await.unwrap();
+        let afresh = add_for(&repo, "jerry", asks("Call the garage"), now(), NAIROBI).await;
+        assert!(
+            afresh.text.starts_with("Added"),
+            "a done to-do does not block a new one: {}",
+            afresh.text
+        );
+        assert_eq!(repo.list("jerry", StateFilter::All).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_reminder_that_already_fired_is_set_again_not_doubled() {
+        let repo = MockTodoRepository::new();
+        let remind = |when: &str| AddTodoParams {
+            kind: Some("reminder".into()),
+            when: Some(when.into()),
+            ..asks("Check the oven")
+        };
+        add_for(&repo, "jerry", remind("18:00"), now(), NAIROBI).await;
+        let first = open(&repo, "jerry").await.remove(0);
+        let fired = first.due_at.unwrap();
+        repo.hook_fired(&first.hooks[0].id, fired, None)
+            .await
+            .unwrap();
+
+        let again = add_for(&repo, "jerry", remind("19:00"), fired, NAIROBI).await;
+        assert!(
+            again.text.contains("it now has the time or place"),
+            "{}",
+            again.text
+        );
+        let kept = open(&repo, "jerry").await;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, first.id);
+        assert_eq!(
+            kept[0].due_at.map(rfc3339).as_deref(),
+            Some("2026-11-09T16:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_list_priority_and_steps_ride_the_add_and_show_in_the_list() {
+        let repo = MockTodoRepository::new();
+        let trip = AddTodoParams {
+            list: Some(" Personal ".into()),
+            priority: Some("High".into()),
+            steps: Some(json!(["Book the train", {"text": " Pack "}, 7, "  "])),
+            ..asks("Plan the Mombasa trip")
+        };
+        let added = add_for(&repo, "jerry", trip, now(), NAIROBI).await;
+        assert!(
+            added.text.starts_with(
+                "Added to their to-dos: \"Plan the Mombasa trip\" (list: Personal, high \
+                 priority, 0 of 2 steps done)."
+            ),
+            "{}",
+            added.text
+        );
+        let mut kept = open(&repo, "jerry").await.remove(0);
+        assert_eq!(
+            (kept.list.as_deref(), kept.priority),
+            (Some("Personal"), Priority::High)
+        );
+        assert_eq!(kept.steps[1].text, "Pack");
+        kept.steps[0].done = true;
+        assert_eq!(
+            line(&kept),
+            format!(
+                "- [{}] Plan the Mombasa trip (todo, list: Personal, high priority, 1 of 2 \
+                 steps done)",
+                kept.id
+            )
+        );
+
+        let loose = AddTodoParams {
+            list: Some("x".repeat(60)),
+            priority: Some("whenever".into()),
+            steps: Some(json!(vec!["a step"; 20])),
+            ..asks("Buy milk")
+        };
+        let added = add_for(&repo, "liz", loose, now(), NAIROBI).await;
+        assert!(added.text.starts_with("Added"), "{}", added.text);
+        let kept = open(&repo, "liz").await.remove(0);
+        assert_eq!(
+            kept.priority,
+            Priority::Normal,
+            "a made-up priority is none"
+        );
+        assert_eq!(
+            (kept.list.unwrap().chars().count(), kept.steps.len()),
+            (MAX_LIST_CHARS, MAX_STEPS)
+        );
+
+        add_for(&repo, "emmanuel", asks("Buy milk"), now(), NAIROBI).await;
+        let plain = open(&repo, "emmanuel").await.remove(0);
+        assert_eq!(line(&plain), format!("- [{}] Buy milk (todo)", plain.id));
+    }
+
+    #[test]
+    fn add_reminder_asks_for_a_full_action_and_takes_a_list_priority_and_steps() {
+        let tool = ScheduleMcpServer::tool_defs()
+            .into_iter()
+            .find(|t| t.name == "add_reminder")
+            .unwrap();
+        let fields = &tool.input_schema["properties"];
+        for field in ["list", "priority", "steps"] {
+            assert!(fields.get(field).is_some(), "{field} missing: {fields}");
+        }
+        let text = fields["text"]["description"].as_str().unwrap();
+        assert!(
+            text.contains("full action") && text.contains("\"Watch Avengers: Doomsday\""),
+            "{text}"
+        );
     }
 
     #[test]

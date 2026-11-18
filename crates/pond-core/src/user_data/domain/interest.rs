@@ -1,6 +1,6 @@
 //! What a member is into: the rows the interview, chat and the member themselves write, and the
-//! portrait the background model keeps of them. The news and ideas read these instead of every
-//! memory.
+//! portrait older readers take from the fact sheet. An unconfirmed row is a candidate and feeds
+//! nothing.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,22 @@ pub const MAX_FACETS: usize = 8;
 const MAX_TOPIC_CHARS: usize = 60;
 const MAX_FACET_CHARS: usize = 40;
 
-/// Evidence at which a guess is offered to the member to confirm.
-pub const OFFERED_AT: u32 = 2;
-/// Evidence at which an unconfirmed guess feeds the news and ideas.
-pub const STRONG_AT: u32 = 3;
+/// Separate days a guess must be seen on before the member is asked to confirm it.
+pub const OFFER_AFTER_DAYS: u32 = 3;
+
+/// Whether a guess is worth asking its member about: seen on three separate days, or liked.
+pub fn ready_to_offer(distinct_days: u32, liked: bool, confirmed: bool, avoid: bool) -> bool {
+    !confirmed && !avoid && (liked || distinct_days >= OFFER_AFTER_DAYS)
+}
+
+/// How many separate days, in `tz`, these sightings fall on.
+pub fn distinct_days(seen_at: &[DateTime<Utc>], tz: chrono_tz::Tz) -> u32 {
+    let days: std::collections::HashSet<chrono::NaiveDate> = seen_at
+        .iter()
+        .map(|at| at.with_timezone(&tz).date_naive())
+        .collect();
+    days.len() as u32
+}
 
 /// A category as stored: a known one, else `other`.
 pub fn category_of(raw: &str) -> String {
@@ -194,10 +206,10 @@ pub fn picture_path(key: &str) -> String {
 }
 
 impl Interest {
-    /// Whether the news and ideas may build on it: confirmed, or a guess resting on several
-    /// conversations, and never one the member asked to keep away from.
+    /// Whether research, the news and prompts may build on it: only one the member confirmed
+    /// and did not ask to keep away from.
     pub fn feeds_research(&self) -> bool {
-        !self.avoid && (self.confirmed || self.evidence >= STRONG_AT)
+        self.confirmed && !self.avoid
     }
 }
 
@@ -288,7 +300,7 @@ pub enum Observed {
     Avoided,
 }
 
-/// The background model's short account of a member.
+/// A short account of a member, derived from their fact sheet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemberPortrait {
     pub summary: String,
@@ -301,17 +313,20 @@ pub struct MemberPortrait {
 impl MemberPortrait {
     /// The portrait as a prompt reads it, a few lines.
     pub fn as_prompt_lines(&self) -> String {
-        let mut out = self.summary.trim().to_string();
+        let mut lines: Vec<String> = Vec::new();
+        if !self.summary.trim().is_empty() {
+            lines.push(self.summary.trim().to_string());
+        }
         for (label, items) in [
             ("Into", &self.into),
             ("Working on", &self.working_on),
             ("Likes", &self.likes),
         ] {
             if !items.is_empty() {
-                out.push_str(&format!("\n{label}: {}", items.join("; ")));
+                lines.push(format!("{label}: {}", items.join("; ")));
             }
         }
-        out
+        lines.join("\n")
     }
 }
 
@@ -346,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_confirmed_or_strong_guess_that_is_not_avoided_feeds_research() {
+    fn only_a_confirmed_interest_that_is_not_avoided_feeds_research() {
         let mut interest = Interest {
             id: "i".into(),
             profile_id: "p".into(),
@@ -357,16 +372,39 @@ mod tests {
             news: NewsMode::Both,
             avoid: false,
             origin: Origin::Chat,
-            evidence: 1,
+            evidence: 40,
             confirmed: false,
             picture: None,
             updated_at: Utc::now(),
         };
-        assert!(!interest.feeds_research(), "one conversation is curiosity");
-        interest.evidence = STRONG_AT;
+        assert!(
+            !interest.feeds_research(),
+            "however often it is seen, a guess is a candidate"
+        );
+        interest.confirmed = true;
         assert!(interest.feeds_research());
         interest.avoid = true;
         assert!(!interest.feeds_research());
+    }
+
+    #[test]
+    fn a_guess_is_offered_after_three_separate_days_or_a_like() {
+        assert!(!ready_to_offer(2, false, false, false));
+        assert!(ready_to_offer(3, false, false, false));
+        assert!(ready_to_offer(0, true, false, false));
+        assert!(!ready_to_offer(9, true, true, false), "already confirmed");
+        assert!(!ready_to_offer(9, true, false, true), "kept away");
+    }
+
+    #[test]
+    fn days_are_counted_where_the_household_lives() {
+        use chrono::TimeZone;
+        let at = |d: u32, h: u32| Utc.with_ymd_and_hms(2026, 11, d, h, 30, 0).unwrap();
+        // 22:30 UTC is already the next day in Nairobi.
+        let seen = [at(10, 22), at(11, 9), at(11, 20)];
+        assert_eq!(distinct_days(&seen, chrono_tz::UTC), 2);
+        assert_eq!(distinct_days(&seen, chrono_tz::Africa::Nairobi), 1);
+        assert_eq!(distinct_days(&[], chrono_tz::UTC), 0);
     }
 
     #[test]

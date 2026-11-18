@@ -27,6 +27,7 @@ import type {
   TurnStats,
 } from "../api/types";
 import { addReceipt, mergeStoredNote, readNote, readReceipt } from "./messageNote";
+import { ASK_TOOL } from "../mygoose/questionShape";
 import type { PreparedImage } from "../lib/imageAttach";
 
 // ── The message model ─────────────────────────────────────────────────────────
@@ -430,11 +431,47 @@ export function sendTurn(turn: SendTurn): void {
   if (state.busy) {
     // The queue holds text only, so a research question queued would run as an ordinary message.
     if (!turn.text || turn.deepResearch) return;
+    if (waitingOnQuestions()) {
+      void answerWaitingQuestions(turn.text);
+      return;
+    }
     state.queued = [...state.queued, turn.text];
     commit();
     return;
   }
   void runTurn(turn);
+}
+
+/** The streaming turn has drawn a questions card whose answers have not come back yet. */
+function waitingOnQuestions(): boolean {
+  const last = state.messages[state.messages.length - 1];
+  return (
+    last?.role === "agent" &&
+    last.streaming === true &&
+    (last.cards ?? []).some((c) => c.tool === ASK_TOOL && typeof c.data?.result !== "string")
+  );
+}
+
+/**
+ * Words typed while the turn waits on its questions answer the first open one as "Other": the
+ * pond hands them to the waiting turn, whose card then shows them. Only while the chat's batch
+ * is still open, so they never start a second turn beside the first; otherwise they queue.
+ */
+async function answerWaitingQuestions(text: string): Promise<void> {
+  const sessionId = state.sessionId;
+  try {
+    const open = sessionId ? await api.listQuestionBatches(sessionId) : [];
+    if (open.some((b) => b.purpose === "chat" && b.state !== "waiting")) {
+      const stream = api.chatStream(text, sessionId);
+      const first = await stream.next();
+      await stream.return(undefined);
+      if ((first.value as ChatEvent | undefined)?.type === "question_answered") return;
+    }
+  } catch (e) {
+    console.warn("Could not answer the waiting questions:", e);
+  }
+  state.queued = [...state.queued, text];
+  commit();
 }
 
 /** Drain one queued message. Module-level, not an effect, so the queue survives leaving Chat. */
@@ -481,6 +518,11 @@ async function consume(
       }
       rememberRun();
       continue;
+    }
+    if (ev.type === "question_answered") {
+      // No turn ran: the words went to a turn waiting on its questions, whose card shows them.
+      mutate((prev) => prev.filter((m) => m.id !== ctx.userMsgId && m.id !== ctx.agentMsgId));
+      return;
     }
     if (ev.type === "reattached" || ev.type === "cancelled") {
       // Bookkeeping only; `cancelled` is followed by a `done` carrying `interrupted`.
@@ -544,6 +586,7 @@ async function consume(
         callId: ev.id as string | undefined,
         data: (ev.result as Record<string, unknown>) ?? {},
         timestamp_ms: Date.now(),
+        ...(ev.input !== undefined ? { input: ev.input } : {}),
       };
       state.bridge?.onContextCard(card);
       patchLastAgent((last) => ({

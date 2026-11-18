@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::shared::domain::todo::{HookEvent, Place, StateFilter, Todo};
+use crate::shared::domain::todo::{todo_key, HookEvent, Place, StateFilter, Todo};
 
 #[async_trait]
 pub trait TodoRepository: Send + Sync {
@@ -15,6 +15,17 @@ pub trait TodoRepository: Send + Sync {
     async fn get(&self, owner: &str, id: &str) -> Result<Option<Todo>>;
     /// The owner's to-dos with their hooks: open ones by due time, then the newest.
     async fn list(&self, owner: &str, filter: StateFilter) -> Result<Vec<Todo>>;
+    /// The owner's open to-do whose text has this [`todo_key`]; an empty key names none.
+    async fn open_with_key(&self, owner: &str, key: &str) -> Result<Option<Todo>> {
+        if key.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .list(owner, StateFilter::Open)
+            .await?
+            .into_iter()
+            .find(|todo| todo_key(&todo.text) == key))
+    }
     /// Writes the to-do's own fields, and replaces its hooks with `todo.hooks` when
     /// `replace_hooks`.
     async fn update(&self, todo: &Todo, replace_hooks: bool) -> Result<()>;

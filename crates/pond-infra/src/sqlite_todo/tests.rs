@@ -4,7 +4,9 @@ use crate::sqlite_proposal::SqliteProposalRepository;
 use crate::sqlite_reminder::SqliteReminderRepository;
 use chrono::Duration;
 use pond_core::mcp::mocks::mock_member_notifier::MockMemberNotifier;
-use pond_core::shared::domain::todo::{resolve_hook, Answer, HookCatalog, Tz};
+use pond_core::shared::domain::todo::{
+    resolve_hook, todo_key, Answer, GooseCan, GooseCanKind, HookCatalog, TodoStep, Tz,
+};
 use pond_core::shared::services::todo_hooks::TodoHookEngine;
 use pond_core::shared::services::todo_offers::offer_pending_reminders;
 use pond_core::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
@@ -60,6 +62,11 @@ fn todo(owner: &str, text: &str, catalog: &HookCatalog, hooks: &[(&str, Value)])
         kind: TodoKind::Todo,
         text: text.into(),
         notes: None,
+        list: None,
+        priority: Priority::Normal,
+        steps: Vec::new(),
+        goose_can: None,
+        anchor_id: None,
         state: TodoState::Open,
         due_at: None,
         ask: true,
@@ -111,6 +118,92 @@ async fn a_todo_and_its_hooks_round_trip_and_only_their_owner_reads_them() {
     assert!(!repo.delete("emmanuel", &t.id).await.unwrap());
     assert_eq!(repo.places("emmanuel").await.unwrap(), vec![]);
     assert!(!repo.delete_place("emmanuel", &place.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_list_priority_steps_gooses_offer_and_anchor_round_trip() {
+    let (repo, _, _tmp) = pond().await;
+    let mut t = todo(
+        "jerry",
+        "Plan the Mombasa trip",
+        &HookCatalog::default(),
+        &[],
+    );
+    t.list = Some("Personal".into());
+    t.priority = Priority::High;
+    t.steps = vec![
+        TodoStep {
+            text: "Book the train".into(),
+            done: true,
+        },
+        TodoStep {
+            text: "Pack".into(),
+            done: false,
+        },
+    ];
+    t.goose_can = Some(GooseCan {
+        label: "Find hotels".into(),
+        kind: GooseCanKind::Research,
+        prompt: "Hotels in Mombasa under KSh 8,000 a night".into(),
+    });
+    t.anchor_id = Some("a-1".into());
+    repo.create(&t).await.unwrap();
+    assert_eq!(repo.get("jerry", &t.id).await.unwrap().unwrap(), t);
+
+    t.list = None;
+    t.priority = Priority::Low;
+    t.steps[1].done = true;
+    t.goose_can = None;
+    t.anchor_id = None;
+    repo.update(&t, false).await.unwrap();
+    assert_eq!(repo.get("jerry", &t.id).await.unwrap().unwrap(), t);
+}
+
+#[tokio::test]
+async fn a_row_written_before_the_structure_reads_with_its_defaults() {
+    let (repo, pool, _tmp) = pond().await;
+    sqlx::query(
+        "INSERT INTO todos (id, profile_id, kind, text, ask, source, created_at, updated_at) \
+         VALUES ('old', 'jerry', 'todo', 'renew the logbook', 1, 'you', \
+         '2026-11-01T06:00:00Z', '2026-11-01T06:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let old = repo.get("jerry", "old").await.unwrap().unwrap();
+    assert_eq!((old.list, old.priority), (None, Priority::Normal));
+    assert_eq!(
+        (old.steps, old.goose_can, old.anchor_id),
+        (vec![], None, None)
+    );
+
+    sqlx::query("UPDATE todos SET priority = '?', steps_json = 'x', goose_can_json = '{}'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let odd = repo.get("jerry", "old").await.unwrap().unwrap();
+    assert_eq!(
+        (odd.priority, odd.steps, odd.goose_can),
+        (Priority::Normal, vec![], None),
+        "what cannot be read is none, and the to-do is still there"
+    );
+}
+
+#[tokio::test]
+async fn an_open_todo_is_found_by_its_key_and_a_closed_one_is_not() {
+    let (repo, _, _tmp) = pond().await;
+    let none = HookCatalog::default();
+    let mut t = todo("jerry", "Call the garage, about the Fielder", &none, &[]);
+    repo.create(&t).await.unwrap();
+    let key = todo_key("call the garage about the fielder!");
+    let found = repo.open_with_key("jerry", &key).await.unwrap();
+    assert_eq!(found.map(|f| f.id), Some(t.id.clone()));
+    assert_eq!(repo.open_with_key("emmanuel", &key).await.unwrap(), None);
+    assert_eq!(repo.open_with_key("jerry", "").await.unwrap(), None);
+
+    t.state = TodoState::Done;
+    repo.update(&t, false).await.unwrap();
+    assert_eq!(repo.open_with_key("jerry", &key).await.unwrap(), None);
 }
 
 #[tokio::test]

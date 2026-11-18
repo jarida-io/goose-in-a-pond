@@ -77,9 +77,10 @@ KV-cost or throughput number.
 
 One slot (`crates/pond-server/src/inference_lane_runner.rs`; policy in
 `crates/pond-core/src/user_data/services/inference_lane.rs`) runs compaction, consolidation,
-titling, proactive review, summary refresh, memory extraction and suggestion generation. Nothing is
-pre-empted mid-call: no job starts while a turn is in flight, user activity cancels consolidation,
-and a quiet compaction of the session a turn arrives on makes that turn wait (`QuietPasses`). The
+titling, long-task steps, proactive review, summary refresh, memory extraction, the news, web watch
+judging and the memory re-sort. Nothing is pre-empted mid-call: no job starts while a turn is in
+flight, user activity cancels consolidation, and a quiet compaction of the session a turn arrives
+on makes that turn wait (`QuietPasses`). The
 embedding slot (`crates/pond-server/src/embedding_slot_runner.rs`, pass in
 `crates/pond-core/src/context/embedding_slot.rs`) is not a lane job: it loads the Memory-role
 embedder and re-embeds stale rows beside a chore, never beside a turn, a compaction or a due
@@ -114,8 +115,9 @@ running server writes `.runtime_api_port` and `.runtime_https_port` there.
 
 `crates/pond-adapters-goose/src/giap_registration.rs` registers them once at startup. The toolkit
 and vision servers are always on. Memory, schedule, weather, knowledge (web search lives here),
-system, device and sensors are on by default; travel, context and orchestrator are off. Each
-`ext_*_enabled` setting gates its server, and `GIAP_NO_TOOLS` registers none.
+system, device, sensors and questions (`giap-questions__ask`, never offered in a spoken turn) are
+on by default; travel, context and orchestrator are off. Each `ext_*_enabled` setting gates its
+server, and `GIAP_NO_TOOLS` registers none.
 
 ### Phones, pairing and the network
 

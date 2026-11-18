@@ -67,7 +67,7 @@ and lane job:
 - memories (`memory_fragments`, batch extraction, consolidation);
 - conversation summaries (`sessions.rolling_summary`);
 - an index over three corpora (`Corpus::{Memory, Context, Summary}`);
-- suggestions (`suggestion_queue`);
+- suggestions (`suggestion_queue`, no longer written: Home's suggestions are derived on read);
 - proactive review (`drafts`).
 
 Long tasks have since added a sixth, artifacts, which is good working memory for a task but

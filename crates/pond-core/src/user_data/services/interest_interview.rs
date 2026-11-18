@@ -8,6 +8,7 @@ use crate::user_data::domain::interest::{Depth, Interest, MemberPortrait, NewsMo
 use crate::user_data::domain::interest_interview::{
     InterestInterview, InterviewNote, InterviewStatus, Question, MAX_QUESTIONS,
 };
+use crate::user_data::domain::question::{means_other, text_key};
 use crate::user_data::services::model_json::{object_in, text_of, texts_of};
 
 /// Questions the model may end the round on, once it has enough.
@@ -79,7 +80,8 @@ pub fn render_system(name: &str, planned: u32) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct KnownAboutMember {
     pub portrait: Option<MemberPortrait>,
-    /// Confirmed rows and strong guesses; avoided rows too, so they are not asked about again.
+    /// Confirmed rows, guesses ready to be offered, and avoided rows so they are not asked
+    /// about again.
     pub interests: Vec<Interest>,
     /// Memory texts, most important first.
     pub memories: Vec<String>,
@@ -95,10 +97,7 @@ fn interest_line(interest: &Interest) -> String {
     } else if interest.confirmed {
         line.push_str(&format!("; {}", interest.depth.as_str()));
     } else {
-        line.push_str(&format!(
-            "; a guess from {} conversations",
-            interest.evidence
-        ));
+        line.push_str("; a guess to confirm with them");
     }
     line.push(')');
     line
@@ -198,9 +197,13 @@ pub fn parse_reply(raw: &str) -> Option<InterviewReply> {
     let question = text_of(&map, "text")
         .filter(|text| text.chars().count() <= MAX_QUESTION_CHARS)
         .map(|text| {
+            // Held to the structured questions' rules for options: no "Other", which the screen
+            // already offers as free text, and no two with the same key.
+            let mut seen = std::collections::HashSet::new();
             let choices: Vec<String> = texts_of(&map, "choices")
                 .into_iter()
                 .filter(|c| c.chars().count() <= MAX_CHOICE_CHARS)
+                .filter(|c| !means_other(c) && seen.insert(text_key(c)))
                 .take(MAX_CHOICES)
                 .collect();
             let allow_free = map
@@ -452,6 +455,15 @@ mod tests {
     }
 
     #[test]
+    fn a_choice_meaning_other_or_repeating_another_is_dropped() {
+        let reply = parse_reply(
+            r#"{"notes": [], "text": "Which team do you follow?", "choices": ["Arsenal", "arsenal!", "Other", "Gor Mahia"]}"#,
+        )
+        .unwrap();
+        assert_eq!(reply.question.unwrap().choices, ["Arsenal", "Gor Mahia"]);
+    }
+
+    #[test]
     fn one_choice_is_not_a_tap_answer() {
         let reply =
             parse_reply(r#"{"notes":[],"text":"What else?","choices":["Yes"],"allow_free":false}"#)
@@ -617,7 +629,7 @@ mod tests {
             memories: vec!["Jerry is shopping for a Toyota Fielder.".into()],
         };
         let message = build_user_message("Jerry", &known, &InterestInterview::default());
-        assert!(message.contains("- The Boys (film_tv; Gen V; a guess from 3 conversations)"));
+        assert!(message.contains("- The Boys (film_tv; Gen V; a guess to confirm with them)"));
         assert!(message.contains("- Jerry is shopping for a Toyota Fielder."));
         assert!(message.contains("write the first question"));
     }

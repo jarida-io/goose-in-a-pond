@@ -12,6 +12,7 @@ export function Dashboard() {
   return (
     <DashboardGrid
       sessionId={state.sessionId}
+      variant="classic"
       onNavigate={(section) => dispatch({ type: "SET_SECTION", payload: section })}
       onTalk={() => dispatch({ type: "SET_MODE", payload: "voice" })}
       // Send first, then navigate. `chatRunStore` is a module singleton that

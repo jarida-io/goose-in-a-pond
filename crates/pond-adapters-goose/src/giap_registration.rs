@@ -197,6 +197,16 @@ pub fn register_giap_extensions(
         registered.push(pond_core::mcp::domain::tool_group::TASK_WORK_EXTENSION.into());
     }
 
+    // On by default; the desk it waits on comes from `init_questions_deps` in pond-server, and a
+    // spoken turn never gets the tool.
+    if settings.ext_questions_enabled {
+        register_builtin_extension(
+            pond_core::mcp::domain::tool_group::QUESTIONS_EXTENSION,
+            pond_mcp_server::spawn_questions_server,
+        );
+        registered.push(pond_core::mcp::domain::tool_group::QUESTIONS_EXTENSION.into());
+    }
+
     // Always on: only an interview turn is offered these tools, and every other turn loses them.
     register_builtin_extension(
         pond_core::mcp::domain::tool_group::INTERVIEW_EXTENSION,

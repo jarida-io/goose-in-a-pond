@@ -1,19 +1,22 @@
-//! SQLite-backed [`IdeaRepository`]: the `ideas` and `idea_runs` tables, the seeds the topic map
-//! (`member_topics`) offers, and the to-dos an idea's steps become in `todos`.
+//! SQLite-backed [`IdeaRepository`]: the `ideas` table and the to-dos an idea's steps become in
+//! `todos`.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
+use pond_core::shared::domain::todo::{new_todo, zone, HookCatalog, TodoSource, MAX_TEXT_CHARS};
+use pond_core::shared::services::todo_add::add_once;
 use pond_core::user_data::domain::idea::{
     card_label, GooseCan, GoosePlan, Grounding, Idea, IdeaFact, IdeaKind, IdeaProgress, IdeaSource,
     IdeaState,
 };
-use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaRun, IdeaTodo, TopicSeed};
+use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaTodo};
 
 use crate::sqlite_interests::{parse_time, stamp};
+use crate::sqlite_todo::SqliteTodoRepository;
 
 pub struct SqliteIdeaRepository {
     pool: Pool<Sqlite>,
@@ -90,10 +93,6 @@ fn idea_of(row: &SqliteRow) -> Result<Idea> {
         progress: task_id.map(|task_id| IdeaProgress { task_id }),
         created_at: parse_time(&created_at)?,
     })
-}
-
-fn time_or_none(raw: Option<String>) -> Option<DateTime<Utc>> {
-    raw.as_deref().and_then(|r| parse_time(r).ok())
 }
 
 #[async_trait]
@@ -185,161 +184,26 @@ impl IdeaRepository for SqliteIdeaRepository {
         Ok(done.rows_affected() > 0)
     }
 
-    async fn topics_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>> {
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT topic, created_at FROM ideas WHERE profile_id = ?")
-                .bind(profile_id)
-                .fetch_all(&self.pool)
-                .await
-                .context("read the topics a member's ideas built on")?;
-        Ok(rows
-            .into_iter()
-            .filter(|(_, at)| parse_time(at).is_ok_and(|at| at >= since))
-            .map(|(topic, _)| topic)
-            .collect())
-    }
-
-    async fn declined_since(&self, profile_id: &str, since: DateTime<Utc>) -> Result<Vec<String>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT topic, created_at FROM ideas WHERE profile_id = ? AND state = 'dismissed'",
-        )
-        .bind(profile_id)
-        .fetch_all(&self.pool)
-        .await
-        .context("read the topics of the ideas a member turned down")?;
-        Ok(rows
-            .into_iter()
-            .filter(|(_, at)| parse_time(at).is_ok_and(|at| at >= since))
-            .map(|(topic, _)| topic)
-            .collect())
-    }
-
-    async fn run(&self, profile_id: &str) -> Result<IdeaRun> {
-        let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT requested_at, started_at, finished_at FROM idea_runs WHERE profile_id = ?",
-        )
-        .bind(profile_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("read a member's idea runs")?;
-        Ok(match row {
-            None => IdeaRun::default(),
-            Some((requested, started, finished)) => IdeaRun {
-                requested_at: time_or_none(requested),
-                started_at: time_or_none(started),
-                finished_at: time_or_none(finished),
-            },
-        })
-    }
-
-    async fn mark_requested(&self, profile_id: &str, at: DateTime<Utc>) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO idea_runs (profile_id, requested_at) VALUES (?, ?) \
-             ON CONFLICT(profile_id) DO UPDATE SET requested_at = excluded.requested_at",
-        )
-        .bind(profile_id)
-        .bind(stamp(at))
-        .execute(&self.pool)
-        .await
-        .context("note that a member asked for ideas")?;
-        Ok(())
-    }
-
-    async fn mark_started(&self, profile_id: &str, at: DateTime<Utc>) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO idea_runs (profile_id, started_at) VALUES (?, ?) \
-             ON CONFLICT(profile_id) DO UPDATE SET started_at = excluded.started_at",
-        )
-        .bind(profile_id)
-        .bind(stamp(at))
-        .execute(&self.pool)
-        .await
-        .context("note that ideas are being thought of")?;
-        Ok(())
-    }
-
-    async fn mark_finished(&self, profile_id: &str, at: DateTime<Utc>) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO idea_runs (profile_id, finished_at) VALUES (?, ?) \
-             ON CONFLICT(profile_id) DO UPDATE SET finished_at = excluded.finished_at",
-        )
-        .bind(profile_id)
-        .bind(stamp(at))
-        .execute(&self.pool)
-        .await
-        .context("note that ideas were thought of")?;
-        Ok(())
-    }
-
-    async fn research_seeds(
-        &self,
-        profile_id: &str,
-        unused_since: DateTime<Utc>,
-    ) -> Result<Vec<TopicSeed>> {
-        type SeedRow = (String, String, String, String, f64, String, Option<String>);
-        let rows: Vec<SeedRow> = match sqlx::query_as(
-            "SELECT id, area, subject, query, score, why, used_at FROM member_topics \
-             WHERE profile_id = ? AND newsworthy = 0 ORDER BY score DESC, rowid ASC",
-        )
-        .bind(profile_id)
-        .fetch_all(&self.pool)
-        .await
-        {
-            Ok(rows) => rows,
-            // The topic map's table arrives with the news; until then ideas seed from interests.
-            Err(e) if e.to_string().contains("no such table") => return Ok(Vec::new()),
-            Err(e) => return Err(e).context("read a member's topic map"),
-        };
-        Ok(rows
-            .into_iter()
-            .filter(|row| time_or_none(row.6.clone()).is_none_or(|used| used < unused_since))
-            .map(|(id, area, subject, query, score, why, _)| TopicSeed {
-                id,
-                area,
-                subject,
-                query,
-                score,
-                why,
-            })
-            .collect())
-    }
-
-    async fn mark_seed_used(
-        &self,
-        profile_id: &str,
-        seed_id: &str,
-        at: DateTime<Utc>,
-    ) -> Result<()> {
-        sqlx::query("UPDATE member_topics SET used_at = ? WHERE profile_id = ? AND id = ?")
-            .bind(stamp(at))
-            .bind(profile_id)
-            .bind(seed_id)
-            .execute(&self.pool)
-            .await
-            .context("mark a topic used by an idea")?;
-        Ok(())
-    }
-
     async fn add_todo(&self, profile_id: &str, idea_id: &str, text: &str) -> Result<IdeaTodo> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-        sqlx::query(
-            "INSERT INTO todos (id, profile_id, kind, text, ask, source, source_ref, created_at, \
-             updated_at) VALUES (?, ?, 'todo', ?, 1, 'idea', ?, ?, ?)",
+        let text: String = text.trim().chars().take(MAX_TEXT_CHARS).collect();
+        let todo = new_todo(
+            profile_id,
+            &serde_json::json!({ "text": text }),
+            &HookCatalog::default(),
+            TodoSource::Idea,
+            Some(idea_id.to_string()),
+            Utc::now(),
+            zone(""),
         )
-        .bind(&id)
-        .bind(profile_id)
-        .bind(text.trim())
-        .bind(idea_id)
-        .bind(stamp(now))
-        .bind(stamp(now))
-        .execute(&self.pool)
-        .await
         .context("add a to-do from an idea")?;
+        let added = add_once(&SqliteTodoRepository::new(self.pool.clone()), todo)
+            .await
+            .context("add a to-do from an idea")?;
+        let todo = added.todo();
         Ok(IdeaTodo {
-            id,
-            text: text.trim().to_string(),
-            created_at: now,
+            id: todo.id.clone(),
+            text: todo.text.clone(),
+            created_at: todo.created_at,
         })
     }
 }
@@ -347,12 +211,6 @@ impl IdeaRepository for SqliteIdeaRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The news engineer's DDL, exactly; it arrives on their branch, not in this one's migration.
-    const MEMBER_TOPICS: &str = "CREATE TABLE IF NOT EXISTS member_topics (id TEXT PRIMARY KEY, \
-        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, area TEXT NOT NULL, \
-        subject TEXT NOT NULL, query TEXT NOT NULL, newsworthy INTEGER NOT NULL, score REAL NOT \
-        NULL, why TEXT NOT NULL DEFAULT '', built_at TEXT NOT NULL, used_at TEXT);";
 
     async fn pool() -> Pool<Sqlite> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -443,90 +301,10 @@ mod tests {
         let working = repo.get("jerry", "i1").await.unwrap().unwrap();
         assert_eq!(working.progress.unwrap().task_id, "task-9");
 
-        let week = Utc::now() - chrono::Duration::days(7);
-        assert!(repo.declined_since("jerry", week).await.unwrap().is_empty());
         repo.set_state("jerry", "i1", IdeaState::Dismissed, None)
             .await
             .unwrap();
         assert!(repo.list("jerry").await.unwrap().is_empty());
-        assert_eq!(
-            repo.declined_since("jerry", week).await.unwrap(),
-            vec!["Toyota Fielder"],
-            "what they turned down is remembered as a topic"
-        );
-        assert!(repo.declined_since("liz", week).await.unwrap().is_empty());
-        assert_eq!(
-            repo.topics_since("jerry", Utc::now() - chrono::Duration::days(7))
-                .await
-                .unwrap(),
-            vec!["Toyota Fielder"],
-            "a dismissed idea's topic still counts as used"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_run_is_pending_from_the_ask_until_it_finishes() {
-        let repo = SqliteIdeaRepository::new(pool().await);
-        assert!(!repo.run("jerry").await.unwrap().is_pending());
-        let t0 = Utc::now() - chrono::Duration::minutes(5);
-        repo.mark_requested("jerry", t0).await.unwrap();
-        assert!(repo.run("jerry").await.unwrap().is_pending());
-        repo.mark_started("jerry", t0 + chrono::Duration::minutes(1))
-            .await
-            .unwrap();
-        repo.mark_finished("jerry", t0 + chrono::Duration::minutes(2))
-            .await
-            .unwrap();
-        assert!(!repo.run("jerry").await.unwrap().is_pending());
-    }
-
-    #[tokio::test]
-    async fn seeds_are_the_unused_topics_the_news_does_not_cover_best_first() {
-        let pool = pool().await;
-        let repo = SqliteIdeaRepository::new(pool.clone());
-        assert!(
-            repo.research_seeds("jerry", Utc::now())
-                .await
-                .unwrap()
-                .is_empty(),
-            "no topic map yet is no seeds, not an error"
-        );
-        sqlx::query(MEMBER_TOPICS).execute(&pool).await.unwrap();
-        let long_ago = stamp(Utc::now() - chrono::Duration::days(30));
-        let yesterday = stamp(Utc::now() - chrono::Duration::days(1));
-        for (id, owner, newsworthy, score, used) in [
-            ("t1", "jerry", 0, 0.6, None),
-            ("t2", "jerry", 0, 0.9, Some(long_ago.as_str())),
-            ("t3", "jerry", 1, 0.99, None),
-            ("t4", "jerry", 0, 0.95, Some(yesterday.as_str())),
-            ("t5", "liz", 0, 0.99, None),
-        ] {
-            sqlx::query(
-                "INSERT INTO member_topics (id, profile_id, area, subject, query, newsworthy, \
-                 score, why, built_at, used_at) VALUES (?, ?, 'cars', 'Fielder', 'q', ?, ?, '', \
-                 ?, ?)",
-            )
-            .bind(id)
-            .bind(owner)
-            .bind(newsworthy)
-            .bind(score)
-            .bind(stamp(Utc::now()))
-            .bind(used)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        let week_ago = Utc::now() - chrono::Duration::days(7);
-        let seeds = repo.research_seeds("jerry", week_ago).await.unwrap();
-        assert_eq!(
-            seeds.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            vec!["t2", "t1"]
-        );
-        repo.mark_seed_used("jerry", "t2", Utc::now())
-            .await
-            .unwrap();
-        let seeds = repo.research_seeds("jerry", week_ago).await.unwrap();
-        assert_eq!(seeds.len(), 1);
     }
 
     #[tokio::test]
@@ -548,6 +326,46 @@ mod tests {
             (source.as_str(), source_ref.as_str(), state.as_str(), ask),
             ("idea", "i1", "open", 1)
         );
+    }
+
+    #[tokio::test]
+    async fn a_step_already_open_on_the_list_is_not_added_twice() {
+        let pool = pool().await;
+        let repo = SqliteIdeaRepository::new(pool.clone());
+        let first = repo
+            .add_todo("jerry", "i1", "Compare three listings")
+            .await
+            .unwrap();
+        let again = repo
+            .add_todo("jerry", "i2", "compare three listings.")
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.id.as_str(), again.text.as_str()),
+            (first.id.as_str(), "Compare three listings")
+        );
+        let theirs = repo
+            .add_todo("liz", "i1", "Compare three listings")
+            .await
+            .unwrap();
+        assert_ne!(theirs.id, first.id, "another member's list");
+
+        sqlx::query("UPDATE todos SET state = 'done' WHERE id = ?")
+            .bind(&first.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let afresh = repo
+            .add_todo("jerry", "i2", "Compare three listings")
+            .await
+            .unwrap();
+        assert_ne!(afresh.id, first.id, "a done to-do does not block a new one");
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM todos WHERE profile_id = 'jerry'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]

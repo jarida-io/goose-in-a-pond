@@ -1048,8 +1048,8 @@ fn interest_for(route: &Route, interests: &[InterestRow]) -> InterestRow {
         })
 }
 
-/// The guesses the member has not confirmed and has shown too seldom to count, unless an interest
-/// they do follow names them: a map never builds on a question asked once or twice.
+/// The guesses the member has not confirmed, unless an interest they do follow names them: a
+/// map never builds on a candidate.
 fn curiosities(rows: &[InterestRow], interests: &[InterestRow]) -> Vec<String> {
     let followed: Vec<String> = interests
         .iter()

@@ -42,6 +42,7 @@ vi.mock("../api/PondApiClient", () => ({
     reattachRun: vi.fn(),
     cancelRun: vi.fn(),
     getSessionAttachment: vi.fn(),
+    listQuestionBatches: vi.fn(),
   },
 }));
 
@@ -203,6 +204,69 @@ describe("starting a turn", () => {
   it("refuses a turn with neither words nor images", () => {
     sendTurn({ text: "   " });
     expect(api.chatStream).not.toHaveBeenCalled();
+    expect(getChatRun().busy).toBe(false);
+  });
+});
+
+describe("a turn waiting on its questions", () => {
+  const ASK: ChatEvent = {
+    type: "tool_call",
+    tool: "giap-questions__ask",
+    id: "call-1",
+    input: { questions: [{ header: "Dates", text: "When?", options: ["Friday", "Saturday"] }] },
+  };
+  const OPEN = [{ id: "b-1", purpose: "chat", anchor_id: null, session_id: "s-1", title: "", state: "open", questions: [] }];
+
+  it("sends words typed meanwhile to the waiting turn, and leaves no empty bubble", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream)
+      .mockReturnValueOnce(held.gen as never)
+      .mockReturnValueOnce(
+        stream([
+          { type: "question_answered", batch_id: "b-1", session_id: "s-1" },
+          { type: "done", done: true, session_id: "s-1", question_answered: true },
+        ]) as never,
+      );
+    vi.mocked(api.listQuestionBatches).mockResolvedValue(OPEN as never);
+    sendTurn({ text: "plan a trip" });
+    await held.push({ type: "run_started", run_id: "r-1", session_id: "s-1", epoch: "e" } as ChatEvent);
+    await held.push(ASK);
+
+    sendTurn({ text: "the week after next" });
+    await flush();
+
+    expect(api.listQuestionBatches).toHaveBeenCalledWith("s-1");
+    expect(api.chatStream).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.chatStream).mock.calls[1][0]).toBe("the week after next");
+    expect(getChatRun().queued).toEqual([]);
+    expect(getChatRun().messages.map((m) => m.role)).toEqual(["user", "agent"]);
+    expect(getChatRun().busy).toBe(true);
+    await held.end();
+  });
+
+  it("queues the words when the questions no longer wait on the turn", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValueOnce(held.gen as never);
+    vi.mocked(api.listQuestionBatches).mockResolvedValue([]);
+    sendTurn({ text: "plan a trip" });
+    await held.push(ASK);
+    sendTurn({ text: "later" });
+    await flush();
+    expect(api.chatStream).toHaveBeenCalledTimes(1);
+    expect(getChatRun().queued).toEqual(["later"]);
+    await held.end();
+  });
+
+  it("drops the bubbles of a send the pond read as an answer", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "question_answered", batch_id: "b-1", session_id: "s-1" },
+        { type: "done", done: true, session_id: "s-1", question_answered: true },
+      ]) as never,
+    );
+    sendTurn({ text: "Saturday" });
+    await flush();
+    expect(getChatRun().messages).toEqual([]);
     expect(getChatRun().busy).toBe(false);
   });
 });

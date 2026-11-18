@@ -551,10 +551,10 @@ async fn an_evergreen_topic_becomes_a_long_read_now_and_then() {
 }
 
 #[test]
-fn a_guess_seen_once_is_curiosity_unless_a_followed_interest_names_it() {
+fn an_unconfirmed_guess_is_kept_off_the_map_unless_a_followed_interest_names_it() {
     let mut primetime = interest("p", "Primetime (thriller)", NewsUse::Both);
     primetime.confirmed = false;
-    primetime.evidence = 1;
+    primetime.evidence = 30;
     let mut dafoe = interest("d", "Willem Dafoe", NewsUse::Both);
     dafoe.confirmed = false;
     dafoe.evidence = 2;

@@ -367,14 +367,6 @@ impl SettingsRepository for SqliteSettingsRepository {
             }
         );
         upsert!(
-            "suggestion_generation_enabled",
-            if settings.suggestion_generation_enabled {
-                "true"
-            } else {
-                "false"
-            }
-        );
-        upsert!(
             "memory_cleanup_enabled",
             if settings.memory_cleanup_enabled {
                 "true"
@@ -657,6 +649,14 @@ impl SettingsRepository for SqliteSettingsRepository {
             }
         );
         upsert!(
+            "ext_questions_enabled",
+            if settings.ext_questions_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
             "ext_knowledge_enabled",
             if settings.ext_knowledge_enabled {
                 "true"
@@ -895,7 +895,11 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
             };
         }
         // Legacy keys — silently ignored for backward compat with old DBs
-        "think_provider" | "think_model" | "task_provider" | "task_model" => {}
+        "think_provider"
+        | "think_model"
+        | "task_provider"
+        | "task_model"
+        | "suggestion_generation_enabled" => {}
         "assistant_name" => s.assistant_name = value.to_string(),
         "assistant_personality" => s.assistant_personality = value.to_string(),
         "user_name" => s.user_name = value.to_string(),
@@ -1155,7 +1159,6 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "network_mode" => s.network_mode = value.to_string(),
         // Memory lifecycle
         "memory_extraction_enabled" => s.memory_extraction_enabled = value == "true",
-        "suggestion_generation_enabled" => s.suggestion_generation_enabled = value == "true",
         "memory_cleanup_enabled" => s.memory_cleanup_enabled = value == "true",
         "memory_consolidation_enabled" => s.memory_consolidation_enabled = value == "true",
         "session_titling_enabled" => s.session_titling_enabled = value == "true",
@@ -1294,6 +1297,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "ext_memory_enabled" => s.ext_memory_enabled = value == "true",
         "ext_schedule_enabled" => s.ext_schedule_enabled = value == "true",
         "ext_weather_enabled" => s.ext_weather_enabled = value == "true",
+        "ext_questions_enabled" => s.ext_questions_enabled = value == "true",
         "ext_knowledge_enabled" => s.ext_knowledge_enabled = value == "true",
         "ext_system_enabled" => s.ext_system_enabled = value == "true",
         "ext_device_enabled" => s.ext_device_enabled = value == "true",
@@ -1404,6 +1408,18 @@ mod tests {
             repo.get().await.unwrap().matter_ws_url,
             "ws://192.168.1.50:5580/ws"
         );
+    }
+
+    #[tokio::test]
+    async fn a_row_for_a_removed_setting_is_read_past() {
+        let repo = fresh_repo().await;
+        repo.set_key("suggestion_generation_enabled", "false".to_string())
+            .await
+            .unwrap();
+        repo.set_key("home_name", "Kilimani".to_string())
+            .await
+            .unwrap();
+        assert_eq!(repo.get().await.unwrap().home_name, "Kilimani");
     }
 
     #[tokio::test]
