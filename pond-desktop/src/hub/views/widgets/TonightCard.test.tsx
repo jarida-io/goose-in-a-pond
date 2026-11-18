@@ -48,9 +48,26 @@ describe("TonightCard", () => {
     expect(container.querySelector(".tonight__mark[data-next]")).toBeTruthy();
   });
 
-  it("calls an empty evening quiet rather than showing a count of nothing", async () => {
+  it("calls an empty night quiet rather than showing a count of nothing", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date(2026, 10, 11, 21, 0));
     vi.mocked(api.listSchedules).mockResolvedValue([]);
     render(<TonightCard onNavigate={() => {}} />);
     expect(await screen.findByText("A quiet night")).toBeTruthy();
+  });
+
+  // It was a starry sky called "Tonight" at nine in the morning.
+  it.each([
+    [9, "day", "Today", false],
+    [18, "dusk", "This evening", false],
+    [22, "night", "Tonight", true],
+  ])("at %i:00 shows the %s sky, named %s", async (hour, phase, name, stars) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date(2026, 10, 11, hour, 0));
+    vi.mocked(api.listSchedules).mockResolvedValue([]);
+    const { container } = render(<TonightCard onNavigate={() => {}} />);
+    expect(await screen.findByText(name)).toBeTruthy();
+    expect(container.querySelector(".tonight")?.getAttribute("data-phase")).toBe(phase);
+    expect(Boolean(container.querySelector(".tonight__stars"))).toBe(stars);
   });
 });
