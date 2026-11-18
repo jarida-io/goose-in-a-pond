@@ -836,6 +836,22 @@ pub async fn request_cards(
     Ok(job)
 }
 
+/// How many of the Pond's engine jobs run before `waiting`: those already running, and those queued
+/// before it. The engine has one inference lane for the whole household, so a set asked for while
+/// three plans are being researched waits for all three; this is the number a member is told, so a
+/// refresh that is only queued does not read as stuck. Another member's jobs count, as they share the
+/// lane; only the number is told, never what they are.
+pub fn jobs_ahead(open: &[EngineJob], waiting: &EngineJob) -> usize {
+    open.iter()
+        .filter(|job| job.id != waiting.id)
+        .filter(|job| match job.state {
+            JobState::Running => true,
+            JobState::Queued => (job.created_at, &job.id) < (waiting.created_at, &waiting.id),
+            _ => false,
+        })
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,6 +860,30 @@ mod tests {
     use serde_json::json;
 
     const NAIROBI: Tz = chrono_tz::Africa::Nairobi;
+
+    // 2026-11-18: a refresh after Go deeper on three cards sat behind ten jobs with only a spinner.
+    #[test]
+    fn a_waiting_set_counts_what_runs_and_what_was_queued_before_it() {
+        let at = |minutes: i64| now() + Duration::minutes(minutes);
+        let job = |kind, minutes, member| {
+            EngineJob::new(kind, JobClass::Asked, Some(member), "x", at(minutes))
+        };
+        let mut running = job(JobKind::Deliverable, 0, "liz");
+        running.start(None, at(1)).unwrap();
+        let earlier = job(JobKind::Questions, 2, "jerry");
+        let set = job(JobKind::Cards, 5, "jerry");
+        let later = job(JobKind::Deliverable, 9, "jerry");
+        let mut done = job(JobKind::FactSheet, 1, "jerry");
+        done.state = JobState::Passed;
+
+        let open = [running, earlier, set.clone(), later, done];
+        assert_eq!(
+            jobs_ahead(&open, &set),
+            2,
+            "the running job and the one queued first"
+        );
+        assert_eq!(jobs_ahead(&[set.clone()], &set), 0);
+    }
 
     fn now() -> DateTime<Utc> {
         // Tuesday 17 November 2026, 09:00 in Nairobi.

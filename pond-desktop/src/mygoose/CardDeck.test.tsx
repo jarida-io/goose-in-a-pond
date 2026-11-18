@@ -102,6 +102,13 @@ describe("CardDeck", () => {
     expect(screen.getByText(/Goose is making your cards/)).toBeTruthy();
   });
 
+  // A refresh queued behind ten jobs showed only "Making your cards", and read as stuck.
+  it("says how many jobs a queued set waits behind", async () => {
+    api.listIdeaCards.mockResolvedValue(deck({ cards: [], set: { state: "queued", made_at: null, ahead: 10 } }));
+    render(<CardDeck variant="classic" place="mygoose" />);
+    expect(await screen.findByText("Goose is finishing 10 things first")).toBeTruthy();
+  });
+
   it("shows one card at a time on the hub", async () => {
     render(<CardDeck variant="hub" place="mygoose" />);
     expect(await screen.findByText("Card 1 of 2")).toBeTruthy();

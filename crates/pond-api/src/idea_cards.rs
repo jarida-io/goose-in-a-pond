@@ -23,7 +23,7 @@ use pond_core::user_data::domain::card::{ActionKind, Card, CardState};
 use pond_core::user_data::domain::dont_list::{Reason, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::{JobClass, JobKind, JobState};
 use pond_core::user_data::services::anchor_add::{add_asked, AnchorAdded};
-use pond_core::user_data::services::cards::{due_time, request_cards};
+use pond_core::user_data::services::cards::{due_time, jobs_ahead, request_cards};
 use pond_core::user_data::services::engine::gaps::request_questions;
 use pond_core::user_data::services::engine::recipes::{deliverable_title, slots_of};
 
@@ -95,7 +95,13 @@ async fn set_view(state: &AppState, member: &str, cards: &[Card]) -> Result<Valu
         None if made_at.is_some() => "ready",
         None => "none",
     };
-    Ok(json!({"state": word, "made_at": made_at}))
+    let mut view = json!({"state": word, "made_at": made_at});
+    // A queued set says what it waits behind, so a refresh behind a long plan does not read as stuck.
+    if let Some(waiting) = open.first().filter(|job| job.state == JobState::Queued) {
+        let all = state.engine.jobs.open().await.map_err(server_error)?;
+        view["ahead"] = json!(jobs_ahead(&all, waiting));
+    }
+    Ok(view)
 }
 
 async fn list(
