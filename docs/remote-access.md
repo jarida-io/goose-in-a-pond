@@ -394,6 +394,103 @@ WARN:
 - `state=NeedsLogin` or `NeedsMachineAuth`: the coordinator answered and wants the node
   re-registered or approved; that is not a network problem.
 
+## Why the Pond is offline
+
+Designed 2026-11-17, after the remote-access drops of 2026-11-12 (about 1.5 h) and 2026-11-14
+(about 1.2 h) turned out to be mains power cuts. A phone away from home used to say only that
+it could not connect. Now the Pond tells the enrollment service about itself, and the phone asks
+the service why the Pond does not answer.
+
+**What the Pond sends.** `PondStatusReports` (`crates/pond-core/src/network/services/pond_status_reports.rs`,
+decisions in `network/domain/pond_status.rs`) sends, while remote access is on and the household
+registered:
+
+| Kind | When | Carries |
+|---|---|---|
+| `booted` | first, every start, retried until it arrives (30 s doubling to 2 min) | `previousShutdown` `clean` or `unclean` |
+| `heartbeat` | every 5 minutes (`HEARTBEAT_INTERVAL`, equal to the service's `HeartbeatInterval`) | |
+| `going_down` | at the start of the graceful stop, waited on for at most 8 s | `reason`: `restart`, `update` or `shutdown` |
+
+Every report also carries the kernel boot id (`/proc/sys/kernel/random/boot_id`), the host's
+monotonic uptime, a per-process `run` id with a `sequence` counting attempts from one, the helper's
+`clockSynchronized`, and `network`: failed attempts before this one, process seconds and the node
+state. Nothing in it comes from the Pond's wall clock.
+
+*Unclean shutdown.* `<data_dir>/.pond_running` is written at start with the boot id and removed at
+the very end of the graceful stop (`pond-infra/src/host_run.rs`). Finding it at start means the
+previous run never stopped gracefully; a different boot id in it means the host restarted under
+it, which the Pond treats as a power loss. This is the inverse of a clean-exit marker on purpose:
+a first start, or the first start after this feature is installed, has no marker and is clean.
+A process that crashed on a host that kept running is unclean but not a power loss.
+
+*Stop reason.* `<data_dir>/.stop_intent` holds one word. The dashboard's restart
+(`POST /api/v1/admin/power/restart`) writes `restart`; `giap.sh` writes `update` before it stops
+or restarts the service for a build. The stop reads and removes it, and ignores one older than ten
+minutes; no intent is `shutdown`.
+
+**Transport and authentication.** The household's Ed25519 authority signs, as it signs
+enrollment approvals: `pondnet --authority-action status` reads the report on stdin, adds the
+household id and a two-minute expiry, signs it in its own domain (`goose-pond-status-v1\0`), and
+posts it. No new secret exists. The service refuses a replay: a report whose `run` matches the last
+one and whose `sequence` is not higher answers `409 stale_report`.
+
+**What the service keeps.** `status.json` beside `state.json`: per household, the last report's
+receive time on the service's clock, boot id, run, sequence, any unanswered `going_down`, and the
+last outage. It is not security state: an unreadable file is set aside as `status.json.unreadable`
+and the service starts without last-seen times.
+
+**How the service explains a silence** (`observe` and `derive`, `native/pondnet/enrollment/status.go`):
+
+| Answer `state` | When |
+|---|---|
+| `online` | a report within 11 minutes (two heartbeats and one minute) |
+| `planned_restart` | a `going_down` arrived and nothing since; believed for 30 minutes for `restart` and `update`, indefinitely for `shutdown`; carries `reason` and `since` |
+| `unreachable` | silent past 11 minutes with no `going_down`, or sooner: as soon as an inventory (every 30 seconds) finds the Pond's node offline after its last report; `since` is the last report; `possibleCauses` is `["power_loss", "network_loss"]`, since from outside the home the two look the same, or `["pond_stopped"]` when Headscale's last inventory still saw the Pond's node online |
+| `back` | reporting again within an hour of an outage's end; `lastOutage` says what it was |
+| `unknown` | the Pond never reported |
+
+`lastOutage.cause` is decided when the Pond returns: `planned` after a `going_down` (or a `booted`
+saying `clean` whose announcement was lost); `power_loss` for `booted` with `unclean` on a new boot
+id, ending at receive time minus uptime, so the minutes the home internet took to return are not
+counted as power off; `network_loss` for heartbeats resuming on the same run and boot after a
+silence, or after a shorter cut that both sides saw: the node went offline after the last report
+and the next report needed a retry (`network.failedAttempts`); `unknown` otherwise.
+
+A cut shorter than two heartbeats used to go unexplained. The Jetson's cuts on 2026-11-18 lasted one
+to three minutes and the Pond retried within a minute of the connection coming back, so no
+heartbeat was missed twice: the phone said only that it could not connect, and nothing was kept.
+The node's presence is why a short cut is now seen; either sign alone is not taken for one, since a
+node can briefly reconnect while every report arrives, and a report can need a retry while this
+service itself was unreachable. How soon a cut shows depends on how soon Headscale marks the node
+offline, which is its keep-alive timeout, plus up to 30 seconds for the next inventory. Answers carry `now`, the service's clock, and `nodeOnline` where known.
+
+**The phone's grant.** A phone never talks to the enrollment service otherwise, so it holds no
+credential there. `GET /api/v1/remote-access/status-grant` (companion API, bearer) answers
+`{enrollmentUrl, grant, expiresAt}`; `409` while remote access is off or unregistered. The grant is
+`{household, device, expires}` signed by the household key (`goose-pond-status-grant-v1\0`), naming
+the phone by the id it is enrolled under at the service, valid 30 days. The phone stores it with
+its profile and presents `Authorization: PondGrant <payload>.<signature>` to
+`GET /v1/pond/status`. The service honours it only while that device is an `active` phone of the
+household, so revoking or replacing the phone ends it at once. A leaked grant reveals only whether
+that household's Pond is up.
+
+**Limits.** Reports and reads share the per-source approval budget and the 10/s public limit,
+then per household: reports 1 per 20 s with a burst of 6, reads 1 per 5 s with a burst of 10.
+Bodies are at most 4 KiB, grants 2 KiB.
+
+**On the Pond after a power cut.** `serve` announces `pond_lost_power` (`Your Pond lost power and
+was off for about N.`) once the service answers the `booted` report with a `power_loss` outage, or
+without a duration after 15 minutes, or at once when remote access is off. The phone says nothing
+extra after the Pond returns; this notice covers it.
+
+**On the phone.** When the Pond does not answer, the connection strip asks the service with the
+grant and words the answer (goose-on-the-go `services/pond-status.ts`); see that repository.
+
+Logs: `pond_status_delivered`, `pond_status_undelivered` (once per failing streak),
+`pond_status_going_down`, `pond_status_going_down_undelivered`, `pond_run_started`,
+`run_marker_unavailable`, `status_grant_issued` on the Pond; `pond_status_report` (with the outage
+cause and length when one ended), `pond_status_save_failed`, `pond_status_unreadable` on the service.
+
 ## Phone side
 
 The companion app's transport (endpoint selection and roaming, SecureStore profiles,

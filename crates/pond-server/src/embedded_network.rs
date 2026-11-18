@@ -832,6 +832,15 @@ impl Runtime {
             .clone()
     }
 
+    /// Whether the host's clock is synchronised, as the helper last reported it; `None` where it
+    /// cannot tell.
+    pub fn clock_synchronized(&self) -> Option<bool> {
+        self.status
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clock_synchronized
+    }
+
     /// Current native addresses for certificate SAN renewal.
     pub fn addresses(&self) -> Vec<String> {
         self.status
@@ -2061,6 +2070,72 @@ fn refused_as(error: &anyhow::Error, reason: &str) -> bool {
         .is_some_and(|refused| refused.reason.as_deref() == Some(reason))
 }
 
+/// Delivers the Pond's status reports to the enrollment service through the helper, which signs
+/// them with the household key (`pondnet --authority-action status`). The helper exits 3 with the
+/// service's reason when it refused a report, and 1 when it could not reach it; both are errors
+/// here, and the caller retries with a new sequence number.
+pub struct StatusViaHelper(pub Arc<Runtime>);
+
+#[async_trait::async_trait]
+impl pond_core::network::ports::pond_status_reporter::PondStatusReporter for StatusViaHelper {
+    async fn report(
+        &self,
+        report: &pond_core::network::domain::pond_status::StatusReport,
+    ) -> Result<pond_core::network::domain::pond_status::CoordinatorView> {
+        let answer = self
+            .0
+            .authority("status", serde_json::to_value(report)?)
+            .await?;
+        Ok(serde_json::from_value(answer)?)
+    }
+}
+
+/// `GET /api/v1/remote-access/status-grant`: a read grant for the calling phone, signed by the
+/// household key, which the phone presents to the enrollment service's `GET /v1/pond/status`
+/// when the Pond cannot be reached. It names the phone as the service knows it, so the service
+/// honours it only while that phone is enrolled; it carries no access to the Pond itself.
+async fn status_grant(
+    State(runtime): State<Arc<Runtime>>,
+    axum::Extension(principal): axum::Extension<pond_core::security::ports::policy::Principal>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let device =
+        pond_core::security::domain::proven_device::ProvenDevice::from_principal(&principal);
+    let id = device.id().ok_or(StatusCode::FORBIDDEN)?;
+    let network = network_device(id).map_err(|_| StatusCode::FORBIDDEN)?;
+    let config = runtime.config().map_err(|error| {
+        tracing::warn!(%error, operation = "status_grant", "remote access configuration unreadable");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+    // No coordinator to ask: nothing a grant could be used for.
+    if !config.enabled || !runtime.registered() {
+        return Err(StatusCode::CONFLICT);
+    }
+    #[derive(Deserialize)]
+    struct Granted {
+        grant: String,
+        expires: i64,
+    }
+    let granted = runtime
+        .authority("grant", serde_json::json!({ "device": network }))
+        .await
+        .and_then(|value| Ok(serde_json::from_value::<Granted>(value)?))
+        .map_err(|error| {
+            tracing::warn!(
+                target: "giap::trace",
+                kind = "status_grant_unsigned",
+                error = %format!("{error:#}"),
+                "could not sign a phone's status grant"
+            );
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    tracing::info!(target: "giap::trace", kind = "status_grant_issued", "a phone was given a status grant");
+    Ok(Json(serde_json::json!({
+        "enrollmentUrl": with_default_coordinator(config).enrollment_url,
+        "grant": granted.grant,
+        "expiresAt": granted.expires,
+    })))
+}
+
 /// The embedded node as the ngrok tunnel hands over to it.
 pub struct AsBuiltIn(pub Arc<Runtime>);
 
@@ -2096,6 +2171,7 @@ pub fn companion_management(runtime: Arc<Runtime>, state: Arc<pond_api::AppState
             "/api/v1/remote-access/enrollment",
             axum::routing::post(register_phone),
         )
+        .route("/api/v1/remote-access/status-grant", get(status_grant))
         .merge(recovery::phone_routes(
             state.handshake.clone(),
             state.device_registry.clone(),
