@@ -715,6 +715,57 @@ describe("SettingsCatalogue", () => {
     });
   });
 
+  describe("the voice picker", () => {
+    // Shaped as `listModels` maps a Kokoro row: name is the voice id, filename its `.bin`.
+    const kokoro = (name: string) => ({
+      id: `tts_kokoro/${name}`, provider: "tts_kokoro", category: "tts_kokoro", name,
+      filename: `${name}.bin`, is_active: false, downloaded: true,
+    });
+    const VOICES = [
+      ...MODELS,
+      kokoro("af_heart"),
+      kokoro("bf_emma"),
+      {
+        id: "tts_piper/lessac", provider: "tts_piper", category: "tts_piper", name: "lessac",
+        display_name: "Lessac", filename: "en_US-lessac-medium.onnx", is_active: false, downloaded: true,
+      },
+    ];
+    const voicePicker = async (overrides: Record<string, unknown>) => {
+      await renderPage(overrides, VOICES);
+      fireEvent.click(screen.getByRole("button", { name: /^Voice/ }));
+      return screen.getByLabelText("Voice") as HTMLSelectElement;
+    };
+    const texts = (select: HTMLSelectElement) => [...select.options].map((o) => o.text);
+
+    it("shows the installed Kokoro voice the pond stores by id as installed, by its name", async () => {
+      const voice = await voicePicker({ voice_tts_voice: "af_heart" });
+      expect(voice.value).toBe("af_heart");
+      expect(texts(voice).some((t) => t.includes("not installed"))).toBe(false);
+      expect(texts(voice)).toContain("Heart (American English, female)");
+      expect(texts(voice).join("|")).not.toMatch(/Af_Heart/);
+    });
+
+    it("saves a Kokoro voice as its id, never its file name", async () => {
+      const voice = await voicePicker({ voice_tts_voice: "af_heart" });
+      fireEvent.change(voice, { target: { value: "bf_emma" } });
+      fireEvent.click(await screen.findByRole("button", { name: /Save 1 change/ }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ voice_tts_voice: "bf_emma" }));
+    });
+
+    it("shows a value saved as a file name as its voice, without saving a change", async () => {
+      const voice = await voicePicker({ voice_tts_voice: "af_heart.bin" });
+      expect(voice.value).toBe("af_heart");
+      expect(texts(voice).some((t) => t.includes("not installed"))).toBe(false);
+      expect(screen.queryByRole("button", { name: /Save 1 change/ })).toBeNull();
+    });
+
+    it("keeps a Piper voice on the file name its resolver reads", async () => {
+      const voice = await voicePicker({ voice_tts_voice: "en_US-lessac-medium.onnx" });
+      expect(voice.value).toBe("en_US-lessac-medium.onnx");
+      expect(texts(voice)).toContain("Lessac");
+    });
+  });
+
   it("offers the device's own time zone when it differs from the saved one", async () => {
     deviceZoneValue = "Africa/Kampala";
     await renderPage({ timezone: "UTC" });
