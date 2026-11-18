@@ -6,6 +6,8 @@ import {
   type AccentName,
   type DensityChoice,
 } from "../../state/themeStore";
+import { useEnterSends } from "../../state/enterSendsStore";
+import { Switch } from "../../../components/Switch";
 import { DeviceTile } from "../../primitives/DeviceTile";
 import type { DeviceData } from "../../data/mockHome";
 import { hubSetDevice } from "../../state/hubStore";
@@ -115,6 +117,7 @@ function SetCard({ title, children }: { title: string; children: React.ReactNode
 
 export function AppearanceView() {
   const { theme, accent, density, setTheme, setAccent, setDensity } = useTheme();
+  const { enterSends, setEnterSends } = useEnterSends();
 
   const themeOptions: ThemeChoice[]   = ["Light", "Dark", "Auto"];
   const accentOptions: AccentName[]   = ["Purple", "Blue", "Teal", "Coral", "Magenta"];
@@ -126,7 +129,7 @@ export function AppearanceView() {
       <div className="setd__titlerow">
         <div>
           <h1 className="view-title">Appearance</h1>
-          <p className="view-sub">Theme, accent and day / night</p>
+          <p className="view-sub">Theme, accent, day / night and typing</p>
         </div>
       </div>
 
@@ -185,6 +188,26 @@ export function AppearanceView() {
                 options={densityOptions}
                 value={density}
                 onChange={setDensity}
+              />
+            </div>
+          </div>
+        </SetCard>
+
+        <SetCard title="Typing">
+          <div className="srow" style={{ cursor: "default" }}>
+            <div className="srow__text">
+              <span className="srow__label">Enter sends the message</span>
+              <span className="srow__sub">
+                {enterSends
+                  ? "Shift + Enter starts a new line"
+                  : "Enter starts a new line; Ctrl + Enter sends"}
+              </span>
+            </div>
+            <div className="srow__control">
+              <Switch
+                checked={enterSends}
+                onChange={setEnterSends}
+                label="Enter sends the message"
               />
             </div>
           </div>
