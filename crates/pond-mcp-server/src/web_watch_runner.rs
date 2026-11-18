@@ -41,6 +41,32 @@ pub struct PageReader;
 #[async_trait]
 impl WatchPageReader for PageReader {
     async fn read(&self, address: &str) -> Result<Vec<WatchItem>, WatchReadError> {
+        if address.starts_with("search://") {
+            use pond_core::shared::ports::news::{Freshness, NewsWeb};
+            let query = reqwest::Url::parse(address)
+                .ok()
+                .and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "q")
+                        .map(|(_, v)| v.into_owned())
+                })
+                .unwrap_or_default();
+            if query.trim().is_empty() {
+                return Err(WatchReadError::Other("empty search query".into()));
+            }
+            let pages = crate::news_web::BraveNewsWeb::default()
+                .find(&query, Freshness::Any)
+                .await
+                .map_err(|e| WatchReadError::Other(format!("{e:?}")))?;
+            return Ok(pages
+                .into_iter()
+                .map(|p| WatchItem {
+                    title: p.title,
+                    link: Some(p.url),
+                    ..WatchItem::default()
+                })
+                .collect());
+        }
         match read_watched(address).await {
             Ok(page) => Ok(page
                 .items
@@ -156,8 +182,12 @@ pub fn spawn(
         let mut clock = tokio::time::interval(PASS_EVERY);
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut digested_on = None;
+        let wake = pond_core::shared::services::web_watch_checker::due_wake();
         loop {
-            clock.tick().await;
+            tokio::select! {
+                _ = clock.tick() => {}
+                _ = wake.notified() => {}
+            }
             let now = Utc::now();
             if let Err(e) = checker.check_due(now).await {
                 tracing::warn!(target: "giap::trace", kind = "web_watch_pass_failed", error = %e);

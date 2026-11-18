@@ -1414,6 +1414,10 @@ impl Handshake for SqliteHandshakeAdapter {
         self.recover_request(request_id, claim_secret, pin).await
     }
 
+    async fn verify_recovery_pin(&self, pin: &str) -> Result<PinCheck> {
+        self.check_pin(pin, Self::now()).await
+    }
+
     async fn mark_pairing_code_approved(&self, code: &str) -> Result<()> {
         let marked = sqlx::query(
             "UPDATE pairing_codes SET approved = 1 WHERE code_hash = ? AND consumed_at IS NULL",

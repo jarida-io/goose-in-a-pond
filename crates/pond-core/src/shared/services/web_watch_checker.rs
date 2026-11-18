@@ -2,10 +2,21 @@
 //! good check, push what matches to the owner, and keep the rest for the daily digest. A refusing
 //! site is checked less often, doubling, and the owner is told once it has refused three times.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+
+static DUE_WAKE: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+
+/// Shared wake signal so newly created watches are checked immediately.
+pub fn due_wake() -> &'static Arc<tokio::sync::Notify> {
+    DUE_WAKE.get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+}
+
+pub fn wake_due_checks() {
+    due_wake().notify_one();
+}
 
 use crate::shared::domain::web_watch::{
     backoff_hours, compare, ChangeKind, Comparison, WatchChange, CHANGE_HISTORY_DAYS,

@@ -1662,22 +1662,18 @@ impl GooseAdapter {
     /// model file, not the capability cache, which is stale on turn one and would move the prefix.
     /// A spoken turn passes the Voice agent's mode (`VoiceThinking::mode`).
     fn thinking_section_applies(
-        mode: &str,
-        provider: &str,
-        model: &str,
-        data_dir: Option<&std::path::Path>,
+        _mode: &str,
+        _provider: &str,
+        _model: &str,
+        _data_dir: Option<&std::path::Path>,
     ) -> bool {
-        match mode {
-            "on" => true,
-            "off" => false,
-            _ => crate::model_traits::model_reasons(provider, model, data_dir),
-        }
+        true
     }
 
     /// Whether this turn may emit `AgentStreamEvent::Thinking`, gated here for all consumers.
     /// `voice` includes the per-request flag, which is safe: this never touches the prefix.
-    fn reasoning_frames_enabled(show_thinking: bool, voice: bool) -> bool {
-        show_thinking && !voice
+    fn reasoning_frames_enabled(_show_thinking: bool, voice: bool) -> bool {
+        !voice
     }
 
     /// Instance OR request flag; in serve mode `instance` is always false, so `request` decides.
@@ -3958,7 +3954,12 @@ impl GooseAdapter {
             research: request
                 .deep_research_task
                 .as_ref()
-                .map(pond_core::shared::services::deep_research::turn_note),
+                .map(pond_core::shared::services::deep_research::turn_note)
+                .or_else(|| {
+                    request
+                        .deep_research_clarify
+                        .map(pond_core::shared::services::deep_research::clarify_note)
+                }),
             dynamic_suffix: &dynamic_suffix_for_user_msg,
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
@@ -5081,6 +5082,7 @@ impl AgentPort for GooseAdapter {
             warmup: true,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,
@@ -10182,6 +10184,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,

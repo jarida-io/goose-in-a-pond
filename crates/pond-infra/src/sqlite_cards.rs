@@ -56,6 +56,40 @@ fn card_of(row: &SqliteRow) -> Result<Card> {
     })
 }
 
+async fn insert_card<'e, E>(executor: E, card: &Card, now: DateTime<Utc>) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(&format!(
+        "INSERT INTO cards ({COLUMNS}, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ))
+    .bind(&card.id)
+    .bind(&card.profile_id)
+    .bind(&card.batch_id)
+    .bind(i64::from(card.rank))
+    .bind(card.kind.as_str())
+    .bind(&card.title)
+    .bind(json_of(&card.why)?)
+    .bind(&card.when)
+    .bind(&card.where_)
+    .bind(&card.cost)
+    .bind(&card.effort)
+    .bind(card.action.as_ref().map(json_of).transpose()?)
+    .bind(json_of(&card.sources)?)
+    .bind(json_of(&card.notes)?)
+    .bind(card.anchor.as_ref().map(|a| a.id.clone()))
+    .bind(card.anchor.as_ref().map(|a| a.title.clone()))
+    .bind(card.state.as_str())
+    .bind(stamp(card.created_at))
+    .bind(stamp(card.fades_at))
+    .bind(stamp(now))
+    .execute(executor)
+    .await
+    .context("store a card")?;
+    Ok(())
+}
+
 #[async_trait]
 impl CardRepository for SqliteCardRepository {
     async fn add_set(&self, profile_id: &str, cards: &[Card], now: DateTime<Utc>) -> Result<()> {
@@ -72,36 +106,14 @@ impl CardRepository for SqliteCardRepository {
         .await
         .context("fade a member's earlier cards")?;
         for card in cards {
-            sqlx::query(&format!(
-                "INSERT INTO cards ({COLUMNS}, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            ))
-            .bind(&card.id)
-            .bind(profile_id)
-            .bind(&card.batch_id)
-            .bind(i64::from(card.rank))
-            .bind(card.kind.as_str())
-            .bind(&card.title)
-            .bind(json_of(&card.why)?)
-            .bind(&card.when)
-            .bind(&card.where_)
-            .bind(&card.cost)
-            .bind(&card.effort)
-            .bind(card.action.as_ref().map(json_of).transpose()?)
-            .bind(json_of(&card.sources)?)
-            .bind(json_of(&card.notes)?)
-            .bind(card.anchor.as_ref().map(|a| a.id.clone()))
-            .bind(card.anchor.as_ref().map(|a| a.title.clone()))
-            .bind(card.state.as_str())
-            .bind(stamp(card.created_at))
-            .bind(stamp(card.fades_at))
-            .bind(stamp(now))
-            .execute(&mut *tx)
-            .await
-            .context("store a card")?;
+            insert_card(&mut *tx, card, now).await?;
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn add_one(&self, card: &Card) -> Result<()> {
+        insert_card(&self.pool, card, card.created_at).await
     }
 
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Card>> {

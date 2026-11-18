@@ -187,6 +187,25 @@ impl AdminElevation {
         Ok(self.idle)
     }
 
+    /// Grant elevation to `device` after an external check (e.g. Security passcode) succeeded.
+    pub async fn grant_verified(
+        &self,
+        device: &str,
+        now: Instant,
+    ) -> Result<Duration, UnlockRefusal> {
+        let mut ledger = self.ledger.lock().await;
+        let card_id = self.cards.current().await.unwrap_or_default();
+        ledger.throttle.record_success();
+        ledger.grants.insert(
+            device.to_string(),
+            Grant {
+                card_id,
+                last_used: now,
+            },
+        );
+        Ok(self.idle)
+    }
+
     /// A key of `device`'s own, for an unlocked device; it replaces any older one.
     pub async fn enroll(&self, device: &str, now: Instant) -> Result<String, Locked> {
         self.admit(device, now).await?;

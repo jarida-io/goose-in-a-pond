@@ -95,9 +95,9 @@ test_the_rules_file_names_the_same_actions_without_a_trailing_comma() {
   world
   local text; text="$(connect_grant_text rules nano)"
   contains "$text" 'subject.user == "nano"'
-  contains "$text" '"org.freedesktop.NetworkManager.enable-disable-wifi"'
-  lacks "$text" 'enable-disable-wifi",'
-  eq "$(printf '%s\n' "$text" | grep -c 'org.freedesktop.NetworkManager\.')" 4
+  contains "$text" '"org.freedesktop.NetworkManager.enable-disable-network"'
+  lacks "$text" 'enable-disable-network",'
+  eq "$(printf '%s\n' "$text" | grep -c 'org.freedesktop.NetworkManager\.')" 6
 }
 
 test_the_pond_user_comes_from_the_system_unit_then_the_caller() {

@@ -19,7 +19,9 @@ use pond_core::shared::domain::todo::{zone, TodoSource};
 use pond_core::user_data::domain::anchor::{
     Anchor, AnchorFact, AnchorKind, AnchorOrigin, AnchorState, Deliverable,
 };
-use pond_core::user_data::domain::card::{ActionKind, Card, CardState};
+use pond_core::user_data::domain::card::{
+    ActionKind, Card, CardKind, CardNotes, CardSource, CardSourceKind, CardState, Why, WhySource,
+};
 use pond_core::user_data::domain::dont_list::{Reason, RuleOrigin, Strength};
 use pond_core::user_data::domain::engine_job::{JobClass, JobKind, JobState};
 use pond_core::user_data::services::anchor_add::{add_asked, AnchorAdded};
@@ -37,7 +39,7 @@ const NOTES_SOURCE: &str = "goose";
 
 pub(crate) fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/me/idea-cards", get(list))
+        .route("/me/idea-cards", get(list).post(create))
         .route("/me/idea-cards/refresh", post(refresh))
         .route("/me/idea-cards/{id}/do", post(do_it))
         .route("/me/idea-cards/{id}/deeper", post(deeper))
@@ -111,6 +113,91 @@ async fn list(
         .map_err(server_error)?;
     let set = set_view(&state, &member, &cards).await?;
     Ok(Json(json!({"cards": cards, "set": set})))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateIdeaBody {
+    title: String,
+    #[serde(default)]
+    why: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+async fn create(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    body: Result<Json<CreateIdeaBody>, JsonRejection>,
+) -> Result<(StatusCode, Json<Card>), Failure> {
+    let member = caller_member(&state, principal.as_ref()).await?;
+    let Json(body) = body.map_err(bad_body)?;
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(failure(StatusCode::BAD_REQUEST, "title is required"));
+    }
+    let why_text = body
+        .why
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Your own idea")
+        .to_string();
+    let notes_text = body
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let kind = body
+        .kind
+        .as_deref()
+        .and_then(CardKind::parse)
+        .unwrap_or(CardKind::Do);
+    let now = Utc::now();
+    let card = Card {
+        id: uuid::Uuid::new_v4().to_string(),
+        profile_id: member,
+        batch_id: "user".to_string(),
+        rank: 0,
+        kind,
+        title,
+        why: Why {
+            text: why_text,
+            source: WhySource {
+                kind: CardSourceKind::Memory,
+                label: "Your idea".to_string(),
+                url: None,
+            },
+        },
+        when: None,
+        where_: None,
+        cost: None,
+        effort: None,
+        action: None,
+        sources: vec![CardSource {
+            kind: CardSourceKind::Memory,
+            title: "Added by you".to_string(),
+            url: None,
+        }],
+        notes: CardNotes {
+            found: notes_text,
+            next: String::new(),
+            caveats: String::new(),
+        },
+        anchor: None,
+        state: CardState::Saved,
+        created_at: now,
+        fades_at: Card::fade_time(now),
+    };
+    state
+        .engine
+        .cards
+        .add_one(&card)
+        .await
+        .map_err(server_error)?;
+    Ok((StatusCode::CREATED, Json(card)))
 }
 
 async fn refresh(

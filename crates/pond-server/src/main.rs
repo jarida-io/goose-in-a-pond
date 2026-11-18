@@ -7737,6 +7737,18 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
     engine_jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
+    pond_mcp_server::plan_tools::init_plan_deps(pond_mcp_server::plan_tools::PlanDeps {
+        anchors: Arc::new(pond_infra::sqlite_anchors::SqliteAnchorRepository::new(
+            pool.clone(),
+        )),
+        dont: Arc::new(pond_infra::sqlite_dont_list::SqliteDontListRepository::new(
+            pool.clone(),
+        )),
+        cards: Some(Arc::new(
+            pond_infra::sqlite_cards::SqliteCardRepository::new(pool.clone()),
+        )),
+        engine_jobs: Some(engine_jobs.clone()),
+    });
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
     pond_mcp_server::saved_items::init_saved_item_deps(
         pond_mcp_server::saved_items::SavedItemDeps {
@@ -7755,14 +7767,6 @@ fn install_long_task_deps(
     pond_mcp_server::todo_tools::init_heartbeat_docs(Arc::new(
         SqlitePromptTemplateRepository::new(pool.clone()),
     ));
-    pond_mcp_server::plan_tools::init_plan_deps(pond_mcp_server::plan_tools::PlanDeps {
-        anchors: Arc::new(pond_infra::sqlite_anchors::SqliteAnchorRepository::new(
-            pool.clone(),
-        )),
-        dont: Arc::new(pond_infra::sqlite_dont_list::SqliteDontListRepository::new(
-            pool.clone(),
-        )),
-    });
     pond_mcp_server::memory::init_memory_profiles(Arc::new(
         pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
     ));
@@ -11363,6 +11367,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 warmup: false,
                 suggestion_context: None,
                 deep_research_task: None,
+                deep_research_clarify: None,
                 interview: None,
                 device_place: None,
                 device_locked: false,
@@ -11446,6 +11451,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     warmup: false,
                     suggestion_context: None,
                     deep_research_task: None,
+                deep_research_clarify: None,
                     interview: None,
                     device_place: None,
                     device_locked: false,

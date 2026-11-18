@@ -266,16 +266,18 @@ pub async fn status(
     }
 }
 
-/// The card's password, or the key the pond issued this device; a key wins if both are sent.
+/// The card's password, the key the pond issued this device, or the Security passcode.
 #[derive(Deserialize)]
 pub struct UnlockBody {
     #[serde(default)]
     password: Option<String>,
     #[serde(default)]
     key: Option<String>,
+    #[serde(default)]
+    pin: Option<String>,
 }
 
-/// `POST /api/v1/admin/unlock {password}` or `{key}`
+/// `POST /api/v1/admin/unlock {password}` or `{key}` or `{pin}`
 pub async fn unlock(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -291,15 +293,24 @@ pub async fn unlock(
     };
     let now = Instant::now();
     let by_key = body.key.is_some();
-    let attempt = match (body.key, body.password) {
-        (Some(key), _) => {
+    let attempt = match (body.key, body.pin, body.password) {
+        (Some(key), _, _) => {
             admin
                 .elevation
                 .unlock_with_key(&caller.device, &key, now)
                 .await
         }
-        (None, Some(password)) => admin.elevation.unlock(&caller.device, &password, now).await,
-        (None, None) => Err(UnlockRefusal::Malformed),
+        (None, Some(pin), _) => {
+            use pond_core::security::domain::pairing_lock::PinCheck;
+            match state.handshake.verify_recovery_pin(&pin).await {
+                Ok(PinCheck::Accepted) => admin.elevation.grant_verified(&caller.device, now).await,
+                Ok(PinCheck::Wrong { .. } | PinCheck::LockedFor(_)) => Err(UnlockRefusal::Rejected),
+                Ok(PinCheck::NoPin) => Err(UnlockRefusal::Malformed),
+                Err(e) => Err(UnlockRefusal::Unavailable(e.to_string())),
+            }
+        }
+        (None, None, Some(password)) => admin.elevation.unlock(&caller.device, &password, now).await,
+        (None, None, None) => Err(UnlockRefusal::Malformed),
     };
     match attempt {
         Ok(left) => {
