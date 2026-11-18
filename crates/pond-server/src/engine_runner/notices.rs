@@ -22,7 +22,7 @@ pub async fn tell_member(
 ) -> MemberDelivery {
     if let (Some(posts), Some(note)) = (&deps.thread, thread) {
         let line = format!("{}. {}", notice.title, notice.body);
-        if let Err(e) = posts.post(Some(profile_id), &line, note).await {
+        if let Err(e) = posts.post(profile_id, &line, note).await {
             tracing::warn!(error = %e, "the engine could not post to the Goose thread");
         }
     }

@@ -3315,4 +3315,122 @@ mod tests {
              (check `PRAGMA foreign_keys` is on for this pool)"
         );
     }
+
+    // -- 0121: one Goose thread per person -----------------------------------------------------
+
+    /// Migration 0121 is a no-op on the empty database `make_storage` builds, so the test lays
+    /// down what a Pond had before it and runs the migration's own text over that.
+    async fn fold_household_thread(s: &SqliteSessionStorage) {
+        sqlx::raw_sql(include_str!(
+            "../migrations/system/0121_one_goose_thread.sql"
+        ))
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn household_thread_with(s: &SqliteSessionStorage, bound_to: Option<&str>) {
+        s.create_session("goose-household".to_string())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE sessions SET profile_id = ?, title = 'Goose', surface = 'goose', \
+                    updated_at = '2026-11-18 05:04:58' WHERE id = 'goose-household'",
+        )
+        .bind(bound_to)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        for (id, at) in [
+            ("brief", "2026-11-17 05:28:02"),
+            ("news", "2026-11-18 05:04:58"),
+        ] {
+            sqlx::query(
+                "INSERT INTO session_messages (id, session_id, role, content, created_at, note_json) \
+                 VALUES (?, 'goose-household', 'assistant', ?, ?, '{}')",
+            )
+            .bind(id)
+            .bind(format!("the {id}"))
+            .bind(at)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn contents(s: &SqliteSessionStorage, session_id: &str) -> Vec<String> {
+        s.get_messages(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.message.content)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_unbound_household_thread_is_copied_to_each_member_and_goes() {
+        let (s, _tmp) = make_storage().await;
+        insert_profile(&s, "amina").await;
+        insert_profile(&s, "baraka").await;
+        insert_profile(&s, "visitor").await;
+        sqlx::query("UPDATE profiles SET role = 'guest' WHERE id = 'visitor'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        // Amina already has a thread of her own, with a look-up in it.
+        s.create_session("goose-amina".to_string()).await.unwrap();
+        s.add_message(
+            "goose-amina".to_string(),
+            SessionMessage::new(
+                "lookup".to_string(),
+                "goose-amina".to_string(),
+                ChatMessage::assistant("the weather"),
+            ),
+        )
+        .await
+        .unwrap();
+        household_thread_with(&s, None).await;
+
+        fold_household_thread(&s).await;
+
+        assert!(s.get_session("goose-household").await.is_err());
+        let hers = contents(&s, "goose-amina").await;
+        assert_eq!(hers.len(), 3, "{hers:?}");
+        assert!(hers.contains(&"the weather".to_string()));
+        assert_eq!(
+            contents(&s, "goose-baraka").await,
+            ["the brief", "the news"]
+        );
+        let his = s.get_session("goose-baraka").await.unwrap();
+        assert_eq!(his.profile_id.as_deref(), Some("baraka"));
+        assert_eq!(his.title.as_deref(), Some("Goose"));
+        assert!(s.get_session("goose-visitor").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_household_thread_one_member_took_over_moves_to_them_alone() {
+        let (s, _tmp) = make_storage().await;
+        insert_profile(&s, "amina").await;
+        insert_profile(&s, "baraka").await;
+        household_thread_with(&s, Some("amina")).await;
+
+        fold_household_thread(&s).await;
+
+        assert!(s.get_session("goose-household").await.is_err());
+        assert_eq!(contents(&s, "goose-amina").await, ["the brief", "the news"]);
+        assert!(s.get_session("goose-baraka").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn with_no_member_the_household_thread_stays() {
+        let (s, _tmp) = make_storage().await;
+        household_thread_with(&s, None).await;
+
+        fold_household_thread(&s).await;
+
+        assert_eq!(
+            contents(&s, "goose-household").await,
+            ["the brief", "the news"]
+        );
+    }
 }

@@ -203,7 +203,7 @@ async fn look_into(
     if let Some(thread) = &deps.engine.thread {
         let note =
             MessageNote::from_source(SourceKind::Lookup, job.text.clone(), Some(job.id.clone()));
-        match thread.post(Some(member), &answer, note).await {
+        match thread.post(member, &answer, note).await {
             Ok(_) => kept = "The answer is in your Goose thread.",
             Err(e) => tracing::warn!(error = %e, "a look-up's answer could not be posted"),
         }
