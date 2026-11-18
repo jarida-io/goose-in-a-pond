@@ -21,6 +21,8 @@ import { OTHER_ID, STARTED_TEXT, TASK_ID, taskOf } from "../longtasks/longTaskFi
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
+    // The empty chat lists idea cards to start from; none here.
+    listIdeaCards: vi.fn().mockResolvedValue({ cards: [], set: { state: "none", made_at: null } }),
     chatStream: vi.fn(),
     listSessions: vi.fn(),
     getSessionMessages: vi.fn(),

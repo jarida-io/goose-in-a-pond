@@ -14,6 +14,8 @@ import type { PreparedImage } from "../lib/imageAttach";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
+    // The empty chat lists idea cards to start from; none here.
+    listIdeaCards: vi.fn().mockResolvedValue({ cards: [], set: { state: "none", made_at: null } }),
     chatStream: vi.fn(),
     listSessions: vi.fn(),
     getSessionMessages: vi.fn(),
@@ -369,6 +371,7 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
     const holder = { sessionId: null as string | null };
     vi.doMock("../api/PondApiClient", () => ({
       api: {
+        listIdeaCards: vi.fn().mockResolvedValue({ cards: [], set: { state: "none", made_at: null } }),
         chatStream: vi.fn(),
         listSessions: vi.fn().mockResolvedValue([]),
         getSessionMessages,
