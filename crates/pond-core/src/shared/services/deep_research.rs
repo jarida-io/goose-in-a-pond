@@ -85,6 +85,28 @@ pub fn turn_note(turn: &DeepResearchTurn) -> String {
     )
 }
 
+/// What the prime is told on an initial deep-research turn before any background task starts:
+/// ask structured clarifying questions to eliminate ambiguity on scope and intent first.
+pub fn clarify_note(answer: AnswerShape) -> String {
+    let depth = match answer {
+        AnswerShape::Short => "a concise summary in a few sentences",
+        AnswerShape::Report => "a full, structured report",
+        AnswerShape::Auto => "the right depth (short answer or full report)",
+    };
+    format!(
+        "<deep-research-clarify>\nThe person asked for deep research on their message (target \
+         output: {depth}). Before starting any research or calling `task_start`, you MUST ask \
+         2 to 4 concise, structured questions to eliminate ambiguity on scope and intent (such as \
+         specific goals, constraints/budget/location, comparison criteria, timeframe, or what to \
+         include/exclude). Format each question as a numbered item with concrete lettered options \
+         so they can reply quickly, plus an open option if none fit. Do NOT answer the research \
+         question yet and do NOT call `task_start` or `web_search` yet. End with a short line \
+         saying that once they reply, you will start the deep research right away. On their next \
+         reply, once scope and intent are clear, call `giap-tasks__task_start` with the full \
+         clarified `goal` and `brief` (including all their answers).\n</deep-research-clarify>"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

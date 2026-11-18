@@ -9,7 +9,7 @@ use pond_core::mcp::ports::notification::{Notification, OpenScreen};
 use pond_core::shared::domain::long_task::{ArtifactKind, ArtifactSummary, LongTask, PlanStep};
 use pond_core::shared::domain::todo::{zone, StateFilter};
 use pond_core::user_data::domain::anchor::{AnchorKind, AnchorState};
-use pond_core::user_data::domain::card::Card;
+use pond_core::user_data::domain::card::{Card, CardSourceKind, CardState};
 use pond_core::user_data::domain::dont_list::Strength;
 use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind, JobState};
 use pond_core::user_data::domain::fact_sheet::FactState;
@@ -117,7 +117,7 @@ async fn own_sources(deps: &EngineDeps, member: &str) -> anyhow::Result<Vec<Numb
         .memories
         .search_recent(&ProfileScope::Owner(member.to_string()), MEMORY_ROWS)
         .await?;
-    Ok(sources(
+    let mut rows = sources(
         SourceRows {
             facts: &facts,
             plans: &plans,
@@ -126,7 +126,33 @@ async fn own_sources(deps: &EngineDeps, member: &str) -> anyhow::Result<Vec<Numb
             memories: &memories,
         },
         &timezone,
-    ))
+    );
+    let shown_cards = deps.cards.shown(member, Utc::now()).await?;
+    for card in shown_cards
+        .into_iter()
+        .filter(|c| c.batch_id == "user" || c.state == CardState::Saved)
+        .take(10)
+    {
+        let mut parts = vec![card.title.clone()];
+        if !card.why.text.is_empty() && card.why.text != "Your own idea" {
+            parts.push(card.why.text.clone());
+        }
+        if !card.notes.found.is_empty() {
+            parts.push(card.notes.found.clone());
+        }
+        rows.push(Numbered {
+            kind: CardSourceKind::Memory,
+            label: if card.batch_id == "user" {
+                format!("Your idea: {}", card.title)
+            } else {
+                format!("Saved idea: {}", card.title)
+            },
+            text: parts.join(" — "),
+            url: None,
+            reference: String::new(),
+        });
+    }
+    Ok(rows)
 }
 
 /// The top passages of each search; a search that fails is left out.

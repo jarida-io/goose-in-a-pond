@@ -65,7 +65,7 @@ async fn hub() -> Json<Value> {
         "interview": true,
         "news": crate::news::SERVED,
         "todos": crate::todos::SERVED,
-        "cart": crate::cart::SERVED,
+        "cart": false,
         "connectors": crate::connectors::SERVED,
         "ideas": crate::ideas::SERVED,
         "screenshots": true,

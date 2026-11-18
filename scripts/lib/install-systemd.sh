@@ -121,7 +121,7 @@ agamemnon_write_unit() { # $1 = path, then the unit text on stdin
 # A locked system account: no password, no shell, and the groups the pond's devices need.
 agamemnon_create() {
   local groups="" g
-  for g in video render audio i2c gpio dialout plugdev input spi; do
+  for g in video render audio i2c gpio dialout plugdev input spi bluetooth netdev; do
     getent group "$g" >/dev/null 2>&1 && groups="${groups:+$groups,}$g"
   done
   if getent passwd "$AGAMEMNON" >/dev/null 2>&1; then

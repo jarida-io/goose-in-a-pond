@@ -113,13 +113,21 @@ impl SystemMcpServer {
             )
         })?;
         // The location service falls back to the time zone, so this is usually a place.
-        let location = pond_core::user_data::services::location::resolve(&settings)
-            .describe()
-            .unwrap_or("unknown")
-            .to_string();
+        let resolved = pond_core::user_data::services::location::resolve(&settings);
+        let location = resolved.describe().unwrap_or("unknown").to_string();
+        let source_note = match settings.weather_location_source.as_str() {
+            "device" => "phone's location (verified, not guessed)",
+            "manual" => "pinned coordinates (verified, not guessed)",
+            "lookup" => "configured place name",
+            _ => match resolved.origin {
+                pond_core::user_data::services::location::Origin::Configured => "configured place name",
+                pond_core::user_data::services::location::Origin::Timezone => "inferred from timezone",
+                pond_core::user_data::services::location::Origin::Unknown => "unknown",
+            },
+        };
         let text = format!(
-            "User: {}\nAssistant name: {}\nTimezone: {}\nHome (where the Pond is): {}",
-            settings.user_name, settings.assistant_name, settings.timezone, location,
+            "User: {}\nAssistant name: {}\nTimezone: {}\nHome (where the Pond is): {}\nHome location source: {}",
+            settings.user_name, settings.assistant_name, settings.timezone, location, source_note,
         );
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }

@@ -21,33 +21,36 @@ const LONG_NUMBER_DIGITS: usize = 9;
 /// Fixed so it stays in the KV prefix. It shows no worked reading: a small model copies one.
 pub const READ_SYSTEM: &str = "\
 You are shown one picture from the phone of a member of this household: a \
-screenshot or a photo. Say what it shows and what the member most likely \
-wants from it, so Goose can help with it later.
+screenshot or a photo. Analyze it step by step, grounded strictly in what is \
+visible, so Goose can help with it later.
 
-First decide how sensitive it is:
+Step 1 — Sensitivity:
 - private: a login or password screen, a code sent to them, a private \
 conversation, an identity or medical document.
 - money: a receipt, a payment or transfer message, a bank or mobile-money screen.
 - none: anything else.
 When unsure between two, choose the more sensitive.
 
+Step 2 — Objective observation (\"description\"):
+Describe all visible elements, text, titles, names, dates, places, and links \
+objectively. Under 250 characters. Only what is visible, never a guess.
+
+Step 3 — Inferred context and next actions (\"intent\", \"suggested_actions\", \"goal\"):
+Based strictly on Step 2, infer the situation and what the member likely wants \
+(\"intent\", under 120 characters). Suggest 1 to 3 concrete open-ended next \
+actions or questions (\"suggested_actions\"). Set \"goal\" only when the picture \
+shows one specific named thing to attend, visit, buy, or build.
+
 Reply with JSON and nothing else:
 
-{\"sensitive\": \"none\" or \"money\" or \"private\", \"description\": \"<what it shows>\", \"intent\": \"<what they want from it>\", \"details\": {\"names\": [], \"dates\": [], \"places\": [], \"prices\": [], \"links\": []}, \"plan\": null}
+{\"sensitive\": \"none\" or \"money\" or \"private\", \"description\": \"<objective observation>\", \"intent\": \"<inferred context and what they want>\", \"details\": {\"names\": [], \"dates\": [], \"places\": [], \"links\": []}, \"suggested_actions\": [\"<concrete next action or question>\"], \"goal\": null}
 
 - For \"private\", leave every other field empty: describe nothing.
-- \"description\": what the picture shows, by its name: the event, place, \
-product, article or topic. Under 200 characters. Only what is on the \
-picture, never a guess.
-- \"intent\": what the member most likely wants from it, in a few words. \
-Under 100 characters.
-- \"details\": the names, dates, places, prices and links the picture \
-writes, as written, at most 8 of each. Never a private person's name, a \
-phone number, an email or an account number.
-- \"plan\": only when the picture shows one named thing they could attend, \
-go on, buy or build: {\"kind\": \"event\" or \"trip\" or \"purchase\" or \
-\"project\", \"title\": \"<its name>\", \"when\": \"<the date as written>\", \
-\"where\": \"<the place>\", \"details\": \"<one line>\"}. Otherwise null.
+- \"details\": only names, dates, places and links written in the picture, at \
+most 8 of each. Never a private person's name, phone number, email or account number.
+- \"goal\": {\"kind\": \"event\" or \"trip\" or \"purchase\" or \"project\", \
+\"title\": \"<its name>\", \"when\": \"<date as written>\", \"where\": \"<place>\", \
+\"details\": \"<one line>\"} or null.
 - No explanation, no preamble.";
 
 /// What goes beside the picture in the maker's call.
@@ -129,9 +132,11 @@ pub fn parse_reading(raw: &str) -> Option<Reading> {
         _ => return None,
     };
     let description = text_of(&map, "description")
+        .or_else(|| text_of(&map, "observation"))
         .map(|text| clipped(text, MAX_DESCRIPTION_CHARS))
         .unwrap_or_default();
     let intent = text_of(&map, "intent")
+        .or_else(|| text_of(&map, "context"))
         .map(|text| clipped(text, MAX_INTENT_CHARS))
         .unwrap_or_default();
     if sensitive == Sensitivity::None {
@@ -147,28 +152,33 @@ pub fn parse_reading(raw: &str) -> Option<Reading> {
         description,
         intent,
         details: details_in(&map),
-        plan: map.get("plan").and_then(plan_in),
+        plan: map
+            .get("goal")
+            .or_else(|| map.get("plan"))
+            .and_then(plan_in),
     })
 }
 
 /// Fixed so it stays in the KV prefix.
 pub const READ_CRITIC_SYSTEM: &str = "\
 You are shown one picture from the phone of a member of this household, and \
-what another reader wrote about it. Check that reading against the picture \
-before anything is kept. You are the last check, so look for what is wrong \
-with it.
+what another reader wrote about it. Check that reading adversarially on both \
+grounds before anything is kept.
 
 Answer \"private\" when the picture is a login or password screen, a code \
 sent to them, a private conversation, or an identity or medical document, \
 whatever the reading says. Nothing about it is then kept.
 
-Answer \"disagree\" when any of these is true:
+Answer \"disagree\" when either ground fails:
+Ground 1 (Observation accuracy):
 - the reading names something the picture does not show;
-- a name, date, place, price or link in it is not what the picture writes;
+- a name, date, place or link in it is not what the picture writes;
 - it calls the picture \"none\" when it shows a receipt, a payment or \
 transfer message, or a bank or mobile-money screen, or \"money\" when it \
-shows none of those;
-- its plan is not something the picture shows.
+shows none of those.
+Ground 2 (Inference & goal grounding):
+- the inferred intent or goal does not follow from what is visible;
+- the goal is vague or not a concrete named thing the picture shows.
 
 Answer \"agree\" otherwise. Wording you would have chosen differently is not \
 a reason to disagree.
@@ -571,9 +581,9 @@ mod tests {
             assert!(READ_CRITIC_SYSTEM.contains(money), "{money}");
         }
         assert!(READ_SYSTEM.contains("leave every other field empty"));
-        assert!(READ_SYSTEM.contains("what the member most likely wants from it"));
+        assert!(READ_SYSTEM.contains("what the member likely wants"));
         assert!(READ_SYSTEM.contains(&format!("at most {MAX_DETAIL_ITEMS} of each")));
-        for field in ["names", "dates", "places", "prices", "links"] {
+        for field in ["names", "dates", "places", "links"] {
             assert!(READ_SYSTEM.contains(&format!("\"{field}\": []")), "{field}");
         }
     }

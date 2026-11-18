@@ -108,7 +108,8 @@ pub fn spawn(deps: NewsDeps) {
     });
     tokio::spawn(runner.clone().story_loop(story_bells));
     tokio::spawn(runner.clone().digest_loop(digest_bells));
-    tokio::spawn(runner.speaker_loop());
+    tokio::spawn(Arc::clone(&runner).speaker_loop());
+    tokio::spawn(runner.backfill_missing_audio());
     tracing::info!("news active -- topic maps, stories and digests on the inference lane");
 }
 
@@ -485,11 +486,40 @@ impl Runner {
             return;
         };
         let path = pond_infra::news_audio::path_for(&self.deps.data_dir, &digest.id);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return;
+        }
         match speech::listen_wav(voice.as_ref(), digest).await {
             Ok(Some(wav)) => pond_infra::news_audio::write(&path, &wav).await,
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(target: "giap::trace", kind = "news_listen_failed", error = %e)
+            }
+        }
+    }
+
+    /// Ensures all existing/old digests have their full-content voice note cached on disk.
+    async fn backfill_missing_audio(self: Arc<Self>) {
+        if self.deps.voice.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        let Ok(members) = self.store.members().await else {
+            return;
+        };
+        for member in members {
+            let Ok(entries) = self.store.digests(&member).await else {
+                continue;
+            };
+            for entry in entries {
+                let path = pond_infra::news_audio::path_for(&self.deps.data_dir, &entry.id);
+                if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                    continue;
+                }
+                if let Ok(Some(digest)) = self.store.digest(&member, &entry.id).await {
+                    self.record(&digest).await;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
             }
         }
     }

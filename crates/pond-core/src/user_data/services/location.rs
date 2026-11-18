@@ -136,8 +136,9 @@ pub fn device_place_note(place: &str) -> Option<String> {
     let place = cleaned.trim();
     (!place.is_empty()).then(|| {
         format!(
-            "The person's phone is in {place} now; their app shares where it is. Home, where the \
-             Pond is, can be elsewhere: get_user_profile gives it."
+            "The person's phone is in {place} now; this is verified live from their phone's \
+             location, not guessed. Use it for where they are now, local weather, and nearby \
+             places; Home, where the Pond is, can be elsewhere: get_user_profile gives it."
         )
     })
 }

@@ -152,7 +152,7 @@ impl SqliteHandshakeAdapter {
     }
 
     /// Checks a PIN and keeps the count of wrong ones with it, so a restart forgives nothing.
-    async fn check_pin(&self, pin: &str, now: DateTime<Utc>) -> Result<PinCheck> {
+    pub(super) async fn check_pin(&self, pin: &str, now: DateTime<Utc>) -> Result<PinCheck> {
         let row = sqlx::query(
             "SELECT pin_verifier, pin_failures, pin_locked_until FROM pairing_lock WHERE id = 1",
         )

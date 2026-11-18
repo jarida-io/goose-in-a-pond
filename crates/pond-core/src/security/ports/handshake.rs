@@ -369,6 +369,10 @@ pub trait Handshake: Send + Sync {
         Ok(PinCheck::NoPin)
     }
 
+    async fn verify_recovery_pin(&self, _pin: &str) -> Result<PinCheck> {
+        Ok(PinCheck::NoPin)
+    }
+
     /// Loopback phase 1: issue a challenge bound to a `client_id`.
     async fn init_handshake(&self, _request: InitRequest) -> Result<ChallengeResponse> {
         Err(anyhow::anyhow!(
