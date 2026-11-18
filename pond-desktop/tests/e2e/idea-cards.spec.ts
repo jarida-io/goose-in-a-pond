@@ -71,6 +71,30 @@ test.describe("Idea cards in the classic shell", () => {
     await expect(deck.getByText("Making your cards")).toBeVisible();
     expect(calls.refreshed).toBe(1);
   });
+
+  // A card with Details open took the whole screen: Home does not scroll, so the widgets under it
+  // were cut to a strip nothing could reach.
+  test("Home keeps room for the widgets under a long card, and the card scrolls", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockCards(page);
+    await page.goto("/");
+    const deck = page.getByRole("region", { name: "Ideas for you" });
+    await expect(deck.getByText("Card 1 of 2")).toBeVisible();
+    await deck.getByRole("button", { name: "Details" }).click();
+
+    const box = await page.evaluate(() => {
+      const body = document.querySelector<HTMLElement>(".dash__body")!.getBoundingClientRect();
+      const top = document.querySelector<HTMLElement>(".dash__top-row")!;
+      return { body: body.height, bottom: body.bottom, scrolls: getComputedStyle(top).overflowY };
+    });
+    expect(box.body).toBeGreaterThanOrEqual(300);
+    expect(box.bottom).toBeLessThanOrEqual(800);
+    expect(box.scrolls).toBe("auto");
+
+    // What the card pushed out of view is still there, by scrolling the row it is in.
+    await deck.getByRole("button", { name: "Next" }).scrollIntoViewIfNeeded();
+    await expect(deck.getByRole("button", { name: "Next" })).toBeInViewport();
+  });
 });
 
 /** Every visible deck control clears 44px, by its own box or its `.reach` band. */

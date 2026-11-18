@@ -88,6 +88,13 @@
 .dash__top-row {
   display: flex;
   flex-direction: column;
+  /* Shrinks and scrolls rather than pushing the widgets off the screen. `.dash`
+     owns its height and does not scroll, so everything here took height from
+     `.dash__body`: an idea card with its question and Details open left the
+     widgets a strip under the fold that nothing could scroll to. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* The idea cards take the same 20px side margin as the status bar and alerts around them. */
@@ -162,8 +169,11 @@
 
 .dash__body {
   position: relative;
-  flex: 1;
-  min-height: 0;
+  flex: 1 1 0;
+  /* The widgets keep at least this much of the screen however long the idea
+     cards above get; the top row scrolls for the rest. min() so a short panel
+     still gives the composer and alerts most of its height. */
+  min-height: min(320px, 50%);
   display: flex;
   /* No bottom padding. The dock's clearance is paid by the column it now
      floats over, in `.sq`'s own bottom padding; a rule here would be this file
