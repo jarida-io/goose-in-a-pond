@@ -417,6 +417,96 @@ async fn delete_model_204_clears_downloaded_flag() {
     assert!(!updated.downloaded, "downloaded flag should be cleared");
 }
 
+/// fastembed's cache entry for `repo` under `<data_dir>/models/embedding`, laid out as hf-hub
+/// leaves it; returns the entry's directory.
+fn cache_fastembed(data_dir: &std::path::Path, repo: &str, model_file: &str) -> std::path::PathBuf {
+    let dir = data_dir.join("models").join("embedding").join(repo);
+    let snapshot = dir.join("snapshots").join("rev1");
+    std::fs::create_dir_all(snapshot.join(model_file).parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dir.join("refs")).unwrap();
+    std::fs::write(dir.join("refs").join("main"), "rev1").unwrap();
+    std::fs::write(snapshot.join(model_file), b"onnx").unwrap();
+    std::fs::write(snapshot.join("tokenizer.json"), b"{}").unwrap();
+    dir
+}
+
+/// The listed embedding row named `name`.
+async fn listed_embedding(app: &axum::Router, name: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(auth_req("GET", "/api/v1/models", None))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    body["embedding"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["name"] == name))
+        .cloned()
+        .unwrap_or_else(|| panic!("no {name} row in {body}"))
+}
+
+/// A built-in memory model is on the device exactly when fastembed's cache holds its weights,
+/// so the Memory list (and the phone, which filters on `downloaded`) shows every one it has.
+#[tokio::test]
+async fn a_built_in_memory_model_is_listed_as_downloaded_when_its_weights_are_cached() {
+    use pond_core::models::domain::embedding_models::find;
+    let (app, repo, tmp) = make_app().await;
+    for name in ["all-MiniLM-L6-v2", "bge-small-en-v1.5"] {
+        repo.upsert(&find(name).unwrap().record()).await.unwrap();
+    }
+
+    assert_eq!(
+        listed_embedding(&app, "all-MiniLM-L6-v2").await["downloaded"],
+        false
+    );
+
+    cache_fastembed(
+        tmp.path(),
+        "models--Qdrant--all-MiniLM-L6-v2-onnx",
+        "model.onnx",
+    );
+    assert_eq!(
+        listed_embedding(&app, "all-MiniLM-L6-v2").await["downloaded"],
+        true
+    );
+    assert_eq!(
+        listed_embedding(&app, "bge-small-en-v1.5").await["downloaded"],
+        false,
+        "a model whose weights are not cached stays off the device"
+    );
+}
+
+/// Deleting a built-in memory model removes fastembed's cache entry, so it does not reappear.
+#[tokio::test]
+async fn deleting_a_built_in_memory_model_removes_its_cached_weights() {
+    use pond_core::models::domain::embedding_models::find;
+    let (app, repo, tmp) = make_app().await;
+    repo.upsert(&find("bge-small-en-v1.5").unwrap().record())
+        .await
+        .unwrap();
+    let cached = cache_fastembed(
+        tmp.path(),
+        "models--Xenova--bge-small-en-v1.5",
+        "onnx/model.onnx",
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(auth_req(
+            "DELETE",
+            "/api/v1/models/embedding/bge-small-en-v1.5",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(!cached.exists(), "the cache entry should have been deleted");
+    assert_eq!(
+        listed_embedding(&app, "bge-small-en-v1.5").await["downloaded"],
+        false
+    );
+}
+
 // ── POST /api/v1/models/{category}/{name}/activate ────────────────────────────
 
 #[tokio::test]
