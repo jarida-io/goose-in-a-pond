@@ -59,6 +59,10 @@ pub struct AgentRequest {
     /// research, so the reply acknowledges it rather than answering the question itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep_research_task: Option<DeepResearchTurn>,
+    /// Initial deep-research turn before a task starts: ask structured clarifying questions on
+    /// scope and intent first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_research_clarify: Option<crate::shared::domain::long_task::AnswerShape>,
     /// This turn runs the speaker's setup interview: where it stands, for the turn's context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interview: Option<String>,
@@ -664,6 +668,7 @@ mod agent_request_scope_tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,

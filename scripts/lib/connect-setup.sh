@@ -11,11 +11,13 @@
 
 CONNECT_ROOT="${CONNECT_ROOT:-}"
 
-# Exactly what scanning and joining need, and nothing broader: no hotspot, no hostname, no sleep.
+# What scanning, joining, and managing Wi-Fi and network settings need from NetworkManager.
 CONNECT_GRANT_ACTIONS="org.freedesktop.NetworkManager.settings.modify.system
+org.freedesktop.NetworkManager.settings.modify.own
 org.freedesktop.NetworkManager.network-control
 org.freedesktop.NetworkManager.wifi.scan
-org.freedesktop.NetworkManager.enable-disable-wifi"
+org.freedesktop.NetworkManager.enable-disable-wifi
+org.freedesktop.NetworkManager.enable-disable-network"
 
 CONNECT_GRANT_NAME="50-giap-network"
 CONNECT_SERVICE_UNIT="goose-in-a-pond.service"
@@ -146,6 +148,37 @@ connect_grant_install() { # $1 = user
     return 1
   fi
   rm -f "$work"
+  # Ensure the pond user has bluetooth and netdev group access and D-Bus org.bluez policy.
+  if [ -z "$CONNECT_ROOT" ] && command -v usermod >/dev/null 2>&1 && command -v getent >/dev/null 2>&1; then
+    local g
+    for g in bluetooth netdev; do
+      getent group "$g" >/dev/null 2>&1 && connect_as_root usermod -a -G "$g" "$user" >/dev/null 2>&1 || true
+    done
+  fi
+  local dbus_dir="$CONNECT_ROOT/etc/dbus-1/system.d"
+  if [ -d "$dbus_dir" ]; then
+    local dbus_work
+    dbus_work="$(mktemp "${TMPDIR:-/tmp}/giap-dbus.XXXXXX")"
+    printf '%s\n' \
+      '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"' \
+      ' "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">' \
+      '<busconfig>' \
+      "  <policy user=\"$user\">" \
+      '    <allow own="org.bluez"/>' \
+      '    <allow send_destination="org.bluez"/>' \
+      '    <allow send_interface="org.bluez.AdvertisementMonitor1"/>' \
+      '    <allow send_interface="org.bluez.Agent1"/>' \
+      '    <allow send_interface="org.bluez.GattCharacteristic1"/>' \
+      '    <allow send_interface="org.bluez.GattDescriptor1"/>' \
+      '    <allow send_interface="org.bluez.LEAdvertisement1"/>' \
+      '    <allow send_interface="org.freedesktop.DBus.ObjectManager"/>' \
+      '    <allow send_interface="org.freedesktop.DBus.Properties"/>' \
+      '  </policy>' \
+      '</busconfig>' > "$dbus_work"
+    connect_as_root cp "$dbus_work" "$dbus_dir/50-giap-bluetooth.conf" >/dev/null 2>&1 \
+      && connect_as_root chmod 0644 "$dbus_dir/50-giap-bluetooth.conf" >/dev/null 2>&1 || true
+    rm -f "$dbus_work"
+  fi
   ok "Wi-Fi grant written for $user: $path"
   note "the pond can now scan and join Wi-Fi from the setup channel; polkit reads it at once"
   return 0

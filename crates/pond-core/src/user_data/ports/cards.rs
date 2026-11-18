@@ -12,6 +12,9 @@ pub trait CardRepository: Send + Sync {
     /// Stores a new set for the member; their new cards still on show fade at `now`.
     async fn add_set(&self, profile_id: &str, cards: &[Card], now: DateTime<Utc>) -> Result<()>;
 
+    /// Stores a single card without fading existing new cards.
+    async fn add_one(&self, card: &Card) -> Result<()>;
+
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Card>>;
 
     /// The cards the member sees: saved, and new ones not yet faded; newest set first, then by

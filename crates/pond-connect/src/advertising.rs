@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pond_core::network::services::advertising::{should_advertise, ADVERTISING_CHECK_INTERVAL};
+use pond_core::network::services::advertising::ADVERTISING_CHECK_INTERVAL;
 use pond_core::network::services::setup_claim::SetupClaimService;
 use pond_core::security::ports::handshake::Handshake;
 use pond_core::user_data::ports::settings::SettingsRepository;
@@ -76,19 +76,6 @@ impl AdvertisingController {
         self
     }
 
-    /// Whether the pairing lock holds. An unreadable lock reads as not holding: the radio
-    /// stays as quiet as it was before the lock existed.
-    async fn lock_holds(&self) -> bool {
-        match &self.pairing {
-            Some(pairing) => pairing
-                .pairing_lock()
-                .await
-                .map(|lock| lock.enforced())
-                .unwrap_or(false),
-            None => false,
-        }
-    }
-
     /// Checks now, then every [`ADVERTISING_CHECK_INTERVAL`], for as long as the pond runs.
     pub async fn run(mut self) {
         let mut interval = tokio::time::interval(ADVERTISING_CHECK_INTERVAL);
@@ -117,8 +104,7 @@ impl AdvertisingController {
             }
         };
         let has_usable_network = self.network.has_usable_network();
-        let advertise = self.enabled
-            && (should_advertise(claimed, has_usable_network) || self.lock_holds().await);
+        let advertise = self.enabled;
         let decision = Decision {
             enabled: self.enabled,
             claimed,
@@ -292,20 +278,16 @@ mod tests {
         assert_eq!(rig.calls().len(), 1, "no call when nothing changed");
 
         rig.store.set_claimed_at(Some(chrono::Utc::now()));
-        assert!(!rig.controller.check().await.advertise);
+        assert!(
+            rig.controller.check().await.advertise,
+            "claimed and online still advertises while BLE setup is enabled"
+        );
         rig.network.0.store(false, Ordering::SeqCst);
         assert!(
             rig.controller.check().await.advertise,
-            "claimed but offline"
+            "claimed and offline"
         );
-        assert_eq!(
-            rig.calls(),
-            [
-                Some("Pond 7f3a".to_string()),
-                None,
-                Some("Pond 7f3a".to_string())
-            ]
-        );
+        assert_eq!(rig.calls(), [Some("Pond 7f3a".to_string())]);
     }
 
     /// A pond whose pairing lock holds or not, as the test sets it.
@@ -351,8 +333,8 @@ mod tests {
         rig.network.0.store(true, Ordering::SeqCst);
         rig.store.set_claimed_at(Some(chrono::Utc::now()));
         assert!(
-            !rig.controller.check().await.advertise,
-            "claimed, online and unlocked: finding it could let a phone in"
+            rig.controller.check().await.advertise,
+            "claimed, online and unlocked still stays findable over BLE"
         );
 
         lock.0.store(true, Ordering::SeqCst);
@@ -361,7 +343,7 @@ mod tests {
             "locked: a phone that finds it can only ask"
         );
         lock.0.store(false, Ordering::SeqCst);
-        assert!(!rig.controller.check().await.advertise);
+        assert!(rig.controller.check().await.advertise);
     }
 
     #[tokio::test]

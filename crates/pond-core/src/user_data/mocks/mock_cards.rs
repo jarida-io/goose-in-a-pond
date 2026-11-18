@@ -51,6 +51,11 @@ impl CardRepository for InMemoryCardRepository {
         Ok(())
     }
 
+    async fn add_one(&self, card: &Card) -> Result<()> {
+        self.rows.lock().unwrap().push(card.clone());
+        Ok(())
+    }
+
     async fn get(&self, profile_id: &str, id: &str) -> Result<Option<Card>> {
         Ok(self
             .rows

@@ -352,6 +352,48 @@ pub async fn clear_pin(
 }
 
 #[derive(Deserialize)]
+pub struct RecoverPinWithCardBody {
+    admin_card: String,
+    pin: String,
+}
+
+/// `POST /pairing/recovery-pin/recover`: reset a forgotten passcode using the giap.sh admin card.
+pub async fn recover_pin_with_admin_card(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Json(body): Json<RecoverPinWithCardBody>,
+) -> Response {
+    if !pin_is_acceptable(&body.pin) {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "pin_invalid");
+    }
+    let Some(admin) = state.pond_admin.as_ref() else {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "admin_unavailable");
+    };
+    let device_id = principal
+        .as_ref()
+        .and_then(|Extension(p)| p.device_id.clone())
+        .unwrap_or_else(|| "host".to_string());
+    if let Err(err) = admin
+        .elevation
+        .unlock(&device_id, &body.admin_card, std::time::Instant::now())
+        .await
+    {
+        return match err {
+            pond_core::security::services::admin_elevation::UnlockRefusal::Cooling(wait) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "cooling", "retry_after": wait.as_secs_ceil()})),
+            )
+                .into_response(),
+            _ => refuse(StatusCode::FORBIDDEN, "admin_card_invalid"),
+        };
+    }
+    match state.handshake.set_recovery_pin(Some(&body.pin)).await {
+        Ok(()) => Json(json!({"has_recovery_pin": true})).into_response(),
+        Err(error) => failed("recover_pin_with_admin_card", error),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct OwnerBody {
     profile_id: String,
 }
