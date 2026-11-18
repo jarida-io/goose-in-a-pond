@@ -270,9 +270,35 @@ async fn request(
             None
         }
     };
+    let pin = headers
+        .get("x-recovery-pin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let pin_approved = if let Some(pin) = pin {
+        match handshake.verify_recovery_pin(pin).await {
+            Ok(pond_core::security::domain::pairing_lock::PinCheck::Accepted) => true,
+            Ok(_) => return Err(StatusCode::FORBIDDEN),
+            Err(error) => return Err(failed(error)),
+        }
+    } else {
+        false
+    };
     let id = runtime
         .recovery
         .insert(device, hash, payload, device_name, generation)?;
+    if pin_approved {
+        let mut entries = runtime
+            .recovery
+            .0
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = entries.get_mut(&id) {
+            entry.approved = true;
+        }
+        tracing::info!("remote recovery approved by security passcode");
+        return Ok(Json(serde_json::json!({"id": id, "approved": true})));
+    }
     tracing::info!("remote recovery awaits local review");
     Ok(Json(serde_json::json!({"id":id})))
 }

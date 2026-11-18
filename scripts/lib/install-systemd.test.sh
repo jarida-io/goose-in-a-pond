@@ -143,11 +143,11 @@ test_the_account_is_locked_with_no_shell_and_only_the_groups_this_host_has() {
 test_an_existing_account_only_gains_groups() {
   world
   printf 'agamemnon:x:998:998::/var/lib/goose-in-a-pond:/usr/sbin/nologin\n' >> "$W/etc/passwd"
-  printf 'i2c:x:116:\ngpio:x:999:\ndialout:x:20:\nplugdev:x:46:\ninput:x:107:\nspi:x:997:\n' >> "$W/etc/group"
+  printf 'i2c:x:116:\ngpio:x:999:\ndialout:x:20:\nplugdev:x:46:\ninput:x:107:\nspi:x:997:\nbluetooth:x:115:\nnetdev:x:108:\n' >> "$W/etc/group"
   agamemnon_create >/dev/null || return 1
   local c; c="$(calls)"
   lacks "$c" "useradd"
-  contains "$c" "usermod -a -G video,render,audio,i2c,gpio,dialout,plugdev,input,spi agamemnon"
+  contains "$c" "usermod -a -G video,render,audio,i2c,gpio,dialout,plugdev,input,spi,bluetooth,netdev agamemnon"
 }
 
 test_a_new_install_moves_the_data_and_leaves_a_link() {

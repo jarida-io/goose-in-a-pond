@@ -21,13 +21,15 @@ const NOTICE_LINES: usize = 4;
 const SYSTEM: &str = "\
 {name} asked the Pond to watch a web page. Below: what they asked for, in \
 their own words, and the numbered changes the latest check found on the \
-page. Decide which of the changes {name} asked to be told about.
+page. Decide which of the changes {name} asked to be told about, and explain \
+your reasoning briefly.
 
 Reply with JSON only, exactly this shape:
-{\"tell\":[1,3]}
+{\"tell\":[1,3], \"thinking\":\"<1-2 sentences explaining what changed and why it does or does not match>\"}
 
 - tell: the numbers of the changes that are what they asked for; [] when \
 none is.
+- thinking: concise reasoning grounded in the changes and what {name} asked for.
 - When they asked to hear of anything new on the page, every new item counts.
 - When they named a subject, a word, a price or a condition, only a change \
 that meets it counts. A change about something else is never told, however \
@@ -56,9 +58,8 @@ pub fn build_user_message(watch: &WebWatch, changes: &[WatchChange]) -> String {
     out
 }
 
-/// The changes to tell, by position among `count`; `None` when the reply says nothing usable,
-/// so the changes are asked about again.
-pub fn parse_reply(raw: &str, count: usize) -> Option<Vec<usize>> {
+/// The changes to tell and the model's reasoning; `None` when the reply says nothing usable.
+pub fn parse_reply_with_thinking(raw: &str, count: usize) -> Option<(Vec<usize>, String)> {
     let map = object_in(raw)?;
     let told = map.get("tell")?.as_array()?;
     let mut picked: Vec<usize> = told
@@ -70,7 +71,18 @@ pub fn parse_reply(raw: &str, count: usize) -> Option<Vec<usize>> {
         .collect();
     picked.sort_unstable();
     picked.dedup();
-    Some(picked)
+    let thinking = map
+        .get("thinking")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().chars().take(400).collect::<String>())
+        .unwrap_or_default();
+    Some((picked, thinking))
+}
+
+/// The changes to tell, by position among `count`; `None` when the reply says nothing usable,
+/// so the changes are asked about again.
+pub fn parse_reply(raw: &str, count: usize) -> Option<Vec<usize>> {
+    parse_reply_with_thinking(raw, count).map(|(picked, _)| picked)
 }
 
 /// Whether a held change has waited long enough to be told without a judgement.

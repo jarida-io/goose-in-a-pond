@@ -45,14 +45,14 @@ const QUERY_CHARS: usize = 80;
 
 /// Fixed so it stays in the KV prefix.
 pub const QUERIES_SYSTEM: &str = "\
-You choose web searches that would help Goose suggest things one member of \
-this household could do soon. You are given today's date, where they live, \
-and what is known about them: facts, plans, to-dos and interests.
+You choose web searches that would help Goose suggest concrete, interest-based \
+ideas for one member of this household. You are given today's date, where they \
+live, and what is known about them: facts, goals, to-dos and interests.
 
-Write searches that find real, current things: an event this week near where \
-they live, opening times or prices for something one of their plans needs, a \
-place that fits one of their interests. Name the town or the date in a search \
-when it matters.
+Step 1: Pick up to 3 active interests or goals that need fresh information.
+Step 2: Write targeted searches for real, current things: an event this week \
+near where they live, opening times or availability for a goal, or something \
+new in one of their interests. Name the town or date when it matters.
 
 Reply with JSON and nothing else:
 
@@ -64,21 +64,26 @@ Reply with JSON and nothing else:
 
 /// Fixed so it stays in the KV prefix. It shows no worked card: a small model copies one.
 pub const MAKER_SYSTEM: &str = "\
-You write idea cards for one member of this household: something they could \
-do, the next step on something they are doing, a reminder worth adding, or a \
-question they could ask Goose. You are given today's date, numbered sources, \
-what the member does not want, and the cards they were shown lately.
+You write structured, interest-based idea cards for one member of this \
+household: something they could do, the next step on a goal, a reminder worth \
+adding, or a question they could ask Goose. You are given today's date, \
+numbered sources, what the member does not want, and cards shown lately.
 
-Every card rests on the sources. Take every name, date, place, price and time \
-from them, never from your own knowledge. Write no card the sources do not \
-support.
+Work step by step for each card:
+Step 1 — Grounding: Pick a specific interest, goal, or fact from the numbered \
+sources. Every name, date, place, and time must come from the sources, never \
+from your own knowledge.
+Step 2 — Concrete Idea: Name a specific, actionable thing (never generic like \
+\"Next step for reading\"). Explain why it fits them (\"why\" starting with \"You\").
+Step 3 — Structured Action: Attach a clear action (todo, reminder, chat, watch, \
+or go_deeper) and honest caveats.
 
 Reply with JSON and nothing else:
 
-{\"cards\": [{\"kind\": \"<do, next_step, reminder or ask>\", \"title\": \"<the idea>\", \
+{\"cards\": [{\"kind\": \"<do, next_step, reminder or ask>\", \"title\": \"<concrete idea naming the thing>\", \
 \"why\": \"<You ...>\", \"why_source\": <source number>, \"when\": \"<when, or empty>\", \
-\"where\": \"<where, or empty>\", \"cost\": \"<price, or empty>\", \"effort\": \"<time it \
-takes, or empty>\", \"action\": {\"kind\": \"<todo, reminder, chat, watch or go_deeper>\", \
+\"where\": \"<where, or empty>\", \"effort\": \"<time it takes, or empty>\", \
+\"action\": {\"kind\": \"<todo, reminder, chat, watch or go_deeper>\", \
 \"label\": \"<button words>\", \"text\": \"<to-do or reminder words>\", \"prompt\": \
 \"<message to Goose>\", \"due\": \"<YYYY-MM-DD HH:MM, or empty>\", \"question\": \
 {\"header\": \"<1 to 2 words>\", \"text\": \"<question to the member>\", \"options\": \
@@ -87,36 +92,36 @@ takes, or empty>\", \"action\": {\"kind\": \"<todo, reminder, chat, watch or go_
 \"caveats\": \"<what is unsure>\"}]}
 
 - At most 12 cards, each different. A few good cards beat many weak ones.
-- \"title\": at most 70 characters, in plain words.
-- \"why\": one line to the member that starts with \"You\" and names what the card builds on.
+- \"title\": at most 70 characters, naming a concrete entity, place, or action.
+- \"why\": one line to the member starting with \"You\" that names the interest, goal, or fact it builds on.
 - \"sources\": the number of every source the card uses, at least one.
-- Each card has a when or a where, a cost or an effort, or an action. Most have an action.
-- \"why\" names the specific thing it builds on; never \"so you should\".
+- Each card has a when, a where, an effort, or an action. Most have an action.
 - Actions: todo adds a to-do, reminder adds a reminder at due, chat sends the prompt to \
-Goose, watch watches a page from the sources that lists things for sale or to book for one \
-of the member's plans, go_deeper has Goose research it.
+Goose, watch monitors a page from the sources for updates toward a goal, go_deeper has Goose research it.
 - A do card names one specific event, place or activity, with its when and where.
-- A reminder or todo card adds something new that follows from a plan, a memory or the web; \
+- A reminder or todo card adds something new that follows from a goal, a memory or the web; \
 never one the member's to-dos already hold, and never one due before today.
-- An ask card's action is chat, with a question to the member and 2 to 4 options. The \
-option they pick is sent to Goose as their message, so word each option as something they \
-would ask Goose; never \"Other\". Other cards have no question.
-- A next_step card moves one of the member's plans on.
+- An ask card's action is chat, with a question to the member and 2 to 4 options worded as \
+things they would ask Goose; never \"Other\". Other cards have no question.
+- A next_step card moves one of the member's goals forward.
 - Leave out what the member does not want and what they were shown lately.
 - No explanation, no preamble.";
 
 /// Fixed so it stays in the KV prefix.
 pub const CRITIC_SYSTEM: &str = "\
-You check idea cards before Goose shows them to one member of this household. \
-You are given the numbered sources, what the member does not want, and the \
-numbered cards.
+You check idea cards adversarially on both grounds before Goose shows them to \
+one member of this household. You are given the numbered sources, what the \
+member does not want, and the numbered cards.
 
-Drop a card when any of these is true:
-- it is vague: there is no clear thing to do;
-- it repeats another card;
+Drop a card when either ground fails:
+Ground 1 (Grounding & Relevance):
 - its sources do not support what it says;
-- it goes against what the member does not want;
-- it is not about this member.
+- it is not grounded in the member's interests, goals, or facts;
+- it goes against what the member does not want.
+Ground 2 (Concrete Quality & Uniqueness):
+- it is vague or generic (no concrete entity, place, or clear thing to do);
+- it repeats another card or duplicates an existing to-do;
+- its action or question is broken or unhelpful.
 
 Reply with JSON and nothing else:
 
