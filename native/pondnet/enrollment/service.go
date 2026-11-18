@@ -126,8 +126,9 @@ type Service struct {
 	status        *statusStore
 	statusReports *sources
 	statusReads   *sources
-	// presence is what the last inventory said about each node, by node ID. Guarded by
-	// Store.mu, and replaced whole by every inventory the policy is computed from.
+	// presence is what the last inventory said about each node, by node ID, with when it
+	// last went offline. Guarded by Store.mu, and replaced by every inventory the policy is
+	// computed from, each node's from its previous one.
 	presence map[string]nodePresence
 	// applied is the decoded policy document this service last wrote to the coordinator
 	// or found already there, and nil while that is unknown: before the first policy
@@ -188,9 +189,10 @@ func (s *Service) enforcePolicy(ctx context.Context) (inventory []Registered, er
 	if err != nil {
 		return nil, err
 	}
+	now := s.Now().Unix()
 	presence := make(map[string]nodePresence, len(inventory))
 	for _, node := range inventory {
-		presence[node.ID] = nodePresence{Online: node.Online}
+		presence[node.ID] = presenceAt(s.presence[node.ID], node.Online, now)
 	}
 	s.presence = presence
 	// Indexed once, so matching runs under the store lock in devices plus nodes rather

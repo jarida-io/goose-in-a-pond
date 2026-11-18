@@ -33,13 +33,13 @@ func booted(run, previous, boot string, uptime int64) PondReport {
 // silence with no announcement, then a Pond on a new boot whose last run never stopped.
 // The host was up eight minutes before its report arrived, so the outage ends there.
 func TestAPowerCutIsTheSilenceUpToTheHostsReturn(t *testing.T) {
-	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000)
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
 	during := derive(record, true, nil, 1000+20*minute)
 	if during.State != StateUnreachable || during.Since != 1000 || !slices.Equal(during.PossibleCauses, []string{CausePowerLoss, CauseNetworkLoss}) {
 		t.Fatalf("during the cut: %+v", during)
 	}
 	arrived := int64(1000 + 98*minute)
-	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "unclean", bootB, 8*minute), arrived)
+	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "unclean", bootB, 8*minute), arrived, nil)
 	outage := record.LastOutage
 	if outage == nil || outage.Cause != CausePowerLoss || outage.StartedAt != 1000 || outage.EndedAt != arrived-8*minute {
 		t.Fatalf("outage: %+v", outage)
@@ -49,7 +49,7 @@ func TestAPowerCutIsTheSilenceUpToTheHostsReturn(t *testing.T) {
 		t.Fatalf("after: %+v", after)
 	}
 	for sequence := int64(2); sequence <= 13; sequence++ {
-		record = observe(record, true, heartbeat("run-bbbbbbbbbbbbbbbb", sequence, bootB), arrived+(sequence-1)*5*minute)
+		record = observe(record, true, heartbeat("run-bbbbbbbbbbbbbbbb", sequence, bootB), arrived+(sequence-1)*5*minute, nil)
 	}
 	if later := derive(record, true, nil, arrived+61*minute); later.State != StateOnline || later.LastOutage == nil {
 		t.Fatalf("an hour on it is simply online, still naming the outage: %+v", later)
@@ -57,8 +57,8 @@ func TestAPowerCutIsTheSilenceUpToTheHostsReturn(t *testing.T) {
 }
 
 func TestAnAnnouncedRestartIsPlannedWithItsReason(t *testing.T) {
-	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000)
-	record = observe(record, true, PondReport{Kind: KindGoingDown, Reason: "update", Run: "run-aaaaaaaaaaaaaaaa", Sequence: 2, BootID: bootA}, 1100)
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
+	record = observe(record, true, PondReport{Kind: KindGoingDown, Reason: "update", Run: "run-aaaaaaaaaaaaaaaa", Sequence: 2, BootID: bootA}, 1100, nil)
 	for _, at := range []int64{1101, 1100 + 20*minute} {
 		answer := derive(record, true, nil, at)
 		if answer.State != StatePlannedRestart || answer.Reason != "update" || answer.Since != 1100 {
@@ -68,14 +68,14 @@ func TestAnAnnouncedRestartIsPlannedWithItsReason(t *testing.T) {
 	if stuck := derive(record, true, nil, 1100+45*minute); stuck.State != StateUnreachable || stuck.Since != 1100 {
 		t.Fatalf("an update that never came back is no longer believed: %+v", stuck)
 	}
-	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "clean", bootA, 2*minute), 1400)
+	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "clean", bootA, 2*minute), 1400, nil)
 	if o := record.LastOutage; o == nil || o.Cause != CausePlanned || o.Reason != "update" || o.StartedAt != 1100 || o.EndedAt != 1400 {
 		t.Fatalf("outage: %+v", o)
 	}
 }
 
 func TestAShutdownIsBelievedForAsLongAsItLasts(t *testing.T) {
-	record := observe(pondRecord{}, false, PondReport{Kind: KindGoingDown, Reason: "shutdown", Run: "run-aaaaaaaaaaaaaaaa", Sequence: 1}, 1000)
+	record := observe(pondRecord{}, false, PondReport{Kind: KindGoingDown, Reason: "shutdown", Run: "run-aaaaaaaaaaaaaaaa", Sequence: 1}, 1000, nil)
 	if answer := derive(record, true, nil, 1000+48*3600); answer.State != StatePlannedRestart || answer.Reason != "shutdown" {
 		t.Fatalf("%+v", answer)
 	}
@@ -84,36 +84,36 @@ func TestAShutdownIsBelievedForAsLongAsItLasts(t *testing.T) {
 // The home's internet went away and came back while the Pond ran throughout: the same
 // run on the same boot resumes counting after a long gap.
 func TestHeartbeatsResumingOnTheSameRunAreANetworkLoss(t *testing.T) {
-	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000)
-	record = observe(record, true, heartbeat("run-aaaaaaaaaaaaaaaa", 2, bootA), 1000+5*minute)
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
+	record = observe(record, true, heartbeat("run-aaaaaaaaaaaaaaaa", 2, bootA), 1000+5*minute, nil)
 	if record.LastOutage != nil {
 		t.Fatalf("an on-time heartbeat is not an outage: %+v", record.LastOutage)
 	}
-	record = observe(record, true, heartbeat("run-aaaaaaaaaaaaaaaa", 3, bootA), 1000+70*minute)
+	record = observe(record, true, heartbeat("run-aaaaaaaaaaaaaaaa", 3, bootA), 1000+70*minute, nil)
 	if o := record.LastOutage; o == nil || o.Cause != CauseNetworkLoss || o.StartedAt != 1000+5*minute {
 		t.Fatalf("outage: %+v", o)
 	}
 	// A heartbeat from a new run without a booted report first cannot be explained.
-	record = observe(record, true, heartbeat("run-cccccccccccccccc", 1, bootB), 1000+200*minute)
+	record = observe(record, true, heartbeat("run-cccccccccccccccc", 1, bootB), 1000+200*minute, nil)
 	if o := record.LastOutage; o.Cause != CauseUnknown {
 		t.Fatalf("outage: %+v", o)
 	}
 }
 
 func TestAnUncleanStopOnTheSameBootIsNotCalledAPowerCut(t *testing.T) {
-	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000)
-	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "unclean", bootA, 3600), 1300)
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
+	record = observe(record, true, booted("run-bbbbbbbbbbbbbbbb", "unclean", bootA, 3600), 1300, nil)
 	if o := record.LastOutage; o == nil || o.Cause != CauseUnknown || o.EndedAt != 1300 {
 		t.Fatalf("a crash is not a power cut: %+v", o)
 	}
-	record = observe(record, true, booted("run-cccccccccccccccc", "clean", bootB, 60), 2000)
+	record = observe(record, true, booted("run-cccccccccccccccc", "clean", bootB, 60), 2000, nil)
 	if o := record.LastOutage; o.Cause != CausePlanned || o.Reason != "" {
 		t.Fatalf("a clean stop whose announcement was lost is still planned: %+v", o)
 	}
 }
 
 func TestAConnectedNodeMeansThePondItselfStopped(t *testing.T) {
-	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000)
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
 	answer := derive(record, true, &nodePresence{Online: true}, 1000+30*minute)
 	if answer.State != StateUnreachable || !slices.Equal(answer.PossibleCauses, []string{"pond_stopped"}) || answer.NodeOnline == nil || !*answer.NodeOnline {
 		t.Fatalf("%+v", answer)
@@ -288,5 +288,54 @@ func TestTheInventoryTellsWhetherThePondNodeIsConnected(t *testing.T) {
 	_, answer := postStatus(s, signedReport(KindBooted, 1), key)
 	if answer.NodeOnline == nil || !*answer.NodeOnline {
 		t.Fatalf("%+v", answer)
+	}
+}
+
+// The 2026-11-18 cuts on the Jetson lasted one to three minutes: the Pond retried its next
+// heartbeat within a minute of the connection coming back, so it never missed two, and the
+// phone was told nothing while the Pond was cut off or after.
+func TestAShortNetworkCutIsSeenFromTheNodeDropping(t *testing.T) {
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
+	node := presenceAt(nodePresence{Online: true}, true, 1000+minute)
+	node = presenceAt(node, false, 1000+2*minute)
+	during := derive(record, true, &node, 1000+3*minute)
+	if during.State != StateUnreachable || during.Since != 1000 || !slices.Equal(during.PossibleCauses, []string{CausePowerLoss, CauseNetworkLoss}) {
+		t.Fatalf("while the node is offline: %+v", during)
+	}
+	node = presenceAt(node, false, 1000+150)
+	if node.OfflineSince != 1000+2*minute {
+		t.Fatalf("a later inventory keeps when it went: %+v", node)
+	}
+	node = presenceAt(node, true, 1000+4*minute)
+	retried := heartbeat("run-aaaaaaaaaaaaaaaa", 2, bootA)
+	retried.Network = &NetworkFacts{FailedAttempts: 2}
+	record = observe(record, true, retried, 1000+5*minute, &node)
+	o := record.LastOutage
+	if o == nil || o.Cause != CauseNetworkLoss || o.StartedAt != 1000 || o.EndedAt != 1000+5*minute {
+		t.Fatalf("the cut is kept: %+v", o)
+	}
+	if after := derive(record, true, &node, 1000+6*minute); after.State != StateBack {
+		t.Fatalf("after the cut: %+v", after)
+	}
+}
+
+// Either sign alone is not a cut: a node that briefly reconnected while every report arrived,
+// or a report that needed a retry while the node stayed up (this service was unreachable).
+func TestANodeBlipOrARetryAloneIsNotACut(t *testing.T) {
+	record := observe(pondRecord{}, false, heartbeat("run-aaaaaaaaaaaaaaaa", 1, bootA), 1000, nil)
+	blip := presenceAt(presenceAt(nodePresence{Online: true}, false, 1060), true, 1090)
+	record = observe(record, true, heartbeat("run-aaaaaaaaaaaaaaaa", 2, bootA), 1000+5*minute, &blip)
+	if record.LastOutage != nil {
+		t.Fatalf("a blip with no failed report: %+v", record.LastOutage)
+	}
+	if answer := derive(record, true, &blip, 1000+6*minute); answer.State != StateOnline {
+		t.Fatalf("a node offline before the last report is not news: %+v", answer)
+	}
+	up := nodePresence{Online: true}
+	retried := heartbeat("run-aaaaaaaaaaaaaaaa", 3, bootA)
+	retried.Network = &NetworkFacts{FailedAttempts: 1}
+	record = observe(record, true, retried, 1000+10*minute, &up)
+	if record.LastOutage != nil {
+		t.Fatalf("a retry with the node up: %+v", record.LastOutage)
 	}
 }

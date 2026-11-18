@@ -180,8 +180,9 @@ type goingDown struct {
 }
 
 // observe folds one report, arriving at now, into the record. known is false for a
-// household that never reported before, which has no silence to explain.
-func observe(previous pondRecord, known bool, report PondReport, now int64) pondRecord {
+// household that never reported before, which has no silence to explain. node is what the
+// inventory says about the Pond's network node, nil when that is not known.
+func observe(previous pondRecord, known bool, report PondReport, now int64, node *nodePresence) pondRecord {
 	next := previous
 	next.LastSeen = now
 	next.Run = report.Run
@@ -201,7 +202,13 @@ func observe(previous pondRecord, known bool, report PondReport, now int64) pond
 	case KindHeartbeat:
 		// Still running after an announced stop: the stop did not happen.
 		next.GoingDown = nil
-		if known && now-previous.LastSeen > int64(silentAfter/time.Second) {
+		silent := now-previous.LastSeen > int64(silentAfter/time.Second)
+		// A cut too short to miss two heartbeats: the node dropped after the last report, and
+		// the Pond tried this one and failed before it arrived. Both, because either alone is
+		// also a coordinator that was briefly unreachable or a node that briefly reconnected.
+		dropped := node.droppedAfter(previous.LastSeen)
+		cut := dropped != 0 && report.Network != nil && report.Network.FailedAttempts > 0
+		if known && (silent || cut) {
 			cause := CauseUnknown
 			// The same process on the same boot kept counting: it ran throughout, and only
 			// its reports did not arrive, so the home's connection was lost.
@@ -239,9 +246,52 @@ func sameBoot(previous, current string) bool {
 	return previous == "" || current == "" || previous == current
 }
 
-// nodePresence is what the coordinator last said about a Pond's network node.
+// nodePresence is what the coordinator last said about a Pond's network node, and when it
+// last saw the node drop. The inventory is read every 30 seconds, so a cut of a few minutes is
+// seen here long before the Pond misses two heartbeats (silentAfter).
 type nodePresence struct {
 	Online bool
+	// OfflineSince is when an inventory first found the node offline; zero while it is online.
+	OfflineSince int64
+	// LastOffline is the most recent offline stretch that has ended, once one has.
+	LastOffline *offlineStretch
+}
+
+// offlineStretch is a time the coordinator saw a node offline, from the first inventory that
+// found it so to the first that found it back.
+type offlineStretch struct {
+	From int64
+	To   int64
+}
+
+// presenceAt is a node's presence after an inventory at now that found it online or not,
+// carrying what the previous inventory knew about its last time offline (the zero value for a
+// node no inventory has listed before).
+func presenceAt(previous nodePresence, online bool, now int64) nodePresence {
+	next := nodePresence{Online: online, LastOffline: previous.LastOffline}
+	switch {
+	case !online && previous.OfflineSince != 0:
+		next.OfflineSince = previous.OfflineSince
+	case !online:
+		next.OfflineSince = now
+	case previous.OfflineSince != 0:
+		next.LastOffline = &offlineStretch{From: previous.OfflineSince, To: now}
+	}
+	return next
+}
+
+// droppedAfter is when the node went offline, if it did after t: still offline, or offline and
+// back since. Zero when it did not, or when that is not known.
+func (n *nodePresence) droppedAfter(t int64) int64 {
+	switch {
+	case n == nil:
+		return 0
+	case n.OfflineSince > t:
+		return n.OfflineSince
+	case n.LastOffline != nil && n.LastOffline.From > t:
+		return n.LastOffline.From
+	}
+	return 0
 }
 
 // derive answers what the record says about the Pond at now.
@@ -266,7 +316,9 @@ func derive(record pondRecord, known bool, node *nodePresence, now int64) PondSt
 		status.PossibleCauses = possibleCauses(node)
 		return status
 	}
-	if silent {
+	// The node dropped after the Pond last reported: its power or its connection went, and a
+	// phone asking now hears so at once rather than after two missed heartbeats.
+	if silent || (node != nil && !node.Online && node.droppedAfter(record.LastSeen) != 0) {
 		status.State, status.Since = StateUnreachable, record.LastSeen
 		status.PossibleCauses = possibleCauses(node)
 		return status
@@ -458,7 +510,7 @@ func (s *Service) reportStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"stale_report"}`, 409)
 		return
 	}
-	next := observe(previous, known, report, now)
+	next := observe(previous, known, report, now, node)
 	s.status.records[report.Household] = next
 	if err := s.status.save(); err != nil {
 		// Kept in memory regardless: a phone asking now still gets the truth.

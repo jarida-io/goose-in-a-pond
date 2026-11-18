@@ -445,7 +445,7 @@ and the service starts without last-seen times.
 |---|---|
 | `online` | a report within 11 minutes (two heartbeats and one minute) |
 | `planned_restart` | a `going_down` arrived and nothing since; believed for 30 minutes for `restart` and `update`, indefinitely for `shutdown`; carries `reason` and `since` |
-| `unreachable` | silent past 11 minutes with no `going_down`; `since` is the last report; `possibleCauses` is `["power_loss", "network_loss"]`, since from outside the home the two look the same, or `["pond_stopped"]` when Headscale's last inventory still saw the Pond's node online |
+| `unreachable` | silent past 11 minutes with no `going_down`, or sooner: as soon as an inventory (every 30 seconds) finds the Pond's node offline after its last report; `since` is the last report; `possibleCauses` is `["power_loss", "network_loss"]`, since from outside the home the two look the same, or `["pond_stopped"]` when Headscale's last inventory still saw the Pond's node online |
 | `back` | reporting again within an hour of an outage's end; `lastOutage` says what it was |
 | `unknown` | the Pond never reported |
 
@@ -453,7 +453,16 @@ and the service starts without last-seen times.
 saying `clean` whose announcement was lost); `power_loss` for `booted` with `unclean` on a new boot
 id, ending at receive time minus uptime, so the minutes the home internet took to return are not
 counted as power off; `network_loss` for heartbeats resuming on the same run and boot after a
-silence; `unknown` otherwise. Answers carry `now`, the service's clock, and `nodeOnline` where known.
+silence, or after a shorter cut that both sides saw: the node went offline after the last report
+and the next report needed a retry (`network.failedAttempts`); `unknown` otherwise.
+
+A cut shorter than two heartbeats used to go unexplained. The Jetson's cuts on 2026-11-18 lasted one
+to three minutes and the Pond retried within a minute of the connection coming back, so no
+heartbeat was missed twice: the phone said only that it could not connect, and nothing was kept.
+The node's presence is why a short cut is now seen; either sign alone is not taken for one, since a
+node can briefly reconnect while every report arrives, and a report can need a retry while this
+service itself was unreachable. How soon a cut shows depends on how soon Headscale marks the node
+offline, which is its keep-alive timeout, plus up to 30 seconds for the next inventory. Answers carry `now`, the service's clock, and `nodeOnline` where known.
 
 **The phone's grant.** A phone never talks to the enrollment service otherwise, so it holds no
 credential there. `GET /api/v1/remote-access/status-grant` (companion API, bearer) answers
