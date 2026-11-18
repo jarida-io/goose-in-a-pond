@@ -7,6 +7,9 @@
 
 CS_DIR=""; CS_SEL=0; CS_VIEW=dash; CS_MSG=""; CS_MSG_UNTIL=0
 CS_LV_FILTER=all; CS_LV_SEARCH=""; CS_LV_BACK=0
+# The highlighted log line, as rows up from the bottom of the window; CS_LV_SEEN is how many lines
+# the view had at the last frame, so a paused view can hold still while new lines arrive.
+CS_LV_CUR=0; CS_LV_SEEN=0; CS_LV_LINE=""
 CS_HOSTS=(); CS_NAMES=(); CS_PIDS=()
 CS_LOADED=""
 
@@ -426,19 +429,69 @@ cs_logview_file() {
   esac 2>/dev/null | { if [ -n "$CS_LV_SEARCH" ]; then grep -aiF -- "$CS_LV_SEARCH"; else cat; fi; }
 }
 
-cs_logview() {
-  local cols="$1" rows="$2" body total first last state
-  body=$(( rows - 4 )); [ "$body" -gt 1 ] || body=1
+cs_lv_body() { local b=$(( $1 - 4 )); [ "$b" -gt 1 ] || b=1; printf '%s' "$b"; }
+
+# cs_lv_sync <rows>: rebuilds the filtered view and settles the window and the highlight on it, in
+# this shell rather than the frame's subshell so the positions carry to the next key. While paused
+# (scrolled back, or the highlight moved off the newest line) new lines at the end push the window
+# back by as many, so the highlighted line stays where the eye left it; trimming the oldest lines
+# moves nothing, since the window is counted from the end.
+cs_lv_sync() {
+  local body total grown shown
+  body="$(cs_lv_body "$1")"
   cs_logview_file > "$CS_DIR/view"
   total="$(wc -l < "$CS_DIR/view" | tr -d ' ')"
+  grown=$(( total - CS_LV_SEEN ))
+  if [ "$grown" -gt 0 ] && [ "$CS_LV_SEEN" -gt 0 ] && { [ "$CS_LV_BACK" -gt 0 ] || [ "$CS_LV_CUR" -gt 0 ]; }; then
+    CS_LV_BACK=$(( CS_LV_BACK + grown ))
+  fi
+  CS_LV_SEEN="$total"
   [ "$CS_LV_BACK" -le $((total - body)) ] || CS_LV_BACK=$(( total > body ? total - body : 0 ))
+  shown=$(( total - CS_LV_BACK )); [ "$shown" -le "$body" ] || shown="$body"
+  [ "$CS_LV_CUR" -lt "$shown" ] || CS_LV_CUR=$(( shown > 0 ? shown - 1 : 0 ))
+}
+
+# cs_lv_move <up|down> <rows>: the highlight one line up or down, scrolling only at the window's edge.
+cs_lv_move() {
+  local body shown
+  body="$(cs_lv_body "$2")"
+  shown=$(( CS_LV_SEEN - CS_LV_BACK )); [ "$shown" -le "$body" ] || shown="$body"
+  if [ "$1" = up ]; then
+    if [ "$CS_LV_CUR" -lt $(( shown - 1 )) ]; then CS_LV_CUR=$(( CS_LV_CUR + 1 ))
+    else CS_LV_BACK=$(( CS_LV_BACK + 1 )); fi
+  elif [ "$CS_LV_CUR" -gt 0 ]; then CS_LV_CUR=$(( CS_LV_CUR - 1 ))
+  elif [ "$CS_LV_BACK" -gt 0 ]; then CS_LV_BACK=$(( CS_LV_BACK - 1 ))
+  fi
+}
+
+# cs_lv_selected: the highlighted line, whole and as the log wrote it.
+cs_lv_selected() { sed -n "$(( CS_LV_SEEN - CS_LV_BACK - CS_LV_CUR ))p" "$CS_DIR/view"; }
+
+# cs_logview <cols> <rows>: reads the view cs_lv_sync wrote. The highlighted line is drawn in
+# reverse video across the whole width with a > in the gutter, so it is found at a glance and
+# still marked on a terminal without colour; its level colour gives way to the bar.
+cs_logview() {
+  local cols="$1" rows="$2" body total first last state sel
+  body="$(cs_lv_body "$rows")"
+  total="$CS_LV_SEEN"
   last=$(( total - CS_LV_BACK )); first=$(( last - body + 1 )); [ "$first" -ge 1 ] || first=1
-  if [ "$CS_LV_BACK" -eq 0 ]; then state="FOLLOW"; else state="PAUSED"; fi
+  sel=$(( last - first + 1 - CS_LV_CUR ))
+  if [ "$CS_LV_BACK" -eq 0 ] && [ "$CS_LV_CUR" -eq 0 ]; then state="FOLLOW"; else state="PAUSED"; fi
   cs_titlebar "$cols" "${CS_DOT} log"
   printf ' filter %s%s  search %s  %s  %s%s%s\n' "$CS_BOLD" "$CS_LV_FILTER" "${CS_LV_SEARCH:-none}${CS_OFF}" \
-    "$( [ "$total" -gt 0 ] && printf 'lines %s-%s of %s' "$first" "$last" "$total" || printf 'no lines')" "$CS_REV" "$state" "$CS_OFF"
-  [ "$total" -gt 0 ] && sed -n "${first},${last}p" "$CS_DIR/view" | cs_loglines $((cols - 1)) | sed 's/^/ /'
+    "$( [ "$total" -gt 0 ] && printf 'lines %s-%s of %s, at %s' "$first" "$last" "$total" "$(( last - CS_LV_CUR ))" || printf 'no lines')" "$CS_REV" "$state" "$CS_OFF"
+  [ "$total" -gt 0 ] && sed -n "${first},${last}p" "$CS_DIR/view" | cs_loglines $((cols - 1)) |
+    awk -v sel="$sel" -v w=$((cols - 1)) -v rev="$CS_REV" -v off="$CS_OFF" '
+      NR == sel { line = $0; gsub(/\033\[[0-9;]*m/, "", line); printf ">%s%-" w "s%s\n", rev, line, off; next }
+      { print " " $0 }'
   [ "$total" -gt 0 ] || printf ' %snothing matches%s\n' "$CS_DIM" "$CS_OFF"
+}
+
+# cs_lineview <cols>: the highlighted line in full, wrapped, for a line wider than the screen.
+cs_lineview() {
+  cs_titlebar "$1" "${CS_DOT} log line"
+  printf '\n'
+  printf '%s\n' "$CS_LV_LINE" | fold -w $(( $1 - 2 )) | sed 's/^/ /'
 }
 
 cs_memview() {
@@ -756,7 +809,8 @@ cs_help() {
    c, esc       return to dashboard
 
  Log view
-   up, k / down, j     one line          PgUp, b / PgDn, space   one page
+   up, k / down, j     move the highlight one line           PgUp, b / PgDn, space   one page
+   enter               the highlighted line in full          (moving it pauses the view)
    g / G               top / bottom      f                       follow the end again
    a  w  t  u          all, warnings and errors, giap traces, turns
    /                   search (case-insensitive)                 esc    back
@@ -772,7 +826,8 @@ EOF
 
 cs_footer() {
   local keys
-  if [ "$CS_VIEW" = logs ]; then keys=" esc back  arrows/j/k scroll  PgUp/PgDn page  g/G ends  f follow  a w t u filter  / search  L less  q quit"
+  if [ "$CS_VIEW" = logs ]; then keys=" esc back  arrows/j/k move  enter whole line  PgUp/PgDn page  g/G ends  f follow  a w t u filter  / search  L less  q quit"
+  elif [ "$CS_VIEW" = line ]; then keys=" esc/enter back to the log  q quit"
   elif [ "$CS_VIEW" = mem ]; then keys=" esc/m dashboard  r restart pond  d doctor  L less  q quit"
   elif [ "$CS_VIEW" = ctx ]; then keys=" esc/c dashboard  r restart pond  d doctor  L less  q quit"
   else keys=" q quit  tab host  m memory  c context  l logs  L less  d doctor  r restart pond  ? keys"; fi
@@ -786,11 +841,13 @@ cs_frame() {
   size="$(stty size < /dev/tty 2>/dev/null)"; rows="${size% *}"; cols="${size#* }"
   case "$rows$cols" in ''|*[!0-9]*) rows=24; cols=80 ;; esac
   cs_load "$CS_SEL"
+  [ "$CS_VIEW" = logs ] && cs_lv_sync "$rows"
   if [ "$cols" -lt 80 ] || [ "$rows" -lt 20 ]; then
     body=" The console needs at least 80 x 20; this terminal is $cols x $rows."
   else
     case "$CS_VIEW" in
       logs) body="$(cs_logview "$cols" "$rows")" ;;
+      line) body="$(cs_lineview "$cols")" ;;
       mem)  body="$(cs_memview "$cols" "$rows")" ;;
       ctx)  body="$(cs_ctxview "$cols" "$rows")" ;;
       help) body="$(cs_help "$cols")" ;;
@@ -860,7 +917,8 @@ cs_restart() {
 # cs_key: one key, or a whole escape sequence, within a second; empty when none came.
 cs_key() {
   local k rest
-  IFS= read -rsn1 -t 1 k < /dev/tty || { printf ''; return; }
+  # NUL as the delimiter, so Enter arrives as a newline rather than as the same nothing a timeout gives.
+  IFS= read -rsn1 -d '' -t 1 k < /dev/tty || { printf ''; return; }
   if [ "$k" = $'\033' ]; then
     IFS= read -rsn2 -t 1 rest < /dev/tty || rest=""
     case "$rest" in '[5'|'[6') IFS= read -rsn1 -t 1 _ < /dev/tty ;; esac
@@ -869,6 +927,11 @@ cs_key() {
   printf '%s' "$k"
 }
 
+# cs_lv_reset: back to following the newest line, for a new host, filter or search.
+cs_lv_reset() { CS_LV_BACK=0; CS_LV_CUR=0; CS_LV_SEEN=0; }
+
+cs_rows() { local s; s="$(stty size < /dev/tty 2>/dev/null)"; s="${s% *}"; case "$s" in ''|*[!0-9]*) s=24 ;; esac; printf '%s' "$s"; }
+
 cs_page() { local s; s="$(stty size < /dev/tty 2>/dev/null)"; printf '%s' $(( ${s% *} - 5 )); }
 
 cs_handle() {
@@ -876,30 +939,33 @@ cs_handle() {
   case "$CS_VIEW:$k" in
     *:q) return 1 ;;
     help:*) [ -n "$k" ] && CS_VIEW=dash ;;
-    *:$'\t'|*:ESC'[Z') CS_SEL=$(( (CS_SEL + 1) % n )); CS_LV_BACK=0 ;;
-    *:[1-9]) [ "$k" -le "$n" ] && { CS_SEL=$((k - 1)); CS_LV_BACK=0; } ;;
+    line:?*) CS_VIEW=logs ;;
+    *:$'\t'|*:ESC'[Z') CS_SEL=$(( (CS_SEL + 1) % n )); cs_lv_reset ;;
+    *:[1-9]) [ "$k" -le "$n" ] && { CS_SEL=$((k - 1)); cs_lv_reset; } ;;
     *:'?') CS_VIEW=help ;;
     *:d) cs_doctor ;;
     *:r) cs_restart ;;
     *:L) cs_less ;;
-    dash:l) CS_VIEW=logs; CS_LV_BACK=0 ;;
+    dash:l) CS_VIEW=logs; cs_lv_reset ;;
     dash:m|dash:M) CS_VIEW=mem ;;
     dash:c|dash:C) CS_VIEW=ctx ;;
     mem:m|mem:M|mem:ESC) CS_VIEW=dash ;;
     ctx:c|ctx:C|ctx:ESC) CS_VIEW=dash ;;
     logs:ESC) CS_VIEW=dash ;;
-    logs:ESC'[A'|logs:k) CS_LV_BACK=$((CS_LV_BACK + 1)) ;;
-    logs:ESC'[B'|logs:j) [ "$CS_LV_BACK" -gt 0 ] && CS_LV_BACK=$((CS_LV_BACK - 1)) ;;
+    logs:ESC'[A'|logs:k) cs_lv_move up "$(cs_rows)" ;;
+    logs:ESC'[B'|logs:j) cs_lv_move down "$(cs_rows)" ;;
     logs:ESC'[5'|logs:b) CS_LV_BACK=$((CS_LV_BACK + $(cs_page))) ;;
-    logs:ESC'[6'|logs:' ') CS_LV_BACK=$((CS_LV_BACK - $(cs_page))); [ "$CS_LV_BACK" -ge 0 ] || CS_LV_BACK=0 ;;
-    logs:g) CS_LV_BACK=1000000 ;;
-    logs:G|logs:f) CS_LV_BACK=0 ;;
-    logs:a) CS_LV_FILTER=all; CS_LV_BACK=0 ;;
-    logs:w) CS_LV_FILTER=warn; CS_LV_BACK=0 ;;
-    logs:t) CS_LV_FILTER=trace; CS_LV_BACK=0 ;;
-    logs:u) CS_LV_FILTER=turns; CS_LV_BACK=0 ;;
-    logs:/) stty echo 2>/dev/null; printf '\033[%s;1H\033[K%s search: ' "$(stty size < /dev/tty | cut -d' ' -f1)" "$CS_REV"
-            IFS= read -r CS_LV_SEARCH < /dev/tty; printf '%s' "$CS_OFF"; stty -echo 2>/dev/null; CS_LV_BACK=0 ;;
+    logs:ESC'[6'|logs:' ') CS_LV_BACK=$((CS_LV_BACK - $(cs_page))); [ "$CS_LV_BACK" -ge 0 ] || { CS_LV_BACK=0; CS_LV_CUR=0; } ;;
+    logs:g) CS_LV_BACK=1000000; CS_LV_CUR=1000000 ;;
+    logs:G|logs:f) CS_LV_BACK=0; CS_LV_CUR=0 ;;
+    logs:'') : ;;
+    logs:$'\n'|logs:$'\r') CS_LV_LINE="$(cs_lv_selected)"; [ -n "$CS_LV_LINE" ] && CS_VIEW=line ;;
+    logs:a) CS_LV_FILTER=all; cs_lv_reset ;;
+    logs:w) CS_LV_FILTER=warn; cs_lv_reset ;;
+    logs:t) CS_LV_FILTER=trace; cs_lv_reset ;;
+    logs:u) CS_LV_FILTER=turns; cs_lv_reset ;;
+    logs:/) stty echo 2>/dev/null; printf '\033[%s;1H\033[K%s search: ' "$(cs_rows)" "$CS_REV"
+            IFS= read -r CS_LV_SEARCH < /dev/tty; printf '%s' "$CS_OFF"; stty -echo 2>/dev/null; cs_lv_reset ;;
   esac
   return 0
 }
