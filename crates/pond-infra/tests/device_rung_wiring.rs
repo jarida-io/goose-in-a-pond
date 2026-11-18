@@ -192,7 +192,7 @@ fn the_auth_middleware_never_reads_a_device_from_the_client() {
 fn the_loopback_bypass_carries_no_device() {
     let production = production_slice(MIDDLEWARE);
     let from = production
-        .find("if dev_allow_loopback()")
+        .find("if dev_bypass_admits(")
         .expect("the dev loopback bypass has moved or been renamed; this guard is blind");
     let to = production
         .find("let token = extract_bearer_token")

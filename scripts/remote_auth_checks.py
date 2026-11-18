@@ -80,7 +80,12 @@ def run():
     assert mismatch["error"] == "channel_binding_mismatch", mismatch
     print("PASS  CPace: vectors hold, a wrong code and a foreign pin are refused by name")
 
-    a, b = pair_phone("w3-live-a"), pair_dashboard("w3-live-b")
+    # The dashboard first, so it can switch quiet hours off before the phone pairs: the pairing
+    # notice is an ordinary one, held between 22:00 and 07:00, and a run at night would find the
+    # phone's queue empty for a reason that has nothing to do with delivery ownership.
+    b = pair_dashboard("w3-live-b")
+    call("PUT", "/settings", {"notices_wait_in_quiet_hours": False}, token=b["session_token"])
+    a = pair_phone("w3-live-a")
     print("PASS  a phone pairs with CPace and checks the Pond's proof; the dashboard pairs over loopback HMAC")
     for method, path in [("POST", "/transcribe"), ("GET", "/dev/goose"), ("POST", "/handshake/revoke")]:
         call(method, path, {}, expected=401)

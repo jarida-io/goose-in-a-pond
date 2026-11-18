@@ -100,6 +100,26 @@ id = "RUSTSEC-2026-0433"
 ignoreUntil = 2027-01-31
 reason = "pulldown-cmark 0.13.5: quadratic parsing of nested image wikilinks under ENABLE_WIKILINKS. This workspace's Cargo.lock is on the fixed 0.13.6; what remains is goose/Cargo.lock, the submodule's own lockfile, which GIAP's build never reads (goose's crates resolve against this workspace's lockfile). Nothing in GIAP or goose enables ENABLE_WIKILINKS. Remove when the goose fork's lockfile moves to 0.13.6."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0014"
+ignoreUntil = 2027-01-31
+reason = "generational-arena is unmaintained. No fixed version exists. It arrives only through ngrok 0.19.0 (pond-server's own-ngrok remote access) via muxado and awaitdrop 0.1.2; ngrok 0.19.1, its latest release, still depends on it (checked 2026-11-17 with cargo update -p ngrok --precise 0.19.1 and cargo tree -i generational-arena). Remove when ngrok or awaitdrop drops it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0523"
+ignoreUntil = 2027-01-31
+reason = "quinn-proto 0.11.18: a MAX_STREAM_DATA frame can open streams beyond the stream limit. This workspace's Cargo.lock is on the fixed 0.11.19; what remains is goose/Cargo.lock, the submodule's own lockfile, which GIAP's build never reads (goose's crates resolve against this workspace's lockfile). Remove when the goose fork's lockfile moves to 0.11.19."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0524"
+ignoreUntil = 2027-01-31
+reason = "quinn-proto 0.11.18: a long Retry token can panic or exhaust memory in a QUIC client. This workspace's Cargo.lock is on the fixed 0.11.19; what remains is goose/Cargo.lock, which GIAP's build never reads. Remove when the goose fork's lockfile moves to 0.11.19."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0538"
+ignoreUntil = 2027-01-31
+reason = "quinn-udp 0.5.15 in goose/Cargo.lock. This workspace's Cargo.lock is on the fixed 0.5.16; goose/Cargo.lock is the submodule's own lockfile, which GIAP's build never reads. Remove when the goose fork's lockfile moves to 0.5.16."
+
 # ── Real vulnerabilities whose fix is a major our dependencies have not taken ─
 
 [[IgnoredVulns]]

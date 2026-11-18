@@ -171,6 +171,13 @@ fn loopback_flag_enabled(value: Option<&str>) -> bool {
     matches!(value, Some("1") | Some("true") | Some("TRUE"))
 }
 
+/// Whether the dev bypass admits a request without reading a token. Only a tokenless loopback
+/// caller is waved through: one presenting a token is validated as usual, so a check that pairs a
+/// member's phone acts as that member, and a bad token is refused rather than admitted.
+fn dev_bypass_admits(flag_on: bool, peer_is_loopback: bool, presents_token: bool) -> bool {
+    flag_on && peer_is_loopback && !presents_token
+}
+
 /// When a route stops answering a caller with no bearer token.
 /// Wizard writes must close with the wizard, or any LAN caller could rewrite settings later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,9 +672,14 @@ pub async fn auth_middleware(
         }
     }
 
-    // Opt-in dev bypass, else any host process reaches every protected route. It returns before
-    // a token is read, so the principal carries no device.
-    if dev_allow_loopback() && peer_is_loopback {
+    // Opt-in dev bypass, else any host process reaches every protected route. It admits only a
+    // caller that presents no token, so its principal carries no device; a caller that does
+    // present one is checked like any other and acts as its own paired device.
+    if dev_bypass_admits(
+        dev_allow_loopback(),
+        peer_is_loopback,
+        headers.contains_key("Authorization"),
+    ) {
         let mut req = req;
         req.extensions_mut().insert(Principal::loopback());
         return Ok(next.run(req).await);
@@ -1766,6 +1778,15 @@ mod tests {
         assert!(loopback_flag_enabled(Some("1")));
         assert!(loopback_flag_enabled(Some("true")));
         assert!(loopback_flag_enabled(Some("TRUE")));
+    }
+
+    #[test]
+    fn the_dev_bypass_admits_only_a_tokenless_loopback_caller() {
+        assert!(dev_bypass_admits(true, true, false));
+        // A presented token is validated, so a paired phone acts as itself and a bad one fails.
+        assert!(!dev_bypass_admits(true, true, true));
+        assert!(!dev_bypass_admits(true, false, false));
+        assert!(!dev_bypass_admits(false, true, false));
     }
 
     #[test]
