@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install the built pond-server and pondnet where the service runs them, out of target/.
+# Install the built pond-server and pondnet where the service runs them, out of target/, with the
+# checkout folders the pond reads at run time (extensions/, matter-server/) beside them.
 #
 #   bash scripts/install-pond-binaries.sh            # from target/release
 #   bash scripts/install-pond-binaries.sh BUILD_DIR  # from another build directory
@@ -17,6 +18,8 @@ source "$HERE/lib/pond-binaries.sh"
 from="${1:-$REPO_ROOT/target/release}"
 to="$(pond_bin_dir)"
 pond_binaries_install "$from" "$to" || exit 1
+root="$(cd "$to/.." && pwd)" || exit 1
+pond_assets_install "$REPO_ROOT" "$root" || exit 1
 
 user_unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/goose-in-a-pond.service"
 system_unit=/etc/systemd/system/goose-in-a-pond.service
@@ -25,6 +28,13 @@ if [ -f "$user_unit" ] && pond_unit_runs_from_build "$user_unit"; then
   pond_unit_repoint "$user_unit" "$to" || { echo "could not point $user_unit at $to" >&2; exit 1; }
   systemctl --user daemon-reload || { echo "systemctl --user daemon-reload failed" >&2; exit 1; }
   echo "the service now runs $to/pond-server; the unit as it was is $user_unit.pre-install"
+fi
+if [ -f "$user_unit" ]; then
+  changed="$(pond_unit_set_asset_root "$user_unit" "$root")" || { echo "could not set GIAP_ASSET_ROOT in $user_unit" >&2; exit 1; }
+  if [ "$changed" = changed ]; then
+    systemctl --user daemon-reload || { echo "systemctl --user daemon-reload failed" >&2; exit 1; }
+    echo "the service reads extensions/ and matter-server/ from $root from its next start; the unit as it was is $user_unit.pre-assets"
+  fi
 fi
 
 # A system unit belongs to root, and one run as agamemnon needs that account able to reach the
