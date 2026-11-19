@@ -71,6 +71,37 @@ test.describe("Idea cards in the classic shell", () => {
     await expect(deck.getByText("Making your cards")).toBeVisible();
     expect(calls.refreshed).toBe(1);
   });
+
+  // A card with Details open took the whole screen: Home did not scroll, so the widgets under it
+  // were cut to a strip nothing could reach. Then a fix gave the top row its own scroll box, which
+  // split Home in two. It is one page that scrolls, the widgets whole under the cards.
+  test("Home scrolls as one page under a long card, the widgets whole below it", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mockCards(page);
+    await page.goto("/");
+    const deck = page.getByRole("region", { name: "Ideas for you" });
+    await expect(deck.getByText("Card 1 of 2")).toBeVisible();
+    await deck.getByRole("button", { name: "Details" }).click();
+
+    const box = await page.evaluate(() => {
+      const dash = document.querySelector<HTMLElement>(".dash")!;
+      const top = document.querySelector<HTMLElement>(".dash__top-row")!;
+      const body = document.querySelector<HTMLElement>(".dash__body")!;
+      return {
+        body: body.getBoundingClientRect().height,
+        dashScrolls: getComputedStyle(dash).overflowY,
+        topScrolls: getComputedStyle(top).overflowY,
+        topClipped: top.scrollHeight > top.clientHeight + 1,
+      };
+    });
+    expect(box.body).toBeGreaterThanOrEqual(440);
+    expect(box.dashScrolls).toBe("auto");
+    expect(box.topScrolls).toBe("visible");
+    expect(box.topClipped).toBe(false);
+
+    await page.locator(".dash__track").scrollIntoViewIfNeeded();
+    await expect(page.locator(".dash__track")).toBeInViewport({ ratio: 0.9 });
+  });
 });
 
 /** Every visible deck control clears 44px, by its own box or its `.reach` band. */
