@@ -47,6 +47,10 @@ vi.mock("../lib/place", async (importOriginal) => ({
   deviceZone: () => deviceZoneValue,
 }));
 
+import { openSettingsAt } from "./openCategory";
+
+vi.mock("../sections/RemoteProvider", () => ({ RemoteProvider: () => <p>remote access choice</p> }));
+
 vi.mock("../api/PondApiClient", () => ({
   api: {
     getSettings: vi.fn(),
@@ -94,7 +98,7 @@ function retitleReply(over: Record<string, unknown> = {}) {
 }
 
 /** Render and wait for the first paint after settings load. */
-async function renderPage(overrides: Record<string, unknown> = {}, models: unknown[] = MODELS) {
+async function renderPage(overrides: Record<string, unknown> = {}, models: unknown[] = MODELS, settledOn = "Who lives here") {
   mockApi.getSettings.mockResolvedValue(serverSettings(overrides));
   mockApi.listModels.mockResolvedValue(models);
   mockApi.listProfiles.mockResolvedValue({ profiles: MEMBERS });
@@ -108,7 +112,7 @@ async function renderPage(overrides: Record<string, unknown> = {}, models: unkno
   mockApi.updateSettings.mockImplementation(async (patch: Record<string, unknown>) =>
     serverSettings({ ...overrides, ...patch }));
   const view = render(<SettingsCatalogueView />);
-  await screen.findByText("Who lives here");
+  await screen.findByText(settledOn);
   return view;
 }
 
@@ -803,6 +807,15 @@ describe("Connections category", () => {
     mockApi.getSystemInfo.mockResolvedValue({ platform: "linux" });
   });
 
+  it("opens straight at Connections when the pairing page asks, and only that once", async () => {
+    openSettingsAt("connections");
+    await renderPage({}, MODELS, "Waiting to be claimed (card 4e81)");
+    expect(screen.getByRole("heading", { level: 2, name: "Connections" })).toBeTruthy();
+    cleanup();
+    await renderPage();
+    expect(screen.queryByRole("heading", { level: 2, name: "Connections" })).toBeNull();
+  });
+
   it("shows Wi-Fi, Ethernet, Bluetooth and Pairing, each with what the pond says about it", async () => {
     await openConnections();
     expect(screen.getByRole("heading", { level: 2, name: "Connections" })).toBeTruthy();
@@ -816,6 +829,8 @@ describe("Connections category", () => {
     expect(screen.getByText("eth0")).toBeTruthy();
     expect(screen.getByText("Visible to phones")).toBeTruthy();
     expect(await screen.findByText("Waiting to be claimed (card 4e81)")).toBeTruthy();
+    // Remote access moved here from the pairing page, under Pairing.
+    expect(screen.getByRole("region", { name: "Remote access" }).textContent).toContain("remote access choice");
   });
 
   it("holds the two switches, which no longer sit under Privacy and Security", async () => {

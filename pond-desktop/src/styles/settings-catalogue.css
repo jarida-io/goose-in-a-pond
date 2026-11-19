@@ -1324,3 +1324,17 @@ select.scat__field--text { width: 264px; }
   .scat__group { padding-left: var(--space-4); padding-right: var(--space-4); }
   .scat__row { gap: var(--space-4); }
 }
+
+/* Remote access, under Connections > Pairing: the provider choice, ngrok and the built-in network. */
+.scat__remote {
+  display: grid;
+  gap: 12px;
+  padding: 16px 20px 20px;
+  border-top: 1px solid var(--color-border);
+}
+
+.scat__remoteTitle {
+  margin: 0;
+  font-size: var(--text-md, 15px);
+  font-weight: var(--weight-semibold, 600);
+}
