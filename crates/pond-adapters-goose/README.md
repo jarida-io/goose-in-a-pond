@@ -1,7 +1,7 @@
 # pond-adapters-goose
 
-Wraps Block's [Goose](https://github.com/aaif-goose/goose), pinned as the `goose/` submodule, as the
-live agent engine. Everything GIAP knows about Goose's types stays in this crate.
+Wraps [goose](https://github.com/aaif-goose/goose), the AAIF's open-source agent, pinned as the `goose/`
+submodule, as the live agent engine. Everything GIAP knows about Goose's types stays in this crate.
 
 | Type | Port it implements | Role |
 |---|---|---|
