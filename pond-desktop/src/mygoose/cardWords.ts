@@ -81,8 +81,11 @@ export function countWords(count: number): string {
   return count === 1 ? "1 card" : `${count} cards`;
 }
 
-export function savedWords(title: string): string {
-  return `Saved: ${title} stays until you are done with it.`;
+/** Home shows only new cards, so a card saved there says where it went. */
+export function savedWords(title: string, place: "home" | "mygoose"): string {
+  return place === "home"
+    ? `Saved: ${title} waits on My Goose until you are done with it.`
+    : `Saved: ${title} stays until you are done with it.`;
 }
 
 export function dismissedWords(title: string): string {

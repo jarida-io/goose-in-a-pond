@@ -111,6 +111,28 @@ describe("CardDeck", () => {
     expect(screen.getByText("Card 2 of 2")).toBeTruthy();
   });
 
+  it("shows only new cards on Home; a saved one waits on My Goose, and Home empties with the last", async () => {
+    const kept = ideaCard({ id: "c-kept", title: "Book the Diani cottage", state: "saved" });
+    api.listIdeaCards.mockResolvedValue(deck({ cards: [WALK, kept] }));
+    api.saveIdeaCard.mockResolvedValue({ ...WALK, state: "saved" });
+    render(<CardDeck variant="hub" place="home" />);
+    expect(await screen.findByText(WALK.title)).toBeTruthy();
+    expect(screen.queryByText(kept.title)).toBeNull();
+    expect(screen.queryByText(/Card 1 of/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(`Saved: ${WALK.title} waits on My Goose until you are done with it.`)).toBeTruthy();
+    expect(screen.queryByText(WALK.title)).toBeNull();
+    expect(screen.queryByText(/Nothing yet/)).toBeNull();
+    cleanup();
+    api.listIdeaCards.mockResolvedValue(deck({ cards: [kept] }));
+    const onlySaved = render(<CardDeck variant="hub" place="home" />);
+    await waitFor(() => expect(api.listIdeaCards).toHaveBeenCalledTimes(2));
+    expect(onlySaved.container.innerHTML).toBe("");
+    cleanup();
+    render(<CardDeck variant="hub" place="mygoose" />);
+    expect(await screen.findByText(kept.title)).toBeTruthy();
+  });
+
   it("draws nothing on a pond that has no cards, and nothing on Home when the cards fail", async () => {
     api.listIdeaCards.mockRejectedValue(new ApiError(404, "Not Found", undefined, undefined));
     const { container } = render(<CardDeck variant="classic" place="mygoose" />);

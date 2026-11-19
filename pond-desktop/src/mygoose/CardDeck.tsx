@@ -128,7 +128,7 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
   async function save(card: IdeaCard, keep: boolean) {
     const next = keep ? await api.saveIdeaCard(card.id) : await api.unsaveIdeaCard(card.id);
     if (deck) replace({ ...deck, cards: deck.cards.map((c) => (c.id === next.id ? next : c)) });
-    say(keep ? savedWords(card.title) : UNSAVED);
+    say(keep ? savedWords(card.title, place) : UNSAVED);
   }
 
   async function dismiss(card: IdeaCard, dismissal: IdeaCardDismissal) {
@@ -137,9 +137,14 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
     say(dismissedWords(card.title));
   }
 
-  const cards = deck?.cards ?? [];
+  // Home is for what is new: a saved card never fades, so on Home it would stay for good. It
+  // waits on My Goose until it is done or turned down, and Home draws nothing while the deck has
+  // nothing new and none being made, once it has said what became of the last one.
+  const cards = (deck?.cards ?? []).filter((card) => place !== "home" || card.state === "new");
   const shown = Math.min(at, Math.max(0, cards.length - 1));
   const making = deck !== null && isMaking(deck.set.state);
+
+  if (place === "home" && cards.length === 0 && !making && said === null) return null;
 
   if (place === "home" && short && onOpenAll) {
     if (cards.length === 0) return null;
@@ -193,7 +198,7 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
       <ActionProblem text={problem} />
       {state.status === "loading" ? <Loading>{LOADING_CARDS}</Loading> : null}
       {state.status === "failed" ? <LoadProblem problem={state.problem} onRetry={retry} variant={variant} /> : null}
-      {deck && cards.length === 0 ? <p className="cd__empty">{making ? MAKING_CARDS : NO_CARDS}</p> : null}
+      {deck && cards.length === 0 && (making || place !== "home") ? <p className="cd__empty">{making ? MAKING_CARDS : NO_CARDS}</p> : null}
       {cards.length > 0 && paged ? (
         <div className="cd__paged">
           {cardView(cards[shown])}
