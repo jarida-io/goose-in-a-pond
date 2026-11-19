@@ -1,6 +1,6 @@
 // What the sky is doing and which part of the day it is, for the weather widget's backdrop.
 
-type DayPhase = "night" | "dawn" | "day" | "dusk";
+export type DayPhase = "night" | "dawn" | "day" | "dusk";
 
 /** Parses "HH:MM" into minutes-past-midnight. Returns null if malformed. */
 function parseClock(t: string): number | null {

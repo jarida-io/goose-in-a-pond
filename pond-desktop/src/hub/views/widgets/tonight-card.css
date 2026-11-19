@@ -1,9 +1,13 @@
-/* Tonight — the evening's routines on the sky they run under.
+/* Tonight -- the rest of the day's routines on the sky they run under.
 
-   The gradient is the weather tile's own night sky (hub.css .wx--night), so the
-   two read as one material; the colour means "after dark" here as it does
-   there, not decoration. White text on its lightest stop, #312E81, is 12.3:1;
-   the 72% white for secondary text is 6.6:1 on the same stop.
+   The sky follows the hour (data-phase, from weatherSky.ts as the weather tile
+   uses it), so the colour says what time of day it is here as it does there,
+   not decoration. Night is the weather tile's own night sky (hub.css
+   .wx--night). Dawn, day and dusk are deeper than the weather tile's, because
+   this card carries small secondary text: on the lightest stop of each, white
+   is 7.3:1 at dawn, 6.7:1 by day and 7.9:1 at dusk, and the secondary text
+   (--tonight-dim, 85% white on the two light skies, 72% on the dark ones) is
+   5.7:1, 5.3:1 and 4.7:1. Only the night has stars.
 
    A soft drop like the weather tile, not InkBudget's hard offset, which stays
    with the composer and the first alert. */
@@ -16,11 +20,29 @@
   border-radius: 18px;
   padding: 16px;
   color: #fff;
+  --tonight-dim: rgba(255, 255, 255, 0.72);
   background: linear-gradient(150deg, #1E293B 0%, #0F172A 60%, #312E81 100%);
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.4);
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.tonight[data-phase="dawn"] {
+  --tonight-dim: rgba(255, 255, 255, 0.85);
+  background: linear-gradient(150deg, #9A3412 0%, #7C2D12 55%, #4338CA 100%);
+  box-shadow: 0 6px 18px rgba(154, 52, 18, 0.3);
+}
+
+.tonight[data-phase="day"] {
+  --tonight-dim: rgba(255, 255, 255, 0.85);
+  background: linear-gradient(150deg, #1D4ED8 0%, #1E40AF 55%, #4338CA 100%);
+  box-shadow: 0 6px 18px rgba(29, 78, 216, 0.3);
+}
+
+.tonight[data-phase="dusk"] {
+  background: linear-gradient(150deg, #9D174D 0%, #6B21A8 55%, #312E81 100%);
+  box-shadow: 0 6px 18px rgba(107, 33, 168, 0.3);
 }
 
 .tonight > :not(.tonight__stars) {
@@ -49,7 +71,7 @@
   font: 700 11px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--tonight-dim);
 }
 
 /* ── The next routine ─────────────────────────────────────── */
@@ -71,7 +93,7 @@
 
 .tonight__next-time {
   font: 600 12px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--tonight-dim);
 }
 
 .tonight__headline {
@@ -81,7 +103,7 @@
 
 .tonight__quiet {
   font: 500 13px Quicksand, sans-serif;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--tonight-dim);
 }
 
 /* ── The evening, now to midnight ─────────────────────────── */
@@ -133,13 +155,13 @@
   justify-content: space-between;
   font: 600 10px var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
   letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--tonight-dim);
 }
 
 .tonight__more {
   margin: 0;
   font: 500 12px Quicksand, sans-serif;
-  color: rgba(255, 255, 255, 0.72);
+  color: var(--tonight-dim);
 }
 
 /* Frosted, so it belongs to the sky rather than sitting on it as a paper button. */
