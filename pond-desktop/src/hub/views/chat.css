@@ -1343,6 +1343,13 @@
 .ch-row--user  { margin-top: var(--space-5); }
 .ch-row--user:first-child { margin-top: 0; }
 
+/* Two of Goose's messages in a row (a schedule's answer, then a reminder, in
+   the Goose thread) are two beats too. Without the user's message between them
+   the gap was 8px, and the first one's actions, which hang 24px below it (see
+   "Reclaim the strip" below), sat on the second one's "From your schedule"
+   line. The same 28px as between turns. */
+.ch-row--goose + .ch-row--goose { margin-top: var(--space-5); }
+
 /* ── Reclaim the strip the hidden furniture was holding ──────────────────
  *
  * Measured: an assistant row was 61px tall for 25px of text, because the
