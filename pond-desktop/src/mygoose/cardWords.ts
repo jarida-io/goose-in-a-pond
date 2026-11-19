@@ -29,7 +29,14 @@ const SET_WORDS: Record<IdeaCardSetState, string> = {
   ready: "Ready",
 };
 
-export function setStateWords(state: IdeaCardSetState): string {
+/**
+ * The set's state in words. A queued set says what it waits behind: the engine runs one job at a
+ * time for the household, and a refresh behind three plans being researched read as stuck.
+ */
+export function setStateWords(state: IdeaCardSetState, ahead?: number): string {
+  if (state === "queued" && ahead !== undefined && ahead > 0) {
+    return ahead === 1 ? "Goose is finishing 1 thing first" : `Goose is finishing ${ahead} things first`;
+  }
   return SET_WORDS[state] ?? "Nothing yet";
 }
 

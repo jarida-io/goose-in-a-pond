@@ -2682,7 +2682,8 @@ export interface IdeaCard {
 
 export interface IdeaCardSet {
   cards: IdeaCard[];
-  set: { state: IdeaCardSetState; made_at: string | null };
+  /** `ahead`, with `queued` only: how many of the Pond's jobs run before this set does. */
+  set: { state: IdeaCardSetState; made_at: string | null; ahead?: number };
 }
 
 export interface IdeaCardDone {

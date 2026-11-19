@@ -176,7 +176,7 @@ function Deck({ variant, place, onAsk, onOpenAll }: CardDeckProps) {
         </h2>
         {deck ? (
           <span className="cd__state" role="status">
-            {setStateWords(deck.set.state)}
+            {setStateWords(deck.set.state, deck.set.ahead)}
           </span>
         ) : null}
         <InkButton
