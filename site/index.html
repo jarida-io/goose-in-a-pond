@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Goose In A Pond</title>
+<meta name="description" content="A fully local, privacy-first smart home assistant built on Goose and MCP. Voice, language, memory and device control run on a board in your house, and Goose On The Go puts it in your pocket.">
+<meta property="og:title" content="Goose In A Pond">
+<meta property="og:description" content="A smart home assistant that lives in your house. Built on Goose and MCP, open source, nothing leaves the house.">
+<meta property="og:image" content="assets/og.png">
+<link rel="icon" href="assets/goose-logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="vendor/ink.css">
+<link rel="stylesheet" href="styles.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="bar-slot">
+  <header class="bar ink-glass" id="bar">
+    <a class="brand" href="#top" aria-label="Goose In A Pond, home">
+      <img src="assets/goose-logo.png" alt="" class="mark mark--light" width="36" height="36">
+      <img src="assets/goose-logo-dark.png" alt="" class="mark mark--dark" width="36" height="36">
+      <span>Goose In A Pond</span>
+    </a>
+    <nav class="links" aria-label="Sections">
+      <a href="#showcase">Showcase</a>
+      <a href="#how">How it works</a>
+      <a href="#repos">Repos</a>
+      <a href="#keynote">Keynote</a>
+    </nav>
+    <div class="bar-actions">
+      <button class="ink-btn ink-btn--quiet ink-btn--sm theme-toggle" id="theme-toggle" type="button" aria-label="Switch between light and dark">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <a class="ink-btn ink-btn--primary ink-btn--sm" href="https://github.com/jarida-io/goose-in-a-pond">Get the code</a>
+    </div>
+  </header>
+</div>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="hero-copy">
+      <span class="ink-eyebrow">Open source · runs on your own hardware</span>
+      <h1 class="ink-title display">A smart home assistant that lives in your house.</h1>
+      <p class="lede">Goose In A Pond runs voice, language, memory and device control on a board you can hold. Goose On The Go puts it in your pocket. Nothing leaves the house.</p>
+      <div class="cta">
+        <a class="ink-btn ink-btn--primary ink-btn--lg" href="#repos">Get the code</a>
+        <a class="ink-btn ink-btn--quiet ink-btn--lg" href="#showcase">See it running</a>
+      </div>
+      <p class="fine">Built on <a href="https://github.com/jarida-io/Goose">Goose</a>, the open-source agent and MCP client. Apache-2.0.</p>
+    </div>
+    <div class="hero-art" aria-hidden="false">
+      <figure class="frame frame--desk ink-edge">
+        <img src="assets/shots/pond-home.webp" alt="The Goose In A Pond dashboard: a greeting, the weather in Nairobi and tonight’s routines" width="1440" height="900" loading="eager">
+      </figure>
+      <figure class="frame frame--phone ink-edge">
+        <img src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine and the weather in Nairobi" width="720" height="1616" loading="eager">
+      </figure>
+    </div>
+  </section>
+
+  <section class="promises" aria-label="What it promises">
+    <article class="promise ink-edge ink-edge--flat">
+      <span class="ink-eyebrow">Private</span>
+      <h2 class="ink-title ink-title--3">Your voice stays home</h2>
+      <p>Wake word, speech, the model and memory all run on the box. A build test fails if any code makes an HTTP call outside the egress tracker.</p>
+    </article>
+    <article class="promise ink-edge ink-edge--flat">
+      <span class="ink-eyebrow">Low connectivity</span>
+      <h2 class="ink-title ink-title--3">Keeps working offline</h2>
+      <p>Switch the pond to Offline and it refuses everything but loopback. The model, voice, memory, schedules, cameras and Matter devices carry on.</p>
+    </article>
+    <article class="promise ink-edge ink-edge--flat">
+      <span class="ink-eyebrow">Yours</span>
+      <h2 class="ink-title ink-title--3">Inspect it, extend it</h2>
+      <p>Apache-2.0, with 17 MCP servers and 74 tools you can read, fork and add to. No vendor can change the terms on you.</p>
+    </article>
+  </section>
+
+  <section class="section" id="showcase" aria-labelledby="showcase-title">
+    <div class="section-head">
+      <span class="ink-eyebrow">Showcase</span>
+      <h2 class="ink-title section-title" id="showcase-title">Two apps, one pond</h2>
+      <p class="section-lede">Screens from the current builds of both apps, talking to a pond running Gemma 4 E4B on the device.</p>
+    </div>
+    <div class="ink-tabs" role="tablist" aria-label="Choose an app" id="showcase-tabs">
+      <button class="ink-tabs__tab" role="tab" id="tab-pond" aria-controls="panel-pond" aria-selected="true" tabindex="0">Goose In A Pond</button>
+      <button class="ink-tabs__tab" role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Goose On The Go</button>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-pond" aria-labelledby="tab-pond">
+      <div class="desk-grid">
+        <figure class="shot ink-edge ink-edge--flat">
+          <img src="assets/shots/pond-chat.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes with its schedule tool" width="1440" height="900" loading="lazy">
+          <figcaption><b>Chat with tools.</b> Goose calls the schedule server to set a weekly reminder.</figcaption>
+        </figure>
+        <figure class="shot ink-edge ink-edge--flat">
+          <img src="assets/shots/pond-routines.webp" alt="Routines and schedules: a weekday 6:30 Morning Briefing and a chapati timer, both set by asking Goose" width="1440" height="900" loading="lazy">
+          <figcaption><b>Schedules.</b> A weekday morning briefing and a kitchen timer, both set by asking.</figcaption>
+        </figure>
+        <figure class="shot ink-edge ink-edge--flat">
+          <img src="assets/shots/pond-network.webp" alt="Settings summarising the pond in plain words, ending “Nothing leaves this house.”" width="1440" height="900" loading="lazy">
+          <figcaption><b>Privacy, in plain words.</b> Set to Offline, the pond says “Nothing leaves this house.”</figcaption>
+        </figure>
+        <figure class="shot ink-edge ink-edge--flat">
+          <img src="assets/shots/pond-voice.webp" alt="Voice mode: the orb listening for “hey goose”" width="1440" height="900" loading="lazy">
+          <figcaption><b>Voice.</b> Listening for “hey goose”, on the device.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-go" aria-labelledby="tab-go" hidden>
+      <div class="phone-row">
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine, the weather in Nairobi and things to ask" width="720" height="1616" loading="lazy">
+          <figcaption><b>Home.</b> The next routine, the weather, and what to ask.</figcaption>
+        </figure>
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-chat.webp" alt="The chat wall: six conversations, on the pond and nowhere else" width="720" height="1616" loading="lazy">
+          <figcaption><b>Chat.</b> Every conversation, kept on the pond.</figcaption>
+        </figure>
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-conversation.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes with its reminder tool" width="720" height="1559" loading="lazy">
+          <figcaption><b>Tools, shown.</b> Goose sets a weekly reminder.</figcaption>
+        </figure>
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-memories.webp" alt="Memories: Baraka is allergic to peanuts, with Edit and Forget buttons" width="720" height="1616" loading="lazy">
+          <figcaption><b>Memory.</b> Fix it, or make it forget.</figcaption>
+        </figure>
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-schedule.webp" alt="The Schedule tab with a chapati timer and a weekday Morning Briefing" width="720" height="1616" loading="lazy">
+          <figcaption><b>Schedule.</b> Timers and routines, set by asking.</figcaption>
+        </figure>
+        <figure class="phone-shot">
+          <img class="ink-edge" src="assets/shots/gotg-pair.webp" alt="Pairing: the phone shows three fingerprints so you can match the pond’s" width="720" height="1616" loading="lazy">
+          <figcaption><b>Pairing.</b> CPace and a pinned certificate. No cloud account.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how" aria-labelledby="how-title">
+    <div class="section-head">
+      <span class="ink-eyebrow">How it works</span>
+      <h2 class="ink-title section-title" id="how-title">Three layers, one board</h2>
+      <p class="section-lede">The surfaces people use, Goose and its MCP servers in the middle, and llama.cpp underneath, in the same process as the agent.</p>
+    </div>
+    <figure class="diagram ink-edge ink-edge--flat">
+      <img src="assets/architecture.png" alt="Architecture: surfaces (pond app, Goose On The Go, browser dashboard, Jarida Ink); the G-Layer (Goose agent, 17 in-process MCP servers, a Matter home controller, and vision, audio and inference buses); and on-device inference (GGUF weights, mmproj encoders, MTP drafter, KV cache, llama.cpp, on CUDA, Metal or CPU)" width="3200" height="2446" loading="lazy">
+    </figure>
+    <div class="facts">
+      <div class="fact ink-edge">
+        <span class="num">17</span>
+        <p>MCP servers and 74 tools, run as Goose builtin extensions over an in-memory duplex. No subprocess, no port.</p>
+      </div>
+      <div class="fact ink-edge ink-edge--flat">
+        <span class="num">7,620 MB</span>
+        <p>The pond’s whole budget on an 8 GB Jetson Orin Nano: model, speech, embedder and camera.</p>
+      </div>
+      <div class="fact ink-edge ink-edge--flat">
+        <span class="num">2.1–2.3×</span>
+        <p>Faster decode on the Orin with a multi-token-prediction drafter, with token-identical output.</p>
+      </div>
+    </div>
+    <div class="hw">
+      <div class="hw-item"><span class="ink-badge" style="--ink-tone-fg: var(--border-ink); --ink-tone-soft: var(--pp-100);">CUDA</span><p>Jetson Orin Nano 8 GB · sm_87</p></div>
+      <div class="hw-item"><span class="ink-badge" style="--ink-tone-fg: var(--border-ink); --ink-tone-soft: var(--pp-100);">Metal</span><p>Apple silicon · M-series</p></div>
+      <div class="hw-item"><span class="ink-badge" style="--ink-tone-fg: var(--border-ink); --ink-tone-soft: var(--pp-100);">CPU</span><p>Raspberry Pi 5 · no GPU offload</p></div>
+    </div>
+  </section>
+
+  <section class="section" id="repos" aria-labelledby="repos-title">
+    <div class="section-head">
+      <span class="ink-eyebrow">Repos</span>
+      <h2 class="ink-title section-title" id="repos-title">Build your own pond</h2>
+      <p class="section-lede">Everything that makes the pond, in the open.</p>
+    </div>
+    <div class="repo-grid">
+      <a class="repo ink-edge ink-pressable" href="https://github.com/jarida-io/goose-in-a-pond">
+        <span class="repo-path">jarida-io/goose-in-a-pond</span>
+        <h3 class="ink-title ink-title--2">Goose In A Pond</h3>
+        <p>The pond: Rust server, desktop app and kiosk, voice stack, and all 17 MCP servers.</p>
+        <span class="repo-meta"><span class="ink-badge">Apache-2.0</span><span class="ink-badge">Rust · TypeScript</span></span>
+      </a>
+      <a class="repo ink-edge ink-edge--flat ink-pressable" href="https://github.com/jarida-io/goose-on-the-go">
+        <span class="repo-path">jarida-io/goose-on-the-go</span>
+        <h3 class="ink-title ink-title--2">Goose On The Go</h3>
+        <p>The phone app for iOS and Android: pairing, chat, voice, schedules and the home.</p>
+        <span class="repo-meta"><span class="ink-badge">Expo · React Native</span></span>
+      </a>
+      <a class="repo ink-edge ink-edge--flat ink-pressable" href="https://github.com/jarida-io/ink">
+        <span class="repo-path">jarida-io/ink · npm @jarida/ink</span>
+        <h3 class="ink-title ink-title--2">Jarida Ink</h3>
+        <p>The design library both apps and this page are drawn with: tokens, headless behaviour, React, React Native and plain CSS.</p>
+        <span class="repo-meta"><span class="ink-badge">Apache-2.0</span><span class="ink-badge">Zero dependencies</span></span>
+      </a>
+      <a class="repo ink-edge ink-edge--flat ink-pressable" href="https://github.com/jarida-io/llama-cpp-rs-giap">
+        <span class="repo-path">jarida-io/llama-cpp-rs-giap</span>
+        <h3 class="ink-title ink-title--2">The inference fork</h3>
+        <p>Rust bindings for llama.cpp with OpenAI-style chat templates and MTP speculative decoding together.</p>
+        <span class="repo-meta"><span class="ink-badge">Rust</span></span>
+      </a>
+      <a class="repo ink-edge ink-edge--flat ink-pressable" href="https://github.com/jarida-io/Goose">
+        <span class="repo-path">jarida-io/Goose</span>
+        <h3 class="ink-title ink-title--2">Goose</h3>
+        <p>Our tracked fork of the AAIF agent and MCP client, pinned by the pond as a submodule.</p>
+        <span class="repo-meta"><span class="ink-badge">Apache-2.0</span></span>
+      </a>
+    </div>
+  </section>
+
+  <section class="section keynote" id="keynote" aria-labelledby="keynote-title">
+    <div class="keynote-card ink-edge">
+      <div class="keynote-copy">
+        <span class="ink-eyebrow">Keynote</span>
+        <h2 class="ink-title section-title" id="keynote-title">Democratizing AI with Goose In A Pond</h2>
+        <p>Most “smart” home assistants need a live connection to someone else’s cloud, ship your voice to a data center you’ll never see, and go quiet the moment your internet does. This talk is about what it took for a five-person team to build the alternative on Goose and MCP: how Goose learned to listen for its own name, how it runs the home, and how it gets better over time without ever phoning home.</p>
+        <div class="cta">
+          <a class="ink-btn ink-btn--primary" href="assets/democratizing-ai-with-goose-in-a-pond.pdf">Download the slides (PDF)</a>
+        </div>
+        <p class="team">Liz Wangui · Purity Wanjiru · Emmanuel Oyugi · Africia Kerubo · Jerry Ochieng</p>
+      </div>
+      <div class="keynote-qr">
+        <img src="assets/qr-pond.svg" alt="QR code for pond.jarida.io" width="220" height="220">
+        <span>pond.jarida.io</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <img src="assets/jarida-logo-purple.png" alt="Jarida" width="94" height="40">
+    <p>Goose In A Pond is a Jarida project. Jarida Open Source Community. Code Apache-2.0, docs CC BY 4.0.</p>
+    <nav class="foot-links" aria-label="Elsewhere">
+      <a href="https://github.com/jarida-io">GitHub</a>
+      <a href="https://jarida.io">jarida.io</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

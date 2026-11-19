@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Goose In A Pond architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@jarida/ink@1.1.0/dist/css/ink.css">
+<script type="module">
+  import { createTheme, cssVariables } from "https://cdn.jsdelivr.net/npm/@jarida/ink@1.1.0/dist/index.js";
+  const vars = cssVariables(createTheme({ scheme: "light", accent: "Purple" }));
+  for (const [k, v] of Object.entries(vars)) document.documentElement.style.setProperty(k, v);
+  document.documentElement.style.removeProperty("--color-bg");
+</script>
+<style>
+  :root {
+    --color-bg: #FAF3E1;
+    --color-surface: #FFFFFF;
+    --color-text: #171616;
+    --color-text-secondary: #566178;
+    --color-border: rgba(23, 22, 22, 0.08);
+    --color-border-strong: rgba(23, 22, 22, 0.15);
+    --color-accent: #7C3AED;
+    --border-ink: #5D23C2;
+    --bg-brand-soft: #F5F3FF;
+    --pp-100: #EDE9FE;
+    --ink-rest: 4px;
+    --ink-border-width: 2px;
+    --radius-lg: 14px;
+    --font-body: "Quicksand", "Comfortaa", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--color-bg); color: var(--color-text); font-family: var(--font-body); }
+  .canvas { width: 1600px; padding: 56px 64px 64px; display: flex; flex-direction: column; gap: 22px; }
+  .head { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; }
+  .eyebrow { font-family: var(--font-mono); font-size: 14px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--color-accent); }
+  h1 { margin: 6px 0 0; font-size: 44px; font-weight: 700; font-style: italic; letter-spacing: -0.02em; line-height: 1.05; }
+  .lede { margin: 8px 0 0; font-size: 18px; font-weight: 500; color: var(--color-text-secondary); max-width: 860px; line-height: 1.45; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand img { width: 96px; height: 96px; }
+
+  .tier { display: grid; grid-template-columns: 200px 1fr; gap: 18px; align-items: stretch; }
+  .tier-label { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding-left: 4px; }
+  .tier-label .n { font-family: var(--font-mono); font-size: 13px; color: var(--color-text-secondary); letter-spacing: 0.1em; }
+  .tier-label .t { font-size: 24px; font-weight: 700; font-style: italic; letter-spacing: -0.02em; line-height: 1.1; }
+  .tier-label .s { font-size: 14px; color: var(--color-text-secondary); font-weight: 500; line-height: 1.35; }
+
+  .panel { background: var(--color-surface); border: 1px solid var(--color-border-strong); border-radius: 20px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .grid { display: grid; gap: 12px; }
+  .box { background: var(--color-bg); border: 1px solid var(--color-border-strong); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+  .box.soft { background: var(--bg-brand-soft); border-color: #D9CCF7; }
+  .box .k { font-size: 17px; font-weight: 700; line-height: 1.2; }
+  .box .v { font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); line-height: 1.45; }
+  .ink-edge.box { background: var(--color-surface); border: 2px solid var(--color-text); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; color: var(--border-ink); background: var(--pp-100); border-radius: 999px; padding: 4px 10px; }
+  .chip.off { color: var(--color-text-secondary); background: transparent; border: 1px dashed var(--color-border-strong); }
+  .band { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--bg-brand-soft); border: 1px solid #D9CCF7; border-radius: 12px; padding: 10px 16px; }
+  .band .k { font-size: 16px; font-weight: 700; }
+  .band .v { font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); }
+
+  .bus { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: center; background: var(--color-bg); border: 1px solid var(--color-border-strong); border-radius: 12px; padding: 10px 14px; }
+  .bus .name { font-size: 16px; font-weight: 700; font-style: italic; }
+  .bus .name small { display: block; font-style: normal; font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--color-text-secondary); margin-top: 2px; }
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .step { font-size: 13.5px; font-weight: 600; background: var(--color-surface); border: 1px solid var(--color-border-strong); border-radius: 8px; padding: 5px 9px; }
+  .step.mono { font-family: var(--font-mono); font-weight: 500; font-size: 12.5px; }
+  .arrow { width: 18px; height: 2px; background: var(--color-accent); position: relative; flex: none; }
+  .arrow::after { content: ""; position: absolute; right: -1px; top: -4px; border-left: 7px solid var(--color-accent); border-top: 5px solid transparent; border-bottom: 5px solid transparent; }
+
+  .wire { display: grid; grid-template-columns: 200px 1fr; gap: 18px; }
+  .wire .line { display: flex; align-items: center; gap: 12px; padding: 0 8px; font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); }
+  .wire .line span.rule { flex: 1; border-top: 2px dashed #CDBDF3; }
+
+  .hw { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .foot { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); padding-top: 4px; }
+</style>
+</head>
+<body>
+<div class="canvas" id="diagram">
+  <div class="head">
+    <div>
+      <div class="eyebrow">Architecture</div>
+      <h1>Goose In A Pond, top to bottom</h1>
+      <p class="lede">Three layers, all on one board in the house: the surfaces people use, Goose and its MCP tools in the middle, and a local inference engine underneath. Phones reach the pond over the home network, or a private tailnet (tsnet + Headscale) when away.</p>
+    </div>
+    <div class="brand"><img src="../../pond-desktop/src/assets/goose-logo.png" alt="Goose In A Pond logo"></div>
+  </div>
+
+  <div class="tier">
+    <div class="tier-label"><span class="n">01</span><span class="t">Surfaces</span><span class="s">Where people meet it</span></div>
+    <div class="panel">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="box"><span class="k">Pond desktop &amp; kiosk</span><span class="v">Electron · app://giap · voice mode<br>the Jetson kiosk runs the same app</span></div>
+        <div class="box"><span class="k">Goose On The Go</span><span class="v">iOS · Android · Expo<br>pairs with CPace, pinned HTTPS :4443</span></div>
+        <div class="box"><span class="k">Browser dashboard</span><span class="v">any phone or laptop on the LAN<br>the same UI, served by the pond</span></div>
+      </div>
+      <div class="band"><span class="k">Jarida Ink</span><span class="v">one design library · tokens, headless behaviour, React, React Native, plain CSS</span></div>
+    </div>
+  </div>
+
+  <div class="wire"><div></div><div class="line"><span class="rule"></span><span>HTTPS + SSE · /api/v1 · auth on every non-public route</span><span class="rule"></span></div></div>
+
+  <div class="tier">
+    <div class="tier-label"><span class="n">02</span><span class="t">G-Layer</span><span class="s">Goose, its tools, and three buses that share the hardware</span></div>
+    <div class="panel">
+      <div class="grid" style="grid-template-columns: 1fr 1.75fr 0.85fr;">
+        <div class="box"><span class="k">Goose agent</span><span class="v">AAIF’s open-source agent and MCP client<br>instructions · recipes · schedules · skills · sub-agents<br>GiapProviderShim: system prompt + tool veto<br>memories ride the turn, so the prefix stays cached</span></div>
+        <div class="box ink-edge"><span class="k">MCP servers, in process</span>
+          <div class="chips">
+            <span class="chip">toolkit</span><span class="chip">vision</span><span class="chip">memory</span><span class="chip">schedule</span><span class="chip">weather</span><span class="chip">knowledge</span><span class="chip">system</span><span class="chip">device</span><span class="chip">device-control</span><span class="chip">sensors</span><span class="chip">questions</span><span class="chip">context</span><span class="chip">interview</span><span class="chip off">travel</span><span class="chip off">orchestrator</span><span class="chip off">tasks</span><span class="chip off">task-work</span>
+          </div>
+          <span class="v">17 servers · 74 tools · Goose builtin extensions over an in-memory duplex: no subprocess, no port</span>
+        </div>
+        <div class="box"><span class="k">Home</span><span class="v">Matter controller on the LAN<br>matter.js · BLE to add devices<br>no vendor cloud</span></div>
+      </div>
+      <div class="bus"><span class="name">Vision bus<small>camera owner</small></span>
+        <div class="flow"><span class="step">Camera</span><span class="arrow"></span><span class="step mono">frames · 2–30 fps</span><span class="arrow"></span><span class="step">motion · YOLOX-Nano</span><span class="arrow"></span><span class="step">people · pets · packages</span><span class="arrow"></span><span class="step mono">camera events</span><span class="arrow"></span><span class="step mono">mmproj on demand</span></div></div>
+      <div class="bus"><span class="name">Audio bus<small>one mic, one speaker</small></span>
+        <div class="flow"><span class="step">Microphone</span><span class="arrow"></span><span class="step">wake word “hey goose”</span><span class="arrow"></span><span class="step mono">Silero VAD</span><span class="arrow"></span><span class="step mono">Whisper</span><span class="arrow"></span><span class="step">think</span><span class="arrow"></span><span class="step mono">Kokoro TTS</span><span class="arrow"></span><span class="step">Speaker</span></div></div>
+      <div class="bus"><span class="name">Inference bus<small>one slot for every model call</small></span>
+        <div class="flow"><span class="step">your turn first</span><span class="arrow"></span><span class="step">then, one at a time:</span><span class="step mono">titles</span><span class="step mono">summaries</span><span class="step mono">memory extraction</span><span class="step mono">consolidation</span><span class="step mono">ideas</span><span class="step mono">news</span><span class="step mono">web watch</span></div></div>
+    </div>
+  </div>
+
+  <div class="wire"><div></div><div class="line"><span class="rule"></span><span>in process · no network hop between the agent and the model</span><span class="rule"></span></div></div>
+
+  <div class="tier">
+    <div class="tier-label"><span class="n">03</span><span class="t">On-device inference</span><span class="s">Weights, engine, cache, silicon</span></div>
+    <div class="panel">
+      <div class="grid" style="grid-template-columns: 1fr 1fr 1fr 1.1fr;">
+        <div class="box"><span class="k">Text</span><span class="v">*.gguf · e.g. Gemma 4 E4B, E2B<br>LiteRT-LM *.litertlm</span></div>
+        <div class="box"><span class="k">Vision &amp; audio</span><span class="v">mmproj-*.gguf<br>multimedia encoders</span></div>
+        <div class="box"><span class="k">Model helpers</span><span class="v">MTP · draft-token<br>speculative decoding</span></div>
+        <div class="box soft"><span class="k">KV cache</span><span class="v">system prefix, prefilled once<br>conversation history<br>multimedia embeddings</span></div>
+      </div>
+      <div class="box ink-edge"><span class="k">llama.cpp, in process</span><span class="v">jarida-io/llama-cpp-rs-giap (OpenAI-style templates + MTP) · LiteRT-LM for .litertlm · llamafile, Ollama, mistral.rs as optional external servers</span></div>
+      <div class="hw">
+        <div class="box"><span class="k">CUDA</span><span class="v">Jetson Orin Nano 8 GB · sm_87<br>7,620 MB budget, Tegra ARM64</span></div>
+        <div class="box"><span class="k">Metal</span><span class="v">Apple silicon · M-series<br>ARM64</span></div>
+        <div class="box"><span class="k">CPU</span><span class="v">Raspberry Pi 5 · ARM64<br>no GPU offload</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot"><span>Goose In A Pond · Jarida Open Source Community · Apache-2.0</span><span>pond.jarida.io</span></div>
+</div>
+</body>
+</html>
