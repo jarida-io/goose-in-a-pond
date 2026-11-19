@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, KeyRound, Lock, LockOpen, ShieldAlert, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import type { PairingLock, PairingRequest } from "../api/types";
-import { clientLabel, isReadOnlyRefusal, lockLines, MAX_PIN_DIGITS, pinProblem } from "./pairingLockView";
+import { clientLabel, confirmProblem, isReadOnlyRefusal, lockLines, MAX_PIN_DIGITS, PIN_MISMATCH, pinProblem } from "./pairingLockView";
 import "./network.css";
 
 const POLL_MS = 4000;
@@ -18,6 +18,8 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [pin, setPin] = useState("");
+  // Typed a second time: the field hides its digits, so a slip would otherwise be saved unseen.
+  const [again, setAgain] = useState("");
   const [pinError, setPinError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -84,12 +86,13 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
 
   const lines = lockLines(lock, ownerName);
   const Icon = lock.locked ? Lock : LockOpen;
+  const pinNote = pinError ?? confirmProblem(pin, again);
 
   function savePin() {
-    const issue = pinProblem(pin, lock?.min_pin_digits ?? 6);
+    const issue = pinProblem(pin, lock?.min_pin_digits ?? 6) ?? (again === pin ? null : PIN_MISMATCH);
     setPinError(issue);
     if (issue) return;
-    void act(() => api.setRecoveryPin(pin), () => setPin(""));
+    void act(() => api.setRecoveryPin(pin), () => { setPin(""); setAgain(""); });
   }
 
   return (
@@ -126,7 +129,8 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
               </button>
             )}
           </div>
-          <div className="net__row">
+          {/* One grid, so both labels share a column and both fields start and end together. */}
+          <div className="net__pinGrid">
             <label className="net__line" htmlFor={`recovery-pin-${variant}`}>
               {lock.has_recovery_pin ? "Change the recovery PIN" : "Set a recovery PIN"}
             </label>
@@ -141,12 +145,27 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
               aria-describedby={pinError ? `recovery-pin-err-${variant}` : undefined}
               onChange={(e) => { setPin(e.target.value); setPinError(null); }}
             />
-            <button type="button" className="net__btn" disabled={busy || pin.length === 0} onClick={savePin}>
+            <label className="net__line" htmlFor={`recovery-pin-again-${variant}`}>
+              Type the PIN again
+            </label>
+            <input
+              id={`recovery-pin-again-${variant}`}
+              className="net__input"
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={MAX_PIN_DIGITS}
+              value={again}
+              disabled={pin.length === 0}
+              aria-describedby={pinNote ? `recovery-pin-err-${variant}` : undefined}
+              onChange={(e) => { setAgain(e.target.value); setPinError(null); }}
+            />
+            <button type="button" className="net__btn net__pinSave" disabled={busy || pin.length === 0 || again.length === 0} onClick={savePin}>
               <KeyRound size={13} aria-hidden="true" />
               Save PIN
             </button>
           </div>
-          {pinError && <p className="net__quiet" id={`recovery-pin-err-${variant}`} role="alert">{pinError}</p>}
+          {pinNote && <p className="net__quiet" id={`recovery-pin-err-${variant}`} role="alert">{pinNote}</p>}
 
           <div className="net__item net__item--flat">
             <div className="net__text">

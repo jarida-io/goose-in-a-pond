@@ -32,6 +32,17 @@ export function pinProblem(pin: string, minDigits: number): string | null {
   return null;
 }
 
+/** Said when the PIN typed a second time differs from the first, so a slip is never saved. */
+export const PIN_MISMATCH = "The two PINs are not the same. Type them again.";
+
+/**
+ * The PIN problem once it has been typed twice: the PIN's own, or a mismatch once the second entry
+ * is as long as the first. `null` while the second is still being typed, or when both agree.
+ */
+export function confirmProblem(pin: string, again: string): string | null {
+  return again.length >= pin.length && again.length > 0 && again !== pin ? PIN_MISMATCH : null;
+}
+
 /** A 403 means this device may look but not change: the pond's own screen is often not a member's phone. */
 export function isReadOnlyRefusal(e: unknown): boolean {
   return e instanceof ApiError && e.status === 403;
