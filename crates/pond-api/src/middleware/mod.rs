@@ -494,7 +494,7 @@ fn reachable_without_token_in_some_state(method: &Method, path: &str) -> bool {
 
 /// Whether the pond is set up, read live: a cache would make reset a one-way door.
 /// A failed read counts as onboarded, so a transient `SQLITE_BUSY` narrows access.
-async fn pond_is_onboarded(state: &crate::AppState) -> bool {
+pub(crate) async fn pond_is_onboarded(state: &crate::AppState) -> bool {
     // `--skip-onboarding` means no wizard, so it must read as onboarded, not as still running.
     if state.skip_onboarding {
         return true;

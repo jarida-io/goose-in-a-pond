@@ -23,9 +23,10 @@
            still take it in the header
   reset-wizard
            after a host reset of the pond `card` claimed: its wizard refuses the tokenless host and
-           admits the claimant's token (the model list and download progress too, #365),
-           completing it makes the claiming phone the primary member's, and after
-           `setup-code --rearm` the wizard reopens to the host
+           admits the claimant's token (the model list and download progress too, #365), which
+           saves the wizard and its model choice but leaves naming the primary member to the
+           owner the pairing-lock checks seated, and after `setup-code --rearm` the wizard reopens
+           to the host
 
 The launcher proves process and port ownership first. The setup code is read from
 `pond-server setup-code --json` and never printed, and neither is the claimant's token, which
@@ -287,14 +288,18 @@ def reset_wizard():
     code, _, text, owner = request("POST", "/profiles", {"display_name": "Live Owner"}, bearer)
     check("the claimant's token reopens the wizard", code == 201, "%s %s" % (code, text[:200]))
     owner_id = (owner or {}).get("id")
+    # `pairing_lock_checks.py` seated this pond's main member, so its primary member is theirs to name.
     code, _, text, _ = request("PUT", "/settings", {**FULL_SETUP, "primary_profile_id": owner_id}, bearer)
-    check("the claimant names the owner as the primary member", code == 200, "%s %s" % (code, text[:200]))
+    check("the claimant may not name the primary member of a pond whose owner is seated",
+          code == 403 and "only the owner" in text, "%s %s" % (code, text[:200]))
+    code, _, text, _ = request("PUT", "/settings", FULL_SETUP, bearer)
+    check("the claimant saves the wizard, its model choice included", code == 200,
+          "%s %s" % (code, text[:200]))
     code, _, text, _ = request("POST", "/onboard/complete", None, bearer)
     check("the claimant finishes setup as itself", code == 200, "%s %s" % (code, text[:200]))
     code, _, text, me = request("GET", "/devices/self", None, bearer)
-    check("and the claiming phone now belongs to the owner",
-          code == 200 and ((me or {}).get("profile") or {}).get("id") == owner_id,
-          "%s %s" % (code, text[:200]))
+    check("and finishing hands the claiming phone no member it was not named for",
+          code == 200 and (me or {}).get("profile") is None, "%s %s" % (code, text[:200]))
     code, _, text, _ = request("PUT", "/settings", FULL_SETUP)
     check("the wizard closes again once set up", code == 401, "%s %s" % (code, text[:200]))
 

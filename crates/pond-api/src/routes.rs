@@ -7539,10 +7539,11 @@ pub(crate) async fn update_settings(
             may_change_model, PermissionDecision,
         };
         let role = resolve_role_from_principal(&state, principal.as_ref()).await;
+        let onboarded = crate::middleware::pond_is_onboarded(&state).await;
         if let PermissionDecision::Denied {
             reason,
             grantable_by,
-        } = may_change_model(role)
+        } = may_change_model(role, onboarded)
         {
             return Err(permission_denied(&state, reason, grantable_by).await);
         }
@@ -9220,10 +9221,11 @@ async fn activate_model(
         may_change_model, PermissionDecision,
     };
     let caller_role = resolve_role_from_principal(&state, principal.as_ref()).await;
+    let onboarded = crate::middleware::pond_is_onboarded(&state).await;
     if let PermissionDecision::Denied {
         reason,
         grantable_by,
-    } = may_change_model(caller_role)
+    } = may_change_model(caller_role, onboarded)
     {
         return Err(permission_denied(&state, reason, grantable_by).await);
     }
@@ -22124,6 +22126,14 @@ async fn resolve_role_from_principal(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
 ) -> Option<Role> {
+    use pond_core::security::ports::policy::PrincipalKind;
+    // The dev bypass admits the host's own processes, which the host credential already lets wipe
+    // the pond; it still names no member, so only its authority changes, never whose data it reads.
+    if principal.is_some_and(|axum::Extension(p)| p.kind == PrincipalKind::Loopback)
+        && crate::middleware::dev_allow_loopback()
+    {
+        return Some(Role::Owner);
+    }
     resolve_role(state, &scope_from_principal(state, principal).await).await
 }
 

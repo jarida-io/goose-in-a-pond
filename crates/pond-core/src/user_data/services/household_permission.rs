@@ -48,7 +48,12 @@ pub fn may_remove_device(role: Option<Role>) -> PermissionDecision {
     owner_only(role, REASON_OWNER_ONLY_REMOVE)
 }
 
-pub fn may_change_model(role: Option<Role>) -> PermissionDecision {
+/// Until onboarding finishes nobody holds the owner's seat, so the wizard's caller, whom the
+/// onboarding gate already admitted, picks the model; requiring an owner would refuse every setup.
+pub fn may_change_model(role: Option<Role>, onboarded: bool) -> PermissionDecision {
+    if !onboarded {
+        return PermissionDecision::Allowed;
+    }
     owner_only(role, REASON_OWNER_ONLY_MODEL)
 }
 
@@ -132,11 +137,30 @@ mod tests {
 
     #[test]
     fn only_the_owner_may_change_the_model() {
-        allowed(may_change_model(Some(Role::Owner)));
-        denied_with(
-            may_change_model(Some(Role::Member)),
-            REASON_OWNER_ONLY_MODEL,
-        );
+        allowed(may_change_model(Some(Role::Owner), true));
+        for role in [
+            Some(Role::Member),
+            Some(Role::Guest),
+            Some(Role::Developer),
+            None,
+        ] {
+            denied_with(may_change_model(role, true), REASON_OWNER_ONLY_MODEL);
+        }
+    }
+
+    /// A reset pond keeps its members, and its claimant's phone belongs to none of them until
+    /// completion; it must still be able to pick the model that completion requires.
+    #[test]
+    fn the_wizard_picks_the_model_before_the_pond_has_an_owner() {
+        for role in [
+            Some(Role::Owner),
+            Some(Role::Member),
+            Some(Role::Guest),
+            Some(Role::Developer),
+            None,
+        ] {
+            allowed(may_change_model(role, false));
+        }
     }
 
     #[test]

@@ -395,20 +395,29 @@ def section_legacy_rows(jerry):
         con.close()
         return
 
+    con.close()
+
+    # Jerry, the household's first member, is its owner; removing them would leave it with none.
+    if jerry:
+        code, body = call("DELETE", "/api/v1/profiles/" + jerry)
+        expect("the household's owner is not removed", code, 409, body)
+    sam = new_profile("Sam")
+
+    con = db()
     con.execute(
         "INSERT OR REPLACE INTO memory_fragments (id, profile_id, content, source, created_at) "
         "VALUES ('legacy-1', NULL, 'the spare key is under the third plant pot', 'live', datetime('now'))"
     )
-    if jerry:
+    if sam:
         con.execute(
             "INSERT OR REPLACE INTO memory_fragments (id, profile_id, content, source, created_at) "
             "VALUES ('owned-1', ?, 'my boiler code is F28', 'live', datetime('now'))",
-            (jerry,),
+            (sam,),
         )
     con.commit()
 
     owned = con.execute(
-        "SELECT COUNT(*) FROM memory_fragments WHERE profile_id = ?", (jerry,)
+        "SELECT COUNT(*) FROM memory_fragments WHERE profile_id = ?", (sam,)
     ).fetchone()[0]
     shared = con.execute(
         "SELECT COUNT(*) FROM memory_fragments WHERE profile_id IS NULL"
@@ -418,9 +427,9 @@ def section_legacy_rows(jerry):
     check("an owned memory is attributed", owned >= 1, "owned=%d" % owned)
     check("a legacy memory stays unattributed", shared >= 1, "shared=%d" % shared)
 
-    # Deleting the owner must take the owned row and leave the shared one.
-    if jerry:
-        code, body = call("DELETE", "/api/v1/profiles/" + jerry)
+    # Deleting the member must take the owned row and leave the shared one.
+    if sam:
+        code, body = call("DELETE", "/api/v1/profiles/" + sam)
         if expect("delete the owning member", code, 200, body):
             check(
                 "the delete reported the owned memory",
@@ -2031,7 +2040,10 @@ def section_composed_suggestions():
     )
 
 
-def section_reminders_surface():
+_REMINDER_READER = "sess-live-reminder-reader"
+
+
+def section_reminders_surface(jerry):
     """A stored reminder can be read and dismissed over real HTTP.
 
     The table landing was only half of keeping the date. A row nothing can reach
@@ -2044,8 +2056,21 @@ def section_reminders_surface():
     The row is seeded through SQL rather than by running an extraction pass,
     because this pond has no embedding model and the engine is therefore not
     running here at all. What is under test is the surface, not the producer.
+
+    Reminders answer only for the caller, and by now the household has several
+    members, so this console names itself through a session bound to Jerry, as
+    the dashboard does. With no name it is nobody, and nobody is shown nothing.
     """
     print("\n=== reminders: the date can be seen and disposed of ===")
+    if not jerry:
+        check("the reminders surface has a member to read as", False, "no member from P1")
+        return
+    seed_session(_REMINDER_READER)
+    code, body = call("PUT", "/api/v1/sessions/%s/user" % _REMINDER_READER, {"profile_id": jerry})
+    if not expect("the reader's session is bound to Jerry", code, 200, body,
+                  ("bound", lambda b: isinstance(b, dict) and b.get("bound") is True)):
+        return
+    as_jerry = "?session_id=" + _REMINDER_READER
 
     con = db()
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -2065,7 +2090,7 @@ def section_reminders_surface():
     con.commit()
     con.close()
 
-    code, body = call("GET", "/api/v1/reminders")
+    code, body = call("GET", "/api/v1/reminders" + as_jerry)
     ok = expect(
         "the reminders route is registered",
         code,
@@ -2107,14 +2132,14 @@ def section_reminders_surface():
         "HTTP %s: %s" % (code, body),
     )
 
-    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss")
+    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss" + as_jerry)
     check(
         "a reminder can be dismissed",
         code == 200 and isinstance(body, dict) and body.get("disposition") == "dismissed",
         "HTTP %s: %s" % (code, body),
     )
 
-    code, body = call("GET", "/api/v1/reminders")
+    code, body = call("GET", "/api/v1/reminders" + as_jerry)
     check(
         "a dismissed reminder is not offered again",
         code == 200
@@ -2130,7 +2155,7 @@ def section_reminders_surface():
         ("one already dismissed", "live-r1"),
         ("one that never existed", "live-r-nobody"),
     ):
-        code, body = call("POST", "/api/v1/reminders/%s/dismiss" % rid)
+        code, body = call("POST", "/api/v1/reminders/%s/dismiss%s" % (rid, as_jerry))
         check(
             "dismissing %s is a 404, not a second success" % label,
             code == 404,
@@ -2411,7 +2436,7 @@ def main():
         section_memory_extraction()
         section_inference_lane()
         section_composed_suggestions()
-        section_reminders_surface()
+        section_reminders_surface(jerry)
         section_notification_history()
         section_delivery_and_conversations()
         section_vision()
