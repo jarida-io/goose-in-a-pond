@@ -151,7 +151,7 @@ impl TodoHookEngine {
                 body => format!("{}\n{body}", notice.title),
             };
             goose_thread::post(
-                Some(&todo.owner),
+                &todo.owner,
                 &text,
                 MessageNote::from_source(
                     SourceKind::Reminder,

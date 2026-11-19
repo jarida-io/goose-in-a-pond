@@ -7677,7 +7677,7 @@ async fn run_proactive_reviewer(
             // Every suggestion goes to the member's thread, with what Goose noticed and the
             // offer to do it.
             let posted = pond_core::shared::services::goose_thread::post(
-                Some(audience.profile_id()),
+                audience.profile_id(),
                 &proposal.summary(),
                 review::thread_offer(proposal),
             )
@@ -8693,7 +8693,7 @@ async fn notify_long_task_owner(
         pond_server::system_notices::long_task_notification(task, finished, body.clone());
     // The answer is kept in the owner's thread, and the notice opens it there.
     let posted = pond_core::shared::services::goose_thread::post(
-        Some(owner),
+        owner,
         &body,
         pond_core::user_data::domain::message_note::MessageNote::from_source(
             pond_core::user_data::domain::message_note::SourceKind::Task,

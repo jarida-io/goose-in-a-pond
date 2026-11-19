@@ -131,7 +131,7 @@ impl WatchNotifier for MemberWatchNotifier {
             }
         }
         pond_core::shared::services::goose_thread::post(
-            Some(&notice.owner),
+            &notice.owner,
             &format!("{}\n{}", notice.title, notice.body),
             pond_core::user_data::domain::message_note::MessageNote::from_source(
                 pond_core::user_data::domain::message_note::SourceKind::Watch,

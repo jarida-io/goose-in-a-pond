@@ -325,11 +325,11 @@ async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thre
     let thread = GooseThread::new(pond.sessions.clone());
     let note = MessageNote::from_source(SourceKind::Schedule, "Daily Briefing", None);
     let hers = thread
-        .post(Some(&amina), "Here is your brief.", note.clone())
+        .post(&amina, "Here is your brief.", note.clone())
         .await
         .unwrap();
     let his = thread
-        .post(Some(&baraka), "Here is your brief.", note)
+        .post(&baraka, "Here is your brief.", note)
         .await
         .unwrap();
 
@@ -411,7 +411,7 @@ async fn an_offer_in_the_thread_is_taken_once_and_hands_back_its_words() {
     });
     let posted = GooseThread::new(pond.sessions.clone())
         .post(
-            Some(&amina),
+            &amina,
             "Shall I check whether the tickets are on sale?",
             note,
         )

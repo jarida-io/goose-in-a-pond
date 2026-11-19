@@ -110,10 +110,11 @@ async fn result_silence(
     notifies_itself(&task.kind).then_some(ResultSilence::RuleSpokeForItself)
 }
 
-/// Keeps a finished run's answer, or why it did not finish, in the Goose thread.
+/// Keeps a finished run's answer, or why it did not finish, in the Goose thread: a member's own
+/// reminder in theirs, a household routine's in every member's.
 async fn post_schedule_result(
     ev: &ScheduleResultEvent,
-) -> Option<pond_core::shared::services::goose_thread::Posted> {
+) -> Vec<pond_core::shared::services::goose_thread::Posted> {
     use pond_core::user_data::domain::message_note::{MessageNote, SourceKind};
     let text = match ev.status {
         RunStatus::Completed => ev.result.clone().unwrap_or_default(),
@@ -121,17 +122,24 @@ async fn post_schedule_result(
             "This did not finish: {}",
             ev.error.as_deref().unwrap_or("the run failed")
         ),
-        RunStatus::Running | RunStatus::Skipped => return None,
+        RunStatus::Running | RunStatus::Skipped => return Vec::new(),
     };
     if text.trim().is_empty() {
-        return None;
+        return Vec::new();
     }
     let note = MessageNote::from_source(
         SourceKind::Schedule,
         ev.schedule_label.clone(),
         Some(ev.schedule_id.clone()),
     );
-    pond_core::shared::services::goose_thread::post(None, &text, note).await
+    use pond_core::shared::services::goose_thread;
+    match ev.for_member.as_deref() {
+        Some(member) => goose_thread::post(member, &text, note)
+            .await
+            .into_iter()
+            .collect(),
+        None => goose_thread::post_to_household(&text, note).await,
+    }
 }
 
 /// Announce each finished schedule or rule run to the household's phones, unless the household
@@ -164,7 +172,9 @@ pub fn spawn_schedule_result_notices(
             let silence = result_silence(&ev, settings.as_ref(), scheduler.as_deref()).await;
             // The answer is kept in the thread whether or not a phone is told.
             if !matches!(silence, Some(ResultSilence::RuleSpokeForItself)) {
-                if let Some(posted) = post_schedule_result(&ev).await {
+                // One notice reaches every phone, so it opens the thread only when there is one
+                // thread; with one per member it keeps opening the run, which says the same.
+                if let [posted] = post_schedule_result(&ev).await.as_slice() {
                     notification.data = Some(OpenScreen::chat(Some(&posted.session_id)).data());
                 }
             }
