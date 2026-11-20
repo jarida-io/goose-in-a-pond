@@ -44,24 +44,41 @@
 <main id="main">
   <section class="hero" id="top">
     <div class="hero-copy">
-      <span class="ink-eyebrow">Open source · runs on your own hardware</span>
+      <p class="product">Goose In A Pond</p>
       <h1 class="ink-title display">A smart home assistant that lives in your house.</h1>
-      <p class="lede">Goose In A Pond runs voice, language, memory and device control on a board you can hold. Goose On The Go puts it in your pocket. Nothing leaves the house.</p>
+    </div>
+    <div class="duo">
+      <figure class="dev dev-pond">
+        <div class="dev-body">
+          <div class="dev-glass">
+            <img class="only-light" src="assets/shots/pond-home.webp" alt="The pond’s own screen: a greeting for Amina, the weather in Nairobi and tonight’s routine" width="1440" height="900" loading="eager">
+            <img class="only-dark" src="assets/shots/pond-home-dark.webp" alt="The pond’s own screen in the dark theme: a greeting for Amina, the weather in Nairobi and tonight’s routine" width="1440" height="900" loading="lazy">
+          </div>
+        </div>
+        <span class="dev-stand" aria-hidden="true"></span>
+      </figure>
+      <figure class="dev dev-phone">
+        <div class="dev-body">
+          <div class="dev-glass">
+            <img src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine and the weather in Nairobi" width="720" height="1616" loading="eager">
+          </div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <div class="strip">
+    <div class="strip-inner">
+      <div class="strip-copy">
+        <p class="lede">Goose In A Pond runs voice, language, memory and device control on a board you can hold. Goose On The Go puts it in your pocket. Nothing leaves the house.</p>
+        <p class="fine">Built on <a href="https://github.com/jarida-io/Goose">Goose</a>, the open-source agent and MCP client. Apache-2.0.</p>
+      </div>
       <div class="cta">
         <a class="ink-btn ink-btn--primary ink-btn--lg" href="#repos">Get the code</a>
         <a class="ink-btn ink-btn--quiet ink-btn--lg" href="#showcase">See it running</a>
       </div>
-      <p class="fine">Built on <a href="https://github.com/jarida-io/Goose">Goose</a>, the open-source agent and MCP client. Apache-2.0.</p>
     </div>
-    <div class="hero-art" aria-hidden="false">
-      <figure class="frame frame--desk ink-edge">
-        <img src="assets/shots/pond-home.webp" alt="The Goose In A Pond dashboard: a greeting, the weather in Nairobi and tonight’s routines" width="1440" height="900" loading="eager">
-      </figure>
-      <figure class="frame frame--phone ink-edge">
-        <img src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine and the weather in Nairobi" width="720" height="1616" loading="eager">
-      </figure>
-    </div>
-  </section>
+  </div>
 
   <section class="promises" aria-label="What it promises">
     <article class="promise ink-edge ink-edge--flat">
@@ -81,65 +98,168 @@
     </article>
   </section>
 
-  <section class="section" id="showcase" aria-labelledby="showcase-title">
-    <div class="section-head">
-      <span class="ink-eyebrow">Showcase</span>
-      <h2 class="ink-title section-title" id="showcase-title">Two apps, one pond</h2>
+  <section class="showcase" id="showcase" aria-labelledby="showcase-title">
+    <div class="showcase-head">
+      <p class="product">Goose In A Pond and Goose On The Go</p>
+      <h2 class="ink-title headline" id="showcase-title">Two apps, one pond.</h2>
       <p class="section-lede">Screens from the current builds of both apps, talking to a pond running Gemma 4 E4B on the device.</p>
     </div>
-    <div class="ink-tabs" role="tablist" aria-label="Choose an app" id="showcase-tabs">
-      <button class="ink-tabs__tab" role="tab" id="tab-pond" aria-controls="panel-pond" aria-selected="true" tabindex="0">Goose In A Pond</button>
-      <button class="ink-tabs__tab" role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Goose On The Go</button>
-    </div>
 
-    <div class="panel" role="tabpanel" id="panel-pond" aria-labelledby="tab-pond">
-      <div class="desk-grid">
-        <figure class="shot ink-edge ink-edge--flat">
-          <img src="assets/shots/pond-chat.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes with its schedule tool" width="1440" height="900" loading="lazy">
-          <figcaption><b>Chat with tools.</b> Goose calls the schedule server to set a weekly reminder.</figcaption>
-        </figure>
-        <figure class="shot ink-edge ink-edge--flat">
-          <img src="assets/shots/pond-routines.webp" alt="Routines and schedules: a weekday 6:30 Morning Briefing and a chapati timer, both set by asking Goose" width="1440" height="900" loading="lazy">
-          <figcaption><b>Schedules.</b> A weekday morning briefing and a kitchen timer, both set by asking.</figcaption>
-        </figure>
-        <figure class="shot ink-edge ink-edge--flat">
-          <img src="assets/shots/pond-network.webp" alt="Settings summarising the pond in plain words, ending “Nothing leaves this house.”" width="1440" height="900" loading="lazy">
-          <figcaption><b>Privacy, in plain words.</b> Set to Offline, the pond says “Nothing leaves this house.”</figcaption>
-        </figure>
-        <figure class="shot ink-edge ink-edge--flat">
-          <img src="assets/shots/pond-voice.webp" alt="Voice mode: the orb listening for “hey goose”" width="1440" height="900" loading="lazy">
-          <figcaption><b>Voice.</b> Listening for “hey goose”, on the device.</figcaption>
-        </figure>
+    <div class="hl" id="hl">
+      <div class="hl-track" tabindex="0" role="region" aria-roledescription="carousel" aria-label="Highlights from both apps">
+        <article class="hl-card" aria-roledescription="slide" aria-label="1 of 7">
+          <p class="hl-cap">Ask in plain words.<br>Goose picks the tool and shows it.</p>
+          <figure class="dev dev-pond">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/pond-chat.webp" alt="A conversation on the pond where Goose sets a Saturday reminder to water the tomatoes, with the reminder it set shown under the reply" width="1440" height="900" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="2 of 7">
+          <p class="hl-cap">Your pond, in your pocket.<br>No cloud account in between.</p>
+          <figure class="dev dev-phone">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with things to ask, the next routine and the weather in Nairobi" width="720" height="1616" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="3 of 7">
+          <p class="hl-cap">Say “hey goose”.<br>It hears you on the device.</p>
+          <figure class="dev dev-pond">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/pond-voice.webp" alt="Voice mode on the pond: the orb listening for “hey goose”" width="1440" height="900" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="4 of 7">
+          <p class="hl-cap">It remembers what matters.<br>Fix a memory, or make it forget.</p>
+          <figure class="dev dev-phone">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/gotg-memories.webp" alt="Memories on the phone: Baraka is allergic to peanuts, with Edit and Forget buttons" width="720" height="1616" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="5 of 7">
+          <p class="hl-cap">Privacy, in plain words.<br>Nothing leaves this house.</p>
+          <figure class="dev dev-pond">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/pond-network.webp" alt="The pond’s settings open on one sentence: it hears nothing, watches nothing, remembers what you tell it, and nothing leaves this house" width="1440" height="900" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="6 of 7">
+          <p class="hl-cap">Paired with a code,<br>checked against the pond’s own screen.</p>
+          <figure class="dev dev-phone">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/gotg-pair.webp" alt="Pairing on the phone: three fingerprint groups to match against the pond’s screen" width="720" height="1616" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+        <article class="hl-card" aria-roledescription="slide" aria-label="7 of 7">
+          <p class="hl-cap">Routines, set by asking.<br>A morning briefing and a kitchen timer.</p>
+          <figure class="dev dev-pond">
+            <div class="dev-body"><div class="dev-glass">
+              <img src="assets/shots/pond-routines.webp" alt="Routines on the pond: a weekday 6:30 Morning Briefing and a chapati timer, both set by asking Goose" width="1440" height="900" loading="lazy">
+            </div></div>
+          </figure>
+        </article>
+      </div>
+      <div class="hl-controls" hidden>
+        <div class="hl-dots" role="group" aria-label="Choose a highlight"></div>
+        <button class="hl-play" type="button" aria-label="Pause the highlights">
+          <svg class="icon-pause" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 5v14M16 5v14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+          <svg class="icon-play" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="section look" id="look" aria-labelledby="look-title">
+    <div class="look-head">
+      <h2 class="ink-title headline" id="look-title">Screen by screen.</h2>
+      <div class="ink-tabs" role="tablist" aria-label="Choose an app" id="look-tabs">
+        <button class="ink-tabs__tab" role="tab" id="tab-pond" aria-controls="panel-pond" aria-selected="true" tabindex="0">Goose In A Pond</button>
+        <button class="ink-tabs__tab" role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Goose On The Go</button>
       </div>
     </div>
 
-    <div class="panel" role="tabpanel" id="panel-go" aria-labelledby="tab-go" hidden>
-      <div class="phone-row">
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine, the weather in Nairobi and things to ask" width="720" height="1616" loading="lazy">
-          <figcaption><b>Home.</b> The next routine, the weather, and what to ask.</figcaption>
-        </figure>
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-chat.webp" alt="The chat wall: six conversations, on the pond and nowhere else" width="720" height="1616" loading="lazy">
-          <figcaption><b>Chat.</b> Every conversation, kept on the pond.</figcaption>
-        </figure>
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-conversation.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes with its reminder tool" width="720" height="1559" loading="lazy">
-          <figcaption><b>Tools, shown.</b> Goose sets a weekly reminder.</figcaption>
-        </figure>
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-memories.webp" alt="Memories: Baraka is allergic to peanuts, with Edit and Forget buttons" width="720" height="1616" loading="lazy">
-          <figcaption><b>Memory.</b> Fix it, or make it forget.</figcaption>
-        </figure>
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-schedule.webp" alt="The Schedule tab with a chapati timer and a weekday Morning Briefing" width="720" height="1616" loading="lazy">
-          <figcaption><b>Schedule.</b> Timers and routines, set by asking.</figcaption>
-        </figure>
-        <figure class="phone-shot">
-          <img class="ink-edge" src="assets/shots/gotg-pair.webp" alt="Pairing: the phone shows three fingerprints so you can match the pond’s" width="720" height="1616" loading="lazy">
-          <figcaption><b>Pairing.</b> CPace and a pinned certificate. No cloud account.</figcaption>
-        </figure>
+    <div class="look-panel" role="tabpanel" id="panel-pond" aria-labelledby="tab-pond">
+      <div class="look-list" role="group" aria-label="Pond screens">
+        <div class="look-item" data-open="true">
+          <button class="look-pill" type="button" aria-pressed="true" data-shot="0"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Home</button>
+          <p class="look-text">A greeting, the weather outside, the next routine, and things to ask written out for you.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="1"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Night</button>
+          <p class="look-text">The same home in the dark theme, for a panel that shouldn’t light up the room.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="2"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Chat</button>
+          <p class="look-text">Ask for a Saturday reminder and Goose sets it with its schedule tool, then shows what it set under the reply.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="3"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Routines</button>
+          <p class="look-text">A weekday 6:30 morning briefing and a chapati timer, both set by asking Goose.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="4"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Privacy</button>
+          <p class="look-text">Settings open on one sentence about the pond: it hears nothing, watches nothing, and nothing leaves this house.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="5"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Voice</button>
+          <p class="look-text">The orb listens for “hey goose”. The wake word, speech and the reply all run on the box.</p>
+        </div>
       </div>
+      <figure class="dev dev-pond look-dev">
+        <div class="dev-body"><div class="dev-glass">
+          <img data-shot="0" data-on="true" src="assets/shots/pond-home.webp" alt="The pond’s home screen: a greeting, the weather and tonight’s routine" width="1440" height="900" loading="lazy">
+          <img data-shot="1" data-on="false" src="assets/shots/pond-home-dark.webp" alt="The pond’s home screen in the dark theme" width="1440" height="900" loading="lazy">
+          <img data-shot="2" data-on="false" src="assets/shots/pond-chat.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes" width="1440" height="900" loading="lazy">
+          <img data-shot="3" data-on="false" src="assets/shots/pond-routines.webp" alt="Routines: a weekday 6:30 Morning Briefing and a chapati timer" width="1440" height="900" loading="lazy">
+          <img data-shot="4" data-on="false" src="assets/shots/pond-network.webp" alt="Settings summarising the pond in plain words, ending “Nothing leaves this house.”" width="1440" height="900" loading="lazy">
+          <img data-shot="5" data-on="false" src="assets/shots/pond-voice.webp" alt="Voice mode: the orb listening for “hey goose”" width="1440" height="900" loading="lazy">
+        </div></div>
+        <span class="dev-stand" aria-hidden="true"></span>
+      </figure>
+    </div>
+
+    <div class="look-panel" role="tabpanel" id="panel-go" aria-labelledby="tab-go" hidden>
+      <div class="look-list" role="group" aria-label="Phone screens">
+        <div class="look-item" data-open="true">
+          <button class="look-pill" type="button" aria-pressed="true" data-shot="0"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Home</button>
+          <p class="look-text">Things to ask, the next routine and the weather, straight from the household’s own pond.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="1"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Chat</button>
+          <p class="look-text">Every conversation, kept on the pond and nowhere else.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="2"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Tools</button>
+          <p class="look-text">Goose sets a Saturday reminder to water the tomatoes, and the reminder it set shows under the reply.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="3"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Memory</button>
+          <p class="look-text">Baraka is allergic to peanuts. Edit a memory, or have Goose forget it.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="4"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Schedule</button>
+          <p class="look-text">A one-off chapati timer and the weekday Morning Briefing, each with a Run now button.</p>
+        </div>
+        <div class="look-item">
+          <button class="look-pill" type="button" aria-pressed="false" data-shot="5"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>Pairing</button>
+          <p class="look-text">Three fingerprint groups to match against the pond’s own screen. No cloud account.</p>
+        </div>
+      </div>
+      <figure class="dev dev-phone look-dev">
+        <div class="dev-body"><div class="dev-glass">
+          <img data-shot="0" data-on="true" src="assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with things to ask, the next routine and the weather" width="720" height="1616" loading="lazy">
+          <img data-shot="1" data-on="false" src="assets/shots/gotg-chat.webp" alt="The chat wall: six conversations, on the pond and nowhere else" width="720" height="1616" loading="lazy">
+          <img data-shot="2" data-on="false" src="assets/shots/gotg-conversation.webp" alt="A conversation where Goose sets a Saturday reminder to water the tomatoes" width="720" height="1559" loading="lazy">
+          <img data-shot="3" data-on="false" src="assets/shots/gotg-memories.webp" alt="Memories: Baraka is allergic to peanuts, with Edit and Forget buttons" width="720" height="1616" loading="lazy">
+          <img data-shot="4" data-on="false" src="assets/shots/gotg-schedule.webp" alt="The Schedule tab with a chapati timer and a weekday Morning Briefing" width="720" height="1616" loading="lazy">
+          <img data-shot="5" data-on="false" src="assets/shots/gotg-pair.webp" alt="Pairing: three fingerprint groups to match against the pond’s screen" width="720" height="1616" loading="lazy">
+        </div></div>
+      </figure>
     </div>
   </section>
 

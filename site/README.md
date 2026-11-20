@@ -8,7 +8,7 @@ python3 -m http.server 8765 --directory site
 
 | Path | What it is |
 |---|---|
-| `index.html`, `styles.css`, `app.js` | The page. `app.js` loads Ink's tokens and headless behaviour from jsDelivr (`@jarida/ink@1.1.0`); without it the page still renders from the fallback tokens in `styles.css`. |
+| `index.html`, `styles.css`, `app.js` | The page. The devices around the screenshots are drawn in CSS. `app.js` loads Ink's tokens and headless behaviour from jsDelivr (`@jarida/ink@1.1.0`) and drives the highlights carousel and the screen switcher; without it the page still renders from the fallback tokens in `styles.css`, with the carousel scrolled by hand. |
 | `vendor/ink.css` | Ink's stylesheet, copied from `@jarida/ink@1.1.0`, so the page needs no third-party stylesheet host. |
 | `assets/shots/` | Screenshots of the current builds: the pond's web UI at 1440×900 and Goose On The Go on an Android emulator and an iOS simulator, all talking to a demo household on a pond running Gemma 4 E4B. |
 | `assets/architecture.png` | The architecture diagram, from `docs/keynote/architecture.html`. |
