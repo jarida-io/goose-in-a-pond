@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAuthorityPersistenceAndSignature(t *testing.T) {
@@ -167,5 +168,39 @@ func TestTheCoordinatorClientIgnoresProxySettings(t *testing.T) {
 	transport, ok := coordinatorClient().Transport.(*http.Transport)
 	if !ok || transport.Proxy != nil {
 		t.Fatal("the coordinator client would use an environment proxy")
+	}
+}
+
+func TestAStatusGrantNamesTheDeviceAndIsSignedForReadingOnly(t *testing.T) {
+	authority, err := LoadAuthority(filepath.Join(t.TempDir(), "authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	token, expires, err := authority.Grant("0123456789abcdef0123456789abcdef", 30*24*time.Hour, now)
+	if err != nil || expires != now.Add(30*24*time.Hour).Unix() {
+		t.Fatalf("grant: %v %d", err, expires)
+	}
+	encoded, signed, _ := strings.Cut(token, ".")
+	payload, _ := base64.StdEncoding.DecodeString(encoded)
+	signature, _ := base64.StdEncoding.DecodeString(signed)
+	var grant enrollment.StatusGrant
+	if json.Unmarshal(payload, &grant) != nil || grant.Household != authority.Household || grant.Device != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("grant names %+v", grant)
+	}
+	public, _ := base64.StdEncoding.DecodeString(authority.PublicKey)
+	if !ed25519.Verify(public, append([]byte("goose-pond-status-grant-v1\x00"), payload...), signature) {
+		t.Fatal("grant is not signed in its own domain")
+	}
+	if ed25519.Verify(public, append([]byte("goose-enrollment-v1\x00"), payload...), signature) {
+		t.Fatal("a grant verifies as an enrollment approval")
+	}
+	for _, device := range []string{"short", "has a space in it 0123", strings.Repeat("a", 81)} {
+		if _, _, err := authority.Grant(device, time.Hour, now); err == nil {
+			t.Errorf("granted %q", device)
+		}
+	}
+	if _, _, err := authority.Grant("0123456789abcdef", 60*24*time.Hour, now); err == nil {
+		t.Error("granted past the service's lifetime bound")
 	}
 }

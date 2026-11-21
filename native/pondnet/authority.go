@@ -268,6 +268,61 @@ func (a Authority) Submit(ctx context.Context, origin string, approval enrollmen
 	return decodeAnswer(response.Body, approval)
 }
 
+// ReportStatus sends one signed report about this Pond to the enrollment service and
+// returns the service's answer: what it now believes about the Pond, including the outage
+// this report ended, if any. The household and the expiry are set here; the caller sets
+// the rest.
+func (a Authority) ReportStatus(ctx context.Context, origin string, report enrollment.PondReport) (enrollment.PondStatus, error) {
+	var result enrollment.PondStatus
+	u, e := url.Parse(origin)
+	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return result, errors.New("enrollment requires an HTTPS origin")
+	}
+	report.Household = a.Household
+	report.Expires = time.Now().Add(2 * time.Minute).Unix()
+	envelope, e := enrollment.SignStatus(report, a.key)
+	if e != nil {
+		return result, e
+	}
+	body, _ := json.Marshal(envelope)
+	request, e := http.NewRequestWithContext(ctx, "POST", strings.TrimSuffix(origin, "/")+"/v1/pond/status", bytes.NewReader(body))
+	if e != nil {
+		return result, e
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, e := coordinatorClient().Do(request)
+	if e != nil {
+		return result, fmt.Errorf("enrollment service unavailable: %w", e)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return result, &Refused{Status: response.StatusCode, Reason: refusal(response.Body), Action: "status"}
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 4096))
+	if e = decoder.Decode(&result); e != nil {
+		return result, e
+	}
+	return result, nil
+}
+
+// Grant signs a read grant for one of this household's phones, naming the device as the
+// enrollment service knows it, valid for lifetime. The phone presents it to read its
+// Pond's status while the Pond cannot answer; the service honours it only while that
+// device is an active phone of this household.
+func (a Authority) Grant(device string, lifetime time.Duration, now time.Time) (string, int64, error) {
+	if len(device) < 16 || len(device) > 80 || strings.ContainsFunc(device, func(r rune) bool {
+		return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_')
+	}) {
+		return "", 0, errors.New("invalid device")
+	}
+	if lifetime <= 0 || lifetime > enrollment.MaxGrantLifetime-24*time.Hour {
+		return "", 0, errors.New("invalid grant lifetime")
+	}
+	expires := now.Add(lifetime).Unix()
+	token, err := enrollment.SignGrant(enrollment.StatusGrant{Household: a.Household, Device: device, Expires: expires}, a.key)
+	return token, expires, err
+}
+
 // decodeAnswer reads the coordinator's account of a device and checks it against what
 // was asked. Fields this helper does not know are ignored, so the service can add one
 // without breaking Ponds already in homes; what protects the answer is its size bound,

@@ -43,7 +43,7 @@ func main() {
 	socket := flag.String("socket", "", "private companion Unix socket")
 	identity := flag.String("identity", "", "existing Pond TLS identity file")
 	port := flag.Int("port", 4443, "tailnet HTTPS port")
-	authorityAction := flag.String("authority-action", "", "local authority operation: identity, register, inspect, enroll, replace or revoke")
+	authorityAction := flag.String("authority-action", "", "local authority operation: identity, register, inspect, enroll, replace, revoke, status or grant")
 	enrollmentOrigin := flag.String("enrollment", "", "enrollment HTTPS origin")
 	deviceAction := flag.String("device-action", "", "provisioning operation on the device directory named by --state: create or install")
 	flag.Parse()
@@ -99,6 +99,9 @@ func main() {
 			}
 			json.NewEncoder(os.Stdout).Encode(map[string]string{"household": household})
 			return
+		}
+		if *authorityAction == "status" || *authorityAction == "grant" {
+			os.Exit(runStatusAction(authority, *authorityAction, *enrollmentOrigin))
 		}
 		if *authorityAction != "enroll" && *authorityAction != "revoke" && *authorityAction != "inspect" && *authorityAction != "replace" {
 			os.Exit(2)
@@ -234,4 +237,51 @@ func runDeviceAction(action, directory string) int {
 	}
 	fmt.Fprintln(os.Stderr, "unknown device action:", action)
 	return 2
+}
+
+// statusGrantLifetime is how long a phone's read grant lasts: the 30-day presence lapse,
+// after which a phone that has not been home loses remote access anyway.
+const statusGrantLifetime = 30 * 24 * time.Hour
+
+// runStatusAction is the Pond status half of the authority: status sends the report read
+// on stdin and prints the service's answer; grant prints a read grant for the device named
+// on stdin. Exit 3 is the service's refusal, printed as {"refused": reason}; 1 a fault.
+func runStatusAction(authority pondnet.Authority, action, origin string) int {
+	decoder := json.NewDecoder(io.LimitReader(os.Stdin, 8192))
+	decoder.DisallowUnknownFields()
+	if action == "grant" {
+		var input struct {
+			Device string `json:"device"`
+		}
+		if decoder.Decode(&input) != nil || decoder.Decode(new(any)) != io.EOF {
+			fmt.Fprintln(os.Stderr, "invalid grant input")
+			return 2
+		}
+		grant, expires, err := authority.Grant(input.Device, statusGrantLifetime, time.Now())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "status grant not signed:", err)
+			return 1
+		}
+		json.NewEncoder(os.Stdout).Encode(map[string]any{"grant": grant, "expires": expires})
+		return 0
+	}
+	var report enrollment.PondReport
+	if decoder.Decode(&report) != nil || decoder.Decode(new(any)) != io.EOF {
+		fmt.Fprintln(os.Stderr, "invalid status report input")
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	answer, err := authority.ReportStatus(ctx, origin, report)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "status report not delivered:", err)
+		var refused *pondnet.Refused
+		if errors.As(err, &refused) {
+			json.NewEncoder(os.Stdout).Encode(map[string]string{"refused": refused.Reason})
+			return 3
+		}
+		return 1
+	}
+	json.NewEncoder(os.Stdout).Encode(answer)
+	return 0
 }

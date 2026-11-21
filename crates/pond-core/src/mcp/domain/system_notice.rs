@@ -2,6 +2,9 @@
 //! catalogue (`docs/architecture/notifications.md`). Each [`SystemEvent`] becomes exactly one
 //! [`Notification`], with its title, body, category and route hint decided here and nowhere else.
 
+use std::time::Duration;
+
+use crate::mcp::domain::notice_delivery::LEADS_MORNING_KEY;
 use crate::mcp::ports::notification::{Notification, OpenScreen};
 
 /// Which part of a model a download fetched.
@@ -70,6 +73,12 @@ pub enum SystemEvent {
     RemoteAccessNeedsSignIn,
     /// Remote access works again, after an outage was announced.
     RemoteAccessRestored,
+    /// The Pond started again after its host lost power. `off_for` is how long it was off, as
+    /// the remote-access coordinator timed it; `None` when no coordinator could say.
+    PondLostPower { off_for: Option<Duration> },
+    /// The Pond kept running but could not reach the internet, for `off_for` as the remote-access
+    /// coordinator timed it. Said once the connection is back, so a phone away from home can read it.
+    PondLostInternet { off_for: Duration },
     /// A paired device was removed from the Pond and lost its access.
     DeviceRemoved { name: String },
     /// A provider refused an account's saved sign-in, so the Pond forgot it.
@@ -88,6 +97,8 @@ impl SystemEvent {
             Self::RemoteAccessDown => "remote_access_down",
             Self::RemoteAccessNeedsSignIn => "remote_access_sign_in",
             Self::RemoteAccessRestored => "remote_access_restored",
+            Self::PondLostPower { .. } => "pond_lost_power",
+            Self::PondLostInternet { .. } => "pond_lost_internet",
             Self::DeviceRemoved { .. } => "device_removed",
             Self::SignInExpired { .. } => "sign_in_expired",
         }
@@ -105,6 +116,9 @@ impl SystemEvent {
         let (category, title, body, open) = self.wording();
         let mut data = serde_json::Map::new();
         data.insert("kind".into(), self.kind().into());
+        if self.is_outage() {
+            data.insert(LEADS_MORNING_KEY.into(), true.into());
+        }
         let data = match open {
             Some(open) => open.merged_into(data),
             None => serde_json::Value::Object(data),
@@ -118,6 +132,15 @@ impl SystemEvent {
             timestamp,
             data: Some(data),
         }
+    }
+
+    /// Whether this says why the Pond was out of reach: news that leads the quiet-hours summary
+    /// rather than hiding in its list.
+    fn is_outage(&self) -> bool {
+        matches!(
+            self,
+            Self::PondLostPower { .. } | Self::PondLostInternet { .. }
+        )
     }
 
     fn wording(&self) -> (&'static str, String, String, Option<OpenScreen>) {
@@ -230,6 +253,28 @@ impl SystemEvent {
                 "This Pond can be reached from outside the home again.".to_string(),
                 Some(OpenScreen::RemoteAccess),
             ),
+            Self::PondLostPower { off_for } => (
+                "info",
+                "Your Pond lost power".to_string(),
+                match off_for {
+                    Some(off_for) => format!(
+                        "Your Pond lost power and was off for {}. It is running again.",
+                        about(*off_for)
+                    ),
+                    None => "Your Pond lost power and has started again.".to_string(),
+                },
+                None,
+            ),
+            Self::PondLostInternet { off_for } => (
+                "info",
+                "Your Pond lost its internet connection".to_string(),
+                format!(
+                    "Your Pond could not reach the internet for {}, so it could not be reached \
+                     from outside the home. It is connected again.",
+                    about(*off_for)
+                ),
+                None,
+            ),
             Self::DeviceRemoved { name } => (
                 "alert",
                 "Device removed".to_string(),
@@ -249,6 +294,25 @@ impl SystemEvent {
                 None,
             ),
         }
+    }
+}
+
+/// A duration as a person says it roughly: minutes up to an hour and a half, then hours, then
+/// days.
+fn about(duration: Duration) -> String {
+    let minutes = (duration.as_secs() + 30) / 60;
+    let plural = |n: u64, unit: &str| {
+        if n == 1 {
+            format!("about 1 {unit}")
+        } else {
+            format!("about {n} {unit}s")
+        }
+    };
+    match minutes {
+        0 => "less than a minute".to_string(),
+        1..=89 => plural(minutes, "minute"),
+        _ if minutes < 36 * 60 => plural((minutes + 30) / 60, "hour"),
+        _ => plural((minutes + 12 * 60) / (24 * 60), "day"),
     }
 }
 
@@ -376,6 +440,59 @@ mod tests {
             name: "Liz's phone".into(),
         });
         assert_eq!(n.data.unwrap()["open"], json!("devices"));
+    }
+
+    #[test]
+    fn a_power_loss_says_how_long_the_pond_was_off_when_that_is_known() {
+        let timed = notify(&SystemEvent::PondLostPower {
+            off_for: Some(Duration::from_secs(92 * 60)),
+        });
+        assert_eq!(timed.title, "Your Pond lost power");
+        assert_eq!(
+            timed.body,
+            "Your Pond lost power and was off for about 2 hours. It is running again."
+        );
+        assert_eq!(timed.category, "info");
+        assert_eq!(timed.data.unwrap()["kind"], json!("pond_lost_power"));
+        let untimed = notify(&SystemEvent::PondLostPower { off_for: None });
+        assert_eq!(untimed.body, "Your Pond lost power and has started again.");
+        assert!(!SystemEvent::PondLostPower { off_for: None }.is_security());
+    }
+
+    #[test]
+    fn an_internet_cut_says_how_long_and_that_it_is_back() {
+        let n = notify(&SystemEvent::PondLostInternet {
+            off_for: Duration::from_secs(14 * 60),
+        });
+        assert_eq!(n.title, "Your Pond lost its internet connection");
+        assert_eq!(
+            n.body,
+            "Your Pond could not reach the internet for about 14 minutes, so it could not be \
+             reached from outside the home. It is connected again."
+        );
+        assert_eq!(n.category, "info");
+        let data = n.data.unwrap();
+        assert_eq!(data["kind"], json!("pond_lost_internet"));
+        assert_eq!(data[LEADS_MORNING_KEY], json!(true));
+    }
+
+    #[test]
+    fn only_an_outage_leads_the_quiet_hours_summary() {
+        let power = notify(&SystemEvent::PondLostPower { off_for: None });
+        assert_eq!(power.data.unwrap()[LEADS_MORNING_KEY], json!(true));
+        let other = notify(&SystemEvent::RemoteAccessRestored);
+        assert!(other.data.unwrap().get(LEADS_MORNING_KEY).is_none());
+    }
+
+    #[test]
+    fn durations_read_as_a_person_would_say_them() {
+        let said = |secs: u64| about(Duration::from_secs(secs));
+        assert_eq!(said(20), "less than a minute");
+        assert_eq!(said(60), "about 1 minute");
+        assert_eq!(said(72 * 60), "about 72 minutes");
+        assert_eq!(said(90 * 60), "about 2 hours");
+        assert_eq!(said(60 * 60 + 89 * 60), "about 2 hours");
+        assert_eq!(said(3 * 24 * 3600), "about 3 days");
     }
 
     #[test]

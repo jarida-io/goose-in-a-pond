@@ -204,11 +204,18 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
             name: "Driveway Light",
             device_type: "light",
             is_online: true,
-            room: "Outdoor",
+            room_id: "outdoor",
             capabilities: ["power"],
           },
         ],
       },
+    }),
+  );
+  // A device names its room by id; the hub reads the names here, and unmocked it reaches a port
+  // nothing listens on, which fails the clean-console assertions.
+  await page.route("**/api/v1/rooms", (route) =>
+    route.fulfill({
+      json: { rooms: [{ id: "outdoor", name: "Outdoor", created_at: "", guest_accessible: false }] },
     }),
   );
   // Read by the Devices tab on mount; off is a fresh Pond's default.

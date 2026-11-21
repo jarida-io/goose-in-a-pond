@@ -759,7 +759,31 @@ pub async fn restart(
     )
     .await;
     match admin.service.restart(body.force).await {
-        Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "restarting": true }))).into_response(),
+        Ok(()) => {
+            record_restart_intent(&state);
+            (StatusCode::ACCEPTED, Json(json!({ "restarting": true }))).into_response()
+        }
         Err(e) => admin_error(e),
+    }
+}
+
+/// Notes that the stop about to come is a restart, so the Pond tells the remote-access
+/// coordinator so and phones away from home say it is restarting rather than gone. Written once
+/// the reboot is under way: the host takes seconds to signal the Pond, this takes milliseconds,
+/// and a restart that was refused must not leave an intent for some later stop.
+fn record_restart_intent(state: &AppState) {
+    let Some(data_dir) = &state.data_dir else {
+        return;
+    };
+    if let Err(error) = pond_infra::host_run::record_stop_intent(
+        data_dir,
+        pond_core::network::domain::pond_status::StopReason::Restart,
+    ) {
+        tracing::warn!(
+            target: "giap::trace",
+            kind = "stop_intent_unrecorded",
+            error = %format!("{error:#}"),
+            "the restart will reach the coordinator as a plain shutdown"
+        );
     }
 }

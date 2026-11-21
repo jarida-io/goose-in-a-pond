@@ -14,6 +14,11 @@ pub const SPEAK_IF_UNFETCHED_KEY: &str = "speak_if_unfetched";
 /// reminder set for that time, or an answer to something the person just asked for.
 pub const QUIET_PASS_KEY: &str = "quiet_pass";
 
+/// The `data` key a producer sets on a notice that leads the quiet-hours summary instead of being
+/// one line in it: why the Pond was out of reach overnight is the morning's news, and a list of
+/// titles would drop how long it lasted.
+pub const LEADS_MORNING_KEY: &str = "leads_morning";
+
 /// Whether a notice goes out in quiet hours: an alert, or one its producer marked.
 pub fn passes_quiet_hours(notification: &Notification) -> bool {
     notification.category == "alert" || flag(notification, QUIET_PASS_KEY)
@@ -39,24 +44,49 @@ pub fn marked(data: Option<serde_json::Value>, key: &str) -> Option<serde_json::
     Some(serde_json::Value::Object(fields))
 }
 
-/// The one notice a phone gets for what was held in quiet hours.
+/// The one notice a phone gets for what was held in quiet hours. A held notice marked
+/// [`LEADS_MORNING_KEY`] gives it its title, body and tap; the rest are listed under it.
 pub fn morning_notice(device_id: &str, held: &[Notification], at: DateTime<Utc>) -> Notification {
     const NAMED: usize = 6;
-    let mut lines: Vec<String> = held.iter().take(NAMED).map(|n| n.title.clone()).collect();
-    if held.len() > NAMED {
-        lines.push(format!("and {} more", held.len() - NAMED));
+    let lead = held.iter().rev().find(|n| flag(n, LEADS_MORNING_KEY));
+    let rest: Vec<&Notification> = held
+        .iter()
+        .filter(|n| lead.is_none_or(|lead| !std::ptr::eq(*n, lead)))
+        .collect();
+    let mut lines: Vec<String> = rest.iter().take(NAMED).map(|n| n.title.clone()).collect();
+    if rest.len() > NAMED {
+        lines.push(format!("and {} more", rest.len() - NAMED));
     }
+    let (title, body, data) = match lead {
+        Some(lead) if lines.is_empty() => {
+            (lead.title.clone(), lead.body.clone(), lead.data.clone())
+        }
+        Some(lead) => (
+            lead.title.clone(),
+            format!(
+                "{}\nAlso from quiet hours:\n{}",
+                lead.body,
+                lines.join("\n")
+            ),
+            lead.data.clone(),
+        ),
+        None => (
+            match held.len() {
+                1 => "1 notice from quiet hours".to_string(),
+                n => format!("{n} notices from quiet hours"),
+            },
+            lines.join("\n"),
+            held.last().and_then(|n| n.data.clone()),
+        ),
+    };
     Notification {
         id: format!("quiet-{}:{device_id}", at.format("%Y%m%d%H%M")),
         target: device_id.to_string(),
         category: "info".to_string(),
-        title: match held.len() {
-            1 => "1 notice from quiet hours".to_string(),
-            n => format!("{n} notices from quiet hours"),
-        },
-        body: lines.join("\n"),
+        title,
+        body,
         timestamp: at.to_rfc3339(),
-        data: held.last().and_then(|n| n.data.clone()),
+        data,
     }
 }
 
@@ -320,6 +350,40 @@ mod tests {
             morning_notice("phone", &held[..1], now()).title,
             "1 notice from quiet hours"
         );
+    }
+
+    #[test]
+    fn an_outage_held_overnight_leads_the_morning_notice() {
+        let titled = |title: &str, data: serde_json::Value| {
+            let mut n = notice(0, 0, None).notification;
+            n.title = title.into();
+            n.body = format!("{title}, in full.");
+            n.data = Some(data);
+            n
+        };
+        let held = vec![
+            titled("Daily Brief check", json!({"open": "schedule"})),
+            titled(
+                "Your Pond lost power",
+                json!({"kind": "pond_lost_power", LEADS_MORNING_KEY: true}),
+            ),
+            titled("Your news is ready", json!({"open": "news"})),
+        ];
+        let morning = morning_notice("phone", &held, now());
+        assert_eq!(morning.title, "Your Pond lost power");
+        assert_eq!(
+            morning.body,
+            "Your Pond lost power, in full.\nAlso from quiet hours:\nDaily Brief check\nYour news is ready"
+        );
+        assert_eq!(
+            morning.data.unwrap()["kind"],
+            "pond_lost_power",
+            "a tap opens the outage"
+        );
+
+        let alone = morning_notice("phone", &held[1..2], now());
+        assert_eq!(alone.title, "Your Pond lost power");
+        assert_eq!(alone.body, "Your Pond lost power, in full.");
     }
 
     #[test]

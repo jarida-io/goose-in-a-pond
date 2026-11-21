@@ -15,7 +15,7 @@
   request_body {
     max_size 8KB
   }
-  @public path /v1/household /v1/approval /health
+  @public path /v1/household /v1/approval /v1/pond/status /health
   handle @public {
     reverse_proxy enrollment:8081
   }
