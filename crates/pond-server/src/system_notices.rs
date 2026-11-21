@@ -563,7 +563,8 @@ where
 
 /// Send the Pond's status reports on their schedule (`network::services::pond_status_reports`),
 /// and announce a power cut once the coordinator has said how long the Pond was off, or once it is
-/// clear it will not. `read` runs every [`TICK`](pond_status_reports::TICK).
+/// clear it will not, and an internet cut of two minutes or more once the coordinator has timed
+/// it. `read` runs every [`TICK`](pond_status_reports::TICK).
 pub fn spawn_pond_status_reports(
     reports: Arc<pond_status_reports::PondStatusReports>,
     read: Arc<dyn Fn() -> HostReading + Send + Sync>,
@@ -579,6 +580,11 @@ pub fn spawn_pond_status_reports(
             {
                 notices
                     .announce(SystemEvent::PondLostPower { off_for })
+                    .await;
+            }
+            if let Some(off_for) = reports.take_internet_cut().await {
+                notices
+                    .announce(SystemEvent::PondLostInternet { off_for })
                     .await;
             }
         }

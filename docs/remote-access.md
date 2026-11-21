@@ -483,6 +483,11 @@ was off for about N.`) once the service answers the `booted` report with a `powe
 without a duration after 15 minutes, or at once when remote access is off. The phone says nothing
 extra after the Pond returns; this notice covers it.
 
+**On the Pond after an internet cut.** The Pond kept running, so there is no `booted` report. When
+a later answer from the service carries a `network_loss` outage of 2 minutes or more that this run
+has not seen, `serve` announces `pond_lost_internet` (`Your Pond could not reach the internet for
+about N ...`). Both notices lead the quiet-hours summary when they arrive at night.
+
 **On the phone.** When the Pond does not answer, the connection strip asks the service with the
 grant and words the answer (goose-on-the-go `services/pond-status.ts`); see that repository.
 

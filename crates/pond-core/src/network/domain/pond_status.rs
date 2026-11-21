@@ -30,6 +30,10 @@ pub const RETRY_CEILING: Duration = Duration::from_secs(2 * 60);
 /// internet took about eight minutes to come back.
 pub const NOTICE_WAIT: Duration = Duration::from_secs(15 * 60);
 
+/// The shortest internet cut the household is told about. Shorter drops are common on a home line
+/// and come back before anyone could have noticed.
+pub const INTERNET_NOTICE_FLOOR: Duration = Duration::from_secs(2 * 60);
+
 /// Why the Pond is stopping on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,6 +250,35 @@ pub enum Due {
 pub enum PowerNotice {
     /// Announce that the Pond lost power, with how long it was off when that is known.
     Announce { off_for: Option<Duration> },
+}
+
+/// Which of the coordinator's network-loss outages the household has been told about this run.
+/// Pure: fed every answer the coordinator gives.
+#[derive(Debug, Clone, Default)]
+pub struct InternetCuts {
+    /// The first answer of a run only sets what is already known: an outage that ended before
+    /// this run started is old news, or the power-loss notice's to tell.
+    primed: bool,
+    known: Option<(i64, i64)>,
+}
+
+impl InternetCuts {
+    /// How long the cut lasted, when `answer` reports a network loss this run has not seen and it
+    /// was at least [`INTERNET_NOTICE_FLOOR`] long.
+    pub fn newly_ended(&mut self, answer: &CoordinatorView) -> Option<Duration> {
+        let outage = answer.last_outage.as_ref();
+        let key = outage.map(|o| (o.started_at, o.ended_at));
+        let first = !std::mem::replace(&mut self.primed, true);
+        if first || key == self.known {
+            self.known = key;
+            return None;
+        }
+        self.known = key;
+        outage
+            .filter(|o| o.cause == "network_loss")
+            .and_then(Outage::duration)
+            .filter(|lasted| *lasted >= INTERNET_NOTICE_FLOOR)
+    }
 }
 
 /// When each report is due, and when the power-loss notice is ready. Pure: the caller supplies the
@@ -660,5 +693,47 @@ mod tests {
             ended_at: 5,
         };
         assert_eq!(backwards.duration(), None);
+    }
+
+    fn answer(cause: &str, started_at: i64, ended_at: i64) -> CoordinatorView {
+        CoordinatorView {
+            state: "online".into(),
+            last_outage: Some(Outage {
+                cause: cause.into(),
+                started_at,
+                ended_at,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_internet_cut_is_told_once_and_only_when_it_mattered() {
+        let mut cuts = InternetCuts::default();
+        assert_eq!(
+            cuts.newly_ended(&answer("network_loss", 100, 4_000)),
+            None,
+            "what the first answer of a run already knew is old news"
+        );
+        assert_eq!(cuts.newly_ended(&answer("network_loss", 100, 4_000)), None);
+        assert_eq!(
+            cuts.newly_ended(&answer("network_loss", 10_000, 10_600)),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            cuts.newly_ended(&answer("network_loss", 10_000, 10_600)),
+            None,
+            "told once"
+        );
+        assert_eq!(
+            cuts.newly_ended(&answer("network_loss", 20_000, 20_090)),
+            None,
+            "a drop under two minutes is not news"
+        );
+        assert_eq!(cuts.newly_ended(&answer("planned", 30_000, 31_000)), None);
+        let quiet = CoordinatorView {
+            state: "online".into(),
+            last_outage: None,
+        };
+        assert_eq!(cuts.newly_ended(&quiet), None);
     }
 }

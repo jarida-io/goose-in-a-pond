@@ -1,4 +1,5 @@
-//! Sends the Pond's status reports on their schedule and settles the power-loss notice. The
+//! Sends the Pond's status reports on their schedule, settles the power-loss notice and hands over
+//! internet cuts the coordinator timed. The
 //! decisions are [`pond_status`](crate::network::domain::pond_status)'s; this drives them
 //! through the [`PondStatusReporter`] port. `serve` calls [`PondStatusReports::tick`] every
 //! [`TICK`] and [`PondStatusReports::going_down`] on its graceful stop.
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::network::domain::pond_status::{
-    report, CoordinatorView, Due, HostReading, PowerNotice, PreviousRun, ReportKind,
+    report, CoordinatorView, Due, HostReading, InternetCuts, PowerNotice, PreviousRun, ReportKind,
     ReportSchedule, StopReason,
 };
 use crate::network::ports::pond_status_reporter::PondStatusReporter;
@@ -28,6 +29,9 @@ struct Settling {
     schedule: ReportSchedule,
     /// The coordinator's answer to `booted`, once it arrived.
     booted_answer: Option<CoordinatorView>,
+    cuts: InternetCuts,
+    /// An internet cut the coordinator timed that has not been handed to the caller yet.
+    untold_cut: Option<Duration>,
 }
 
 impl PondStatusReports {
@@ -45,6 +49,8 @@ impl PondStatusReports {
             schedule: Mutex::new(Settling {
                 schedule: ReportSchedule::new(previous, started),
                 booted_answer: None,
+                cuts: InternetCuts::default(),
+                untold_cut: None,
             }),
         }
     }
@@ -83,6 +89,9 @@ impl PondStatusReports {
                             "the coordinator has the Pond's status"
                         );
                     }
+                    if let Some(lasted) = settling.cuts.newly_ended(&answer) {
+                        settling.untold_cut = Some(lasted);
+                    }
                     if due == Due::Booted {
                         settling.booted_answer = Some(answer);
                     }
@@ -106,8 +115,16 @@ impl PondStatusReports {
         let Settling {
             schedule,
             booted_answer,
+            ..
         } = &mut *settling;
         schedule.power_notice(reading.reporting, booted_answer.as_ref(), now)
+    }
+
+    /// How long the internet cut the coordinator last reported lasted, once per cut: a network
+    /// loss of at least two minutes that ended during this run. `serve` asks after every
+    /// [`tick`](Self::tick).
+    pub async fn take_internet_cut(&self) -> Option<Duration> {
+        self.schedule.lock().await.untold_cut.take()
     }
 
     /// Tells the coordinator the Pond is stopping on purpose, and stops every later report.
@@ -232,6 +249,51 @@ mod tests {
         let sent = reporter.sent();
         assert_eq!(sent.last().unwrap().kind, ReportKind::Heartbeat);
         assert_eq!(sent.last().unwrap().previous_shutdown, None);
+    }
+
+    #[tokio::test]
+    async fn an_internet_cut_the_coordinator_timed_is_handed_over_once() {
+        let start = Instant::now();
+        let (reporter, reports) = reports(PreviousRun::from_marker(None, Some(BOOT_B)), start);
+        reporter.set_answer(CoordinatorView {
+            state: "back".into(),
+            last_outage: Some(Outage {
+                cause: "planned".into(),
+                started_at: 1_000,
+                ended_at: 1_030,
+            }),
+        });
+        reports.tick(&reading(true), start).await;
+        assert_eq!(
+            reports.take_internet_cut().await,
+            None,
+            "the restart was planned"
+        );
+
+        reporter.set_answer(CoordinatorView {
+            state: "online".into(),
+            last_outage: Some(Outage {
+                cause: "network_loss".into(),
+                started_at: 5_000,
+                ended_at: 5_000 + 9 * 60,
+            }),
+        });
+        reports
+            .tick(&reading(true), start + HEARTBEAT_INTERVAL)
+            .await;
+        assert_eq!(
+            reports.take_internet_cut().await,
+            Some(Duration::from_secs(9 * 60))
+        );
+        assert_eq!(reports.take_internet_cut().await, None, "handed over once");
+        reports
+            .tick(&reading(true), start + 2 * HEARTBEAT_INTERVAL)
+            .await;
+        assert_eq!(
+            reports.take_internet_cut().await,
+            None,
+            "the same cut again is not news"
+        );
     }
 
     #[tokio::test]

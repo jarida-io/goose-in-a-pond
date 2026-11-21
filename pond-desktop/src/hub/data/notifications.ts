@@ -78,6 +78,7 @@ const ICON_FOR_KIND: Record<string, NoticeIcon> = {
   remote_access_sign_in: "signIn",
   remote_access_restored: "online",
   pond_lost_power: "offline",
+  pond_lost_internet: "offline",
   device_removed: "deviceRemoved",
   sign_in_expired: "signIn",
 };

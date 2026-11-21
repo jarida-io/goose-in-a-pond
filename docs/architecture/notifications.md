@@ -235,7 +235,11 @@ within five minutes is said once in the room, outside quiet hours, when
 While the household's quiet hours last and `notices_wait_in_quiet_hours` is on, a copy that is
 neither an `alert` nor marked `data.quiet_pass` is held (`held = 1`): no wake, nothing on an open
 stream, not listed by `/pending`. When quiet hours end, each phone's held copies become one notice,
-"N notices from quiet hours", naming up to six of them. A due reminder and an answer to something
+"N notices from quiet hours", naming up to six of them. A held notice that says why the Pond was
+out of reach (`pond_lost_power`, `pond_lost_internet`, marked `data.leads_morning`) leads that notice
+instead: its own title, body and tap, with the others listed under "Also from quiet hours". Before
+2026-11-22 it was one title in the list, so the length of a night's power cut never reached the
+phone. A due reminder and an answer to something
 the person just asked for (a form to confirm, a ride offer, a link sent to the phone) are marked to
 pass. Unreadable quiet-hour bounds hold nothing.
 
@@ -286,6 +290,7 @@ noticed is `crates/pond-server/src/system_notices.rs` unless the table says othe
 | `remote_access_sign_in` | as above, with the helper in `NeedsLogin` or `NeedsMachineAuth` | `Remote access needs signing in` / `... Sign it in again ...` | `action_required` | `remote_access` | as above |
 | `remote_access_restored` | `Running` again after an announced outage | `Remote access is working again` | `info` | `remote_access` | only after an announced outage; switching remote access off during one forgets it silently |
 | `pond_lost_power` | `serve` started after a run that never reached its graceful stop, on a new boot id (`.pond_running` left behind; `pond-infra/src/host_run.rs`) | `Your Pond lost power` / `Your Pond lost power and was off for about {N}. It is running again.` (no coordinator answer: `... and has started again.`) | `info` | none | once per start; waits up to 15 minutes for the remote-access coordinator's account of how long it was off ([remote access](../remote-access.md#why-the-pond-is-offline)), then goes without a duration |
+| `pond_lost_internet` | the remote-access coordinator answers a status report with a `network_loss` outage of 2 minutes or more that ended during this run (`InternetCuts`, `network/domain/pond_status.rs`) | `Your Pond lost its internet connection` / `Your Pond could not reach the internet for about {N}, so it could not be reached from outside the home. It is connected again.` | `info` | none | once per outage, as the coordinator timed it; the first answer of a run only records what is already known; shorter drops are silent |
 | `device_removed` | `DELETE /devices/{id}` removed a device that held a session (pond-api `unregister_device`) | `Device removed` / `"{name}" was removed from this Pond and can no longer reach it. ...` | `alert` | `devices` | one per removal; every paired phone but the one that removed it (`broadcast_except`); the removed device's access is revoked first; a device with no session is not news |
 | `sign_in_expired` | an account provider refused the Pond's saved refresh token, and the Pond forgot it (OAuth refresh tick) | `Sign in to {provider} again` / `{provider} refused this Pond's saved sign-in ...` | `action_required` | none | once: the forgotten token is never refreshed again |
 

@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use crate::mcp::domain::notice_delivery::LEADS_MORNING_KEY;
 use crate::mcp::ports::notification::{Notification, OpenScreen};
 
 /// Which part of a model a download fetched.
@@ -75,6 +76,9 @@ pub enum SystemEvent {
     /// The Pond started again after its host lost power. `off_for` is how long it was off, as
     /// the remote-access coordinator timed it; `None` when no coordinator could say.
     PondLostPower { off_for: Option<Duration> },
+    /// The Pond kept running but could not reach the internet, for `off_for` as the remote-access
+    /// coordinator timed it. Said once the connection is back, so a phone away from home can read it.
+    PondLostInternet { off_for: Duration },
     /// A paired device was removed from the Pond and lost its access.
     DeviceRemoved { name: String },
     /// A provider refused an account's saved sign-in, so the Pond forgot it.
@@ -94,6 +98,7 @@ impl SystemEvent {
             Self::RemoteAccessNeedsSignIn => "remote_access_sign_in",
             Self::RemoteAccessRestored => "remote_access_restored",
             Self::PondLostPower { .. } => "pond_lost_power",
+            Self::PondLostInternet { .. } => "pond_lost_internet",
             Self::DeviceRemoved { .. } => "device_removed",
             Self::SignInExpired { .. } => "sign_in_expired",
         }
@@ -111,6 +116,9 @@ impl SystemEvent {
         let (category, title, body, open) = self.wording();
         let mut data = serde_json::Map::new();
         data.insert("kind".into(), self.kind().into());
+        if self.is_outage() {
+            data.insert(LEADS_MORNING_KEY.into(), true.into());
+        }
         let data = match open {
             Some(open) => open.merged_into(data),
             None => serde_json::Value::Object(data),
@@ -124,6 +132,15 @@ impl SystemEvent {
             timestamp,
             data: Some(data),
         }
+    }
+
+    /// Whether this says why the Pond was out of reach: news that leads the quiet-hours summary
+    /// rather than hiding in its list.
+    fn is_outage(&self) -> bool {
+        matches!(
+            self,
+            Self::PondLostPower { .. } | Self::PondLostInternet { .. }
+        )
     }
 
     fn wording(&self) -> (&'static str, String, String, Option<OpenScreen>) {
@@ -246,6 +263,16 @@ impl SystemEvent {
                     ),
                     None => "Your Pond lost power and has started again.".to_string(),
                 },
+                None,
+            ),
+            Self::PondLostInternet { off_for } => (
+                "info",
+                "Your Pond lost its internet connection".to_string(),
+                format!(
+                    "Your Pond could not reach the internet for {}, so it could not be reached \
+                     from outside the home. It is connected again.",
+                    about(*off_for)
+                ),
                 None,
             ),
             Self::DeviceRemoved { name } => (
@@ -430,6 +457,31 @@ mod tests {
         let untimed = notify(&SystemEvent::PondLostPower { off_for: None });
         assert_eq!(untimed.body, "Your Pond lost power and has started again.");
         assert!(!SystemEvent::PondLostPower { off_for: None }.is_security());
+    }
+
+    #[test]
+    fn an_internet_cut_says_how_long_and_that_it_is_back() {
+        let n = notify(&SystemEvent::PondLostInternet {
+            off_for: Duration::from_secs(14 * 60),
+        });
+        assert_eq!(n.title, "Your Pond lost its internet connection");
+        assert_eq!(
+            n.body,
+            "Your Pond could not reach the internet for about 14 minutes, so it could not be \
+             reached from outside the home. It is connected again."
+        );
+        assert_eq!(n.category, "info");
+        let data = n.data.unwrap();
+        assert_eq!(data["kind"], json!("pond_lost_internet"));
+        assert_eq!(data[LEADS_MORNING_KEY], json!(true));
+    }
+
+    #[test]
+    fn only_an_outage_leads_the_quiet_hours_summary() {
+        let power = notify(&SystemEvent::PondLostPower { off_for: None });
+        assert_eq!(power.data.unwrap()[LEADS_MORNING_KEY], json!(true));
+        let other = notify(&SystemEvent::RemoteAccessRestored);
+        assert!(other.data.unwrap().get(LEADS_MORNING_KEY).is_none());
     }
 
     #[test]
