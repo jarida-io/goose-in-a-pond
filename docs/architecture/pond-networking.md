@@ -124,7 +124,7 @@ on its 60-second check (`ADVERT_RECHECK_INTERVAL`), when the setup record reads 
 | Host | Responder | When the claim changes | Goodbyes |
 |---|---|---|---|
 | macOS | mDNSResponder, through `DNSServiceRegister` on one registrar thread | `DNSServiceUpdateRecord` on the same registration | sent by mDNSResponder when the connection closes, even for a killed pond (gone within 2 s of `kill -9`, measured) |
-| Linux and elsewhere | mdns-sd 0.11, in-process, tunnel interfaces excluded | the instance re-registered in place | on `withdraw` at shutdown |
+| Linux and elsewhere | mdns-sd 0.22, in-process, tunnel interfaces excluded | the instance re-registered in place | on `withdraw` at shutdown |
 
 On macOS the SRV target is the Mac's own host name, which mDNSResponder keeps current, and a name
 conflict renames the instance rather than failing. If mDNSResponder drops the registration (it
@@ -150,7 +150,16 @@ restarted), the adapter registers again on its next 5-second check.
 
 mdns-sd 0.21.5 answers legacy unicast and, in a 40-second run beside mDNSResponder, left the host
 name alone. Whether it also cures the deafness was not tested, and it would still be a second
-responder on 5353. Linux stays on 0.11.5, which works beside avahi.
+responder on 5353. Linux stayed on 0.11.5, which worked beside avahi, until 2026-11-22.
+
+**Why Linux moved to 0.22 (2026-11-22).** On 2026-11-20 a malformed packet on the home LAN made
+0.11.5's NSEC type-bitmap reader index past the end of the packet (`dns_parser.rs:1445`), and with
+the release profile's `panic = "abort"` the whole pond stopped until systemd restarted it two
+minutes later. mdns-sd checks that length from 0.13.2 (#291). Every release with the fix also
+probes its names (from 0.12), the behaviour the macOS fight above came from; 0.22.0 no longer
+treats the host's own addresses as a conflict (#545), which is the case beside avahi on the same
+machine. A panic anywhere is now logged as `pond_panicked` before the abort
+(`tracing_setup.rs :: log_panics`).
 
 **After**, with the dns_sd adapter: a scratch pond resolved through `dns-sd -L` ten minutes after
 start, and from the Jetson through `avahi-browse -rpt`, with `id` and `setup=1` while unclaimed;

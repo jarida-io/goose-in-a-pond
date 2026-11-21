@@ -403,8 +403,37 @@ pub fn init_tracing_with_console(
 
     // Decided at the top of `main`, before there was a subscriber to hear it.
     crate::node_path::log_decision();
+    log_panics();
 
     LogDrainHandle { rx, file_guard }
+}
+
+/// Logs a panic as one structured event before the default hook prints it. The release profile
+/// sets `panic = "abort"`, so a panic in any thread, a library's included, ends the process and
+/// systemd restarts it: on 2026-11-20 a malformed mDNS packet did that through mdns-sd's parser,
+/// and the only trace was raw stderr. This puts it on the record as `pond_panicked`, with the
+/// thread and the place, on the console (the journal) at once; the file writer is buffered and
+/// may not flush before the abort.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        tracing::error!(
+            target: "giap::trace",
+            kind = "pond_panicked",
+            thread = thread.name().unwrap_or("unnamed"),
+            location = %info.location().map(ToString::to_string).unwrap_or_default(),
+            message = %message,
+            "a thread panicked; the Pond stops here and its service restarts it"
+        );
+        default(info);
+    }));
 }
 
 /// The clock on every log line: the host's local time with its UTC offset
