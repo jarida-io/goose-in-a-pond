@@ -158,6 +158,13 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [In-process MTP scope](developer/jetson-mtp-in-process-scope.md) | Speculative decoding on the Orin; live on CUDA builds |
 | [Re-prefill cost on the Orin](developer/orin-prefill-measurement.md) | *Record* |
 
+## Talks and the website
+
+| Page | For |
+|---|---|
+| [Keynote: Democratizing AI with Goose In A Pond](keynote/README.md) | The 15-minute MCP conference talk: the architecture diagram, and the source in the code of every figure on the slides |
+| [pond.jarida.io](../site/README.md) | The landing page's source: the showcase screenshots, the repos and the slides as a PDF |
+
 ## Records
 
 | Page | |

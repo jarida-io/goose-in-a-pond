@@ -1,4 +1,5 @@
-//! What a member is into, the interview that asks them, and the Pond's portrait of them.
+//! What a member is into, the interview that asks them, and the portrait of them their fact
+//! sheet gives.
 //!
 //! An interview turn is one direct model call, not a lane job: the member is waiting for the
 //! next question. The route sets the interview `thinking`, spawns the call and answers at once;
@@ -18,11 +19,15 @@ use serde_json::{json, Value};
 
 use pond_core::models::domain::message::ChatMessage;
 use pond_core::security::ports::policy::Principal;
-use pond_core::user_data::domain::interest::{InterestInput, InterestPatch, Origin, OFFERED_AT};
+use pond_core::user_data::domain::fact_sheet::FactState;
+use pond_core::user_data::domain::interest::{
+    InterestInput, InterestPatch, MemberPortrait, Origin,
+};
 use pond_core::user_data::domain::interest_interview::{InterestInterview, InterviewStatus};
 use pond_core::user_data::domain::memory::MemorySegment;
 use pond_core::user_data::domain::profile::ProfileScope;
 use pond_core::user_data::ports::interests::InterestRepository;
+use pond_core::user_data::services::fact_sheet;
 use pond_core::user_data::services::interest_interview::{self as interview, KnownAboutMember};
 
 use crate::me::{caller_member, failure, server_error, Failure};
@@ -121,16 +126,22 @@ async fn remove(
     }
 }
 
+/// The member's portrait as their fact sheet gives it; `None` while the sheet is empty.
+async fn portrait_of(state: &AppState, member: &str) -> anyhow::Result<Option<MemberPortrait>> {
+    let sheet = state.engine.facts.list(member, FactState::Active).await?;
+    Ok(fact_sheet::as_portrait(&sheet))
+}
+
 async fn portrait(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
 ) -> Result<Json<Value>, Failure> {
     let member = caller_member(&state, principal.as_ref()).await?;
-    match repo(&state).portrait(&member).await {
+    match portrait_of(&state, &member).await {
         Ok(Some(portrait)) => Ok(Json(json!(portrait))),
         Ok(None) => Err(failure(
             StatusCode::NOT_FOUND,
-            "no portrait yet: the Pond writes one when it is quiet",
+            "no portrait yet: your fact sheet is empty",
         )),
         Err(e) => Err(server_error(e)),
     }
@@ -285,20 +296,30 @@ async fn approve(
     repo.save_interview(&member, &existing)
         .await
         .map_err(server_error)?;
+    if saved > 0 {
+        crate::fact_sheet::rebuild_after_interview(&state, &member).await;
+    }
     Ok(Json(json!({ "saved": saved })))
 }
 
-/// What the Pond knows of the member, to seed the interview: their portrait, the interests the
-/// phone would show (confirmed, offered guesses, avoided), and their weightiest memories.
+/// What the Pond knows of the member, to seed the interview: their portrait, the interests
+/// they confirmed or keep away, the guesses ready to be offered, and their weightiest memories.
 async fn known_about(state: &AppState, member: &str) -> KnownAboutMember {
     let repo = repo(state);
-    let portrait = repo.portrait(member).await.ok().flatten();
+    let portrait = portrait_of(state, member).await.ok().flatten();
+    let ready: Vec<String> = repo
+        .ready_to_offer(member, crate::todos::timezone(state).await)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
     let interests = repo
         .list(member)
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|i| i.confirmed || i.avoid || i.evidence >= OFFERED_AT)
+        .filter(|i| i.confirmed || i.avoid || ready.contains(&i.id))
         .take(20)
         .collect();
     let memories = state
@@ -313,13 +334,10 @@ async fn known_about(state: &AppState, member: &str) -> KnownAboutMember {
             !pond_core::user_data::services::memory_extraction::describes_a_question(&m.content)
         })
         .collect();
-    let memories = pond_core::user_data::services::member_portrait::top_memories(
-        memories,
-        interview::SEED_MEMORIES,
-    )
-    .into_iter()
-    .map(|m| m.content)
-    .collect();
+    let memories = fact_sheet::top_memories(memories, interview::SEED_MEMORIES)
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
     KnownAboutMember {
         portrait,
         interests,

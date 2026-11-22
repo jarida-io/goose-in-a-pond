@@ -89,6 +89,10 @@ const SECTION_FOR_OPEN: Record<string, GuiSection> = {
   extensions: "extensions",
   remote_access: "pairing",
   watch: "watches",
+  anchor: "mygoose",
+  deliverable: "mygoose",
+  questions: "mygoose",
+  idea_cards: "mygoose",
 };
 
 export function openSection(notice: Pick<HouseholdNotice, "data">): GuiSection | null {

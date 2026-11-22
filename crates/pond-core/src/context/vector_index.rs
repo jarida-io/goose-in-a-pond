@@ -16,8 +16,9 @@ pub enum Corpus {
     Context,
     /// `sessions.rolling_summary` — a model's compression of a conversation.
     Summary,
-    /// A member's profile, places, interests, news topics, portrait, saved items and screenshot
-    /// notes, each row id prefixed with its table.
+    /// A member's profile, places, confirmed interests, fact lines, don't rules, answers,
+    /// anchors, deliverables, saved items, captures and screenshot notes, each row id prefixed
+    /// with its table.
     Personal,
     /// `session_messages`: what a member said and what the pond replied.
     Message,

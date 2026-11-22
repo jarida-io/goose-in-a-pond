@@ -135,7 +135,6 @@ gives it a control, and the server-side rule if any.
 | `memory_extraction_enabled` | `true` |  |
 | `memory_extraction_max_facts` | `3` |  |
 | `memory_extraction_interval_secs` | `60` |  |
-| `suggestion_generation_enabled` | `true` |  |
 | `memory_cleanup_enabled` | `true` |  |
 | `memory_cleanup_interval_hours` | `6` |  |
 | `memory_prune_threshold` | `0.05` |  |

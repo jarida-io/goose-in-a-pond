@@ -587,9 +587,6 @@ pub struct Settings {
     /// Extract durable facts from each turn into categorised memories.
     #[serde(default = "Settings::default_memory_extraction_enabled")]
     pub memory_extraction_enabled: bool,
-    /// Compose questions from memories, on the lane. Kept apart from `memory_extraction_enabled`.
-    #[serde(default = "Settings::default_suggestion_generation_enabled")]
-    pub suggestion_generation_enabled: bool,
 
     /// When true, a background task periodically prunes/archives decayed memories.
     #[serde(default = "Settings::default_memory_cleanup_enabled")]
@@ -782,6 +779,10 @@ pub struct Settings {
     #[serde(default = "Settings::default_ext_enabled")]
     pub ext_weather_enabled: bool,
 
+    /// Lets the chat model ask the member structured questions mid-turn (`giap-questions__ask`).
+    #[serde(default = "Settings::default_ext_enabled")]
+    pub ext_questions_enabled: bool,
+
     /// Enable the knowledge tools module (Wikipedia search, article fetch).
     #[serde(default = "Settings::default_ext_enabled")]
     pub ext_knowledge_enabled: bool,
@@ -946,9 +947,9 @@ impl Default for Settings {
             retention_events_by_category: std::collections::HashMap::new(),
             retention_sensitive_days: Self::default_sensitive_days(),
             thinking_mode: Self::default_thinking_mode(),
-            show_thinking: false,
+            show_thinking: true,
             reasoning_effort: Self::default_reasoning_effort(),
-            persist_thinking: false,
+            persist_thinking: true,
             review_mode: Self::default_review_mode(),
             review_max_rounds: Self::default_review_max_rounds(),
             review_pass_threshold: Self::default_review_pass_threshold(),
@@ -971,7 +972,6 @@ impl Default for Settings {
             agent_memory_limit: Self::default_agent_memory_limit(),
             tool_output_compaction: Self::default_tool_output_compaction(),
             memory_extraction_enabled: true,
-            suggestion_generation_enabled: Self::default_suggestion_generation_enabled(),
             memory_cleanup_enabled: true,
             memory_consolidation_enabled: Self::default_memory_consolidation_enabled(),
             session_titling_enabled: Self::default_session_titling_enabled(),
@@ -1018,6 +1018,7 @@ impl Default for Settings {
             ext_memory_enabled: true,
             ext_schedule_enabled: true,
             ext_weather_enabled: true,
+            ext_questions_enabled: true,
             ext_knowledge_enabled: true,
             ext_system_enabled: true,
             ext_device_enabled: true,
@@ -1257,7 +1258,7 @@ impl Settings {
         factory_defaults::u32("sensitive_days", 7)
     }
     fn default_thinking_mode() -> String {
-        factory_defaults::str("thinking_mode", "auto")
+        factory_defaults::str("thinking_mode", "on")
     }
     fn default_reasoning_effort() -> String {
         factory_defaults::str("reasoning_effort", "brief")
@@ -1395,10 +1396,6 @@ impl Settings {
     }
     fn default_tool_output_compaction() -> bool {
         factory_defaults::boolean("tool_output_compaction", true)
-    }
-    /// On: one model call per idle period, versus the same three template questions forever.
-    fn default_suggestion_generation_enabled() -> bool {
-        factory_defaults::boolean("suggestion_generation_enabled", true)
     }
     fn default_memory_extraction_enabled() -> bool {
         factory_defaults::boolean("memory_extraction_enabled", true)
@@ -2269,6 +2266,7 @@ mod tests {
             "ext_system_enabled",
             "ext_travel_enabled",
             "ext_weather_enabled",
+            "ext_questions_enabled",
             "home_name",
             // Privacy hub view and the catalogue's Privacy & Security section, both of them.
             "spoken_pairing_codes",
@@ -2290,7 +2288,6 @@ mod tests {
             "memory_extraction_enabled",
             "memory_extraction_interval_secs",
             "memory_extraction_max_facts",
-            "suggestion_generation_enabled",
             "memory_graph_enabled",
             "memory_prune_threshold",
             "mic_enabled",

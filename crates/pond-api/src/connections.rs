@@ -372,3 +372,341 @@ fn forget_status(error: WifiForgetError) -> StatusCode {
         WifiForgetError::Busy => StatusCode::CONFLICT,
     }
 }
+
+fn valid_mac(raw: &str) -> Option<String> {
+    let mac = raw.trim().to_ascii_uppercase();
+    let parts: Vec<&str> = mac.split(':').collect();
+    if parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit())) {
+        Some(mac)
+    } else {
+        None
+    }
+}
+
+async fn run_bluetoothctl(args: &[&str]) -> Result<String, Refusal> {
+    let out = tokio::process::Command::new("bluetoothctl")
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "bluetoothctl unavailable");
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "bluetooth_unavailable")
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        tracing::warn!(?args, %stdout, %stderr, "bluetoothctl command failed");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+async fn bt_adapter_status() -> (bool, bool, bool) {
+    let info = run_bluetoothctl(&["show"]).await.unwrap_or_default();
+    let powered = info.contains("Powered: yes");
+    let discoverable = info.contains("Discoverable: yes");
+    let pairable = info.contains("Pairable: yes");
+    (powered, discoverable, pairable)
+}
+
+fn is_mac_like(name: &str, addr: &str) -> bool {
+    let norm_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let norm_addr: String = addr
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    norm_name.is_empty() || norm_name == norm_addr
+}
+
+fn infer_bt_type(info: &str, name: &str) -> &'static str {
+    let icon = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Icon: ").map(str::trim))
+        .unwrap_or("");
+    match icon {
+        "audio-headset" => return "Headset",
+        "audio-headphones" => return "Headphones",
+        "audio-card" | "audio-speakers" => return "Speaker",
+        "input-keyboard" => return "Keyboard",
+        "input-mouse" => return "Mouse",
+        "input-gaming" => return "Controller",
+        "phone" => return "Phone",
+        "computer" => return "Computer",
+        "camera-photo" | "camera-video" => return "Camera",
+        "printer" => return "Printer",
+        _ => {}
+    }
+
+    let lower_info = info.to_ascii_lowercase();
+    let lower_name = name.to_ascii_lowercase();
+
+    if lower_info.contains("0000110b") || lower_info.contains("0000110a") || lower_name.contains("speaker") || lower_name.contains("soundbar") {
+        return "Speaker";
+    }
+    if lower_info.contains("0000111e") || lower_info.contains("00001108") || lower_name.contains("buds") || lower_name.contains("airpods") || lower_name.contains("headphone") || lower_name.contains("headset") {
+        return "Headphones";
+    }
+    if lower_info.contains("00001124") || lower_info.contains("00001812") {
+        if lower_name.contains("mouse") {
+            return "Mouse";
+        }
+        if lower_name.contains("controller") || lower_name.contains("gamepad") {
+            return "Controller";
+        }
+        return "Keyboard / HID";
+    }
+    if lower_info.contains("185b51bd") || lower_name.starts_with("pond ") {
+        return "Pond";
+    }
+    if lower_info.contains("0000180d") || lower_info.contains("0000181a") || lower_name.contains("sensor") || lower_name.contains("watch") || lower_name.contains("band") {
+        return "Sensor / Wearable";
+    }
+    if let Some(class_hex) = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Class: 0x"))
+        .and_then(|h| u32::from_str_radix(h.trim(), 16).ok())
+    {
+        match (class_hex >> 8) & 0x1f {
+            0x01 => return "Computer",
+            0x02 => return "Phone",
+            0x04 => return "Audio / Video",
+            0x05 => return "Accessory (HID)",
+            0x06 => return "Imaging / Camera",
+            0x07 => return "Wearable",
+            0x09 => return "Health Sensor",
+            _ => {}
+        }
+    }
+    if lower_name.contains("iphone") || lower_name.contains("galaxy") || lower_name.contains("pixel") || lower_name.contains("phone") {
+        return "Phone";
+    }
+    if lower_name.contains("macbook") || lower_name.contains("laptop") || lower_name.contains("pc") {
+        return "Computer";
+    }
+    if lower_name.contains("tv") || lower_name.contains("display") {
+        return "TV / Display";
+    }
+    "Accessory"
+}
+
+fn bt_display_name(addr: &str, list_name: &str, info: &str, device_type: &str) -> (String, bool) {
+    let info_name = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Name: ").map(str::trim));
+    let info_alias = info
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Alias: ").map(str::trim));
+
+    for candidate in [info_name, Some(list_name), info_alias].into_iter().flatten() {
+        let trimmed = candidate.trim();
+        if !is_mac_like(trimmed, addr) {
+            return (trimmed.to_string(), true);
+        }
+    }
+    (format!("Unnamed {device_type}"), false)
+}
+
+async fn list_bt_devices() -> Result<Vec<Value>, Refusal> {
+    let raw = run_bluetoothctl(&["devices"]).await?;
+    let mut parsed = Vec::new();
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix("Device ") else {
+            continue;
+        };
+        let mut parts = rest.splitn(2, ' ');
+        let Some(addr) = parts.next().and_then(valid_mac) else {
+            continue;
+        };
+        let name = parts.next().unwrap_or(&addr).trim().to_string();
+        parsed.push((addr, name));
+    }
+
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, (addr, list_name)) in parsed.into_iter().enumerate() {
+        set.spawn(async move {
+            let info = run_bluetoothctl(&["info", &addr]).await.unwrap_or_default();
+            let paired = info.contains("Paired: yes");
+            let connected = info.contains("Connected: yes");
+            let icon = info
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("Icon: ").map(str::trim))
+                .map(str::to_string);
+            let provisional_type = infer_bt_type(&info, &list_name);
+            let (name, has_name) = bt_display_name(&addr, &list_name, &info, provisional_type);
+            let device_type = infer_bt_type(&info, &name);
+            (
+                idx,
+                has_name,
+                json!({
+                    "address": addr,
+                    "name": name,
+                    "device_type": device_type,
+                    "paired": paired,
+                    "connected": connected,
+                    "icon": icon,
+                }),
+            )
+        });
+    }
+
+    let mut indexed = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(item) = res {
+            indexed.push(item);
+        }
+    }
+    indexed.sort_by_key(|(idx, has_name, val)| {
+        let connected = val["connected"].as_bool().unwrap_or(false);
+        let paired = val["paired"].as_bool().unwrap_or(false);
+        let specific_type = val["device_type"].as_str() != Some("Accessory");
+        (!connected, !paired, !has_name, !specific_type, *idx)
+    });
+    Ok(indexed.into_iter().map(|(_, _, v)| v).collect())
+}
+
+/// `GET /api/v1/connections/bluetooth/devices`: adapter state + known & discovered Bluetooth devices.
+pub(crate) async fn bluetooth_devices() -> Result<Json<Value>, Refusal> {
+    let ((powered, discoverable, pairable), devices) =
+        tokio::join!(bt_adapter_status(), list_bt_devices());
+    Ok(Json(json!({
+        "powered": powered,
+        "discoverable": discoverable,
+        "pairable": pairable,
+        "devices": devices?,
+    })))
+}
+
+/// `POST /api/v1/connections/bluetooth/scan`: scan for nearby Bluetooth devices & accessories.
+pub(crate) async fn bluetooth_scan(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    credential: Option<Extension<HostCredential>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Refusal> {
+    let principal = principal.as_ref().map(|Extension(p)| p);
+    let credential = credential.as_ref().map(|Extension(c)| c);
+    require_changer(&state, principal, credential, &headers, "bluetooth_scan").await?;
+    let _ = run_bluetoothctl(&["power", "on"]).await;
+    let _ = run_bluetoothctl(&["--timeout", "4", "scan", "on"]).await;
+    let ((powered, discoverable, pairable), devices) =
+        tokio::join!(bt_adapter_status(), list_bt_devices());
+    Ok(Json(json!({
+        "powered": powered,
+        "discoverable": discoverable,
+        "pairable": pairable,
+        "devices": devices?,
+    })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BluetoothPowerBody {
+    powered: Option<bool>,
+    discoverable: Option<bool>,
+    pairable: Option<bool>,
+}
+
+/// `POST /api/v1/connections/bluetooth/power`: toggle Bluetooth adapter power, discoverability, or pairing mode.
+pub(crate) async fn bluetooth_power(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    credential: Option<Extension<HostCredential>>,
+    headers: HeaderMap,
+    Json(body): Json<BluetoothPowerBody>,
+) -> Result<Json<Value>, Refusal> {
+    let principal = principal.as_ref().map(|Extension(p)| p);
+    let credential = credential.as_ref().map(|Extension(c)| c);
+    require_changer(&state, principal, credential, &headers, "bluetooth_power").await?;
+    if let Some(on) = body.powered {
+        let _ = run_bluetoothctl(&["power", if on { "on" } else { "off" }]).await?;
+    }
+    if let Some(on) = body.discoverable {
+        if on {
+            let _ = run_bluetoothctl(&["discoverable-timeout", "0"]).await;
+        }
+        let _ = run_bluetoothctl(&["discoverable", if on { "on" } else { "off" }]).await?;
+    }
+    if let Some(on) = body.pairable {
+        if let Err(err) = run_bluetoothctl(&["pairable", if on { "on" } else { "off" }]).await {
+            tracing::warn!(?err, on, "bluetoothctl pairable failed; continuing");
+        }
+    }
+    let (powered, discoverable, pairable) = bt_adapter_status().await;
+    Ok(Json(json!({
+        "powered": powered,
+        "discoverable": discoverable,
+        "pairable": pairable,
+    })))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BluetoothAddressBody {
+    address: String,
+}
+
+/// `POST /api/v1/connections/bluetooth/connect`: pair, trust, and connect a Bluetooth device.
+pub(crate) async fn bluetooth_connect(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    credential: Option<Extension<HostCredential>>,
+    headers: HeaderMap,
+    Json(body): Json<BluetoothAddressBody>,
+) -> Result<Json<Value>, Refusal> {
+    let principal = principal.as_ref().map(|Extension(p)| p);
+    let credential = credential.as_ref().map(|Extension(c)| c);
+    require_changer(&state, principal, credential, &headers, "bluetooth_connect").await?;
+    let addr = valid_mac(&body.address)
+        .ok_or_else(|| refuse(StatusCode::UNPROCESSABLE_ENTITY, "invalid_address"))?;
+    let _ = run_bluetoothctl(&["power", "on"]).await;
+    let _ = run_bluetoothctl(&["agent", "NoInputNoOutput"]).await;
+    let _ = run_bluetoothctl(&["default-agent"]).await;
+    let _ = run_bluetoothctl(&["pairable", "on"]).await;
+    let _ = run_bluetoothctl(&["pair", &addr]).await;
+    let _ = run_bluetoothctl(&["trust", &addr]).await;
+    let out = run_bluetoothctl(&["connect", &addr]).await.unwrap_or_default();
+    let connected = out.contains("Connection successful")
+        || run_bluetoothctl(&["info", &addr])
+            .await
+            .is_ok_and(|info| info.contains("Connected: yes"));
+    if !connected {
+        return Err(refuse(StatusCode::BAD_GATEWAY, "bluetooth_connect_failed"));
+    }
+    Ok(Json(json!({ "connected": true, "address": addr })))
+}
+
+/// `POST /api/v1/connections/bluetooth/disconnect`: disconnect a Bluetooth device.
+pub(crate) async fn bluetooth_disconnect(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    credential: Option<Extension<HostCredential>>,
+    headers: HeaderMap,
+    Json(body): Json<BluetoothAddressBody>,
+) -> Result<Json<Value>, Refusal> {
+    let principal = principal.as_ref().map(|Extension(p)| p);
+    let credential = credential.as_ref().map(|Extension(c)| c);
+    require_changer(&state, principal, credential, &headers, "bluetooth_disconnect").await?;
+    let addr = valid_mac(&body.address)
+        .ok_or_else(|| refuse(StatusCode::UNPROCESSABLE_ENTITY, "invalid_address"))?;
+    let _ = run_bluetoothctl(&["disconnect", &addr]).await?;
+    Ok(Json(json!({ "connected": false, "address": addr })))
+}
+
+/// `DELETE /api/v1/connections/bluetooth/devices/{address}`: unpair/remove a Bluetooth device.
+pub(crate) async fn bluetooth_forget(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    credential: Option<Extension<HostCredential>>,
+    headers: HeaderMap,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, Refusal> {
+    let principal = principal.as_ref().map(|Extension(p)| p);
+    let credential = credential.as_ref().map(|Extension(c)| c);
+    require_changer(&state, principal, credential, &headers, "bluetooth_forget").await?;
+    let addr = valid_mac(&address)
+        .ok_or_else(|| refuse(StatusCode::UNPROCESSABLE_ENTITY, "invalid_address"))?;
+    let _ = run_bluetoothctl(&["remove", &addr]).await?;
+    Ok(Json(json!({ "removed": true, "address": addr })))
+}

@@ -1,5 +1,5 @@
-//! Ideas Goose researched for a member, which Goose or the member can act on. The lane writes
-//! them (`pond-server`'s `my_goose_mind`); these routes read them and start the member's choice.
+//! Ideas Goose researched for a member, which Goose or the member can act on. Nothing writes new
+//! ones any more; these routes read the ones a pond already holds and start the member's choice.
 
 use std::sync::Arc;
 
@@ -14,9 +14,9 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use pond_core::security::ports::policy::Principal;
+use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::idea::{GooseKind, Idea, IdeaState};
 use pond_core::user_data::ports::ideas::{IdeaRepository, IdeaTodo};
-use pond_core::user_data::services::inference_lane::LaneJob;
 
 use crate::me::{caller_member, failure, server_error, Failure};
 use crate::AppState;
@@ -48,13 +48,8 @@ async fn list(
     principal: Option<Extension<Principal>>,
 ) -> Result<Json<Value>, Failure> {
     let member = caller_member(&state, principal.as_ref()).await?;
-    let repo = repo(&state);
-    let ideas = repo.list(&member).await.map_err(server_error)?;
-    let run = repo.run(&member).await.map_err(server_error)?;
-    Ok(Json(json!({
-        "ideas": ideas,
-        "state": if run.is_thinking(Utc::now()) { "thinking" } else { "idle" },
-    })))
+    let ideas = repo(&state).list(&member).await.map_err(server_error)?;
+    Ok(Json(json!({ "ideas": ideas, "state": "idle" })))
 }
 
 /// `GET /me/ideas/{id}`: the idea's own page.
@@ -67,20 +62,13 @@ async fn read(
     Ok(Json(json!(the_idea(&state, &member, &id).await?)))
 }
 
+/// Starts nothing: answered in its old shape so a phone that still asks shows no error.
 async fn refresh(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
 ) -> Result<Response, Failure> {
-    let member = caller_member(&state, principal.as_ref()).await?;
-    repo(&state)
-        .mark_requested(&member, Utc::now())
-        .await
-        .map_err(server_error)?;
-    // Without a lane (CLI, tests) the request waits for the next process that has one.
-    if let Some(lane) = &state.lane {
-        lane.wake(LaneJob::Ideas).await;
-    }
-    Ok((StatusCode::ACCEPTED, Json(json!({ "state": "thinking" }))).into_response())
+    caller_member(&state, principal.as_ref()).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "state": "idle" }))).into_response())
 }
 
 async fn dismiss(
@@ -107,24 +95,14 @@ async fn the_idea(state: &AppState, member: &str, id: &str) -> Result<Idea, Fail
         .ok_or_else(|| failure(StatusCode::NOT_FOUND, "no such idea"))
 }
 
-/// A to-do as `/me/todos` shows one; its hooks are the to-do routes' business.
-fn todo_json(todo: &IdeaTodo) -> Value {
-    json!({
-        "id": todo.id,
-        "kind": "todo",
-        "text": todo.text,
-        "notes": null,
-        "state": "open",
-        "due_at": null,
-        "hooks": [],
-        "ask": true,
-        "source": "idea",
-        "last_asked_at": null,
-        "asked": 0,
-        "snoozed_until": null,
-        "created_at": todo.created_at,
-        "done_at": null,
-    })
+/// The to-do as `/me/todos` shows it.
+async fn todo_json(state: &AppState, member: &str, todo: &IdeaTodo) -> Result<Value, Failure> {
+    crate::todos::repo(state)
+        .get(member, &todo.id)
+        .await
+        .map_err(server_error)?
+        .map(|kept| kept.view())
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "no such to-do"))
 }
 
 /// `POST /me/ideas/{id}/mine`: each step the idea suggests becomes an open to-do, and a new idea
@@ -148,7 +126,7 @@ async fn mine(
             .add_todo(&member, &idea.id, step)
             .await
             .map_err(server_error)?;
-        todos.push(todo_json(&todo));
+        todos.push(todo_json(&state, &member, &todo).await?);
     }
     if idea.state == IdeaState::New {
         repo.set_state(&member, &idea.id, IdeaState::Done, None)
@@ -303,21 +281,35 @@ async fn start_schedule(state: &AppState, idea: &Idea) -> Result<(), Failure> {
 
 /// A web watch on the listings page the idea names; its first check sets the baseline.
 async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), Failure> {
-    use pond_core::shared::domain::web_watch::{
-        WatchFilters, DEFAULT_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
-    };
-    use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
-
     let Some(address) = idea.goose_plan.listing_url.clone() else {
         return Err(failure(
             StatusCode::CONFLICT,
             "this idea names no page of listings to watch",
         ));
     };
+    let looking_for: String = idea.pitch.chars().take(300).collect();
+    watch_page(state, member, address, &idea.title, &looking_for).await?;
+    Ok(())
+}
+
+/// Starts a web watch on `address` for the member and returns its id; the watch they already
+/// keep on that page is answered in place of a second.
+pub(crate) async fn watch_page(
+    state: &AppState,
+    member: &str,
+    address: String,
+    title: &str,
+    looking_for: &str,
+) -> Result<String, Failure> {
+    use pond_core::shared::domain::web_watch::{
+        WatchFilters, DEFAULT_INTERVAL_HOURS, MAX_WATCHES_PER_MEMBER,
+    };
+    use pond_core::shared::ports::web_watch::{WebWatch, WebWatchRepository};
+
     let repo = pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(state.db.system.clone());
     let mine = repo.list_for(member).await.map_err(server_error)?;
-    if mine.iter().any(|w| w.address == address) {
-        return Ok(());
+    if let Some(held) = mine.iter().find(|w| w.address == address) {
+        return Ok(held.id.clone());
     }
     if mine.len() >= MAX_WATCHES_PER_MEMBER {
         return Err(failure(
@@ -326,12 +318,13 @@ async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), 
         ));
     }
     let now = Utc::now();
+    let id = uuid::Uuid::new_v4().to_string();
     repo.create(&WebWatch {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: id.clone(),
         owner: member.to_string(),
         address,
-        title: idea.title.clone(),
-        looking_for: idea.pitch.chars().take(300).collect(),
+        title: title.to_string(),
+        looking_for: looking_for.to_string(),
         filters: WatchFilters::default(),
         interval_hours: DEFAULT_INTERVAL_HOURS,
         paused: false,
@@ -344,5 +337,5 @@ async fn start_watch(state: &AppState, member: &str, idea: &Idea) -> Result<(), 
     })
     .await
     .map_err(server_error)?;
-    Ok(())
+    Ok(id)
 }

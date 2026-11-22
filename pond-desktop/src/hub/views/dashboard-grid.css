@@ -90,6 +90,12 @@
   flex-direction: column;
 }
 
+/* The idea cards take the same 20px side margin as the status bar and alerts around them. */
+.dash__top-left :is(.cd--home, .cd-glance) {
+  margin: 4px 20px 8px;
+  width: auto;
+}
+
 @media (min-width: 1101px) {
   .dash__top-row {
     flex-direction: row;
@@ -121,6 +127,10 @@
   }
 
   .dash__top-left .hcomposer {
+    margin: 0;
+  }
+
+  .dash__top-left :is(.cd--home, .cd-glance) {
     margin: 0;
   }
 

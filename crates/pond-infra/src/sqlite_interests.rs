@@ -1,5 +1,7 @@
-//! SQLite-backed [`InterestRepository`]: the `interests`, `member_portraits`, `interest_sightings`
-//! and `interest_interviews` tables. Facets, portrait lists and interview turns are JSON.
+//! SQLite-backed [`InterestRepository`]: the `interests`, `interest_sightings` and
+//! `interest_interviews` tables. Facets and interview turns are JSON.
+
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -7,10 +9,11 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Pool, Row, Sqlite};
 
+use pond_core::shared::domain::todo::Tz;
 use pond_core::user_data::domain::interest::{
-    category_of, clean_facets, clean_topic, merge_facets, picture_path, topic_key, Depth, Interest,
-    InterestInput, InterestPatch, MemberPortrait, NewsMode, Observed, ObservedInterest, Origin,
-    STRONG_AT,
+    category_of, clean_facets, clean_topic, distinct_days, merge_facets, picture_path,
+    ready_to_offer, topic_key, Depth, Interest, InterestInput, InterestPatch, NewsMode, Observed,
+    ObservedInterest, Origin,
 };
 use pond_core::user_data::domain::interest_interview::{InterestInterview, InterviewStatus};
 use pond_core::user_data::ports::interests::InterestRepository;
@@ -353,17 +356,58 @@ impl InterestRepository for SqliteInterestRepository {
         Ok(done.rows_affected() > 0)
     }
 
-    async fn last_changed(&self, profile_id: &str) -> Result<Option<DateTime<Utc>>> {
-        let latest: Option<String> = sqlx::query_scalar(
-            "SELECT MAX(updated_at) FROM interests WHERE profile_id = ? \
-             AND (confirmed = 1 OR evidence >= ?)",
+    async fn sighted_days(&self, profile_id: &str, id: &str, tz: Tz) -> Result<u32> {
+        let stamps: Vec<String> = sqlx::query_scalar(
+            "SELECT s.seen_at FROM interest_sightings s \
+             JOIN interests i ON i.id = s.interest_id WHERE i.profile_id = ? AND i.id = ?",
         )
         .bind(profile_id)
-        .bind(STRONG_AT as i64)
-        .fetch_one(&self.pool)
+        .bind(id)
+        .fetch_all(&self.pool)
         .await
-        .context("read when a member's interests last changed")?;
-        latest.as_deref().map(parse_time).transpose()
+        .context("read when an interest was seen")?;
+        let seen = stamps
+            .iter()
+            .map(|raw| parse_time(raw))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(distinct_days(&seen, tz))
+    }
+
+    async fn ready_to_offer(&self, profile_id: &str, tz: Tz) -> Result<Vec<Interest>> {
+        let sightings = sqlx::query(
+            "SELECT s.interest_id, s.seen_at FROM interest_sightings s \
+             JOIN interests i ON i.id = s.interest_id \
+             WHERE i.profile_id = ? AND i.confirmed = 0 AND i.avoid = 0",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("read when a member's guessed interests were seen")?;
+        let mut seen: HashMap<String, Vec<DateTime<Utc>>> = HashMap::new();
+        for row in &sightings {
+            let at: String = row.try_get("seen_at")?;
+            seen.entry(row.try_get("interest_id")?)
+                .or_default()
+                .push(parse_time(&at)?);
+        }
+        let liked: HashSet<String> = sqlx::query_scalar(
+            "SELECT DISTINCT interest_id FROM news_stories WHERE profile_id = ? AND vote = 'up'",
+        )
+        .bind(profile_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("read which interests a member liked a story of")?
+        .into_iter()
+        .collect();
+        Ok(self
+            .list(profile_id)
+            .await?
+            .into_iter()
+            .filter(|row| {
+                let days = seen.get(&row.id).map_or(0, |at| distinct_days(at, tz));
+                ready_to_offer(days, liked.contains(&row.id), row.confirmed, row.avoid)
+            })
+            .collect())
     }
 
     async fn without_picture(&self, profile_id: &str, limit: usize) -> Result<Vec<Interest>> {
@@ -387,52 +431,6 @@ impl InterestRepository for SqliteInterestRepository {
             .execute(&self.pool)
             .await
             .context("record an interest's picture")?;
-        Ok(())
-    }
-
-    async fn portrait(&self, profile_id: &str) -> Result<Option<MemberPortrait>> {
-        let row = sqlx::query(
-            "SELECT summary, into_json, working_on_json, likes_json, updated_at \
-             FROM member_portraits WHERE profile_id = ?",
-        )
-        .bind(profile_id)
-        .fetch_optional(&self.pool)
-        .await
-        .context("read a member's portrait")?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let into: String = row.try_get("into_json")?;
-        let working_on: String = row.try_get("working_on_json")?;
-        let likes: String = row.try_get("likes_json")?;
-        let updated_at: String = row.try_get("updated_at")?;
-        Ok(Some(MemberPortrait {
-            summary: row.try_get("summary")?,
-            into: strings(&into),
-            working_on: strings(&working_on),
-            likes: strings(&likes),
-            updated_at: parse_time(&updated_at)?,
-        }))
-    }
-
-    async fn save_portrait(&self, profile_id: &str, portrait: &MemberPortrait) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO member_portraits \
-             (profile_id, summary, into_json, working_on_json, likes_json, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(profile_id) DO UPDATE SET summary = excluded.summary, \
-             into_json = excluded.into_json, working_on_json = excluded.working_on_json, \
-             likes_json = excluded.likes_json, updated_at = excluded.updated_at",
-        )
-        .bind(profile_id)
-        .bind(&portrait.summary)
-        .bind(json_of(&portrait.into))
-        .bind(json_of(&portrait.working_on))
-        .bind(json_of(&portrait.likes))
-        .bind(stamp(portrait.updated_at))
-        .execute(&self.pool)
-        .await
-        .context("save a member's portrait")?;
         Ok(())
     }
 
@@ -712,28 +710,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_portrait_and_the_interview_round_trip() {
+    async fn the_interview_round_trips() {
         let repo = repo().await;
-        assert!(repo.portrait("jerry").await.unwrap().is_none());
-        let portrait = MemberPortrait {
-            summary: "Runs a company.".into(),
-            into: vec!["Formula 1".into()],
-            working_on: vec!["a talk".into()],
-            likes: vec!["teal".into()],
-            updated_at: Utc::now(),
-        };
-        repo.save_portrait("jerry", &portrait).await.unwrap();
-        assert_eq!(
-            repo.portrait("jerry").await.unwrap().unwrap().into,
-            vec!["Formula 1"]
-        );
-
         let mut interview = InterestInterview::default();
         interview.status = InterviewStatus::Thinking;
         repo.save_interview("jerry", &interview).await.unwrap();
         let back = repo.interview("jerry").await.unwrap().unwrap();
         assert_eq!(back.status, InterviewStatus::Thinking);
         assert!(back.updated_at.is_some());
+    }
+
+    /// Replaces the times `observe` stamped, so a test decides the days.
+    async fn seen_on(repo: &SqliteInterestRepository, id: &str, session: &str, at: &str) {
+        sqlx::query(
+            "INSERT INTO interest_sightings (interest_id, session_id, seen_at) VALUES (?, ?, ?) \
+             ON CONFLICT(interest_id, session_id) DO UPDATE SET seen_at = excluded.seen_at",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(at)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn guess(repo: &SqliteInterestRepository, member: &str, topic: &str) -> String {
+        repo.observe(member, "s1", &seen(topic, &[])).await.unwrap();
+        let rows = repo.list(member).await.unwrap();
+        rows.into_iter().find(|r| r.topic == topic).unwrap().id
+    }
+
+    #[tokio::test]
+    async fn a_guess_is_ready_to_offer_after_three_local_days_or_a_liked_story() {
+        const NAIROBI: Tz = Tz::Africa__Nairobi;
+        let repo = repo().await;
+        let fielder = guess(&repo, "jerry", "Toyota Fielder").await;
+        let chatty = guess(&repo, "jerry", "Primetime").await;
+        let liked = guess(&repo, "jerry", "Gen V").await;
+        let confirmed = guess(&repo, "jerry", "Formula 1").await;
+        let avoided = guess(&repo, "jerry", "Celebrity gossip").await;
+        let hers = guess(&repo, "liz", "Rally").await;
+
+        for (session, at) in [
+            ("s1", "2026-11-10T09:00:00Z"),
+            ("s2", "2026-11-11T09:00:00Z"),
+            ("s3", "2026-11-12T09:00:00Z"),
+        ] {
+            for id in [&fielder, &confirmed, &avoided, &hers] {
+                seen_on(&repo, id, session, at).await;
+            }
+        }
+        // Three conversations on one Nairobi day: 21:30 UTC is already the 11th there.
+        for (session, at) in [
+            ("s1", "2026-11-10T21:30:00Z"),
+            ("s2", "2026-11-11T08:00:00Z"),
+            ("s3", "2026-11-11T20:00:00Z"),
+        ] {
+            seen_on(&repo, &chatty, session, at).await;
+        }
+        sqlx::query(
+            "INSERT INTO news_stories (id, profile_id, interest_id, interest_topic, headline, \
+             headline_key, dek, summary, why_you, url, url_key, site, source_title, written_at, \
+             vote) VALUES ('n1', 'jerry', ?, 'Gen V', 'h', 'h', 'd', 's', 'w', 'u', 'u', 'x', 't', \
+             '2026-11-12T09:00:00Z', 'up')",
+        )
+        .bind(&liked)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        let patch = |confirmed, avoid| InterestPatch {
+            confirmed,
+            avoid,
+            ..Default::default()
+        };
+        repo.patch("jerry", &confirmed, &patch(Some(true), None))
+            .await
+            .unwrap();
+        repo.patch("jerry", &avoided, &patch(None, Some(true)))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.sighted_days("jerry", &fielder, NAIROBI).await.unwrap(),
+            3
+        );
+        assert_eq!(
+            repo.sighted_days("jerry", &chatty, NAIROBI).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.sighted_days("jerry", &chatty, Tz::UTC).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            repo.sighted_days("jerry", &hers, NAIROBI).await.unwrap(),
+            0,
+            "never another member's"
+        );
+
+        let mut ready: Vec<String> = repo
+            .ready_to_offer("jerry", NAIROBI)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.topic)
+            .collect();
+        ready.sort();
+        assert_eq!(ready, ["Gen V", "Toyota Fielder"]);
+        let hers: Vec<String> = repo
+            .ready_to_offer("liz", NAIROBI)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.topic)
+            .collect();
+        assert_eq!(hers, ["Rally"]);
     }
 
     #[tokio::test]

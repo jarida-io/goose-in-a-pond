@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::mcp::ports::notification::{Notification, OpenScreen};
 use crate::shared::domain::todo::{
-    clock_label, rfc3339, Hook, HookSpec, Todo, TodoKind, TodoSource, TodoState,
+    clock_label, rfc3339, Hook, HookSpec, Priority, Todo, TodoKind, TodoSource, TodoState,
 };
 use crate::shared::domain::when_said::due_from_words;
 use crate::user_data::domain::profile::ProfileScope;
@@ -212,6 +212,11 @@ pub fn todo_from_offer(
         kind: TodoKind::Reminder,
         text: reminder.about.trim().to_string(),
         notes: None,
+        list: None,
+        priority: Priority::Normal,
+        steps: Vec::new(),
+        goose_can: None,
+        anchor_id: None,
         state: TodoState::Open,
         due_at: Some(due),
         ask: false,

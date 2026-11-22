@@ -19,6 +19,7 @@ use crate::shared::domain::session_activity::{PresenceTransition, ProfilePresenc
 use crate::shared::ports::event_bus::BusEvent;
 use crate::shared::services::long_task_runner::RESULT_TITLE;
 use crate::user_data::domain::device::DeviceStateValue;
+use crate::user_data::domain::engine_job::is_engine_task;
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Timelike, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -700,13 +701,17 @@ pub fn plannable_roles(offered: &[AgentRole]) -> Vec<AgentRole> {
 
 /// Whether the runner's own end-of-task notice reaches the owner. An activation speaks only
 /// through its `notify_owner` hook, or every scheduled run would buzz a phone; when one gives up,
-/// the owner hears only if that hook says they want to hear from it.
+/// the owner hears only if that hook says they want to hear from it. An engine job's task never
+/// does: the engine tells the member what it made.
 pub fn runner_notifies_at_end(
     task: &LongTask,
     steps: &[PlanStep],
     roles: &[AgentRole],
     finished: bool,
 ) -> bool {
+    if is_engine_task(task.id()) {
+        return false;
+    }
     if !is_activation_task(task) {
         return true;
     }

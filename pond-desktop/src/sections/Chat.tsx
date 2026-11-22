@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WarmupBanner } from "../components/WarmupBanner";
-import { ArrowLeft, ArrowUp, Brain, Check, Copy, Loader2, Pencil, PenSquare, PlayCircle, RefreshCw, ThumbsDown, ThumbsUp, Wand2, Wrench, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, Check, Copy, Loader2, Pencil, PenSquare, PlayCircle, RefreshCw, ThumbsDown, ThumbsUp, Wand2, Wrench, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import {
@@ -18,6 +18,8 @@ import {
 } from "../state/chatRunStore";
 import type { Message } from "../state/chatRunStore";
 import { ToolCallChip } from "../components/ToolCallChip";
+import { AskQuestionsCard } from "../components/AskQuestionsCard";
+import { ASK_TOOL } from "../mygoose/questionShape";
 import { KeptResultNote } from "../components/KeptResultNote";
 import { NoteFromLine, ReceiptChips, SuggestionOffer } from "../components/MessageNoteView";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
@@ -62,11 +64,24 @@ export function Chat() {
   const state    = useAppState();
   const dispatch = useAppDispatch();
 
-  const chips = useSuggestedPrompts(state.sessionId);
-
   // Turn state lives in `state/chatRunStore`: any sidebar press unmounts Chat, and the turn must survive it.
   const run = useChatRun();
   const { messages, busy, queued, turnSeed, loadingSession } = run;
+  const [ideas, setIdeas] = useState<Array<{
+    id: string;
+    title: string;
+    why?: { text?: string };
+    notes?: { found?: string; next?: string; caveats?: string };
+  }>>([]);
+
+  useEffect(() => {
+    if (!state.serverOnline || loadingSession || messages.length > 0) return;
+    let active = true;
+    api.listIdeaCards().then((res) => {
+      if (active) setIdeas(res.cards ?? []);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [state.serverOnline, loadingSession, messages.length]);
 
   const startedTasks = useMemo(() => messages.flatMap((m) => m.longTaskIds ?? []), [messages]);
   const startedTaskSet = useMemo(() => new Set(startedTasks), [startedTasks]);
@@ -97,11 +112,6 @@ export function Chat() {
   // Fail open: attaching is disabled only once the model is confirmed to lack vision.
   const [visionCapable, setVisionCapable]         = useState(true);
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
-  // `thinking_mode` is a server setting ("auto" | "on" | "off") the agent reads each turn.
-  const [thinkingMode, setThinkingMode]           = useState<string>("auto");
-  const [thinkingSaving, setThinkingSaving]       = useState(false);
-  // Restored on re-enable, so an explicit "on" doesn't come back as "auto".
-  const lastThinkingOnRef                         = useRef<string>("auto");
   // Used only to personalise the greeting; blank is fine and handled there.
   const [userName, setUserName]                   = useState<string>("");
   const conversationModel = useConversationModel();
@@ -263,9 +273,6 @@ export function Chat() {
     api.getSettings().then((s) => {
       setShowTurnStats(s.show_turn_stats ?? false);
       setUserName(s.user_name ?? "");
-      const mode = s.thinking_mode ?? "auto";
-      setThinkingMode(mode);
-      if (mode !== "off") lastThinkingOnRef.current = mode;
     }).catch(() => {});
   }, [state.serverOnline]);
 
@@ -551,23 +558,6 @@ export function Chat() {
   titleDraftRef.current = titleDraft;
   renameSessionRef.current = renameSession;
 
-  /** Optimistic; reverted if the save fails. */
-  async function toggleThinking() {
-    if (thinkingSaving) return;
-    const next = thinkingMode === "off" ? lastThinkingOnRef.current : "off";
-    const previous = thinkingMode;
-    if (previous !== "off") lastThinkingOnRef.current = previous;
-    setThinkingMode(next);
-    setThinkingSaving(true);
-    try {
-      await api.updateSettings({ thinking_mode: next as "auto" | "on" | "off" });
-    } catch {
-      setThinkingMode(previous);
-    } finally {
-      setThinkingSaving(false);
-    }
-  }
-
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
@@ -755,12 +745,19 @@ export function Chat() {
             <div key={msg.id} className={`ch-row ${msg.role === "user" ? "ch-row--user" : "ch-row--goose"}`}>
               <div className="ch-bubble-wrap">
                 <NoteFromLine note={msg.note} />
+                {/* Structured questions: drawn while the turn waits for the answers. */}
+                {msg.role === "agent" &&
+                  msg.cards
+                    ?.filter((card) => card.tool === ASK_TOOL)
+                    .map((card) => <AskQuestionsCard key={card.id} card={card} sessionId={run.sessionId ?? null} />)}
                 {/* Tool call chips */}
-                {msg.role === "agent" && msg.cards && msg.cards.length > 0 && !msg.streaming && (
+                {msg.role === "agent" && msg.cards && msg.cards.some((card) => card.tool !== ASK_TOOL) && !msg.streaming && (
                   <div className="tool-call-chips" role="list" aria-label="Tools used">
-                    {msg.cards.map((card) => (
-                      <ToolCallChip key={card.id} card={card} onAction={sendMessage} />
-                    ))}
+                    {msg.cards
+                      .filter((card) => card.tool !== ASK_TOOL)
+                      .map((card) => (
+                        <ToolCallChip key={card.id} card={card} onAction={sendMessage} />
+                      ))}
                   </div>
                 )}
                 {/* History tool indicators */}
@@ -996,6 +993,50 @@ export function Chat() {
         />
       )}
 
+      {!loadingSession && messages.length === 0 && conversationModel.state !== "none" && ideas.length > 0 && (
+        <div className="chat2__chips" role="group" aria-label="Ideas" style={{ flexWrap: "nowrap", overflowX: "auto", marginBottom: 8 }}>
+          {ideas.map((idea, i) => {
+            const note = idea.notes?.found || idea.notes?.next || idea.why?.text;
+            const fullContext = [
+              idea.title,
+              idea.why?.text ? `Why: ${idea.why.text}` : null,
+              idea.notes?.found ? `Context: ${idea.notes.found}` : null,
+              idea.notes?.next ? `Next: ${idea.notes.next}` : null,
+              idea.notes?.caveats ? `Caveats: ${idea.notes.caveats}` : null,
+            ]
+              .filter(Boolean)
+              .join("\n");
+            return (
+              <button
+                key={idea.id}
+                className="ch-chip"
+                style={{
+                  animationDelay: `${60 + i * 45}ms`,
+                  flexShrink: 0,
+                  textAlign: "left",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "flex-start",
+                  gap: 2,
+                  maxWidth: 260,
+                }}
+                onClick={() => sendMessage(fullContext)}
+                disabled={!state.serverOnline}
+                type="button"
+                title={note ?? idea.title}
+              >
+                <span style={{ fontWeight: 600 }}>{idea.title}</span>
+                {note ? (
+                  <span style={{ fontSize: 11, opacity: 0.72, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>
+                    {note}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className={`chat2__composer${busy ? " is-busy" : ""}`}>
         <ComposerMenu
           variant="classic"
@@ -1051,52 +1092,9 @@ export function Chat() {
         </button>
       </div>
 
-      {/* Quips, below the composer — a starting point, not a header. */}
-      {!loadingSession && messages.length === 0 && conversationModel.state !== "none" && (
-        <div className="chat2__chips" role="group" aria-label="Suggestions">
-          {chips.map((c, i) => (
-            <button
-              key={c}
-              className="ch-chip"
-              style={{ animationDelay: `${60 + i * 45}ms` }}
-              onClick={() => sendMessage(c)}
-              disabled={!state.serverOnline}
-              type="button"
-            >
-              {c}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* Hint bar — model selector + keyboard shortcut */}
       <div className="chat2__hint">
         <ModelSwitcher onSwitched={refreshVisionStatus} />
-
-        {/* Thinking. Writes `thinking_mode`, which the agent reads on the next
-            turn — so this is the real setting, not a display preference. */}
-        <button
-          type="button"
-          className={`think-toggle${thinkingMode !== "off" ? " is-on" : ""}`}
-          onClick={toggleThinking}
-          disabled={thinkingSaving || !state.serverOnline}
-          role="switch"
-          aria-checked={thinkingMode !== "off"}
-          aria-label="Thinking mode"
-          title={
-            thinkingMode === "off"
-              ? "Thinking off — Goose answers directly"
-              : thinkingMode === "on"
-                ? "Thinking on for every model"
-                : "Thinking on where the model supports it"
-          }
-        >
-          <Brain size={11} aria-hidden="true" />
-          <span className="think-toggle__label">Thinking</span>
-          <span className="think-toggle__state">
-            {thinkingMode === "off" ? "Off" : thinkingMode === "on" ? "On" : "Auto"}
-          </span>
-        </button>
 
         <span className="chat2__hint-sep">·</span>
         <span className="chat2__hint-kbd">Cmd + Enter to send</span>

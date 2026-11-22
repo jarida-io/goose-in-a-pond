@@ -292,7 +292,6 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "memory_extraction_enabled", label: "Learn from conversations", description: "Read your conversations back in quiet moments and remember what lasts. Nothing is remembered while you are talking, so this takes a while to show up \u2014 and a long history takes a few nights.", control: { kind: "toggle" }, consumer: "live" },
           { key: "memory_extraction_max_facts", label: "Most things kept at once", description: "How many things it may remember from one stretch of conversation. Fewer is better: a store full of near-misses crowds out what matters.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", validate: all(integer, range(0, 50)) },
           { key: "memory_extraction_interval_secs", label: "Wait between readings", description: "The shortest gap between two readings. It only ever makes them rarer.", control: { kind: "number", min: 0, unit: "seconds" }, consumer: "live", validate: all(integer, atLeast(0, "seconds")) },
-          { key: "suggestion_generation_enabled", label: "Suggest things to ask", description: "Turn what it remembers about you into questions on the Home screen. Off, Home still suggests \u2014 but only the same general questions every day.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {
@@ -419,6 +418,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "ext_memory_enabled", label: "Memories", description: "Let it remember, recall and forget things on request.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_schedule_enabled", label: "Schedules", description: "Let it create, pause and run things on a schedule.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_weather_enabled", label: "Weather", description: "Let it look up the weather.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "ext_questions_enabled", label: "Questions", description: "Let it ask you a few questions with options to tap when it needs a detail.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_knowledge_enabled", label: "Knowledge", description: "Let it look things up in an encyclopedia.", control: { kind: "toggle" }, consumer: "live" },
           { key: "browser_rendering_enabled", label: "Read pages that need a browser", description: "Some pages show nothing until their scripts have run. The pond reads those with a headless browser, when it finds one and has the memory free.", control: { kind: "toggle" }, consumer: "live" },
           { key: "ext_system_enabled", label: "System", description: "Let it read files and check on the device it runs on.", control: { kind: "toggle" }, consumer: "live" },
@@ -532,20 +532,11 @@ export const CATALOGUE: CatalogueCategory[] = [
     id: "reasoning",
     name: "Reasoning",
     tier: "Workshop",
-    blurb: "Whether the model thinks before answering, how long, and who checks its work.",
+    blurb: "How long the model thinks before answering.",
     groups: [
       {
         name: "Thinking",
         entries: [
-          {
-            key: "thinking_mode", label: "Thinking", description: "Whether it reasons before answering. Automatic decides per model.", consumer: "live",
-            control: { kind: "radio", options: [
-              { value: "auto", label: "When the model supports it", hint: "The default" },
-              { value: "on",   label: "Always try",  hint: "Even on models that ignore it" },
-              { value: "off",  label: "Never",       hint: "Removes the section from the prompt entirely" },
-            ] },
-            validate: oneOf(["auto", "on", "off"]),
-          },
           {
             key: "reasoning_effort", label: "How long it may think", description: "How much thinking to encourage before it answers.", consumer: "live",
             control: { kind: "radio", options: [
@@ -555,25 +546,6 @@ export const CATALOGUE: CatalogueCategory[] = [
             ] },
             validate: oneOf(["brief", "balanced", "thorough"]),
           },
-          { key: "show_thinking", label: "Show thinking as it happens", description: "Watch it think while it works.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "persist_thinking", label: "Keep thinking after the reply", description: "Keep its reasoning after it answers, so you can reopen it later.", control: { kind: "toggle" }, consumer: "live" },
-        ],
-      },
-      {
-        name: "Answer review",
-        entries: [
-          {
-            key: "review_mode", label: "Review answers", description: "Whether answers are checked before you see them. Checking is slower but catches more.", consumer: "live",
-            control: { kind: "radio", options: [
-              { value: "off",  label: "Never",             hint: "Answers stream straight to you" },
-              { value: "auto", label: "Factual questions", hint: "Only where a wrong answer would be quotable" },
-              { value: "on",   label: "Every answer",      hint: "Doubles the model calls per turn" },
-            ] },
-            validate: oneOf(["off", "on", "auto"]),
-          },
-          { key: "review_max_rounds", label: "Revision rounds", description: "How many times an answer may be sent back for another try.", control: { kind: "number", min: 0, max: 5 }, consumer: "live", validate: all(integer, range(0, 5)) },
-          { key: "review_pass_threshold", label: "Pass mark", description: "How good an answer must be to pass the check.", control: { kind: "number", min: 1, max: 5 }, consumer: "live", validate: all(integer, range(1, 5)) },
-          { key: "goal_check_enabled", label: "Check the question was answered", description: "Ask whether it actually answered you, and let it keep going if not.", control: { kind: "toggle" }, consumer: "live", proposed: true },
         ],
       },
     ],

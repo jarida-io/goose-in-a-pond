@@ -107,9 +107,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
         data_wipe: None,
         warmup: Default::default(),
         pond_admin: None,
-        suggestion_queue: Arc::new(
-            pond_infra::sqlite_suggestion_queue::SqliteSuggestionQueue::new(db.system.clone()),
-        ),
+        engine: pond_api::EngineStores::sqlite(db.system.clone()),
         db,
         onboarding_repo: Arc::new(CompletedOnboarding),
         handshake: Arc::new(mock_hs),

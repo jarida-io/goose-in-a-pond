@@ -563,6 +563,27 @@ fn an_activation_speaks_through_its_hook_and_a_plain_task_as_before() {
 }
 
 #[test]
+fn an_engine_jobs_task_leaves_its_notice_to_the_engine() {
+    let job = crate::user_data::domain::engine_job::EngineJob::new(
+        crate::user_data::domain::engine_job::JobKind::Deliverable,
+        crate::user_data::domain::engine_job::JobClass::Open,
+        Some("m-1"),
+        "a dossier",
+        t(0),
+    );
+    let (task, _) = crate::user_data::services::engine::task::task_for_job(
+        &job,
+        "Write a dossier for the summit.",
+        "m-1",
+        t(0),
+    )
+    .unwrap();
+    for finished in [true, false] {
+        assert!(!runner_notifies_at_end(&task, &[], &[], finished));
+    }
+}
+
+#[test]
 fn a_brief_offers_only_the_agents_that_accept_work_from_this_one() {
     let source = role("researcher", "  hooks:\n    after: [start_task]\n");
     let planner = role(

@@ -1,91 +1,131 @@
 <div align="center">
-  <img src="pond-desktop/src/assets/goose-logo-dark.png" alt="Goose In A Pond" width="120" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="pond-desktop/src/assets/goose-logo-dark.png">
+    <img src="pond-desktop/src/assets/goose-logo.png" alt="Goose In A Pond" width="120" />
+  </picture>
 
   # Goose In A Pond
 
-  **Privacy-first, fully local AI smart home assistant**
+  **A household AI assistant that runs on hardware you own**
 
-  Built on [Goose](https://github.com/aaif-goose/goose) · Runs on your hardware · No cloud required
+  Built on [goose](https://github.com/aaif-goose/goose) · Tools over [MCP](https://modelcontextprotocol.io) · Runs on a Jetson, a Mac or a Linux box · No cloud account
 
-  [![Apache License 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-  [![CC BY 4.0](https://licensebuttons.net/l/by/4.0/80x15.png)](http://creativecommons.org/licenses/by/4.0/)
-  [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-  [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Jetson-lightgrey)](https://github.com/jarida-io/goose-in-a-pond)
+  [![Friend of the AAIF](https://img.shields.io/badge/friend%20of%20the-AAIF-5D23C2)](https://aaif.io)
+  [![Apache License 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
+  [![CC BY 4.0](https://img.shields.io/badge/docs-CC%20BY%204.0-lightgrey.svg)](./docs/LICENSE-CC-BY-4.0)
+  [![Rust](https://img.shields.io/badge/rust-1.91.1-orange.svg)](https://www.rust-lang.org)
+  [![Platform](https://img.shields.io/badge/platform-Jetson%20%7C%20macOS%20%7C%20Linux-lightgrey)](#getting-started)
+
+  [Website](https://pond.jarida.io) · [Documentation](./docs/README.md) · [Quick start](./docs/QUICKSTART.md) · [Keynote](#talks)
 
 </div>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="site/assets/shots/pond-home-dark.webp">
+    <img src="site/assets/shots/pond-home.webp" alt="The pond's dashboard greeting Amina, with the weather in Nairobi and tonight's routines" width="640">
+  </picture>
+  <img src="site/assets/shots/gotg-home.webp" alt="Goose On The Go greeting Amina, with the next routine and the weather" width="178">
+  <br>
+  <sub>The pond's dashboard and Goose On The Go, current builds, on a demo household running Gemma 4 E4B.</sub>
+</p>
 
 ---
 
 ## What is Goose In A Pond?
 
-**Goose In A Pond (GIAP)** is a privacy-first household assistant that runs on hardware you own. Its
-primary target is the **NVIDIA Jetson Orin Nano (8 GB)**; it also runs on macOS and Linux. Inference,
-speech and memory stay on the device, and nothing needs a cloud account to work.
+**Goose In A Pond (GIAP)** is a household assistant that lives on a small computer in your home.
+Its main target is the **NVIDIA Jetson Orin Nano (8 GB)**; it also runs on macOS and Linux. The
+model, speech, memory and every tool run on that device, and nothing needs a cloud account to work.
 
-GIAP is built on Block's [Goose](https://github.com/aaif-goose/goose) agent framework, pinned as the
-`goose/` submodule, and adds the household layer: voice, memory and personal context, devices,
-schedules, a desktop app, and a phone companion, **Goose On The Go (GOTG)**.
+It is built on [goose](https://github.com/aaif-goose/goose), the open-source agent, pinned as the
+`goose/` submodule. GIAP adds the household around it: voice in the room, memory of each member,
+devices, schedules, a desktop app and kiosk, and a phone app, [Goose On The Go](#goose-on-the-go).
+Every tool the assistant can call is an MCP server.
 
 ### What it does
 
 | Capability | How |
 |---|---|
-| **Local models** | In-process GGUF through Goose's llama.cpp provider by default; LiteRT-LM on the Jetson and Mac; or an Ollama, llamafile or mistral.rs server. Models are recommended for the hardware and downloaded on first use |
-| **Voice** | Wake word (matched on Whisper's transcript), end of speech (Silero), speech recognition (whisper-rs, in-process) and speech (Kokoro), all on-device |
-| **Tools** | GIAP's own MCP servers (devices, memory, schedules, weather, web search, knowledge, travel and more) plus any MCP server the household adds |
-| **Memory and personal context** | Memory extracted from conversations, and a local vector index over personal context, injected per turn |
-| **Devices** | Matter devices through a bundled matter.js controller; camera motion and face recognition (optional features) |
+| **Local models** | GGUF in process through llama.cpp by default, LiteRT-LM for `.litertlm` models, or an Ollama, llamafile or OpenAI-compatible server. The pond recommends models for its hardware and downloads them on first use |
+| **Voice in the room** | The server runs the voice loop on the pond's own microphone and speaker: a "hey goose" wake word, Silero for the end of speech, Whisper in process, Kokoro to speak. Saying the wake word again interrupts the reply |
+| **Tools** | GIAP's own MCP servers run in process as goose extensions: memory, schedules, weather, knowledge and web search, system, devices, sensors, vision and questions, with travel, context and orchestration off until switched on. A household can add any other MCP server |
+| **Memory and personal context** | Memories extracted from conversations in the background, a fact sheet per member, and a local vector index over personal context, attached to each turn |
+| **Devices** | Matter devices through a bundled matter.js controller; camera motion and face recognition as optional features |
 | **Schedules and rules** | Cron or one-shot routines that run an agent prompt or a webhook, and rules that fire on a sensor, camera or device event |
-| **Desktop app** | Electron app for macOS with a GUI mode and a voice mode |
-| **Phone companion** | GOTG pairs over pinned HTTPS. A pond with no screen is set up by scanning its printed setup card, over Bluetooth |
+| **Desktop app and kiosk** | An Electron app for macOS with a GUI mode and a voice mode; the Jetson runs the same app full screen on a touchscreen |
+| **Phone app** | [Goose On The Go](#goose-on-the-go) pairs with a code or a printed setup card and talks to the pond over pinned HTTPS |
 | **Remote access** | An embedded tailnet node (`native/pondnet`) reaches the pond away from home without an OS VPN |
 | **Services** | Music (Apple Music, Spotify), calendar and mail (CalDAV, IMAP), rides (Uber), each on the household's own account |
 
 ---
 
+## Goose On The Go
+
+Goose On The Go is the pond's phone app for iOS and Android, built with Expo and React Native and
+drawn with [Jarida Ink](https://github.com/jarida-io/ink). It pairs with a pond using CPace, a
+password-authenticated key exchange: the six-digit code, a spoken code or the printed setup card is
+the password, and it never crosses the network. From then on the phone talks HTTPS to a certificate
+it pinned while pairing. It sets up a brand-new pond over Bluetooth, Wi-Fi details included,
+reaches the pond away from home through its own tailnet node, and carries chat, schedules, the
+household's memories and My Goose. On Android it can be the phone's assistant, woken with
+"Hey Goose". See it on [pond.jarida.io](https://pond.jarida.io/#showcase).
+
+---
+
 ## Architecture
 
-Hexagonal (ports and adapters). `pond-core` is the domain and imports no framework; every adapter
-implements a trait (a port) defined there, and `pond-server` wires them together.
+<p align="center">
+  <img src="site/assets/architecture.png" alt="The three layers: the apps on top; the G-Layer with the goose agent, GIAP's MCP servers and the vision, audio and inference buses; on-device inference at the bottom with llama.cpp in process on CUDA, Metal or the CPU" width="900">
+</p>
+
+The code is hexagonal (ports and adapters). `pond-core` is the domain and imports no framework;
+every adapter implements a trait (a port) defined there, and `pond-server` wires them together.
 
 ```
-pond-server            binary: CLI, composition root, HTTP + HTTPS listeners
+pond-server            binary: CLI, composition root, HTTP + HTTPS listeners, room voice
   pond-api             Axum router and DTOs; embeds the web dashboard
   pond-core            domain: ports, services and types, by bounded context
   pond-infra           SQLite: pond_system.db, pond_logs.db, pond_vectors.db
-  pond-adapters-goose  the live agent engine (wraps Goose)
-  pond-mcp-server      GIAP's tools, as Goose builtin MCP extensions
+  pond-adapters-goose  the live agent engine (wraps goose)
+  pond-mcp-server      GIAP's tools, as goose builtin MCP extensions
   pond-adapters-*      models, voice, devices, services, mesh
   pond-voice, pond-audio, pond-audio-out           microphone, text and speaker primitives
-  pond-ear             wake word, Voice Match, echo cancellation (built, not yet wired in)
+  pond-ear             wake word, endpointing, echo cancellation, Voice Match
   pond-net, pond-connect                             egress, setup channel, Wi-Fi
-pond-desktop           Electron app (React + TypeScript), macOS
+pond-desktop           Electron app (React + TypeScript), macOS and the Jetson kiosk
 native/pondnet         Go: the embedded tailnet node and mobile bindings
 matter-server          Node: the matter.js controller
+site                   the pond.jarida.io landing page
 ```
 
-Every crate is described in [docs/architecture/components.md](./docs/architecture/components.md).
+Every crate is described in [docs/architecture/components.md](./docs/architecture/components.md),
+and one chat turn is traced end to end in [docs/architecture/data_flow.md](./docs/architecture/data_flow.md).
 
 ---
 
 ## Getting Started
+
+The short version, on a Mac or a Linux box:
+
+```bash
+git clone --recursive https://github.com/jarida-io/goose-in-a-pond.git
+cd goose-in-a-pond
+bash scripts/giap.sh install     # builds, sets up and downloads the models; -y skips the prompts
+bash scripts/giap.sh doctor      # confirms the result; exits 1 on any FAIL
+```
+
+The rest of this section is what that does, and how to do each step by hand.
 
 ### 1. Prerequisites
 
 - **Rust** stable via [rustup](https://rustup.rs). `giap.sh install` fetches it if it's missing.
 - **Go ≥ 1.27**. The build compiles the bundled `pondnet` network helper (`native/pondnet`) next to `pond-server`. The installer does not install Go for you.
 - **Node** `^22.13 || ^24 || >=26` for the desktop app and the tests (`.nvmrc` says 22). **≥ 20.19** is enough to build the web UI, and an older Node can still run the server. Not sure what you have? `bash scripts/giap.sh node` checks, uses one you already have (nvm, fnm, volta, asdf), or downloads one after asking. See [Node](docs/developer/installation.md#node).
-- **Git** with submodule support (Goose is vendored as the `goose` submodule)
+- **Git** with submodule support (goose is vendored as the `goose` submodule)
 - **cmake** and a C/C++ toolchain (`install.sh` installs these on Linux)
 
-### 2. Clone and install
-
-```bash
-git clone --recursive https://github.com/jarida-io/goose-in-a-pond.git
-cd goose-in-a-pond
-bash scripts/giap.sh install     # -y to skip the prompts
-bash scripts/giap.sh doctor      # confirm the result; exits 1 on any FAIL
-```
+### 2. Install with `giap.sh`
 
 **`scripts/giap.sh` is the front door.** Run it with no arguments for a menu that covers
 install, build, service management, logs and diagnostics. It works out what the
@@ -108,6 +148,7 @@ bash scripts/giap.sh build-desktop  # Electron app (macOS only)
 bash scripts/giap.sh node           # find, or download and verify, the Node this repo needs
 bash scripts/giap.sh status         # detection banner only
 bash scripts/giap.sh logs           # today's rolling log file (not journald)
+bash scripts/giap.sh check          # the CI checks for what your branch changes
 bash scripts/giap.sh provision --host HOST --key FILE  # operator: give a Pond a device certificate
 bash scripts/giap.sh --dry-run …    # print every command instead of running it
 ```
@@ -128,13 +169,13 @@ service units competing for one port, and a stray `target/debug` binary that
 You don't need these if you use `giap.sh`, but these are the commands it runs:
 
 ```bash
-# The genuinely fast set: no Goose, no llama-cpp-2
+# The genuinely fast set: no goose, no llama-cpp-2
 cargo build -p pond-core -p pond-infra -p pond-api
 
 # Build the web UI FIRST, or the server embeds a placeholder dashboard
 (cd pond-desktop && npm ci && npm run build)
 
-# pond-server pulls in Goose AND llama-cpp-2 through its default features,
+# pond-server pulls in goose AND llama-cpp-2 through its default features,
 # so a cold build takes 10-35 minutes
 cargo build -p pond-server --release
 
@@ -169,7 +210,7 @@ Whisper ASR model. `install` already runs it, so you only need it after a hand b
 The server opens two listeners:
 
 - **HTTP** on `127.0.0.1` only (default port 4000). It serves the dashboard, the CLI and OAuth callbacks.
-- **HTTPS** on all interfaces (default 4443). The paired phone companion uses this one.
+- **HTTPS** on all interfaces (default 4443). The paired phone app uses this one.
 
 Each listener tries ten consecutive ports if its first choice is taken, so always
 pass `--port` explicitly. To find the ports a server actually bound, read
@@ -226,6 +267,9 @@ on both. After a deploy the service listens on 8080, not 4000, so tunnel that po
 **[scripts/jetson/README.md](./scripts/jetson/README.md)** and
 **[docs/developer/jetson-dev-routine.md](./docs/developer/jetson-dev-routine.md)**.
 
+No Jetson on your desk? `bash scripts/jetson-emu.sh run` makes the Orin's decisions on a Mac, such
+as the context size it picks for its memory budget, though never its performance.
+
 ### 9. Desktop app (macOS)
 
 ```bash
@@ -236,20 +280,26 @@ npm run bundle:app               # release .app (or: bash scripts/giap.sh build-
 ```
 
 The desktop app has two modes: the GUI and the voice screen.
-On Linux there's no desktop shell. Use the server's own dashboard instead.
+On Linux there's no packaged desktop app. Use the server's own dashboard instead.
 
 ---
 
 ## Voice
+
+`serve` runs the voice loop itself on the pond's own microphone and speaker wherever the models,
+a microphone and a speaker are there; `GET /api/v1/voice/room` says whether it is running, and the
+`voice_room_enabled` setting switches it. To try voice from a terminal instead:
 
 ```bash
 ./target/release/pond-server chat --voice                  # wake word, listen, reply aloud
 ./target/release/pond-server chat --voice --no-wake-word   # listen on every turn
 ```
 
-The first run downloads whichever voice models are missing. Recognition runs in-process through whisper-rs (Metal on macOS, CUDA on the Jetson); speech is
-Kokoro. The desktop app runs this same command as a child process (`--json-events`) and drives its
-voice screen from the events.
+The first run downloads whichever voice models are missing. Recognition runs in process through
+whisper-rs (Metal on macOS, CUDA on the Jetson); speech is Kokoro. Only one voice loop holds the
+microphone at a time. The desktop app attaches to the room's voice where it is running, and
+otherwise starts `chat --voice --json-events` as a child process and drives its voice screen from
+the events. [docs/developer/voice-mode.md](./docs/developer/voice-mode.md) has the whole stack.
 
 ---
 
@@ -275,8 +325,8 @@ Every command and flag is in [docs/cli.md](./docs/cli.md).
 ## Testing
 
 ```bash
+bash scripts/giap.sh check                  # the CI checks for what your branch changes (--all)
 make test                                   # a quick subset: pond-core, pond-api, pond-infra
-cargo test -p pond-core                     # one crate
 cargo test -p pond-core <name>              # one test
 cargo test -p <crate> -- --ignored          # live tests that need hardware, models or keys
 cargo check -p pond-server -p pond-adapters-goose --all-targets   # the production binary
@@ -284,10 +334,11 @@ scripts/live-test.sh                        # the real server over HTTP, restart
 cd pond-desktop && npm test && npm run typecheck && npx playwright test
 ```
 
-The full fast-crate list CI runs is in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 Unit tests never exercise startup ordering, migrations against a database that already has rows,
 or auth middleware; `scripts/live-test.sh` does, and is required for any change to a migration,
-route, handler or startup code. See the [testing guide](./docs/testing/tdd_guide.md).
+route, handler or startup code. See the [testing guide](./docs/testing/tdd_guide.md) and
+[CONTRIBUTING § Checks](./docs/CONTRIBUTING.md#checks), which mirrors
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml).
 
 ---
 
@@ -296,12 +347,13 @@ route, handler or startup code. See the [testing guide](./docs/testing/tdd_guide
 | Layer | Technology |
 |---|---|
 | Core | Rust (`rust-version` 1.91.1) |
-| Agent | [Goose](https://github.com/aaif-goose/goose), MCP via `rmcp` |
+| Agent | [goose](https://github.com/aaif-goose/goose), MCP via `rmcp` |
 | HTTP | Axum 0.8, rustls |
 | Storage | SQLite via SQLx (three databases) |
-| Local inference | llama.cpp (through Goose and `llama-cpp-2`), LiteRT-LM |
+| Local inference | llama.cpp (in process through `llama-cpp-2`), LiteRT-LM |
 | Speech | whisper-rs, Silero VAD, Kokoro |
-| Desktop | Electron, React 19, TypeScript, Vite, HeroUI, `@jarida/ink` |
+| Desktop | Electron, React 19, TypeScript, Vite, HeroUI, [Jarida Ink](https://github.com/jarida-io/ink) |
+| Phone | [Goose On The Go](#goose-on-the-go): Expo, React Native |
 | Networking | Go (`native/pondnet`): tsnet against a Headscale coordinator |
 | Devices | matter.js (`matter-server/`) |
 | Tests | cargo test, Vitest, Playwright, `scripts/live-test.sh` |
@@ -314,6 +366,7 @@ Start at the **[documentation index](./docs/README.md)**. The most used pages:
 
 | Document | For |
 |---|---|
+| [Quick start](./docs/QUICKSTART.md) | A first change, checked as CI checks it, in about ten minutes |
 | [Installation](./docs/developer/installation.md) | What `giap.sh install` does, prerequisites, troubleshooting |
 | [Components](./docs/architecture/components.md) | Every crate and what it owns |
 | [Data flow](./docs/architecture/data_flow.md) | One chat turn from request to response |
@@ -321,6 +374,17 @@ Start at the **[documentation index](./docs/README.md)**. The most used pages:
 | [Remote access](./docs/remote-access.md) | Reaching the pond away from home |
 | [Design](./DESIGN.md) | The design rules for every surface |
 | [Contributing](./docs/CONTRIBUTING.md) | Branches, commits, comments, tests |
+| [AGENTS.md](./AGENTS.md) and [HOWTOAI.md](./HOWTOAI.md) | For coding agents: how GIAP fits together, and the traps |
+
+---
+
+## Talks
+
+**Democratizing AI with Goose In A Pond**, a 15-minute keynote at the MCP conference: why a
+household assistant belongs on a box in the house, and how MCP, goose and a local model make one.
+The [slides](https://pond.jarida.io/assets/democratizing-ai-with-goose-in-a-pond.pdf) are on
+[pond.jarida.io](https://pond.jarida.io/#keynote); the architecture diagram, and the source in
+the code of every figure on the slides, are in [docs/keynote](./docs/keynote/README.md).
 
 ---
 
@@ -339,24 +403,35 @@ first checked change in about ten minutes. Read the [Contributing Guide](./docs/
 
 ---
 
-## Sponsors
+## A friend of the AAIF
+
+Goose In A Pond is a friend of the [Agentic AI Foundation (AAIF)](https://aaif.io). It is built on
+the foundation's projects: [goose](https://github.com/aaif-goose/goose) runs every turn, every tool
+is a [Model Context Protocol](https://modelcontextprotocol.io) server, and coding agents working in
+this repository start at its [AGENTS.md](./AGENTS.md). GIAP is an independent project; the AAIF
+does not host it. GIAP builds goose from a tracked fork that syncs with upstream; the patches it
+carries, and which are fit to send upstream, are in
+[goose patch management](./docs/goose-patch-management.md).
+
+---
+
+## Sponsor
 
 <table>
   <tr>
-    <td align="center" width="200">
-      <a href="https://block.xyz">
-        <img src="https://avatars.githubusercontent.com/u/42147435?s=200&v=4" width="80" alt="Block" /><br/>
-        <strong>Block</strong>
+    <td align="center" width="260">
+      <a href="https://spiral.xyz">
+        <img src="docs/assets/sponsors/spiral-logo.svg" alt="spiral.xyz" width="64" /><br/>
+        <strong>spiral.xyz</strong>
       </a>
       <br/>
-      <sub>Creator of <a href="https://github.com/aaif-goose/goose">Goose</a>, the open-source AI agent framework that powers GIAP</sub>
+      <sub>A Block initiative for the public good, funding open-source bitcoin and AI</sub>
     </td>
   </tr>
 </table>
 
-Goose In A Pond is built on [Goose](https://github.com/aaif-goose/goose), the open-source agentic AI framework created and maintained by [Block](https://block.xyz). We are grateful for their commitment to open-source AI tooling.
-
-> Interested in sponsoring GIAP? Contact us at [info@jarida.io](mailto:info@jarida.io).
+Goose In A Pond is sponsored by [spiral.xyz](https://spiral.xyz). Interested in supporting the
+project? Write to [info@jarida.io](mailto:info@jarida.io).
 
 ---
 
@@ -364,10 +439,10 @@ Goose In A Pond is built on [Goose](https://github.com/aaif-goose/goose), the op
 
 Goose In A Pond is dual-licensed:
 
-- **[Apache License 2.0](./LICENSE)** — for the source code
-- **[CC BY 4.0](http://creativecommons.org/licenses/by/4.0/)** — for documentation and media
+- **[Apache License 2.0](./LICENSE)** for the source code
+- **[CC BY 4.0](./docs/LICENSE-CC-BY-4.0)** for documentation and media
 
-You may use, modify, and distribute this project, including commercially, provided you comply with the license terms.
+You may use, modify and distribute this project, including commercially, provided you comply with the license terms.
 
 **Attribution:**
 ```
@@ -378,5 +453,7 @@ and licensed under the Apache License, Version 2.0 and CC BY 4.0.
 ---
 
 <div align="center">
-  <sub>Built by <a href="https://jarida.io">Jarida Open Source</a> · Nairobi, Kenya</sub>
+  <a href="https://jarida.io"><img src="pond-desktop/src/assets/jarida-logo-purple.png" alt="Jarida" width="140" /></a>
+  <br/>
+  <sub>Built by the <a href="https://jarida.io">Jarida Open Source Community</a> · Nairobi, Kenya</sub>
 </div>

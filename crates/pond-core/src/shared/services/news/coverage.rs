@@ -2,24 +2,19 @@
 
 use crate::shared::domain::news::InterestRow;
 
-/// Conversations a guess must rest on before the news treats it as an interest: one question
-/// asked once is curiosity, not an interest.
-pub const GUESS_EVIDENCE: u32 = 3;
-
 /// Words a search query keeps at most; more narrows a news search to nothing.
 const QUERY_WORDS: usize = 10;
 
-/// The interests the news may cover: confirmed ones and well-evidenced guesses, never one the
-/// member wants avoided or switched off, the deepest first.
+/// The interests the news may cover: those the member confirmed, never one they want avoided
+/// or switched off, the deepest first. A guess is a candidate and is covered by nothing.
 pub fn covered(rows: &[InterestRow]) -> Vec<InterestRow> {
     let mut kept: Vec<InterestRow> = rows
         .iter()
-        .filter(|r| !r.avoid && (r.news.tiles() || r.news.digest()))
-        .filter(|r| r.confirmed || r.evidence >= GUESS_EVIDENCE)
+        .filter(|r| r.confirmed && !r.avoid && (r.news.tiles() || r.news.digest()))
         .filter(|r| !r.topic.trim().is_empty())
         .cloned()
         .collect();
-    kept.sort_by_key(|r| (depth_rank(&r.depth), !r.confirmed));
+    kept.sort_by_key(|r| depth_rank(&r.depth));
     kept
 }
 
@@ -90,25 +85,25 @@ mod tests {
     }
 
     #[test]
-    fn guesses_need_three_conversations_and_avoided_or_off_rows_never_count() {
+    fn only_confirmed_interests_are_covered_and_avoided_or_off_rows_never_are() {
         let mut guess = interest("P vs NP", NewsUse::Both);
         guess.confirmed = false;
         guess.evidence = 2;
-        let mut strong_guess = interest("Mini Cooper engineering", NewsUse::Both);
-        strong_guess.confirmed = false;
-        strong_guess.evidence = 3;
+        let mut often_seen = interest("Mini Cooper engineering", NewsUse::Both);
+        often_seen.confirmed = false;
+        often_seen.evidence = 30;
         let mut avoided = interest("Primetime", NewsUse::Both);
         avoided.avoid = true;
         let off = interest("GTA V", NewsUse::Off);
         let kept = covered(&[
             guess,
-            strong_guess,
+            often_seen,
             avoided,
             off,
             interest("The Boys", NewsUse::Tiles),
         ]);
         let topics: Vec<&str> = kept.iter().map(|r| r.topic.as_str()).collect();
-        assert_eq!(topics, vec!["The Boys", "Mini Cooper engineering"]);
+        assert_eq!(topics, vec!["The Boys"]);
     }
 
     #[test]

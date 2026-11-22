@@ -163,8 +163,6 @@ export interface Settings {
 
   // Memory lifecycle
   memory_extraction_enabled?: boolean;
-  /** Turn what the pond remembers into questions on Home. */
-  suggestion_generation_enabled?: boolean;
   memory_cleanup_enabled?: boolean;
   memory_consolidation_enabled?: boolean;
   /** Let the pond rename conversations while idle. Never touches a name you typed. */
@@ -215,6 +213,8 @@ export interface Settings {
   ext_memory_enabled?: boolean;
   ext_schedule_enabled?: boolean;
   ext_weather_enabled?: boolean;
+  /** Let the chat model ask structured questions mid-turn. */
+  ext_questions_enabled?: boolean;
   ext_knowledge_enabled?: boolean;
   ext_system_enabled?: boolean;
   ext_device_enabled?: boolean;
@@ -1422,7 +1422,7 @@ export interface ActiveRun {
   epoch: string;
 }
 
-export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled";
+export type ChatEventType = "text" | "thinking" | "tool_call" | "tool_result" | "done" | "error" | "status" | "review_status" | "review_revision" | "tool_revision" | "turn_stats" | "turn_limit_reached" | "context_warning" | "subagent_progress" | "run_started" | "reattached" | "replay_gap" | "run_evicted" | "cancelled" | "question_answered";
 
 /** One delegation's progress; spellings are pond-core's `SubagentStatus::as_str`. */
 export type SubagentStatus =
@@ -1509,6 +1509,10 @@ export interface ChatEvent {
   tool?: string;            // for "tool_call" and "tool_result" events
   id?: string;              // tool call ID — for matching tool_call to tool_result
   input?: unknown;          // for "tool_call" events — model's tool call arguments
+  /** On "question_answered": the batch of questions the typed message answered. */
+  batch_id?: string;
+  /** On the "done" that follows "question_answered": no turn ran; a waiting one carries on. */
+  question_answered?: boolean;
   result?: unknown;         // for "tool_call" events
   /** On "tool_call": the text streamed since the previous tool call, which was the model at work, not the answer. */
   working_notes?: string;
@@ -2174,9 +2178,6 @@ export interface Suggestion {
   because: string;
   /** The tool group that can answer `prompt`. */
   answered_by: string;
-
-  /** Composed from one of your memories (a row, so settled on tap) rather than from a template. */
-  composed: boolean;
 }
 
 /** Why one suggestor produced nothing, so quiet can be told from broken. */
@@ -2447,4 +2448,376 @@ export interface HouseholdProfile {
   guest_until: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// The idea engine's routes under `/api/v1/me`, as docs/architecture/idea-engine.md section 11 gives them.
+
+export type AnchorKind = "event" | "trip" | "purchase" | "project" | "interest" | "standing";
+/** The kinds a member may add; the standing one belongs to the pond. */
+export type NewAnchorKind = Exclude<AnchorKind, "standing">;
+export type AnchorState = "candidate" | "active" | "ended" | "stopped" | "faded";
+export type SpecialistId = "budget" | "work" | "trip" | "hunt";
+
+/** One fact an anchor or a deliverable holds, and where it came from. */
+export interface AnchorFact {
+  label: string;
+  value: string;
+  source: string;
+}
+
+export type DeliverableKind = "dossier" | "plan" | "shortlist" | "digest" | "checklist";
+export type DeliverableState = "queued" | "making" | "ready" | "unsure" | "rejected" | "archived";
+
+/** A deliverable as an anchor lists it. `unseen` is only ever true for its owner. */
+export interface DeliverableSummary {
+  id: string;
+  kind: DeliverableKind;
+  slot: string;
+  title: string;
+  state: DeliverableState;
+  hook: string;
+  version: number;
+  changed: string;
+  unseen: boolean;
+}
+
+export type EngineJobKind =
+  | "deliverable"
+  | "fact_sheet"
+  | "memory"
+  | "consolidation"
+  | "heartbeat"
+  | "capture"
+  | "ledger"
+  | "rule"
+  | "questions";
+export type EngineJobState = "queued" | "running" | "passed" | "unsure" | "dropped" | "failed" | "cancelled";
+
+/** A long-task step of an engine job, labelled by the pond in words a member reads. */
+export interface EngineJobStep {
+  key: string;
+  role: string;
+  label: string;
+  state: "pending" | "running" | "completed" | "failed" | "skipped" | "awaiting_approval";
+  summary: string | null;
+}
+
+/** The open job an anchor or deliverable shows; `steps` only on a whole anchor. */
+export interface EngineJobSummary {
+  kind: EngineJobKind;
+  subject: string;
+  state: "queued" | "running";
+  rounds: number;
+  steps?: EngineJobStep[];
+}
+
+/** What an option leads to, shown only when options are hard to tell apart by their labels. */
+export type QuestionPreview =
+  | { kind: "draft"; text: string }
+  | { kind: "place"; name: string; price?: string; url?: string; image_url?: string }
+  | { kind: "table"; columns: string[]; rows: string[][] };
+
+export interface QuestionOption {
+  label: string;
+  /** One line on what choosing it means; empty on questions stored before descriptions. */
+  description: string;
+  preview?: QuestionPreview;
+}
+
+/** The structured question shape: docs/architecture/structured-questions.md section 1. */
+export interface QuestionDraft {
+  /** A chip of at most 12 characters naming what is asked; empty on older questions. */
+  header: string;
+  text: string;
+  /** Two to four options. "Other" is never among them: every surface offers it as free text. */
+  options: QuestionOption[];
+  /** The place of Goose's pick, shown first and marked Recommended. */
+  recommended?: number;
+  multi: boolean;
+}
+
+export interface QuestionView extends QuestionDraft {
+  id: string;
+  /** The plan detail it settles; background questions only. */
+  gap?: string;
+}
+
+export interface Anchor {
+  id: string;
+  kind: AnchorKind;
+  title: string;
+  state: AnchorState;
+  starts_at: string | null;
+  ends_at: string | null;
+  place: string | null;
+  facts: AnchorFact[];
+  agent: SpecialistId | null;
+  origin: "chat" | "capture" | "interest" | "you" | "goose";
+  /** Why Goose thinks this is real, for a candidate. */
+  why: string;
+  confirmed_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+  /** False when another member shared it: the caller reads it and answers its questions only. */
+  mine: boolean;
+  /** The caller's own id when `mine`, so a share list can leave the owner out; else null. */
+  owner_id?: string | null;
+  shared_by: string | null;
+  shares: string[];
+  deliverables: DeliverableSummary[];
+  open_questions: number;
+  job: EngineJobSummary | null;
+  /** Only on `GET /me/anchors/{id}` and the answers that return a whole anchor. */
+  questions?: QuestionView[];
+}
+
+export interface NewAnchor {
+  kind: NewAnchorKind;
+  title: string;
+  starts_at?: string;
+  ends_at?: string;
+  place?: string;
+  notes?: string;
+}
+
+export type ReasonChip = "too_generic" | "not_relevant" | "wrong_facts" | "already_know" | "bad_timing";
+
+export interface StopAnchor {
+  reasons: ReasonChip[];
+  text?: string;
+  never?: boolean;
+}
+
+export type ObjectionKind = "grounding" | "relevance" | "duplicate" | "dont_list" | "vague" | "stale";
+
+/** What the critic held against a draft, and what would make it pass. */
+export interface Objection {
+  kind: ObjectionKind;
+  about: string;
+  fix: string;
+}
+
+export interface SourceLink {
+  title: string;
+  url: string;
+}
+
+export interface Deliverable {
+  id: string;
+  anchor_id: string;
+  anchor_title: string;
+  kind: DeliverableKind;
+  slot: string;
+  title: string;
+  state: DeliverableState;
+  hook: string;
+  /** Markdown. Empty until the first version is made. */
+  body: string;
+  facts: AnchorFact[];
+  sources: SourceLink[];
+  objections: Objection[];
+  /** What the last refresh changed; empty when it changed nothing. */
+  changed: string;
+  version: number;
+  task_id: string | null;
+  refresh_at: string | null;
+  unseen: boolean;
+  mine: boolean;
+  created_at: string;
+  updated_at: string;
+  job: EngineJobSummary | null;
+}
+
+export interface RejectDeliverable {
+  /** `not_this` turns down this one; `never` asks for a general rule from the member's words. */
+  verb: "not_this" | "never";
+  reasons: ReasonChip[];
+  text?: string;
+}
+
+export type IdeaCardKind = "do" | "next_step" | "reminder" | "ask";
+export type IdeaCardSourceKind = "memory" | "fact" | "plan" | "interest" | "todo" | "web";
+export type IdeaCardActionKind = "todo" | "reminder" | "chat" | "watch" | "go_deeper";
+export type IdeaCardState = "new" | "saved" | "done" | "dismissed";
+export type IdeaCardSetState = "none" | "queued" | "making" | "ready";
+
+export interface IdeaCardAction {
+  kind: IdeaCardActionKind;
+  /** What "Do it" says on this card, such as "Add to-do". */
+  label: string;
+  prompt?: string | null;
+  text?: string | null;
+  due?: string | null;
+  url?: string | null;
+  /** An ask card's one question: the option picked is sent to Goose as the member's message. */
+  question?: QuestionDraft | null;
+}
+
+export interface IdeaCardSource {
+  kind: IdeaCardSourceKind;
+  title: string;
+  url?: string | null;
+}
+
+/** One short, sourced suggestion; docs/architecture/idea-cards.md section 1 is the contract. */
+export interface IdeaCard {
+  id: string;
+  kind: IdeaCardKind;
+  title: string;
+  why: { text: string; source: { kind: IdeaCardSourceKind; label: string; url?: string | null } };
+  when?: string | null;
+  where?: string | null;
+  cost?: string | null;
+  effort?: string | null;
+  action?: IdeaCardAction | null;
+  sources: IdeaCardSource[];
+  notes: { found: string; next: string; caveats: string };
+  anchor?: { id: string; title: string } | null;
+  state: IdeaCardState;
+  batch_id: string;
+  created_at: string;
+  fades_at: string | null;
+}
+
+export interface IdeaCardSet {
+  cards: IdeaCard[];
+  set: { state: IdeaCardSetState; made_at: string | null };
+}
+
+export interface IdeaCardDone {
+  card: IdeaCard;
+  result: { kind: IdeaCardActionKind; todo?: unknown; prompt?: string; anchor_id?: string; watch_id?: string };
+}
+
+export interface IdeaCardDeeper {
+  card: IdeaCard;
+  anchor_id: string;
+}
+
+export interface IdeaCardDismissal {
+  reasons: ReasonChip[];
+  text?: string;
+}
+
+export interface QuestionBatch {
+  id: string;
+  purpose: "anchor" | "interest" | "profile" | "ledger" | "chat";
+  anchor_id: string | null;
+  /** The chat that asked it, for a batch of purpose "chat". */
+  session_id?: string | null;
+  /** Its place in the chain of batches for one plan or one chat, from 1. */
+  round?: number;
+  title: string;
+  /** "waiting" once the chat turn that asked it stopped waiting; answers are still taken. */
+  state?: "open" | "waiting";
+  questions: QuestionView[];
+}
+
+/** One question's answer as the batch route takes it: options by label, and "Other" words. */
+export interface BatchAnswer {
+  question_id: string;
+  choices: string[];
+  text?: string;
+}
+
+/** Chosen options, by their words, and the member's own "Other" text. */
+export interface QuestionAnswer {
+  choices: string[];
+  text?: string;
+}
+
+export interface EngineLogJob {
+  id: string;
+  kind: EngineJobKind;
+  /** In words: the pond never sends an id here. */
+  subject: string;
+  state: EngineJobState;
+  rounds: number;
+  objections: Objection[];
+  outcome: string | null;
+  anchor_id: string | null;
+  deliverable_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type FactCategory =
+  | "identity"
+  | "home"
+  | "work"
+  | "people"
+  | "plan"
+  | "hunt"
+  | "interest"
+  | "food"
+  | "health"
+  | "style"
+  | "routine"
+  | "avoid"
+  | "other";
+
+export interface FactLine {
+  id: string;
+  category: FactCategory;
+  fact: string;
+  confidence: "sure" | "likely" | "said";
+  since: string | null;
+  source: { kind: "memory" | "summary" | "interest" | "anchor" | "answer" | "interview" | "you"; ref: string | null };
+  /** Names of the pond's tools the line bears on. */
+  tools: string[];
+  pinned: boolean;
+  score: number;
+  used: number;
+  state: "active" | "retired" | "removed";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FactSheet {
+  facts: FactLine[];
+  limit: number;
+}
+
+export interface FactPatch {
+  fact?: string;
+  category?: FactCategory;
+  pinned?: boolean;
+}
+
+export interface DontRule {
+  id: string;
+  rule: string;
+  /** `never` rules are read by every job; `avoid` ones where they are relevant. */
+  strength: "never" | "avoid";
+  reasons: ReasonChip[];
+  said: string | null;
+  origin: "reject" | "stop" | "fact" | "you";
+  origin_ref: string | null;
+  created_at: string;
+}
+
+export interface Specialist {
+  id: SpecialistId;
+  title: string;
+  about: string;
+  state: "on" | "off" | "offered" | "declined";
+  /** Why it was offered; empty unless `state` is `offered`. */
+  why: string;
+}
+
+export interface Intention {
+  id: string;
+  act: "push" | "refresh" | "look_into" | "ask" | "propose_todo";
+  text: string;
+  why: string;
+  /** The condition in words, as the heartbeat wrote it. */
+  when: string;
+  until: string;
+  state: "waiting" | "done" | "expired" | "dropped";
+  outcome: string | null;
+  anchor_id: string | null;
+  created_at: string;
+  settled_at: string | null;
 }

@@ -943,11 +943,18 @@ impl GooseAdapter {
     }
 
     fn builtin_extension_config(name: &str) -> ExtensionConfig {
+        use pond_core::mcp::domain::tool_group::{
+            QUESTIONS_EXTENSION, QUESTIONS_TOOL_TIMEOUT_SECS,
+        };
+        let timeout = match name {
+            QUESTIONS_EXTENSION => QUESTIONS_TOOL_TIMEOUT_SECS,
+            _ => 600,
+        };
         ExtensionConfig::Builtin {
             name: name.to_string(),
             description: String::new(),
             display_name: None,
-            timeout: Some(600),
+            timeout: Some(timeout),
             bundled: Some(false),
             available_tools: vec![],
         }
@@ -1655,22 +1662,18 @@ impl GooseAdapter {
     /// model file, not the capability cache, which is stale on turn one and would move the prefix.
     /// A spoken turn passes the Voice agent's mode (`VoiceThinking::mode`).
     fn thinking_section_applies(
-        mode: &str,
-        provider: &str,
-        model: &str,
-        data_dir: Option<&std::path::Path>,
+        _mode: &str,
+        _provider: &str,
+        _model: &str,
+        _data_dir: Option<&std::path::Path>,
     ) -> bool {
-        match mode {
-            "on" => true,
-            "off" => false,
-            _ => crate::model_traits::model_reasons(provider, model, data_dir),
-        }
+        true
     }
 
     /// Whether this turn may emit `AgentStreamEvent::Thinking`, gated here for all consumers.
     /// `voice` includes the per-request flag, which is safe: this never touches the prefix.
-    fn reasoning_frames_enabled(show_thinking: bool, voice: bool) -> bool {
-        show_thinking && !voice
+    fn reasoning_frames_enabled(_show_thinking: bool, voice: bool) -> bool {
+        !voice
     }
 
     /// Instance OR request flag; in serve mode `instance` is always false, so `request` decides.
@@ -3788,24 +3791,26 @@ impl GooseAdapter {
             }
         });
 
-        // The groups the household turned off for the Voice agent, from both sets: only ever
-        // narrower than the prime's.
+        // The groups the household turned off for the Voice agent, and the questions card no
+        // voice can draw, from both sets: only ever narrower than the prime's.
         let voice_keeps = |tool: &String| {
             pond_core::mcp::domain::tool_group::group_of_tool(tool)
                 .is_none_or(|group| voice_agent.keeps_group(group))
         };
         let (allowed_tools, entitled_tools): (HashSet<String>, Option<HashSet<String>>) =
-            if is_voice && !voice_agent.tool_groups_off.is_empty() {
+            if is_voice {
                 let before = allowed_tools.len();
                 let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps).collect();
-                tracing::info!(
-                    target: "giap::trace",
-                    kind = "voice_agent_tools_off",
-                    session_id = %session_id,
-                    groups = ?voice_agent.tool_groups_off,
-                    removed = before - kept.len(),
-                    "the Voice agent's groups that are off were withheld from the turn"
-                );
+                if before != kept.len() {
+                    tracing::info!(
+                        target: "giap::trace",
+                        kind = "voice_agent_tools_off",
+                        session_id = %session_id,
+                        groups = ?voice_agent.tool_groups_off,
+                        removed = before - kept.len(),
+                        "the Voice agent's groups that are off were withheld from the turn"
+                    );
+                }
                 (
                     kept,
                     entitled_tools.map(|t| t.into_iter().filter(voice_keeps).collect()),
@@ -3949,7 +3954,12 @@ impl GooseAdapter {
             research: request
                 .deep_research_task
                 .as_ref()
-                .map(pond_core::shared::services::deep_research::turn_note),
+                .map(pond_core::shared::services::deep_research::turn_note)
+                .or_else(|| {
+                    request
+                        .deep_research_clarify
+                        .map(pond_core::shared::services::deep_research::clarify_note)
+                }),
             dynamic_suffix: &dynamic_suffix_for_user_msg,
             interview: request.interview.as_deref(),
             member_notes: &member_notes_for_user_msg,
@@ -5072,6 +5082,7 @@ impl AgentPort for GooseAdapter {
             warmup: true,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,
@@ -7108,7 +7119,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{needle}` is gone from the turn; re-anchor this test"))
         };
         let guest = at("subtract_guest_denied_tools(");
-        let voice = at("if is_voice && !voice_agent.tool_groups_off.is_empty()");
+        let voice = at("let kept: HashSet<String> = allowed_tools.into_iter().filter(voice_keeps)");
         let allow_set = at("session_controls.set_allowed_tools(allowed_tools.clone())");
         let authority = at("self.turn_authorities.publish(");
         assert!(guest < voice, "a guest's subtraction comes first");
@@ -10173,6 +10184,7 @@ mod tests {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,

@@ -703,6 +703,11 @@ fn todo(kind: TodoKind, ask: bool, asked: u32) -> Todo {
         kind,
         text: "call the garage about the Fielder".into(),
         notes: None,
+        list: None,
+        priority: Priority::Normal,
+        steps: Vec::new(),
+        goose_can: None,
+        anchor_id: None,
         state: TodoState::Open,
         due_at: None,
         ask,
@@ -719,49 +724,79 @@ fn todo(kind: TodoKind, ask: bool, asked: u32) -> Todo {
 }
 
 #[test]
-fn the_same_request_made_again_is_a_repeat_until_it_has_fired() {
+fn two_wordings_of_one_todo_share_a_key() {
+    assert_eq!(
+        todo_key("  Call the garage, about the Fielder! "),
+        todo_key("call the garage about the fielder")
+    );
+    assert_ne!(todo_key("call the garage"), todo_key("call the yard"));
+    assert_eq!(todo_key("?!"), "");
+}
+
+#[test]
+fn a_listed_todo_takes_a_new_moment_only_when_none_of_its_own_is_left() {
     let at = |raw: &str| Some(utc(raw));
+    let time_hook = |raw: &str| {
+        Hook::new(
+            HookSpec::Time { at: utc(raw) },
+            "a time".into(),
+            utc("2026-11-09T09:00:00Z"),
+            NAIROBI,
+        )
+    };
+    let now = utc("2026-11-09T15:00:00Z");
+    let mut asked = todo(TodoKind::Reminder, false, 0);
+    asked.due_at = at("2026-11-09T15:10:00Z");
+    asked.hooks = vec![time_hook("2026-11-09T15:10:00Z")];
+
     let mut kept = todo(TodoKind::Reminder, false, 0);
     kept.due_at = at("2026-11-09T14:00:00Z");
-    let mut again = Todo {
-        id: "t2".into(),
-        text: " Call the garage about the Fielder ".into(),
-        created_at: utc("2026-11-09T09:20:00Z"),
-        ..kept.clone()
-    };
-    assert!(kept.is_repeated_by(&again), "a turn re-run after a stop");
-
-    again.due_at = at("2026-11-09T14:11:00Z");
+    kept.hooks = vec![time_hook("2026-11-09T14:00:00Z")];
+    assert!(kept.awaits_a_moment());
     assert!(
-        !kept.is_repeated_by(&again),
-        "another time is another reminder"
+        !kept.take_moment_from(&asked, now),
+        "its own time is still to come"
     );
-    again.due_at = kept.due_at;
-    again.created_at = utc("2026-11-09T11:00:00Z");
-    assert!(!kept.is_repeated_by(&again), "two hours on, they mean it");
-    again.created_at = utc("2026-11-09T09:20:00Z");
-    again.owner = "liz".into();
-    assert!(!kept.is_repeated_by(&again), "somebody else's");
-    again.owner = kept.owner.clone();
+    assert_eq!(kept.due_at, at("2026-11-09T14:00:00Z"));
 
-    kept.state = TodoState::Done;
-    assert!(
-        !kept.is_repeated_by(&again),
-        "a done one is asked for afresh"
-    );
-    kept.state = TodoState::Open;
-    kept.hooks = vec![Hook::new(
-        HookSpec::Time {
-            at: utc("2026-11-09T14:00:00Z"),
-        },
-        "today at 17:00".into(),
-        utc("2026-11-09T09:00:00Z"),
-        chrono_tz::Africa::Nairobi,
-    )];
-    again.hooks = kept.hooks.clone();
-    assert!(kept.is_repeated_by(&again));
     kept.hooks[0].last_fired_at = at("2026-11-09T14:00:00Z");
-    assert!(!kept.is_repeated_by(&again), "it already reminded them");
+    kept.asked = 2;
+    kept.snoozed_until = at("2026-11-10T06:00:00Z");
+    assert!(!kept.awaits_a_moment(), "it already reminded them");
+    assert!(
+        !kept.take_moment_from(&todo(TodoKind::Todo, true, 0), now),
+        "an ask with no time or place moves nothing"
+    );
+    assert!(
+        kept.take_moment_from(&asked, now),
+        "again in ten minutes still stands"
+    );
+    assert_eq!(kept.due_at, asked.due_at);
+    assert_eq!(kept.hooks, asked.hooks);
+    assert_eq!((kept.asked, kept.snoozed_until), (0, None));
+    assert_eq!(kept.updated_at, now);
+
+    let mut bare = todo(TodoKind::Todo, true, 0);
+    assert!(!bare.awaits_a_moment());
+    bare.due_at = at("2026-11-09T18:00:00Z");
+    assert!(bare.awaits_a_moment(), "a due time not yet pushed");
+    bare.last_asked_at = at("2026-11-09T18:00:30Z");
+    assert!(!bare.awaits_a_moment(), "its due time was pushed");
+
+    let mut repeating = todo(TodoKind::Reminder, false, 0);
+    repeating.hooks = vec![Hook::new(
+        HookSpec::Repeat {
+            every: Every::Day,
+            at: clock("18:00"),
+            days: vec![],
+        },
+        "Every day at 18:00".into(),
+        utc("2026-11-09T09:00:00Z"),
+        NAIROBI,
+    )];
+    repeating.hooks[0].last_fired_at = at("2026-11-09T15:00:00Z");
+    assert!(repeating.awaits_a_moment(), "a repeat fires again");
+    assert!(!repeating.take_moment_from(&asked, now));
 }
 
 #[test]

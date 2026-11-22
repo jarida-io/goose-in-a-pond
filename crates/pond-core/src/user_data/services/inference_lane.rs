@@ -28,22 +28,13 @@ pub enum LaneJob {
     /// Mine one window of one conversation for what to remember about its person.
     /// Declared late to lose ties: the costliest pass, not urgent, and resumable by its cursor.
     MemoryExtraction,
-    /// Compose questions out of the household's own memories.
-    /// Declared after `MemoryExtraction` because it reads what extraction writes.
-    SuggestionGeneration,
     /// Write a member's topic map and news stories from the pages it finds.
     NewsTiles,
     /// Write a member's daily digest from the day's stories, ready by their digest time.
     NewsDigest,
-    /// Rewrite each member's portrait from their interests, memories and recent conversations.
-    Portrait,
-    /// Research an idea for a member from what they are into or working on.
-    Ideas,
     /// File memories kept before the profile under what each is about. It has no deadline,
     /// and ends once every older row is filed.
     MemoryResort,
-    /// Read the screenshots members sent for a one-line note each, then drop the pictures.
-    ScreenshotNotes,
     /// Ask which of a web watch's changes are what its owner asked to be told about.
     WatchJudge,
 }
@@ -58,13 +49,9 @@ impl LaneJob {
         LaneJob::ProactiveReview,
         LaneJob::SummaryRefresh,
         LaneJob::MemoryExtraction,
-        LaneJob::SuggestionGeneration,
         LaneJob::NewsTiles,
         LaneJob::NewsDigest,
-        LaneJob::Portrait,
-        LaneJob::Ideas,
         LaneJob::MemoryResort,
-        LaneJob::ScreenshotNotes,
         LaneJob::WatchJudge,
     ];
 
@@ -78,13 +65,9 @@ impl LaneJob {
             LaneJob::ProactiveReview => "proactive_review",
             LaneJob::SummaryRefresh => "summary_refresh",
             LaneJob::MemoryExtraction => "memory_extraction",
-            LaneJob::SuggestionGeneration => "suggestion_generation",
             LaneJob::NewsTiles => "news_tiles",
             LaneJob::NewsDigest => "news_digest",
-            LaneJob::Portrait => "portrait",
-            LaneJob::Ideas => "ideas",
             LaneJob::MemoryResort => "memory_resort",
-            LaneJob::ScreenshotNotes => "screenshot_notes",
             LaneJob::WatchJudge => "watch_judge",
         }
     }
@@ -99,13 +82,9 @@ impl LaneJob {
             LaneJob::ProactiveReview => "Look for something to suggest",
             LaneJob::SummaryRefresh => "Refresh conversation summaries",
             LaneJob::MemoryExtraction => "Read conversations for memories",
-            LaneJob::SuggestionGeneration => "Think of things to suggest",
             LaneJob::NewsTiles => "Write members' news",
             LaneJob::NewsDigest => "Write members' daily digests",
-            LaneJob::Portrait => "Keep a portrait of each member",
-            LaneJob::Ideas => "Research ideas for members",
             LaneJob::MemoryResort => "File older memories into profiles",
-            LaneJob::ScreenshotNotes => "Read members' screenshots for ideas",
             LaneJob::WatchJudge => "Sort web watch changes by what was asked",
         }
     }
@@ -440,13 +419,9 @@ mod tests {
             LaneJob::ProactiveReview,
             LaneJob::SummaryRefresh,
             LaneJob::MemoryExtraction,
-            LaneJob::SuggestionGeneration,
             LaneJob::NewsTiles,
             LaneJob::NewsDigest,
-            LaneJob::Portrait,
-            LaneJob::Ideas,
             LaneJob::MemoryResort,
-            LaneJob::ScreenshotNotes,
             LaneJob::WatchJudge,
         ] {
             assert!(
@@ -455,7 +430,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 15, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 11, "a job was added or removed");
     }
 
     #[test]
@@ -523,7 +498,7 @@ mod tests {
         let chores = [
             job(LaneJob::MemoryExtraction, Some(600), 0),
             job(LaneJob::SummaryRefresh, Some(300), 0),
-            job(LaneJob::SuggestionGeneration, None, 0),
+            job(LaneJob::NewsTiles, None, 0),
         ];
         let mut jobs = chores.to_vec();
         jobs.push(step.clone());
@@ -554,7 +529,7 @@ mod tests {
 
         assert_eq!(
             pick(&chores, LaneJob::SummaryRefresh),
-            LaneDecision::Run(LaneJob::SuggestionGeneration),
+            LaneDecision::Run(LaneJob::NewsTiles),
             "with no task, the chores keep their own order"
         );
     }

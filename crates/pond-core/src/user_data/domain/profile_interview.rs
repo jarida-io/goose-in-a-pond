@@ -96,6 +96,22 @@ impl Topic {
         }
     }
 
+    /// The chip a structured question about the topic carries, at most 12 characters.
+    pub fn header(self) -> &'static str {
+        match self {
+            Topic::Address => "Name",
+            Topic::Identity => "About you",
+            Topic::Language => "Languages",
+            Topic::Household => "Household",
+            Topic::Routine => "Your week",
+            Topic::Food => "Food",
+            Topic::Access => "Access",
+            Topic::Style => "Style",
+            Topic::Avoid => "Avoid",
+            Topic::Other => "More",
+        }
+    }
+
     /// A question that opens the topic; the model may reword it and ask one follow-up.
     pub fn question(self) -> &'static str {
         match self {
@@ -619,8 +635,9 @@ impl Interview {
                 self.draft.len()
             )),
             (_, Some(topic)) => out.push_str(&format!(
-                " Next topic: {} (for example: \"{}\").",
+                " Next topic: {} (header \"{}\"; for example: \"{}\").",
                 topic.id(),
+                topic.header(),
                 topic.question()
             )),
             (_, None) => out.push_str(
@@ -644,8 +661,10 @@ pub const INTERVIEW_RULES: &str = "<setup-interview-rules>
 You are running a setup interview: learning about the person you are talking with, so you can \
 write their standing notes, which they approve before anything is saved. Each turn's \
 <setup-interview> says where it stands.
-- Ask exactly one question per reply, on the next topic. Keep it short and warm. One follow-up \
-on the same topic is fine when their answer is unclear.
+- Put the next topic to them with the ask tool, one topic a call: one short, warm question with \
+the topic's header and 2 to 4 options they could tap, each with a one-line description, never an \
+Other. Its result is their answer. When the tool says to ask in plain speech, ask the question in \
+words instead. One follow-up on the same topic is fine when their answer is unclear.
 - After each answer, call record_answer with the topic and the note to keep: one short standing \
 instruction about them, in the third person, for example \"Call her Mama Amina.\" If they \
 decline, would rather not say, or want to move on, call skip_topic and never return to it. Call \
@@ -694,6 +713,19 @@ mod tests {
             i.skip(*topic, t0()).unwrap();
         }
         assert_eq!(i.next_topic(), None);
+    }
+
+    #[test]
+    fn every_topic_has_a_header_a_structured_question_can_carry() {
+        use crate::user_data::domain::question::MAX_HEADER_CHARS;
+        for topic in Topic::ALL {
+            let header = topic.header();
+            assert!(
+                !header.is_empty() && header.chars().count() <= MAX_HEADER_CHARS,
+                "{header}"
+            );
+        }
+        assert!(INTERVIEW_RULES.contains("with the ask tool, one topic a call"));
     }
 
     #[test]

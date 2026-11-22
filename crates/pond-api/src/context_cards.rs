@@ -18,6 +18,7 @@ use pond_core::shared::domain::cart::CartItem;
 use pond_core::shared::domain::context_card::ContextCard;
 use pond_core::shared::domain::todo::{Todo, TodoKind, TodoState};
 use pond_core::shared::ports::news::NewsStore;
+use pond_core::user_data::domain::anchor::{Anchor, Deliverable};
 use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::shared::ports::web_watch::{StoredChange, WebWatch, WebWatchRepository};
 use pond_infra::sqlite_web_watch::SqliteWebWatchRepository;
@@ -28,12 +29,23 @@ use crate::AppState;
 /// A card as a chat request names it.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CardRef {
-    /// `idea`, `news`, `digest`, `todo`, `cart` or `watch`.
+    /// `idea`, `news`, `digest`, `todo`, `cart`, `watch`, `anchor` or `deliverable`; `idea_card` for an idea card.
     pub kind: String,
     pub id: String,
 }
 
-pub(crate) const KINDS: [&str; 6] = ["idea", "news", "digest", "todo", "cart", "watch"];
+pub(crate) const KINDS: [&str; 8] = [
+    "idea",
+    "news",
+    "digest",
+    "todo",
+    "cart",
+    "watch",
+    "anchor",
+    "deliverable",
+];
+
+const DELIVERABLE_BODY_MAX_CHARS: usize = 6000;
 
 /// Changes a watch's card tells Goose about.
 const WATCH_CHANGES: usize = 8;
@@ -163,6 +175,88 @@ fn watch_card(watch: &WebWatch, changes: &[StoredChange]) -> ContextCard {
     ContextCard::new("Web watch".to_string(), watch.title.clone(), content, notes)
 }
 
+fn anchor_card(anchor: &Anchor, deliverables: &[Deliverable]) -> ContextCard {
+    let mut content = format!(
+        "Kind: {}\nState: {}",
+        anchor.kind.as_str(),
+        anchor.state.as_str()
+    );
+    if let Some(starts) = anchor.starts_at {
+        content.push_str(&format!(
+            "\nWhen: {} UTC",
+            starts.format("%-d %B %Y %H:%M")
+        ));
+    }
+    if let Some(ends) = anchor.ends_at {
+        content.push_str(&format!("\nUntil: {} UTC", ends.format("%-d %B %Y %H:%M")));
+    }
+    if let Some(place) = anchor.place.as_deref().filter(|p| !p.trim().is_empty()) {
+        content.push_str(&format!("\nPlace: {}", place.trim()));
+    }
+    for fact in &anchor.facts {
+        content.push_str(&format!("\n{}: {}", fact.label, fact.value));
+    }
+    let mut notes = String::new();
+    if !anchor.why.trim().is_empty() {
+        notes.push_str(&format!("Why: {}\n", anchor.why.trim()));
+    }
+    if !deliverables.is_empty() {
+        notes.push_str("Deliverables:\n");
+        for d in deliverables {
+            notes.push_str(&format!(
+                "- {} ({}, {}, id: {})\n",
+                d.title,
+                d.kind.as_str(),
+                d.state.as_str(),
+                d.id
+            ));
+        }
+    }
+    notes.push_str(&format!("Its id is {}.\n", anchor.id));
+    ContextCard::new("Plan".to_string(), anchor.title.clone(), content, notes)
+}
+
+fn deliverable_card(deliverable: &Deliverable, anchor: &Anchor) -> ContextCard {
+    let mut content = String::new();
+    if !deliverable.hook.trim().is_empty() {
+        content.push_str(deliverable.hook.trim());
+        content.push_str("\n\n");
+    }
+    for fact in &deliverable.facts {
+        content.push_str(&format!("{}: {}\n", fact.label, fact.value));
+    }
+    if !deliverable.body.trim().is_empty() {
+        if !content.is_empty() && !content.ends_with("\n\n") {
+            content.push('\n');
+        }
+        let body: String = deliverable
+            .body
+            .chars()
+            .take(DELIVERABLE_BODY_MAX_CHARS)
+            .collect();
+        content.push_str(&body);
+        if deliverable.body.chars().count() > DELIVERABLE_BODY_MAX_CHARS {
+            content.push_str("\n…(truncated)");
+        }
+    }
+    let mut notes = format!(
+        "Kind: {}, State: {}\n",
+        deliverable.kind.as_str(),
+        deliverable.state.as_str()
+    );
+    notes.push_str(&format!(
+        "For plan: {} (anchor id: {})\n",
+        anchor.title, anchor.id
+    ));
+    notes.push_str(&format!("Its id is {}.\n", deliverable.id));
+    ContextCard::new(
+        "Plan artifact".to_string(),
+        deliverable.title.clone(),
+        content,
+        notes,
+    )
+}
+
 /// The member's card, or `None` when they have none of that kind by that id.
 pub(crate) async fn resolve(
     state: &AppState,
@@ -170,10 +264,15 @@ pub(crate) async fn resolve(
     card: &CardRef,
 ) -> anyhow::Result<Option<ContextCard>> {
     Ok(match card.kind.as_str() {
-        "idea" => crate::ideas::repo(state)
-            .get(member, &card.id)
-            .await?
-            .map(|idea| idea.as_card()),
+        "idea" => match crate::ideas::repo(state).get(member, &card.id).await? {
+            Some(idea) => Some(idea.as_card()),
+            None => state
+                .engine
+                .cards
+                .get(member, &card.id)
+                .await?
+                .map(|found| crate::idea_cards::as_context(&found)),
+        },
         "news" => crate::news::store(state)
             .story(member, &card.id)
             .await?
@@ -190,6 +289,13 @@ pub(crate) async fn resolve(
             .get(member, &card.id)
             .await?
             .map(|item| cart_card(&item)),
+        // Not in `KINDS`: the chat's own cards are those; an idea card rides a turn the same way.
+        "idea_card" => state
+            .engine
+            .cards
+            .get(member, &card.id)
+            .await?
+            .map(|found| crate::idea_cards::as_context(&found)),
         "watch" => {
             let watches = SqliteWebWatchRepository::new(state.db.system.clone());
             match watches.get(&card.id).await? {
@@ -200,6 +306,31 @@ pub(crate) async fn resolve(
                 _ => None,
             }
         }
+        "anchor" => match state.engine.anchors.get(member, &card.id).await? {
+            Some(anchor) if anchor.is_readable_by(member) => {
+                let deliverables = state
+                    .engine
+                    .anchors
+                    .deliverables(member, &anchor.id)
+                    .await?;
+                Some(anchor_card(&anchor, &deliverables))
+            }
+            _ => None,
+        },
+        "deliverable" => match state.engine.anchors.deliverable(member, &card.id).await? {
+            Some(deliverable) => match state
+                .engine
+                .anchors
+                .get(member, &deliverable.anchor_id)
+                .await?
+            {
+                Some(anchor) if anchor.is_readable_by(member) => {
+                    Some(deliverable_card(&deliverable, &anchor))
+                }
+                _ => None,
+            },
+            None => None,
+        },
         _ => None,
     })
 }

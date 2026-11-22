@@ -67,19 +67,7 @@ export function SuggestionQueue({ sessionId, onAsk }: SuggestionQueueProps): Rea
 
   const shortPanel = useShortPanel();
 
-  /**
-   * Sends an offer, then marks it taken. `onAsk` goes first, unawaited: settling is bookkeeping.
-   * Only composed suggestions are settled; a template one's `id` is a suggestor name, not a row.
-   */
-  const take = useCallback(
-    async (offer: Suggestion) => {
-      onAsk?.(offer.prompt);
-      if (!offer.composed) return;
-      // Swallowed: the household is in chat by now, where a toast would land on the conversation.
-      await api.markSuggestionTaken(offer.id).catch(() => {});
-    },
-    [onAsk],
-  );
+  const take = useCallback((offer: Suggestion) => onAsk?.(offer.prompt), [onAsk]);
 
   const lastWheel = useRef(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -248,7 +236,7 @@ export function SuggestionQueue({ sessionId, onAsk }: SuggestionQueueProps): Rea
             <button
               type="button"
               className="sq__offer sq__offer--lead"
-              onClick={() => void take(lead)}
+              onClick={() => take(lead)}
             >
               <span className="sq__offer-prompt">{lead.prompt}</span>
               <span className="sq__offer-why">{lead.because}</span>
@@ -259,7 +247,7 @@ export function SuggestionQueue({ sessionId, onAsk }: SuggestionQueueProps): Rea
                 key={s.id}
                 type="button"
                 className="sq__offer"
-                onClick={() => void take(s)}
+                onClick={() => take(s)}
               >
                 <span className="sq__offer-prompt">{s.prompt}</span>
                 <span className="sq__offer-why">{s.because}</span>

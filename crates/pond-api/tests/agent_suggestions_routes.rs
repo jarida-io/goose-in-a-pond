@@ -27,6 +27,7 @@ struct Pond {
     member: String,
     profiles: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
+    engine_jobs: Arc<dyn pond_core::user_data::ports::engine_jobs::EngineJobRepository>,
     settings: Arc<SqliteSettingsRepository>,
     agent: Arc<pond_core::shared::mocks::mock_agent::MockAgent>,
     _dir: tempfile::TempDir,
@@ -85,6 +86,7 @@ async fn pond(paired: bool, primary: bool) -> Pond {
     Pond {
         profiles: state.profile_repo.clone(),
         tasks,
+        engine_jobs: state.engine.jobs.clone(),
         settings,
         agent,
         router: build_router(
@@ -526,6 +528,39 @@ async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
 /// Deep research asked partway through a conversation carries what was said before it, so the
 /// helpers, who start in empty windows, still know it.
 #[tokio::test]
+async fn deep_research_asks_clarifying_questions_before_starting_a_task() {
+    use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
+    let pond = pond(true, false).await;
+    turn_long_tasks_on(&pond).await;
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(serde_json::json!({
+                "message": "Compare solar inverters for my house",
+                "deep_research": true
+            })),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+    let tasks = pond
+        .tasks
+        .list_tasks(LongTaskOwnerFilter::Member(&pond.member), true)
+        .await
+        .unwrap();
+    assert!(
+        tasks.is_empty(),
+        "initial deep research turn asks clarifying questions before starting a task"
+    );
+    let sent = pond.agent.last_request().unwrap();
+    assert!(sent.deep_research_task.is_none());
+    assert!(sent.deep_research_clarify.is_some());
+}
+
+#[tokio::test]
 async fn deep_research_takes_what_was_said_before_the_ask_into_its_brief() {
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
     let pond = pond(true, false).await;
@@ -554,7 +589,8 @@ async fn deep_research_takes_what_was_said_before_the_ask_into_its_brief() {
             Some(serde_json::json!({
                 "message": "Plan our Mombasa trip.",
                 "session_id": session,
-                "deep_research": true
+                "deep_research": true,
+                "deep_research_clarified": true
             })),
             false,
         ),
@@ -682,7 +718,7 @@ async fn a_member_sees_where_their_task_waits_and_nothing_of_another_members() {
     }
 
     turn_long_tasks_on(&pond).await;
-    let ask = serde_json::json!({"message": "Which tents suit the rains?", "deep_research": true});
+    let ask = serde_json::json!({"message": "Which tents suit the rains?", "deep_research": true, "deep_research_clarified": true});
     let (status, frames) = stream(
         &pond,
         call(Method::POST, "/api/v1/chat/stream", Some(ask), false),
@@ -773,6 +809,7 @@ async fn deep_research_starts_a_research_task_the_chat_card_can_follow() {
     let ask = serde_json::json!({
         "message": "Which heat pumps suit a cold one-bedroom flat?",
         "deep_research": true,
+        "deep_research_clarified": true,
     });
     let availability = |pond: &Pond| {
         let request = call(Method::GET, "/api/v1/long-tasks/deep-research", None, false);
@@ -1058,4 +1095,75 @@ async fn a_long_report_is_joined_from_its_sections_and_exports_three_ways() {
     let stranger = pond_with_no_member().await;
     let (status, ..) = fetch(&stranger, &format!("{uri}/export?format=markdown")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// What the idea engine makes unasked waits in the same line as the household's tasks, in the
+/// engine's order, and is not one of the member's tasks.
+#[tokio::test]
+async fn an_engine_jobs_task_keeps_its_place_in_the_line_and_is_not_listed() {
+    use pond_core::shared::domain::long_task::{LongTask, LongTaskBudget};
+    use pond_core::user_data::domain::engine_job::{EngineJob, JobClass, JobKind};
+    use pond_core::user_data::domain::profile::ProfileScope;
+    use pond_core::user_data::services::engine::task::task_for_job;
+
+    let pond = pond(true, false).await;
+    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let mut refresh = EngineJob::new(
+        JobKind::Deliverable,
+        JobClass::Asked,
+        Some(&pond.member),
+        "Dossier for the summit",
+        start,
+    );
+    let (unasked, _) = task_for_job(
+        &refresh,
+        "Bring the dossier for the summit up to date.",
+        &pond.member,
+        start,
+    )
+    .unwrap();
+    pond.tasks.create_task(&unasked).await.unwrap();
+    refresh.task_id = Some(unasked.id().to_string());
+    pond.engine_jobs.add(&refresh).await.unwrap();
+    let mine = LongTask::start(
+        ProfileScope::Owner(pond.member.clone()),
+        None,
+        "a packing list",
+        None,
+        LongTaskBudget::new(12, None).unwrap(),
+        start + chrono::Duration::minutes(1),
+    )
+    .unwrap();
+    pond.tasks.create_task(&mine).await.unwrap();
+
+    let (status, listed) = send(&pond, call(Method::GET, "/api/v1/long-tasks", None, false)).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let listed = listed.as_array().unwrap().clone();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["id"], mine.id());
+    assert_eq!(
+        listed[0]["queue"]["position"], 2,
+        "a refresh the member asked for first runs first"
+    );
+    assert_eq!(listed[0]["queue"]["ahead"][0]["id"], unasked.id());
+
+    let (_, line) = send(
+        &pond,
+        call(Method::GET, "/api/v1/long-tasks/queue", None, false),
+    )
+    .await;
+    let line = line["line"].as_array().unwrap().clone();
+    assert_eq!(line.len(), 1, "{line:?}");
+    assert_eq!(line[0]["id"], mine.id());
+    assert_eq!(line[0]["position"], 2, "the same place its card gives");
+
+    refresh.class = JobClass::Open;
+    assert!(pond.engine_jobs.save(&refresh).await.unwrap());
+    let view = format!("/api/v1/long-tasks/{}", mine.id());
+    let (_, view) = send(&pond, call(Method::GET, &view, None, false)).await;
+    assert_eq!(
+        view["queue"]["position"], 1,
+        "what the engine makes unasked waits behind what a member asked for: {view}"
+    );
+    assert_eq!(view["queue"]["of"], 2);
 }

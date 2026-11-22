@@ -7,10 +7,12 @@ use std::sync::Mutex;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 
 use crate::user_data::domain::interest::{
-    category_of, clean_facets, clean_topic, merge_facets, picture_path, topic_key, Interest,
-    InterestInput, InterestPatch, MemberPortrait, Observed, ObservedInterest, Origin, STRONG_AT,
+    category_of, clean_facets, clean_topic, distinct_days, merge_facets, picture_path,
+    ready_to_offer, topic_key, Interest, InterestInput, InterestPatch, Observed, ObservedInterest,
+    Origin,
 };
 use crate::user_data::domain::interest_interview::InterestInterview;
 use crate::user_data::ports::interests::InterestRepository;
@@ -19,9 +21,10 @@ use crate::user_data::services::member_interview::MemberInterview;
 #[derive(Default)]
 pub struct InMemoryInterestRepository {
     rows: Mutex<Vec<Interest>>,
-    sightings: Mutex<HashSet<(String, String)>>,
+    /// Interest, conversation, and when it was read.
+    sightings: Mutex<Vec<(String, String, DateTime<Utc>)>>,
+    liked: Mutex<HashSet<String>>,
     pictures_looked_for: Mutex<HashSet<String>>,
-    portraits: Mutex<HashMap<String, MemberPortrait>>,
     interviews: Mutex<HashMap<String, InterestInterview>>,
     member_interviews: Mutex<HashMap<String, MemberInterview>>,
 }
@@ -34,6 +37,36 @@ impl InMemoryInterestRepository {
     /// Every member's rows, for assertions.
     pub fn all(&self) -> Vec<Interest> {
         self.rows.lock().unwrap().clone()
+    }
+
+    /// Records that `session_id` showed the interest at `at`; a conversation counts once.
+    pub fn sight_at(&self, interest_id: &str, session_id: &str, at: DateTime<Utc>) -> bool {
+        let mut sightings = self.sightings.lock().unwrap();
+        if sightings
+            .iter()
+            .any(|(id, session, _)| id == interest_id && session == session_id)
+        {
+            return false;
+        }
+        sightings.push((interest_id.to_string(), session_id.to_string(), at));
+        true
+    }
+
+    /// Marks the interest as one the member voted a story of up.
+    pub fn like(&self, interest_id: &str) {
+        self.liked.lock().unwrap().insert(interest_id.to_string());
+    }
+
+    fn days_seen(&self, interest_id: &str, tz: Tz) -> u32 {
+        let seen: Vec<DateTime<Utc>> = self
+            .sightings
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _, _)| id == interest_id)
+            .map(|(_, _, at)| *at)
+            .collect();
+        distinct_days(&seen, tz)
     }
 }
 
@@ -79,14 +112,13 @@ impl InterestRepository for InMemoryInterestRepository {
         let key = topic_key(&topic);
         let now = Utc::now();
         let mut rows = self.rows.lock().unwrap();
-        let mut sightings = self.sightings.lock().unwrap();
         match rows
             .iter_mut()
             .find(|r| r.profile_id == profile_id && topic_key(&r.topic) == key)
         {
             Some(row) if row.avoid => Ok(Observed::Avoided),
             Some(row) => {
-                if !sightings.insert((row.id.clone(), session_id.to_string())) {
+                if !self.sight_at(&row.id, session_id, now) {
                     return Ok(Observed::AlreadyCounted);
                 }
                 row.evidence += 1;
@@ -98,7 +130,7 @@ impl InterestRepository for InMemoryInterestRepository {
             }
             None => {
                 let id = uuid::Uuid::new_v4().to_string();
-                sightings.insert((id.clone(), session_id.to_string()));
+                self.sight_at(&id, session_id, now);
                 rows.push(Interest {
                     id,
                     profile_id: profile_id.to_string(),
@@ -211,13 +243,30 @@ impl InterestRepository for InMemoryInterestRepository {
         Ok(rows.len() < before)
     }
 
-    async fn last_changed(&self, profile_id: &str) -> Result<Option<DateTime<Utc>>> {
-        let rows = self.rows.lock().unwrap();
-        Ok(rows
+    async fn sighted_days(&self, profile_id: &str, id: &str, tz: Tz) -> Result<u32> {
+        let owned = self
+            .rows
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|r| r.profile_id == profile_id && (r.confirmed || r.evidence >= STRONG_AT))
-            .map(|r| r.updated_at)
-            .max())
+            .any(|r| r.profile_id == profile_id && r.id == id);
+        Ok(if owned { self.days_seen(id, tz) } else { 0 })
+    }
+
+    async fn ready_to_offer(&self, profile_id: &str, tz: Tz) -> Result<Vec<Interest>> {
+        let mine = self.list(profile_id).await?;
+        let liked = self.liked.lock().unwrap().clone();
+        Ok(mine
+            .into_iter()
+            .filter(|r| {
+                ready_to_offer(
+                    self.days_seen(&r.id, tz),
+                    liked.contains(&r.id),
+                    r.confirmed,
+                    r.avoid,
+                )
+            })
+            .collect())
     }
 
     async fn without_picture(&self, profile_id: &str, limit: usize) -> Result<Vec<Interest>> {
@@ -246,18 +295,6 @@ impl InterestRepository for InMemoryInterestRepository {
         {
             row.picture = key.map(picture_path);
         }
-        Ok(())
-    }
-
-    async fn portrait(&self, profile_id: &str) -> Result<Option<MemberPortrait>> {
-        Ok(self.portraits.lock().unwrap().get(profile_id).cloned())
-    }
-
-    async fn save_portrait(&self, profile_id: &str, portrait: &MemberPortrait) -> Result<()> {
-        self.portraits
-            .lock()
-            .unwrap()
-            .insert(profile_id.to_string(), portrait.clone());
         Ok(())
     }
 

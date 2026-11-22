@@ -36,9 +36,9 @@ pub struct Notification {
 /// still opens the right screen, and one that cannot open the id (unknown, deleted, another
 /// member's) falls back to that screen too.
 ///
-/// `models`, `extensions` and `remote_access` (2026-10-27), `my_pond` (2026-11-08) and `todos` are
-/// newer than the app's allow-list: an app that does not know one opens where it was, exactly as
-/// for a notice with no hint.
+/// `models`, `extensions` and `remote_access` (2026-10-27), `my_pond` (2026-11-08), `todos`,
+/// `anchor`, `deliverable` and `questions` are newer than the app's allow-list: an app that does
+/// not know one opens where it was, exactly as for a notice with no hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenScreen {
     /// The schedules list, with the schedule and the run the notification reports on.
@@ -68,6 +68,14 @@ pub enum OpenScreen {
     Todos { todo_id: Option<String> },
     /// My Goose's list of what Goose did by itself.
     GooseActivity,
+    /// One anchor, with what Goose made for it.
+    Anchor { anchor_id: String },
+    /// One deliverable, at its body.
+    Deliverable { deliverable_id: String },
+    /// The questions Goose is waiting on.
+    Questions,
+    /// My Goose's idea cards, at one card when there is a `card_id`; not the chat's context cards.
+    Cards,
 }
 
 impl OpenScreen {
@@ -145,6 +153,16 @@ impl OpenScreen {
                 "todos"
             }
             Self::GooseActivity => "goose_activity",
+            Self::Anchor { anchor_id } => {
+                fields.insert("anchor_id".into(), anchor_id.as_str().into());
+                "anchor"
+            }
+            Self::Deliverable { deliverable_id } => {
+                fields.insert("deliverable_id".into(), deliverable_id.as_str().into());
+                "deliverable"
+            }
+            Self::Questions => "questions",
+            Self::Cards => "idea_cards",
         };
         fields.insert("open".into(), screen.into());
         fields
@@ -246,6 +264,26 @@ mod tests {
             .data(),
             json!({"open": "cart", "cart_id": "c1"})
         );
+    }
+
+    #[test]
+    fn the_idea_engines_hints_name_the_anchor_the_deliverable_or_the_questions() {
+        assert_eq!(
+            OpenScreen::Anchor {
+                anchor_id: "a1".into()
+            }
+            .data(),
+            json!({"open": "anchor", "anchor_id": "a1"})
+        );
+        assert_eq!(
+            OpenScreen::Deliverable {
+                deliverable_id: "d1".into()
+            }
+            .data(),
+            json!({"open": "deliverable", "deliverable_id": "d1"})
+        );
+        assert_eq!(OpenScreen::Questions.data(), json!({"open": "questions"}));
+        assert_eq!(OpenScreen::Cards.data(), json!({"open": "idea_cards"}));
     }
 
     #[test]

@@ -140,7 +140,12 @@ fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
 // may see it), `body` and `rev`. Text that only exists once rendered (a profile, a digest's
 // sections) is rendered here, so a vector and the words a search returns always agree.
 
+// Scope is one `profile_id` a row, so a member an anchor is shared with gets a row of their own
+// under `<id>:<reader>`. A fact's label is `fact_sheet::category_label`'s; a test holds them together.
 const PERSONAL_SOURCE: &str = "(\
+    WITH anchor_readers(anchor_id, profile_id) AS (\
+      SELECT id, profile_id FROM sys.anchors \
+      UNION SELECT anchor_id, profile_id FROM sys.anchor_shares) \
     SELECT 'profile:' || p.id AS id, p.id AS profile_id, 0 AS shared, \
            p.display_name || CASE WHEN json_valid(p.preferences) THEN \
              COALESCE(', who goes by ' || NULLIF(trim(json_extract(p.preferences, '$.preferred_name')), ''), '') \
@@ -159,15 +164,77 @@ const PERSONAL_SOURCE: &str = "(\
            || COALESCE(': ' || (SELECT group_concat(f.value, ', ') FROM json_each(\
                 CASE WHEN json_valid(i.facets) THEN i.facets ELSE '[]' END) f), ''), \
            i.updated_at \
-      FROM sys.interests i \
+      FROM sys.interests i WHERE i.confirmed = 1 OR i.avoid = 1 \
     UNION ALL \
-    SELECT 'topic:' || t.id, t.profile_id, 0, \
-           t.area || ': ' || t.subject || CASE WHEN trim(t.why) != '' THEN '. ' || t.why ELSE '' END, \
-           t.built_at \
-      FROM sys.member_topics t \
+    SELECT 'fact:' || fs.id, fs.profile_id, 0, \
+           CASE fs.category \
+             WHEN 'identity' THEN 'Who they are' WHEN 'home' THEN 'Home' \
+             WHEN 'work' THEN 'Work' WHEN 'people' THEN 'People' WHEN 'plan' THEN 'Plan' \
+             WHEN 'hunt' THEN 'Looking for' WHEN 'interest' THEN 'Interest' \
+             WHEN 'food' THEN 'Food' WHEN 'health' THEN 'Health' WHEN 'style' THEN 'Taste' \
+             WHEN 'routine' THEN 'Routine' WHEN 'avoid' THEN 'Keep away' ELSE 'Other' END \
+           || ': ' || fs.fact \
+           || COALESCE(' -> ' || (SELECT group_concat(t.value, ', ') FROM json_each(\
+                CASE WHEN json_valid(fs.tools_json) THEN fs.tools_json ELSE '[]' END) t), ''), \
+           fs.updated_at \
+      FROM sys.fact_sheet fs WHERE fs.state = 'active' \
     UNION ALL \
-    SELECT 'portrait:' || pr.profile_id, pr.profile_id, 0, pr.summary, pr.updated_at \
-      FROM sys.member_portraits pr WHERE trim(pr.summary) != '' \
+    SELECT 'dont:' || dl.id, dl.profile_id, 0, dl.body, dl.body \
+      FROM (SELECT id, profile_id, \
+                   CASE strength WHEN 'never' THEN 'Never: ' ELSE 'Avoid: ' END || rule \
+                   || COALESCE('. They said: ' || NULLIF(trim(said), ''), '') AS body \
+              FROM sys.dont_list) dl \
+    UNION ALL \
+    SELECT 'answer:' || q.id, q.profile_id, 0, \
+           'Asked: ' || q.text || char(10) || 'Answered: ' \
+           || trim(COALESCE((SELECT group_concat(c.value, '; ') FROM json_each(\
+                CASE WHEN json_valid(q.choices_json) THEN q.choices_json ELSE '[]' END) c), '') \
+              || COALESCE('; ' || NULLIF(trim(q.other_text), ''), ''), '; '), \
+           COALESCE(q.answered_at, q.created_at) \
+      FROM sys.questions q WHERE q.state = 'answered' \
+    UNION ALL \
+    SELECT 'anchor:' || a.id || CASE WHEN r.profile_id = a.profile_id THEN '' \
+                                     ELSE ':' || r.profile_id END, \
+           r.profile_id, 0, \
+           a.title \
+           || CASE WHEN a.starts_at IS NOT NULL THEN ' (' || substr(a.starts_at, 1, 10) \
+                     || CASE WHEN a.ends_at IS NOT NULL \
+                              AND substr(a.ends_at, 1, 10) != substr(a.starts_at, 1, 10) \
+                             THEN ' to ' || substr(a.ends_at, 1, 10) ELSE '' END || ')' \
+                   WHEN a.ends_at IS NOT NULL THEN ' (until ' || substr(a.ends_at, 1, 10) || ')' \
+                   ELSE '' END \
+           || COALESCE(', at ' || NULLIF(trim(a.place), ''), '') \
+           || COALESCE(char(10) || (SELECT group_concat(\
+                json_extract(j.value, '$.label') || ': ' || json_extract(j.value, '$.value'), '; ') \
+                FROM json_each(CASE WHEN json_valid(a.facts_json) THEN a.facts_json ELSE '[]' END) j), ''), \
+           a.updated_at \
+      FROM sys.anchors a JOIN anchor_readers r ON r.anchor_id = a.id \
+     WHERE a.state = 'active' \
+    UNION ALL \
+    SELECT 'deliverable:' || d.id || CASE WHEN r.profile_id = a.profile_id THEN '' \
+                                          ELSE ':' || r.profile_id END, \
+           r.profile_id, 0, \
+           d.title || CASE WHEN trim(d.hook) != '' THEN char(10) || d.hook ELSE '' END, \
+           d.updated_at \
+      FROM sys.deliverables d JOIN sys.anchors a ON a.id = d.anchor_id \
+      JOIN anchor_readers r ON r.anchor_id = a.id \
+     WHERE d.state = 'ready' \
+    UNION ALL \
+    SELECT 'capture:' || c.id, c.profile_id, 0, \
+           c.description \
+           || COALESCE(char(10) || NULLIF(trim(c.intent), ''), '') \
+           || COALESCE(char(10) || NULLIF(rtrim(\
+                COALESCE('Names: ' || (SELECT group_concat(v.value, ', ') FROM json_each(c.details, '$.names') v) || '. ', '') \
+             || COALESCE('Dates: ' || (SELECT group_concat(v.value, ', ') FROM json_each(c.details, '$.dates') v) || '. ', '') \
+             || COALESCE('Places: ' || (SELECT group_concat(v.value, ', ') FROM json_each(c.details, '$.places') v) || '. ', '') \
+             || COALESCE('Prices: ' || (SELECT group_concat(v.value, ', ') FROM json_each(c.details, '$.prices') v) || '. ', '') \
+             || COALESCE('Links: ' || (SELECT group_concat(v.value, ', ') FROM json_each(c.details, '$.links') v) || '. ', ''), \
+             '. '), ''), ''), \
+           c.updated_at \
+      FROM (SELECT id, profile_id, description, intent, updated_at, \
+                   CASE WHEN json_valid(details_json) THEN details_json ELSE '{}' END AS details \
+              FROM sys.captures \
+             WHERE state = 'read' AND sensitive = 'none' AND trim(COALESCE(description, '')) != '') c \
     UNION ALL \
     SELECT 'saved:' || si.id, si.profile_id, si.shared, \
            si.title || CASE WHEN trim(si.body) != '' THEN char(10) || si.body ELSE '' END, \
@@ -1776,9 +1843,69 @@ mod write_through_tests {
              ('mum', 'Mum', 'not json')",
             "INSERT INTO member_places (id, profile_id, label, lat, lng, created_at) VALUES \
              ('home', 'jerry', 'Home', 0, 0, '2026-11-01')",
-            "INSERT INTO interests (id, profile_id, topic, topic_key, facets, depth, created_at, \
-             updated_at) VALUES ('f1', 'jerry', 'Formula 1', 'formula 1', '[\"Ferrari\"]', 'keen', \
-             '2026-11-01', '2026-11-02')",
+            "INSERT INTO interests (id, profile_id, topic, topic_key, facets, depth, confirmed, \
+             created_at, updated_at) VALUES \
+             ('f1', 'jerry', 'Formula 1', 'formula 1', '[\"Ferrari\"]', 'keen', 1, \
+              '2026-11-01', '2026-11-02'), \
+             ('g1', 'jerry', 'Primetime', 'primetime', '[]', 'curious', 0, \
+              '2026-11-01', '2026-11-02')",
+            "INSERT INTO fact_sheet (id, profile_id, category, fact, fact_key, source_kind, \
+             tools_json, state, created_at, updated_at) VALUES \
+             ('home', 'jerry', 'home', 'Lives in Kilimani', 'lives in kilimani', 'memory', \
+              '[\"get_weather\",\"search_web\"]', 'active', '2026-11-01', '2026-11-05'), \
+             ('gone', 'jerry', 'food', 'Likes duck recipes', 'likes duck recipes', 'memory', \
+              '[]', 'removed', '2026-11-01', '2026-11-05'), \
+             ('old', 'jerry', 'other', 'Once owned a boat', 'once owned a boat', 'memory', \
+              'not json', 'retired', '2026-11-01', '2026-11-05')",
+            "INSERT INTO dont_list (id, profile_id, rule, rule_key, strength, said, origin, \
+             created_at) VALUES \
+             ('r1', 'jerry', 'recipes built on a colour preference', 'r1', 'never', \
+              'I do not cook', 'reject', '2026-11-01'), \
+             ('r2', 'mum', 'celebrity gossip', 'r2', 'avoid', NULL, 'you', '2026-11-01')",
+            "INSERT INTO anchors (id, profile_id, kind, title, title_key, state, starts_at, \
+             ends_at, place, facts_json, origin, created_at, updated_at) VALUES \
+             ('trip', 'jerry', 'trip', 'Mombasa with Mum', 'mombasa with mum', 'active', \
+              '2026-12-19T06:00:00Z', '2026-12-23T06:00:00Z', 'Diani', \
+              '[{\"label\":\"Budget\",\"value\":\"KSh 80,000\",\"source\":\"you\"}]', 'you', \
+              '2026-11-01', '2026-11-06'), \
+             ('summit', 'jerry', 'event', 'MCP Dev Summit', 'mcp dev summit', 'active', \
+              '2026-12-03T05:00:00Z', NULL, NULL, 'not json', 'you', '2026-11-01', '2026-11-06'), \
+             ('maybe', 'jerry', 'event', 'A wedding', 'a wedding', 'candidate', NULL, NULL, \
+              NULL, '[]', 'chat', '2026-11-01', '2026-11-06')",
+            "INSERT INTO anchor_shares (anchor_id, profile_id) VALUES ('trip', 'mum')",
+            "INSERT INTO deliverables (id, anchor_id, kind, slot, title, state, hook, created_at, \
+             updated_at) VALUES \
+             ('plan', 'trip', 'plan', 'plan', 'Five days in Diani', 'ready', \
+              'Train down on the 19th, three stays compared.', '2026-11-06', '2026-11-08'), \
+             ('packing', 'trip', 'checklist', 'packing', 'Packing list', 'queued', '', \
+              '2026-11-06', '2026-11-08')",
+            "INSERT INTO questions (id, profile_id, batch_id, purpose, text, text_key, \
+             options_json, state, choices_json, other_text, answered_at, created_at) VALUES \
+             ('q1', 'jerry', 'b1', 'profile', 'How do you get to work?', 'q1', \
+              '[\"Drive\",\"Matatu\"]', 'answered', '[\"Drive\"]', 'a Fielder', \
+              '2026-11-07T08:00:00Z', '2026-11-06'), \
+             ('q2', 'jerry', 'b1', 'profile', 'Where do you shop?', 'q2', \
+              '[\"Carrefour\",\"Naivas\"]', 'open', '[]', NULL, NULL, '2026-11-06'), \
+             ('q3', 'jerry', 'b1', 'profile', 'What do you drive?', 'q3', \
+              '[\"A car\",\"A bike\"]', 'answered', 'not json', 'A Fielder', \
+              '2026-11-07T08:00:00Z', '2026-11-06')",
+            "INSERT INTO captures (id, profile_id, kind, state, sensitive, description, intent, \
+             details_json, created_at, updated_at) VALUES \
+             ('shot', 'jerry', 'screenshot', 'read', 'none', \
+              'A listing for a 2015 Toyota Fielder', 'Thinking of buying it', \
+              '{\"names\":[\"Toyota Fielder\"],\"prices\":[\"KSh 1.15M\",\"KSh 1.2M\"],\"links\":[]}', \
+              '2026-11-06', '2026-11-09'), \
+             ('plain', 'jerry', 'photo', 'read', 'none', 'A whiteboard sketch', NULL, \
+              'not json', '2026-11-06', '2026-11-09'), \
+             ('bank', 'jerry', 'screenshot', 'read', 'money', 'A bank statement', NULL, '{}', \
+              '2026-11-06', '2026-11-09'), \
+             ('wait', 'jerry', 'photo', 'pending', 'none', NULL, NULL, '{}', \
+              '2026-11-06', '2026-11-09')",
+            "INSERT INTO member_portraits (profile_id, summary, updated_at) VALUES \
+             ('jerry', 'An account nothing writes any more.', '2026-11-01')",
+            "INSERT INTO member_topics (id, profile_id, area, subject, query, newsworthy, score, \
+             built_at) VALUES ('t1', 'jerry', 'cars', 'Fielder prices', 'fielder', 1, 1, \
+             '2026-11-01')",
             "INSERT INTO saved_items (id, profile_id, kind, title, fields, body, shared, \
              created_at, updated_at) VALUES \
              ('recipe', 'mum', 'recipe', 'Pilau for ten', '{}', 'Rice, beef, spices.', 1, \
@@ -1866,8 +1993,71 @@ mod write_through_tests {
             "Interested in Formula 1 (keen): Ferrari"
         );
         assert_eq!(text("saved:recipe"), "Pilau for ten\nRice, beef, spices.");
-        let interest = personal.iter().find(|r| r.row_id == "interest:f1").unwrap();
-        assert_eq!(interest.rev.as_deref(), Some("2026-11-02"));
+        let rev = |id: &str| {
+            let row = personal.iter().find(|r| r.row_id == id).unwrap();
+            row.rev.clone().unwrap()
+        };
+        assert_eq!(rev("interest:f1"), "2026-11-02");
+
+        assert_eq!(
+            text("fact:home"),
+            "Home: Lives in Kilimani -> get_weather, search_web"
+        );
+        assert_eq!(rev("fact:home"), "2026-11-05");
+        let never = "Never: recipes built on a colour preference. They said: I do not cook";
+        assert_eq!(text("dont:r1"), never);
+        assert_eq!(
+            rev("dont:r1"),
+            never,
+            "a rule has no time: its words are its revision"
+        );
+        assert_eq!(text("dont:r2"), "Avoid: celebrity gossip");
+        assert_eq!(
+            text("answer:q1"),
+            "Asked: How do you get to work?\nAnswered: Drive; a Fielder"
+        );
+        assert_eq!(rev("answer:q1"), "2026-11-07T08:00:00Z");
+        assert_eq!(
+            text("answer:q3"),
+            "Asked: What do you drive?\nAnswered: A Fielder",
+            "unreadable choices must not fail the read"
+        );
+        let trip = "Mombasa with Mum (2026-12-19 to 2026-12-23), at Diani\nBudget: KSh 80,000";
+        assert_eq!(text("anchor:trip"), trip);
+        assert_eq!(text("anchor:trip:mum"), trip, "one row for each reader");
+        assert_eq!(rev("anchor:trip"), "2026-11-06");
+        assert_eq!(text("anchor:summit"), "MCP Dev Summit (2026-12-03)");
+        let plan = "Five days in Diani\nTrain down on the 19th, three stays compared.";
+        assert_eq!(text("deliverable:plan"), plan);
+        assert_eq!(text("deliverable:plan:mum"), plan);
+        assert_eq!(rev("deliverable:plan"), "2026-11-08");
+        assert_eq!(
+            text("capture:shot"),
+            "A listing for a 2015 Toyota Fielder\nThinking of buying it\n\
+             Names: Toyota Fielder. Prices: KSh 1.15M, KSh 1.2M"
+        );
+        assert_eq!(text("capture:plain"), "A whiteboard sketch");
+        assert_eq!(rev("capture:shot"), "2026-11-09");
+
+        let ids: Vec<&str> = personal.iter().map(|r| r.row_id.as_str()).collect();
+        for absent in [
+            "interest:g1",
+            "fact:gone",
+            "fact:old",
+            "answer:q2",
+            "anchor:maybe",
+            "anchor:summit:mum",
+            "deliverable:packing",
+            "capture:bank",
+            "capture:wait",
+        ] {
+            assert!(!ids.contains(&absent), "{absent} is indexed: {ids:?}");
+        }
+        assert!(
+            !ids.iter()
+                .any(|id| id.starts_with("portrait:") || id.starts_with("topic:")),
+            "{ids:?}"
+        );
 
         let messages = stale(&index, Corpus::Message).await;
         let ids: Vec<&str> = messages.iter().map(|r| r.row_id.as_str()).collect();
@@ -1914,6 +2104,92 @@ mod write_through_tests {
             ideas[0].text,
             "Ride the night train\nSleep to Mombasa.\nYou like trains."
         );
+    }
+
+    #[tokio::test]
+    async fn a_fact_is_indexed_under_the_label_a_brief_gives_it() {
+        use pond_core::user_data::domain::fact_sheet::FactCategory;
+        use pond_core::user_data::services::fact_sheet::category_label;
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        add_profile(&db.system, "jerry").await;
+        let categories = [
+            FactCategory::Identity,
+            FactCategory::Home,
+            FactCategory::Work,
+            FactCategory::People,
+            FactCategory::Plan,
+            FactCategory::Hunt,
+            FactCategory::Interest,
+            FactCategory::Food,
+            FactCategory::Health,
+            FactCategory::Style,
+            FactCategory::Routine,
+            FactCategory::Avoid,
+            FactCategory::Other,
+        ];
+        for category in categories {
+            sqlx::query(
+                "INSERT INTO fact_sheet (id, profile_id, category, fact, fact_key, source_kind, \
+                 created_at, updated_at) VALUES (?1, 'jerry', ?1, 'a fact', ?1, 'you', \
+                 '2026-11-01', '2026-11-01')",
+            )
+            .bind(category.as_str())
+            .execute(&db.system)
+            .await
+            .unwrap();
+        }
+        let rows = stale(&index, Corpus::Personal).await;
+        for category in categories {
+            let id = format!("fact:{}", category.as_str());
+            let row = rows.iter().find(|r| r.row_id == id).unwrap();
+            assert_eq!(row.text, format!("{}: a fact", category_label(category)));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unshared_anchor_and_a_reworded_rule_leave_the_index() {
+        let tmp = TempDir::new().unwrap();
+        let db = crate::db::Database::init(tmp.path()).await.unwrap();
+        let index = SqliteVectorIndex::new(db.vectors.clone());
+        household_with_everything(&db.system).await;
+        index_everything(&index).await;
+        assert!(stale(&index, Corpus::Personal).await.is_empty());
+
+        for statement in [
+            "DELETE FROM anchor_shares WHERE anchor_id = 'trip'",
+            "UPDATE dont_list SET strength = 'never' WHERE id = 'r2'",
+            "UPDATE fact_sheet SET state = 'removed' WHERE id = 'home'",
+        ] {
+            sqlx::query(statement).execute(&db.system).await.unwrap();
+        }
+        let owed: Vec<String> = stale(&index, Corpus::Personal)
+            .await
+            .into_iter()
+            .map(|r| r.row_id)
+            .collect();
+        assert_eq!(owed, ["dont:r2"], "its strength is in its words");
+
+        index.prune_orphans().await.unwrap();
+        let mum = found(
+            &index,
+            &ProfileScope::Owner("mum".into()),
+            &Exclusions::default(),
+        )
+        .await;
+        assert!(!mum.iter().any(|id| id.contains("trip")), "{mum:?}");
+        for gone in ["anchor:trip:mum", "deliverable:plan:mum", "fact:home"] {
+            assert!(
+                index.get(Corpus::Personal, gone).await.unwrap().is_none(),
+                "{gone} kept its vector"
+            );
+        }
+        assert!(index
+            .get(Corpus::Personal, "anchor:trip")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     /// Every live row of every new corpus, indexed with the same vector so only scope decides.
@@ -1971,6 +2247,13 @@ mod write_through_tests {
         for expected in [
             "personal:profile:jerry",
             "personal:saved:recipe",
+            "personal:fact:home",
+            "personal:dont:r1",
+            "personal:answer:q1",
+            "personal:anchor:trip",
+            "personal:anchor:summit",
+            "personal:deliverable:plan",
+            "personal:capture:shot",
             "message:m1",
             "digest:d1",
             "report:a1",
@@ -1985,6 +2268,9 @@ mod write_through_tests {
         for hidden in [
             "personal:profile:mum",
             "personal:saved:gift",
+            "personal:dont:r2",
+            "personal:anchor:trip:mum",
+            "personal:deliverable:plan:mum",
             "message:m4",
             "notice:n2",
         ] {
@@ -2006,6 +2292,26 @@ mod write_through_tests {
         );
         assert!(mum.contains(&"personal:saved:gift".to_string()));
         assert!(!mum.contains(&"message:m1".to_string()));
+        for shared in ["personal:anchor:trip:mum", "personal:deliverable:plan:mum"] {
+            assert!(
+                mum.contains(&shared.to_string()),
+                "{shared} missing: {mum:?}"
+            );
+        }
+        for jerrys in [
+            "personal:anchor:trip",
+            "personal:anchor:summit",
+            "personal:deliverable:plan",
+            "personal:fact:home",
+            "personal:dont:r1",
+            "personal:answer:q1",
+            "personal:capture:shot",
+        ] {
+            assert!(
+                !mum.contains(&jerrys.to_string()),
+                "{jerrys} leaked: {mum:?}"
+            );
+        }
 
         assert!(found(&index, &ProfileScope::Guest, &Exclusions::default())
             .await

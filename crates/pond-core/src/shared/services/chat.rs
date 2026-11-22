@@ -540,7 +540,7 @@ impl ChatService {
             profile_scope: ProfileScope::Household,
             device_locked: false,
             thinking_tone: true,
-            persist_thinking: false,
+            persist_thinking: true,
             thinking_blocks: Arc::new(std::sync::Mutex::new(Vec::new())),
             control: None,
             speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -871,6 +871,28 @@ impl ChatService {
         }
     }
 
+    /// Hands the saved turn to whoever waits for its member's next one; a turn that is no one
+    /// member's is nobody's next.
+    async fn member_turn_saved(&self) {
+        use crate::user_data::services::condition_events;
+        use crate::user_data::services::intentions::ConditionEvent;
+        let spoke = match &self.voice_identity {
+            Some(_) => self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            None => None,
+        };
+        let member = match spoke {
+            Some(who) => Some(who.profile_id),
+            None => self
+                .unrecognised_turn_scope()
+                .await
+                .owner_id()
+                .map(str::to_string),
+        };
+        if let Some(profile_id) = member {
+            condition_events::raise(ConditionEvent::Chat { profile_id });
+        }
+    }
+
     /// The turn's scope and context: the recognised speaker's, else the loop's own.
     async fn turn_speaker(&self) -> (ProfileScope, Option<crate::prompts::ProfileContext>) {
         let Some(context) = &self.voice_identity else {
@@ -1047,6 +1069,7 @@ impl ChatService {
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;
+        self.member_turn_saved().await;
 
         let request = AgentRequest {
             message: message.clone(),
@@ -1064,6 +1087,7 @@ impl ChatService {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: self.device_locked,
@@ -1174,6 +1198,7 @@ impl ChatService {
         self.session_storage
             .add_message(self.session_id(), sm)
             .await?;
+        self.member_turn_saved().await;
         Ok(id)
     }
 
@@ -1402,6 +1427,7 @@ impl ChatService {
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;
+        self.member_turn_saved().await;
 
         // Stream + speak (no persistence inside).
         let outcome = self
@@ -1459,6 +1485,7 @@ impl ChatService {
             warmup: false,
             suggestion_context: None,
             deep_research_task: None,
+            deep_research_clarify: None,
             interview: None,
             device_place: None,
             device_locked: false,
@@ -1845,6 +1872,7 @@ impl ChatService {
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;
+        self.member_turn_saved().await;
 
         self.persist_assistant_response(response_text, usage)
             .await?;
@@ -2800,6 +2828,48 @@ mod tests {
 
         let session = storage.get_session(&session_id).await.unwrap();
         assert_eq!(session.title.as_deref(), Some("My custom title"));
+    }
+
+    #[tokio::test]
+    async fn a_members_saved_turn_is_handed_to_whoever_waits_for_their_next_one() {
+        use crate::user_data::services::condition_events;
+        use crate::user_data::services::intentions::ConditionEvent;
+
+        let mut heard = condition_events::listen();
+        let storage = Arc::new(InMemorySessionStorage::new());
+        let service = |session: &str, scope: ProfileScope| {
+            ChatService::new(
+                Arc::new(MockAgent::new()),
+                session.to_string(),
+                storage.clone(),
+            )
+            .with_profile_scope(scope)
+        };
+        for (session, scope) in [
+            ("turn-household", ProfileScope::Household),
+            ("turn-guest", ProfileScope::Guest),
+            (
+                "turn-member",
+                ProfileScope::Owner("turn-test-member".into()),
+            ),
+        ] {
+            storage.create_session(session.to_string()).await.unwrap();
+            service(session, scope)
+                .persist_user_message("hello there")
+                .await
+                .unwrap();
+        }
+        // Other tests raise turns of their own: only this test's member is looked for.
+        let mine = loop {
+            match heard.recv().await {
+                Ok(ConditionEvent::Chat { profile_id }) if profile_id.starts_with("turn-") => {
+                    break profile_id
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("nothing raised"),
+                _ => continue,
+            }
+        };
+        assert_eq!(mine, "turn-test-member");
     }
 
     // ── is_dismissal_or_exit_phrase / classify_voice_command ─────────────
