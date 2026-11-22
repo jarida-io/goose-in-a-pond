@@ -48,7 +48,9 @@ RUST_LOG=info,pond_adapters_goose=debug cargo run -p pond-server -- serve
 (`turn_end`) and the engine/context lines. A systemd unit logs to these files, not to journald.
 
 Structured events use explicit targets (`giap::trace`, `giap::kv`, `giap::vision`, `giap::runs`),
-so a crate-level filter cannot hide them. Per-turn telemetry is also queryable:
+so a crate-level filter cannot hide them. Every settings, extension and schedule change is one
+such line (`kind = "setting_changed"`, `"extension_changed"` or `"schedule_changed"`); see
+`docs/architecture/settings-catalogue.md` section 5.5. Per-turn telemetry is also queryable:
 `GET /api/v1/telemetry/turns` and `GET /api/v1/telemetry/summary`.
 
 ## Calling the API from a terminal

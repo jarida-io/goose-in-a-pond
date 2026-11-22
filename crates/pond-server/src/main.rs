@@ -1255,6 +1255,27 @@ fn report_acceleration() {
     }
 }
 
+/// The serve path's settings repository: SQLite, wrapped so every change is logged as a
+/// `giap::trace` line and an activity event. The events pass the redacting event log, so a value
+/// that slips past the audit's own classification is still scrubbed on the way in.
+fn audited_settings_repo(
+    system: &sqlx::Pool<sqlx::Sqlite>,
+    logs: &sqlx::Pool<sqlx::Sqlite>,
+    redactor: &Arc<dyn pond_core::security::ports::redactor::Redactor>,
+) -> Arc<dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync> {
+    Arc::new(
+        pond_core::user_data::services::audited_settings_repository::AuditedSettingsRepository::new(
+            Arc::new(SqliteSettingsRepository::new(system.clone())),
+            Arc::new(
+                pond_core::security::services::redacting_event_log::RedactingEventLog::new(
+                    Arc::new(SqliteEventLog::new(logs.clone())),
+                    redactor.clone(),
+                ),
+            ),
+        ),
+    )
+}
+
 async fn run_server(
     static_dir: std::path::PathBuf,
     open: bool,
@@ -1300,6 +1321,10 @@ async fn run_server(
     }
 
     system_deps::warn_if_missing();
+
+    // Deterministic, rule-based redactor (no model in the loop), shared by every chokepoint below.
+    let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
+        Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
 
     // ── Load settings early (drives model selection) ─────────────────────────
     let settings_repo_early = SqliteSettingsRepository::new(db.system.clone());
@@ -1371,7 +1396,7 @@ async fn run_server(
             role,
             &data_dir,
             Some(mic_handle.clone()),
-            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            audited_settings_repo(&db.system, &db.logs, &redactor),
             None,
         );
         match supervisor.wait_ready(std::time::Duration::from_secs(5)) {
@@ -1524,7 +1549,7 @@ async fn run_server(
             whisper.clone(),
             &data_dir,
             Arc::new(SqliteModelRepository::new(db.system.clone())),
-            Arc::new(SqliteSettingsRepository::new(db.system.clone())),
+            audited_settings_repo(&db.system, &db.logs, &redactor),
             download_tracker.clone(),
         ));
         pond_api::speech_model::install(switch.clone());
@@ -1722,9 +1747,7 @@ async fn run_server(
     let onboarding_repo = Arc::new(SqlxOnboardingRepository::new(db.system.clone()));
     let session_storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage> =
         Arc::new(SqliteSessionStorage::new(db.system.clone()));
-    let settings_repo: Arc<
-        dyn pond_core::user_data::ports::settings::SettingsRepository + Send + Sync,
-    > = Arc::new(SqliteSettingsRepository::new(db.system.clone()));
+    let settings_repo = audited_settings_repo(&db.system, &db.logs, &redactor);
     let profile_repo: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
@@ -1749,9 +1772,6 @@ async fn run_server(
     > = Arc::new(
         pond_infra::sqlite_guest_device_access::SqliteGuestDeviceAccess::new(db.system.clone()),
     );
-    // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
-    let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
-        Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
     // ── Embedder (the Memory-role model) ─────────────────────────────────────
     // Chosen before the memory/context repos and the agent, which read its model as they work;
     // loaded in the background once AppState exists, so a missing GGUF can be fetched.

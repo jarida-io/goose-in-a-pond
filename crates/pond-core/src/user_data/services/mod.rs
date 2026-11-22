@@ -1,5 +1,6 @@
 pub mod activity_watcher;
 pub mod anchor_add;
+pub mod audited_settings_repository;
 pub mod capture_reading;
 pub mod cards;
 pub mod condition_events;
