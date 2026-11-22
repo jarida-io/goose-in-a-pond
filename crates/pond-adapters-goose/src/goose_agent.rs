@@ -494,6 +494,12 @@ fn replace_out_of_gpu_memory_report(session_id: &str, text: String, out_of_memor
 const EMPTY_TURN_STEER: &str = "(Your previous attempt produced only internal reasoning and no reply. \
 Do not reason further — either call the tool you already decided on, or write the answer directly.)";
 
+/// Appended after an attempt said it was about to act ("I'm searching the web, give me a moment")
+/// and ended the turn with no tool run, so nothing was ever done (`promised_action`).
+const PROMISE_STEER: &str = "(Your previous reply said you would look something up or do \
+something, but it called no tool, so nothing happened. Call the tool now, then answer. If no tool \
+can do it, say so plainly.)";
+
 /// Appended after an attempt wrote a tool call as text, which the engine cannot run.
 const TEXT_CALL_STEER: &str = "(Your previous attempt wrote a tool call as plain text, so it did \
 not run. Call the tool through the tool-call format, or write the answer directly.)";
@@ -4159,6 +4165,9 @@ impl GooseAdapter {
                 let mut final_reply_next = false;
                 // Set when an attempt wrote a tool call as text, so the next is told how to call.
                 let mut wrote_text_call = false;
+                // Set when an attempt promised to act and ran no tool; at most once a turn.
+                let mut promised_without_call = false;
+                let mut promise_retried = false;
                 // Why the final reply was asked for: `REASONED_WITHOUT_REPLY` or a `TurnStop`.
                 let mut final_reply_reason = REASONED_WITHOUT_REPLY;
                 'attempts: loop {
@@ -4167,6 +4176,8 @@ impl GooseAdapter {
                         turn_text.clone()
                     } else if std::mem::take(&mut wrote_text_call) {
                         format!("{turn_text}\n\n{TEXT_CALL_STEER}")
+                    } else if std::mem::take(&mut promised_without_call) {
+                        format!("{turn_text}\n\n{PROMISE_STEER}")
                     } else {
                         format!("{turn_text}\n\n{EMPTY_TURN_STEER}")
                     };
@@ -4194,6 +4205,8 @@ impl GooseAdapter {
                     };
                     // Text or a tool call — anything the user actually receives.
                     let mut produced_visible = false;
+                    // The reply text this attempt showed, for the promised-action check.
+                    let mut attempt_reply = String::new();
                     // Errored, not quiet: re-engaging an error only repeats it.
                     let mut stream_failed = false;
                     // What this attempt adds, so the final reply can tell reasoning from a reply.
@@ -4576,6 +4589,7 @@ impl GooseAdapter {
                                     produced_visible = true;
                                     emitted_text = true;
                                     total_output_chars += raw_text.len();
+                                    attempt_reply.push_str(&raw_text);
                                     yield Ok(AgentStreamEvent::Text { content: raw_text });
                                 }
                             }
@@ -4720,6 +4734,7 @@ impl GooseAdapter {
                         produced_visible = true;
                         emitted_text = true;
                         total_output_chars += tail.len();
+                        attempt_reply.push_str(&tail);
                         yield Ok(AgentStreamEvent::Text { content: tail });
                     }
                     if reply_filter.scaffold_blocks() > 0 {
@@ -4901,6 +4916,31 @@ impl GooseAdapter {
                         );
                         final_reply_reason = REASONED_WITHOUT_REPLY;
                         final_reply_next = true;
+                        continue 'attempts;
+                    }
+                    // A reply that only promised to act, in a turn that ran no tool, is asked once
+                    // more, steered to make the call; what it already said stays on screen.
+                    if !final_attempt
+                        && !request.warmup
+                        && !promise_retried
+                        && tool_results_gathered == 0
+                        && attempt < MAX_EMPTY_TURN_REENGAGEMENTS
+                        && pond_core::models::services::promised_action::promises_unrun_action(
+                            &attempt_reply,
+                        )
+                    {
+                        promise_retried = true;
+                        promised_without_call = true;
+                        attempt += 1;
+                        tracing::info!(
+                            target: "giap::trace",
+                            kind = "promised_action_retried",
+                            session_id = %session_id,
+                            goose_sid = %turn_goose_sid,
+                            reply_chars = attempt_reply.chars().count(),
+                            "the reply said it would act but the turn ran no tool; asking once \
+                             more, steered to call it",
+                        );
                         continue 'attempts;
                     }
                     if produced_visible {
