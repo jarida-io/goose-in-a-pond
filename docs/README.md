@@ -145,6 +145,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [Design system](design-system.md) | Tokens, primitives, class conventions |
 | [Desktop server sidecar](developer/desktop-server-sidecar.md) | How the app stages and owns `pond-server` |
 | [Onboarding](Onboarding_Doc/Onboarding_guide.md) | The first-run flow and its API gate |
+| [Sending with Enter](guides/send-with-enter.md) | Where the Enter-sends switch is and what it changes |
 
 ## Jetson Orin Nano
 

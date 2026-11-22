@@ -257,35 +257,6 @@
   flex-shrink: 0;
 }
 
-.chat2__input input {
-  flex: 1;
-  border: 1px solid var(--line);
-  background: var(--color-surface);
-  border-radius: 16px;
-  padding: 14px 18px;
-  font-family: inherit;
-  font-size: 14.5px;
-  font-weight: 500;
-  color: var(--ink);
-  outline: none;
-  transition: border 0.15s;
-}
-
-.chat2__input input:focus {
-  border-color: var(--pp);
-  box-shadow: 0 0 0 3px var(--pp-50);
-}
-
-.chat2__input input::placeholder {
-  color: #A8A8B3;
-  font-weight: 500;
-}
-
-.chat2__input input:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .ch-mic,
 .ch-send {
   width: 48px;

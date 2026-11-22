@@ -38,6 +38,7 @@ import {
 } from "../../components/imageSupportCopy";
 import { ADD_PICTURES, PICTURES_NOT_IN_RESEARCH, RESEARCH_PLACEHOLDER, RESEARCH_SEND } from "../../components/deepResearchCopy";
 import { useVisionStatus } from "../../api/useVisionStatus";
+import { sendsMessage, useEnterSends } from "../state/enterSendsStore";
 import { prepareImage, validateAttachmentSet } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
 import { useSuggestedPrompts } from "../../hooks/useSuggestedPrompts";
@@ -171,6 +172,7 @@ export function ChatHubView() {
       .catch(() => {});
   }, [state.serverOnline]);
   const [text, setText] = useState("");
+  const { enterSends } = useEnterSends();
   const [showTurnStats, setShowTurnStats] = useState(false);
   const [attachments, setAttachments] = useState<PreparedImage[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -268,7 +270,7 @@ export function ChatHubView() {
     void addFiles(files);
   }
 
-  function onPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+  function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
@@ -285,7 +287,7 @@ export function ChatHubView() {
   }
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // The mode belongs to one message in one conversation. A first id arriving for a new chat is
   // that same conversation getting saved, so only a change from one id to another ends it.
@@ -316,6 +318,7 @@ export function ChatHubView() {
       }
 
       setText("");
+      if (inputRef.current) inputRef.current.style.height = "auto";
 
       if (asResearch) {
         sendTurn({ text: t, deepResearch: true, deepResearchAnswer: deepResearch.answer });
@@ -343,8 +346,8 @@ export function ChatHubView() {
     }
   }, [busy, conversationModel]);
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (sendsMessage(e, enterSends)) {
       e.preventDefault();
       sendMessage();
     }
@@ -559,10 +562,16 @@ export function ChatHubView() {
           hidden
           onChange={onFileInputChange}
         />
-        <input
+        <textarea
           ref={inputRef}
+          className="chat2__textarea"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            const el = e.target;
+            el.style.height = "auto";
+            el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+          }}
           onKeyDown={handleKeyDown}
           onPaste={onPaste}
           placeholder={deepResearch.on ? RESEARCH_PLACEHOLDER : "Message Goose or speak a command…"}
@@ -570,6 +579,7 @@ export function ChatHubView() {
           aria-label="Message input"
           autoComplete="off"
           spellCheck={false}
+          rows={1}
         />
         <button
           className="ch-send"

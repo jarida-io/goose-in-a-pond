@@ -209,7 +209,7 @@ export const SETTINGS: SettingsGroup[] = [
         color: "#8B5CF6",
         bg: "#F3E8FF",
         label: "Appearance",
-        sub: "Theme, accent & day/night",
+        sub: "Theme, accent, day/night & typing",
         value: "Light",
       },
       {

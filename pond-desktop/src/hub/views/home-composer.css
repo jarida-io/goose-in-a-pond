@@ -33,9 +33,12 @@
 .hcomposer__input {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   height: 100%;
   box-sizing: border-box;
-  padding: 0 20px;
+  /* One 22px line centred inside the bar's 52px; further lines scroll. */
+  padding: 15px 20px;
+  resize: none;
   border: 0;
   /* base.css's global `input` rule sets --radius-md on every corner; the outer bar's own
      rounding only clips the true left edge, so the inner-right corner needs this zeroed
@@ -43,7 +46,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--color-text);
-  font: 500 14px var(--font-body, "Quicksand", sans-serif);
+  font: 500 14px / 22px var(--font-body, "Quicksand", sans-serif);
 }
 
 .hcomposer__input:focus-visible {
