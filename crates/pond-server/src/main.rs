@@ -1951,21 +1951,20 @@ async fn run_server(
     let inference_pool: Option<Arc<dyn pond_core::models::ports::inference_pool::InferencePool>> =
         None;
 
-    // Always built: routes.rs checks `review_mode` per request, so it toggles at runtime.
+    // Always built: routes.rs checks `review_mode` per request, and the reviewer reads its pass
+    // mark and round limit per review, so all three change without a restart.
     println!(
-        "  Answer Reviewer: ready (mode={}, threshold={}/5, max_rounds={})",
-        settings.review_mode, settings.review_pass_threshold, settings.review_max_rounds
+        "  Answer Reviewer: ready (mode={}; limits read per review)",
+        settings.review_mode
     );
     let answer_reviewer_for_http: Option<
         Arc<dyn pond_core::models::ports::answer_reviewer::AnswerReviewer>,
-    > = Some(Arc::new(GiapAnswerReviewer {
-        live_provider: llm_provider.clone(),
-        pass_threshold: settings.review_pass_threshold,
-        max_rounds: settings.review_max_rounds,
-    })
-        as Arc<
-            dyn pond_core::models::ports::answer_reviewer::AnswerReviewer,
-        >);
+    > = Some(Arc::new(
+        pond_core::models::services::answer_review::LlmAnswerReviewer::new(
+            llm_provider.clone(),
+            settings_repo.clone(),
+        ),
+    ));
 
     let db = Arc::new(db);
 
@@ -6686,144 +6685,6 @@ async fn run_chat(
     }
     mic_handle.shutdown();
     Ok(())
-}
-
-// ── Adversarial Answer Reviewer ───────────────────────────────────────────────
-
-/// Critiques answers with the main LLM and sends below-threshold ones back for revision.
-struct GiapAnswerReviewer {
-    /// Read per review, so it always uses the currently loaded model.
-    live_provider:
-        Arc<tokio::sync::RwLock<Option<Arc<dyn pond_core::models::ports::provider::LlmProvider>>>>,
-    pass_threshold: u8,
-    max_rounds: u32,
-}
-
-#[async_trait::async_trait]
-impl pond_core::models::ports::answer_reviewer::AnswerReviewer for GiapAnswerReviewer {
-    async fn review(
-        &self,
-        question: &str,
-        answer: &str,
-        tool_context: Option<&str>,
-    ) -> anyhow::Result<pond_core::models::ports::answer_reviewer::ReviewResult> {
-        use pond_core::models::domain::message::ChatMessage;
-        use pond_core::models::ports::answer_reviewer::{ReviewResult, ReviewVerdict};
-
-        let provider = {
-            let guard = self.live_provider.read().await;
-            match guard.as_ref() {
-                Some(p) => p.clone(),
-                None => return Err(anyhow::anyhow!("no LLM provider available for review")),
-            }
-        };
-
-        let mut current_answer = answer.to_string();
-        let mut rounds = 0u32;
-        let mut last_verdict: Option<ReviewVerdict> = None;
-
-        for _ in 0..self.max_rounds {
-            rounds += 1;
-
-            let review_input = if let Some(ctx) = tool_context {
-                format!(
-                    "QUESTION: {}\n\nCONTEXT PROVIDED TO THE ANSWERER:\n{}\n\nANSWER TO REVIEW:\n{}",
-                    question, ctx, current_answer
-                )
-            } else {
-                format!(
-                    "QUESTION: {}\n\nANSWER TO REVIEW:\n{}",
-                    question, current_answer
-                )
-            };
-
-            println!("[answer-reviewer] reviewing (round {})...", rounds);
-            let review_msg = vec![ChatMessage::user(review_input)];
-            let review_response = provider
-                .complete(pond_core::prompts::REVIEW_SYSTEM_PROMPT, review_msg)
-                .await?;
-
-            let verdict = parse_review_verdict(&review_response.content);
-            println!(
-                "[answer-reviewer] verdict: pass={}, score={}/5",
-                verdict.pass, verdict.score
-            );
-
-            if verdict.pass || verdict.score >= self.pass_threshold {
-                return Ok(ReviewResult {
-                    final_answer: current_answer,
-                    was_revised: last_verdict.is_some(),
-                    verdict,
-                    rounds,
-                });
-            }
-
-            println!("[answer-reviewer] critique: {}", verdict.critique);
-            let revision_input = format!(
-                "ORIGINAL QUESTION: {}\n\n\
-                YOUR PREVIOUS ANSWER:\n{}\n\n\
-                REVIEWER CRITIQUE:\n{}\n\n\
-                WHAT THE ANSWER SHOULD INCLUDE:\n- {}\n\n\
-                Please provide an improved, more thorough answer.",
-                question,
-                current_answer,
-                verdict.critique,
-                verdict.expectations.join("\n- ")
-            );
-
-            println!("[answer-reviewer] revising...");
-            let revision_msg = vec![ChatMessage::user(revision_input)];
-            let revision_response = provider
-                .complete(pond_core::prompts::REVISION_SYSTEM_PROMPT, revision_msg)
-                .await?;
-
-            // This bypasses the SSE ThoughtFilter, so strip reasoning tags here.
-            current_answer = strip_thinking_tags(&revision_response.content);
-            last_verdict = Some(verdict);
-        }
-
-        Ok(ReviewResult {
-            final_answer: current_answer,
-            was_revised: true,
-            verdict: last_verdict.unwrap_or(ReviewVerdict {
-                pass: true,
-                score: 3,
-                expectations: Vec::new(),
-                critique: String::new(),
-            }),
-            rounds,
-        })
-    }
-}
-
-fn strip_thinking_tags(raw: &str) -> String {
-    pond_core::models::services::thought_filter::strip_reasoning(raw)
-}
-
-/// Parses the verdict JSON; unparseable output passes, since review must never block the user.
-fn parse_review_verdict(text: &str) -> pond_core::models::ports::answer_reviewer::ReviewVerdict {
-    use pond_core::models::ports::answer_reviewer::ReviewVerdict;
-
-    let json_start = text.find('{');
-    let json_end = text.rfind('}');
-    if let (Some(start), Some(end)) = (json_start, json_end) {
-        if end > start {
-            if let Ok(verdict) = serde_json::from_str::<ReviewVerdict>(&text[start..=end]) {
-                return verdict;
-            }
-        }
-    }
-
-    println!(
-        "[answer-reviewer] WARNING: unparseable verdict, defaulting to pass: {:?}",
-        &text[..text.len().min(100)]
-    );
-    ReviewVerdict {
-        pass: true,
-        score: 3,
-        expectations: Vec::new(),
-        critique: String::new(),
-    }
 }
 
 fn has_display() -> bool {

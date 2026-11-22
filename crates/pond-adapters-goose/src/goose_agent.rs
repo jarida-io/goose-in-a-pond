@@ -4112,6 +4112,8 @@ impl GooseAdapter {
             // ── Repetition guard ─────────────────────────────────────────────
             // Outside `'attempts`: re-engaging is the same question, so no fresh budget.
             let mut goal_rechecks: u32 = 0;
+            // Any tool call this turn failed: the completeness check may still put that right.
+            let mut tool_failed = false;
             let mut picture_failure_reported = false;
             let mut tool_call_counts: HashMap<(String, u64), usize> = HashMap::new();
             // Set when a guard ends the turn; the turn is never re-engaged after it, and gets at
@@ -4395,6 +4397,27 @@ impl GooseAdapter {
                                         goose::conversation::message::MessageContent::SystemNotification(n)
                                             if n.msg.starts_with(GOOSE_GOAL_NOTIFICATION_PREFIX) =>
                                         {
+                                            // Already answered and nothing failed: the check's
+                                            // round could only replace the shown answer, so it
+                                            // never runs. Cancelled here, before goose polls on
+                                            // to send its nudge to the model.
+                                            if !pond_core::models::domain::completeness_check::completeness_check_needed(
+                                                total_output_chars > chars_at_last_call,
+                                                tool_failed,
+                                            ) {
+                                                tracing::info!(
+                                                    target: "giap::trace",
+                                                    kind = "completeness_check_skipped",
+                                                    session_id = %session_id,
+                                                    reason = "answered",
+                                                );
+                                                agent_clone.set_session_goal(&turn_goose_sid, None).await;
+                                                engine_cancel.cancel();
+                                                drain_deadline = Some(
+                                                    tokio::time::Instant::now() + GUARD_DRAIN_TIMEOUT,
+                                                );
+                                                continue 'engine;
+                                            }
                                             // Re-armed check; genuine multi-tool turns emit none.
                                             completeness_checked = true;
                                             goal_rechecks += 1;
@@ -4497,6 +4520,7 @@ impl GooseAdapter {
                                                 failed = failed,
                                             );
                                             if failed {
+                                                tool_failed = true;
                                                 tracing::warn!(
                                                     tool = %tool_name,
                                                     tool_id = %tr.id,

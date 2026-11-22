@@ -84,7 +84,8 @@ Step by step, in `drive_turn`:
    The idle timeout is `agent_timeout_secs` between events (0 disables it). A cancel wins over
    queued events (`biased` select).
 8. **After the stream**: the thought filter's tail is flushed; if `review_mode` is `on`, or `auto`
-   and the message looks like a question, `AnswerReviewer` runs (default `off`).
+   and the turn called tools, `AnswerReviewer` runs (default `off`). The streamed answer stands
+   unless a revision scores strictly higher (see `agent_pipeline.md`, "Answer review").
 9. **Assistant turn**: `ChatService::persist_assistant_turn`, unless the turn was cancelled before
    it produced any text or tool result, in which case the orphaned user row is deleted.
 10. **Telemetry**: a `TurnMetrics` row when `telemetry_enabled`; the context monitor records the

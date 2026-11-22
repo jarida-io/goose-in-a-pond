@@ -4382,54 +4382,47 @@ async fn drive_turn(
         }
     }
 
-    // ── Adversarial answer review (post-inference) ───────────────
-    // A `review_revision` frame tells the frontend to replace the streamed text.
+    // ── Answer review (post-inference) ───────────────────────────────
+    // Only a revision that beat the streamed answer sends `review_revision`, which tells the
+    // client to replace the text; otherwise the answer stands as streamed.
+    if !timed_out
+        && !cancelled
+        && !turn.full_text.trim().is_empty()
+        && pond_core::models::services::answer_review::should_review(
+            &settings.review_mode,
+            !turn.tool_results.is_empty(),
+        )
     {
-        let should_review = !timed_out
-            && !cancelled
-            && match settings.review_mode.as_str() {
-                "on" => true,
-                "auto" => {
-                    let msg = req.message.to_lowercase();
-                    msg.contains('?')
-                        || msg.starts_with("what ")
-                        || msg.starts_with("how ")
-                        || msg.starts_with("why ")
-                        || msg.starts_with("explain ")
-                        || msg.starts_with("compare ")
-                        || msg.starts_with("analyze ")
+        if let Some(ref reviewer) = state.answer_reviewer {
+            let status =
+                json!({"type": "review_status", "content": "Reviewing answer..."}).to_string();
+            run.push(status, false);
+
+            match reviewer
+                .review(&req.message, &turn.full_text, &turn.tool_results)
+                .await
+            {
+                Ok(result) if result.was_revised() => {
+                    turn.full_text = result.final_answer.clone();
+                    let data = json!({
+                        "type": "review_revision",
+                        "content": result.final_answer,
+                        "score": result.verdict.as_ref().map(|v| v.score),
+                        "rounds": result.rounds,
+                    })
+                    .to_string();
+                    run.push(data, false);
                 }
-                _ => false,
-            };
-
-        if should_review {
-            if let Some(ref reviewer) = state.answer_reviewer {
-                let status =
-                    json!({"type": "review_status", "content": "Reviewing answer..."}).to_string();
-                run.push(status, false);
-
-                match reviewer.review(&req.message, &turn.full_text, None).await {
-                    Ok(result) if result.was_revised => {
-                        turn.full_text = result.final_answer.clone();
-                        let data = json!({
-                            "type": "review_revision",
-                            "content": result.final_answer,
-                            "score": result.verdict.score,
-                            "rounds": result.rounds,
-                        })
-                        .to_string();
-                        run.push(data, false);
-                    }
-                    Ok(result) => {
-                        let status = json!({
-                            "type": "review_status",
-                            "content": format!("Answer verified (score: {}/5)", result.verdict.score),
-                        }).to_string();
-                        run.push(status, false);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Answer review failed (non-fatal): {}", e);
-                    }
+                Ok(result) => {
+                    let content = match &result.verdict {
+                        Some(v) => format!("Answer checked (score: {}/5)", v.score),
+                        None => "Answer not checked: the review gave no verdict".to_string(),
+                    };
+                    let status = json!({"type": "review_status", "content": content}).to_string();
+                    run.push(status, false);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "answer review failed; the answer stands");
                 }
             }
         }
