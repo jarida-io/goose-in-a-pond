@@ -19,7 +19,7 @@ chacha20poly1305 = { workspace = true }
 # getifaddrs: the advertising decision and a Wi-Fi join's wait read the host's addresses live.
 libc = { workspace = true }
 # The `_pond._tcp` responder off macOS; macOS registers with mDNSResponder through libSystem.
-mdns-sd = "0.11"
+mdns-sd = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

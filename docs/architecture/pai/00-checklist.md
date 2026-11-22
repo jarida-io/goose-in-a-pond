@@ -3607,7 +3607,8 @@ mDNSResponder on macOS (touches PAI-2's LAN surface; not a PAI milestone).**
   after mDNSResponder restarts (needs root). The mdns-sd path on the Orin (moved, not changed).
 - **Open.** mdns-sd 0.21.5 answers legacy unicast and left the host name alone in a 40-second run
   beside mDNSResponder. Whether Linux should move to it, with its name probing beside avahi, is
-  a separate decision for a Jetson run.
+  a separate decision for a Jetson run. (2026-11-22: Linux moved to 0.22 after 0.11.5's parser
+  panicked the pond; see `pond-networking.md`, "Why Linux moved to 0.22".)
 
 **2026-10-17 — A phone's device row is its own (PAI-1 and PAI-2; not a PAI milestone).**
 
