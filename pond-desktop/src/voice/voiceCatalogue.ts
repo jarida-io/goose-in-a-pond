@@ -127,6 +127,13 @@ export function groupVoices(ids: string[]): { group: string; voices: VoiceInfo[]
     .sort((a, b) => rank(a.group) - rank(b.group) || a.group.localeCompare(b.group));
 }
 
+/** A picker's label for a voice: `af_heart` → "Heart (American English, female)". */
+export function voiceLabel(id: string): string {
+  const { name, language, gender } = describeVoice(id);
+  const about = [language, gender?.toLowerCase()].filter(Boolean).join(", ");
+  return about ? `${name} (${about})` : name;
+}
+
 /**
  * Catalogue title, `af_heart` → `Af_Heart`, keeping the prefix the picker drops. Derived, since
  * `ModelRecord.name` must stay the lowercase id the engine loads `<name>.bin` from.
