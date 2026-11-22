@@ -8,20 +8,26 @@ embed different GGML revisions and exported the same symbols. The old link faile
 with 533 duplicate definitions; permitting duplicate definitions would also let
 one engine call the other engine's incompatible implementation.
 
-On Linux, `namespace.rs` scans the pinned native sources and generates a forced
+On Linux and macOS, `namespace.rs` scans the pinned native sources and generates a forced
 include that gives Whisper's GGML/GGUF, C++ `ggml` namespace, CUDA sum-row helper,
-quantization, block types and IQ helpers a
-`pond_whisper_` prefix. C, C++ and CUDA receive the same header. Bindgen preserves
+quantization, block types, IQ helpers and the Metal backend's Objective-C class a
+`pond_whisper_` prefix. C, C++, Objective-C and CUDA receive the same header. Bindgen preserves
 the Rust API and assigns explicit private link names to corresponding FFI items.
-Generation must succeed; Linux cannot fall back to bindings that name public GGML
+Generation must succeed; an isolated build cannot fall back to bindings that name public GGML
 symbols. Dynamic backend loading is disabled because it looks up public symbol
-names; CPU and CUDA backends remain statically registered. Other platforms retain
+names; CPU, CUDA and Metal backends remain statically registered. Other platforms retain
 the upstream build behavior.
+
+macOS was added on 2026-11-13. Without it, the Mac build linked some GGML functions from
+each copy: `ggml_flash_attn_ext` from Whisper's, which numbers `GGML_OP_FLASH_ATTN_EXT` 73,
+and the fork-only `ggml_flash_attn_ext_set_n_kv_max` from llama.cpp's, which expects 74. Every
+Gemma turn then aborted on `GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT)`. Which copy won
+followed link order, so a rebuild could break a build that had worked.
 
 Changes from the published crate: this note, `namespace.rs`, build-script wiring,
 a standalone Cargo workspace declaration, the upstream Unlicense text
 (restored from the whisper-rs repository because the published crate omitted it),
-and five native source changes, below.
+and six native source changes, below.
 When updating Whisper, regenerate and inspect the linked symbol inventory and run
 both GPU transcription and inference in the same production process before shipping.
 
@@ -123,3 +129,12 @@ copies. With states now kept between transcriptions, the next allocation on that
 reuse them against a different graph: a copy-layout assert or misrouted inputs when the shape
 differs (prompt versus beam step, or another wake-word clip length). Worst-case buffers are
 reserved when a state is created, so this path is rare. Drop it when upstream resets there.
+
+## Native source change: a prefix for the embedded Metal library's symbols
+
+`whisper.cpp/ggml/src/ggml-metal/CMakeLists.txt` names the start and end of the embedded Metal
+library `_${GGML_METAL_EMBED_SYMBOL_PREFIX}ggml_metallib_start` and `..._end`. This is Pond's own
+change. Upstream writes them as fixed names into generated assembly, which the forced include
+never reaches, so with the Objective-C renamed they would be undefined; and with llama.cpp's
+Metal backend defining the same names, Whisper could load llama.cpp's shaders. `build.rs` sets
+the prefix to `pond_whisper_` when it isolates GGML; unset, the names are upstream's.
