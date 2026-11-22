@@ -212,14 +212,13 @@
   font-family: inherit;
   font-size: 14px;
   color: var(--ink);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.15s;
   box-sizing: border-box;
 }
 
 .rb-field__input:focus {
   outline: none;
   border-color: var(--pp);
-  box-shadow: 0 0 0 3px rgba(140, 75, 255, 0.15);
 }
 
 .rb-field__input--area {

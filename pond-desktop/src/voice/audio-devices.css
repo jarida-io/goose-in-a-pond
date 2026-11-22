@@ -108,8 +108,9 @@
 
 .adev__btn:focus-visible,
 .adev__select:focus-visible {
-  outline: 2px solid var(--color-accent, #8c4bff);
-  outline-offset: 2px;
+  /* One ring: the field's own border takes the focus colour; an outline outside it was a second. */
+  outline: none;
+  border-color: var(--color-accent);
 }
 
 .adev__btn:disabled {

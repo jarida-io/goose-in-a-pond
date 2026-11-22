@@ -127,7 +127,12 @@
 }
 .connections-field input::placeholder { color: var(--color-text-secondary); opacity: 1; }
 .connections-field input:focus-visible,
-.connections-field select:focus-visible,
+.connections-field select:focus-visible {
+  /* One ring: the field's own border takes the focus colour; an outline outside it was a second. */
+  outline: none;
+  border-color: var(--color-accent);
+}
+
 .connections-disconnect:focus-visible,
 .connections-submit:focus-visible {
   outline: 2px solid var(--focus-ring);

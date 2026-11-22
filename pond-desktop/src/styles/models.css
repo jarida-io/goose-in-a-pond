@@ -403,7 +403,6 @@
 
 .mdl-search:focus-within {
   border-color: var(--focus-ring);
-  box-shadow: 0 0 0 3px var(--color-accent-subtle);
 }
 
 .mdl-search__input {
@@ -416,15 +415,6 @@
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--text-base);
-}
-
-/* One ring, on the pill. The global input rules add a glow and an !important
-   focus outline as a safety net against controls with none; this control has
-   one, so the inner pair would be a second and third ring on the same event. */
-.mdl-search__input:focus,
-.mdl-search__input:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
 }
 
 .mdl-search .mm-btn { margin-right: calc(-1 * var(--space-3)); }

@@ -202,16 +202,20 @@ input, textarea, select {
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
   padding: var(--space-2) var(--space-3);
-  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  transition: border-color var(--transition-fast);
   user-select: text;
 }
 
+/* One ring per control: focus recolours the border the field already has and
+ * adds nothing outside it. A halo here used to stack a second ring on every
+ * bordered field, and on fields wrapped in a box that draws its own focus
+ * border (Ink's `.ink-input__box`, the search pills, the chat composer) the
+ * borderless inner field still drew the halo inside the wrapper's ring. */
 input:focus,
 textarea:focus,
 select:focus {
   outline: none;
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-subtle);
 }
 
 /* Global focus-visible safety net (a11y pass): several component stylesheets
@@ -220,9 +224,9 @@ select:focus {
  * everywhere via !important so no interactive element can end up with zero
  * focus feedback, regardless of what a more specific/later rule does.
  *
- * Text fields are deliberately NOT in this list. They already have a focus
- * treatment of their own directly above -- an accent border plus a 3px halo --
- * and stacking an outline at `outline-offset: 2px` on top of it drew a SECOND
+ * Text fields are deliberately NOT in this list, by element or by tabindex.
+ * They already have a focus treatment of their own directly above -- an accent
+ * border -- and stacking an outline at `outline-offset: 2px` on top of it drew a SECOND
  * accent ring 2px outside the first. The Register-device dialog is where it
  * showed worst, because `autoFocus` means the field is focused on open: two
  * concentric rounded borders around one input, which reads as a rendering bug.
@@ -231,12 +235,13 @@ select:focus {
  * `input`, `textarea` and `select`, so no text field can end up with zero focus
  * feedback either -- it just gets one indicator instead of two. Anything that
  * sets `outline: none` on a text field (`.sched-modal__input` does) still shows
- * the border and halo, which is why the `!important` was not what was protecting
- * them. */
+ * the accent border, which is why the `!important` was not what was protecting
+ * them. A text field given a `tabindex` is excluded from the last selector for
+ * the same reason. */
 button:focus-visible,
 a:focus-visible,
 [role="button"]:focus-visible,
-[tabindex]:focus-visible {
+[tabindex]:not(input):not(textarea):not(select):focus-visible {
   outline: 2px solid var(--focus-ring) !important;
   outline-offset: 2px !important;
 }

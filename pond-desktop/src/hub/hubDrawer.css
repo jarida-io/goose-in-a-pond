@@ -306,10 +306,17 @@
 .hdrawer__chip:focus-visible,
 .hdrawer__room:focus-visible,
 .hdrawer__routine:focus-visible,
-.hdrawer__close:focus-visible,
-.shellbar__btn:focus-visible {
+.hdrawer__close:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+/* The focus ring is drawn over the 2px border, not around it: outside it, it was
+   a second ring beside the ink edge. !important and class specificity beat
+   base.css's global offset. */
+.shellbar__btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
