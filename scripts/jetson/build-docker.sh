@@ -27,7 +27,7 @@
 set -euo pipefail
 
 # mesh is in every pond-server build, the lean one included.
-FEATURES_ARGS=(--no-default-features --features goose-agent,mesh)
+FEATURES_ARGS=(--no-default-features --features "goose-agent,mesh")
 LABEL="lean (goose backend; ollama/llamafile providers; mesh)"
 for arg in "$@"; do
   case "$arg" in

@@ -257,6 +257,30 @@ async fn activity_summary_counts_by_category() {
     assert_eq!(body["by_category"]["sensor"], 1);
     assert_eq!(body["by_category"]["device"], 1);
     assert!(body["by_category"].get("auth").is_none());
+    assert_eq!(body["truncated"], false, "two events are an exact count");
+}
+
+#[tokio::test]
+async fn activity_summary_says_when_it_stopped_counting_at_the_cap() {
+    let (app, tmp) = make_app().await;
+    // The router's state holds its own log; a second one over the same file appends to it.
+    let db = Database::init(tmp.path()).await.unwrap();
+    let log = SqliteEventLog::new(db.logs.clone());
+    for _ in 0..1000 {
+        log.append(
+            Event::new(EventCategory::Network, "egress.http").attr("host", "api.spotify.com"),
+        )
+        .await
+        .unwrap();
+    }
+
+    let (status, body) = get_json(&app, "/api/v1/activity/summary?window=day").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], 1000, "counting stops at the cap");
+    assert_eq!(
+        body["truncated"], true,
+        "a capped total must be marked as a floor"
+    );
 }
 
 #[tokio::test]
