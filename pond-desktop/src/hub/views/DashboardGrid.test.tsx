@@ -154,6 +154,52 @@ describe("arranging", () => {
   });
 });
 
+/** A backdrop click or Escape closes the sheet but not the mode; the list must be reachable again. */
+describe("reopening the arrange sheet", () => {
+  function sheet(): HTMLDialogElement {
+    const dialog = document.querySelector("dialog.dash__sheet");
+    if (!(dialog instanceof HTMLDialogElement)) throw new Error("the arrange sheet did not render");
+    return dialog;
+  }
+
+  it("offers no way back while the sheet is open, or outside arrange mode", () => {
+    renderGrid();
+    expect(screen.queryByRole("button", { name: "Show arrange list" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Arrange" }));
+    expect(screen.queryByRole("button", { name: "Show arrange list" })).toBeNull();
+  });
+
+  it.each([
+    ["a backdrop click", (d: HTMLDialogElement) => fireEvent.click(d)],
+    ["Escape", (d: HTMLDialogElement) => fireEvent(d, new Event("cancel", { cancelable: true }))],
+  ])("reopens after %s closed it, still arranging", (_how, close) => {
+    renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Arrange" }));
+    expect(sheet().open).toBe(true);
+
+    close(sheet());
+    expect(sheet().open).toBe(false);
+    // Still arranging: the frames keep their controls and the mode's exit is still offered.
+    expect(screen.getByRole("button", { name: "Done arranging" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show arrange list" }));
+    expect(sheet().open).toBe(true);
+    expect(screen.queryByRole("button", { name: "Show arrange list" })).toBeNull();
+  });
+
+  it("leaves the mode in one press from the closed sheet", () => {
+    renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Arrange" }));
+    fireEvent.click(sheet());
+
+    fireEvent.click(screen.getByRole("button", { name: "Done arranging" }));
+    expect(screen.getByRole("button", { name: "Arrange" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show arrange list" })).toBeNull();
+    expect(sheet().open).toBe(false);
+  });
+});
+
 /** Asserted as CSS source text: jsdom applies no external stylesheet, so nothing can be measured. */
 describe("the arrange chrome", () => {
   const HERE = dirname(fileURLToPath(import.meta.url));

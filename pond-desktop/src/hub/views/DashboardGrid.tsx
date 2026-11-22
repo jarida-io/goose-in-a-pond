@@ -162,6 +162,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk, variant = 
       <HomeStatusBar
         arranging={arranging}
         onToggleArrange={toggleArrange}
+        onShowArrangeList={arranging && !sheetOpen ? () => setSheetOpen(true) : undefined}
         temp={home.weatherEnabled ? home.weather.temp : null}
         hideTemp={weatherPlaced}
         userName={home.user}
