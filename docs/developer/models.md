@@ -76,7 +76,10 @@ assembles the catalogue from two sources, and one failing is skipped:
   `pond_core::models::domain::embedding_models`: fastembed's `all-MiniLM-L6-v2` (the default)
   and `bge-small-en-v1.5`, which fetch themselves, and the pinned GGUFs `nomic-embed-text-v1.5`,
   `bge-base-en-v1.5` and `embeddinggemma-2` (EmbeddingGemma 2, the Memory role's recommended
-  pick), which download.
+  pick), which download. A fastembed row names no file of the pond's, so `GET /api/v1/models`
+  reports it `downloaded` when fastembed's cache under `<data_dir>/models/embedding` (or
+  `HF_HOME`) holds its weights (`pond_infra::fastembed_embedding::weights_cached`), and
+  deleting it removes that cache entry.
 - `OllamaCatalogProvider`: whatever a running Ollama server lists.
 
 Nothing is fetched from a remote registry; there is no registry URL setting.

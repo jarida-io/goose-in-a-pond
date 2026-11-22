@@ -8789,10 +8789,18 @@ async fn list_models(
         .map(|s| s.memory_status())
         .unwrap_or_default();
     let footing = crate::model_views::MemoryFooting::read(&state, &memory);
+    let fastembed_root = fastembed_cache_root(&state);
 
     for m in &records {
         let mut dto = record_to_dto(m, &assignments, &holders, state.engine_availability);
         footing.weigh(&mut dto);
+        // A built-in memory model names no file of ours; whether it is here is whether
+        // fastembed's cache holds its weights, so it is listed as on the device when it is.
+        if is_fastembed(m) {
+            if let Some(root) = &fastembed_root {
+                dto.downloaded = pond_infra::fastembed_embedding::weights_cached(&m.name, root);
+            }
+        }
         if let Some(v) = vision.get(&m.id) {
             dto.reads_images = Some(v.reads_images);
             dto.image_support_bytes = v.image_support_bytes;
@@ -8975,6 +8983,18 @@ async fn download_model(
     Ok(Json(started))
 }
 
+/// A memory model fastembed fetches and caches itself: an embedding row with no file of ours.
+fn is_fastembed(m: &ModelRecord) -> bool {
+    m.category == ModelCategory::Embedding && m.filename.is_none()
+}
+
+/// Where fastembed caches weights on this pond: the directory the embedder hands it, under
+/// `HF_HOME` when that is set. `None` without a data directory.
+fn fastembed_cache_root(state: &AppState) -> Option<std::path::PathBuf> {
+    let dir = model_layout::dir_for(state.data_dir.as_ref()?, &ModelCategory::Embedding)?;
+    Some(pond_infra::fastembed_embedding::cache_root(&dir))
+}
+
 /// DELETE /api/v1/models/{category}/{name} — deletes the file but keeps the catalog row.
 async fn delete_model(
     State(state): State<Arc<AppState>>,
@@ -9052,6 +9072,25 @@ async fn delete_model(
                 )
             })),
         ));
+    }
+
+    // fastembed's own cache entry is the model's only copy; left behind, the row would read as
+    // on the device again on the next list.
+    if is_fastembed(&m) {
+        let cached = fastembed_cache_root(&state)
+            .and_then(|root| pond_infra::fastembed_embedding::cached_repo_dir(&m.name, &root));
+        if let Some(dir) = cached {
+            if tokio::fs::metadata(&dir).await.is_ok() {
+                tokio::fs::remove_dir_all(&dir).await.map_err(|e| {
+                    tracing::warn!(model = %m.name, error = %e, "could not delete fastembed's cached weights");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("Failed to delete the model's files: {e}")})),
+                    )
+                })?;
+                tracing::info!(model = %m.name, dir = %dir.display(), "deleted fastembed's cached weights");
+            }
+        }
     }
 
     let path = match (&m.filename, &state.data_dir) {
