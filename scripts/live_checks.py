@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 
+import pond_cpace
+
 # What the egress gate says when it refuses a weather call: an open-meteo host, named as the
 # destination of the refused request.
 OPEN_METEO_REFUSAL = re.compile(r"outbound request to (?:[a-z-]+\.)?open-meteo\.com(?![\w.-])")
@@ -150,6 +152,58 @@ def seed_session(sid):
     )
     con.commit()
     con.close()
+
+
+# A member's paired phone, by member id. The API answers member-only and owner-only routes for
+# the caller's own paired device (a tokenless loopback caller belongs to nobody), so a check
+# that acts as a member pairs a phone for them the way production does: a code issued for that
+# member, then the phone's own pairing exchange. Never a row written into `devices` by hand.
+_MEMBER_TOKENS = {}
+
+
+def _pairing_call(method, path, body=None, expected=200):
+    code, parsed = call(method, "/api/v1" + path, body)
+    if code != expected:
+        raise AssertionError("%s %s answered %s, wanted %s: %s" % (method, path, code, expected, parsed))
+    return parsed
+
+
+def member_token(profile_id, client):
+    """A session token for a phone paired to `profile_id`, paired once per member."""
+    if profile_id in _MEMBER_TOKENS:
+        return _MEMBER_TOKENS[profile_id]
+    code, issued = call(
+        "POST", "/api/v1/handshake/pairing-code", {"profile_id": profile_id, "approved": True}
+    )
+    if not expect("a pairing code is issued for the member", code, 200, issued):
+        return None
+    try:
+        result = pond_cpace.pair(
+            _pairing_call, issued["code"], issued["pairing"]["tls_spki_sha256"], client
+        )
+    except AssertionError as e:
+        check("the member's phone pairs", False, str(e))
+        return None
+    if not check("the member's phone pairs", result.get("accepted") is True, str(result)):
+        return None
+    _MEMBER_TOKENS[profile_id] = result["session_token"]
+    return result["session_token"]
+
+
+_HOUSEHOLD_MEMBER = {}
+
+
+def household_member_token():
+    """A phone of a member who is still in the household after the deletion sections.
+
+    The identity and deletion sections delete Jerry and Liz, so the later sections that save
+    memories, read reminders or change the model need a member of their own.
+    """
+    if "token" not in _HOUSEHOLD_MEMBER:
+        member = new_profile("Ana")
+        _HOUSEHOLD_MEMBER["id"] = member
+        _HOUSEHOLD_MEMBER["token"] = member_token(member, "live-ana-phone") if member else None
+    return _HOUSEHOLD_MEMBER["token"]
 
 
 def new_profile(name):
@@ -339,7 +393,9 @@ def section_deletion(jerry, liz):
     code, _ = call("PUT", "/api/v1/settings", {"primary_profile_id": liz})
     check("set Liz as primary member", code == 200)
 
-    code, body = call("DELETE", "/api/v1/profiles/" + liz)
+    # Only the owner may remove a member; Jerry, the first member, is the owner.
+    owner = member_token(jerry, "live-jerry-phone")
+    code, body = call("DELETE", "/api/v1/profiles/" + liz, token=owner)
     ok = expect(
         "DELETE /profiles/{id} succeeds with a live session bound",
         code,
@@ -372,9 +428,9 @@ def section_deletion(jerry, liz):
         ("is empty", body is not None and not body.get("primary_profile_id")),
     )
 
-    code, body = call("DELETE", "/api/v1/profiles/" + liz)
+    code, body = call("DELETE", "/api/v1/profiles/" + liz, token=owner)
     expect("deleting the same member again is 404", code, 404, body)
-    code, body = call("DELETE", "/api/v1/profiles/never-existed")
+    code, body = call("DELETE", "/api/v1/profiles/never-existed", token=owner)
     expect("deleting a member who never existed is 404", code, 404, body)
 
 
@@ -420,7 +476,15 @@ def section_legacy_rows(jerry):
 
     # Deleting the owner must take the owned row and leave the shared one.
     if jerry:
-        code, body = call("DELETE", "/api/v1/profiles/" + jerry)
+        # A household is never left without an owner, so Jerry hands the role to Ana first, and
+        # she removes him: the order a real household would have to follow.
+        ana = household_member_token()
+        code, body = call(
+            "PUT", "/api/v1/profiles/%s/role" % _HOUSEHOLD_MEMBER.get("id"), {"role": "owner"},
+            token=member_token(jerry, "live-jerry-phone"),
+        )
+        expect("the owner hands the role to another member", code, 200, body)
+        code, body = call("DELETE", "/api/v1/profiles/" + jerry, token=ana)
         if expect("delete the owning member", code, 200, body):
             check(
                 "the delete reported the owned memory",
@@ -1150,7 +1214,8 @@ def section_redaction():
     content = "stripe key %s -- %s" % (key, prose)
 
     code, body = call(
-        "POST", "/api/v1/memories", {"content": content, "source": "live-check"}
+        "POST", "/api/v1/memories", {"content": content, "source": "live-check"},
+        token=household_member_token(),
     )
     # 201, not 200. The handler echoes back the fragment it BUILT, which still
     # holds the credential -- the decorator redacts on the way into the store,
@@ -1300,6 +1365,7 @@ def section_memory_vectors():
             "content": "I am building a solar irrigation controller for the greenhouse",
             "segment": "project",
         },
+        token=household_member_token(),
     )
     if not expect("a memory is saved", code, 201, body):
         return
@@ -1317,7 +1383,8 @@ def section_memory_vectors():
     )
 
     code, body = call(
-        "PUT", "/api/v1/memories/%s" % mid, {"content": "I am restoring a vintage motorbike"}
+        "PUT", "/api/v1/memories/%s" % mid, {"content": "I am restoring a vintage motorbike"},
+        token=household_member_token(),
     )
     if expect("the memory is reworded", code, 204, body):
         edited = _memory_vector(mid)
@@ -1629,10 +1696,15 @@ def section_delivery_and_conversations():
     expect("a message with no offer is 404", code, 404, body)
 
     code, body = call("GET", "/api/v1/pairing/lock")
+    # Earlier sections pair a member's phone (the API answers member-only routes for a paired
+    # device), and a member's phone names the main member; from then on the lock is enforced.
     expect(
-        "a fresh pond's pairing lock", code, 200, body,
+        "the pond's pairing lock", code, 200, body,
         ("is on", lambda b: b.get("locked") is True),
-        ("holds nobody out before the pond has a main member", lambda b: b.get("enforced") is False),
+        (
+            "holds phones out exactly when the main member has a phone",
+            lambda b: b.get("enforced") is bool(b.get("owner_has_a_phone")),
+        ),
         ("is not the loopback caller's to change", lambda b: b.get("can_change") is False),
     )
     code, body = call("PUT", "/api/v1/pairing/lock", {"locked": False})
@@ -2065,7 +2137,7 @@ def section_reminders_surface():
     con.commit()
     con.close()
 
-    code, body = call("GET", "/api/v1/reminders")
+    code, body = call("GET", "/api/v1/reminders", token=household_member_token())
     ok = expect(
         "the reminders route is registered",
         code,
@@ -2107,14 +2179,14 @@ def section_reminders_surface():
         "HTTP %s: %s" % (code, body),
     )
 
-    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss")
+    code, body = call("POST", "/api/v1/reminders/live-r1/dismiss", token=household_member_token())
     check(
         "a reminder can be dismissed",
         code == 200 and isinstance(body, dict) and body.get("disposition") == "dismissed",
         "HTTP %s: %s" % (code, body),
     )
 
-    code, body = call("GET", "/api/v1/reminders")
+    code, body = call("GET", "/api/v1/reminders", token=household_member_token())
     check(
         "a dismissed reminder is not offered again",
         code == 200
@@ -2130,7 +2202,7 @@ def section_reminders_surface():
         ("one already dismissed", "live-r1"),
         ("one that never existed", "live-r-nobody"),
     ):
-        code, body = call("POST", "/api/v1/reminders/%s/dismiss" % rid)
+        code, body = call("POST", "/api/v1/reminders/%s/dismiss" % rid, token=household_member_token())
         check(
             "dismissing %s is a 404, not a second success" % label,
             code == 404,
@@ -2185,9 +2257,12 @@ def section_picture_support():
         return
     # A local provider with a text-only model. No model file is needed: the gate asks whether the
     # model declares picture support, which is decided by name before any file is read.
+    # Only the owner may change the model; the household's remaining member is it now.
+    owner = household_member_token()
     code, body = call(
         "PUT", "/api/v1/settings",
         {"chat_provider": "local", "chat_model": "Llama-3.2-3B-Instruct-Q4_K_M"},
+        token=owner,
     )
     expect("switch to a text-only local model", code, 200, body)
 
@@ -2214,6 +2289,7 @@ def section_picture_support():
     call(
         "PUT", "/api/v1/settings",
         {"chat_provider": before.get("chat_provider", ""), "chat_model": before.get("chat_model", "mock")},
+        token=owner,
     )
 
 

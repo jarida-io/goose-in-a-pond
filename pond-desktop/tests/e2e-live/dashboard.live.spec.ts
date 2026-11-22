@@ -33,8 +33,22 @@ test.describe("live dashboard", () => {
       if (r.status() >= 500) failed.push(`${r.status()} ${r.url()}`);
     });
 
+    // Not `networkidle`: the dashboard holds its live feeds (`/schedules/events` and the other
+    // event streams) open for as long as it is on screen, so the network is never idle and the
+    // wait timed out on every run. Wait instead until every request that is not a stream has
+    // answered, so the 5xx and console checks below still cover the whole first load.
+    const inFlight = new Set<string>();
+    const isStream = (url: string) => /\/(events|stream)$/.test(new URL(url).pathname);
+    page.on("request", (r) => {
+      if (!isStream(r.url())) inFlight.add(r.url() + " " + r.method());
+    });
+    const settled = (r: { url(): string; method(): string }) => inFlight.delete(r.url() + " " + r.method());
+    page.on("requestfinished", settled);
+    page.on("requestfailed", settled);
+
     await page.goto("/");
-    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect.poll(() => inFlight.size, { timeout: 30_000 }).toBe(0);
 
     expect(failed, "server returned 5xx to the dashboard").toEqual([]);
     expect(consoleErrors, "dashboard logged console errors").toEqual([]);
