@@ -53,7 +53,6 @@ import { LongTaskCards, LongTaskStrays } from "../longtasks/LongTaskCards";
 import { useLongTasks } from "../longtasks/useLongTasks";
 import { prepareImage, validateAttachmentSet } from "../lib/imageAttach";
 import type { PreparedImage } from "../lib/imageAttach";
-import { useSuggestedPrompts } from "../hooks/useSuggestedPrompts";
 import { useConversationModel } from "../hooks/useConversationModel";
 import { useDeepResearch } from "../hooks/useDeepResearch";
 import { ModelSwitcher } from "../components/ModelSwitcher";
