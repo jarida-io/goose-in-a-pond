@@ -1,4 +1,6 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import { HubIco } from "./HubIco";
+import { forecastFit, type ForecastFit } from "./forecastFit";
 import { HP_PATHS, sunEl } from "./icons";
 import { useHomeData } from "../state/hubDataStore";
 import { useNow } from "../state/useNow";
@@ -31,6 +33,33 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
   const now = useNow();
   const phase = dayPhaseFor(w.sunrise, w.sunset, now);
   const sky = skyConditionFor(w.icon, w.cond);
+  const days = w.forecast.length;
+
+  // The strip shows as many days as the card has room for: a card stretched by its row's tallest
+  // neighbour fills the extra height with more of the week instead of empty sky. Null until
+  // measured (and in jsdom, which lays nothing out), when every day is rendered.
+  const strip = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState<ForecastFit | null>(null);
+  useLayoutEffect(() => {
+    const el = strip.current;
+    // The small card hides the strip; there is nothing to fit.
+    if (el === null || variant !== "hero" || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      // One tile's height is the strip's min-height (hub.css's --wx-day-h): a rendered tile is no
+      // measure, since the rows stretch to share out spare height once every day is showing.
+      const tileHeight = parseFloat(getComputedStyle(el).minHeight);
+      if (!(tileHeight > 0) || el.clientWidth === 0) return;
+      const next = forecastFit(days, el.clientWidth, el.clientHeight, tileHeight);
+      setFit((prev) =>
+        prev?.shown === next.shown && prev.columns === next.columns ? prev : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [variant, days]);
+  const shownDays = fit === null ? w.forecast : w.forecast.slice(0, fit.shown);
 
   return (
     <div
@@ -58,8 +87,12 @@ export function WeatherWidget({ variant = "card" }: WeatherWidgetProps) {
           <span className="wx__range">H:{w.hi}°C L:{w.lo}°C</span>
         </div>
       </div>
-      <div className="wx__fc">
-        {w.forecast.map((f) => (
+      <div
+        ref={strip}
+        className="wx__fc"
+        style={fit === null ? undefined : { gridTemplateColumns: `repeat(${fit.columns}, minmax(0, 1fr))` }}
+      >
+        {shownDays.map((f) => (
           <div key={f.d} className="wx__fday">
             <span>{f.d}</span>
             {/* currentColor, same reason as the main icon above -- --color-text-secondary

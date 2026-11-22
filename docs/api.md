@@ -690,7 +690,7 @@ carries `tls_spki_sha256`.
 | `POST /test/speak` | optional `{text}` | `{status, text, latency_ms}` |
 | `GET /dev/goose` | | `{goose_active, extension_count, extensions: [{name, kind, tools}], tool_count}`, or `{goose_active: false, message}` |
 | `PUT /location/device` | `{latitude, longitude, accuracy_m, name?, replace?}` | `{applied, reason?, name, latitude, longitude}`; `403 not_on_home_network`, `422 invalid_coordinates` or `too_imprecise` |
-| `GET /weather` | | `{enabled: false}` when switched off or with no location, else the current conditions and `forecast` |
+| `GET /weather` | | `{enabled: false}` when switched off or with no location, else the current conditions and `forecast`: the seven days after today, each `{d, i, t}` (short weekday, icon key, rounded high), fewer if the provider returns fewer |
 | `GET /usage/summary` | | `{total_prompt_tokens, total_completion_tokens, total_reasoning_tokens, counted_reasoning_turns, total_tokens, session_count, cloud_input_price_per_million, cloud_output_price_per_million}` |
 | `GET /lane` | | The lane's jobs: per job `title`, `enabled`, `since_last_run_secs`, `blocked_by`, refusal counters, plus `running` and `observed_secs_ago` |
 | `POST /lane/jobs/{job}/run` | | `{known, lane, job, woken, reason}`; `404` for no such job. The job still waits for the single slot |
