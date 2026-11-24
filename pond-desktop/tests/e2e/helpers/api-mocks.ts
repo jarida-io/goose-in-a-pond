@@ -195,6 +195,14 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   );
   await page.route("**/api/v1/agents/suggestions", (route) => route.fulfill({ json: [] }));
 
+  // The hub's own cards: no ideas, anchors or open questions, and no rooms, in the test pond.
+  await page.route("**/api/v1/me/idea-cards", (route) =>
+    route.fulfill({ json: { cards: [], set: { state: "none", made_at: null } } }),
+  );
+  await page.route("**/api/v1/me/anchors", (route) => route.fulfill({ json: { anchors: [] } }));
+  await page.route("**/api/v1/me/questions*", (route) => route.fulfill({ json: { batches: [] } }));
+  await page.route("**/api/v1/rooms", (route) => route.fulfill({ json: { rooms: [] } }));
+
   await page.route("**/api/v1/devices", (route) =>
     route.fulfill({
       json: {

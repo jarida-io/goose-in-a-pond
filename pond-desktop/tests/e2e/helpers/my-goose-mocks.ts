@@ -90,7 +90,16 @@ export async function mockMyGoose(page: Page, opts: { unknownCaller?: boolean } 
     ],
   ]);
   const questions: Array<Record<string, unknown>> = [
-    { id: "q-budget", text: "What is the budget for stays?", options: ["Under KSh 50,000", "KSh 50,000 to 100,000"], multi: false },
+    {
+      id: "q-budget",
+      header: "Budget",
+      text: "What is the budget for stays?",
+      options: [
+        { label: "Under KSh 50,000", description: "" },
+        { label: "KSh 50,000 to 100,000", description: "" },
+      ],
+      multi: false,
+    },
   ];
 
   const whole = (id: string) => {
