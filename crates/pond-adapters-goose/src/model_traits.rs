@@ -1,8 +1,15 @@
-//! Active-model traits read from its GGUF (local providers; HTTP ones use the name heuristic).
+//! Active-model traits read from the model's own file: a GGUF's header, or a LiteRT-LM file
+//! through goose's backend profile; HTTP providers use the name heuristic.
 //! Answers must be cheap and stable across turns, or `prefix_hash` moves and forces a re-prefill.
 
+use goose_providers::model_profile::ModelProfile;
+use pond_core::models::domain::litert;
+use pond_core::models::domain::model_capabilities::ModelCapabilities;
 use pond_core::models::domain::model_probe::{probe_cached, ModelProbe};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 /// Providers whose "model" is a GGUF on this machine.
 fn is_local_gguf(provider: &str) -> bool {
@@ -60,10 +67,105 @@ fn announce_once(model_name: &str, probe: Option<&ModelProbe>) {
     }
 }
 
+/// The active model's capabilities, from the same evidence the prompt reads. Every path that
+/// asks what a model can do comes here, so a chat and a side call cannot disagree.
+#[must_use]
+pub fn capabilities(
+    provider: &str,
+    model_name: &str,
+    data_dir: Option<&Path>,
+) -> ModelCapabilities {
+    let mut caps = ModelCapabilities::from_model_name(model_name);
+    caps.vision = vision_declared(provider, model_name, data_dir);
+    caps.thinking = model_reasons(provider, model_name, data_dir);
+    caps.tool_calling = model_uses_native_tools(provider, model_name, data_dir);
+    if let Some(profile) = litert_profile(provider, model_name, data_dir) {
+        caps.structured_output = profile
+            .endpoint
+            .supported_parameters
+            .iter()
+            .any(|p| p == "response_format" || p == "structured_outputs");
+    } else if is_local_gguf(provider) && !litert::is_litert_model(model_name) {
+        // llama.cpp can GBNF-constrain any GGUF, quant tag in its name or not.
+        caps.structured_output = true;
+    }
+    if let Some(trained) = trained_context_window(provider, model_name, data_dir) {
+        // Upper bound only; `ContextGovernor` ranks a registry pin or engine cap above it.
+        caps.context_window_tokens = trained;
+    }
+    caps
+}
+
+/// Whether the active model DECLARES vision, regardless of whether its encoder has downloaded.
+/// Must not flip mid-session: the `<vision>` prompt section sits in the KV-cached prefix.
+/// Mesh and mistral.rs never claim it: both would drop a picture silently.
+#[must_use]
+pub fn vision_declared(provider: &str, model_name: &str, data_dir: Option<&Path>) -> bool {
+    if litert::is_litert_model(model_name) && is_local_gguf(provider) {
+        return litert_profile(provider, model_name, data_dir).is_some_and(|profile| {
+            profile
+                .model
+                .modalities
+                .input
+                .contains(&goose_providers::canonical::Modality::Image)
+        });
+    }
+    match provider {
+        "local" | "gguf" => crate::vision_encoder::declaration(data_dir, model_name).is_declared(),
+        "mesh" | "mistralrs" => false,
+        _ => ModelCapabilities::name_implies_vision(model_name),
+    }
+}
+
+/// goose's account of a LiteRT-LM model, kept per file version: the file and library answer
+/// once, and a model the backend cannot describe yet is asked again next time.
+fn litert_profile(
+    provider: &str,
+    model_name: &str,
+    data_dir: Option<&Path>,
+) -> Option<Arc<ModelProfile>> {
+    if !is_local_gguf(provider) || !litert::is_litert_model(model_name) {
+        return None;
+    }
+    type Key = (String, Option<SystemTime>);
+    static PROFILES: OnceLock<Mutex<HashMap<Key, Arc<ModelProfile>>>> = OnceLock::new();
+    let modified = data_dir
+        .and_then(|dd| std::fs::metadata(litert::model_path(dd, model_name)).ok())
+        .and_then(|metadata| metadata.modified().ok());
+    let key = (model_name.to_string(), modified);
+    let profiles = PROFILES.get_or_init(Default::default);
+    if let Some(profile) = profiles.lock().ok()?.get(&key) {
+        return Some(Arc::clone(profile));
+    }
+    match goose::providers::local_inference::model_profile(model_name) {
+        Ok(profile) => {
+            tracing::info!(
+                model = model_name,
+                profile = %serde_json::to_string(&profile).unwrap_or_default(),
+                "read this model's profile from its backend"
+            );
+            let profile = Arc::new(profile);
+            profiles.lock().ok()?.insert(key, Arc::clone(&profile));
+            Some(profile)
+        }
+        Err(error) => {
+            tracing::debug!(
+                model = model_name,
+                %error,
+                "the LiteRT-LM backend could not describe this model yet"
+            );
+            None
+        }
+    }
+}
+
 /// Whether the model reasons, for `thinking_mode = "auto"`. `Always` counts too: it emits a
 /// reasoning block regardless, which the prompt and filter must handle.
 #[must_use]
 pub fn model_reasons(provider: &str, model_name: &str, data_dir: Option<&Path>) -> bool {
+    if let Some(profile) = litert_profile(provider, model_name, data_dir) {
+        return profile.model.reasoning.unwrap_or(false);
+    }
     match probe_for_model(provider, model_name, data_dir) {
         Some(probe) => probe.thinking_is_selectable() || probe.thinking_marker().is_some(),
         None => {
@@ -108,6 +210,9 @@ pub fn tool_mode_for_gguf(
 /// Native tool support for `ModelCapabilities.tool_calling`: the file, else the name heuristic.
 #[must_use]
 pub fn model_uses_native_tools(provider: &str, model_name: &str, data_dir: Option<&Path>) -> bool {
+    if let Some(profile) = litert_profile(provider, model_name, data_dir) {
+        return profile.model.tool_call;
+    }
     match probe_for_model(provider, model_name, data_dir) {
         Some(probe) => probe.supports_native_tools(),
         None => {
@@ -127,6 +232,11 @@ pub fn trained_context_window(
     model_name: &str,
     data_dir: Option<&Path>,
 ) -> Option<u32> {
+    if let Some(profile) = litert_profile(provider, model_name, data_dir) {
+        return u32::try_from(profile.model.limit.context)
+            .ok()
+            .filter(|&n| n > 0);
+    }
     probe_for_model(provider, model_name, data_dir).and_then(|p| p.context_window_tokens)
 }
 
@@ -145,7 +255,28 @@ mod tests {
         assert!(probe_for_model("local", "gemma-4-E2B-it", None).is_none());
     }
 
-    /// No GGUF header to read, so the Gemma 4 name answers: it reasons and calls tools natively.
+    /// A LiteRT-LM model the backend cannot describe never claims pictures from its name: the
+    /// backend sends text only, so a picture would reach the model as a note.
+    #[test]
+    fn a_litert_model_never_claims_pictures_from_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = "gemma-4-E2B-it.litertlm";
+        assert!(ModelCapabilities::from_model_name(model).vision);
+        let caps = capabilities("local", model, Some(tmp.path()));
+        assert!(!caps.vision);
+        assert!(!caps.structured_output);
+        assert!(caps.thinking && caps.tool_calling);
+        assert!(!capabilities("local", model, None).vision);
+    }
+
+    #[test]
+    fn http_providers_keep_the_name_heuristic() {
+        assert!(capabilities("ollama", "llava:7b", None).vision);
+        assert!(!capabilities("mesh", "llava:7b", None).vision);
+    }
+
+    /// No GGUF header to read and no backend profile, so the Gemma 4 name answers: it reasons
+    /// and calls tools natively.
     #[test]
     fn a_litert_model_takes_its_traits_from_its_name() {
         let tmp = tempfile::tempdir().unwrap();

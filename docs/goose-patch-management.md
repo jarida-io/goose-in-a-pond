@@ -9,7 +9,7 @@ this document is one that gets dropped at the next sync.
 | | |
 |---|---|
 | Submodule | `.gitmodules`: `https://github.com/jarida-io/Goose`, `branch = main` |
-| Pinned commit | `893971302`, fork `main`: #18 (`fix/jetson-model-load-memory`: the model-load memory fix) and #26 (`fix/kv-q8-when-tight`: the KV cache type chosen from memory and the windowed KV estimate) merged, after the 24k and 32k context rungs and MemAvailable context sizing |
+| Pinned commit | `56638fc8e`, [jarida-io/Goose#30](https://github.com/jarida-io/Goose/pull/30) (`feat/model-profile`: the model profile), on `c248d373b` (no room for the encoder is its own typed error), which fork `main` does not have yet |
 | How CI gets it | the recorded SHA: `git submodule update --init --recursive --depth=1` (rust job), `submodules: recursive` (live-test job) |
 | Shared pins | `rmcp = "=2.1.0"` and `llama-cpp-2 = "=0.1.156"` in both workspaces |
 
@@ -62,6 +62,12 @@ Commits are in the fork. "Up" says whether the patch is fit to send upstream as 
 | Patch | What and why | Files | Commits | Up |
 |---|---|---|---|---|
 | `litert` backend | A third `LocalInferenceBackend` that runs `.litertlm` models through the LiteRT-LM C API, chosen per registry entry by `backend_id: "litert"`, so the host keeps `chat_provider = "local"`. The library is loaded at run time with `libloading` from `GOOSE_LITERT_LIB_DIR`, `<exe dir>/litert-lm`, `<exe dir>` or `<goose data>/litert-lm/lib`; nothing native is built by cargo. One retained conversation per model; side calls run in a throwaway conversation. With GIAP's LiteRT-LM fork (`giap-main`) a diverged history is rematched, and the retained conversation is set aside as a KV snapshot in `<goose data>/litert-lm/kv-snapshots` (two kept; tool-less one-shot work is never saved) and restored on the next request of its family. Tool calls the parser rejects are kept and repaired by `fc_repair.rs`. `ModelSettings.litert` holds backend and speculative-decoding settings. GIAP builds and records the library with `giap.sh litert`. | `litert/{mod.rs,ffi.rs,convert.rs,fc_repair.rs}`, `lib.rs`, `local_model_registry.rs`, `management.rs`, `Cargo.toml` | `f253d1330`, `e27ad7334`, `bf5d9d524`, `6c38f5b32`, `424a692a5` | yes |
+
+### Model profile (`goose-provider-types/src/model_profile.rs`)
+
+| Patch | What and why | Files | Commits | Up |
+|---|---|---|---|---|
+| A backend describes the model it serves | `local_inference::model_profile(model_id)` asks the backend chosen for a registry entry what it makes of the model, from its files and settings, without loading weights. The answer, `ModelProfile`, is goose's `CanonicalModel` (the model card), OpenRouter's per-endpoint fields (`quantization`, `supported_parameters`, `supports_tool_choice`, `supports_implicit_caching`), and, below what either describes, `Quantization` (each component's weights by element type, in TFLite/ONNX names with GGML's block format kept as `scheme`; activations; the K and V cache types with who chooses them) and `Caches` (the KV layout in Hugging Face's cache terms, how far it rewinds, prefix reuse, side calls, disk snapshots and whether they can hold what someone said). llama.cpp reads the GGUF tensor tables of the model, its encoder and its drafter with ggml's own reader (`GgufHeader::tensors`) and its KV geometry (`KvMeta`). LiteRT-LM asks the C API (`loaded_file_supports_thinking`, `loaded_file_supports_function_calling`, now bound) and reads the `.litertlm` section table and each TFLite graph's tables (`litert/file.rs`), never weight data, once per file version. MLX declines. | `goose-provider-types/src/{model_profile.rs,lib.rs}`, `goose-providers/src/lib.rs`, `goose-local-inference/src/{backend.rs,lib.rs,mlx.rs}`, `llamacpp/{profile.rs,memory.rs,mod.rs}`, `litert/{profile.rs,file.rs,ffi.rs,mod.rs}` | `56638fc8e` | yes |
 
 ### Context management and the provider request context
 

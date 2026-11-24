@@ -81,7 +81,7 @@ Cloud models are not listed.
 | `GooseAdapter` (`Agent`, the live engine) | `pond-adapters-goose` | cached; see below |
 | `MistralRsProvider` / its agent | `pond-adapters-mistralrs` | name heuristic, then `tool_calling = true`, `context_window_tokens` from the provider, `vision = false`; `vision_state` is `NotDeclared` |
 | `OllamaProvider` | `pond-adapters-ollama` | `from_model_name(model)` |
-| `LocalInferenceLlmAdapter` | `pond-adapters-local-inference` | `from_model_name(inner.model_name())` |
+| `LocalInferenceLlmAdapter` | `pond-adapters-local-inference` | `model_traits::capabilities("local", model, data_dir)`, the same as `GooseAdapter` |
 | `GooseProviderAdapter` | `pond-adapters-goose` | `from_model_name(model_config.model_name)` |
 | `LlamaCppEngine` (`InferenceProvider`) | `pond-inference` | `from_model_name(model_id)`, cached at load |
 | `PondAgent`, `OllamaInferenceProvider` | `pond-agent` (quarantined) | provider's capabilities; name heuristic |
@@ -89,18 +89,23 @@ Cloud models are not listed.
 ### `GooseAdapter`
 
 The cache (`model_capabilities: Mutex<ModelCapabilities>`) is refreshed in the provider-swap branch
-of `ensure_provider_current`, starting from the name heuristic and overriding it from evidence:
+of `ensure_provider_current` from `model_traits::capabilities`, which `LocalInferenceLlmAdapter` also
+calls, so a chat and a side call cannot disagree about a model. It starts from the name heuristic
+and overrides it from evidence:
 
 | Field | Source |
 |---|---|
-| `vision` | `model_supports_vision(provider, model, data_dir)` (below) |
-| `thinking` | `model_traits::model_reasons`: the GGUF's template (thinking selectable, or a reasoning marker), else the name |
-| `tool_calling` | `model_traits::model_uses_native_tools`: the GGUF probe, else the name |
-| `structured_output` | `true` for `local` / `gguf` providers unless the model is a `.litertlm` file |
-| `context_window_tokens` | `model_traits::trained_context_window` (the GGUF header's trained window), when present |
+| `vision` | `model_traits::vision_declared(provider, model, data_dir)` (below) |
+| `thinking` | `model_traits::model_reasons`: the GGUF's template (thinking selectable, or a reasoning marker); a `.litertlm` file's own answer through goose's profile; else the name |
+| `tool_calling` | `model_traits::model_uses_native_tools`: the GGUF probe; the `.litertlm` profile; else the name |
+| `structured_output` | the `.litertlm` profile's `supported_parameters` (`response_format`); `true` for other `local` / `gguf` models |
+| `context_window_tokens` | `model_traits::trained_context_window`: the GGUF header's trained window, or the `.litertlm` file's maximum context, when present |
 
-`model_traits` reads the GGUF only for `local` / `gguf` providers and never for `.litertlm` models;
-everything else falls back to the name heuristic.
+A `.litertlm` model's traits come from goose's `local_inference::model_profile`, which asks the
+LiteRT-LM library and reads the file; `model_traits` keeps one per file version and logs it once
+(`read this model's profile from its backend`). When the backend cannot describe the model yet, the
+name answers, except for pictures. Everything that is not a local model falls back to the name
+heuristic.
 
 `capabilities()` returns the cache with `thinking`, `vision` and `audio_input` forced to `false` in
 voice mode.
@@ -110,11 +115,12 @@ does not read it: `thinking_section_applies` and `vision_section_applies` call `
 `model_supports_vision` directly. Reading the cache there would move the KV-cached static prefix
 between turn one and turn two.
 
-**Vision.** `model_supports_vision` reports what is declared, not what is downloaded:
+**Vision.** `model_traits::vision_declared` reports what is declared, not what is downloaded:
 
 | Provider | Rule |
 |---|---|
-| `local`, `gguf` | `vision_encoder::declaration` -> `device_budget::vision_declaration`: the model must pair with an encoder (`encoder_for_model`, by name or GGUF header); on a budgeted device such as the Orin the encoder must also fit and be listed in `DEVICE_MEASURED_VISION`, which is empty, so budgeted devices declare no vision. `.litertlm` models declare none on this path. |
+| `local`, `gguf` | `vision_encoder::declaration` -> `device_budget::vision_declaration`: the model must pair with an encoder (`encoder_for_model`, by name or GGUF header); on a budgeted device such as the Orin the encoder must also fit and be listed in `DEVICE_MEASURED_VISION`, which is empty, so budgeted devices declare no vision. |
+| `local`, `.litertlm` | the profile's `modalities.input` lists `image`. The backend sends text only, so none does yet, whatever encoders the file carries; never the name. |
 | `mesh`, `mistralrs` | never; both would drop a picture silently |
 | any other | `name_implies_vision` |
 
