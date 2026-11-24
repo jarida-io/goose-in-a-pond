@@ -9,7 +9,7 @@ this document is one that gets dropped at the next sync.
 | | |
 |---|---|
 | Submodule | `.gitmodules`: `https://github.com/jarida-io/Goose`, `branch = main` |
-| Pinned commit | `893971302`, fork `main`: #18 (`fix/jetson-model-load-memory`: the model-load memory fix) and #26 (`fix/kv-q8-when-tight`: the KV cache type chosen from memory and the windowed KV estimate) merged, after the 24k and 32k context rungs and MemAvailable context sizing |
+| Pinned commit | `56638fc8e`, [jarida-io/Goose#30](https://github.com/jarida-io/Goose/pull/30) (`feat/model-profile`: the model profile), on `c248d373b` (no room for the encoder is its own typed error), which fork `main` does not have yet |
 | How CI gets it | the recorded SHA: `git submodule update --init --recursive --depth=1` (rust job), `submodules: recursive` (live-test job) |
 | Shared pins | `rmcp = "=2.1.0"` and `llama-cpp-2 = "=0.1.156"` in both workspaces |
 
