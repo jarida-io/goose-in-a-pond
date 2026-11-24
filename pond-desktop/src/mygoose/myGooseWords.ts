@@ -114,6 +114,10 @@ export const NEVER_THIS_DESCRIPTION =
   "Goose won't make anything like this again. Say what to avoid in your own words and it becomes a rule.";
 
 export const QUESTIONS_HEADING = "Questions from Goose";
+/** The count on Home's one-line glance at a set of questions. */
+export function glanceQuestionCount(count: number): string {
+  return count === 1 ? "1 question" : `${count} questions`;
+}
 export const QUESTIONS_INTRO = "Goose asks when a plan is missing a detail. Your answers go into the work at once and are kept for next time.";
 export const LOADING_QUESTIONS = "Loading questions...";
 export const NO_QUESTIONS_TITLE = "Nothing to answer";

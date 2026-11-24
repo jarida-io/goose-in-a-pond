@@ -1,8 +1,9 @@
 // Every open and waiting question batch as a card, newest first. On the kiosk, and on Home, one
-// batch at a time: one decision per screen.
+// batch at a time: one decision per screen. On a short screen Home gives it one line that leads to
+// My Goose, as it does the idea cards, so the mic stays on the panel.
 
 import { useState } from "react";
-import { MessageCircleQuestion } from "lucide-react";
+import { ChevronRight, MessageCircleQuestion } from "lucide-react";
 import { InkButton, InkEmptyState } from "@jarida/ink/react";
 import { api } from "../api/PondApiClient";
 import {
@@ -13,12 +14,15 @@ import {
   QUESTIONS_INTRO,
   SEE_PLANS,
   buttonSize,
+  glanceQuestionCount,
   moreWords,
   type Variant,
 } from "./myGooseWords";
 import { useLoaded } from "./useLoaded";
 import { LoadProblem, Loading } from "./MyGooseParts";
 import { QuestionCard } from "./QuestionCard";
+import { useShortScreen } from "./useShortScreen";
+import "./card-deck.css";
 
 interface Props {
   variant: Variant;
@@ -34,6 +38,7 @@ export function QuestionsPanel({ variant, say, onSeePlans, place = "mygoose" }: 
     return { found, shared: new Set(anchors.filter((a) => !a.mine).map((a) => a.id)) };
   });
   const [done, setDone] = useState<ReadonlySet<string>>(new Set());
+  const short = useShortScreen();
 
   function finished(batchId: string) {
     setDone((all) => new Set(all).add(batchId));
@@ -47,6 +52,17 @@ export function QuestionsPanel({ variant, say, onSeePlans, place = "mygoose" }: 
 
   if (place === "home") {
     if (shown.length === 0) return null;
+    if (short) {
+      const batch = shown[0];
+      return (
+        <button type="button" className="cd-glance" onClick={onSeePlans}>
+          <span className="cd-glance__label">{QUESTIONS_HEADING}</span>
+          <span className="cd-glance__title">{batch.title}</span>
+          <span className="cd-glance__count">{glanceQuestionCount(batch.questions.length)}</span>
+          <ChevronRight size={18} aria-hidden="true" />
+        </button>
+      );
+    }
     return (
       <section className="mg-panel mg-panel--home" aria-label={QUESTIONS_HEADING}>
         {shown.map((batch) => (
