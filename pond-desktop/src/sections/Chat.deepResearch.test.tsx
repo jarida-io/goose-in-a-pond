@@ -31,6 +31,7 @@ vi.mock("../api/PondApiClient", () => ({
       finished_unix_ms: null, elapsed_ms: 0,
     }),
     updateSettings: vi.fn().mockResolvedValue({}),
+    listIdeaCards: vi.fn().mockResolvedValue({ cards: [] }),
     getModelCapabilities: vi.fn().mockResolvedValue({
       thinking: false,
       vision: true,
@@ -463,7 +464,10 @@ describe("Chat, sending a research question", () => {
     expect(vi.mocked(api.chatStream).mock.calls[1][6]).toBe(true);
   });
 
-  it("sends a suggestion chip as an ordinary message, and keeps the mode for the box", async () => {
+  it("sends an idea chip as an ordinary message, and keeps the mode for the box", async () => {
+    vi.mocked(api.listIdeaCards).mockResolvedValue({
+      cards: [{ id: "idea-1", title: "What can you help me with?" }],
+    } as never);
     vi.mocked(api.chatStream).mockReturnValue(
       makeStream([{ type: "text", content: "I can help with plenty." }, { done: true, session_id: "sess-1", type: "done" }]),
     );

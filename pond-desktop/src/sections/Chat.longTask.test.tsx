@@ -20,6 +20,7 @@ vi.mock("../api/PondApiClient", () => ({
       finished_unix_ms: null, elapsed_ms: 0,
     }),
     updateSettings: vi.fn().mockResolvedValue({}),
+    listIdeaCards: vi.fn().mockResolvedValue({ cards: [] }),
     getModelCapabilities: vi.fn().mockResolvedValue({
       thinking: false,
       vision: true,

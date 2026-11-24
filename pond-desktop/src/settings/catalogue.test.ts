@@ -21,6 +21,17 @@ function settingsTypeKeys(): string[] {
   return [...new Set(keys)];
 }
 
+// Settings the settings screen leaves out on purpose; the pond still stores them, and the API sets them.
+const OFF_SCREEN = [
+  "thinking_mode",
+  "show_thinking",
+  "persist_thinking",
+  "review_mode",
+  "review_max_rounds",
+  "review_pass_threshold",
+  "goal_check_enabled",
+];
+
 describe("settings catalogue", () => {
   const typeKeys = settingsTypeKeys();
   const entries = allEntries();
@@ -31,10 +42,15 @@ describe("settings catalogue", () => {
   });
 
   it("lists every setting the app's type names, and nothing else", () => {
-    const missing = typeKeys.filter((k) => !entryKeys.includes(k));
+    const missing = typeKeys.filter((k) => !entryKeys.includes(k) && !OFF_SCREEN.includes(k));
     const extra = entryKeys.filter((k) => !typeKeys.includes(k));
     expect(missing, `settings with no home in the catalogue: ${missing.join(", ")}`).toEqual([]);
     expect(extra, `catalogue entries that are not Settings fields: ${extra.join(", ")}`).toEqual([]);
+  });
+
+  it("leaves out only settings that exist and have no home", () => {
+    expect(OFF_SCREEN.filter((k) => !typeKeys.includes(k)), "no longer Settings fields").toEqual([]);
+    expect(OFF_SCREEN.filter((k) => entryKeys.includes(k)), "back in the catalogue").toEqual([]);
   });
 
   it("lists each setting exactly once", () => {
