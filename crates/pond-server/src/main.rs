@@ -11451,7 +11451,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     warmup: false,
                     suggestion_context: None,
                     deep_research_task: None,
-                deep_research_clarify: None,
+                    deep_research_clarify: None,
                     interview: None,
                     device_place: None,
                     device_locked: false,

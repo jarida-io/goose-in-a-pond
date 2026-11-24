@@ -376,7 +376,11 @@ fn forget_status(error: WifiForgetError) -> StatusCode {
 fn valid_mac(raw: &str) -> Option<String> {
     let mac = raw.trim().to_ascii_uppercase();
     let parts: Vec<&str> = mac.split(':').collect();
-    if parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit())) {
+    if parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+    {
         Some(mac)
     } else {
         None
@@ -444,10 +448,20 @@ fn infer_bt_type(info: &str, name: &str) -> &'static str {
     let lower_info = info.to_ascii_lowercase();
     let lower_name = name.to_ascii_lowercase();
 
-    if lower_info.contains("0000110b") || lower_info.contains("0000110a") || lower_name.contains("speaker") || lower_name.contains("soundbar") {
+    if lower_info.contains("0000110b")
+        || lower_info.contains("0000110a")
+        || lower_name.contains("speaker")
+        || lower_name.contains("soundbar")
+    {
         return "Speaker";
     }
-    if lower_info.contains("0000111e") || lower_info.contains("00001108") || lower_name.contains("buds") || lower_name.contains("airpods") || lower_name.contains("headphone") || lower_name.contains("headset") {
+    if lower_info.contains("0000111e")
+        || lower_info.contains("00001108")
+        || lower_name.contains("buds")
+        || lower_name.contains("airpods")
+        || lower_name.contains("headphone")
+        || lower_name.contains("headset")
+    {
         return "Headphones";
     }
     if lower_info.contains("00001124") || lower_info.contains("00001812") {
@@ -462,7 +476,12 @@ fn infer_bt_type(info: &str, name: &str) -> &'static str {
     if lower_info.contains("185b51bd") || lower_name.starts_with("pond ") {
         return "Pond";
     }
-    if lower_info.contains("0000180d") || lower_info.contains("0000181a") || lower_name.contains("sensor") || lower_name.contains("watch") || lower_name.contains("band") {
+    if lower_info.contains("0000180d")
+        || lower_info.contains("0000181a")
+        || lower_name.contains("sensor")
+        || lower_name.contains("watch")
+        || lower_name.contains("band")
+    {
         return "Sensor / Wearable";
     }
     if let Some(class_hex) = info
@@ -481,10 +500,15 @@ fn infer_bt_type(info: &str, name: &str) -> &'static str {
             _ => {}
         }
     }
-    if lower_name.contains("iphone") || lower_name.contains("galaxy") || lower_name.contains("pixel") || lower_name.contains("phone") {
+    if lower_name.contains("iphone")
+        || lower_name.contains("galaxy")
+        || lower_name.contains("pixel")
+        || lower_name.contains("phone")
+    {
         return "Phone";
     }
-    if lower_name.contains("macbook") || lower_name.contains("laptop") || lower_name.contains("pc") {
+    if lower_name.contains("macbook") || lower_name.contains("laptop") || lower_name.contains("pc")
+    {
         return "Computer";
     }
     if lower_name.contains("tv") || lower_name.contains("display") {
@@ -501,7 +525,10 @@ fn bt_display_name(addr: &str, list_name: &str, info: &str, device_type: &str) -
         .lines()
         .find_map(|l| l.trim().strip_prefix("Alias: ").map(str::trim));
 
-    for candidate in [info_name, Some(list_name), info_alias].into_iter().flatten() {
+    for candidate in [info_name, Some(list_name), info_alias]
+        .into_iter()
+        .flatten()
+    {
         let trimmed = candidate.trim();
         if !is_mac_like(trimmed, addr) {
             return (trimmed.to_string(), true);
@@ -666,7 +693,9 @@ pub(crate) async fn bluetooth_connect(
     let _ = run_bluetoothctl(&["pairable", "on"]).await;
     let _ = run_bluetoothctl(&["pair", &addr]).await;
     let _ = run_bluetoothctl(&["trust", &addr]).await;
-    let out = run_bluetoothctl(&["connect", &addr]).await.unwrap_or_default();
+    let out = run_bluetoothctl(&["connect", &addr])
+        .await
+        .unwrap_or_default();
     let connected = out.contains("Connection successful")
         || run_bluetoothctl(&["info", &addr])
             .await
@@ -687,7 +716,14 @@ pub(crate) async fn bluetooth_disconnect(
 ) -> Result<Json<Value>, Refusal> {
     let principal = principal.as_ref().map(|Extension(p)| p);
     let credential = credential.as_ref().map(|Extension(c)| c);
-    require_changer(&state, principal, credential, &headers, "bluetooth_disconnect").await?;
+    require_changer(
+        &state,
+        principal,
+        credential,
+        &headers,
+        "bluetooth_disconnect",
+    )
+    .await?;
     let addr = valid_mac(&body.address)
         .ok_or_else(|| refuse(StatusCode::UNPROCESSABLE_ENTITY, "invalid_address"))?;
     let _ = run_bluetoothctl(&["disconnect", &addr]).await?;

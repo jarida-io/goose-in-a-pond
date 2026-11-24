@@ -309,7 +309,9 @@ pub async fn unlock(
                 Err(e) => Err(UnlockRefusal::Unavailable(e.to_string())),
             }
         }
-        (None, None, Some(password)) => admin.elevation.unlock(&caller.device, &password, now).await,
+        (None, None, Some(password)) => {
+            admin.elevation.unlock(&caller.device, &password, now).await
+        }
         (None, None, None) => Err(UnlockRefusal::Malformed),
     };
     match attempt {

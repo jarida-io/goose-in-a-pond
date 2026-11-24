@@ -18,9 +18,9 @@ use pond_core::shared::domain::cart::CartItem;
 use pond_core::shared::domain::context_card::ContextCard;
 use pond_core::shared::domain::todo::{Todo, TodoKind, TodoState};
 use pond_core::shared::ports::news::NewsStore;
-use pond_core::user_data::domain::anchor::{Anchor, Deliverable};
 use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::shared::ports::web_watch::{StoredChange, WebWatch, WebWatchRepository};
+use pond_core::user_data::domain::anchor::{Anchor, Deliverable};
 use pond_infra::sqlite_web_watch::SqliteWebWatchRepository;
 
 use crate::me::{caller_member, failure, server_error, Failure};
@@ -182,10 +182,7 @@ fn anchor_card(anchor: &Anchor, deliverables: &[Deliverable]) -> ContextCard {
         anchor.state.as_str()
     );
     if let Some(starts) = anchor.starts_at {
-        content.push_str(&format!(
-            "\nWhen: {} UTC",
-            starts.format("%-d %B %Y %H:%M")
-        ));
+        content.push_str(&format!("\nWhen: {} UTC", starts.format("%-d %B %Y %H:%M")));
     }
     if let Some(ends) = anchor.ends_at {
         content.push_str(&format!("\nUntil: {} UTC", ends.format("%-d %B %Y %H:%M")));
