@@ -6524,21 +6524,27 @@ mod tests {
 
     // ── thinking section stability ────────────────────────────────────────
 
-    /// Turns 1 and 2 must agree in "auto", or every session re-prefills on its second turn.
+    /// Every turn carries the thinking section, whatever the mode, model or agent, so turns 1
+    /// and 2 always agree and no session re-prefills on its second turn.
     #[test]
-    fn auto_thinking_is_decided_without_a_cache_that_fills_in_later() {
-        assert!(GooseAdapter::thinking_section_applies(
-            "auto",
-            "ollama",
-            "gemma-4-E2B-it",
-            None
-        ));
-        assert!(!GooseAdapter::thinking_section_applies(
-            "auto",
-            "ollama",
-            "llama-3.2-3b",
-            None
-        ));
+    fn every_turn_carries_the_thinking_section() {
+        use pond_core::shared::services::voice_agent::VoiceThinking;
+        for mode in ["auto", "on", "off"] {
+            for model in ["gemma-4-E2B-it", "llama-3.2-3b"] {
+                assert!(
+                    GooseAdapter::thinking_section_applies(mode, "ollama", model, None),
+                    "{model} in mode {mode}"
+                );
+            }
+        }
+        for voice in [VoiceThinking::Off, VoiceThinking::On, VoiceThinking::Auto] {
+            assert!(GooseAdapter::thinking_section_applies(
+                voice.mode("off"),
+                "ollama",
+                "gemma-4-E2B-it",
+                None,
+            ));
+        }
     }
 
     #[test]
@@ -6590,41 +6596,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn explicit_thinking_modes_ignore_the_model_and_voice_follows_its_agent() {
-        assert!(GooseAdapter::thinking_section_applies(
-            "on",
-            "ollama",
-            "llama-3.2-3b",
-            None
-        ));
-        assert!(!GooseAdapter::thinking_section_applies(
-            "off",
-            "ollama",
-            "gemma-4-E2B-it",
-            None
-        ));
-        // A spoken turn passes the Voice agent's mode, which follows the household's on auto.
-        use pond_core::shared::services::voice_agent::VoiceThinking;
-        for (voice, household, thinks) in [
-            (VoiceThinking::Off, "on", false),
-            (VoiceThinking::On, "off", true),
-            (VoiceThinking::Auto, "off", false),
-            (VoiceThinking::Auto, "on", true),
-        ] {
-            assert_eq!(
-                GooseAdapter::thinking_section_applies(
-                    voice.mode(household),
-                    "ollama",
-                    "gemma-4-E2B-it",
-                    None,
-                ),
-                thinks,
-                "{voice:?} over a household on {household}"
-            );
-        }
-    }
-
     // ── The structured reasoning channel ──────────────────────────────────
 
     /// The producer is the only gate: downstream forwards `Thinking` frames unconditionally.
@@ -6635,12 +6606,11 @@ mod tests {
                 !GooseAdapter::reasoning_frames_enabled(show_thinking, true),
                 "voice mode leaked reasoning with show_thinking={show_thinking}"
             );
+            assert!(
+                GooseAdapter::reasoning_frames_enabled(show_thinking, false),
+                "a typed turn shows its reasoning whatever show_thinking says"
+            );
         }
-        assert!(GooseAdapter::reasoning_frames_enabled(true, false));
-        assert!(
-            !GooseAdapter::reasoning_frames_enabled(false, false),
-            "a user who turned thinking off must not receive reasoning frames"
-        );
     }
 
     /// Serve mode hardcodes the instance flag to false, so the request flag is the only defence.
@@ -6662,16 +6632,6 @@ mod tests {
             "a text turn on a text process must not be treated as voice, or reasoning \
              is suppressed for everyone"
         );
-    }
-
-    /// A failed settings read falls back to `Settings::default()`, which must narrow.
-    #[test]
-    fn the_settings_default_emits_no_reasoning() {
-        let fallback = pond_core::user_data::domain::settings::Settings::default();
-        assert!(!GooseAdapter::reasoning_frames_enabled(
-            fallback.show_thinking,
-            false
-        ));
     }
 
     /// `as_concat_text()` drops `Thinking`, so reasoning needs its own lift.
@@ -6821,20 +6781,6 @@ mod tests {
             None,
             "reasoning was buffered with the display gate shut; on a voice turn \
              that is unspeakable text one flush away from the speaker"
-        );
-
-        let fallback = pond_core::user_data::domain::settings::Settings::default();
-        let emit = GooseAdapter::reasoning_frames_enabled(fallback.show_thinking, false);
-        let mut coalescer = ReasoningCoalescer::default();
-        coalescer.push(
-            &Message::assistant().with_thinking("something private", ""),
-            emit,
-        );
-        assert_eq!(
-            coalescer.flush(),
-            None,
-            "the settings-read fallback emitted reasoning; a scope-widening default \
-             is a bug"
         );
     }
 

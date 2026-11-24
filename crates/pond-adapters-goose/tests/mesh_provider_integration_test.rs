@@ -87,6 +87,7 @@ async fn a_chat_turn_over_an_unavailable_mesh_surfaces_a_clean_error() {
         warmup: false,
         suggestion_context: None,
         deep_research_task: None,
+        deep_research_clarify: None,
         interview: None,
         device_place: None,
         device_locked: false,
