@@ -1597,21 +1597,12 @@ impl GooseAdapter {
         }
     }
 
-    /// Whether the active model DECLARES vision, regardless of whether its encoder has downloaded.
-    /// Must not flip mid-session: the `<vision>` prompt section sits in the KV-cached prefix.
-    /// Mesh and mistral.rs never claim it: both would drop a picture silently.
     fn model_supports_vision(
         provider: &str,
         model: &str,
         data_dir: Option<&std::path::Path>,
     ) -> bool {
-        match provider {
-            "local" | "gguf" => crate::vision_encoder::declaration(data_dir, model).is_declared(),
-            "mesh" | "mistralrs" => false,
-            _ => pond_core::models::domain::model_capabilities::ModelCapabilities::name_implies_vision(
-                model,
-            ),
-        }
+        crate::model_traits::vision_declared(provider, model, data_dir)
     }
 
     /// Pure body of `AgentPort::vision_state`; `None` means unknown and callers fail open.
@@ -2127,41 +2118,13 @@ impl GooseAdapter {
                 "exported the global goose provider fallback"
             );
 
-            // Name heuristic first, then overridden from evidence (for a GGUF, the template and
-            // metadata `thinking_section_applies` reads) so this cache can't contradict the prompt.
-            let mut caps =
-                pond_core::models::domain::model_capabilities::ModelCapabilities::from_model_name(
-                    &settings.chat_model,
-                );
-            caps.vision = Self::model_supports_vision(
+            // From the evidence `thinking_section_applies` reads, so this cache can't contradict
+            // the prompt.
+            let caps = crate::model_traits::capabilities(
                 &settings.chat_provider,
                 &settings.chat_model,
                 self.data_dir.as_deref(),
             );
-            caps.thinking = crate::model_traits::model_reasons(
-                &settings.chat_provider,
-                &settings.chat_model,
-                self.data_dir.as_deref(),
-            );
-            caps.tool_calling = crate::model_traits::model_uses_native_tools(
-                &settings.chat_provider,
-                &settings.chat_model,
-                self.data_dir.as_deref(),
-            );
-            if matches!(settings.chat_provider.as_str(), "local" | "gguf")
-                && !pond_core::models::domain::litert::is_litert_model(&settings.chat_model)
-            {
-                // llama.cpp can GBNF-constrain any GGUF, quant tag in its name or not.
-                caps.structured_output = true;
-            }
-            if let Some(trained) = crate::model_traits::trained_context_window(
-                &settings.chat_provider,
-                &settings.chat_model,
-                self.data_dir.as_deref(),
-            ) {
-                // Upper bound only; `ContextGovernor` ranks a registry pin or engine cap above it.
-                caps.context_window_tokens = trained;
-            }
             tracing::debug!(
                 "[model-switch] capabilities: thinking={}, vision={}, context={}k",
                 caps.thinking,

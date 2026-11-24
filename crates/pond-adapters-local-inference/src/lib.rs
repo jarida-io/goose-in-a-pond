@@ -28,6 +28,8 @@ pub const DEFAULT_MODEL: &str = "bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M";
 pub struct LocalInferenceLlmAdapter {
     inner: GooseProviderAdapter,
     raw_inner: GooseProviderAdapter,
+    /// Where the model's file is, for reading its capabilities from it.
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl LocalInferenceLlmAdapter {
@@ -57,6 +59,7 @@ impl LocalInferenceLlmAdapter {
         Ok(Self {
             inner: GooseProviderAdapter::new(provider.clone(), model_config),
             raw_inner: GooseProviderAdapter::new(provider, raw_config),
+            data_dir: None,
         })
     }
 
@@ -64,6 +67,12 @@ impl LocalInferenceLlmAdapter {
     /// models dir. `model_id` is a `repo:QUANT` id, a `.gguf` file already in that dir, or a
     /// `.litertlm` file in `$data_dir/models/litertlm/`.
     pub async fn new_with_data_dir(model_id: &str, data_dir: &std::path::Path) -> Result<Self> {
+        let mut adapter = Self::registered_in(model_id, data_dir).await?;
+        adapter.data_dir = Some(data_dir.to_path_buf());
+        Ok(adapter)
+    }
+
+    async fn registered_in(model_id: &str, data_dir: &std::path::Path) -> Result<Self> {
         use goose::providers::local_inference::local_model_registry::{
             get_registry, model_id_from_repo, LocalModelEntry, LocalModelStorage, ModelSettings,
         };
@@ -596,8 +605,11 @@ fn strip_thinking_tokens(text: &str) -> String {
 #[async_trait]
 impl LlmProvider for LocalInferenceLlmAdapter {
     fn capabilities(&self) -> pond_core::models::domain::model_capabilities::ModelCapabilities {
-        let name = self.inner.model_name();
-        pond_core::models::domain::model_capabilities::ModelCapabilities::from_model_name(&name)
+        pond_adapters_goose::model_traits::capabilities(
+            "local",
+            &self.inner.model_name(),
+            self.data_dir.as_deref(),
+        )
     }
 
     async fn complete(&self, system: &str, messages: Vec<ChatMessage>) -> Result<ChatMessage> {
