@@ -80,6 +80,11 @@ def run():
     assert mismatch["error"] == "channel_binding_mismatch", mismatch
     print("PASS  CPace: vectors hold, a wrong code and a foreign pin are refused by name")
 
+    # Notices wait out quiet hours (22:00 to 07:00 by default, on this pond's UTC clock), and a
+    # waiting notice is not pending; the pairing notice below is read whatever the hour.
+    claimant = json.loads((data / "live-claimant.json").read_text())["session_token"]
+    call("PUT", "/settings", {"notices_wait_in_quiet_hours": False}, token=claimant)
+
     a, b = pair_phone("w3-live-a"), pair_dashboard("w3-live-b")
     print("PASS  a phone pairs with CPace and checks the Pond's proof; the dashboard pairs over loopback HMAC")
     for method, path in [("POST", "/transcribe"), ("GET", "/dev/goose"), ("POST", "/handshake/revoke")]:
