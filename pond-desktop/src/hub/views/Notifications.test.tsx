@@ -2,7 +2,7 @@
 // matches the bell's badge.
 
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach, onTestFinished, vi } from "vitest";
 import "../../i18n";
 import type { HouseholdNotice, ScheduleRunNotification } from "../../api/types";
 import { centreUnreadCount } from "../../state/householdNotices";
@@ -262,6 +262,12 @@ describe("the Pond's household notices", () => {
   });
 
   it("folds identical notices in a row into one, which reads them all when opened", () => {
+    // Midday, so four hours back stays in today's group: before 04:00 the fold splits at midnight.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 10, 25, 12, 0));
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const at = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
     const unlocked = { category: "alert", title: "My Pond unlocked", body: "Emmanuel's A57 unlocked it.", data: { open: "my_pond" } };
     appState.householdNotices = [
