@@ -335,7 +335,7 @@ Each weakens a boundary above. None is on by default; none belongs on a househol
 
 | Variable | Effect | Release binary |
 |---|---|---|
-| `POND_DEV_ALLOW_LOOPBACK=1` (or `true`) | Tokenless loopback requests pass the auth middleware with a loopback principal, and a missing host credential is accepted. The Host and Origin checks still apply. | Honoured |
+| `POND_DEV_ALLOW_LOOPBACK=1` (or `true`) | Loopback requests without a valid token pass the auth middleware with a loopback principal, and a missing host credential is accepted; one with a valid token is authenticated as its device. The Host and Origin checks still apply. | Honoured |
 | `POND_DEV_INSECURE_LAN=1` | Opens the plaintext companion listener (below). | Ignored, with `kind="insecure_dev_lan_ignored"` |
 | `POND_DEV_INSECURE_LAN_PORT` | Its port; default 4080, bound exactly, no fallback. | Ignored with it |
 | `POND_DEV_SAME_MACHINE_MESH=1` | Mesh dials allocate a new port so two Ponds can run on one machine. | Honoured |
