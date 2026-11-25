@@ -6,13 +6,20 @@ import { navigateTo } from "./helpers/nav";
 // ─── Mock data ──────────────────────────────────────────────────
 const MOCK_DEVICES = {
   devices: [
-    { id: "dev-1", name: "Jetson Orin Nano",  device_type: "host",   room: "Office",      is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-2", name: "Desk Sensor",        device_type: "sensor", room: "Office",      is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
-    { id: "dev-3", name: "Living Room Hub",    device_type: "host",   room: "Living Room", is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-4", name: "Motion Sensor",      device_type: "sensor", room: "Living Room", is_online: true,  last_seen: new Date().toISOString() },
-    { id: "dev-5", name: "Front Door Camera",  device_type: "sensor", room: "Outdoor",     is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-1", name: "Jetson Orin Nano",  device_type: "host",   room_id: "room-office",      is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-2", name: "Desk Sensor",        device_type: "sensor", room_id: "room-office",      is_online: false, last_seen: new Date(Date.now() - 3_600_000).toISOString() },
+    { id: "dev-3", name: "Living Room Hub",    device_type: "host",   room_id: "room-living", is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-4", name: "Motion Sensor",      device_type: "sensor", room_id: "room-living", is_online: true,  last_seen: new Date().toISOString() },
+    { id: "dev-5", name: "Front Door Camera",  device_type: "sensor", room_id: "room-outdoor",     is_online: true,  last_seen: new Date().toISOString() },
   ],
 };
+
+// Devices name their room by id; GET /rooms names it.
+const MOCK_ROOMS = [
+  { id: "room-office", name: "Office", created_at: "2026-11-01T00:00:00Z", guest_accessible: false },
+  { id: "room-living", name: "Living Room", created_at: "2026-11-01T00:00:00Z", guest_accessible: false },
+  { id: "room-outdoor", name: "Outdoor", created_at: "2026-11-01T00:00:00Z", guest_accessible: false },
+];
 
 // ─── Route helpers ───────────────────────────────────────────────
 async function setupBaseRoutes(page: Page) {
@@ -94,6 +101,7 @@ test.describe("Hub — Rooms sub-screen wiring", () => {
   test("loads devices and groups them by room with device count badge", async ({ page }) => {
     await setupBaseRoutes(page);
     await page.route("**/api/v1/devices", (r) => r.fulfill({ json: MOCK_DEVICES }));
+    await page.route("**/api/v1/rooms", (r) => r.fulfill({ json: { rooms: MOCK_ROOMS } }));
 
     await goToRoomsScreen(page);
 

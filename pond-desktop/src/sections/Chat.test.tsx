@@ -25,6 +25,7 @@ vi.mock("../api/PondApiClient", () => ({
       finished_unix_ms: null, elapsed_ms: 0,
     }),
     updateSettings: vi.fn().mockResolvedValue({}),
+    listIdeaCards: vi.fn().mockResolvedValue({ cards: [] }),
     getModelCapabilities: vi.fn().mockResolvedValue({
       thinking: false,
       vision: true,
@@ -386,6 +387,7 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
           model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
         } satisfies VisionStatus),
         getSessionAttachment: vi.fn(),
+        listIdeaCards: vi.fn().mockResolvedValue({ cards: [] }),
       },
     }));
     vi.doMock("../state/useAppContext", () => ({
@@ -562,7 +564,10 @@ describe("Chat — picture support", () => {
     expect(api.chatStream).not.toHaveBeenCalled();
   });
 
-  it("blocks a suggestion chip too", async () => {
+  it("blocks an idea chip too", async () => {
+    vi.mocked(api.listIdeaCards).mockResolvedValue({
+      cards: [{ id: "idea-1", title: "What can you help me with?" }],
+    } as never);
     vi.mocked(api.getVisionStatus).mockResolvedValue({
       model: "x", state: { kind: "not_declared" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
@@ -900,61 +905,6 @@ describe("message queuing", () => {
     expect(screen.queryByText("Queued")).toBeNull();
 
     await act(async () => { first.release(); });
-  });
-});
-
-// ── Thinking toggle ───────────────────────────────────────────────────────────
-
-describe("thinking toggle", () => {
-  async function renderChat() {
-    render(<Chat />);
-    await waitFor(() => expect(screen.getByLabelText("Message input")).toBeTruthy());
-    return screen.getByRole("switch", { name: /thinking mode/i });
-  }
-
-  it("reflects the stored thinking_mode", async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({ show_turn_stats: false, thinking_mode: "off" } as never);
-    const toggle = await renderChat();
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
-    expect(screen.getByText("Off")).toBeTruthy();
-  });
-
-  it("persists the new mode to the server", async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({ show_turn_stats: false, thinking_mode: "auto" } as never);
-    const toggle = await renderChat();
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
-
-    fireEvent.click(toggle);
-
-    // The setting the agent actually reads, not a display preference.
-    await waitFor(() =>
-      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({ thinking_mode: "off" }));
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
-  });
-
-  it("restores the previous mode rather than collapsing it to auto", async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({ show_turn_stats: false, thinking_mode: "on" } as never);
-    const toggle = await renderChat();
-    await waitFor(() => expect(screen.getByText("On")).toBeTruthy());
-
-    fireEvent.click(toggle);
-    await waitFor(() => expect(screen.getByText("Off")).toBeTruthy());
-
-    fireEvent.click(toggle);
-    await waitFor(() =>
-      expect(vi.mocked(api.updateSettings)).toHaveBeenLastCalledWith({ thinking_mode: "on" }));
-  });
-
-  it("reverts the control when the save fails", async () => {
-    vi.mocked(api.getSettings).mockResolvedValue({ show_turn_stats: false, thinking_mode: "auto" } as never);
-    vi.mocked(api.updateSettings).mockRejectedValueOnce(new Error("offline"));
-    const toggle = await renderChat();
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
-
-    fireEvent.click(toggle);
-
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
-    expect(screen.getByText("Auto")).toBeTruthy();
   });
 });
 

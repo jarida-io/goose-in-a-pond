@@ -488,12 +488,7 @@ async fn save_idea_for_member(
         .filter(|s| !s.is_empty())
         .unwrap_or("Discussed in chat")
         .to_string();
-    let notes_text = p
-        .notes
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or("")
-        .to_string();
+    let notes_text = p.notes.as_deref().map(str::trim).unwrap_or("").to_string();
     let kind = p
         .kind
         .as_deref()
@@ -766,7 +761,12 @@ mod tests {
         assert!(reply.contains("Updated \"Diani trip\""), "{reply}");
         assert!(reply.contains("1 deliverable(s) to refresh"), "{reply}");
 
-        let updated = deps.anchors.get("jerry", &anchor.id).await.unwrap().unwrap();
+        let updated = deps
+            .anchors
+            .get("jerry", &anchor.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.place.as_deref(), Some("Watamu"));
         assert!(updated
             .facts
@@ -791,8 +791,17 @@ mod tests {
             now(),
         )
         .await;
-        assert!(reply.starts_with("Saved idea \"Weekend pottery class\""), "{reply}");
-        let shown = deps.cards.as_ref().unwrap().shown("jerry", now()).await.unwrap();
+        assert!(
+            reply.starts_with("Saved idea \"Weekend pottery class\""),
+            "{reply}"
+        );
+        let shown = deps
+            .cards
+            .as_ref()
+            .unwrap()
+            .shown("jerry", now())
+            .await
+            .unwrap();
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].state, CardState::Saved);
         assert_eq!(shown[0].batch_id, "user");

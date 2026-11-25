@@ -35,6 +35,10 @@ PORT_FILE = os.path.join(DATA_DIR, ".runtime_api_port")
 
 results = []
 
+# The household's owner's token, from section_deletion on. Owner-only actions need it once the
+# household has a second member; the suite removes every member it adds after Jerry.
+OWNER_TOKEN = None
+
 # Written on the first pass and read back on the restart pass. The name is
 # deliberately unlike anything a shell would export: `SecretRepository::has`
 # consults the process environment before the store, so a plausible name would
@@ -85,11 +89,13 @@ def api_port():
     return _PORT
 
 
-def call(method, path, body=None, token=None):
+def call(method, path, body=None, token=None, headers=None):
     url = "http://127.0.0.1:%s%s" % (api_port(), path)
     cmd = ["curl", "-s", "-o", "/dev/stdout", "-w", "\n%{http_code}", "-X", method, url]
     if token:
         cmd += ["-H", "Authorization: Bearer " + token]
+    for name, value in (headers or {}).items():
+        cmd += ["-H", "%s: %s" % (name, value)]
     if body is not None:
         cmd += ["-H", "Content-Type: application/json", "-d", json.dumps(body)]
     out = subprocess.run(cmd, capture_output=True, text=True).stdout
@@ -150,6 +156,68 @@ def seed_session(sid):
     )
     con.commit()
     con.close()
+
+
+def setup_code(*args):
+    """`pond-server setup-code` against this pond's data directory; its output, or None."""
+    binary = os.environ.get("POND_SERVER_BIN")
+    if not binary:
+        return None
+    out = subprocess.run(
+        [binary, "setup-code", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "POND_DATA_DIR": DATA_DIR},
+    )
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def member_token(profile_id, client_id):
+    """The token of a phone paired as `profile_id`, or None. These checks call through the
+    loopback bypass, which identifies nobody: once the household has two members that caller is
+    a guest, so an owner-only action has to come from the owner's own device. A pairing claims
+    a fresh pond, so the claim is put back as it was found."""
+    import pond_cpace
+
+    found = setup_code("--status")
+
+    with open(os.path.join(DATA_DIR, ".runtime_host_credential")) as fh:
+        host = {"X-Pond-Host-Credential": fh.read().strip()}
+    code, body = call(
+        "POST",
+        "/api/v1/handshake/pairing-code",
+        {"profile_id": profile_id, "test": True, "approved": True},
+        headers=host,
+    )
+    if code != 200:
+        check("issue a pairing code for %s" % client_id, False, "HTTP %s: %s" % (code, body))
+        return None
+    pairing_code = body["code"]
+    code, body = call("GET", "/api/v1/handshake/pairing-code", headers=host)
+    if code != 200:
+        check("read the pairing pin", False, "HTTP %s: %s" % (code, body))
+        return None
+    pin = body["pairing"]["tls_spki_sha256"]
+
+    def via(method, path, payload=None, expected=200):
+        status, answer = call(method, "/api/v1" + path, payload)
+        if status != expected:
+            raise RuntimeError("%s %s: HTTP %s %s" % (method, path, status, answer))
+        return answer
+
+    try:
+        result = pond_cpace.pair(via, pairing_code, pin, client_id)
+    except (AssertionError, RuntimeError) as e:
+        check("pair %s" % client_id, False, str(e))
+        return None
+    finally:
+        if found == "unclaimed":
+            setup_code("--rearm")
+    if not result.get("accepted"):
+        check("pair %s" % client_id, False, str({k: v for k, v in result.items() if "token" not in k}))
+        return None
+    return result["session_token"]
 
 
 def new_profile(name):
@@ -339,7 +407,10 @@ def section_deletion(jerry, liz):
     code, _ = call("PUT", "/api/v1/settings", {"primary_profile_id": liz})
     check("set Liz as primary member", code == 200)
 
-    code, body = call("DELETE", "/api/v1/profiles/" + liz)
+    # Jerry, the first member, is the owner; only the owner removes a member.
+    global OWNER_TOKEN
+    OWNER_TOKEN = member_token(jerry, "live-owner-phone")
+    code, body = call("DELETE", "/api/v1/profiles/" + liz, token=OWNER_TOKEN)
     ok = expect(
         "DELETE /profiles/{id} succeeds with a live session bound",
         code,
@@ -383,6 +454,8 @@ def section_deletion(jerry, liz):
 
 def section_legacy_rows(jerry):
     print("\n=== P8: a legacy unattributed memory is shared, not owned ===")
+    # Not Jerry: the household keeps its last owner, so the memory belongs to another member.
+    member = new_profile("Wanjiku") if jerry else None
     con = db()
     tables = [
         r[0]
@@ -399,16 +472,16 @@ def section_legacy_rows(jerry):
         "INSERT OR REPLACE INTO memory_fragments (id, profile_id, content, source, created_at) "
         "VALUES ('legacy-1', NULL, 'the spare key is under the third plant pot', 'live', datetime('now'))"
     )
-    if jerry:
+    if member:
         con.execute(
             "INSERT OR REPLACE INTO memory_fragments (id, profile_id, content, source, created_at) "
             "VALUES ('owned-1', ?, 'my boiler code is F28', 'live', datetime('now'))",
-            (jerry,),
+            (member,),
         )
     con.commit()
 
     owned = con.execute(
-        "SELECT COUNT(*) FROM memory_fragments WHERE profile_id = ?", (jerry,)
+        "SELECT COUNT(*) FROM memory_fragments WHERE profile_id = ?", (member,)
     ).fetchone()[0]
     shared = con.execute(
         "SELECT COUNT(*) FROM memory_fragments WHERE profile_id IS NULL"
@@ -418,9 +491,9 @@ def section_legacy_rows(jerry):
     check("an owned memory is attributed", owned >= 1, "owned=%d" % owned)
     check("a legacy memory stays unattributed", shared >= 1, "shared=%d" % shared)
 
-    # Deleting the owner must take the owned row and leave the shared one.
-    if jerry:
-        code, body = call("DELETE", "/api/v1/profiles/" + jerry)
+    # Deleting the member who owns it must take the owned row and leave the shared one.
+    if member:
+        code, body = call("DELETE", "/api/v1/profiles/" + member, token=OWNER_TOKEN)
         if expect("delete the owning member", code, 200, body):
             check(
                 "the delete reported the owned memory",
@@ -693,15 +766,25 @@ def section_web_search():
 AUDIO_PIN = "Live Test Speaker That Is Not Here"
 
 
+# Bases that say the microphone was opened to choose it.
+AUDIO_PROBED = {"pinned", "system_default", "fallback", "best_effort"}
+
+
 def section_audio_devices():
     """The device routes on a real server: what is in use, a test that never opens a mic the
     household switched off, and a pinned speaker that is not connected giving way.
 
-    The mic is switched off for the test so this suite never opens a microphone on the machine
-    running it, which also checks the privacy rule over HTTP. The pin is left for the restart.
+    A fresh pond runs room voice, which owns and tests the microphone at startup by design. Room
+    voice goes off first, so this suite stops holding the machine's microphone and the restart
+    comes up as plain serve, where the rule that serve never opens the mic on its own is checked.
+    The mic is switched off for the test, which also checks the privacy rule over HTTP. The pin
+    is left for the restart.
     """
     print("\n=== audio devices ===")
-    probed = {"pinned", "system_default", "fallback", "best_effort"}
+
+    code, body = call("PUT", "/api/v1/settings", {"voice_room_enabled": False})
+    if not expect("room voice off for the rest of this suite", code, 200, body):
+        return
 
     code, body = call("GET", "/api/v1/audio/devices")
     if not expect(
@@ -711,10 +794,6 @@ def section_audio_devices():
         body,
         ("both directions", isinstance(body, dict) and "input" in body and "output" in body),
         ("chosen by serve", isinstance(body, dict) and body.get("source") == "serve"),
-        (
-            "serve has not opened the mic on its own",
-            isinstance(body, dict) and body["input"]["basis"] not in probed,
-        ),
     ):
         return
 
@@ -825,6 +904,10 @@ def section_audio_devices_after_restart():
         200,
         body,
         ("pin", isinstance(body, dict) and body["output"]["pinned"] == AUDIO_PIN),
+        (
+            "serve without room voice has not opened the mic on its own",
+            isinstance(body, dict) and body["input"]["basis"] not in AUDIO_PROBED,
+        ),
     )
     code, body = call("PUT", "/api/v1/settings", {"audio_output_device": ""})
     expect("the speaker pin is cleared", code, 200, body)
@@ -1470,7 +1553,14 @@ def section_policy_telemetry():
     who = new_profile("Telemetry")
     if not who:
         return
+    try:
+        _policy_telemetry_decision(before, who)
+    finally:
+        code, body = call("DELETE", "/api/v1/profiles/" + who, token=OWNER_TOKEN)
+        expect("the member made for it is removed again", code, 200, body)
 
+
+def _policy_telemetry_decision(before, who):
     code, body = call(
         "PUT", "/api/v1/sessions/sess-policy-telemetry/user", {"profile_id": who}
     )

@@ -7478,6 +7478,48 @@ async fn refuse_primary_profile_that_is_not_a_member(
     }
 }
 
+/// Whether this request is the setup wizard's own while the pond is not set up: from the device
+/// that claimed the pond, or, on a pond nobody has claimed, from the tokenless host the
+/// middleware confines the wizard to. The wizard picks the model and the main member for a
+/// household that may still hold members from before a reset; other paired devices keep their
+/// household role.
+async fn is_the_setup_wizard(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> bool {
+    use pond_core::network::domain::setup_record::ClaimState;
+    if state.skip_onboarding {
+        return false;
+    }
+    // A failed read counts as set up, as in the middleware, so the owner gates stay shut.
+    let onboarded = state.onboarding_repo.is_complete().await.unwrap_or(true);
+    let device = proven_device(principal);
+    let (claimed, claimant) = match state.setup_claims.as_ref() {
+        None => (false, None),
+        Some(claims) => (
+            !matches!(claims.claim_state().await, Ok(ClaimState::Unclaimed)),
+            claims.claimed_by().await.ok().flatten(),
+        ),
+    };
+    wizard_caller(onboarded, claimed, device.id(), claimant.as_deref())
+}
+
+/// [`is_the_setup_wizard`] once its reads are done; a failed claim read counts as claimed.
+fn wizard_caller(
+    onboarded: bool,
+    claimed: bool,
+    device: Option<&str>,
+    claimant: Option<&str>,
+) -> bool {
+    if onboarded {
+        return false;
+    }
+    match device {
+        Some(device) => claimant == Some(device),
+        None => !claimed,
+    }
+}
+
 /// Only the owner changes the household's primary member. A pond that names nobody yet, in
 /// settings or in the main member's seat, takes its first from whoever sets it up.
 async fn refuse_primary_profile_change_by_a_non_owner(
@@ -7485,6 +7527,7 @@ async fn refuse_primary_profile_change_by_a_non_owner(
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
     patch: &Value,
     current: &Settings,
+    setup_wizard: bool,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     use pond_core::user_data::services::household_permission::{
         may_manage_household_roles, PermissionDecision,
@@ -7492,6 +7535,9 @@ async fn refuse_primary_profile_change_by_a_non_owner(
     let Some(asked) = patch.get("primary_profile_id") else {
         return Ok(());
     };
+    if setup_wizard {
+        return Ok(());
+    }
     let asked = asked.as_str().unwrap_or_default();
     let named = current.primary_profile_id.as_deref().unwrap_or_default();
     if asked == named {
@@ -7532,9 +7578,12 @@ pub(crate) async fn update_settings(
         )
     })?;
 
+    let setup_wizard = is_the_setup_wizard(&state, principal.as_ref()).await;
+
     // Only the model fields are owner-gated; the rest of this patch may touch unrelated settings
     // (voice, appearance, retention, ...) that any household member may already freely change.
-    if patch.get("chat_model").is_some() || patch.get("chat_provider").is_some() {
+    if !setup_wizard && (patch.get("chat_model").is_some() || patch.get("chat_provider").is_some())
+    {
         use pond_core::user_data::services::household_permission::{
             may_change_model, PermissionDecision,
         };
@@ -7582,8 +7631,14 @@ pub(crate) async fn update_settings(
     }
 
     refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
-    refuse_primary_profile_change_by_a_non_owner(&state, principal.as_ref(), &patch, &current)
-        .await?;
+    refuse_primary_profile_change_by_a_non_owner(
+        &state,
+        principal.as_ref(),
+        &patch,
+        &current,
+        setup_wizard,
+    )
+    .await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -25059,6 +25114,40 @@ mod weather_icon_tests {
         ] {
             assert_eq!(weather_icon_key(description), icon, "{description}");
         }
+    }
+}
+
+#[cfg(test)]
+mod setup_wizard_tests {
+    use super::wizard_caller;
+
+    #[test]
+    fn the_claimant_runs_the_wizard_and_no_other_phone_does() {
+        assert!(wizard_caller(
+            false,
+            true,
+            Some("claimant"),
+            Some("claimant")
+        ));
+        assert!(!wizard_caller(false, true, Some("other"), Some("claimant")));
+        assert!(!wizard_caller(false, true, Some("claimant"), None));
+    }
+
+    #[test]
+    fn the_tokenless_host_runs_it_only_on_an_unclaimed_pond() {
+        assert!(wizard_caller(false, false, None, None));
+        assert!(!wizard_caller(false, true, None, Some("claimant")));
+    }
+
+    #[test]
+    fn a_set_up_pond_has_no_wizard() {
+        assert!(!wizard_caller(
+            true,
+            true,
+            Some("claimant"),
+            Some("claimant")
+        ));
+        assert!(!wizard_caller(true, false, None, None));
     }
 }
 

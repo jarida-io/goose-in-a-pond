@@ -120,8 +120,12 @@ impl SystemMcpServer {
             "manual" => "pinned coordinates (verified, not guessed)",
             "lookup" => "configured place name",
             _ => match resolved.origin {
-                pond_core::user_data::services::location::Origin::Configured => "configured place name",
-                pond_core::user_data::services::location::Origin::Timezone => "inferred from timezone",
+                pond_core::user_data::services::location::Origin::Configured => {
+                    "configured place name"
+                }
+                pond_core::user_data::services::location::Origin::Timezone => {
+                    "inferred from timezone"
+                }
                 pond_core::user_data::services::location::Origin::Unknown => "unknown",
             },
         };

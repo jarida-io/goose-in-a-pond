@@ -695,12 +695,23 @@ pub async fn auth_middleware(
         }
     }
 
-    // Opt-in dev bypass, else any host process reaches every protected route. It returns before
-    // a token is read, so the principal carries no device.
+    // Opt-in dev bypass, else any host process reaches every protected route. Its principal
+    // carries no device; a caller presenting a valid token skips it and is authenticated below
+    // as the device it was issued to, so a harness can act as a member.
     if dev_allow_loopback() && peer_is_loopback {
-        let mut req = req;
-        req.extensions_mut().insert(Principal::loopback());
-        return Ok(next.run(req).await);
+        let presented = match extract_bearer_token(&headers) {
+            Ok(token) => state
+                .handshake
+                .validate_token(&token)
+                .await
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !presented {
+            let mut req = req;
+            req.extensions_mut().insert(Principal::loopback());
+            return Ok(next.run(req).await);
+        }
     }
 
     let token = extract_bearer_token(&headers).or_else(|missing| {

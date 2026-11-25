@@ -175,7 +175,16 @@ async fn an_idea_is_a_short_card_with_its_own_page_and_goose_notes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         hub["cards"],
-        json!(["idea", "news", "digest", "todo", "cart", "watch"])
+        json!([
+            "idea",
+            "news",
+            "digest",
+            "todo",
+            "cart",
+            "watch",
+            "anchor",
+            "deliverable"
+        ])
     );
 
     let (status, list) = call(&pond, Method::GET, "/me/ideas", json!({})).await;

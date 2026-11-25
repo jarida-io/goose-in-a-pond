@@ -123,6 +123,16 @@ for (const viewport of [
       await expect(page.getByRole("region", { name: "Ideas for you" }).getByText("Card 1 of 2")).toBeVisible();
     });
 
+    test("Home's open question is one 44px line that leads to My Goose", async ({ page }) => {
+      await page.goto("/");
+      await page.waitForSelector(".ghub", { timeout: 10_000 });
+      const glance = page.getByRole("button", { name: /Questions from Goose.*Diani trip.*1 question/ });
+      await expect(glance).toBeVisible();
+      expect((await glance.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+      await glance.click();
+      await expect(page.getByRole("heading", { level: 1, name: "My Goose" })).toBeVisible();
+    });
+
     test("My Goose shows one card at a time with 44px targets", async ({ page }) => {
       await page.goto("/");
       await page.waitForSelector(".ghub", { timeout: 10_000 });
