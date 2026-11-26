@@ -377,7 +377,8 @@ fn disk_cache_speeds_up_model_load() {
 }
 
 /// A second load reads the optimized graph the first load cached on disk, and must not optimize
-/// it again: doing so re-runs ORT's NCHWc pass over its own output, which segfaults.
+/// it again: doing so re-runs ORT's NCHWc pass over its own output, which segfaults. Reproduced
+/// with `model_q8f16.onnx` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
 #[test]
 #[ignore = "needs Kokoro weights; set KOKORO_DIR"]
 fn the_disk_cache_loads_again() {
