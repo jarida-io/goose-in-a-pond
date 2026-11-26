@@ -32,7 +32,7 @@ impl Engine {
 
         let cache = Self::cache_path(model_path);
         if Self::is_cache_valid(&cache, model_path) {
-            match Self::load_session(&cache, intra_threads, None, true) {
+            match Self::load_session(&cache, intra_threads, None, false) {
                 Ok(session) => {
                     tracing::info!(
                         path = %cache.display(),
@@ -55,14 +55,14 @@ impl Engine {
             }
         }
 
-        let session = match Self::load_session(model_path, intra_threads, Some(&cache), false) {
+        let session = match Self::load_session(model_path, intra_threads, Some(&cache), true) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "loading Kokoro with disk caching failed; falling back to uncached load"
                 );
-                Self::load_session(model_path, intra_threads, None, false).with_context(|| {
+                Self::load_session(model_path, intra_threads, None, true).with_context(|| {
                     format!("failed to load Kokoro model at {}", model_path.display())
                 })?
             }
@@ -115,7 +115,7 @@ impl Engine {
         path: &Path,
         intra_threads: Option<usize>,
         save_optimized_to: Option<&Path>,
-        already_optimized: bool,
+        first_load: bool,
     ) -> Result<Session> {
         let mut builder = Session::builder().context("failed to create ort session builder")?;
         if let Some(n) = intra_threads {
@@ -123,12 +123,13 @@ impl Engine {
                 .with_intra_threads(n)
                 .map_err(|e| anyhow!("failed to set ort intra-op threads to {n}: {e}"))?;
         }
-        // Re-optimizing the saved graph re-runs the NCHWc layout pass over its own output, which
-        // segfaults inside ORT (NchwcTransformer, 1.24 and 1.27).
-        let level = if already_optimized {
-            ort::session::builder::GraphOptimizationLevel::Disable
-        } else {
+        let level = if first_load {
             ort::session::builder::GraphOptimizationLevel::Level3
+        } else {
+            // ORT says to load an offline-optimized model with all optimizations disabled
+            // (https://onnxruntime.ai/docs/performance/model-optimizations/graph-optimizations.html#onlineoffline-mode);
+            // re-optimizing it segfaults in ORT 1.24 and 1.27.
+            ort::session::builder::GraphOptimizationLevel::Disable
         };
         builder = builder
             .with_optimization_level(level)
