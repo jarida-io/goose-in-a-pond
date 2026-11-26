@@ -32,7 +32,7 @@ impl Engine {
 
         let cache = Self::cache_path(model_path);
         if Self::is_cache_valid(&cache, model_path) {
-            match Self::load_session(&cache, intra_threads, None) {
+            match Self::load_session(&cache, intra_threads, None, false) {
                 Ok(session) => {
                     tracing::info!(
                         path = %cache.display(),
@@ -55,14 +55,14 @@ impl Engine {
             }
         }
 
-        let session = match Self::load_session(model_path, intra_threads, Some(&cache)) {
+        let session = match Self::load_session(model_path, intra_threads, Some(&cache), true) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "loading Kokoro with disk caching failed; falling back to uncached load"
                 );
-                Self::load_session(model_path, intra_threads, None).with_context(|| {
+                Self::load_session(model_path, intra_threads, None, true).with_context(|| {
                     format!("failed to load Kokoro model at {}", model_path.display())
                 })?
             }
@@ -115,6 +115,7 @@ impl Engine {
         path: &Path,
         intra_threads: Option<usize>,
         save_optimized_to: Option<&Path>,
+        first_load: bool,
     ) -> Result<Session> {
         let mut builder = Session::builder().context("failed to create ort session builder")?;
         if let Some(n) = intra_threads {
@@ -122,8 +123,16 @@ impl Engine {
                 .with_intra_threads(n)
                 .map_err(|e| anyhow!("failed to set ort intra-op threads to {n}: {e}"))?;
         }
+        let level = if first_load {
+            ort::session::builder::GraphOptimizationLevel::Level3
+        } else {
+            // ORT says to load an offline-optimized model with all optimizations disabled
+            // (https://onnxruntime.ai/docs/performance/model-optimizations/graph-optimizations.html#onlineoffline-mode);
+            // re-optimizing it segfaults in ORT 1.24 and 1.27.
+            ort::session::builder::GraphOptimizationLevel::Disable
+        };
         builder = builder
-            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+            .with_optimization_level(level)
             .map_err(|e| anyhow!("failed to set ort optimization level: {e}"))?;
         // Each clause is a new input length and ORT keeps a memory pattern per length, so with
         // patterns on the process grew with every new clause the pond spoke.

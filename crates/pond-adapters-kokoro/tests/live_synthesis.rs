@@ -376,6 +376,23 @@ fn disk_cache_speeds_up_model_load() {
     );
 }
 
+/// A second load reads the optimized graph the first load cached on disk, and must not optimize
+/// it again: doing so re-runs ORT's NCHWc pass over its own output, which segfaults. Reproduced
+/// with `model_q8f16.onnx` from `onnx-community/Kokoro-82M-v1.0-ONNX`.
+#[test]
+#[ignore = "needs Kokoro weights; set KOKORO_DIR"]
+fn the_disk_cache_loads_again() {
+    let Some(dir) = model_dir() else {
+        panic!("set KOKORO_DIR");
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let model_path = tmp.path().join(model_file());
+    std::fs::copy(dir.join(model_file()), &model_path).unwrap();
+    drop(Engine::load(&model_path, intra_threads()).expect("first load"));
+    assert!(Engine::cache_path(&model_path).exists());
+    Engine::load(&model_path, intra_threads()).expect("load from cache");
+}
+
 /// Hand freed heap pages back to the OS, as `KOKORO_TRIM` asks, to tell the allocator's
 /// retention from memory ORT still holds.
 fn return_freed_memory() {
